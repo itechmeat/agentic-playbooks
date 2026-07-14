@@ -8,7 +8,39 @@ permissions:
   contents: write
 
 jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      - name: Build web (needed by rust-embed)
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      - name: Test
+        run: cargo test --workspace
+
   build:
+    needs: [test]
     strategy:
       fail-fast: false
       matrix:
@@ -44,10 +76,15 @@ jobs:
 
       - name: Package
         run: |
-          bin="target/${{ matrix.target }}/release/apb"
-          tar -czf "apb-${{ matrix.target }}.tar.gz" -C "$(dirname "$bin")" apb
+          mkdir stage
+          cp "target/${{ matrix.target }}/release/apb" stage/
+          cp LICENSE stage/
+          tar -czf "apb-${{ matrix.target }}.tar.gz" -C stage .
+          shasum -a 256 "apb-${{ matrix.target }}.tar.gz" > "apb-${{ matrix.target }}.tar.gz.sha256"
 
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
-          files: apb-${{ matrix.target }}.tar.gz
+          files: |
+            apb-${{ matrix.target }}.tar.gz
+            apb-${{ matrix.target }}.tar.gz.sha256

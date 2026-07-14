@@ -5,15 +5,18 @@ updates:
     schedule:
       interval: weekly
     groups:
-      rust-dependencies:
-        patterns:
-          - "*"
+      rust-patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"
+    # Major bumps stay ungrouped on purpose: each is its own PR for review.
 
   - package-ecosystem: bun
     directory: /web
     schedule:
       interval: weekly
     groups:
-      web-dependencies:
-        patterns:
-          - "*"
+      web-patch-and-minor:
+        update-types:
+          - "patch"
+          - "minor"

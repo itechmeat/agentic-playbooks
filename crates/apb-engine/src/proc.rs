@@ -63,10 +63,18 @@ pub fn run_capture(
             // channel open and the recv() below blocks forever.
             // Cancellation (another join:any branch won) likewise tears
             // down the whole script tree, with no leaked side effects.
-            let _ = std::process::Command::new("kill")
-                .arg("-KILL")
-                .arg(format!("-{}", child.id()))
-                .status();
+            //
+            // libc::kill is used directly instead of spawning a `kill`
+            // subprocess: the syscall is immediate and avoids arg-parsing
+            // ambiguity of `kill -KILL -<pgid>` across implementations,
+            // which on some Linux setups failed to reach the grandchild
+            // and left the stdout pipe open until natural exit.
+            #[cfg(unix)]
+            {
+                let pid = child.id() as i32;
+                let _ = unsafe { libc::kill(-pid, libc::SIGKILL) };
+                let _ = unsafe { libc::kill(pid, libc::SIGKILL) };
+            }
             let _ = child.wait();
             cancelled = was_cancelled;
             break None;

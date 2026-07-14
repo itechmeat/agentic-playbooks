@@ -88,26 +88,8 @@ edges:
 
 ## Install
 
-Prebuilt binaries ship for `aarch64-apple-darwin`, `x86_64-apple-darwin`, and
-`x86_64-unknown-linux-gnu`. Full details: [docs/INSTALL.md](docs/INSTALL.md).
-
-**Prebuilt binary (recommended).** Download the archive for your platform from
-the releases page and put `apb` on your `PATH`:
-
-```sh
-tar -xzf apb-aarch64-apple-darwin.tar.gz
-mv apb /usr/local/bin/
-apb --version
-```
-
-**Homebrew (tap):**
-
-```sh
-brew install itechmeat/tap/apb
-```
-
-**From source** (requires Rust and Bun; the web UI must be built first because
-it is embedded into the binary):
+The project is currently pre-release. Install from source (requires Rust and
+Bun; the web UI must be built first because it is embedded into the binary):
 
 ```sh
 git clone https://github.com/itechmeat/agentic-playbooks && cd agentic-playbooks
@@ -117,21 +99,25 @@ cargo install --path crates/apb-cli
 
 Note: `cargo install --git` is not supported; install from a local clone.
 
-### Update
+To update: `git pull`, rebuild `web/`, re-run `cargo install --path crates/apb-cli`.
+To uninstall: `cargo uninstall apb-cli`. Project state in `.apb/` and global
+config in `~/.config/apb/` are never touched by uninstall.
 
-- Binary: download the new archive and replace the file.
-- Homebrew: `brew upgrade apb`.
-- From source: `git pull`, rebuild `web/`, re-run `cargo install --path crates/apb-cli`.
+### Planned for v0.1.0
 
-### Uninstall
+Prebuilt binaries (aarch64/x86_64 Apple darwin, x86_64 Linux GNU), a Homebrew
+tap, and SHA256 checksums will be published alongside the first tagged release.
+The release archive will include the `apb` binary and a copy of `LICENSE`.
 
-- Binary: `rm /usr/local/bin/apb`.
-- Homebrew: `brew uninstall apb`.
-- From source: `cargo uninstall apb-cli`.
+```sh
+# Planned (not yet available):
+tar -xzf apb-aarch64-apple-darwin.tar.gz
+mv apb /usr/local/bin/
+apb --version
 
-Uninstalling never touches your data: project state stays in `.apb/` inside
-each project, global config in `~/.config/apb/`. Delete those yourself if you
-want them gone.
+# Planned (not yet available):
+brew install itechmeat/tap/apb
+```
 
 ## Everyday commands
 

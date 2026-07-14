@@ -11,8 +11,8 @@ No separate Contributor License Agreement is required at this time.
 
 ## Developer Certificate of Origin
 
-Every commit must include a `Signed-off-by` line certifying the Developer
-Certificate of Origin in [DCO](DCO).
+Every commit submitted through a pull request must include a `Signed-off-by`
+line certifying the Developer Certificate of Origin in [DCO](DCO).
 
 Create a signed-off commit with:
 
@@ -51,7 +51,7 @@ boundary and expected failure modes in the pull request.
 
 ## Pull request checklist
 
-- All commits are signed off under the DCO.
+- All commits in the pull request are signed off under the DCO.
 - Tests pass locally.
 - User-facing changes are documented.
 - No secrets or private run data are included.
