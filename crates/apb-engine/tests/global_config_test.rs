@@ -28,7 +28,7 @@ edges:
 
 fn write_mock_agent(root: &Path) -> String {
     let path = root.join("mock-agent.sh");
-    fs::write(&path, "#!/bin/sh\necho ok\n").unwrap();
+    common::write_sync(&path, "#!/bin/sh\necho ok\n");
     let mut p = fs::metadata(&path).unwrap().permissions();
     p.set_mode(0o755);
     fs::set_permissions(&path, p).unwrap();
