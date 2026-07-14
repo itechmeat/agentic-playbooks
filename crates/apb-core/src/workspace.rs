@@ -106,7 +106,10 @@ pub fn fingerprint(root: &Path) -> Option<String> {
     }
     let mut h = Sha256::new();
     h.update(url.as_bytes());
-    Some(format!("sha256:{:x}", h.finalize()))
+    Some(format!(
+        "sha256:{}",
+        crate::content::hex_lower(&h.finalize())
+    ))
 }
 
 #[cfg(test)]
