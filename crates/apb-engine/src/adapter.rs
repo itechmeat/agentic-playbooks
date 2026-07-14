@@ -20,6 +20,17 @@ use crate::state::NodeStatus;
 fn spawn_in_group(cmd: &mut Command) -> std::io::Result<Child> {
     #[cfg(unix)]
     cmd.process_group(0);
+    // ETXTBSY (errno 26) can transiently occur on Linux right after the
+    // executable was written. Retry briefly before surfacing the error.
+    for _ in 0..20 {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(26) => {
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    }
     cmd.spawn()
 }
 

@@ -35,7 +35,7 @@ fn seed(root: &Path) {
     fs::create_dir_all(&scripts).unwrap();
     fs::write(dir.join("playbook.yaml"), PLAYBOOK).unwrap();
     fs::write(root.join(".apb/playbooks/conc/current"), "1.0.0").unwrap();
-    fs::write(scripts.join("slow.sh"), "sleep 0.4\n").unwrap();
+    fs::write(scripts.join("slow.sh"), "sleep 1.5\n").unwrap();
 }
 
 #[test]
@@ -58,10 +58,11 @@ fn parallel_script_branches_run_concurrently() {
             "node {n} must finish"
         );
     }
-    // Concurrent: 0.8s of work total, but wall-clock should be noticeably
-    // less (threshold with margin - under 0.75s).
+    // Concurrent: 3s of work total, but wall-clock should be ~1.5s + spawn
+    // overhead. Threshold 2.5s leaves margin for slow CI runners while still
+    // catching sequential execution (~3s).
     assert!(
-        elapsed.as_millis() < 750,
-        "two 0.4s branches ran in {elapsed:?}; expected concurrent (< 750ms)"
+        elapsed.as_millis() < 2500,
+        "two 1.5s branches ran in {elapsed:?}; expected concurrent (< 2500ms)"
     );
 }
