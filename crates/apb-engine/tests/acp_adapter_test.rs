@@ -9,12 +9,14 @@ use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, ErrorClass};
 use apb_engine::invocation::builtin;
 use apb_engine::state::NodeStatus;
 
+mod common;
+
 // Stub agent that prints given stream-json lines. Ignores its own
 // arguments (-p/--model/--output-format/--verbose), the same way a real agent
 // in streaming mode prints NDJSON to stdout.
 fn stub(dir: &Path, body: &str) -> String {
     let path = dir.join("acp-stub.sh");
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    common::write_sync(&path, &format!("#!/bin/sh\n{body}\n"));
     let mut perm = fs::metadata(&path).unwrap().permissions();
     perm.set_mode(0o755);
     fs::set_permissions(&path, perm).unwrap();

@@ -4,10 +4,12 @@ use apb_engine::state::NodeStatus;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
+mod common;
+
 // Prepares a stub agent: a shell script with the given body.
 fn stub_agent(dir: &std::path::Path, body: &str) -> String {
     let path = dir.join("stub-agent.sh");
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    common::write_sync(&path, &format!("#!/bin/sh\n{body}\n"));
     let mut perm = fs::metadata(&path).unwrap().permissions();
     perm.set_mode(0o755);
     fs::set_permissions(&path, perm).unwrap();
