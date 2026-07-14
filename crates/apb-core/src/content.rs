@@ -134,7 +134,7 @@ fn hash_tree(
         &mut h,
         &mut acc,
     )?;
-    Ok(format!("sha256:{:x}", h.finalize()))
+    Ok(format!("sha256:{}", hex_lower(&h.finalize())))
 }
 
 /// Recursive deterministic walk of directory `src_dir`. `rel_prefix` is the
@@ -323,7 +323,14 @@ pub fn bundle_digest(profile_digest: &str, skills: &[(String, String)]) -> Strin
         lp(&mut h, r.as_bytes());
         lp(&mut h, d.as_bytes());
     }
-    format!("sha256:{:x}", h.finalize())
+    format!("sha256:{}", hex_lower(&h.finalize()))
+}
+
+/// Single-pass sha256 of arbitrary bytes in `sha256:<hex>` format. For cases
+/// where we need to store/compare not the secret itself but its irreversible
+/// fingerprint (e.g. a supervisor session token on disk).
+pub fn hex_lower(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// Single-pass sha256 of arbitrary bytes in `sha256:<hex>` format. For cases
@@ -332,5 +339,5 @@ pub fn bundle_digest(profile_digest: &str, skills: &[(String, String)]) -> Strin
 pub fn sha256_hex(bytes: &[u8]) -> String {
     let mut h = Sha256::new();
     h.update(bytes);
-    format!("sha256:{:x}", h.finalize())
+    format!("sha256:{}", hex_lower(&h.finalize()))
 }
