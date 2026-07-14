@@ -39,7 +39,7 @@ fn agent_stub(dir: &Path, invocation_file: &Path) -> String {
         "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo '---end---'; }} >> '{}'\n",
         invocation_file.display()
     );
-    fs::write(&path, body).unwrap();
+    common::write_sync(&path, &body);
     set_executable(&path);
     path.to_string_lossy().to_string()
 }
