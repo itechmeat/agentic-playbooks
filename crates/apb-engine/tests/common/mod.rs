@@ -4,6 +4,18 @@
 
 use std::path::Path;
 
+/// Writes `content` to `path` and fsyncs. On Linux, `fs::write` without
+/// fsync can cause the following `execve` to fail with `ETXTBSY` when the
+/// file is a shebang script executed directly (not via `sh script.sh`),
+/// because the page cache may still hold dirty pages after close. Use this
+/// for any file that will be exec'd in the same test.
+pub fn write_sync(path: &Path, content: &str) {
+    use std::io::Write;
+    let mut f = std::fs::File::create(path).unwrap();
+    f.write_all(content.as_bytes()).unwrap();
+    f.sync_all().unwrap();
+}
+
 /// Seeds a profile to disk: `<root>/.apb/profiles/<name>/{profile.yaml,SOUL.md}`.
 /// The agent/model under the stub agent (APB_AGENT_CMD) do not matter - what matters
 /// is only that the profile resolves and builds an invocation chain.
