@@ -122,7 +122,7 @@ impl MigrationPlan {
 fn hash6(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
-    format!("{:x}", h.finalize())[..6].to_string()
+    crate::content::hex_lower(&h.finalize())[..6].to_string()
 }
 
 /// Canonical content of an executor for deduplication. Structural JSON

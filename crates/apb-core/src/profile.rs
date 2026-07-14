@@ -197,7 +197,7 @@ pub fn profile_digest(profile_yaml: &str, soul_md: &str) -> String {
     h.update(profile_yaml.as_bytes());
     h.update([0u8]);
     h.update(soul_md.as_bytes());
-    format!("sha256:{:x}", h.finalize())
+    format!("sha256:{}", crate::content::hex_lower(&h.finalize()))
 }
 
 #[cfg(test)]
