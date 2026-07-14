@@ -12,6 +12,8 @@ use apb_core::registry::init_project;
 use apb_engine::scheduler::{RunOptions, resume_with, run};
 use apb_engine::state::RunStatus;
 
+mod common;
+
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
@@ -31,7 +33,7 @@ impl Drop for EnvGuard {
 
 fn make_stub(dir: &Path, body: &str) -> String {
     let path = dir.join("stub.sh");
-    fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    common::write_sync(&path, &format!("#!/bin/sh\n{body}\n"));
     let mut p = fs::metadata(&path).unwrap().permissions();
     p.set_mode(0o755);
     fs::set_permissions(&path, p).unwrap();
