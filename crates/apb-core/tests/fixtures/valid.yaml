@@ -1,0 +1,50 @@
+schema: 2
+id: implement-task
+name: Implement Task
+description: Example from the spec, shortened
+version: 1.0.0
+
+params:
+  - { name: task, type: text, label: "Task" }
+
+defaults:
+  profile: architect
+  max_retries: 1
+  timeout_seconds: 3600
+
+nodes:
+  - id: start
+    type: start
+    title: Start
+  - id: plan
+    type: agent_task
+    title: Plan
+    profile: architect
+    prompt: |
+      Write a plan: {{params.task}}
+  - id: lint
+    type: script
+    title: Lint
+    script: scripts/node-lint.sh
+    runner: sh
+    timeout_seconds: 300
+  - id: check
+    type: condition
+    title: Passed?
+    max_loops: 3
+  - id: fix
+    type: agent_task
+    title: Fix
+    prompt: |
+      Fix: {{nodes.lint.output}}
+  - id: done
+    type: finish
+    outcome: success
+
+edges:
+  - { from: start, to: plan }
+  - { from: plan, to: lint }
+  - { from: lint, to: check }
+  - { from: check, to: done, condition: { type: node_status, node: lint, equals: success } }
+  - { from: check, to: fix,  condition: { type: node_status, node: lint, equals: failure } }
+  - { from: fix, to: lint }

@@ -1,0 +1,24 @@
+[package]
+name = "apb-mcp"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+apb-core = { path = "../apb-core" }
+apb-engine = { path = "../apb-engine" }
+serde.workspace = true
+serde_json.workspace = true
+serde_yaml_ng.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+anyhow = "1.0"
+rmcp = { version = "2.2.0", features = ["transport-io"] }
+schemars = "1.2.1"
+hmac.workspace = true
+sha2.workspace = true
+uuid.workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"

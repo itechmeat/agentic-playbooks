@@ -1,0 +1,621 @@
+use std::io::{BufRead, BufReader, Write as _};
+use std::path::Path;
+use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
+
+use apb_core::config::{InvocationDef, PromptVia, SoulDelivery, Transport};
+
+use crate::error::EngineError;
+use crate::state::NodeStatus;
+
+/// Spawns the agent in its own process group so that cancellation/timeout can
+/// tear down the whole tree, not just the direct child (a real agent spawns
+/// node, MCP servers, tool subprocesses). On Unix - process_group(0) (pgid ==
+/// leader pid); on other platforms - no-op (fallback to child.kill()).
+fn spawn_in_group(cmd: &mut Command) -> std::io::Result<Child> {
+    #[cfg(unix)]
+    cmd.process_group(0);
+    cmd.spawn()
+}
+
+/// Terminates the agent's whole process tree and reaps the leader. On Unix
+/// this sends SIGKILL to the group (`kill(-pgid, ...)`, pgid == pid because of
+/// process_group(0) at spawn time) so children are not orphaned; on other
+/// platforms - child.kill().
+fn kill_process_tree(child: &mut Child) {
+    #[cfg(unix)]
+    {
+        let pid = child.id() as i32;
+        // A negative pid signals the entire process group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = child.kill();
+    }
+    let _ = child.wait();
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ErrorClass {
+    Transport,
+    ProcessExit,
+    StructuredOutputMissing,
+    AgentReportedFailure,
+    Timeout,
+}
+
+pub struct AgentTask<'a> {
+    pub prompt: &'a str,
+    pub model: &'a str,
+    pub workdir: &'a Path,
+    /// Maximum agent run time; once it elapses the process is killed and the
+    /// attempt is considered timed out. `None` - no limit.
+    pub timeout: Option<Duration>,
+    /// File for streaming the agent's NDJSON events (acp transport). Each
+    /// event is written as a separate line as it arrives - the basis for the
+    /// live stream in the web UI and logs. `None` - do not stream (headless
+    /// ignores this field).
+    pub stream_log: Option<&'a Path>,
+    /// System role prompt (profile SOUL). Delivered according to the agent's
+    /// capability (native flag or prompt prefix, see `build_command`).
+    /// `None`/empty - no role set.
+    pub soul: Option<&'a str>,
+}
+
+#[derive(Debug)]
+pub struct AgentReport {
+    pub status: NodeStatus,
+    pub summary: String,
+    pub raw: String,
+}
+
+pub trait AgentAdapter {
+    fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)>;
+
+    /// Like `run`, but with cooperative cancellation: while the agent is
+    /// running, the implementation periodically checks `cancel` and, if set,
+    /// kills the process and returns Err(Transport, "cancelled"). Needed by
+    /// parallel branches so join:any can cancel the losing branch (spec 8.4).
+    /// The default ignores `cancel` and just calls `run` (for adapters
+    /// without kill support).
+    fn run_cancellable(
+        &self,
+        task: &AgentTask,
+        cancel: &AtomicBool,
+    ) -> Result<AgentReport, (ErrorClass, String)> {
+        let _ = cancel;
+        self.run(task)
+    }
+
+    /// Spawns a background supervisor agent as a separate, non-awaited
+    /// (detached) process. The default implementation is a no-op, so adapters
+    /// for which spawning a supervisor makes no sense do not need to override
+    /// it.
+    fn spawn_supervisor(
+        &self,
+        _brief: &str,
+        _model: &str,
+        _workdir: &Path,
+        _soul: Option<&str>,
+    ) -> Result<(), (ErrorClass, String)> {
+        Ok(())
+    }
+}
+
+pub struct ClaudeAdapter {
+    pub program: String,
+    /// Declarative invocation form (argv template, prompt_via, SOUL delivery,
+    /// transport). The type name is historical: the adapter is now
+    /// parameterized by the form and serves any headless/acp-compatible CLI,
+    /// not just claude.
+    pub spec: InvocationDef,
+}
+
+/// Builds argv (without the program name) and an optional stdin payload from
+/// the invocation form. The `{prompt}`/`{model}` placeholders are substituted
+/// as whole elements. SOUL: with `prefix` it is prepended before the prompt,
+/// with `native` it goes out as a separate `soul_flag <soul>`. An empty SOUL
+/// is not delivered.
+fn build_command(
+    spec: &InvocationDef,
+    prompt: &str,
+    model: &str,
+    soul: Option<&str>,
+) -> (Vec<String>, Option<String>) {
+    let soul = soul.filter(|s| !s.is_empty());
+    let effective_prompt = match (spec.soul, soul) {
+        (SoulDelivery::Prefix, Some(s)) => format!("{s}\n\n---\n\n{prompt}"),
+        _ => prompt.to_string(),
+    };
+    let mut argv: Vec<String> = Vec::with_capacity(spec.argv.len() + 2);
+    for a in &spec.argv {
+        match a.as_str() {
+            "{prompt}" => argv.push(effective_prompt.clone()),
+            "{model}" => argv.push(model.to_string()),
+            other => argv.push(other.to_string()),
+        }
+    }
+    if spec.soul == SoulDelivery::Native
+        && let Some(s) = soul
+        && let Some(flag) = &spec.soul_flag
+    {
+        argv.push(flag.clone());
+        argv.push(s.to_string());
+    }
+    let stdin_payload = match spec.prompt_via {
+        PromptVia::Stdin => Some(effective_prompt),
+        PromptVia::Argv => None,
+    };
+    (argv, stdin_payload)
+}
+
+/// Tail appended to the prompt: asks the agent to end its reply with a
+/// structured report block (spec 6.2 contract). Agents that follow the
+/// contract get their self-assessed status reflected in node_status;
+/// stubs/agents without the block get backward-compatible handling (see
+/// `interpret_report`).
+const REPORT_INSTRUCTION: &str = "When you are done, end your reply with a fenced yaml block reporting the outcome:\n```yaml\nstatus: success | failure\nsummary: one-line summary of what you did\n```";
+
+fn with_report_instruction(prompt: &str) -> String {
+    format!("{prompt}\n\n{REPORT_INSTRUCTION}")
+}
+
+/// Extracts status and summary from the agent's reply per the report contract
+/// (spec 6.2): the last fenced ```yaml block with a `status` field.
+/// `status: failure` is the agent's self-assessment (agent_reported_failure),
+/// and it drives the node_status branching. If there is no block, or it has
+/// no valid status, the default is Succeeded, and the summary is the whole
+/// text (backward compatibility with agents and stubs that have no
+/// structured block). NOTE: the strict variant of the spec (no block ->
+/// unknown + anomaly) is deliberately NOT included so as not to break agents
+/// without the contract; this is a possible future tightening.
+fn interpret_report(text: &str) -> (NodeStatus, String) {
+    if let Some(block) = last_yaml_block(text)
+        && let Ok(val) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&block)
+    {
+        let status = match val.get("status").and_then(|s| s.as_str()) {
+            Some("failure") => Some(NodeStatus::Failed),
+            Some("success") => Some(NodeStatus::Succeeded),
+            _ => None,
+        };
+        if let Some(status) = status {
+            let summary = val
+                .get("summary")
+                .and_then(|s| s.as_str())
+                .map(|s| s.trim().to_string())
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| text.trim().to_string());
+            return (status, summary);
+        }
+    }
+    (NodeStatus::Succeeded, text.trim().to_string())
+}
+
+/// Body of the last completed fenced ```yaml (or ```yml) block. The scan runs
+/// forward, each opening fence pairs with its OWN nearest closing fence, and
+/// after closing the opening state is reset - so a closing fence can never be
+/// mistakenly paired with an unrelated opening. None if there is no completed
+/// block.
+fn last_yaml_block(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let mut open: Option<usize> = None;
+    let mut last: Option<String> = None;
+    for (i, line) in lines.iter().enumerate() {
+        let t = line.trim();
+        match open {
+            None if t == "```yaml" || t == "```yml" => open = Some(i),
+            Some(start) if t == "```" => {
+                last = Some(lines[(start + 1)..i].join("\n"));
+                open = None;
+            }
+            _ => {}
+        }
+    }
+    last
+}
+
+impl ClaudeAdapter {
+    pub fn from_env() -> Self {
+        let program = std::env::var("APB_AGENT_CMD").unwrap_or_else(|_| "claude".to_string());
+        Self {
+            program,
+            spec: crate::invocation::builtin("claude").expect("builtin claude spec"),
+        }
+    }
+
+    fn check_cancel_timeout(
+        child: &mut Child,
+        cancel: &AtomicBool,
+        started: Instant,
+        timeout: Option<Duration>,
+    ) -> Option<(ErrorClass, String)> {
+        if cancel.load(Ordering::Relaxed) {
+            kill_process_tree(child);
+            return Some((ErrorClass::Transport, "cancelled".to_string()));
+        }
+        if let Some(limit) = timeout
+            && started.elapsed() >= limit
+        {
+            kill_process_tree(child);
+            return Some((
+                ErrorClass::Timeout,
+                format!("agent timed out after {}s", limit.as_secs()),
+            ));
+        }
+        None
+    }
+
+    /// Headless transport: a one-shot buffered run of `claude -p ...`, stdout
+    /// is collected on completion. Cancellation/timeout - via a poll loop.
+    fn run_headless(
+        &self,
+        task: &AgentTask,
+        cancel: &AtomicBool,
+    ) -> Result<AgentReport, (ErrorClass, String)> {
+        let prompt = with_report_instruction(task.prompt);
+        let (argv, stdin_payload) = build_command(&self.spec, &prompt, task.model, task.soul);
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&argv)
+            .current_dir(task.workdir)
+            .stdin(if stdin_payload.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = spawn_in_group(&mut cmd).map_err(|e| {
+            (
+                ErrorClass::ProcessExit,
+                format!("spawn `{}` failed: {e}", self.program),
+            )
+        })?;
+        if let Some(payload) = &stdin_payload
+            && let Some(mut si) = child.stdin.take()
+        {
+            let _ = si.write_all(payload.as_bytes());
+            // si is dropped here - stdin closes, the agent sees EOF.
+        }
+        let started = Instant::now();
+        loop {
+            if let Some(err) = Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)
+            {
+                return Err(err);
+            }
+            match child.try_wait() {
+                Ok(Some(_)) => break,
+                Ok(None) => std::thread::sleep(Duration::from_millis(50)),
+                Err(e) => {
+                    return Err((
+                        ErrorClass::ProcessExit,
+                        format!("wait `{}` failed: {e}", self.program),
+                    ));
+                }
+            }
+        }
+        let output = child.wait_with_output().map_err(|e| {
+            (
+                ErrorClass::ProcessExit,
+                format!("collect `{}` output failed: {e}", self.program),
+            )
+        })?;
+        let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        if !output.status.success() {
+            return Err((
+                ErrorClass::ProcessExit,
+                format!("agent exited with {:?}: {stderr}", output.status.code()),
+            ));
+        }
+        // Status comes from the structured report block (spec 6.2); raw is the full stdout.
+        let (status, summary) = interpret_report(&stdout);
+        Ok(AgentReport {
+            status,
+            summary,
+            raw: stdout,
+        })
+    }
+
+    /// acp transport (currently based on Claude Code's stream-json): runs the
+    /// agent in streaming mode, reads stdout line by line on a separate
+    /// thread, writes each NDJSON event to `stream_log` as it arrives, and on
+    /// EOF extracts the final result from the terminal `type: result` event.
+    /// Cancellation/timeout kill the process. Error classification per spec
+    /// 7.2: a broken/invalid stream with no result -> Transport; non-zero
+    /// exit code -> ProcessExit; a successful exit code with no result event
+    /// -> StructuredOutputMissing; a result with is_error -> a report with
+    /// status Failed (agent_reported_failure).
+    ///
+    /// NOTE (provisional): the exact Claude Code stream-json schema is not
+    /// rigidly pinned down here - parsing is lenient (unrecognized lines are
+    /// skipped). The full Agent Client Protocol (JSON-RPC initialize/
+    /// session.new/session.prompt/session.update, permissions, multi-agent)
+    /// is a follow-up refinement on top of this same transport.
+    fn run_acp(
+        &self,
+        task: &AgentTask,
+        cancel: &AtomicBool,
+    ) -> Result<AgentReport, (ErrorClass, String)> {
+        let prompt = with_report_instruction(task.prompt);
+        // Base argv comes from the invocation form; claude-specific streaming
+        // flags (stream-json) are layered on top. In the first iteration,
+        // acp = claude.
+        let (mut argv, _stdin) = build_command(&self.spec, &prompt, task.model, task.soul);
+        argv.push("--output-format".to_string());
+        argv.push("stream-json".to_string());
+        argv.push("--verbose".to_string());
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&argv)
+            .current_dir(task.workdir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let mut child = spawn_in_group(&mut cmd).map_err(|e| {
+            (
+                ErrorClass::ProcessExit,
+                format!("spawn `{}` failed: {e}", self.program),
+            )
+        })?;
+
+        // Read stdout on a background thread: BufReader::lines() blocks
+        // line by line, but we also need to poll cancel/timeout concurrently.
+        // Lines go into a channel.
+        let stdout = child.stdout.take().expect("stdout piped");
+        let (tx, rx) = mpsc::channel::<String>();
+        let reader = std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                match line {
+                    Ok(l) => {
+                        if tx.send(l).is_err() {
+                            break;
+                        }
+                    }
+                    Err(_) => break,
+                }
+            }
+        });
+
+        // Drain stderr on a separate thread, otherwise heavy stderr output
+        // would fill its pipe and block the agent on write (we only read
+        // stdout).
+        let stderr_pipe = child.stderr.take();
+        let err_reader = std::thread::spawn(move || {
+            use std::io::Read as _;
+            let mut s = String::new();
+            if let Some(mut e) = stderr_pipe {
+                let _ = e.read_to_string(&mut s);
+            }
+            s
+        });
+
+        let mut sink = task.stream_log.and_then(|p| {
+            if let Some(parent) = p.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            std::fs::OpenOptions::new()
+                .create(true)
+                .append(true)
+                .open(p)
+                .ok()
+        });
+
+        let started = Instant::now();
+        let mut raw_lines: Vec<String> = Vec::new();
+        loop {
+            if let Some(err) = Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)
+            {
+                return Err(err);
+            }
+            match rx.recv_timeout(Duration::from_millis(50)) {
+                Ok(line) => {
+                    if let Some(f) = sink.as_mut() {
+                        let _ = writeln!(f, "{line}");
+                    }
+                    raw_lines.push(line);
+                }
+                // The reader thread closed the channel: stdout reached EOF
+                // (the process finished its output) - exit and assemble the result.
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        let _ = reader.join();
+        let stderr = err_reader.join().unwrap_or_default();
+
+        let status = child.wait().map_err(|e| {
+            (
+                ErrorClass::ProcessExit,
+                format!("wait `{}` failed: {e}", self.program),
+            )
+        })?;
+        if !status.success() {
+            return Err((
+                ErrorClass::ProcessExit,
+                format!("agent exited with {:?}: {}", status.code(), stderr.trim()),
+            ));
+        }
+
+        parse_stream_result(&raw_lines)
+    }
+}
+
+/// Extracts the result from the stream-json stream: looks for the terminal
+/// `type: "result"` event and takes its text (`result`) and `is_error` flag.
+/// The absence of such an event on a normal exit is StructuredOutputMissing.
+fn parse_stream_result(lines: &[String]) -> Result<AgentReport, (ErrorClass, String)> {
+    let raw = lines.join("\n");
+    for line in lines.iter().rev() {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|t| t.as_str()) != Some("result") {
+            continue;
+        }
+        let is_error = val
+            .get("is_error")
+            .and_then(|b| b.as_bool())
+            .unwrap_or(false);
+        let text = val
+            .get("result")
+            .and_then(|r| r.as_str())
+            .unwrap_or("")
+            .to_string();
+        // Status: the stream's is_error takes priority; otherwise, the
+        // agent's self-assessment from the report block in the result text
+        // (spec 6.2), defaulting to success.
+        let (block_status, summary) = interpret_report(&text);
+        let status = if is_error {
+            NodeStatus::Failed
+        } else {
+            block_status
+        };
+        return Ok(AgentReport {
+            status,
+            summary,
+            raw,
+        });
+    }
+    Err((
+        ErrorClass::StructuredOutputMissing,
+        "no `result` event in stream-json output".to_string(),
+    ))
+}
+
+impl AgentAdapter for ClaudeAdapter {
+    fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)> {
+        // A non-cancellable run is a cancellable run with an always-false flag.
+        self.run_cancellable(task, &AtomicBool::new(false))
+    }
+
+    fn run_cancellable(
+        &self,
+        task: &AgentTask,
+        cancel: &AtomicBool,
+    ) -> Result<AgentReport, (ErrorClass, String)> {
+        match self.spec.transport {
+            Transport::Headless => self.run_headless(task, cancel),
+            Transport::Acp => self.run_acp(task, cancel),
+        }
+    }
+
+    /// Spawns a background supervisor agent and does not wait for it to
+    /// finish (fire-and-forget): dropping the `Child` will orphan the
+    /// process, which is intentional for Phase 4c - the supervisor lives out
+    /// its own cycle (supervisor_wait_event -> ... -> supervisor_report) for
+    /// the whole run, and the engine holds no explicit handle to it. The live
+    /// cycle against a real `claude` is verified manually (Task 5); here we
+    /// only cover the fact of spawning.
+    fn spawn_supervisor(
+        &self,
+        brief: &str,
+        model: &str,
+        workdir: &Path,
+        soul: Option<&str>,
+    ) -> Result<(), (ErrorClass, String)> {
+        // Goes through build_command using the invocation form (not hardcoded
+        // -p/--model), otherwise codex/opencode/custom argv and stdin
+        // profiles would be spawned incorrectly. The supervisor profile's
+        // SOUL is delivered according to the form (native flag / prefix).
+        let (argv, stdin_payload) = build_command(&self.spec, brief, model, soul);
+        let mut cmd = Command::new(&self.program);
+        cmd.args(&argv)
+            .current_dir(workdir)
+            .stdin(if stdin_payload.is_some() {
+                Stdio::piped()
+            } else {
+                Stdio::null()
+            })
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        let mut child = cmd.spawn().map_err(|e| {
+            (
+                ErrorClass::ProcessExit,
+                format!("spawn supervisor `{}` failed: {e}", self.program),
+            )
+        })?;
+        if let Some(payload) = &stdin_payload
+            && let Some(mut si) = child.stdin.take()
+        {
+            let _ = si.write_all(payload.as_bytes());
+            // si is dropped here - stdin closes, the agent sees EOF.
+        }
+        Ok(())
+    }
+}
+
+pub fn adapter_for(agent: &str) -> Result<Box<dyn AgentAdapter>, EngineError> {
+    // APB_AGENT_CMD is an explicit program override (tests, local runs) with
+    // the highest priority and the headless claude form: the config-free path
+    // stays unchanged.
+    if let Ok(program) = std::env::var("APB_AGENT_CMD") {
+        let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
+        return Ok(Box::new(ClaudeAdapter { program, spec }));
+    }
+    // Agent invocation form: config overrides the built-in default. An
+    // unknown agent with no form -> error (same as the former "unsupported
+    // agent").
+    let global = apb_core::config::GlobalConfig::load().unwrap_or_default();
+    let spec = crate::invocation::spec_for(agent, &global)?;
+    let program = global
+        .agent_program(agent)
+        .unwrap_or_else(|| default_program(agent));
+    Ok(Box::new(ClaudeAdapter { program, spec }))
+}
+
+/// Default binary name for built-in agents when not set in config:
+/// claude/claude-code -> "claude", others - the id itself (codex, opencode, agy).
+fn default_program(agent: &str) -> String {
+    match agent {
+        "claude" | "claude-code" => "claude".to_string(),
+        other => other.to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn interpret_report_reads_failure_block() {
+        let text = "did work\n```yaml\nstatus: failure\nsummary: could not finish\n```";
+        let (status, summary) = interpret_report(text);
+        assert_eq!(status, NodeStatus::Failed);
+        assert_eq!(summary, "could not finish");
+    }
+
+    #[test]
+    fn interpret_report_reads_success_block() {
+        let text = "```yaml\nstatus: success\nsummary: done\n```";
+        assert_eq!(interpret_report(text).0, NodeStatus::Succeeded);
+    }
+
+    #[test]
+    fn interpret_report_defaults_to_success_without_block() {
+        let text = "just plain output, no block";
+        let (status, summary) = interpret_report(text);
+        assert_eq!(status, NodeStatus::Succeeded);
+        assert_eq!(summary, text);
+    }
+
+    #[test]
+    fn last_yaml_block_returns_last_completed_pairing_forward() {
+        // A yaml block first, then an unrelated (json) block: it must not
+        // pair with the json closing fence; the last COMPLETED yaml block is taken.
+        let text = "```yaml\nstatus: success\nsummary: first\n```\nmid\n```json\n{\"x\":1}\n```";
+        let block = last_yaml_block(text).expect("a yaml block");
+        assert!(block.contains("summary: first"));
+        assert!(!block.contains("json"));
+
+        // Two yaml blocks: the last one is returned.
+        let two = "```yaml\nstatus: failure\n```\n```yaml\nstatus: success\nsummary: latest\n```";
+        assert_eq!(interpret_report(two).0, NodeStatus::Succeeded);
+    }
+}

@@ -1,0 +1,920 @@
+use std::collections::BTreeMap;
+use std::path::Path;
+use std::time::Duration;
+
+use apb_core::registry::{Registry, RegistryError, is_safe_segment};
+use apb_core::validate::{Severity, ValidationContext, validate};
+use apb_core::versioning::{
+    VersioningError, create_patch_version, create_version, delete_playbook,
+};
+use apb_engine::control::Control;
+use apb_engine::event::read_all;
+use apb_engine::state::RunState;
+use apb_engine::{
+    EngineError, RunMode, RunOptions, list_runs, post_supervisor_command, resume, run,
+    run_background, run_cancel, run_inspect as engine_run_inspect, touch_heartbeat, wait_wake,
+    write_supervisor_report,
+};
+use serde_json::{Value, json};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ToolError {
+    #[error("not found: {0}")]
+    NotFound(String),
+    #[error("engine error: {0}")]
+    Engine(String),
+    /// An optimistic-concurrency conflict (CAS): the profile already exists / does not
+    /// exist / `expected_digest` did not match. Typed separately so that
+    /// surfaces can map it to 409 without a fragile substring search in the text.
+    #[error("conflict: {0}")]
+    Conflict(String),
+}
+
+impl From<RegistryError> for ToolError {
+    fn from(e: RegistryError) -> Self {
+        match e {
+            RegistryError::NotFound(w) => ToolError::NotFound(w),
+            other => ToolError::Engine(other.to_string()),
+        }
+    }
+}
+
+impl From<EngineError> for ToolError {
+    fn from(e: EngineError) -> Self {
+        match e {
+            EngineError::NotFound(m) => ToolError::NotFound(m),
+            EngineError::Registry(RegistryError::NotFound(w)) => ToolError::NotFound(w),
+            other => ToolError::Engine(other.to_string()),
+        }
+    }
+}
+
+impl From<VersioningError> for ToolError {
+    fn from(e: VersioningError) -> Self {
+        match e {
+            VersioningError::NotFound(w) => ToolError::NotFound(w),
+            VersioningError::Validation(codes) => {
+                ToolError::Engine(format!("validation failed: {codes:?}"))
+            }
+            other => ToolError::Engine(other.to_string()),
+        }
+    }
+}
+
+/// Creates a new playbook or a new minor version of an existing one.
+pub fn playbook_create(root: &Path, id: &str, yaml: &str) -> Result<Value, ToolError> {
+    let version = create_version(root, id, yaml, None, true)?;
+    Ok(json!({ "id": id, "version": version }))
+}
+
+/// Updates an existing playbook (a new minor version). If the id does not exist - NotFound.
+pub fn playbook_update(root: &Path, id: &str, yaml: &str) -> Result<Value, ToolError> {
+    if !is_safe_segment(id) {
+        return Err(ToolError::NotFound(id.to_string()));
+    }
+    let dir = root.join(".apb/playbooks").join(id);
+    if !dir.is_dir() {
+        return Err(ToolError::NotFound(id.to_string()));
+    }
+    let version = create_version(root, id, yaml, None, true)?;
+    Ok(json!({ "id": id, "version": version }))
+}
+
+/// Approves the digest of a version just created locally (spec 3.1): creation
+/// through the tool/CLI is a local user action, hence trusted. Best-effort:
+/// a failure is not critical (the playbook will simply stay untrusted until trial/acknowledge).
+/// Project scope (`root/.apb`); global creation is approved on its own path.
+pub fn approve_local(root: &Path, id: &str, version: &str) {
+    let yaml_path = root
+        .join(".apb/playbooks")
+        .join(id)
+        .join(version)
+        .join("playbook.yaml");
+    if let Ok(yaml) = std::fs::read_to_string(&yaml_path) {
+        let digest = apb_core::scope::digest_str(&yaml);
+        let mut trust = apb_core::trust::TrustStore::load();
+        let _ = trust.approve(&digest, id, apb_core::trust::OriginKind::LocallyApproved);
+    }
+}
+
+/// Soft-deletes a playbook into trash.
+pub fn playbook_delete(root: &Path, id: &str) -> Result<Value, ToolError> {
+    let trashed = delete_playbook(root, id, apb_engine::event::now_millis())?;
+    Ok(json!({ "trashed": trashed.to_string_lossy() }))
+}
+
+fn open(root: &Path) -> Result<Registry, ToolError> {
+    Registry::open(root).map_err(ToolError::from)
+}
+
+pub fn playbook_list(root: &Path) -> Result<Value, ToolError> {
+    let reg = open(root)?;
+    let list = reg.list()?;
+    serde_json::to_value(list).map_err(|e| ToolError::Engine(e.to_string()))
+}
+
+/// The compact structural playbook catalog (tier 1, spec 4). Project scope
+/// plus global, with trust-aware shadowing and effective effects. Does not break
+/// `playbook_list` - this is a separate surface.
+pub fn playbook_catalog(
+    root: &Path,
+    workspace_id: Option<&str>,
+    revision: Option<&str>,
+    limit: Option<usize>,
+) -> Result<Value, ToolError> {
+    let dismissed = apb_core::dismiss::active_patterns();
+    Ok(crate::catalog::build(
+        root,
+        workspace_id,
+        revision,
+        limit,
+        dismissed,
+    ))
+}
+
+/// The registry of the user's workspaces (spec 6): current, global, and other projects.
+pub fn projects_list() -> Result<Value, ToolError> {
+    let entries = apb_core::projects::list_active();
+    serde_json::to_value(entries).map_err(|e| ToolError::Engine(e.to_string()))
+}
+
+/// Tier 2 (spec 4): playbook authoring details. Pulled only when
+/// creating/reworking one; it does not enter a normal session.
+pub fn playbook_howto() -> Result<Value, ToolError> {
+    Ok(json!({ "howto": include_str!("../../../docs/HOWTO-authoring.md") }))
+}
+
+/// A "looks like a secret" heuristic (spec 8.3): a crude scan without a regex crate.
+/// Catches `key: value` with an indicator key and a value of length >= 8 with no
+/// whitespace, as well as long (>= 32) contiguous base64/hex-like tokens.
+/// Returns a masked fragment. This is an extra safety net, not a
+/// guarantee: the main contract is that the host does not put secrets into the synopsis.
+fn secret_like(text: &str) -> Option<String> {
+    const KEYS: [&str; 6] = [
+        "api_key", "apikey", "api-key", "secret", "token", "password",
+    ];
+    for raw in text.lines() {
+        let line = raw.trim();
+        let lower = line.to_lowercase();
+        // Look for the indicator key anywhere in the line (robust to a JSON wrapper
+        // like `"note":"api_key: ..."`), then take the value after the nearest ':'/'='.
+        // We take offsets and slice using the same `lower` string throughout - otherwise on Unicode
+        // (to_lowercase can change length) a byte index from `lower` could
+        // point into the middle of a character in `line` and panic.
+        for key in KEYS {
+            let Some(kpos) = lower.find(key) else {
+                continue;
+            };
+            let after = &lower[kpos + key.len()..];
+            if let Some(sep) = after.find([':', '=']) {
+                let val = after[sep + 1..].trim();
+                let val: &str = val
+                    .split(|c: char| {
+                        c.is_whitespace() || c == '"' || c == '\'' || c == ',' || c == '}'
+                    })
+                    .find(|s| !s.is_empty())
+                    .unwrap_or("");
+                if val.len() >= 8 {
+                    return Some(mask(val));
+                }
+            }
+        }
+        for tok in line.split(|c: char| c.is_whitespace() || c == '"' || c == '\'') {
+            if tok.len() >= 32
+                && tok
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '+' | '/' | '=' | '_' | '-'))
+            {
+                return Some(mask(tok));
+            }
+        }
+    }
+    None
+}
+
+fn mask(s: &str) -> String {
+    let head: String = s.chars().take(3).collect();
+    format!("{head}...({} chars)", s.len())
+}
+
+fn normalize(s: &str) -> String {
+    s.trim().to_lowercase()
+}
+
+/// Accepts an action synopsis and creates a draft playbook from it in the chosen
+/// scope (spec 8.3). Draft: does not pass the run gate until it goes through trial
+/// or explicit confirmation. Secrets and duplicates are rejected before writing.
+pub fn playbook_capture(
+    root: &Path,
+    synopsis: &Value,
+    selected_scope: &str,
+    yaml: &str,
+) -> Result<Value, ToolError> {
+    // Secret scan over the synopsis and over the yaml (spec 8.3).
+    let synopsis_text = serde_json::to_string(synopsis).unwrap_or_default();
+    for src in [synopsis_text.as_str(), yaml] {
+        if let Some(m) = secret_like(src) {
+            return Ok(json!({ "rejected": "secret_like_value", "match": m }));
+        }
+    }
+
+    // Take the id from the yaml itself (the canonical source).
+    let parsed = apb_core::schema::Playbook::from_yaml(yaml)
+        .map_err(|e| ToolError::Engine(format!("invalid yaml: {e}")))?;
+    let id = parsed.id.clone();
+
+    let parent = match selected_scope {
+        "project" => root.join(".apb"),
+        "global" => apb_core::store::global_playbooks_parent()
+            .ok_or_else(|| ToolError::Engine("no global config dir".into()))?,
+        other => return Err(ToolError::Engine(format!("unknown scope `{other}`"))),
+    };
+
+    // Dedup: a close trigger among the existing ones (both scopes). An exact
+    // match of the normalized when string -> possible_duplicate.
+    let catalog = crate::catalog::build(root, None, None, None, Vec::new());
+    if let Some(entries) = catalog["entries"].as_array() {
+        let new_whens: Vec<String> = synopsis
+            .get("trigger")
+            .and_then(|t| t.get("when"))
+            .and_then(|w| w.as_array())
+            .map(|a| a.iter().filter_map(|v| v.as_str().map(normalize)).collect())
+            .unwrap_or_default();
+        for e in entries {
+            let existing: Vec<String> = e
+                .get("trigger")
+                .and_then(|t| t.get("when"))
+                .and_then(|w| w.as_array())
+                .map(|a| a.iter().filter_map(|v| v.as_str().map(normalize)).collect())
+                .unwrap_or_default();
+            if new_whens.iter().any(|w| existing.contains(w)) {
+                return Ok(json!({ "rejected": "possible_duplicate", "candidate": e["ref"] }));
+            }
+        }
+    }
+
+    // Draft creation. A Conflict from core -> duplicate_id.
+    let origin = if selected_scope == "global" {
+        apb_core::profile_store::PlaybookOrigin::Global
+    } else {
+        apb_core::profile_store::PlaybookOrigin::Project
+    };
+    let version = match apb_core::versioning::create_draft_in(&parent, &id, yaml, origin) {
+        Ok(v) => v,
+        Err(apb_core::versioning::VersioningError::Conflict(_)) => {
+            return Ok(json!({ "rejected": "duplicate_id", "id": id }));
+        }
+        Err(e) => return Err(ToolError::from(e)),
+    };
+
+    // Mark it draft and write provenance. The digest is NOT approved - capture is not a
+    // local approval (spec 8.3).
+    let playbook_dir = parent.join("playbooks").join(&id);
+    apb_core::trust::write_lifecycle(&playbook_dir, apb_core::trust::Lifecycle::Draft)
+        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    let provenance = json!({
+        "created_by": "agent-capture",
+        "title": synopsis.get("title").and_then(|t| t.as_str()).unwrap_or(""),
+    });
+    let _ = apb_core::fsutil::atomic_write(
+        &playbook_dir.join("provenance.json"),
+        provenance.to_string().as_bytes(),
+    );
+
+    Ok(json!({
+        "id": id,
+        "version": version,
+        "scope": selected_scope,
+        "lifecycle": "draft",
+        "trusted": false,
+        "provenance": provenance,
+    }))
+}
+
+/// Records the user's decline of the suggestion to save a playbook (spec 8.2):
+/// "no, and don't suggest that again". The pattern is an English kebab-slug.
+pub fn suggestion_dismiss(pattern: &str, ttl_days: Option<u64>) -> Result<Value, ToolError> {
+    apb_core::dismiss::record(pattern, ttl_days).map_err(|e| ToolError::Engine(e.to_string()))?;
+    Ok(json!({ "dismissed": pattern }))
+}
+
+fn git(root: &Path, args: &[&str]) -> Option<std::process::Output> {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(args)
+        .output()
+        .ok()
+}
+
+fn is_git_repo(root: &Path) -> bool {
+    git(root, &["rev-parse", "--is-inside-work-tree"])
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Truncates a string to <= `max` bytes, backing off to the nearest UTF-8 character
+/// boundary (String::truncate panics on a non-boundary; a git diff can contain
+/// multi-byte characters).
+fn truncate_on_char_boundary(s: &mut String, max: usize) {
+    if s.len() > max {
+        let mut end = max;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
+    }
+}
+
+/// Waits for a terminal run event (succeeded/failed/aborted) up to the deadline.
+fn poll_terminal(run_dir: &Path) -> String {
+    use apb_engine::state::{RunState, RunStatus};
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        if let Ok(events) = read_all(run_dir) {
+            let state = RunState::fold(&events);
+            if matches!(
+                state.run_status,
+                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
+            ) {
+                return state.run_status.as_str().to_string();
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return "timeout".to_string();
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
+/// A trial run of a draft playbook driven by the effects matrix (spec 8.3): filesystem-writing
+/// ones run in a git worktree with the diff shown; irreversible ones are forbidden; network-only
+/// ones with no writes run unisolated, with a flag.
+pub fn playbook_trial(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    params: BTreeMap<String, String>,
+    scope: &str,
+) -> Result<Value, ToolError> {
+    use apb_core::schema::Effect;
+
+    // Take the definition from the chosen scope; a global draft must also be runnable
+    // (spec 8.3). Execution happens in the current project regardless.
+    let (definition_parent, origin_label) = match scope {
+        "project" => (root.join(".apb"), "project"),
+        "global" => (
+            apb_core::store::global_playbooks_parent()
+                .ok_or_else(|| ToolError::Engine("no global config dir".into()))?,
+            "global",
+        ),
+        other => return Err(ToolError::Engine(format!("unknown scope `{other}`"))),
+    };
+    let reg = Registry::open_dir(&definition_parent).map_err(ToolError::from)?;
+    let loaded = reg.load(id, version)?;
+    let effects = apb_core::effects::effective(&loaded.playbook);
+    let digest = apb_core::scope::digest_str(&loaded.yaml);
+
+    if effects.contains(&Effect::Irreversible) {
+        return Ok(json!({ "rejected": "trial_forbidden_irreversible", "id": id }));
+    }
+
+    let opts = RunOptions {
+        params,
+        ..Default::default()
+    };
+    let resolved_version = loaded.version.clone();
+
+    // ResolvedPlaybook: the definition comes from the chosen scope, execution happens in
+    // the given execution_root (worktree or the current project).
+    let resolved = |exec_root: std::path::PathBuf| apb_core::store::ResolvedPlaybook {
+        definition_parent: definition_parent.clone(),
+        execution_root: exec_root,
+        id: id.to_string(),
+        version: resolved_version.clone(),
+        digest: digest.clone(),
+        origin_label,
+    };
+
+    if effects.contains(&Effect::FsWrite) {
+        if !is_git_repo(root) {
+            return Ok(json!({ "rejected": "trial_needs_git_worktree", "id": id }));
+        }
+        let scratch = std::env::temp_dir().join(format!(
+            "apb-trial-{}-{}",
+            id,
+            apb_engine::event::now_millis()
+        ));
+        let scratch_str = scratch.to_string_lossy().into_owned();
+        let add = git(root, &["worktree", "add", "--detach", &scratch_str, "HEAD"]);
+        if add.as_ref().map(|o| !o.status.success()).unwrap_or(true) {
+            return Err(ToolError::Engine("git worktree add failed".into()));
+        }
+
+        // Run in the worktree. We remove the worktree ONLY when the run is definitely
+        // terminal (or the spawn failed outright): on timeout the run is still alive in the
+        // background thread, and `worktree remove --force` would yank the directory
+        // out from under it - so in that case we keep the worktree and report the path.
+        match apb_engine::run_background_resolved(&resolved(scratch.clone()), opts) {
+            Ok(run_id) => {
+                let run_dir = scratch.join(".apb/runs").join(&run_id);
+                let status = poll_terminal(&run_dir);
+                if status == "timeout" {
+                    return Ok(json!({
+                        "run_id": run_id,
+                        "status": "timeout",
+                        "worktree": scratch_str,
+                        "notes": ["trial did not finish within the poll window; the run continues and the worktree is preserved at `worktree` - remove it manually once the run ends"],
+                    }));
+                }
+                let mut diff = String::new();
+                if let Some(o) = git(
+                    &scratch,
+                    &["status", "--porcelain", "--", ".", ":(exclude).playbook"],
+                ) {
+                    diff.push_str(&String::from_utf8_lossy(&o.stdout));
+                }
+                if let Some(o) = git(&scratch, &["diff", "--", ".", ":(exclude).playbook"]) {
+                    diff.push_str(&String::from_utf8_lossy(&o.stdout));
+                }
+                truncate_on_char_boundary(&mut diff, 64 * 1024);
+                let _ = git(root, &["worktree", "remove", "--force", &scratch_str]);
+                let _ = git(root, &["worktree", "prune"]);
+                return Ok(json!({
+                    "run_id": run_id,
+                    "status": status,
+                    "diff": diff,
+                    "notes": ["ran in a throwaway git worktree; changes are not applied to your workspace"],
+                }));
+            }
+            Err(e) => {
+                // The spawn failed - there is no run, the worktree can be torn down.
+                let _ = git(root, &["worktree", "remove", "--force", &scratch_str]);
+                let _ = git(root, &["worktree", "prune"]);
+                return Err(ToolError::from(e));
+            }
+        }
+    }
+
+    // No filesystem writes: network/external effects run unisolated (the agent
+    // was required to confirm with the user before the call, tier 0), we flag this.
+    let external = effects.contains(&Effect::Network) || effects.contains(&Effect::External);
+    let run_id = apb_engine::run_background_resolved(&resolved(root.to_path_buf()), opts)
+        .map_err(ToolError::from)?;
+    let run_dir = root.join(".apb/runs").join(&run_id);
+    let status = poll_terminal(&run_dir);
+    Ok(json!({
+        "run_id": run_id,
+        "status": status,
+        "external_effects_executed": external,
+        "notes": ["no filesystem writes to isolate"],
+    }))
+}
+
+/// Phase 1 of the two-phase contract (spec 7): resolves the target in another workspace,
+/// runs preflight, and issues a signed plan_token. Read-only: it executes
+/// and mutates nothing. An unreachable workspace/refusal is returned
+/// structurally.
+pub fn playbook_prepare_run(
+    id: &str,
+    version: Option<&str>,
+    workspace: &str,
+    params: BTreeMap<String, String>,
+) -> Result<Value, ToolError> {
+    let root_b = match apb_core::projects::resolve_root(workspace) {
+        Ok(p) => p,
+        Err(apb_core::projects::ProjectAccessError::Unreachable { workspace_id, path }) => {
+            return Ok(
+                json!({ "error": "workspace_unreachable", "workspace": workspace_id, "path": path }),
+            );
+        }
+        Err(apb_core::projects::ProjectAccessError::Unknown(w)) => {
+            return Ok(json!({ "error": "workspace_unknown", "workspace": w }));
+        }
+    };
+    let pf = match crate::policy::preflight(&root_b, id, version) {
+        Ok(p) => p,
+        Err(refusal) => return Ok(json!({ "policy_refusal": refusal })),
+    };
+    let now = apb_engine::event::now_millis() as u64;
+    let payload = crate::plan::PlanPayload {
+        workspace_id: workspace.to_string(),
+        id: id.to_string(),
+        version: pf.version.clone(),
+        digest: pf.digest.clone(),
+        params: params.clone(),
+        effects: pf.effects.clone(),
+        // Resolve the bundle against the version SELECTED by preflight (pf.version), not the
+        // original request: otherwise the token would carry the digest of one version and the bundle
+        // of another (for example, with version: None and current != active).
+        // A cross-workspace prepare does not spawn an external supervisor agent -> supervised: false.
+        profiles: crate::policy::playbook_profile_bundles(&root_b, id, Some(&pf.version), false)
+            .into_iter()
+            .map(|(key, bundle)| crate::plan::PlanProfile { key, bundle })
+            .collect(),
+        exp_ms: now + 10 * 60 * 1000,
+        nonce: format!("n-{}", uuid::Uuid::new_v4().simple()),
+    };
+    let store = apb_core::trust::TrustStore::load();
+    let trusted = store.is_approved(&pf.digest);
+    // Profiles with their bundle and trust status - the user must see exactly what they
+    // are confirming (spec 5.2). We show exactly the bundles baked into the plan.
+    let profiles: Vec<Value> = payload
+        .profiles
+        .iter()
+        .map(|p| json!({ "ref": p.key, "bundle": p.bundle, "trusted": store.is_approved(&p.bundle) }))
+        .collect();
+    let token = crate::plan::encode(&payload);
+    Ok(json!({
+        "plan": {
+            "workspace": workspace,
+            "id": id,
+            "version": pf.version,
+            "digest": pf.digest,
+            "effects": pf.effects,
+            "trusted": trusted,
+            "profiles": profiles,
+            "params": params,
+        },
+        "plan_token": token,
+    }))
+}
+
+/// Activates a playbook after a successful trial or explicit confirmation (spec
+/// 8.3): lifecycle -> active, digest -> approved (agent-generated). Also works
+/// with the global scope (otherwise a global draft could never be activated).
+pub fn playbook_approve(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    scope: &str,
+) -> Result<Value, ToolError> {
+    let definition_parent = match scope {
+        "project" => root.join(".apb"),
+        "global" => apb_core::store::global_playbooks_parent()
+            .ok_or_else(|| ToolError::Engine("no global config dir".into()))?,
+        other => return Err(ToolError::Engine(format!("unknown scope `{other}`"))),
+    };
+    let reg = Registry::open_dir(&definition_parent).map_err(ToolError::from)?;
+    let loaded = reg.load(id, version)?;
+    let digest = apb_core::scope::digest_str(&loaded.yaml);
+    let playbook_dir = definition_parent.join("playbooks").join(id);
+    apb_core::trust::write_lifecycle(&playbook_dir, apb_core::trust::Lifecycle::Active)
+        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    let mut trust = apb_core::trust::TrustStore::load();
+    trust
+        .approve(&digest, id, apb_core::trust::OriginKind::AgentGenerated)
+        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    Ok(
+        json!({ "id": id, "version": loaded.version, "scope": scope, "lifecycle": "active", "trusted": true }),
+    )
+}
+
+pub fn playbook_get(root: &Path, id: &str, version: Option<&str>) -> Result<Value, ToolError> {
+    let reg = open(root)?;
+    let loaded = reg.load(id, version)?;
+    Ok(json!({
+        "id": id,
+        "version": loaded.version,
+        "yaml": loaded.yaml,
+        "playbook": loaded.playbook,
+        "layout": loaded.layout,
+    }))
+}
+
+pub fn playbook_validate(root: &Path, id: &str) -> Result<Value, ToolError> {
+    let reg = open(root)?;
+    let loaded = reg.load(id, None)?;
+    let ctx = ValidationContext {
+        profiles: reg.profiles(),
+        ..Default::default()
+    };
+    let report = validate(&loaded.playbook, &ctx);
+    let issues: Vec<Value> = report.issues.iter().map(|i| json!({
+        "code": i.code,
+        "severity": match i.severity { Severity::Error => "error", Severity::Warning => "warning" },
+        "message": i.message,
+        "node": i.node,
+    })).collect();
+    Ok(json!({ "valid": report.is_valid(), "issues": issues }))
+}
+
+/// Resolves the run directory, uniformly rejecting an unsafe run_id (path traversal)
+/// and a missing run as NotFound.
+fn resolve_run_dir(root: &Path, run_id: &str) -> Result<std::path::PathBuf, ToolError> {
+    if !is_safe_segment(run_id) {
+        return Err(ToolError::NotFound(format!("run `{run_id}`")));
+    }
+    let dir = root.join(".apb/runs").join(run_id);
+    if !dir.is_dir() {
+        return Err(ToolError::NotFound(format!("run `{run_id}`")));
+    }
+    Ok(dir)
+}
+
+pub fn playbook_run(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    params: BTreeMap<String, String>,
+    instruction: Option<String>,
+    expected_digest: Option<String>,
+    expected_profile_bundles: Option<BTreeMap<String, String>>,
+) -> Result<Value, ToolError> {
+    let opts = RunOptions {
+        instruction,
+        params,
+        allow_shared_workdir: false,
+        mode: RunMode::Autonomous,
+        supervisor_expected: false,
+        max_patches_per_run: None,
+        context_max_bytes: None,
+        context_compact_model: None,
+        overrides: None,
+        expected_digest,
+        expected_profile_bundles,
+    };
+    let res = run(root, id, version, opts)?;
+    Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
+}
+
+/// A non-blocking run start for a regular (non-supervised) MCP client:
+/// starts the playbook in the background (autonomous) and returns run_id immediately. The client
+/// then polls `run_status`/`run_events` and resolves reviews via `review_decide`.
+/// Needed because some hosts (e.g. ChatGPT Apps) have a tool-call timeout of
+/// ~60s, while a run can take minutes (design doc, section 13.5).
+pub fn playbook_run_background(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    params: BTreeMap<String, String>,
+    instruction: Option<String>,
+    expected_digest: Option<String>,
+    expected_profile_bundles: Option<BTreeMap<String, String>>,
+) -> Result<Value, ToolError> {
+    let opts = RunOptions {
+        instruction,
+        params,
+        allow_shared_workdir: false,
+        mode: RunMode::Autonomous,
+        supervisor_expected: false,
+        max_patches_per_run: None,
+        context_max_bytes: None,
+        context_compact_model: None,
+        overrides: None,
+        expected_digest,
+        expected_profile_bundles,
+    };
+    let run_id = run_background(root, id, version, opts)?;
+    Ok(json!({ "run_id": run_id }))
+}
+
+pub fn runs_list(root: &Path) -> Result<Value, ToolError> {
+    let runs = list_runs(root)?;
+    serde_json::to_value(runs).map_err(|e| ToolError::Engine(e.to_string()))
+}
+
+pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    let dir = resolve_run_dir(root, run_id)?;
+    let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
+    let state = RunState::fold(&events);
+    let nodes: BTreeMap<String, String> = state
+        .nodes
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
+        .collect();
+    Ok(json!({
+        "run_id": run_id,
+        "run_status": state.run_status.as_str(),
+        "nodes": nodes,
+        "outputs": state.outputs,
+    }))
+}
+
+pub fn run_events(root: &Path, run_id: &str, from_seq: Option<u64>) -> Result<Value, ToolError> {
+    let dir = resolve_run_dir(root, run_id)?;
+    let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
+    let from = from_seq.unwrap_or(0);
+    let filtered: Vec<&_> = events.iter().filter(|e| e.seq >= from).collect();
+    Ok(
+        json!({ "events": serde_json::to_value(filtered).map_err(|e| ToolError::Engine(e.to_string()))? }),
+    )
+}
+
+pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    // There is no supervisor agent in Phase 3: the report is a light state summary. The full supervisor report is Phase 4.
+    run_status(root, run_id)
+}
+
+pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<Value, ToolError> {
+    let res = resume(root, run_id, from_node)?;
+    Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
+}
+
+/// Starts a playbook in supervised mode without waiting for it to finish.
+/// The supervisor access token is minted by the server layer (Phase 4b, Task 3), not this function.
+pub fn playbook_run_supervised(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    params: BTreeMap<String, String>,
+    instruction: Option<String>,
+    expected_digest: Option<String>,
+    expected_profile_bundles: Option<BTreeMap<String, String>>,
+) -> Result<Value, ToolError> {
+    // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
+    // MCP session that called playbook_run, hence supervisor_expected: false
+    // (heartbeat oversight in drive does not touch this path).
+    let opts = RunOptions {
+        instruction,
+        params,
+        allow_shared_workdir: false,
+        mode: RunMode::Supervised,
+        supervisor_expected: false,
+        max_patches_per_run: None,
+        context_max_bytes: None,
+        context_compact_model: None,
+        overrides: None,
+        expected_digest,
+        expected_profile_bundles,
+    };
+    let run_id = run_background(root, id, version, opts)?;
+    Ok(json!({ "run_id": run_id }))
+}
+
+/// Blockingly waits for the next wake (or a timeout/run completion) and
+/// returns it along with a fresh status. `wake: null` means the run
+/// has already finished, or the wait timed out - the agent decides for itself whether to
+/// keep looping.
+pub fn supervisor_wait_event(
+    root: &Path,
+    run_id: &str,
+    after_seq: Option<u64>,
+    timeout_ms: Option<u64>,
+) -> Result<Value, ToolError> {
+    // A liveness mark for the background supervisor before the blocking wait:
+    // a signal that the process watching the run is still alive and polling.
+    touch_heartbeat(root, run_id)?;
+    let timeout = Duration::from_millis(timeout_ms.unwrap_or(25_000));
+    let wake = wait_wake(root, run_id, after_seq, timeout)?;
+    let status = run_status(root, run_id)?;
+    Ok(json!({ "wake": wake, "run_status": status["run_status"] }))
+}
+
+/// A full run summary for the observer (status, nodes, context.md, wakes, actions, events).
+pub fn sv_run_inspect(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    Ok(engine_run_inspect(root, run_id)?)
+}
+
+pub fn node_retry(
+    root: &Path,
+    run_id: &str,
+    node: &str,
+    prompt_override: Option<String>,
+) -> Result<Value, ToolError> {
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::Retry {
+            node: node.to_string(),
+            prompt_override,
+        },
+    )?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
+pub fn run_continue_from(root: &Path, run_id: &str, node: &str) -> Result<Value, ToolError> {
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::ContinueFrom {
+            node: node.to_string(),
+        },
+    )?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
+pub fn run_pause(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    let seq = post_supervisor_command(root, run_id, Control::Pause)?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
+pub fn run_abort(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    run_cancel(root, run_id)?;
+    Ok(json!({ "ok": true }))
+}
+
+pub fn context_append(root: &Path, run_id: &str, note: &str) -> Result<Value, ToolError> {
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::ContextAppend {
+            note: note.to_string(),
+        },
+    )?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
+/// Creates a patch version of the playbook from patched YAML and posts a run
+/// migration command. Writes no events - drive will write them when applying
+/// `Control::Patch` (single-writer). The patch's base is the run's active version.
+pub fn playbook_patch(
+    root: &Path,
+    run_id: &str,
+    yaml: &str,
+    classification: &str,
+    continue_from: &str,
+) -> Result<Value, ToolError> {
+    if !matches!(classification, "improvement" | "workaround") {
+        return Err(ToolError::Engine(format!(
+            "invalid classification `{classification}`"
+        )));
+    }
+    let (id, base_version) = apb_engine::scheduler::run_playbook_ref(root, run_id)?;
+    let version = create_patch_version(root, &id, &base_version, yaml, run_id, classification)?;
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::Patch {
+            version: version.clone(),
+            classification: classification.to_string(),
+            continue_from: continue_from.to_string(),
+        },
+    )?;
+    Ok(json!({ "version": version, "posted_seq": seq }))
+}
+
+/// A human_review node decision: writes a command into the run's reviews.jsonl channel.
+/// A regular run tool (not supervised): takes run_id directly.
+pub fn review_decide(
+    root: &Path,
+    run_id: &str,
+    node: &str,
+    decision: &str,
+    note: &str,
+) -> Result<Value, ToolError> {
+    if !is_safe_segment(run_id) {
+        return Err(ToolError::NotFound(run_id.to_string()));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(ToolError::NotFound(run_id.to_string()));
+    }
+    let seq = apb_engine::post_review(
+        &run_dir,
+        apb_engine::ReviewCommand {
+            node: node.to_string(),
+            decision: decision.to_string(),
+            note: note.to_string(),
+        },
+    )?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
+/// Writes the supervisor's final report to `runs/<run_id>/supervisor/report.md`.
+pub fn supervisor_report(root: &Path, run_id: &str, text: &str) -> Result<Value, ToolError> {
+    write_supervisor_report(root, run_id, text)?;
+    Ok(json!({ "ok": true }))
+}
+
+/// Extracts the capability list from `playbook.supervisor.policy.capabilities`.
+/// Distinguishes an absent key (default) from a present one (exact value):
+/// - key absent -> default `["observe", "retry", "patch_playbook"]`
+///   (all implemented capabilities, see spec 9.5: the default is all)
+/// - key present as a sequence -> its strings (empty if empty)
+/// - key present as a scalar string -> a single-element list
+/// - key present as another type -> empty (deny all)
+pub fn supervisor_capabilities(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+) -> Result<Vec<String>, ToolError> {
+    let reg = open(root)?;
+    let loaded = reg.load(id, version)?;
+
+    let caps = match loaded
+        .playbook
+        .supervisor
+        .as_ref()
+        .and_then(|s| s.policy.as_ref())
+        .and_then(|p| p.get("capabilities"))
+    {
+        None => vec![
+            "observe".to_string(),
+            "retry".to_string(),
+            "patch_playbook".to_string(),
+        ],
+        Some(v) if v.is_sequence() => v
+            .as_sequence()
+            .unwrap()
+            .iter()
+            .filter_map(|x| x.as_str().map(String::from))
+            .collect(),
+        Some(v) if v.as_str().is_some() => {
+            vec![v.as_str().unwrap().to_string()]
+        }
+        Some(_) => Vec::new(),
+    };
+
+    Ok(caps)
+}

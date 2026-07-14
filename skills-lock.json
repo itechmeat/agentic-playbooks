@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "skills": {
+    "base-ui": {
+      "source": "itechmeat/llm-code",
+      "sourceType": "github",
+      "skillPath": "skills/base-ui/SKILL.md",
+      "computedHash": "317c9ab0c87a9fac2b095e7ba7588ae385c5ca5f71c336a48ddca64d5e386f96"
+    },
+    "bun": {
+      "source": "itechmeat/llm-code",
+      "sourceType": "github",
+      "skillPath": "skills/bun/SKILL.md",
+      "computedHash": "2448402805256e26698e8345c0cac9652cea6f3321cabf339f33f846dc639a5e"
+    },
+    "rust-skills": {
+      "source": "leonardomso/rust-skills",
+      "sourceType": "github",
+      "skillPath": "SKILL.md",
+      "computedHash": "54a0b74547168fc59feef6a8e5e2e889f38524a1f8f764c2b4d435de63b3998c"
+    },
+    "zcode-subagent": {
+      "source": "itechmeat/llm-code",
+      "sourceType": "github",
+      "skillPath": "skills/zcode-subagent/SKILL.md",
+      "computedHash": "a907207988943f5cef044efe23ec182e5f977d2606325184f78306e79fdfe69e"
+    }
+  }
+}

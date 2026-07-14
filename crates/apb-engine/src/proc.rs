@@ -1,0 +1,85 @@
+use std::io::Read;
+use std::os::unix::process::CommandExt;
+use std::process::{Command, ExitStatus, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+pub struct Captured {
+    pub status: Option<ExitStatus>,
+    pub stdout: String,
+    pub stderr: String,
+    /// The process was killed due to the cancellation signal (`cancel`), not
+    /// a timeout/exit code. Lets the caller distinguish a join:any
+    /// cancellation from a real timeout.
+    pub cancelled: bool,
+}
+
+/// Runs the command, capturing stdout/stderr. If the timeout is exceeded OR
+/// `cancel` is set, kills the whole process group and returns status = None
+/// (with `cancelled = true` in the cancellation case). With no timeout and no
+/// cancellation, waits for completion.
+pub fn run_capture(
+    mut cmd: Command,
+    timeout: Option<Duration>,
+    cancel: Option<&AtomicBool>,
+) -> std::io::Result<Captured> {
+    cmd.stdout(Stdio::piped()).stderr(Stdio::piped());
+    // Make the child process the leader of its own process group (pgid ==
+    // pid), so that on timeout the whole group can be killed (shell
+    // pipelines, background jobs `&`, forks), not just the direct child.
+    cmd.process_group(0);
+    let mut child = cmd.spawn()?;
+
+    // Read the streams on separate threads so we don't hit pipe buffers filling up.
+    let mut out_pipe = child.stdout.take().expect("piped stdout");
+    let mut err_pipe = child.stderr.take().expect("piped stderr");
+    let (tx_out, rx_out) = mpsc::channel();
+    let (tx_err, rx_err) = mpsc::channel();
+    thread::spawn(move || {
+        let mut s = String::new();
+        let _ = out_pipe.read_to_string(&mut s);
+        let _ = tx_out.send(s);
+    });
+    thread::spawn(move || {
+        let mut s = String::new();
+        let _ = err_pipe.read_to_string(&mut s);
+        let _ = tx_err.send(s);
+    });
+
+    let start = Instant::now();
+    let mut cancelled = false;
+    let status = loop {
+        if let Some(status) = child.try_wait()? {
+            break Some(status);
+        }
+        let timed_out = timeout.is_some_and(|limit| start.elapsed() >= limit);
+        let was_cancelled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+        if timed_out || was_cancelled {
+            // Kill the whole process group (a negative pid signals the
+            // group), not just the direct child - otherwise grandchild
+            // processes that inherited the stdout/stderr pipes keep the
+            // channel open and the recv() below blocks forever.
+            // Cancellation (another join:any branch won) likewise tears
+            // down the whole script tree, with no leaked side effects.
+            let _ = std::process::Command::new("kill")
+                .arg("-KILL")
+                .arg(format!("-{}", child.id()))
+                .status();
+            let _ = child.wait();
+            cancelled = was_cancelled;
+            break None;
+        }
+        thread::sleep(Duration::from_millis(50));
+    };
+
+    let stdout = rx_out.recv().unwrap_or_default().trim().to_string();
+    let stderr = rx_err.recv().unwrap_or_default().trim().to_string();
+    Ok(Captured {
+        status,
+        stdout,
+        stderr,
+        cancelled,
+    })
+}
