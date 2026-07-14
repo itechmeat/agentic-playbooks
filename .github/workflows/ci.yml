@@ -18,26 +18,35 @@ jobs:
       - name: Install bun
         uses: oven-sh/setup-bun@v2
 
-      - name: Build web (embedded by apb-server via rust-embed)
+      - name: Install web dependencies
         working-directory: web
-        run: |
-          bun install --frozen-lockfile
-          bun run build
+        run: bun install --frozen-lockfile
+
+      - name: Web type check
+        working-directory: web
+        run: bun run check
 
       - name: Web unit tests
         working-directory: web
         run: bun run test
 
+      - name: Build web (embedded by apb-server via rust-embed)
+        working-directory: web
+        run: bun run build
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Format check
+        run: cargo fmt --all -- --check
+
       - name: Clippy
-        run: cargo clippy --workspace --all-targets
+        run: cargo clippy --workspace --all-targets -- -D warnings
 
       - name: Test
         run: cargo test --workspace
