@@ -1,0 +1,107 @@
+# agentic-playbooks
+
+> A local runner for agentic playbooks: YAML playbook definitions, a svelte-flow web visualizer, semver versioning, and an MCP server so coding agents can drive playbooks. Rust workspace, edition 2024. The binary is called `apb`.
+
+The MCP server (started with `apb mcp`) identifies itself as `agentic-playbooks` to MCP clients. The binary name and all CLI commands use `apb`.
+
+## Install from source
+
+Requires Rust (stable) and Bun. The web frontend must be built before the Rust binary because it is embedded at compile time via rust-embed.
+
+```sh
+git clone https://github.com/itechmeat/agentic-playbooks && cd agentic-playbooks
+(cd web && bun install && bun run build)
+cargo install --path crates/apb-cli
+```
+
+`cargo install --git` is not supported: git mode builds in a private cargo cache where `web/dist` cannot be placed. Install from a local clone (`--path`).
+
+Verify the installation:
+
+```sh
+apb --version
+apb doctor
+```
+
+## Connect to a coding agent (MCP)
+
+`apb mcp` starts a stdio MCP server on the current project's `.apb/` directory. Use the name `agentic-playbooks` when registering it.
+
+Claude Code (project scope):
+
+```sh
+claude mcp add agentic-playbooks -- apb mcp
+```
+
+Claude Code (global scope):
+
+```sh
+claude mcp add --scope user agentic-playbooks -- apb mcp
+```
+
+Project `.mcp.json` (shareable, commit to repo):
+
+```json
+{ "mcpServers": { "agentic-playbooks": { "command": "apb", "args": ["mcp"] } } }
+```
+
+Codex (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.agentic-playbooks]
+command = "apb"
+args = ["mcp"]
+```
+
+OpenCode (`~/.config/opencode/opencode.json`, mcp section):
+
+```json
+"agentic-playbooks": {
+  "type": "local",
+  "command": ["apb", "mcp"],
+  "enabled": true
+}
+```
+
+Run `apb init` in each project where you want to use playbooks. The MCP server discovers `.apb/` relative to the current working directory.
+
+## CLI commands
+
+```text
+apb init            create the .apb structure
+apb list            playbooks and versions
+apb validate        validate playbook schema
+apb run <id>        run a playbook
+apb runs            list runs
+apb resume <run>    resume a paused or interrupted run
+apb review          decide a pending human_review node
+apb serve           web UI on port 7321
+apb mcp             stdio MCP server for coding agents
+apb doctor          diagnose environment
+apb detect          detect installed coding agents
+apb profile         manage agent profiles
+apb migrate         migrate schema 1 playbooks to schema 2
+```
+
+## Architecture
+
+Five crates under `crates/` with dependency direction core <- engine <- mcp, and cli and server on top:
+
+- `apb-core`: domain layer (no async). Playbook schema, validator, profiles, registry, versioning, trust store, atomic state IO.
+- `apb-engine`: execution. Drive loop, node execution, immutable run manifest, agent adapters, append-only event log, background supervisor.
+- `apb-mcp`: rmcp stdio MCP server, policy gate, profile and supervisor tools.
+- `apb-cli`: the `apb` binary; thin dispatch.
+- `apb-server`: axum web API with the svelte frontend embedded via rust-embed.
+
+## Docs
+
+- [Install guide](docs/INSTALL.md): detailed installation methods and environment checks
+- [MCP tools reference](docs/MCP.md): full tool surface, annotations, safety model
+- [Host integration](docs/HOST-INTEGRATION.md): tier-0 instructions delivery, client compatibility
+- [Profile authoring](docs/PROFILES.md): how profiles bind agent + model + fallbacks + skills
+- [Playbook authoring guide](docs/HOWTO-authoring.md): node types, edges, conditions, params, templating
+
+## Optional
+
+- [Design spec](docs/superpowers/specs/2026-07-08-workflows-cli-design.md): full system design and rationale
+- [Agent profiles spec](docs/superpowers/specs/2026-07-12-agent-profiles-design.md): profiles, trust, skills, scope resolution

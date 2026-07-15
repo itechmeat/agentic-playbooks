@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rmcp::handler::server::router::tool::ToolRouter;
-use rmcp::model::{CallToolResult, ContentBlock, ServerCapabilities, ServerInfo};
+use rmcp::model::{CallToolResult, ContentBlock, Implementation, ServerCapabilities, ServerInfo};
 use rmcp::{ServerHandler, ServiceExt, tool_handler};
 use serde_json::{Value, json};
 
@@ -236,6 +236,10 @@ impl WfMcp {
 impl ServerHandler for WfMcp {
     fn get_info(&self) -> ServerInfo {
         ServerInfo::new(ServerCapabilities::builder().enable_tools().build())
+            .with_server_info(Implementation::new(
+                "agentic-playbooks",
+                env!("CARGO_PKG_VERSION"),
+            ))
             .with_instructions(crate::instructions::TIER0)
     }
 }
