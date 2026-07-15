@@ -20,3 +20,10 @@ updates:
         update-types:
           - "patch"
           - "minor"
+    # Major bumps stay ungrouped on purpose: each is its own PR for review.
+    ignore:
+      # svelte-check (all versions, latest 4.7.2) crashes on TS 7 with
+      # TypeError on typescript.sys.useCaseSensitiveFileNames. Re-enable
+      # when svelte-check ships TS 7 support.
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
