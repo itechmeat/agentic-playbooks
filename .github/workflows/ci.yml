@@ -42,6 +42,9 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      - name: Cargo deny (licenses, advisories, bans)
+        uses: EmbarkStudios/cargo-deny-action@v2
+
       - name: Format check
         run: cargo fmt --all -- --check
 

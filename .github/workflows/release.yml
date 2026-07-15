@@ -51,12 +51,18 @@ jobs:
             target: x86_64-apple-darwin
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
 
       - name: Install bun
         uses: oven-sh/setup-bun@v2
+
+      - name: Install musl tools (static Linux build)
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
 
       # web/dist is gitignored: build the frontend BEFORE cargo, since apb-server
       # embeds it via rust-embed (folder = ../../web/dist).

@@ -1,0 +1,45 @@
+name: Bug report
+description: Report something that is not working as expected
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to file a bug report.
+  - type: textarea
+    id: description
+    attributes:
+      label: What happened?
+      description: A clear description of the bug and what you expected instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      description: Exact commands or actions that trigger the bug.
+      placeholder: |
+        1. Run `apb ...`
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: apb version
+      description: Output of `apb --version`
+    validations:
+      required: true
+  - type: input
+    id: platform
+    attributes:
+      label: Platform
+      description: OS and architecture (e.g. macOS aarch64, Linux x86_64)
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or error output
+      description: Relevant terminal output, event logs, or stack traces. Paste as-is.
+      render: shell
