@@ -88,8 +88,17 @@ edges:
 
 ## Install
 
-The project is currently pre-release. Install from source (requires Rust and
-Bun; the web UI must be built first because it is embedded into the binary):
+**The simplest path - let your agent install it.** Paste this into Claude Code,
+Codex, OpenCode, or any AI agent with shell access:
+
+> Install agentic-playbooks for me by following the instructions at
+> <https://github.com/itechmeat/agentic-playbooks/blob/main/llms.txt>
+
+The agent reads the `llms.txt`, clones the repo, builds the web frontend,
+installs the binary, and verifies with `apb doctor`.
+
+If you prefer running the steps yourself, the project is currently pre-release
+and requires Rust and Bun (the web UI is embedded into the binary at build time):
 
 ```sh
 git clone https://github.com/itechmeat/agentic-playbooks && cd agentic-playbooks
@@ -146,17 +155,27 @@ apb export/import   move a playbook as a single bundle file
 
 ## Use from a coding agent (MCP)
 
-`apb mcp` serves the current project's playbooks over stdio MCP. Claude Code:
+`apb mcp` serves the current project's playbooks over stdio MCP. The server
+identifies itself as `agentic-playbooks` to MCP clients. Claude Code:
 
 ```sh
-claude mcp add apb -- apb mcp
+claude mcp add agentic-playbooks -- apb mcp
 ```
 
 or in the project's `.mcp.json`:
 
 ```json
-{ "mcpServers": { "apb": { "command": "apb", "args": ["mcp"] } } }
+{ "mcpServers": { "agentic-playbooks": { "command": "apb", "args": ["mcp"] } } }
 ```
+
+For global scope (available in all projects), add `--scope user`:
+
+```sh
+claude mcp add --scope user agentic-playbooks -- apb mcp
+```
+
+Other MCP-compatible hosts (Codex, OpenCode, etc.): add a stdio MCP server
+with command `apb` and args `["mcp"]`, using the name `agentic-playbooks`.
 
 Tool families: playbook CRUD and validation, run control (`playbook_run`,
 `run_status`, `run_events`, `run_report`, `run_resume`), profile and advisory
