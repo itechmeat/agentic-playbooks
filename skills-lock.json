@@ -1,12 +1,6 @@
 {
   "version": 1,
   "skills": {
-    "base-ui": {
-      "source": "itechmeat/llm-code",
-      "sourceType": "github",
-      "skillPath": "skills/base-ui/SKILL.md",
-      "computedHash": "317c9ab0c87a9fac2b095e7ba7588ae385c5ca5f71c336a48ddca64d5e386f96"
-    },
     "bun": {
       "source": "itechmeat/llm-code",
       "sourceType": "github",
@@ -18,6 +12,12 @@
       "sourceType": "github",
       "skillPath": "SKILL.md",
       "computedHash": "54a0b74547168fc59feef6a8e5e2e889f38524a1f8f764c2b4d435de63b3998c"
+    },
+    "shadcn-svelte": {
+      "source": "huntabyte/shadcn-svelte",
+      "sourceType": "github",
+      "skillPath": "skills/shadcn-svelte/SKILL.md",
+      "computedHash": "d4f3f983a71466a86649985a8a7fbce47da29f44de3a9d02540bbcf3167134e0"
     },
     "zcode-subagent": {
       "source": "itechmeat/llm-code",
