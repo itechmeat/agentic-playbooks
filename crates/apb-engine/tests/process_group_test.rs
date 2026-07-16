@@ -54,6 +54,7 @@ fn timeout_kills_whole_process_tree() {
             timeout: Some(Duration::from_secs(1)),
             stream_log: None,
             soul: None,
+            grant_autonomy: false,
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::Timeout), "got: {err:?}");

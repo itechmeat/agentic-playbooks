@@ -5,9 +5,10 @@
 //! (global, the ecosystem's standard location). For claude, the same skill is
 //! visible via the symlink `.claude/skills/<name>` -> canon.
 
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 
 use crate::profile::ProfileError;
 use crate::profile::{ProfileScope, SkillRef};
@@ -54,6 +55,56 @@ fn scope_dir(root: &Path, scope: ProfileScope) -> Option<PathBuf> {
         ProfileScope::Global => global_skills_dir(),
         ProfileScope::Auto => None,
     }
+}
+
+/// A skill available for selection, with the scope it resolves in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct AvailableSkill {
+    pub name: String,
+    /// "project" | "global".
+    pub scope: String,
+}
+
+/// Lists the skills a profile of the given scope could reference, by
+/// enumerating the skills directories. Order and shadowing mirror
+/// `resolve_skill`: a project profile sees project skills then global ones
+/// (a project skill shadows a same-named global one); a global profile sees
+/// only global skills. Names that are not a single safe segment are skipped.
+pub fn list_available(root: &Path, profile_scope: ProfileScope) -> Vec<AvailableSkill> {
+    let scopes: &[ProfileScope] = match profile_scope {
+        ProfileScope::Global => &[ProfileScope::Global],
+        _ => &[ProfileScope::Project, ProfileScope::Global],
+    };
+    let mut out = Vec::new();
+    let mut seen: BTreeSet<String> = BTreeSet::new();
+    for &scope in scopes {
+        let Some(dir) = scope_dir(root, scope) else {
+            continue;
+        };
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        let mut names: Vec<String> = entries
+            .filter_map(Result::ok)
+            .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .filter(|n| crate::profile::validate_profile_name(n).is_ok())
+            .collect();
+        names.sort();
+        let scope_str = match scope {
+            ProfileScope::Global => "global",
+            _ => "project",
+        };
+        for name in names {
+            if seen.insert(name.clone()) {
+                out.push(AvailableSkill {
+                    name,
+                    scope: scope_str.to_string(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// Resolves a skill per the rules in 6.4: a global profile sees only global
@@ -186,4 +237,36 @@ fn make_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other(
         "symlink bridge is only supported on unix",
     ))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    #[test]
+    fn list_available_returns_project_skills_and_skips_invalid_names() {
+        let root = tempdir().unwrap();
+        let skills = root.path().join(".agents/skills");
+        for name in ["alpha", "beta"] {
+            std::fs::create_dir_all(skills.join(name)).unwrap();
+        }
+        // An invalid segment (space, uppercase) must not appear.
+        std::fs::create_dir_all(skills.join("Bad Name")).unwrap();
+        // A stray file (not a directory) is not a skill.
+        std::fs::write(skills.join("notaskill.txt"), "x").unwrap();
+
+        let out = list_available(root.path(), ProfileScope::Project);
+        let names: Vec<&str> = out.iter().map(|s| s.name.as_str()).collect();
+        assert!(names.contains(&"alpha"));
+        assert!(names.contains(&"beta"));
+        assert!(!names.contains(&"Bad Name"));
+        assert!(!names.contains(&"notaskill.txt"));
+        // Project skills are tagged as such.
+        for s in &out {
+            if s.name == "alpha" || s.name == "beta" {
+                assert_eq!(s.scope, "project");
+            }
+        }
+    }
 }

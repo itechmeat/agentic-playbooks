@@ -17,7 +17,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::fsutil::atomic_write;
-use crate::registry::{Registry, is_safe_segment};
+use crate::registry::{Registry, is_frozen_dir, is_safe_segment};
 use crate::schema::{Playbook, SchemaError};
 use crate::validate::{Severity, ValidationContext, validate};
 
@@ -33,6 +33,8 @@ pub enum VersioningError {
     Schema(String),
     #[error("version conflict: {0}")]
     Conflict(String),
+    #[error("playbook `{0}` is frozen: definition changes are disabled")]
+    Frozen(String),
     #[error(transparent)]
     Io(#[from] io::Error),
 }
@@ -127,6 +129,12 @@ pub fn create_version(
 
     let playbook_dir = playbooks_dir(root).join(id);
     let is_new = !playbook_dir.is_dir();
+
+    // A frozen playbook refuses every new version. A brand-new playbook cannot
+    // be frozen (it does not exist yet), so only guard existing ones.
+    if !is_new && is_frozen_dir(&playbook_dir) {
+        return Err(VersioningError::Frozen(id.to_string()));
+    }
 
     let base = if is_new {
         None
@@ -226,6 +234,11 @@ pub fn create_patch_version(
     let playbook_dir = playbooks_dir(root).join(id);
     if !playbook_dir.is_dir() || !playbook_dir.join(base_version).is_dir() {
         return Err(VersioningError::NotFound(format!("{id}@{base_version}")));
+    }
+    // Frozen playbooks reject supervisor patches too: the supervisor may only
+    // intervene within the current run, never fork the definition.
+    if is_frozen_dir(&playbook_dir) {
+        return Err(VersioningError::Frozen(id.to_string()));
     }
 
     let existing = list_version_dirs(&playbook_dir)?;
@@ -345,6 +358,10 @@ pub fn set_promoted(
 
 pub fn promote_version(root: &Path, id: &str, version: &str) -> Result<(), VersioningError> {
     let playbook_dir = playbook_version_dir(root, id, version)?;
+    // Promotion repoints `current`, a definition change - refused while frozen.
+    if is_frozen_dir(&playbooks_dir(root).join(id)) {
+        return Err(VersioningError::Frozen(id.to_string()));
+    }
     set_promoted(root, id, version, true)?;
     atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
     Ok(())
@@ -1010,5 +1027,37 @@ mod tests {
         let yaml = fs::read_to_string(path.join("playbook.yaml")).unwrap();
         assert!(yaml.contains("version: 1.2.0"));
         assert!(!yaml.contains("version: 1.1.0"));
+    }
+
+    #[test]
+    fn frozen_playbook_refuses_new_versions_and_patches() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        crate::registry::init_project(root).unwrap();
+
+        // A first version exists (this playbook is now an existing one).
+        create_version(root, "implement-task", VALID, None, true).unwrap();
+        let pb_dir = playbooks_dir(root).join("implement-task");
+        assert!(pb_dir.join("1.0.0").is_dir());
+
+        // Freeze it.
+        fs::write(pb_dir.join(crate::registry::FROZEN_MARKER), "1").unwrap();
+
+        // A new minor version is refused.
+        let e1 = create_version(root, "implement-task", VALID, None, true).unwrap_err();
+        assert!(matches!(e1, VersioningError::Frozen(_)), "got {e1:?}");
+
+        // A supervisor patch is refused too.
+        let e2 = create_patch_version(root, "implement-task", "1.0.0", VALID, "run1", "workaround")
+            .unwrap_err();
+        assert!(matches!(e2, VersioningError::Frozen(_)), "got {e2:?}");
+
+        // Promotion (repoints current) is refused too.
+        let e3 = promote_version(root, "implement-task", "1.0.0").unwrap_err();
+        assert!(matches!(e3, VersioningError::Frozen(_)), "got {e3:?}");
+
+        // Unfreezing lets a new version through again.
+        fs::remove_file(pb_dir.join(crate::registry::FROZEN_MARKER)).unwrap();
+        create_version(root, "implement-task", VALID, None, true).unwrap();
     }
 }

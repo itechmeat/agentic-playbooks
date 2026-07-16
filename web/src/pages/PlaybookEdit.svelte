@@ -6,9 +6,11 @@
     createPlaybook,
     fetchPlaybook,
     fetchPlaybooks,
+    fetchProjects,
     saveLayout,
     updatePlaybook,
   } from '../lib/api'
+  import type { Project } from '../lib/types'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import DiffView from '../lib/DiffView.svelte'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
@@ -20,12 +22,24 @@
   import type { PlaybookModel } from '../lib/playbookyaml'
   import type { PlaybookNode as PlaybookNodeType } from '../lib/types'
   import type { Document } from 'yaml'
+  import Topbar from '$lib/components/Topbar.svelte'
+  import { Button } from '$lib/components/ui/button'
+  import { Badge } from '$lib/components/ui/badge'
+  import { Input } from '$lib/components/ui/input'
+  import { Spinner } from '$lib/components/ui/spinner'
+  import * as Select from '$lib/components/ui/select'
+  import { toast } from 'svelte-sonner'
+  import Plus from '@lucide/svelte/icons/plus'
+  import X from '@lucide/svelte/icons/x'
+  import GitCompare from '@lucide/svelte/icons/git-compare'
 
-  let { id }: { id: string } = $props()
+  let { id, workspace = '' }: { id: string; workspace?: string } = $props()
 
   const isNew = $derived(!id)
 
-  // Palette of node types.
+  let projects = $state<Project[]>([])
+  let targetWorkspace = $state('')
+
   const NODE_KINDS = ['start', 'agent_task', 'script', 'condition', 'finish'] as const
 
   let yamlText = $state('')
@@ -35,20 +49,16 @@
   let nodes = $state.raw<FlowNode[]>([])
   let edges = $state.raw<FlowEdge[]>([])
   let parseError = $state<string | null>(null)
-  let saveError = $state<string | null>(null)
   let saving = $state(false)
-  let loadError = $state<string | null>(null)
+  let loadFailed = $state(false)
 
-  // Versions and layout.
   let loadedVersion = $state('')
   let versions = $state<string[]>([])
   let storedLayout = $state<{ nodes?: { id: string; x: number; y: number }[] } | null>(null)
 
-  // Selection and inspectors.
   let selectedNodeId = $state<string | null>(null)
   let selectedEdge = $state<{ from: string; to: string } | null>(null)
   let showDiff = $state(false)
-  // Bumped on load/version-switch so NodePanel re-syncs its fields.
   let revision = $state(0)
 
   const nodeTypes = { playbookNode: PlaybookNode }
@@ -61,6 +71,9 @@
       : null,
   )
   const canEditStruct = $derived(!parseError && !!lastValidModel)
+  const projectName = $derived(
+    projects.find((p) => p.workspace_id === targetWorkspace)?.name ?? 'select a project',
+  )
 
   function onYamlChange(v: string) {
     yamlText = v
@@ -71,7 +84,7 @@
   }
 
   async function load() {
-    loadError = null
+    loadFailed = false
     selectedNodeId = null
     selectedEdge = null
     if (isNew) {
@@ -80,34 +93,39 @@
       idInput = draft?.suggestedId ?? ''
       debouncedYaml = yamlText
       revision++
+      try {
+        projects = await fetchProjects()
+        if (!targetWorkspace && projects.length) targetWorkspace = projects[0].workspace_id
+      } catch (e) {
+        toast.error('Failed to load projects', { description: String(e) })
+      }
       return
     }
     try {
-      const detail = await fetchPlaybook(id)
+      const detail = await fetchPlaybook(id, workspace)
       yamlText = detail.yaml
       idInput = id
       debouncedYaml = yamlText
       loadedVersion = detail.version
       storedLayout = detail.layout
       revision++
-      // List of versions for the switcher.
       try {
         const all = await fetchPlaybooks()
-        const found = all.find((w) => w.id === id)
+        const found = all.find((w) => w.id === id && w.workspace_id === workspace)
         versions = found?.versions ?? (detail.version ? [detail.version] : [])
       } catch {
         versions = detail.version ? [detail.version] : []
       }
-      loadError = null
     } catch (e) {
-      loadError = String(e)
+      loadFailed = true
+      toast.error('Failed to load playbook', { description: String(e) })
     }
   }
 
   async function loadVersion(v: string) {
     if (isNew || !v) return
     try {
-      const detail = await fetchPlaybook(id, v)
+      const detail = await fetchPlaybook(id, workspace, v)
       yamlText = detail.yaml
       debouncedYaml = yamlText
       loadedVersion = detail.version
@@ -115,14 +133,14 @@
       selectedNodeId = null
       selectedEdge = null
       revision++
-      loadError = null
     } catch (e) {
-      loadError = String(e)
+      toast.error('Failed to load version', { description: String(e) })
     }
   }
 
   $effect(() => {
     id
+    workspace
     load()
   })
 
@@ -132,19 +150,8 @@
     if (model) {
       lastValidModel = model
       parseError = null
-      // Merge the stored layout (storedLayout) with the current node positions
-      // (prev). prev takes priority - dragged positions override the stored
-      // ones. On initial load prev is empty and the stored positions are used;
-      // new nodes (absent from both prev and stored) get the dagre auto-layout.
-      // Read nodes without tracking, otherwise this would loop.
-      const prev = untrack(() =>
-        nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y })),
-      )
-      const stored = (storedLayout?.nodes ?? []).map((n) => ({
-        id: n.id,
-        x: n.x,
-        y: n.y,
-      }))
+      const prev = untrack(() => nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y })))
+      const stored = (storedLayout?.nodes ?? []).map((n) => ({ id: n.id, x: n.x, y: n.y }))
       const merged = new Map<string, { id: string; x: number; y: number }>()
       for (const n of stored) merged.set(n.id, n)
       for (const n of prev) merged.set(n.id, n)
@@ -156,7 +163,6 @@
     }
   })
 
-  // Applies a structural mutation to the YAML document and updates yamlText.
   function applyMutation(fn: (doc: Document) => Document): boolean {
     const { doc, error } = parseDoc(yamlText)
     if (error || !doc) {
@@ -184,42 +190,35 @@
     selectedNodeId = node.id
     selectedEdge = null
   }
-
   function onEdgeClick({ edge }: { edge: FlowEdge }) {
     selectedEdge = { from: edge.source, to: edge.target }
     selectedNodeId = null
   }
-
   function onConnect(conn: { source: string; target: string }) {
     if (!conn.source || !conn.target) return
     applyMutation((d) => addEdge(d, conn.source, conn.target))
   }
-
   function onPaneClick() {
     selectedNodeId = null
     selectedEdge = null
   }
-
   function onNodePatch(patch: Record<string, unknown>) {
     if (!selectedNodeId) return
     const targetId = selectedNodeId
     applyMutation((d) => updateNode(d, targetId, patch))
   }
-
   function onDeleteNode() {
     if (!selectedNodeId) return
     const target = selectedNodeId
     selectedNodeId = null
     applyMutation((d) => removeNode(d, target))
   }
-
   function onDeleteEdge() {
     if (!selectedEdge) return
     const target = selectedEdge
     selectedEdge = null
     applyMutation((d) => removeEdge(d, target.from, target.to))
   }
-
   function onNodeDragStop() {
     if (isNew || !loadedVersion) return
     clearTimeout(layoutTimer)
@@ -228,7 +227,7 @@
         nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y })),
       )
       try {
-        await saveLayout(id, loadedVersion, { nodes: positions })
+        await saveLayout(id, loadedVersion, { nodes: positions }, workspace)
       } catch {
         // saving the layout isn't critical, ignore silently
       }
@@ -243,99 +242,134 @@
   }
 
   async function save() {
-    saveError = null
     const idErr = isNew ? validateIdInput() : null
-    if (idErr) {
-      saveError = idErr
-      return
-    }
+    if (idErr) return toast.error(idErr)
+    if (isNew && !targetWorkspace) return toast.error('Select a project')
     saving = true
     try {
       const targetId = isNew ? idInput.trim() : id
+      const ws = isNew ? targetWorkspace : workspace
       const result = isNew
-        ? await createPlaybook(targetId, yamlText)
-        : await updatePlaybook(targetId, yamlText)
-      location.hash = `#/playbook/${result.id}`
+        ? await createPlaybook(targetId, yamlText, ws)
+        : await updatePlaybook(targetId, yamlText, ws)
+      toast.success(isNew ? `Created "${result.id}"` : `Saved "${result.id}"`)
+      location.hash = `#/playbook/${encodeURIComponent(ws)}/${encodeURIComponent(result.id)}`
     } catch (e) {
-      saveError = String(e)
+      toast.error('Save failed', { description: String(e) })
     } finally {
       saving = false
     }
   }
 </script>
 
-<header class="topbar">
-  <a href={isNew ? '#/' : `#/playbook/${encodeURIComponent(id)}`}>&larr; back</a>
-  <h1>{isNew ? 'New playbook' : id}</h1>
-  {#if isNew}
-    <label class="id-field">
-      id
-      <input type="text" bind:value={idInput} placeholder="playbook-id" />
-    </label>
-  {:else}
-    <select class="ver-sel" value={loadedVersion} onchange={(e) => loadVersion(e.currentTarget.value)}>
-      {#each versions as v}<option value={v}>{v}</option>{/each}
-    </select>
-    <button class="btn btn-toggle" class:on={showDiff} onclick={() => (showDiff = !showDiff)}>diff</button>
-  {/if}
-  <span class="spacer"></span>
-  {#if loadError}
-    <span class="badge err" title={loadError}>load error</span>
-  {/if}
-  {#if parseError}
-    <span class="badge warn" title={parseError}>parse error</span>
-  {/if}
-  {#if saveError}
-    <span class="badge err" title={saveError}>save error</span>
-  {/if}
-  <button class="btn" onclick={save} disabled={saving || !!loadError}>
-    {saving ? 'Saving...' : 'Save'}
-  </button>
-</header>
+<Topbar active="playbooks">
+  {#snippet title()}
+    <span class="truncate text-sm font-semibold">{isNew ? 'New playbook' : id}</span>
+    {#if isNew}
+      <Select.Root type="single" bind:value={targetWorkspace}>
+        <Select.Trigger class="h-8 w-40">{projectName}</Select.Trigger>
+        <Select.Content>
+          <Select.Group>
+            {#each projects as p (p.workspace_id)}
+              <Select.Item value={p.workspace_id} label={p.name}>{p.name}</Select.Item>
+            {/each}
+          </Select.Group>
+        </Select.Content>
+      </Select.Root>
+      <Input class="h-8 w-40" bind:value={idInput} placeholder="playbook-id" />
+    {:else}
+      <Select.Root type="single" value={loadedVersion} onValueChange={(v) => loadVersion(v)}>
+        <Select.Trigger class="h-8 w-28">{loadedVersion || 'version'}</Select.Trigger>
+        <Select.Content>
+          <Select.Group>
+            {#each versions as v (v)}<Select.Item value={v} label={v}>{v}</Select.Item>{/each}
+          </Select.Group>
+        </Select.Content>
+      </Select.Root>
+      <Button variant={showDiff ? 'default' : 'outline'} size="sm" onclick={() => (showDiff = !showDiff)}>
+        <GitCompare data-icon="inline-start" />
+        diff
+      </Button>
+    {/if}
+    {#if parseError}
+      <Badge variant="outline" class="text-warning" title={parseError}>parse error</Badge>
+    {/if}
+  {/snippet}
+  {#snippet actions()}
+    <Button size="sm" onclick={save} disabled={saving || loadFailed}>
+      {#if saving}<Spinner data-icon="inline-start" />{/if}
+      {saving ? 'Saving...' : 'Save'}
+    </Button>
+  {/snippet}
+</Topbar>
 
-<div class="page-split">
-  <div class="pane-editor">
+<div class="flex min-h-0 flex-1">
+  <div class="flex min-h-0 w-1/2 min-w-0 flex-col border-r border-border">
     <CodeEditor value={yamlText} onChange={onYamlChange} />
   </div>
-  <div class="pane-graph">
+  <div class="relative min-h-0 min-w-0 flex-1">
     {#if parseError && lastValidModel}
-      <div class="parse-hint">Showing last valid graph ({parseError})</div>
+      <div
+        class="absolute left-2 top-2 z-[5] max-w-[60%] rounded-md border border-warning bg-background px-2 py-1 text-xs text-warning"
+      >
+        Showing last valid graph ({parseError})
+      </div>
     {/if}
 
-    <div class="palette">
-      {#each NODE_KINDS as kind}
-        <button class="pal-btn" onclick={() => onAddNode(kind)} disabled={!canEditStruct} title={`Add ${kind} node`}>
-          + {kind}
-        </button>
+    <div class="absolute left-2 top-2 z-[6] flex flex-col gap-1 rounded-md border border-border bg-background p-1">
+      {#each NODE_KINDS as kind (kind)}
+        <Button
+          variant="ghost"
+          size="sm"
+          class="h-7 justify-start"
+          onclick={() => onAddNode(kind)}
+          disabled={!canEditStruct}
+          title={`Add ${kind} node`}
+        >
+          <Plus data-icon="inline-start" />
+          {kind}
+        </Button>
       {/each}
     </div>
 
     {#if selectedNode}
-      <div class="inspector">
+      <div
+        class="absolute right-2 top-2 z-[6] max-h-[calc(100%-1rem)] w-60 overflow-auto rounded-md border border-border bg-background p-3 shadow-md"
+      >
         <NodePanel
           node={selectedNode as PlaybookNodeType}
           onChange={onNodePatch}
           onDelete={onDeleteNode}
           {revision}
+          workspace={isNew ? targetWorkspace : workspace}
         />
       </div>
     {:else if selectedEdge}
-      <div class="inspector">
-        <div class="edge-panel">
-          <strong>edge</strong>
-          <span>{selectedEdge.from} -&gt; {selectedEdge.to}</span>
-          <button class="btn-del-edge" onclick={onDeleteEdge}>delete</button>
-        </div>
+      <div
+        class="absolute right-2 top-2 z-[6] flex w-60 flex-col gap-2 rounded-md border border-border bg-background p-3 text-sm shadow-md"
+      >
+        <strong>edge</strong>
+        <span class="font-mono text-xs">{selectedEdge.from} → {selectedEdge.to}</span>
+        <Button
+          variant="outline"
+          size="sm"
+          class="self-start text-muted-foreground hover:text-destructive"
+          onclick={onDeleteEdge}
+        >
+          delete
+        </Button>
       </div>
     {/if}
 
     {#if showDiff && !isNew}
-      <div class="diff-overlay">
-        <div class="diff-head">
-          <strong>diff</strong>
-          <button class="btn-close" onclick={() => (showDiff = false)}>x</button>
+      <div class="absolute inset-0 z-10 flex flex-col bg-background p-3">
+        <div class="mb-2 flex items-center justify-between">
+          <strong class="text-sm">diff</strong>
+          <Button variant="ghost" size="icon" class="size-7" onclick={() => (showDiff = false)}>
+            <X />
+          </Button>
         </div>
-        <DiffView {id} {versions} />
+        <DiffView {id} {versions} {workspace} />
       </div>
     {/if}
 
@@ -358,140 +392,3 @@
     </SvelteFlow>
   </div>
 </div>
-
-<style>
-  .id-field {
-    display: flex;
-    align-items: center;
-    gap: 6px;
-    font-size: 12px;
-    color: var(--muted);
-  }
-  .id-field input {
-    font: inherit;
-    color: var(--fg);
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 2px 6px;
-    width: 160px;
-  }
-  .ver-sel {
-    font: inherit;
-    font-size: 12px;
-    color: var(--fg);
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 2px 4px;
-  }
-  .btn {
-    font: inherit;
-    font-size: 12px;
-    padding: 4px 12px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--fg);
-    cursor: pointer;
-  }
-  .btn:hover:not(:disabled) { border-color: var(--accent); }
-  .btn:disabled { opacity: 0.5; cursor: default; }
-  .btn-toggle.on { border-color: var(--accent); color: var(--accent); }
-  .parse-hint {
-    position: absolute;
-    top: 8px;
-    left: 8px;
-    z-index: 5;
-    font-size: 12px;
-    color: var(--warn);
-    background: var(--bg);
-    border: 1px solid var(--warn);
-    border-radius: 4px;
-    padding: 4px 8px;
-    max-width: 60%;
-  }
-  .palette {
-    position: absolute;
-    top: 8px;
-    left: 8px;
-    z-index: 6;
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 4px;
-  }
-  .pal-btn {
-    font: inherit;
-    font-size: 11px;
-    text-align: left;
-    padding: 3px 8px;
-    border: 1px solid transparent;
-    border-radius: 3px;
-    background: transparent;
-    color: var(--fg);
-    cursor: pointer;
-  }
-  .pal-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-  .pal-btn:disabled { opacity: 0.4; cursor: default; }
-  .inspector {
-    position: absolute;
-    top: 8px;
-    right: 8px;
-    z-index: 6;
-    width: 220px;
-    max-height: calc(100% - 16px);
-    overflow: auto;
-    background: var(--bg);
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 8px;
-  }
-  .edge-panel {
-    display: flex;
-    flex-direction: column;
-    gap: 6px;
-    font-size: 12px;
-  }
-  .edge-panel .btn-del-edge {
-    font: inherit;
-    font-size: 11px;
-    padding: 2px 8px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--fg);
-    cursor: pointer;
-    align-self: flex-start;
-  }
-  .edge-panel .btn-del-edge:hover { border-color: var(--err); color: var(--err); }
-  .diff-overlay {
-    position: absolute;
-    inset: 0;
-    z-index: 10;
-    background: var(--bg);
-    padding: 8px;
-    display: flex;
-    flex-direction: column;
-  }
-  .diff-head {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 6px;
-  }
-  .btn-close {
-    font: inherit;
-    font-size: 12px;
-    padding: 1px 8px;
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    background: var(--bg);
-    color: var(--fg);
-    cursor: pointer;
-  }
-  .btn-close:hover { border-color: var(--err); color: var(--err); }
-</style>

@@ -916,5 +916,15 @@ pub fn supervisor_capabilities(
         Some(_) => Vec::new(),
     };
 
+    // A frozen playbook cannot be patched, so never advertise `patch_playbook`:
+    // the supervisor still observes and retries within the current run, but the
+    // definition is off the table (enforced in core too, this just keeps the
+    // advertised capability honest).
+    let caps = if reg.is_frozen(id) {
+        caps.into_iter().filter(|c| c != "patch_playbook").collect()
+    } else {
+        caps
+    };
+
     Ok(caps)
 }

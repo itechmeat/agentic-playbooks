@@ -98,6 +98,16 @@ pub struct InvocationDef {
     pub soul_flag: Option<String>,
     #[serde(default)]
     pub transport: Transport,
+    /// Extra argv appended when the engine grants the spawned agent autonomy
+    /// for an authorized effectful run (spec 8.5). These are the agent's own
+    /// "act without interactive approval" flags (e.g. claude's
+    /// `--permission-mode bypassPermissions`), so a headless one-shot run can
+    /// perform the file-writes and network access its effects already declared
+    /// and the user already consented to at the run-authorization gate. Empty
+    /// means the agent has no such mechanism (or it is not wired yet), and the
+    /// run stays in the default permission mode.
+    #[serde(default)]
+    pub autonomous_args: Vec<String>,
 }
 
 impl InvocationDef {

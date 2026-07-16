@@ -3,20 +3,16 @@ use std::process::ExitCode;
 
 use apb_core::registry::init_project;
 
-pub(crate) fn serve(root: PathBuf, port: u16, no_open: bool) -> ExitCode {
-    if !root.join(".apb").is_dir() {
-        if let Err(e) = init_project(&root) {
-            eprintln!("init failed: {e}");
-            return ExitCode::from(2);
-        }
-        println!("initialized {}", root.join(".apb").display());
-    }
+/// Starts the single, global dashboard for the machine. There is no
+/// project-scoped server: the dashboard aggregates every registered project,
+/// so it does not bind to (or initialize) the current directory.
+pub(crate) fn serve(port: u16, no_open: bool) -> ExitCode {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if !no_open {
         let url = format!("http://127.0.0.1:{port}");
         let _ = open::that_detached(&url);
     }
-    match rt.block_on(apb_server::run_server(root, port)) {
+    match rt.block_on(apb_server::run_server(port)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("serve failed: {e}");
@@ -52,10 +48,9 @@ pub(crate) fn dev_cmd(root: PathBuf, no_open: bool) -> ExitCode {
 
     // API server in the background on 7321 (fixed to match the Vite proxy).
     // Daemon thread: dies with the process when Vite exits.
-    let api_root = root.clone();
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        if let Err(e) = rt.block_on(apb_server::run_server(api_root, 7321)) {
+        if let Err(e) = rt.block_on(apb_server::run_server(7321)) {
             eprintln!("apb dev: API server on 7321 stopped: {e}");
         }
     });

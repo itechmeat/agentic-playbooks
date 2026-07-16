@@ -78,6 +78,24 @@ pub(crate) fn execute_node(
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
 
+            // Autonomy grant (spec 8.5): reaching node execution means the run
+            // already cleared the policy/trust gate, where the user consented
+            // to the run's effects. An agent-task node's effects always include
+            // acting effects (fs_write/network/external), so we hand the agent
+            // its non-interactive permission flags; otherwise a headless
+            // one-shot agent blocks on approvals it can never receive.
+            //
+            // The grant is all-or-nothing: any effective effect beyond FsRead
+            // yields the full non-interactive permission set (not a per-effect
+            // subset). This matches the pessimistic effect model - inference
+            // already unions fs_write/network/external onto every acting node,
+            // so a narrower declared effect does not narrow the grant. If the
+            // effect taxonomy ever gains finer acting effects, revisit this to
+            // avoid silently granting full bypass for a narrow declaration.
+            let grant_autonomy = apb_core::effects::effective(playbook)
+                .iter()
+                .any(|e| !matches!(e, apb_core::schema::Effect::FsRead));
+
             // A single step of the executor chain. For the profile path it carries
             // the invocation fixed in the manifest (call form + binary) rather than
             // re-deriving it from the live config at execution time (spec 3.6).
@@ -221,6 +239,7 @@ pub(crate) fn execute_node(
                         timeout,
                         stream_log: Some(&stream_log),
                         soul: soul_text.as_deref(),
+                        grant_autonomy,
                     };
                     match adapter.run_cancellable(&task, cancel) {
                         Ok(report) => {
@@ -463,6 +482,9 @@ pub(crate) fn maybe_compact_context(
         timeout: Some(COMPACTION_TIMEOUT),
         stream_log: None,
         soul: None,
+        // Context compaction only summarizes text; it needs no file or network
+        // access, so it stays in the default permission posture.
+        grant_autonomy: false,
     };
     let summary = match adapter.run(&task) {
         Ok(report) => report.summary,

@@ -34,12 +34,12 @@ describe('toFlow', () => {
     expect(a.position).toEqual({ x: 111, y: 222 })
   })
 
-  it('auto-layouts nodes left-to-right without stored positions', () => {
+  it('auto-layouts nodes top-to-bottom without stored positions', () => {
     const { nodes } = toFlow(playbook, null)
-    const xs = nodes.map((n) => n.position.x)
-    // dagre lays out ranks horizontally: start left of a, a left of done
-    expect(xs[0]).toBeLessThan(xs[1])
-    expect(xs[1]).toBeLessThan(xs[2])
+    const ys = nodes.map((n) => n.position.y)
+    // dagre lays out ranks vertically: start above a, a above done
+    expect(ys[0]).toBeLessThan(ys[1])
+    expect(ys[1]).toBeLessThan(ys[2])
   })
 
   it('annotates nodes with run status when provided', () => {

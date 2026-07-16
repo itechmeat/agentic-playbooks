@@ -9,33 +9,36 @@
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import type { RunDetail } from '../lib/types'
+  import Topbar from '$lib/components/Topbar.svelte'
+  import { Button } from '$lib/components/ui/button'
+  import { Badge } from '$lib/components/ui/badge'
+  import * as Card from '$lib/components/ui/card'
+  import * as Tabs from '$lib/components/ui/tabs'
+  import { runStatusClass } from '../lib/status'
+  import { toast } from 'svelte-sonner'
 
-  let { id }: { id: string } = $props()
+  let { id, workspace = '' }: { id: string; workspace?: string } = $props()
 
   let nodes = $state.raw<FlowNode[]>([])
   let edges = $state.raw<FlowEdge[]>([])
   let detail = $state<RunDetail | null>(null)
-  let error = $state<string | null>(null)
   let report = $state<string | null>(null)
   let tab = $state<'events' | 'journal' | 'report'>('events')
-  let reviewError = $state<string | null>(null)
   let deciding = $state<string | null>(null)
 
   const nodeTypes = { playbookNode: PlaybookNode }
   const journal = $derived(detail ? interventionJournal(detail.events) : [])
   const pending = $derived(detail ? pendingReviews(detail.events) : [])
   const waiting = $derived(detail ? pendingWaits(detail.events) : [])
-  const hooks = $derived(detail?.hooks ?? {})
-  const hookEntries = $derived(Object.entries(hooks))
+  const hookEntries = $derived(Object.entries(detail?.hooks ?? {}))
 
   async function decide(node: string, decision: string) {
-    reviewError = null
     deciding = `${node}:${decision}`
     try {
-      await postReview(id, node, decision)
+      await postReview(id, node, decision, '', workspace)
       await load()
     } catch (e) {
-      reviewError = String(e)
+      toast.error('Review failed', { description: String(e) })
     } finally {
       deciding = null
     }
@@ -43,19 +46,18 @@
 
   async function load() {
     try {
-      const d = await fetchRun(id)
+      const d = await fetchRun(id, workspace)
       detail = d
       if (d.model) {
-        const flow = toFlow(d.model, null, d.nodes)
+        const flow = toFlow(d.model, d.layout, d.nodes)
         nodes = flow.nodes
         edges = flow.edges
       }
-      error = null
     } catch (e) {
-      error = String(e)
+      toast.error('Failed to load run', { description: String(e) })
     }
     try {
-      const r = await fetchRunReport(id)
+      const r = await fetchRunReport(id, workspace)
       report = r.report
     } catch {
       report = null
@@ -63,192 +65,150 @@
   }
 
   $effect(() => {
+    // Track the route target so browser back/forward between two runs reloads.
+    void id
+    void workspace
     load()
     return subscribeChanges(load)
   })
 </script>
 
-<header class="topbar">
-  <a href="#/runs">runs</a>
-  <h1>{id}</h1>
-  {#if detail}<span class="muted">{detail.playbook} · {detail.run_status}</span>{/if}
-  <span class="spacer"></span>
-  {#if error}<span class="badge err" title={error}>error</span>{/if}
-</header>
+<Topbar active="runs">
+  {#snippet title()}
+    <span class="truncate font-mono text-sm font-medium">{id}</span>
+    {#if detail}
+      <span class="text-sm text-muted-foreground">{detail.playbook}</span>
+      <Badge
+        variant={runStatusClass(detail.run_status) ? 'outline' : 'secondary'}
+        class={runStatusClass(detail.run_status)}
+      >
+        {detail.run_status}
+      </Badge>
+    {/if}
+  {/snippet}
+</Topbar>
 
-<div class="run-body">
-  <div class="graph">
-    <SvelteFlow bind:nodes bind:edges {nodeTypes} fitView
-      nodesDraggable={false} nodesConnectable={false} elementsSelectable={false}>
+<div class="flex min-h-0 flex-1">
+  <div class="relative min-h-0 min-w-0 flex-1">
+    <SvelteFlow
+      bind:nodes
+      bind:edges
+      {nodeTypes}
+      fitView
+      nodesDraggable={false}
+      nodesConnectable={false}
+      elementsSelectable={false}
+    >
       <Background />
       <Controls />
     </SvelteFlow>
   </div>
-  <aside class="side">
+
+  <aside class="flex min-h-0 w-80 shrink-0 flex-col gap-3 overflow-auto border-l border-border p-3">
     {#if pending.length}
-      <section class="reviews">
-        <h2>Human review</h2>
-        {#if reviewError}<p class="err-text">{reviewError}</p>{/if}
-        {#each pending as pr (pr.node)}
-          <div class="review">
-            <span class="node">{pr.node}</span>
-            <div class="opts">
-              {#each pr.options as opt (opt)}
-                <button onclick={() => decide(pr.node, opt)} disabled={deciding === `${pr.node}:${opt}`}>
-                  {deciding === `${pr.node}:${opt}` ? '...' : opt}
-                </button>
-              {/each}
+      <Card.Root class="border-primary/60">
+        <Card.Header>
+          <Card.Title class="text-sm">Human review</Card.Title>
+        </Card.Header>
+        <Card.Content class="flex flex-col gap-3">
+          {#each pending as pr (pr.node)}
+            <div class="flex flex-wrap items-center gap-2">
+              <span class="font-mono text-xs">{pr.node}</span>
+              <div class="flex flex-wrap gap-1">
+                {#each pr.options as opt (opt)}
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    class="h-7"
+                    onclick={() => decide(pr.node, opt)}
+                    disabled={deciding === `${pr.node}:${opt}`}
+                  >
+                    {opt}
+                  </Button>
+                {/each}
+              </div>
             </div>
-          </div>
-        {/each}
-      </section>
+          {/each}
+        </Card.Content>
+      </Card.Root>
     {/if}
+
     {#if hookEntries.length}
-      <section class="hooks">
-        <h2>Webhooks</h2>
-        {#each hookEntries as [key, path] (key)}
-          <div class="hook">
-            <span class="hkey">{key}</span>
-            <code class="hurl">{location.origin}{path}</code>
-          </div>
-        {/each}
-      </section>
+      <Card.Root>
+        <Card.Header><Card.Title class="text-sm">Webhooks</Card.Title></Card.Header>
+        <Card.Content class="flex flex-col gap-2">
+          {#each hookEntries as [key, path] (key)}
+            <div>
+              <span class="font-mono text-xs font-semibold">{key}</span>
+              <code class="block break-all text-[11px] text-muted-foreground"
+                >{location.origin}{path}</code
+              >
+            </div>
+          {/each}
+        </Card.Content>
+      </Card.Root>
     {/if}
+
     {#if waiting.length}
-      <section class="waiting">
-        <h2>Waiting</h2>
-        {#each waiting as node (node)}
-          <div class="wnode"><span class="node">{node}</span> <span class="muted">awaiting signal or timer</span></div>
-        {/each}
-      </section>
-    {/if}
-    <nav class="tabs">
-      <button class:active={tab === 'events'} onclick={() => (tab = 'events')}>events</button>
-      <button class:active={tab === 'journal'} onclick={() => (tab = 'journal')}>journal{#if journal.length} ({journal.length}){/if}</button>
-      <button class:active={tab === 'report'} onclick={() => (tab = 'report')}>report</button>
-    </nav>
-    {#if tab === 'events'}
-      {#if detail}
-        <ol class="events">
-          {#each detail.events as e (e.seq)}
-            <li><code>{e.type}</code>{#if e.node} <span class="muted">{e.node}</span>{/if}</li>
+      <Card.Root>
+        <Card.Header><Card.Title class="text-sm">Waiting</Card.Title></Card.Header>
+        <Card.Content class="flex flex-col gap-1">
+          {#each waiting as node (node)}
+            <div class="text-xs">
+              <span class="font-mono">{node}</span>
+              <span class="text-muted-foreground"> · awaiting signal or timer</span>
+            </div>
           {/each}
-        </ol>
-      {/if}
-    {:else if tab === 'journal'}
-      {#if journal.length}
-        <ol class="journal">
-          {#each journal as entry (entry.seq)}
-            <li class="entry {entry.kind}">
-              <span class="kind">{entry.kind}</span>
-              <span class="label">{entry.label}</span>
-              {#if entry.node}<span class="muted">{entry.node}</span>{/if}
-              {#if entry.detail}<p class="detail">{entry.detail}</p>{/if}
-            </li>
-          {/each}
-        </ol>
-      {:else}
-        <p class="muted">no interventions yet</p>
-      {/if}
-    {:else if tab === 'report'}
-      {#if report}
-        <pre class="report">{report}</pre>
-      {:else}
-        <p class="muted">no report yet</p>
-      {/if}
+        </Card.Content>
+      </Card.Root>
     {/if}
+
+    <Tabs.Root bind:value={tab} class="min-h-0 flex-1">
+      <Tabs.List class="w-full">
+        <Tabs.Trigger value="events">events</Tabs.Trigger>
+        <Tabs.Trigger value="journal">
+          journal{#if journal.length}&nbsp;({journal.length}){/if}
+        </Tabs.Trigger>
+        <Tabs.Trigger value="report">report</Tabs.Trigger>
+      </Tabs.List>
+
+      <Tabs.Content value="events">
+        {#if detail}
+          <ol class="flex flex-col gap-1 text-xs">
+            {#each detail.events as e (e.seq)}
+              <li class="flex items-center gap-1.5">
+                <code class="rounded bg-muted px-1 py-0.5">{e.type}</code>
+                {#if e.node}<span class="text-muted-foreground">{e.node}</span>{/if}
+              </li>
+            {/each}
+          </ol>
+        {/if}
+      </Tabs.Content>
+
+      <Tabs.Content value="journal">
+        {#if journal.length}
+          <ol class="flex flex-col gap-2">
+            {#each journal as entry (entry.seq)}
+              <li class="rounded-md border border-border p-2 text-xs">
+                <span class="mr-1.5 text-[10px] uppercase tracking-wide text-primary">{entry.kind}</span>
+                <span class="font-semibold">{entry.label}</span>
+                {#if entry.node}<span class="text-muted-foreground"> {entry.node}</span>{/if}
+                {#if entry.detail}<p class="mt-1 text-muted-foreground">{entry.detail}</p>{/if}
+              </li>
+            {/each}
+          </ol>
+        {:else}
+          <p class="text-xs text-muted-foreground">no interventions yet</p>
+        {/if}
+      </Tabs.Content>
+
+      <Tabs.Content value="report">
+        {#if report}
+          <pre class="whitespace-pre-wrap break-words text-xs">{report}</pre>
+        {:else}
+          <p class="text-xs text-muted-foreground">no report yet</p>
+        {/if}
+      </Tabs.Content>
+    </Tabs.Root>
   </aside>
 </div>
-
-<style>
-  .run-body { flex: 1 1 auto; min-height: 0; display: flex; }
-  .graph { flex: 1 1 auto; min-height: 0; position: relative; }
-  .side {
-    flex: 0 0 300px;
-    display: flex;
-    flex-direction: column;
-    min-height: 0;
-    overflow: auto;
-    border-left: 1px solid var(--border);
-    padding: 8px 10px;
-    font-size: 12px;
-  }
-  .tabs {
-    display: flex;
-    gap: 4px;
-    margin-bottom: 8px;
-    border-bottom: 1px solid var(--border);
-  }
-  .tabs button {
-    background: none;
-    border: none;
-    padding: 4px 8px;
-    font-size: 12px;
-    color: var(--muted);
-    cursor: pointer;
-  }
-  .tabs button.active {
-    color: var(--fg);
-    border-bottom: 2px solid var(--accent);
-  }
-  .events, .journal { margin: 0; padding-left: 18px; }
-  .events code { font-size: 11px; }
-  .journal { list-style: none; padding-left: 0; }
-  .journal .entry {
-    border: 1px solid var(--border);
-    border-radius: 4px;
-    padding: 6px 8px;
-    margin-bottom: 6px;
-  }
-  .journal .kind {
-    display: inline-block;
-    font-size: 10px;
-    text-transform: uppercase;
-    letter-spacing: 0.04em;
-    color: var(--accent);
-    margin-right: 6px;
-  }
-  .journal .label { font-weight: 600; }
-  .journal .detail { margin: 4px 0 0; color: var(--muted); }
-  .report {
-    white-space: pre-wrap;
-    word-break: break-word;
-    font-size: 12px;
-    margin: 0;
-  }
-  .muted { opacity: 0.6; }
-  .reviews {
-    border: 1px solid var(--accent);
-    border-radius: 6px;
-    padding: 8px;
-    margin-bottom: 10px;
-  }
-  .reviews h2 { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
-  .reviews .review { display: flex; align-items: center; gap: 8px; margin-top: 4px; flex-wrap: wrap; }
-  .reviews .node { font-family: ui-monospace, monospace; }
-  .reviews .opts { display: flex; gap: 6px; }
-  .reviews button {
-    font-size: 12px;
-    padding: 2px 10px;
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    background: transparent;
-    color: var(--fg);
-    cursor: pointer;
-  }
-  .reviews button:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
-  .reviews button:disabled { opacity: 0.6; cursor: default; }
-  .err-text { color: var(--err); margin: 0 0 6px; }
-  .hooks, .waiting {
-    border: 1px solid var(--border);
-    border-radius: 6px;
-    padding: 8px;
-    margin-bottom: 10px;
-  }
-  .hooks h2, .waiting h2 { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
-  .hooks .hook { margin-top: 4px; }
-  .hooks .hkey { font-weight: 600; font-family: ui-monospace, monospace; }
-  .hooks .hurl { display: block; font-size: 11px; word-break: break-all; color: var(--muted); }
-  .waiting .wnode { margin-top: 4px; }
-  .waiting .node { font-family: ui-monospace, monospace; }
-</style>

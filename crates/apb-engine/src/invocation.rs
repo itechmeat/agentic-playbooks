@@ -28,33 +28,45 @@ pub struct ResolvedInvocation {
 /// Built-in invocation form for the known five. `None` for unknown agents and
 /// for pi (details will follow once the binary exists).
 pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
-    let mk = |argv: &[&str], soul: SoulDelivery, soul_flag: Option<&str>| InvocationDef {
+    let mk = |argv: &[&str],
+              soul: SoulDelivery,
+              soul_flag: Option<&str>,
+              autonomous_args: &[&str]| InvocationDef {
         argv: argv.iter().map(|s| s.to_string()).collect(),
         prompt_via: PromptVia::Argv,
         soul,
         soul_flag: soul_flag.map(|s| s.to_string()),
         transport: Transport::Headless,
+        autonomous_args: autonomous_args.iter().map(|s| s.to_string()).collect(),
     };
     match agent_id {
+        // claude runs headless one-shot (`-p`); to actually write files and
+        // reach the network on an authorized effectful run it needs an explicit
+        // non-interactive permission mode, otherwise every tool call blocks
+        // waiting for an approval that never comes (spec 8.5).
         "claude" | "claude-code" => Some(mk(
             &["-p", "{prompt}", "--model", "{model}"],
             SoulDelivery::Native,
             Some("--append-system-prompt"),
+            &["--permission-mode", "bypassPermissions"],
         )),
         "agy" => Some(mk(
             &["-p", "{prompt}", "--model", "{model}"],
             SoulDelivery::Prefix,
             None,
+            &[],
         )),
         "codex" => Some(mk(
             &["exec", "{prompt}", "-m", "{model}"],
             SoulDelivery::Prefix,
             None,
+            &[],
         )),
         "opencode" => Some(mk(
             &["run", "{prompt}", "-m", "{model}"],
             SoulDelivery::Prefix,
             None,
+            &[],
         )),
         _ => None,
     }
@@ -247,6 +259,7 @@ mod tests {
             soul: SoulDelivery::Prefix,
             soul_flag: None,
             transport: Transport::Headless,
+            autonomous_args: vec![],
         };
         assert!(two.validate().is_err());
 
@@ -256,6 +269,7 @@ mod tests {
             soul: SoulDelivery::Prefix,
             soul_flag: None,
             transport: Transport::Headless,
+            autonomous_args: vec![],
         };
         assert!(partial.validate().is_err());
 
@@ -265,6 +279,7 @@ mod tests {
             soul: SoulDelivery::Prefix,
             soul_flag: None,
             transport: Transport::Headless,
+            autonomous_args: vec![],
         };
         assert!(stdin_with_slot.validate().is_err());
 
@@ -274,6 +289,7 @@ mod tests {
             soul: SoulDelivery::Native,
             soul_flag: None,
             transport: Transport::Headless,
+            autonomous_args: vec![],
         };
         assert!(native_no_flag.validate().is_err());
     }

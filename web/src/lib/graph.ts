@@ -42,8 +42,9 @@ export function toFlow(
   const auto = new Map<string, { x: number; y: number }>()
   if (needAuto) {
     const g = new dagre.graphlib.Graph()
-    // LR: the playbook is laid out horizontally, left to right.
-    g.setGraph({ rankdir: 'LR', nodesep: 40, ranksep: 80 })
+    // TB: the playbook is laid out vertically, top to bottom. Branches are
+    // usually few, and a vertical flow reads better on narrow / mobile screens.
+    g.setGraph({ rankdir: 'TB', nodesep: 40, ranksep: 80 })
     g.setDefaultEdgeLabel(() => ({}))
     for (const n of playbook.nodes) g.setNode(n.id, { width: NODE_W, height: NODE_H })
     for (const e of playbook.edges) g.setEdge(e.from, e.to)
