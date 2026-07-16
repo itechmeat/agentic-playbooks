@@ -39,3 +39,27 @@ pub fn remove_lock(root: &Path) -> io::Result<()> {
     }
     Ok(())
 }
+
+/// Global (machine-wide) dashboard lock, written directly in the config dir
+/// (`<config_dir>/serve.lock`) rather than under a project's `.apb`. There is
+/// exactly one global dashboard, so this is the single lock that guards its
+/// port.
+pub fn write_global_lock(config_dir: &Path, port: u16) -> io::Result<LockInfo> {
+    let info = LockInfo {
+        port,
+        pid: std::process::id(),
+        root_fingerprint: fingerprint(config_dir),
+        instance_id: uuid::Uuid::new_v4().to_string(),
+    };
+    let bytes = serde_json::to_vec_pretty(&info).map_err(io::Error::other)?;
+    atomic_write(&config_dir.join("serve.lock"), &bytes)?;
+    Ok(info)
+}
+
+pub fn remove_global_lock(config_dir: &Path) -> io::Result<()> {
+    let p = config_dir.join("serve.lock");
+    if p.exists() {
+        std::fs::remove_file(p)?;
+    }
+    Ok(())
+}

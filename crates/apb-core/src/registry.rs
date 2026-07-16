@@ -43,6 +43,19 @@ pub fn is_safe_segment(s: &str) -> bool {
     !s.is_empty() && !s.contains('/') && !s.contains('\\') && !s.contains("..")
 }
 
+/// Marker filename (inside the playbook directory, alongside `current`) that
+/// flags a playbook as frozen. A frozen playbook rejects every definition
+/// change (new version, patch, promote) so agents can no longer alter it;
+/// runs and run-scoped supervisor intervention keep working. Freeze is a
+/// playbook-wide lifecycle flag, not part of any immutable version's content,
+/// which is why it lives next to `current` rather than inside a version dir.
+pub const FROZEN_MARKER: &str = "frozen";
+
+/// Whether the given playbook directory carries the frozen marker.
+pub fn is_frozen_dir(playbook_dir: &Path) -> bool {
+    playbook_dir.join(FROZEN_MARKER).is_file()
+}
+
 #[derive(Debug, Serialize)]
 pub struct PlaybookSummary {
     pub id: String,
@@ -50,6 +63,8 @@ pub struct PlaybookSummary {
     pub description: String,
     pub current: String,
     pub versions: Vec<String>,
+    /// True when the playbook is frozen (definition changes are refused).
+    pub frozen: bool,
 }
 
 #[derive(Debug)]
@@ -108,21 +123,37 @@ impl Registry {
                 continue;
             }
             let id = entry.file_name().to_string_lossy().to_string();
-            let current = self.read_current(&id)?;
-            let mut versions: Vec<String> = fs::read_dir(entry.path())?
+            // A single broken definition (missing `current`, unparseable YAML,
+            // version mismatch) must not take down the whole listing: `list`
+            // powers the web dashboard, the CLI list and the MCP catalog. Skip
+            // the broken entry - `apb doctor` is where broken definitions
+            // surface for repair.
+            let Ok(current) = self.read_current(&id) else {
+                continue;
+            };
+            let Ok(loaded) = self.load(&id, Some(&current)) else {
+                continue;
+            };
+            // Enumerating the version dirs must not be fatal either: a single
+            // unreadable playbook directory should be skipped like the other
+            // broken cases above, not abort the whole listing.
+            let Ok(version_entries) = fs::read_dir(entry.path()) else {
+                continue;
+            };
+            let mut versions: Vec<String> = version_entries
                 .filter_map(Result::ok)
                 .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .filter(|name| name != "layouts" && name != "meta")
                 .collect();
             versions.sort();
-            let loaded = self.load(&id, Some(&current))?;
             out.push(PlaybookSummary {
                 id,
                 name: loaded.playbook.name.clone(),
                 description: loaded.playbook.description.clone(),
                 current,
                 versions,
+                frozen: is_frozen_dir(&entry.path()),
             });
         }
         out.sort_by(|a, b| a.id.cmp(&b.id));
@@ -130,9 +161,10 @@ impl Registry {
     }
 
     /// Names (ids) of all playbooks without loading them - just the
-    /// subdirectories under playbooks/. Unlike `list`, does not fail because
-    /// of one broken playbook, so it is suitable for diagnostics (`apb
-    /// doctor`), where each one is loaded independently.
+    /// subdirectories under playbooks/. Unlike `list`, it reports broken
+    /// playbooks too (it never loads them), so it is suitable for diagnostics
+    /// (`apb doctor`), where each one is loaded independently. `list` silently
+    /// skips definitions that fail to load; `playbook_ids` keeps them.
     pub fn playbook_ids(&self) -> Vec<String> {
         let dir = self.playbooks_dir();
         let mut out: Vec<String> = fs::read_dir(&dir)
@@ -197,6 +229,32 @@ impl Registry {
         })
     }
 
+    /// Whether the playbook `id` is frozen (definition changes are refused).
+    pub fn is_frozen(&self, id: &str) -> bool {
+        is_frozen_dir(&self.playbooks_dir().join(id))
+    }
+
+    /// Freezes or unfreezes the playbook `id` by adding/removing its marker
+    /// file. The operation is idempotent. `NotFound` if the playbook does not
+    /// exist. This is an operator action (surfaced only through the dashboard);
+    /// agents have no path to call it.
+    pub fn set_frozen(&self, id: &str, frozen: bool) -> Result<(), RegistryError> {
+        if !is_safe_segment(id) {
+            return Err(RegistryError::NotFound(id.into()));
+        }
+        let dir = self.playbooks_dir().join(id);
+        if !dir.is_dir() {
+            return Err(RegistryError::NotFound(id.into()));
+        }
+        let marker = dir.join(FROZEN_MARKER);
+        if frozen {
+            atomic_write(&marker, b"1")?;
+        } else if marker.exists() {
+            fs::remove_file(&marker)?;
+        }
+        Ok(())
+    }
+
     pub fn profiles(&self) -> Vec<String> {
         let dir = self.base.join("profiles");
         let mut out: Vec<String> = fs::read_dir(dir)
@@ -229,5 +287,76 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join(".apb/playbooks")).unwrap();
         assert!(Registry::open(tmp.path()).is_ok());
+    }
+
+    const MINI: &str = "schema: 1\nid: mini\nname: Mini\nversion: {v}\nnodes:\n  - id: s\n    type: start\nedges: []\n";
+
+    fn seed_version(base: &Path, id: &str, version: &str) -> PathBuf {
+        let vdir = base.join("playbooks").join(id).join(version);
+        std::fs::create_dir_all(&vdir).unwrap();
+        let yaml = MINI
+            .replace("id: mini", &format!("id: {id}"))
+            .replace("{v}", version);
+        std::fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+        vdir
+    }
+
+    #[test]
+    fn set_frozen_roundtrip_is_idempotent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+        seed_version(base, "alpha", "1.0.0");
+        std::fs::write(
+            base.join("playbooks").join("alpha").join("current"),
+            "1.0.0",
+        )
+        .unwrap();
+
+        let reg = Registry::open_dir(base).unwrap();
+        assert!(!reg.is_frozen("alpha"));
+
+        reg.set_frozen("alpha", true).unwrap();
+        reg.set_frozen("alpha", true).unwrap(); // idempotent
+        assert!(reg.is_frozen("alpha"));
+        assert!(
+            base.join("playbooks")
+                .join("alpha")
+                .join(FROZEN_MARKER)
+                .is_file()
+        );
+
+        reg.set_frozen("alpha", false).unwrap();
+        reg.set_frozen("alpha", false).unwrap(); // idempotent
+        assert!(!reg.is_frozen("alpha"));
+
+        // Unknown playbook: NotFound.
+        assert!(reg.set_frozen("nope", true).is_err());
+    }
+
+    // A single playbook missing its `current` pointer must not take down the
+    // whole listing: `list` powers the web dashboard, the CLI list and the MCP
+    // catalog, so one broken definition would otherwise 500 the dashboard and
+    // hide every healthy playbook.
+    #[test]
+    fn list_skips_broken_playbook_and_returns_healthy_ones() {
+        let tmp = tempfile::tempdir().unwrap();
+        let base = tmp.path();
+
+        seed_version(base, "alpha", "1.0.0");
+        std::fs::write(
+            base.join("playbooks").join("alpha").join("current"),
+            "1.0.0",
+        )
+        .unwrap();
+
+        // Broken: a version dir exists but there is no `current` pointer.
+        seed_version(base, "broken", "1.0.1");
+
+        let reg = Registry::open_dir(base).unwrap();
+        let list = reg
+            .list()
+            .expect("list must not fail on one broken playbook");
+        let ids: Vec<&str> = list.iter().map(|p| p.id.as_str()).collect();
+        assert_eq!(ids, vec!["alpha"]);
     }
 }

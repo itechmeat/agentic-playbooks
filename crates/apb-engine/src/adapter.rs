@@ -79,6 +79,12 @@ pub struct AgentTask<'a> {
     /// capability (native flag or prompt prefix, see `build_command`).
     /// `None`/empty - no role set.
     pub soul: Option<&'a str>,
+    /// Whether the engine grants this attempt the agent's non-interactive
+    /// permission flags (`InvocationDef::autonomous_args`). Set for agent-task
+    /// nodes of an authorized effectful run so the headless agent can perform
+    /// the file-writes and network access the run already declared; kept false
+    /// for internal, side-effect-free calls (e.g. context compaction).
+    pub grant_autonomy: bool,
 }
 
 #[derive(Debug)]
@@ -140,6 +146,7 @@ fn build_command(
     prompt: &str,
     model: &str,
     soul: Option<&str>,
+    grant_autonomy: bool,
 ) -> (Vec<String>, Option<String>) {
     let soul = soul.filter(|s| !s.is_empty());
     let effective_prompt = match (spec.soul, soul) {
@@ -160,6 +167,13 @@ fn build_command(
     {
         argv.push(flag.clone());
         argv.push(s.to_string());
+    }
+    // Autonomy is granted only for an authorized effectful run (decided by the
+    // caller, see AgentTask::grant_autonomy). The flags themselves are the
+    // agent's own non-interactive permission mechanism, carried as data on the
+    // invocation form so codex/opencode/custom agents stay unaffected.
+    if grant_autonomy {
+        argv.extend(spec.autonomous_args.iter().cloned());
     }
     let stdin_payload = match spec.prompt_via {
         PromptVia::Stdin => Some(effective_prompt),
@@ -272,7 +286,13 @@ impl ClaudeAdapter {
         cancel: &AtomicBool,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
-        let (argv, stdin_payload) = build_command(&self.spec, &prompt, task.model, task.soul);
+        let (argv, stdin_payload) = build_command(
+            &self.spec,
+            &prompt,
+            task.model,
+            task.soul,
+            task.grant_autonomy,
+        );
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(task.workdir)
@@ -359,7 +379,13 @@ impl ClaudeAdapter {
         // Base argv comes from the invocation form; claude-specific streaming
         // flags (stream-json) are layered on top. In the first iteration,
         // acp = claude.
-        let (mut argv, _stdin) = build_command(&self.spec, &prompt, task.model, task.soul);
+        let (mut argv, _stdin) = build_command(
+            &self.spec,
+            &prompt,
+            task.model,
+            task.soul,
+            task.grant_autonomy,
+        );
         argv.push("--output-format".to_string());
         argv.push("stream-json".to_string());
         argv.push("--verbose".to_string());
@@ -535,7 +561,10 @@ impl AgentAdapter for ClaudeAdapter {
         // -p/--model), otherwise codex/opencode/custom argv and stdin
         // profiles would be spawned incorrectly. The supervisor profile's
         // SOUL is delivered according to the form (native flag / prefix).
-        let (argv, stdin_payload) = build_command(&self.spec, brief, model, soul);
+        // The supervisor keeps the default permission posture for now; its
+        // intervention path is the supervisor_* MCP tools, not autonomous
+        // file/network actions in the run workdir.
+        let (argv, stdin_payload) = build_command(&self.spec, brief, model, soul, false);
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(workdir)
@@ -600,6 +629,27 @@ mod tests {
         let (status, summary) = interpret_report(text);
         assert_eq!(status, NodeStatus::Failed);
         assert_eq!(summary, "could not finish");
+    }
+
+    #[test]
+    fn build_command_appends_autonomous_args_when_granted() {
+        let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
+        let (argv, _) = build_command(&spec, "hello", "claude-opus-4-8", None, true);
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"),
+            "expected the autonomous permission flag when granted, got {argv:?}"
+        );
+    }
+
+    #[test]
+    fn build_command_omits_autonomous_args_when_not_granted() {
+        let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
+        let (argv, _) = build_command(&spec, "hello", "claude-opus-4-8", None, false);
+        assert!(
+            !argv.iter().any(|a| a == "bypassPermissions"),
+            "must not grant permissions without autonomy, got {argv:?}"
+        );
     }
 
     #[test]

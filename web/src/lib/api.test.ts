@@ -37,14 +37,23 @@ describe('fetchPlaybook', () => {
   it('appends ?version= when version is provided', async () => {
     const detail = { id: 'demo', version: '1.0.0', yaml: '', playbook: { id: 'demo', name: 'D', nodes: [], edges: [] }, layout: null, validation: [] }
     fetchMock.mockResolvedValueOnce(jsonResponse(detail))
-    await fetchPlaybook('demo', '1.0.0')
+    await fetchPlaybook('demo', '', '1.0.0')
     expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?version=1.0.0')
   })
 
   it('encodes version with special characters', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ id: 'demo', version: '1.0.0', yaml: '', playbook: { id: 'demo', name: 'D', nodes: [], edges: [] }, layout: null, validation: [] }))
-    await fetchPlaybook('demo', '1.0.0-beta')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?version=1.0.0-beta')
+    // `+` is URI-reserved: encodeURIComponent turns it into %2B, so this asserts
+    // the query value is actually percent-encoded (a hyphen would pass through).
+    await fetchPlaybook('demo', '', '1.0.0+build')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?version=1.0.0%2Bbuild')
+  })
+
+  it('adds ?workspace= to select a project on the global dashboard', async () => {
+    const detail = { id: 'demo', version: '1.0.0', yaml: '', playbook: { id: 'demo', name: 'D', nodes: [], edges: [] }, layout: null, validation: [] }
+    fetchMock.mockResolvedValueOnce(jsonResponse(detail))
+    await fetchPlaybook('demo', 'ws-abc', '1.0.0')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?workspace=ws-abc&version=1.0.0')
   })
 })
 

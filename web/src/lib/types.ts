@@ -1,9 +1,20 @@
+export interface Project {
+  workspace_id: string
+  name: string
+  path: string
+  playbook_count: number
+}
+
 export interface PlaybookSummary {
   id: string
   name: string
   description: string
   current: string
   versions: string[]
+  frozen: boolean
+  // Owning project (global dashboard). Empty on the pinned-root test server.
+  workspace_id: string
+  project: string
 }
 
 export interface PlaybookNode {
@@ -29,6 +40,7 @@ export interface PlaybookDetail {
   playbook: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[] }
   layout: { nodes?: LayoutNode[] } | null
   validation: { code: string; severity: string; message: string; node?: string | null }[]
+  frozen: boolean
 }
 
 export interface RunSummary {
@@ -36,6 +48,9 @@ export interface RunSummary {
   playbook: string
   status: string
   started_ts: number
+  // Owning project (global dashboard). Empty on the pinned-root test server.
+  workspace_id: string
+  project: string
 }
 
 export interface WfEvent {
@@ -86,6 +101,7 @@ export interface RunDetail {
   instruction: string | null
   params: Record<string, string>
   model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[] } | null
+  layout: { nodes?: LayoutNode[] } | null
   hooks?: Record<string, string>
   events: WfEvent[]
 }

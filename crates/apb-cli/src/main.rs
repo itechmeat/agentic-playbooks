@@ -216,7 +216,7 @@ fn main() -> ExitCode {
             decision,
             note,
         }) => review_cmd(&root, &run_id, &node_id, &decision, &note),
-        Some(Command::Serve { port, no_open }) => serve(root, resolve_port(port), no_open),
+        Some(Command::Serve { port, no_open }) => serve(resolve_port(port), no_open),
         Some(Command::Dev { no_open }) => dev_cmd(root, no_open),
         Some(Command::Mcp) => mcp_cmd(&root),
         Some(Command::Projects { action }) => projects_cmd(action),
@@ -241,6 +241,6 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             &handshake,
         ),
-        None => serve(root, resolve_port(None), false),
+        None => serve(resolve_port(None), false),
     }
 }

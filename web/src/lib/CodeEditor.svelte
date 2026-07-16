@@ -17,7 +17,8 @@
 </script>
 
 <textarea
-  class="editor"
+  class="size-full resize-none whitespace-pre bg-background p-3 font-mono text-[13px] leading-relaxed text-foreground outline-none"
+  style="tab-size: 2;"
   spellcheck="false"
   autocomplete="off"
   autocapitalize="off"
@@ -25,23 +26,3 @@
   {value}
   oninput={(e) => onChange(e.currentTarget.value)}
 ></textarea>
-
-<style>
-  .editor {
-    width: 100%;
-    height: 100%;
-    resize: none;
-    border: 0;
-    outline: none;
-    padding: 10px 12px;
-    box-sizing: border-box;
-    background: var(--bg);
-    color: var(--fg);
-    font-size: 13px;
-    line-height: 1.5;
-    tab-size: 2;
-    font-family: ui-monospace, 'Cascadia Code', 'Source Code Pro', Menlo, monospace;
-    white-space: pre;
-    overflow: auto;
-  }
-</style>

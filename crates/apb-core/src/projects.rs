@@ -292,6 +292,27 @@ pub fn list_active() -> Vec<ProjectEntry> {
     .unwrap_or_default()
 }
 
+/// Active entries that are actually usable right now: the path exists, holds
+/// an `.apb/playbooks` directory, and carries a matching `workspace.local`
+/// identity marker. The global dashboard lists these so dead or moved projects
+/// (common with throwaway temp dirs left in the registry) never show up. This
+/// is a read-only filesystem probe and does not mutate registry state.
+pub fn list_reachable() -> Vec<ProjectEntry> {
+    list_active()
+        .into_iter()
+        .filter(|e| {
+            let path = PathBuf::from(&e.path);
+            if !path.join(".apb/playbooks").is_dir() {
+                return false;
+            }
+            let local_id = std::fs::read_to_string(path.join(".apb/workspace.local"))
+                .ok()
+                .map(|s| s.trim().to_string());
+            local_id.as_deref() == Some(e.workspace_id.as_str())
+        })
+        .collect()
+}
+
 /// Resolves a `workspace_id` to a root path on disk (spec 6.4). Success
 /// transitions the entry to `active`; failure (path missing or no `.apb/`)
 /// transitions it to `unreachable` and returns a structured error.
@@ -371,6 +392,31 @@ mod tests {
             std::env::remove_var("APB_NO_REGISTRY");
             std::env::remove_var("CI");
         }
+    }
+
+    #[test]
+    fn list_reachable_skips_projects_whose_path_is_gone() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let a = tempfile::tempdir().unwrap();
+        init_project(a.path()).unwrap();
+        touch(a.path());
+        let a_id = crate::workspace::ensure_id(a.path()).unwrap();
+
+        let c = tempfile::tempdir().unwrap();
+        init_project(c.path()).unwrap();
+        touch(c.path());
+
+        assert_eq!(list_reachable().len(), 2, "both live projects listed");
+
+        // c disappears (a moved/removed workspace, like a throwaway temp dir).
+        std::fs::remove_dir_all(c.path().join(".apb")).unwrap();
+        let reachable = list_reachable();
+        assert_eq!(reachable.len(), 1, "the dead project is filtered out");
+        assert_eq!(reachable[0].workspace_id, a_id);
     }
 
     #[test]

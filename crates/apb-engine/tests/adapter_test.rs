@@ -33,6 +33,7 @@ fn claude_adapter_success_via_stub() {
             timeout: None,
             stream_log: None,
             soul: None,
+            grant_autonomy: false,
         })
         .unwrap();
     assert_eq!(report.status, NodeStatus::Succeeded);
@@ -54,6 +55,7 @@ fn claude_adapter_nonzero_exit_is_process_exit() {
             timeout: None,
             stream_log: None,
             soul: None,
+            grant_autonomy: false,
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::ProcessExit));
