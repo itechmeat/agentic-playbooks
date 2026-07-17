@@ -13,6 +13,7 @@ use std::path::Path;
 
 use apb_core::config::GlobalConfig;
 use apb_core::profile::SoulRequirement;
+use apb_core::schema::Playbook;
 use serde::Deserialize;
 
 use crate::error::EngineError;
@@ -85,6 +86,22 @@ pub fn has_legacy_executors(snapshot_yaml: &str) -> bool {
     v.get("nodes")
         .and_then(|n| n.as_sequence())
         .is_some_and(|nodes| nodes.iter().any(|n| n.get("executor").is_some()))
+}
+
+/// The one read-only compatibility parser for a persisted run snapshot, shared
+/// by the resume path and by progress/report consumers. A snapshot carrying
+/// schema-1 `executors` is parsed directly (those removed fields are silently
+/// ignored by the current `Playbook`), the same tolerance resume relies on; any
+/// other snapshot goes through the strict `Playbook::from_yaml`. This does NOT
+/// weaken the strict parser: live definitions still route legacy executors to
+/// migration.
+pub fn parse_snapshot_playbook(snapshot_yaml: &str) -> Result<Playbook, EngineError> {
+    if has_legacy_executors(snapshot_yaml) {
+        serde_yaml_ng::from_str::<Playbook>(snapshot_yaml)
+            .map_err(|e| EngineError::Yaml(format!("legacy snapshot playbook: {e}")))
+    } else {
+        Playbook::from_yaml(snapshot_yaml).map_err(|e| EngineError::Yaml(e.to_string()))
+    }
 }
 
 /// Resolves a snapshot executor reference into `LegacyExec`: a string is a

@@ -149,6 +149,8 @@ impl RunState {
                 EventPayload::ContextCompacted { .. } => {}
                 // An accepted environment drift is an audit record, it does not change state.
                 EventPayload::EnvironmentDriftAccepted { .. } => {}
+                // Progress is an audit-only cycle report, it does not change state.
+                EventPayload::RunProgress { .. } => {}
                 EventPayload::ReviewRequested { .. } => {}
                 EventPayload::ReviewDecided {
                     node,

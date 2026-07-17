@@ -20,6 +20,7 @@ nodes:
     type: agent_task
     title: Plan
     profile: architect
+    expected_duration: 5m
     prompt: |
       Write a plan: {{params.task}}
   - id: lint
@@ -28,6 +29,7 @@ nodes:
     script: scripts/node-lint.sh
     runner: sh
     timeout_seconds: 300
+    expected_duration: 5m
   - id: check
     type: condition
     title: Passed?
@@ -35,6 +37,7 @@ nodes:
   - id: fix
     type: agent_task
     title: Fix
+    expected_duration: 5m
     prompt: |
       Fix: {{nodes.lint.output}}
   - id: done

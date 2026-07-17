@@ -226,6 +226,7 @@ async fn lists_runs() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json[0]["playbook"], "noagent");
     assert_eq!(json[0]["status"], "succeeded");
+    assert_eq!(json[0]["progress"]["percent"], 100);
 }
 
 #[tokio::test]
@@ -237,6 +238,7 @@ async fn run_detail_has_statuses_and_events() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["run_status"], "succeeded");
     assert_eq!(json["nodes"]["note"], "succeeded");
+    assert_eq!(json["progress"]["percent"], 100);
     assert_eq!(json["model"]["nodes"][0]["type"], "start");
     assert!(json["events"].as_array().unwrap().len() >= 3);
 }

@@ -438,12 +438,17 @@ pub fn playbook_trial(
                     diff.push_str(&String::from_utf8_lossy(&o.stdout));
                 }
                 truncate_on_char_boundary(&mut diff, 64 * 1024);
+                let measured = apb_engine::progress::node_durations_seconds(
+                    &read_all(&run_dir).unwrap_or_default(),
+                );
+                let durations = build_duration_table_from(&loaded.playbook, &measured);
                 let _ = git(root, &["worktree", "remove", "--force", &scratch_str]);
                 let _ = git(root, &["worktree", "prune"]);
                 return Ok(json!({
                     "run_id": run_id,
                     "status": status,
                     "diff": diff,
+                    "durations": durations,
                     "notes": ["ran in a throwaway git worktree; changes are not applied to your workspace"],
                 }));
             }
@@ -463,10 +468,14 @@ pub fn playbook_trial(
         .map_err(ToolError::from)?;
     let run_dir = root.join(".apb/runs").join(&run_id);
     let status = poll_terminal(&run_dir);
+    let measured =
+        apb_engine::progress::node_durations_seconds(&read_all(&run_dir).unwrap_or_default());
+    let durations = build_duration_table_from(&loaded.playbook, &measured);
     Ok(json!({
         "run_id": run_id,
         "status": status,
         "external_effects_executed": external,
+        "durations": durations,
         "notes": ["no filesystem writes to isolate"],
     }))
 }
@@ -683,11 +692,13 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         .iter()
         .map(|(k, v)| (k.clone(), v.as_str().to_string()))
         .collect();
+    let progress = apb_engine::progress::from_run_dir(&dir, &events);
     Ok(json!({
         "run_id": run_id,
         "run_status": state.run_status.as_str(),
         "nodes": nodes,
         "outputs": state.outputs,
+        "progress": progress,
     }))
 }
 
@@ -701,9 +712,82 @@ pub fn run_events(root: &Path, run_id: &str, from_seq: Option<u64>) -> Result<Va
     )
 }
 
+fn node_kind_label(kind: &apb_core::schema::NodeKind) -> &'static str {
+    use apb_core::schema::NodeKind::*;
+    match kind {
+        Start => "start",
+        AgentTask { .. } => "agent_task",
+        Script { .. } => "script",
+        Prompt { .. } => "prompt",
+        Condition { .. } => "condition",
+        HumanReview { .. } => "human_review",
+        Wait { .. } => "wait",
+        Finish { .. } => "finish",
+    }
+}
+
+/// Per-node expected vs measured durations for calibration (spec 5). Measured
+/// comes from the run's events; expected from the playbook version bound to
+/// the run. The maintaining agent uses this to update estimates via
+/// playbook_update; the engine never rewrites the playbook.
+pub(crate) fn build_duration_table_from(
+    playbook: &apb_core::schema::Playbook,
+    measured: &BTreeMap<String, u64>,
+) -> Vec<Value> {
+    playbook
+        .nodes
+        .iter()
+        .map(|n| {
+            json!({
+                "node": n.id,
+                "kind": node_kind_label(&n.kind),
+                "expected_seconds": n.expected_seconds(),
+                "measured_seconds": measured.get(&n.id),
+            })
+        })
+        .collect()
+}
+
 pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
-    // There is no supervisor agent in Phase 3: the report is a light state summary. The full supervisor report is Phase 4.
-    run_status(root, run_id)
+    // There is no supervisor agent in Phase 3: the report is a light state
+    // summary. The full supervisor report is Phase 4. events.jsonl is read once
+    // and the playbook snapshot parsed once here; a failing events read
+    // propagates as a ToolError rather than masquerading as an empty duration
+    // table (B7). The base object mirrors `run_status`'s JSON shape exactly.
+    let dir = resolve_run_dir(root, run_id)?;
+    let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
+    let state = RunState::fold(&events);
+    let pb = apb_engine::progress::load_run_playbook(&dir);
+    let progress = pb
+        .as_ref()
+        .map(|p| apb_engine::progress::compute(p, &events));
+
+    let nodes: BTreeMap<String, String> = state
+        .nodes
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
+        .collect();
+    let mut base = json!({
+        "run_id": run_id,
+        "run_status": state.run_status.as_str(),
+        "nodes": nodes,
+        "outputs": state.outputs,
+        "progress": progress,
+    });
+
+    // duration_table is always present (empty when there is no snapshot), as
+    // before; it is now built from the single events read above.
+    let table = match &pb {
+        Some(playbook) => {
+            let measured = apb_engine::progress::node_durations_seconds(&events);
+            build_duration_table_from(playbook, &measured)
+        }
+        None => Vec::new(),
+    };
+    if let Some(obj) = base.as_object_mut() {
+        obj.insert("duration_table".into(), json!(table));
+    }
+    Ok(base)
 }
 
 pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<Value, ToolError> {
@@ -812,6 +896,21 @@ pub fn context_append(root: &Path, run_id: &str, note: &str) -> Result<Value, To
             note: note.to_string(),
         },
     )?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
+/// Reports cycle progress for the run's currently executing node group. Posts
+/// a `Control::Progress` command; drive stamps the node and appends the
+/// `RunProgress` event (single-writer). Callable by the executing agent or the
+/// supervisor.
+pub fn run_progress_report(
+    root: &Path,
+    run_id: &str,
+    done: u64,
+    total: u64,
+    label: Option<String>,
+) -> Result<Value, ToolError> {
+    let seq = post_supervisor_command(root, run_id, Control::Progress { done, total, label })?;
     Ok(json!({ "posted_seq": seq }))
 }
 
@@ -927,4 +1026,59 @@ pub fn supervisor_capabilities(
     };
 
     Ok(caps)
+}
+
+#[cfg(test)]
+mod progress_tests {
+    use super::*;
+
+    #[test]
+    fn run_progress_report_posts_a_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        // minimal events + playbook so resolve_run_dir + run_status succeed
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+        let out = run_progress_report(tmp.path(), "r1", 2, 5, Some("x".into())).unwrap();
+        assert!(out.get("posted_seq").is_some());
+        let control = std::fs::read_to_string(run_dir.join("control.jsonl")).unwrap();
+        assert!(control.contains("\"cmd\":\"progress\""));
+    }
+
+    #[test]
+    fn run_report_includes_duration_table() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi, expected_duration: 100 }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n").unwrap();
+        std::fs::write(run_dir.join("events.jsonl"),
+            "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n{\"seq\":1,\"ts\":1000,\"type\":\"node_started\",\"node\":\"a\",\"attempt\":1}\n{\"seq\":2,\"ts\":6000,\"type\":\"node_finished\",\"node\":\"a\",\"status\":\"succeeded\",\"attempt\":1,\"output\":\"\"}\n").unwrap();
+        let out = run_report(tmp.path(), "r1").unwrap();
+        let table = out
+            .get("duration_table")
+            .and_then(|v| v.as_array())
+            .unwrap();
+        let a = table.iter().find(|e| e["node"] == "a").unwrap();
+        assert_eq!(a["expected_seconds"], 100);
+        assert_eq!(a["measured_seconds"], 5);
+    }
+
+    #[test]
+    fn run_report_propagates_unreadable_events() {
+        // B7: an unreadable/corrupt event log surfaces as an error, not an
+        // empty duration table masquerading as "no measurements".
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi, expected_duration: 100 }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n").unwrap();
+        std::fs::write(run_dir.join("events.jsonl"), "this is not json\n").unwrap();
+        let err = run_report(tmp.path(), "r1").unwrap_err();
+        assert!(matches!(err, ToolError::Engine(_)), "got {err:?}");
+    }
 }

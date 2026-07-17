@@ -374,6 +374,29 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "Report cycle progress for a run: done of total iterations of the current cycle group, with an optional label. Scales the progress bar for loops with a known amount of work.",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn run_progress_report(
+        &self,
+        Parameters(ProgressReportArgs {
+            run_id,
+            done,
+            total,
+            label,
+            workspace,
+        }): Parameters<ProgressReportArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(tools::run_progress_report(
+            &root, &run_id, done, total, label,
+        ))
+    }
+
+    #[tool(
         description = "List events of a run, optionally starting from a given seq",
         annotations(read_only_hint = true)
     )]

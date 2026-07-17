@@ -44,6 +44,22 @@ migrated reference to a global executor becomes a global-scope profile).
 `finish`. Edges connect node ids; conditional edges gate on node status,
 review status, or output match.
 
+## expected_duration (progress estimates)
+
+Every node may carry an optional `expected_duration`: the estimated wall time
+of ONE execution. Give it as integer seconds (`90`) or a single unit suffix
+(`30s`, `5m`, `2h`). For a node inside a loop this is the per-iteration time.
+Use a whole number of the units above: an invalid value such as a bare decimal
+(`1.5`), a negative number, or a boolean still lets the playbook load but the
+validator flags it as a V20 error.
+
+When creating or editing a playbook, estimate `expected_duration` for every
+`agent_task` and `script` node. A rough guess is fine; the trial and run
+reports show expected vs measured durations, and you refine the numbers with
+`playbook_update`. Nodes without it fall back to a 120s default, and the
+validator emits a V19 warning. Waiting nodes (`human_review`, `wait`) count as
+zero work, so leave their estimate at the default.
+
 ## trigger (matching contract)
 
 `trigger` is the only thing used for matching. Keep fields machine-oriented and

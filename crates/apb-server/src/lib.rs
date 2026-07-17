@@ -859,21 +859,20 @@ async fn get_run_handler(
     let run_state = apb_engine::state::RunState::fold(&events);
     let cfg = apb_engine::run_config::read_run_config(&run_dir).unwrap_or_default();
 
-    // The run's playbook snapshot (may be missing for very old runs).
-    let (playbook_json, playbook_id, version) = {
-        let path = run_dir.join("playbook.yaml");
-        match std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|y| apb_core::schema::Playbook::from_yaml(&y).ok())
-        {
-            Some(playbook) => (
-                serde_json::to_value(&playbook).unwrap_or(serde_json::Value::Null),
-                playbook.id.clone(),
-                playbook.version.clone(),
-            ),
-            None => (serde_json::Value::Null, id.clone(), String::new()),
-        }
+    // The run's playbook snapshot (may be missing for very old runs). Kept in
+    // scope because it also feeds the graph JSON and layout lookup below.
+    let loaded_pb = apb_engine::progress::load_run_playbook(&run_dir);
+    let (playbook_json, playbook_id, version) = match &loaded_pb {
+        Some(playbook) => (
+            serde_json::to_value(playbook).unwrap_or(serde_json::Value::Null),
+            playbook.id.clone(),
+            playbook.version.clone(),
+        ),
+        None => (serde_json::Value::Null, id.clone(), String::new()),
     };
+    let progress = loaded_pb
+        .as_ref()
+        .map(|pb| apb_engine::progress::compute(pb, &events));
 
     // The saved graph layout for the run's playbook version, so the run view
     // shows the same node arrangement the author laid out in the editor rather
@@ -911,6 +910,7 @@ async fn get_run_handler(
         "layout": layout,
         "hooks": hooks,
         "events": events,
+        "progress": progress,
     }))
     .into_response()
 }

@@ -106,11 +106,13 @@ pub(crate) const AWAIT_CONTROL_POLL: Duration = Duration::from_millis(50);
 /// `ContextAppend` is not terminal here: it is applied in place (logs
 /// SupervisorAction + rebuilds context.md) and the wait continues - with the
 /// same cursor, so neither the top-of-loop nor the next await_control call will
-/// see it again.
+/// see it again. `Progress` is likewise applied in place: it logs `RunProgress`
+/// (stamped with `current_node`) and the wait continues.
 pub(crate) fn await_control(
     run_dir: &Path,
     log: &mut EventLog,
     cursor: Option<u64>,
+    current_node: &str,
 ) -> Result<(Control, u64), EngineError> {
     let mut cursor = cursor;
     loop {
@@ -125,11 +127,54 @@ pub(crate) fn await_control(
                     rebuild_context_md(run_dir)?;
                     cursor = Some(entry.seq);
                 }
+                Control::Progress { done, total, label } => {
+                    log.append(EventPayload::RunProgress {
+                        node_id: current_node.to_string(),
+                        done,
+                        total,
+                        label,
+                    })?;
+                    cursor = Some(entry.seq);
+                }
                 other => return Ok((other, entry.seq)),
             }
         }
         std::thread::sleep(AWAIT_CONTROL_POLL);
     }
+}
+
+/// Drains the `Control::Progress` commands pending right after a node finished
+/// executing, stamping each `RunProgress` with `node` (the node that just ran)
+/// and advancing `cursor` past them. Stops at the first non-Progress command,
+/// leaving it untouched for the top-of-loop scan.
+///
+/// B2: a report the agent posts during `execute_node` of node A is otherwise
+/// only drained at the next top-of-loop, by which point `current` has advanced
+/// to the successor B, so the report is stamped with B. Draining here, before
+/// frontier advancement, keeps the attribution on A. The remaining drains
+/// (top-of-loop, await_control) still catch commands that arrive between nodes.
+pub(crate) fn drain_progress_after_execute(
+    run_dir: &Path,
+    log: &mut EventLog,
+    cursor: Option<u64>,
+    node: &str,
+) -> Result<Option<u64>, EngineError> {
+    let mut cursor = cursor;
+    for entry in read_control_after(run_dir, cursor)? {
+        match entry.cmd {
+            Control::Progress { done, total, label } => {
+                log.append(EventPayload::RunProgress {
+                    node_id: node.to_string(),
+                    done,
+                    total,
+                    label,
+                })?;
+                cursor = Some(entry.seq);
+            }
+            _ => break,
+        }
+    }
+    Ok(cursor)
 }
 
 /// Rebuilds context.md as a materialized view from events.jsonl. A shared
@@ -141,4 +186,85 @@ pub(crate) fn rebuild_context_md(run_dir: &Path) -> Result<(), EngineError> {
     let ctx_md = build_context(&read_all(run_dir)?);
     apb_core::fsutil::atomic_write(&run_dir.join("context.md"), ctx_md.as_bytes())?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::control::{Control, post_control};
+    use crate::event::{EventLog, EventPayload, read_all};
+
+    /// B2: a progress command posted while node `a` was executing is drained by
+    /// `drain_progress_after_execute` with `node_id: "a"`, even though the next
+    /// top-of-loop drain would have stamped the successor. This is the exact
+    /// mechanism `post_supervisor_command` uses (a `Control::Progress` entry in
+    /// the run's control channel); folding the resulting events proves the
+    /// attribution deterministically, with no sleeps or timing races.
+    #[test]
+    fn drain_stamps_progress_with_the_executing_node() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+
+        // The agent reports progress mid-execution of node `a`.
+        post_control(
+            &run_dir,
+            Control::Progress {
+                done: 2,
+                total: 5,
+                label: Some("chapter 2 of 5".into()),
+            },
+        )
+        .unwrap();
+
+        let cursor = super::drain_progress_after_execute(&run_dir, &mut log, None, "a").unwrap();
+        assert_eq!(cursor, Some(0));
+
+        let events = read_all(&run_dir).unwrap();
+        let progress = events
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::RunProgress {
+                    node_id,
+                    done,
+                    total,
+                    ..
+                } => Some((node_id.clone(), *done, *total)),
+                _ => None,
+            })
+            .expect("a RunProgress event must have been written");
+        assert_eq!(progress, ("a".to_string(), 2, 5));
+    }
+
+    /// The drain consumes only the leading run of progress commands and stops at
+    /// the first non-progress command, leaving it for the top-of-loop scan
+    /// (Pause/Abort must not be swallowed here).
+    #[test]
+    fn drain_stops_at_first_non_progress_command() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+
+        post_control(
+            &run_dir,
+            Control::Progress {
+                done: 1,
+                total: 3,
+                label: None,
+            },
+        )
+        .unwrap();
+        post_control(&run_dir, Control::Pause).unwrap();
+
+        let cursor = super::drain_progress_after_execute(&run_dir, &mut log, None, "a").unwrap();
+        // Consumed the progress at seq 0, stopped before the pause at seq 1.
+        assert_eq!(cursor, Some(0));
+        let progress_count = read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::RunProgress { .. }))
+            .count();
+        assert_eq!(progress_count, 1);
+    }
 }

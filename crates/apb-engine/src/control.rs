@@ -23,6 +23,12 @@ pub enum Control {
     ContextAppend {
         note: String,
     },
+    Progress {
+        done: u64,
+        total: u64,
+        #[serde(default)]
+        label: Option<String>,
+    },
     Patch {
         version: String,
         classification: String,

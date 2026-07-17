@@ -79,6 +79,21 @@ pub struct RunRefArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct ProgressReportArgs {
+    pub run_id: String,
+    /// Iterations completed in the current cycle group.
+    pub done: u64,
+    /// Total iterations planned for the current cycle group.
+    pub total: u64,
+    /// Optional human label shown next to the bar, e.g. "chapter 3 of 14".
+    #[serde(default)]
+    pub label: Option<String>,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunEventsArgs {
     pub run_id: String,
     /// Return events starting from this seq (inclusive).

@@ -97,6 +97,25 @@ impl Playbook {
     }
 }
 
+impl Node {
+    /// Expected seconds for progress weighting: the parsed `expected_duration`
+    /// if present and valid, otherwise the per-kind default (agent_task/script
+    /// = `duration::DEFAULT_TASK_SECONDS`, every other kind = 0).
+    pub fn expected_seconds(&self) -> u64 {
+        if let Some(ed) = &self.expected_duration
+            && let Some(s) = ed.parsed()
+        {
+            return s;
+        }
+        match self.kind {
+            NodeKind::AgentTask { .. } | NodeKind::Script { .. } => {
+                crate::duration::DEFAULT_TASK_SECONDS
+            }
+            _ => 0,
+        }
+    }
+}
+
 /// Whether the raw YAML has traces of schema-1 executors: a top-level
 /// `executors`, `defaults.executor`, `supervisor.executor`, or `executor` on
 /// any node.
@@ -151,11 +170,44 @@ pub struct Supervisor {
     pub policy: Option<serde_yaml_ng::Value>, // details land in phase 3A
 }
 
+/// Estimated wall time of ONE execution of a node (spec 2026-07-17). Accepts
+/// an integer count of seconds or a string with a single unit suffix; the
+/// parse is validated (V20) and the value is read via `parsed()`.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum ExpectedDuration {
+    Seconds(u64),
+    Text(String),
+    /// Any other scalar the author wrote (a float, a negative number, a
+    /// boolean, ...). Kept verbatim so the playbook still loads and the
+    /// validator can emit a clean V20 diagnostic instead of the load failing
+    /// at deserialization. MUST stay the LAST untagged variant so it only
+    /// catches values that match neither `Seconds` nor `Text`. `parsed()`
+    /// returns None, so callers fall back to the per-kind default.
+    Invalid(serde_yaml_ng::Value),
+}
+
+impl ExpectedDuration {
+    /// Seconds if the value parses, else None (an invalid value is caught by
+    /// validator V20; callers fall back to the per-kind default).
+    pub fn parsed(&self) -> Option<u64> {
+        match self {
+            ExpectedDuration::Seconds(n) => Some(*n),
+            ExpectedDuration::Text(s) => crate::duration::parse_duration_str(s),
+            ExpectedDuration::Invalid(_) => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Node {
     pub id: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// Estimated time of ONE execution (spec 2026-07-17). Absent -> the per-kind
+    /// default (see `expected_seconds`). Additive to schema 2; no migration.
+    #[serde(default)]
+    pub expected_duration: Option<ExpectedDuration>,
     #[serde(flatten)]
     pub kind: NodeKind,
 }
@@ -268,4 +320,32 @@ pub enum EdgeCondition {
 pub enum StatusEq {
     Success,
     Failure,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn expected_seconds_uses_value_or_kind_default() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x }
+  - { id: b, type: agent_task, prompt: hi, profile: x, expected_duration: 5m }
+  - { id: c, type: agent_task, prompt: hi, profile: x, expected_duration: 90 }
+  - { id: p1, type: prompt, prompt: hi }
+  - { id: f, type: finish, outcome: success }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        assert_eq!(pb.node("a").unwrap().expected_seconds(), 120);
+        assert_eq!(pb.node("b").unwrap().expected_seconds(), 300);
+        assert_eq!(pb.node("c").unwrap().expected_seconds(), 90);
+        assert_eq!(pb.node("p1").unwrap().expected_seconds(), 0);
+    }
 }

@@ -44,3 +44,17 @@ fn read_missing_control_is_empty() {
     let dir = tempfile::tempdir().unwrap();
     assert!(read_control_after(dir.path(), None).unwrap().is_empty());
 }
+
+#[test]
+fn progress_control_serializes_with_cmd_tag() {
+    use apb_engine::control::Control;
+    let c = Control::Progress {
+        done: 3,
+        total: 14,
+        label: Some("chapter 3 of 14".into()),
+    };
+    let s = serde_json::to_string(&c).unwrap();
+    assert!(s.contains("\"cmd\":\"progress\""), "got {s}");
+    assert!(s.contains("\"done\":3"));
+    assert!(s.contains("\"total\":14"));
+}

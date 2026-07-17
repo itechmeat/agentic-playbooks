@@ -4,6 +4,7 @@
   import type { RunSummary } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
   import { Badge } from '$lib/components/ui/badge'
+  import RunProgress from '$lib/RunProgress.svelte'
   import * as Table from '$lib/components/ui/table'
   import * as Empty from '$lib/components/ui/empty'
   import { Skeleton } from '$lib/components/ui/skeleton'
@@ -57,6 +58,7 @@
               <Table.Head>Run</Table.Head>
               <Table.Head>Playbook</Table.Head>
               <Table.Head>Status</Table.Head>
+              <Table.Head>Progress</Table.Head>
               <Table.Head>Project</Table.Head>
             </Table.Row>
           </Table.Header>
@@ -76,6 +78,13 @@
                   <Badge variant={statusVariant(r.status)} class={runStatusClass(r.status)}>
                     {r.status}
                   </Badge>
+                </Table.Cell>
+                <Table.Cell class="w-56">
+                  <RunProgress
+                    progress={r.progress}
+                    status={r.status}
+                    runKey={`${r.workspace_id}/${r.run_id}`}
+                  />
                 </Table.Cell>
                 <Table.Cell class="text-muted-foreground">{r.project ?? ''}</Table.Cell>
               </Table.Row>

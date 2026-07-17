@@ -10,6 +10,7 @@ pub mod legacy_snapshot;
 pub mod manifest;
 pub mod parallel;
 pub mod proc;
+pub mod progress;
 pub mod review;
 pub mod run_config;
 pub mod scheduler;
@@ -25,6 +26,7 @@ pub use inspect::{
     run_inspect, should_declare_lost, supervisor_report_or_summary, supervisor_silence_ms,
     touch_heartbeat, wait_wake, write_supervisor_report, write_supervisor_session,
 };
+pub use progress::{ProgressSummary, compute as run_progress, node_durations_seconds};
 pub use review::{ReviewCommand, ReviewEntry, post_review, read_reviews_after};
 pub use scheduler::{
     PreparedRun, RunMode, RunOptions, RunResult, RunSummary, drive_prepared, list_runs,

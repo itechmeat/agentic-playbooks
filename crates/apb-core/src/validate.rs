@@ -58,6 +58,7 @@ pub struct ValidationContext {
 pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationReport {
     let mut r = ValidationReport::default();
     check_unique_ids(playbook, &mut r); // V01, V02
+    check_expected_duration(playbook, &mut r); // V19, V20
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     if r.is_valid() {
@@ -134,6 +135,38 @@ fn check_isolation(playbook: &Playbook, r: &mut ValidationReport) {
                 Some(&n.id),
                 format!("isolation `{name}` materializes skill copies into an isolated node workdir, but full sandbox isolation (project tree, process) is not yet enforced; see spec 8.3"),
             );
+        }
+    }
+}
+
+/// V19 (warning): an agent_task or script node without `expected_duration`
+/// (nudges authors; never blocks). V20 (error): an `expected_duration` value
+/// that cannot be parsed to seconds.
+fn check_expected_duration(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        match &n.expected_duration {
+            Some(ed) if ed.parsed().is_none() => {
+                r.error(
+                    "V20",
+                    Some(&n.id),
+                    format!(
+                        "node `{}` has an unparsable expected_duration; use seconds like `90` or a single unit like `30s`, `5m`, `2h`",
+                        n.id
+                    ),
+                );
+            }
+            None if matches!(n.kind, NodeKind::AgentTask { .. } | NodeKind::Script { .. }) => {
+                r.warn(
+                    "V19",
+                    Some(&n.id),
+                    format!(
+                        "node `{}` has no expected_duration; progress will use the {}s default",
+                        n.id,
+                        crate::duration::DEFAULT_TASK_SECONDS
+                    ),
+                );
+            }
+            _ => {}
         }
     }
 }
