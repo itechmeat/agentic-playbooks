@@ -4,6 +4,7 @@ pub mod content;
 pub mod detect;
 pub mod dismiss;
 pub mod doctor;
+pub mod duration;
 pub mod effects;
 pub mod fsutil;
 pub mod migration;

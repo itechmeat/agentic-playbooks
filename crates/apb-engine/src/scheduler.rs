@@ -576,6 +576,15 @@ fn drive(
                         }
                     }
                 }
+                Control::Progress { done, total, label } => {
+                    log.append(EventPayload::RunProgress {
+                        node_id: current.clone(),
+                        done,
+                        total,
+                        label,
+                    })?;
+                    control_cursor = Some(entry.seq);
+                }
                 Control::Retry { .. } | Control::ContinueFrom { .. } => {
                     // Valid only inside await_control, in response to a wake -
                     // we do not advance the cursor, the command remains unconsumed.
@@ -930,6 +939,10 @@ fn drive(
 
         rebuild_context_md(run_dir)?;
 
+        // Attribute any progress the agent posted while `current` was executing
+        // to `current`, before the frontier advances to the successor (B2).
+        control_cursor = drain_progress_after_execute(run_dir, log, control_cursor, &current)?;
+
         // unknown/interrupted halt progression (Phase 2 without supervisor - run pauses).
         if matches!(status, NodeStatus::Unknown | NodeStatus::Interrupted) {
             log.append(EventPayload::RunPaused {
@@ -959,14 +972,15 @@ fn drive(
             })?;
 
             loop {
-                let (cmd, seq) = await_control(run_dir, log, control_cursor)?;
+                let (cmd, seq) = await_control(run_dir, log, control_cursor, &current)?;
                 control_cursor = Some(seq);
                 match cmd {
-                    // await_control applies ContextAppend in-place and never
-                    // returns it (see its implementation above) - this branch is defensive, in case
-                    // of future refactoring: we do not fail the run, just wait for
-                    // the next command on the same node.
+                    // await_control applies ContextAppend and Progress in-place
+                    // and never returns them (see its implementation above) - these
+                    // branches are defensive, in case of future refactoring: we do
+                    // not fail the run, just wait for the next command on the same node.
                     Control::ContextAppend { .. } => continue,
+                    Control::Progress { .. } => continue,
                     Control::Retry {
                         node,
                         prompt_override,
@@ -1100,6 +1114,8 @@ pub struct RunSummary {
     pub playbook: String,
     pub status: String,
     pub started_ts: u128,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub progress: Option<crate::progress::ProgressSummary>,
 }
 
 pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
@@ -1132,11 +1148,13 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
                 _ => None,
             })
             .unwrap_or_else(|| (run_id.clone(), 0));
+        let progress = crate::progress::from_run_dir(&entry.path(), &events);
         out.push(RunSummary {
             run_id,
             playbook,
             status: state.run_status.as_str().into(),
             started_ts,
+            progress,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.started_ts));
@@ -1211,16 +1229,16 @@ pub fn resume_with(
     // non-resumable. When manifest is absent - create it, when present -
     // just read the existing. Do not weaken `Playbook::from_yaml`: live
     // definitions are still sent to migration.
-    let playbook = if crate::legacy_snapshot::has_legacy_executors(&yaml) {
-        if crate::manifest::read(&run_dir)?.is_none() {
-            let m = crate::legacy_snapshot::build_ephemeral_manifest(&run_dir, &yaml)?;
-            crate::manifest::write(&run_dir, &m)?;
-        }
-        serde_yaml_ng::from_str::<Playbook>(&yaml)
-            .map_err(|e| EngineError::Yaml(format!("legacy snapshot playbook: {e}")))?
-    } else {
-        Playbook::from_yaml(&yaml)?
-    };
+    // A legacy snapshot needs its ephemeral manifest built once; the Playbook
+    // itself is parsed by the shared read-only snapshot parser either way (it
+    // tolerates the schema-1 executors resume once relied on inline).
+    if crate::legacy_snapshot::has_legacy_executors(&yaml)
+        && crate::manifest::read(&run_dir)?.is_none()
+    {
+        let m = crate::legacy_snapshot::build_ephemeral_manifest(&run_dir, &yaml)?;
+        crate::manifest::write(&run_dir, &m)?;
+    }
+    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
     let cfg = crate::run_config::read_run_config(&run_dir)?;
     let mut log = EventLog::open(&run_dir)?;
     for ev in drift_events {

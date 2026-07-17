@@ -9,6 +9,7 @@
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import type { RunDetail } from '../lib/types'
+  import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
@@ -87,6 +88,12 @@
     {/if}
   {/snippet}
 </Topbar>
+
+{#if detail}
+  <div class="border-b border-border px-4 py-2">
+    <RunProgress progress={detail.progress} status={detail.run_status} runKey={`${workspace}/${id}`} />
+  </div>
+{/if}
 
 <div class="flex min-h-0 flex-1">
   <div class="relative min-h-0 min-w-0 flex-1">

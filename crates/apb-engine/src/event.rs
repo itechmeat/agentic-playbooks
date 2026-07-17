@@ -157,6 +157,20 @@ pub enum EventPayload {
         model: String,
         up_to_seq: u64,
     },
+    /// An explicit cycle-progress report (spec 2026-07-17): the current
+    /// iteration `done` of `total` for the cycle group anchored at `node_id`.
+    /// Written by drive when it drains a `Control::Progress` command, never by a
+    /// tool (single-writer). Fields default so old logs read unchanged.
+    RunProgress {
+        #[serde(default)]
+        node_id: String,
+        #[serde(default)]
+        done: u64,
+        #[serde(default)]
+        total: u64,
+        #[serde(default)]
+        label: Option<String>,
+    },
     /// Resume proceeded despite a change in the agent binary's fingerprint
     /// between start and resume (spec 3.6, `--allow-environment-drift`).
     /// Recorded in the log rather than swallowed silently.

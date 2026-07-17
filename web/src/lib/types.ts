@@ -43,6 +43,18 @@ export interface PlaybookDetail {
   frozen: boolean
 }
 
+export interface ProgressSummary {
+  percent: number
+  label: string | null
+  waiting_on: string | null
+  // null whenever waiting_on is null.
+  waiting_kind: 'human_review' | 'wait' | null
+  // Deterministic work-plan identity: changes exactly when a report raises a
+  // cycle total or the run migrates to a patched version. Does not change on
+  // ordinary done/label updates. This is the only valid reset signal.
+  plan_key: string
+}
+
 export interface RunSummary {
   run_id: string
   playbook: string
@@ -51,6 +63,7 @@ export interface RunSummary {
   // Owning project (global dashboard). Empty on the pinned-root test server.
   workspace_id: string
   project: string
+  progress?: ProgressSummary | null
 }
 
 export interface WfEvent {
@@ -104,4 +117,5 @@ export interface RunDetail {
   layout: { nodes?: LayoutNode[] } | null
   hooks?: Record<string, string>
   events: WfEvent[]
+  progress?: ProgressSummary | null
 }

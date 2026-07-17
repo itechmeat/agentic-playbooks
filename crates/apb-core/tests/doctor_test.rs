@@ -20,7 +20,7 @@ defaults:
   profile: main
 nodes:
   - { id: start, type: start }
-  - { id: w, type: agent_task, prompt: "do" }
+  - { id: w, type: agent_task, prompt: "do", expected_duration: 5m }
   - { id: done, type: finish, outcome: success }
 edges:
   - { from: start, to: w }
@@ -34,7 +34,7 @@ name: Valid Script
 version: 1.0.0
 nodes:
   - { id: start, type: start }
-  - { id: s, type: script, script: "s.sh", runner: sh }
+  - { id: s, type: script, script: "s.sh", runner: sh, expected_duration: 5m }
   - { id: done, type: finish, outcome: success }
 edges:
   - { from: start, to: s }

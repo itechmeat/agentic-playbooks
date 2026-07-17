@@ -88,6 +88,10 @@ Format and lint gates (must be clean):
   Fix every error in the logs; also clean up warnings as far as practical.
 - Commit only after the owner approves. Do not commit or push on your own
   initiative.
+- **Never upload, publish, or send any file to any server or external service
+  without the owner's explicit per-action approval** (git push, artifacts,
+  deploys, package registries, file sharing - any network destination). Local
+  writes are fine; anything leaving the machine needs an approval first.
 
 ## Conventions
 
