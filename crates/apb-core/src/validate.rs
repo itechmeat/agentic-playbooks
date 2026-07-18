@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
-use crate::schema::{EdgeCondition, Isolation, NodeKind, Playbook};
+use crate::schema::{EdgeCondition, FunctionsAllow, Isolation, NodeKind, Playbook};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -61,6 +61,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_expected_duration(playbook, &mut r); // V19, V20
     check_finish(playbook, &mut r); // V21
     check_playbook_ref(playbook, &mut r); // V22
+    check_connectors(playbook, &mut r); // V23, V24, V25, V26
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     if r.is_valid() {
@@ -210,6 +211,103 @@ fn check_playbook_ref(playbook: &Playbook, r: &mut ValidationReport) {
                 format!(
                     "playbook node `{}` has an empty or invalid playbook reference",
                     n.id
+                ),
+            );
+        }
+    }
+}
+
+/// V23 (error): a connector binding name, an `accounts` entry, or a
+/// `functions` list entry fails its identifier format check. Binding names
+/// and account entries are connector/account folder names - hyphen slugs
+/// (`crate::profile::validate_profile_name`); `functions` list entries are
+/// the connector's snake_case function names
+/// (`crate::connector::validate_snake_name`). V24 (error): a node binds the
+/// same connector name more than once. V25 (error): an `accounts` or
+/// `functions` list entry that is empty or repeated within one binding. V26
+/// (error): `max_calls` is 0 (a binding that can never be called).
+fn check_connectors(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        let mut seen_connectors = HashSet::new();
+        for b in n.kind.connector_bindings() {
+            if !seen_connectors.insert(b.name.as_str()) {
+                r.error(
+                    "V24",
+                    Some(&n.id),
+                    format!(
+                        "node `{}` binds connector `{}` more than once",
+                        n.id, b.name
+                    ),
+                );
+            }
+            if let Err(msg) = crate::profile::validate_profile_name(&b.name) {
+                r.error(
+                    "V23",
+                    Some(&n.id),
+                    format!(
+                        "node `{}` connector `{}` has an invalid name: {msg}",
+                        n.id, b.name
+                    ),
+                );
+            }
+            if let Some(accounts) = &b.accounts {
+                check_connector_list(&n.id, &b.name, "accounts", accounts, r, |item| {
+                    crate::profile::validate_profile_name(item)
+                });
+            }
+            if let FunctionsAllow::List(names) = &b.functions {
+                check_connector_list(&n.id, &b.name, "functions", names, r, |item| {
+                    crate::connector::validate_snake_name(item)
+                });
+            }
+            if b.max_calls == Some(0) {
+                r.error(
+                    "V26",
+                    Some(&n.id),
+                    format!("node `{}` connector `{}` has max_calls 0", n.id, b.name),
+                );
+            }
+        }
+    }
+}
+
+/// Checks one `accounts`/`functions` list of a connector binding: every
+/// entry must be non-empty, unique within the list (V25), and pass its
+/// identifier format check (V23). `field` names the offending list in the
+/// message (`accounts` or `functions`).
+fn check_connector_list(
+    node_id: &str,
+    connector: &str,
+    field: &str,
+    items: &[String],
+    r: &mut ValidationReport,
+    validate: impl Fn(&str) -> Result<(), String>,
+) {
+    let mut seen = HashSet::new();
+    for item in items {
+        if item.is_empty() {
+            r.error(
+                "V25",
+                Some(node_id),
+                format!("node `{node_id}` connector `{connector}` has an empty {field} entry"),
+            );
+            continue;
+        }
+        if !seen.insert(item.as_str()) {
+            r.error(
+                "V25",
+                Some(node_id),
+                format!(
+                    "node `{node_id}` connector `{connector}` has duplicate {field} entry `{item}`"
+                ),
+            );
+        }
+        if let Err(msg) = validate(item) {
+            r.error(
+                "V23",
+                Some(node_id),
+                format!(
+                    "node `{node_id}` connector `{connector}` {field} entry `{item}` is invalid: {msg}"
                 ),
             );
         }
@@ -663,5 +761,93 @@ fn check_refs(playbook: &Playbook, ctx: &ValidationContext, r: &mut ValidationRe
                 ),
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod connector_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    fn codes(yaml: &str) -> Vec<&'static str> {
+        let playbook = Playbook::from_yaml(yaml).unwrap();
+        validate(&playbook, &ctx())
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.code)
+            .collect()
+    }
+
+    const GOOD: &str = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: a
+    type: agent_task
+    prompt: hi
+    profile: x
+    connectors:
+      - { name: telegram, accounts: [team-bot], functions: [send_message], max_calls: 50 }
+      - jira
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: done }
+"#;
+
+    #[test]
+    fn valid_connector_bindings_have_no_errors() {
+        let c = codes(GOOD);
+        assert!(c.is_empty(), "expected no errors, got {c:?}");
+    }
+
+    #[test]
+    fn v23_invalid_connector_name_is_rejected() {
+        let bad = GOOD.replace("name: telegram", "name: Telegram");
+        assert!(codes(&bad).contains(&"V23"));
+    }
+
+    #[test]
+    fn v23_invalid_account_entry_is_rejected() {
+        let bad = GOOD.replace("accounts: [team-bot]", "accounts: [Team-Bot]");
+        assert!(codes(&bad).contains(&"V23"));
+    }
+
+    #[test]
+    fn v23_invalid_function_entry_is_rejected() {
+        let bad = GOOD.replace("functions: [send_message]", "functions: [send-message]");
+        assert!(codes(&bad).contains(&"V23"));
+    }
+
+    #[test]
+    fn v24_duplicate_connector_name_is_rejected() {
+        let bad = GOOD.replace("      - jira", "      - jira\n      - jira");
+        assert!(codes(&bad).contains(&"V24"));
+    }
+
+    #[test]
+    fn v25_duplicate_account_entry_is_rejected() {
+        let bad = GOOD.replace("accounts: [team-bot]", "accounts: [team-bot, team-bot]");
+        assert!(codes(&bad).contains(&"V25"));
+    }
+
+    #[test]
+    fn v25_empty_function_entry_is_rejected() {
+        let bad = GOOD.replace("functions: [send_message]", r#"functions: [""]"#);
+        assert!(codes(&bad).contains(&"V25"));
+    }
+
+    #[test]
+    fn v26_max_calls_zero_is_rejected() {
+        let bad = GOOD.replace("max_calls: 50", "max_calls: 0");
+        assert!(codes(&bad).contains(&"V26"));
     }
 }

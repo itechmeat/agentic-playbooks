@@ -32,6 +32,13 @@ pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
             set.insert(Effect::Network);
             set.insert(Effect::External);
         }
+        // A node with a non-empty connector binding reaches an external
+        // service over HTTP regardless of node kind (spec 12's automatic
+        // catalog flag), which also feeds `preflight` for free.
+        if !n.kind.connector_bindings().is_empty() {
+            set.insert(Effect::Network);
+            set.insert(Effect::External);
+        }
     }
     set
 }
@@ -91,6 +98,26 @@ edges:
         let yaml = SCRIPT_WF.replace("nodes:", "effects: [irreversible]\nnodes:");
         let set = effective(&playbook(&yaml));
         assert!(set.contains(&Effect::Irreversible));
+    }
+
+    #[test]
+    fn bound_connector_implies_network_and_external() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x, connectors: [jira] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: done }
+"#;
+        let set = effective(&playbook(yaml));
+        assert!(set.contains(&Effect::Network));
+        assert!(set.contains(&Effect::External));
     }
 
     #[test]
