@@ -1,7 +1,7 @@
 # Run input, finish answer, and sub-playbooks - design
 
 Date: 2026-07-18
-Status: implemented, in review
+Status: implemented, owner-review fixes applied
 
 ## Goal
 
@@ -277,12 +277,12 @@ New node kind, schema 2 additive:
   acknowledgment and child drift-pinning apply only to the local
   `playbook_run` path. The whole-tree effects union still reaches the consent
   surface via preflight, and the parent digest stays trust-gated.
-- Automated tests cover the child success path, permit/cycle/effects
-  policy, and progress credit; the reattach-on-resume and abort-propagation
-  paths are implemented and review-verified but not yet exercised by tests.
 - `run_report` progress uses the pure fold (no child credit) while
   `run_status` uses the enriched read; a running child shows slightly lower
   percent in reports than in status.
+- The web playbook picker offers only current-workspace playbooks: the HTTP
+  playbooks listing has no global-store enumeration yet, so global children
+  are referenced by typing the id (resolution still works at gate/run time).
 
 ## Compatibility notes
 
