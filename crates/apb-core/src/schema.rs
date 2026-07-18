@@ -107,15 +107,93 @@ impl Node {
         {
             return s;
         }
-        match &self.kind {
-            NodeKind::AgentTask { .. } | NodeKind::Script { .. } => {
-                crate::duration::DEFAULT_TASK_SECONDS
-            }
-            NodeKind::Finish {
+        if self.kind.needs_duration_estimate() {
+            crate::duration::DEFAULT_TASK_SECONDS
+        } else {
+            0
+        }
+    }
+}
+
+impl NodeKind {
+    /// Whether executing this node spawns an agent: an `agent_task`, or a
+    /// `finish` that composes its answer from the run context via a `prompt`.
+    /// The single source of truth for "an agent runs here" (review M3). The
+    /// match is exhaustive on purpose: a new `NodeKind` variant is a compile
+    /// error until its agent-ness is decided, which keeps the derived
+    /// predicates (`takes_workdir_lock`, effects) from silently defaulting a
+    /// new acting node to "no agent".
+    pub fn runs_agent(&self) -> bool {
+        match self {
+            NodeKind::AgentTask { .. }
+            | NodeKind::Finish {
                 prompt: Some(_), ..
-            } => crate::duration::DEFAULT_TASK_SECONDS,
-            NodeKind::Playbook { .. } => crate::duration::DEFAULT_TASK_SECONDS,
-            _ => 0,
+            } => true,
+            NodeKind::Start
+            | NodeKind::Script { .. }
+            | NodeKind::Prompt { .. }
+            | NodeKind::Condition { .. }
+            | NodeKind::HumanReview { .. }
+            | NodeKind::Wait { .. }
+            | NodeKind::Finish { prompt: None, .. }
+            | NodeKind::Playbook { .. } => false,
+        }
+    }
+
+    /// Whether executing this node writes to the shared working directory and
+    /// therefore must hold the workdir lock: any agent node (`runs_agent`), a
+    /// `script`, or a `playbook` node (its child runs in-process under the
+    /// parent's lock, so the parent must hold it). FIXES review I5: a
+    /// finish-with-prompt runs an agent in the shared workdir, which the old
+    /// `AgentTask | Script | Playbook` predicate missed, so a Start +
+    /// Finish-with-prompt playbook ran an agent WITHOUT the lock.
+    pub fn takes_workdir_lock(&self) -> bool {
+        self.runs_agent() || matches!(self, NodeKind::Script { .. } | NodeKind::Playbook { .. })
+    }
+
+    /// Whether progress weighting estimates a duration for this node: the V19
+    /// nudge and the `Node::expected_seconds` default arm. Same set as
+    /// `takes_workdir_lock` (agent_task | script | finish-with-prompt |
+    /// playbook), identical to prior behavior.
+    pub fn needs_duration_estimate(&self) -> bool {
+        self.takes_workdir_lock()
+    }
+
+    /// Whether executing this node renders the full run context (so context
+    /// compaction must run before the render): an `agent_task`, a `prompt`, a
+    /// finish-with-prompt, or a `playbook` node with an explicit `instruction`
+    /// template (review R1-M3 - the old trigger covered only agent_task and
+    /// prompt).
+    pub fn renders_context(&self) -> bool {
+        matches!(
+            self,
+            NodeKind::AgentTask { .. }
+                | NodeKind::Prompt { .. }
+                | NodeKind::Finish {
+                    prompt: Some(_),
+                    ..
+                }
+                | NodeKind::Playbook {
+                    instruction: Some(_),
+                    ..
+                }
+        )
+    }
+
+    /// The effective profile binding for a node that runs an agent: the node's
+    /// own `profile`, else `defaults.profile`. `None` for any node that does
+    /// not run an agent (a plain finish, script, prompt, ...). The single
+    /// source used by both the run-manifest builder and the policy gate so
+    /// their key sets cannot diverge (anti-TOCTOU).
+    pub fn effective_profile_ref(&self, defaults: &Defaults) -> Option<QualifiedProfileRef> {
+        match self {
+            NodeKind::AgentTask { profile, .. }
+            | NodeKind::Finish {
+                prompt: Some(_),
+                profile,
+                ..
+            } => profile.clone().or_else(|| defaults.profile.clone()),
+            _ => None,
         }
     }
 }

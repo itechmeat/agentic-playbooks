@@ -157,16 +157,7 @@ fn check_expected_duration(playbook: &Playbook, r: &mut ValidationReport) {
                     ),
                 );
             }
-            None if matches!(n.kind, NodeKind::AgentTask { .. } | NodeKind::Script { .. })
-                || matches!(
-                    n.kind,
-                    NodeKind::Finish {
-                        prompt: Some(_),
-                        ..
-                    }
-                )
-                || matches!(n.kind, NodeKind::Playbook { .. }) =>
-            {
+            None if n.kind.needs_duration_estimate() => {
                 r.warn(
                     "V19",
                     Some(&n.id),
@@ -644,19 +635,33 @@ fn check_refs(playbook: &Playbook, ctx: &ValidationContext, r: &mut ValidationRe
     }
     let has_default = playbook.defaults.profile.is_some();
     for n in &playbook.nodes {
-        if let NodeKind::AgentTask { profile, .. } = &n.kind {
-            if let Some(p) = profile {
-                check_profile(&n.id, p, r);
+        // Nodes that run an agent (agent_task and finish-with-prompt) need an
+        // executor binding and get identical scope checks. A finish WITHOUT a
+        // prompt never runs an agent and needs no binding (a profile on such a
+        // node is a V21 authoring error, handled in check_finish).
+        if !n.kind.runs_agent() {
+            continue;
+        }
+        let node_profile = match &n.kind {
+            NodeKind::AgentTask { profile, .. } | NodeKind::Finish { profile, .. } => {
+                profile.as_ref()
             }
-            // V18: an agent_task node must have an executor binding - a
-            // profile on the node or `defaults.profile`.
-            if profile.is_none() && !has_default {
-                r.error(
-                    "V18",
-                    Some(&n.id),
-                    "agent_task node has no profile and playbook has no defaults.profile".into(),
-                );
-            }
+            _ => None,
+        };
+        if let Some(p) = node_profile {
+            check_profile(&n.id, p, r);
+        }
+        // V18: a node that runs an agent must have an executor binding - a
+        // profile on the node or `defaults.profile`.
+        if node_profile.is_none() && !has_default {
+            r.error(
+                "V18",
+                Some(&n.id),
+                format!(
+                    "node `{}` runs an agent but has no profile and playbook has no defaults.profile",
+                    n.id
+                ),
+            );
         }
     }
 }

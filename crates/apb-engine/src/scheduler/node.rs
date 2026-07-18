@@ -664,8 +664,7 @@ pub(crate) fn run_playbook_node(
     // scope + version verbatim (anti-TOCTOU); without a pin (CLI path) we live
     // resolve with the same candidate order the policy gate uses: an explicit
     // scope pins the origin, `auto` prefers the parent origin then global.
-    use apb_core::profile::ProfileScope;
-    use apb_core::scope::{Origin, PlaybookRef};
+    use apb_core::scope::{Origin, PlaybookRef, scope_candidates};
     let pin = cfg.expected_children.as_ref().and_then(|m| m.get(node_id));
     let resolved = if let Some(p) = pin {
         let origin = if p.scope == "global" {
@@ -681,16 +680,7 @@ pub(crate) fn run_playbook_node(
         apb_core::store::resolve(root, &cref)
             .map_err(|e| EngineError::Invalid(format!("sub-playbook `{}`: {e}", child_ref.id)))?
     } else {
-        let candidates: Vec<Origin> = match child_ref.scope {
-            ProfileScope::Global => vec![Origin::Global],
-            ProfileScope::Project => vec![Origin::Project { workspace_id: None }],
-            ProfileScope::Auto => match parent_run_origin(run_dir) {
-                Origin::Global => vec![Origin::Global],
-                Origin::Project { .. } => {
-                    vec![Origin::Project { workspace_id: None }, Origin::Global]
-                }
-            },
-        };
+        let candidates = scope_candidates(child_ref.scope, &parent_run_origin(run_dir));
         let mut resolved_opt = None;
         for cand in &candidates {
             let cref = PlaybookRef {

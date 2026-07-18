@@ -740,19 +740,16 @@ fn drive(
         }
 
         // Context compaction before rendering the prompt: only if the upcoming
-        // node (current or an agent_task in the frontier) actually substitutes
-        // {{run.context}}. Triggered by drive (the sole writer) so that the
-        // ContextCompacted event lands in the log before the context is read in
-        // execute_node. Disabled if context_max_bytes is not set.
-        let renders_context = matches!(
-            node_kind,
-            NodeKind::AgentTask { .. } | NodeKind::Prompt { .. }
-        ) || frontier.iter().any(|n| {
-            matches!(
-                playbook.node(n).map(|x| &x.kind),
-                Some(NodeKind::AgentTask { .. })
-            )
-        });
+        // node (current or a frontier node) actually renders the run context
+        // (`NodeKind::renders_context`: agent_task, prompt, finish-with-prompt,
+        // or a playbook node with an instruction template - review R1-M3).
+        // Triggered by drive (the sole writer) so that the ContextCompacted
+        // event lands in the log before the context is read in execute_node.
+        // Disabled if context_max_bytes is not set.
+        let renders_context = node_kind.renders_context()
+            || frontier
+                .iter()
+                .any(|n| playbook.node(n).is_some_and(|x| x.kind.renders_context()));
         if renders_context
             && let Some(ev) = maybe_compact_context(run_dir, &workdir, cfg, &read_all(run_dir)?)?
         {
@@ -1387,15 +1384,10 @@ fn resume_inner(
     log.append(EventPayload::RunPaused {
         reason: format!("resume from `{start_node}`"),
     })?;
-    // Mirrors prepare's predicate: a `playbook` node also writes (its child runs
-    // in the shared workdir), so a resumed parent with a sub-playbook node still
-    // takes the lock.
-    let is_write = playbook.nodes.iter().any(|n| {
-        matches!(
-            n.kind,
-            NodeKind::AgentTask { .. } | NodeKind::Script { .. } | NodeKind::Playbook { .. }
-        )
-    });
+    // Mirrors prepare's predicate (`NodeKind::takes_workdir_lock`): a resumed
+    // parent with a sub-playbook node (or a finish-with-prompt agent node)
+    // still takes the shared workdir lock.
+    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let _guard = if is_write {
         acquire(root, allow_shared_workdir)?
     } else {

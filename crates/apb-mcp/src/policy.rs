@@ -6,7 +6,6 @@
 use std::path::Path;
 
 use apb_core::config::program_in_path;
-use apb_core::profile::ProfileScope;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::Registry;
 use apb_core::schema::{Effect, NodeKind, Playbook};
@@ -269,19 +268,10 @@ fn collect_children(
         let NodeKind::Playbook { playbook: pref, .. } = &n.kind else {
             continue;
         };
-        // Scope resolution: an explicit scope pins the origin; `auto` prefers the
-        // parent's origin, then global (mirrors profile scope: auto ordering).
-        let candidates: Vec<Origin> = match pref.scope {
-            ProfileScope::Global => vec![Origin::Global],
-            ProfileScope::Project => vec![Origin::Project { workspace_id: None }],
-            ProfileScope::Auto => match origin {
-                Origin::Global => vec![Origin::Global],
-                Origin::Project { .. } => {
-                    vec![Origin::Project { workspace_id: None }, Origin::Global]
-                }
-            },
-        };
-        // First candidate scope in which the child resolves wins.
+        // Scope resolution shared with the engine (`scope_candidates`): an
+        // explicit scope pins the origin; `auto` prefers the parent's origin,
+        // then global. The first candidate in which the child resolves wins.
+        let candidates = apb_core::scope::scope_candidates(pref.scope, origin);
         let mut resolved_opt = None;
         for cand in &candidates {
             let cref = PlaybookRef {
@@ -303,11 +293,7 @@ fn collect_children(
                 ),
             }));
         };
-        let scope_str = if matches!(child_origin, Origin::Global) {
-            "global"
-        } else {
-            "project"
-        };
+        let scope_str = apb_core::scope::origin_scope_label(&child_origin);
         let pair = (scope_str.to_string(), resolved.id.clone());
         if path.contains(&pair) {
             let mut cycle: Vec<String> = path.iter().map(|(s, i)| format!("{s}/{i}")).collect();
@@ -396,20 +382,7 @@ pub fn collect_profile_refs(
 ) -> Vec<apb_core::profile::QualifiedProfileRef> {
     let mut refs = Vec::new();
     for n in &playbook.nodes {
-        let pref = match &n.kind {
-            NodeKind::AgentTask { profile, .. } => profile
-                .clone()
-                .or_else(|| playbook.defaults.profile.clone()),
-            NodeKind::Finish {
-                prompt: Some(_),
-                profile,
-                ..
-            } => profile
-                .clone()
-                .or_else(|| playbook.defaults.profile.clone()),
-            _ => None,
-        };
-        if let Some(p) = pref {
+        if let Some(p) = n.kind.effective_profile_ref(&playbook.defaults) {
             refs.push(p);
         }
     }

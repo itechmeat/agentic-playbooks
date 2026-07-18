@@ -58,20 +58,7 @@ pub(crate) fn build_run_manifest(
 ) -> Result<RunExecutionManifest, EngineError> {
     let mut bindings: Vec<(String, apb_core::profile::QualifiedProfileRef)> = Vec::new();
     for n in &playbook.nodes {
-        let pref = match &n.kind {
-            NodeKind::AgentTask { profile, .. } => profile
-                .clone()
-                .or_else(|| playbook.defaults.profile.clone()),
-            NodeKind::Finish {
-                prompt: Some(_),
-                profile,
-                ..
-            } => profile
-                .clone()
-                .or_else(|| playbook.defaults.profile.clone()),
-            _ => None,
-        };
-        if let Some(pref) = pref {
+        if let Some(pref) = n.kind.effective_profile_ref(&playbook.defaults) {
             bindings.push((n.id.clone(), pref));
         }
     }
@@ -299,18 +286,13 @@ pub(crate) fn prepare_run_target(
         .id
         .clone();
 
-    // A run takes the shared workdir lock if it has any node that writes to the
-    // workdir. Besides agent_task/script this includes a `playbook` node: its
-    // child runs in-process under the parent's lock (with allow_shared_workdir),
-    // so the PARENT must hold the lock even when its only acting node is the
-    // sub-playbook one - otherwise nothing guards the shared workdir the child
-    // writes to.
-    let is_write = playbook.nodes.iter().any(|n| {
-        matches!(
-            n.kind,
-            NodeKind::AgentTask { .. } | NodeKind::Script { .. } | NodeKind::Playbook { .. }
-        )
-    });
+    // A run takes the shared workdir lock if any node writes to the workdir
+    // (`NodeKind::takes_workdir_lock`): an agent node (agent_task OR
+    // finish-with-prompt), a script, or a `playbook` node whose child runs
+    // in-process under the parent's lock. The single predicate FIXES review
+    // I5: a Start + finish-with-prompt playbook runs an agent and now holds the
+    // lock, which the old agent_task|script|playbook match missed.
+    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let guard = if is_write {
         acquire(root, opts.allow_shared_workdir)?
     } else {
