@@ -32,6 +32,7 @@
   const pending = $derived(detail ? pendingReviews(detail.events) : [])
   const waiting = $derived(detail ? pendingWaits(detail.events) : [])
   const hookEntries = $derived(Object.entries(detail?.hooks ?? {}))
+  const children = $derived(detail?.children ?? [])
 
   async function decide(node: string, decision: string) {
     deciding = `${node}:${decision}`
@@ -95,6 +96,13 @@
   </div>
 {/if}
 
+{#if detail?.answer}
+  <div class="border-b border-border px-4 py-2">
+    <div class="text-xs font-semibold text-muted-foreground">Answer</div>
+    <pre class="mt-1 whitespace-pre-wrap break-words text-sm">{detail.answer}</pre>
+  </div>
+{/if}
+
 <div class="flex min-h-0 flex-1">
   <div class="relative min-h-0 min-w-0 flex-1">
     <SvelteFlow
@@ -140,6 +148,30 @@
       </Card.Root>
     {/if}
 
+    {#if children.length}
+      <Card.Root>
+        <Card.Header><Card.Title class="text-sm">Child runs</Card.Title></Card.Header>
+        <Card.Content class="flex flex-col gap-2">
+          {#each children as c (c.run_id)}
+            <div class="flex flex-wrap items-center gap-2">
+              <a
+                href={`#/run/${encodeURIComponent(workspace)}/${encodeURIComponent(c.run_id)}`}
+                class="font-mono text-xs hover:underline"
+              >
+                {c.node_id}
+              </a>
+              <Badge
+                variant={runStatusClass(c.status) ? 'outline' : 'secondary'}
+                class={runStatusClass(c.status)}
+              >
+                {c.status}
+              </Badge>
+            </div>
+          {/each}
+        </Card.Content>
+      </Card.Root>
+    {/if}
+
     {#if hookEntries.length}
       <Card.Root>
         <Card.Header><Card.Title class="text-sm">Webhooks</Card.Title></Card.Header>
@@ -166,6 +198,15 @@
               <span class="text-muted-foreground"> · awaiting signal or timer</span>
             </div>
           {/each}
+        </Card.Content>
+      </Card.Root>
+    {/if}
+
+    {#if detail?.instruction}
+      <Card.Root>
+        <Card.Header><Card.Title class="text-sm">Run input</Card.Title></Card.Header>
+        <Card.Content>
+          <pre class="whitespace-pre-wrap break-words text-xs text-muted-foreground">{detail.instruction}</pre>
         </Card.Content>
       </Card.Root>
     {/if}

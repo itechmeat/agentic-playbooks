@@ -127,8 +127,17 @@ fn playbook_run_supervised_no_agent_reaches_succeeded() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let res =
-        playbook_run_supervised(dir.path(), "noagent_sv", None, params, None, None, None).unwrap();
+    let res = playbook_run_supervised(
+        dir.path(),
+        "noagent_sv",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();
 
     wait_for_status(dir.path(), &run_id, "succeeded");
@@ -153,6 +162,7 @@ fn supervised_wake_context_append_and_retry_recovers() {
         "supflow_mcp",
         None,
         BTreeMap::new(),
+        None,
         None,
         None,
         None,
@@ -260,8 +270,17 @@ fn supervisor_report_write_then_read() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let res =
-        playbook_run_supervised(dir.path(), "noagent_sv", None, params, None, None, None).unwrap();
+    let res = playbook_run_supervised(
+        dir.path(),
+        "noagent_sv",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();
     wait_for_status(dir.path(), &run_id, "succeeded");
 
@@ -279,8 +298,17 @@ fn run_continue_from_posts_command() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let res =
-        playbook_run_supervised(dir.path(), "noagent_sv", None, params, None, None, None).unwrap();
+    let res = playbook_run_supervised(
+        dir.path(),
+        "noagent_sv",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();
 
     let v = run_continue_from(dir.path(), &run_id, "note").unwrap();
@@ -421,8 +449,17 @@ fn write_supervisor_session_is_findable_without_in_memory_table() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let res =
-        playbook_run_supervised(dir.path(), "noagent_sv", None, params, None, None, None).unwrap();
+    let res = playbook_run_supervised(
+        dir.path(),
+        "noagent_sv",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+    )
+    .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();
 
     apb_engine::write_supervisor_session(

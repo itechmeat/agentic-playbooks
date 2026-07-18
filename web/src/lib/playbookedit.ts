@@ -6,7 +6,7 @@ import { Document, YAMLSeq } from 'yaml'
 // supervisor), as well as comments and key order. Each function clones the
 // document (immutable from the caller's point of view) and returns a new copy.
 
-const NODE_TYPES = ['start', 'agent_task', 'script', 'condition', 'finish'] as const
+const NODE_TYPES = ['start', 'agent_task', 'script', 'condition', 'finish', 'playbook'] as const
 export type NodeKind = (typeof NODE_TYPES)[number]
 
 /** Default value for a new node's title. */

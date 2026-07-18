@@ -64,6 +64,7 @@ export interface RunSummary {
   workspace_id: string
   project: string
   progress?: ProgressSummary | null
+  parent_run?: string | null
 }
 
 export interface WfEvent {
@@ -112,10 +113,16 @@ export interface RunDetail {
   nodes: Record<string, string>
   outputs: Record<string, string>
   instruction: string | null
+  answer?: string | null
   params: Record<string, string>
   model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[] } | null
   layout: { nodes?: LayoutNode[] } | null
   hooks?: Record<string, string>
   events: WfEvent[]
   progress?: ProgressSummary | null
+  // Sub-runs started by a `playbook` node in this run (review R1-I6), one
+  // entry per `ChildRunStarted` event. Empty (not absent) when there are
+  // none; `status` is folded from the child run's own event log, `"unknown"`
+  // if that log could not be read.
+  children?: { node_id: string; run_id: string; status: string }[]
 }

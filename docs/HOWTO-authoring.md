@@ -60,6 +60,44 @@ reports show expected vs measured durations, and you refine the numbers with
 validator emits a V19 warning. Waiting nodes (`human_review`, `wait`) count as
 zero work, so leave their estimate at the default.
 
+## Run input prompt (Start node)
+
+Every run can carry a free-form "input prompt": the text available to node
+prompts as `{{run.instruction}}`. Edit it on the Start node in the web editor.
+Typing autosaves a draft that is NOT part of the playbook definition: it does
+not create a version and does not change trust, and a frozen playbook still
+accepts draft edits. At run start the value is resolved once: an explicitly
+passed instruction wins, otherwise the current draft, otherwise none. The chosen
+value is snapshotted immutably into the run.
+
+## Finish answer
+
+A finish node may carry a `prompt` and an optional `profile`. With a prompt, an
+agent composes the run's final answer from the accumulated run context (params,
+instruction, node outputs, reviews, hooks, compacted context) and that text
+becomes the run answer, shown on the dashboard and returned by run_status and
+run_report. A finish without a prompt stays instant and free with no answer.
+Do not set a profile without a prompt (validator V21). Estimate
+expected_duration on a finish-with-prompt like any agent step.
+
+## Sub-playbooks (the playbook node)
+
+A `playbook` node runs another playbook as a full child run:
+
+    - id: translate_book
+      type: playbook
+      playbook: book-translation      # or { id: book-translation, scope: global }
+      instruction: "Translate the plan from {{outputs.plan}} chapter by chapter."
+      expected_duration: 2h
+
+The node's rendered instruction becomes the child's run input; the child's
+finish answer becomes the node's output. The child is an ordinary playbook (any
+playbook can be a child). The parent's policy gate walks the whole reference
+tree once and pins each child, so you consent to the whole tree at parent start;
+an untrusted child blocks the parent, and a reference cycle is refused. Nesting
+is limited to 5 levels. Set expected_duration explicitly on a playbook node
+(validator V19 nudges you): the parent cannot sum the child's own estimates.
+
 ## trigger (matching contract)
 
 `trigger` is the only thing used for matching. Keep fields machine-oriented and

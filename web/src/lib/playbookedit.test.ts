@@ -154,6 +154,24 @@ describe('updateNode', () => {
     updateNode(doc, 'plan', { prompt: 'x' })
     expect(doc.toString()).toBe(before)
   })
+
+  it('sets prompt and profile on a finish node', () => {
+    const src = [
+      'schema: 2',
+      'id: p',
+      'name: p',
+      'version: 1.0.0',
+      'nodes:',
+      '  - { id: f, type: finish, outcome: success }',
+      'edges: []',
+      '',
+    ].join('\n')
+    const doc = parseDocument(src)
+    const next = updateNode(doc, 'f', { prompt: 'compose', profile: 'writer' })
+    const yaml = next.toString()
+    expect(yaml).toContain('prompt: compose')
+    expect(yaml).toContain('profile: writer')
+  })
 })
 
 describe('addEdge', () => {
@@ -212,6 +230,52 @@ describe('removeEdge', () => {
     const before = doc.toString()
     removeEdge(doc, 'plan', 'done')
     expect(doc.toString()).toBe(before)
+  })
+})
+
+describe('playbook node (add + update)', () => {
+  it('adds a playbook node and sets its reference and instruction', () => {
+    const src = [
+      'schema: 2',
+      'id: p',
+      'name: p',
+      'version: 1.0.0',
+      'nodes:',
+      '  - { id: s, type: start }',
+      'edges: []',
+      '',
+    ].join('\n')
+    const doc = parseDocument(src)
+    const withNode = addNode(doc, 'playbook', 'c')
+    const withPatch = updateNode(withNode, 'c', { playbook: 'child', instruction: 'go' })
+    const yaml = withPatch.toString()
+    expect(yaml).toContain('type: playbook')
+    expect(yaml).toContain('playbook: child')
+    expect(yaml).toContain('instruction: go')
+  })
+
+  // review R1-I7: NodePanel's playbook-ref field must round-trip an
+  // object-form ref ({ id, scope }) through updateNode without collapsing it
+  // to a bare string (which would silently reset an explicit scope to auto).
+  it('preserves an object-form playbook ref (with scope) on update', () => {
+    const src = [
+      'schema: 2',
+      'id: p',
+      'name: p',
+      'version: 1.0.0',
+      'nodes:',
+      '  - { id: c, type: playbook, playbook: { id: child, scope: global } }',
+      'edges: []',
+      '',
+    ].join('\n')
+    const doc = parseDocument(src)
+    const next = updateNode(doc, 'c', { playbook: { id: 'child', scope: 'global' } })
+    const node = items(next, 'nodes').find((n) => n.get('id') === 'c')!
+    const ref = node.get('playbook') as { get: (k: string) => unknown }
+    expect(ref.get('id')).toBe('child')
+    expect(ref.get('scope')).toBe('global')
+    const yaml = next.toString()
+    expect(yaml).toContain('scope: global')
   })
 })
 

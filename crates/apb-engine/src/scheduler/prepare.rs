@@ -32,6 +32,24 @@ pub(crate) fn prepare_run(
     prepare_run_target(&t, id, version, opts)
 }
 
+/// Renders a param `default` (a free-form YAML scalar) into the plain-string
+/// representation the params map (`BTreeMap<String, String>`) uses everywhere:
+/// a string yields its bare content, a bool/number its natural text, and any
+/// non-scalar its trimmed YAML serialization. This matches how callers already
+/// hand params in as strings, so a defaulted param and an explicitly passed one
+/// render identically.
+fn stringify_param_default(v: &serde_yaml_ng::Value) -> String {
+    match v {
+        serde_yaml_ng::Value::String(s) => s.clone(),
+        serde_yaml_ng::Value::Bool(b) => b.to_string(),
+        serde_yaml_ng::Value::Number(n) => n.to_string(),
+        other => serde_yaml_ng::to_string(other)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string(),
+    }
+}
+
 pub(crate) fn soul_delivery_str(d: SoulDelivery) -> String {
     match d {
         SoulDelivery::Native => "native".to_string(),
@@ -58,11 +76,7 @@ pub(crate) fn build_run_manifest(
 ) -> Result<RunExecutionManifest, EngineError> {
     let mut bindings: Vec<(String, apb_core::profile::QualifiedProfileRef)> = Vec::new();
     for n in &playbook.nodes {
-        if let NodeKind::AgentTask { profile, .. } = &n.kind
-            && let Some(pref) = profile
-                .clone()
-                .or_else(|| playbook.defaults.profile.clone())
-        {
+        if let Some(pref) = n.kind.effective_profile_ref(&playbook.defaults) {
             bindings.push((n.id.clone(), pref));
         }
     }
@@ -290,10 +304,13 @@ pub(crate) fn prepare_run_target(
         .id
         .clone();
 
-    let is_write = playbook
-        .nodes
-        .iter()
-        .any(|n| matches!(n.kind, NodeKind::AgentTask { .. } | NodeKind::Script { .. }));
+    // A run takes the shared workdir lock if any node writes to the workdir
+    // (`NodeKind::takes_workdir_lock`): an agent node (agent_task OR
+    // finish-with-prompt), a script, or a `playbook` node whose child runs
+    // in-process under the parent's lock. The single predicate FIXES review
+    // I5: a Start + finish-with-prompt playbook runs an agent and now holds the
+    // lock, which the old agent_task|script|playbook match missed.
+    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let guard = if is_write {
         acquire(root, opts.allow_shared_workdir)?
     } else {
@@ -324,14 +341,51 @@ pub(crate) fn prepare_run_target(
     copy_scripts(&version_dir, &run_dir)?;
     // The run's webhook hook secrets (for wait nodes, spec 6.7).
     crate::hooks::generate_hooks(&run_dir, &playbook)?;
+
+    // Run input precedence (spec A): an explicitly passed instruction wins;
+    // otherwise the playbook's autosaved draft, read at start time; otherwise
+    // None. Resolved once here so every surface (MCP, CLI, server, and a Part C
+    // sub-playbook child) shares the rule. A blank draft is treated as absent.
+    //
+    // Honest errors (review I7/R1-I9): a real IO error reading the draft
+    // (unreadable file, permission fault) must fail the run start, not silently
+    // start with different input. `read_instruction_draft` already returns
+    // Ok(None) for an absent draft, so only a genuine fault propagates through
+    // `?`; the old `.ok().flatten()` swallowed both cases alike.
+    let instruction = match opts.instruction.clone() {
+        Some(i) => Some(i),
+        None => reg
+            .read_instruction_draft(id)?
+            .filter(|s| !s.trim().is_empty()),
+    };
+
+    // Schema-default fill (review I6/R1-I2): every declared param that the
+    // caller did NOT supply falls back to its `default` from the playbook
+    // schema. This is the SINGLE normalization point for ALL runs - top-level
+    // and sub-playbook children (which arrive here with an empty params map)
+    // alike - so a playbook that relies on a param default renders the default
+    // instead of the empty string the template renderer substitutes for a
+    // missing param.
+    let mut params = opts.params.clone();
+    for p in &playbook.params {
+        if let Some(default) = &p.default
+            && !params.contains_key(&p.name)
+        {
+            params.insert(p.name.clone(), stringify_param_default(default));
+        }
+    }
+
     let cfg = RunConfig {
-        params: opts.params.clone(),
-        instruction: opts.instruction.clone(),
+        params,
+        instruction,
         supervisor_expected: opts.supervisor_expected,
         max_patches_per_run: opts.max_patches_per_run,
         context_max_bytes: opts.context_max_bytes,
         context_compact_model: opts.context_compact_model.clone(),
         overrides: opts.overrides.clone(),
+        parent_run: opts.parent_run.clone(),
+        depth: opts.depth,
+        expected_children: opts.expected_children.clone(),
     };
     write_run_config(&run_dir, &cfg)?;
 

@@ -2,6 +2,8 @@
   import { untrack } from 'svelte'
   import type { PlaybookNode } from './types'
   import { profileToField, fieldToProfile } from './profileref'
+  import { playbookRefToField, fieldToPlaybookRef } from './playbookref'
+  import { fetchInputDraft, saveInputDraft, fetchPlaybooks } from './api'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Textarea } from '$lib/components/ui/textarea'
@@ -11,12 +13,14 @@
   import Trash2 from '@lucide/svelte/icons/trash-2'
 
   let {
+    id,
     node,
     onChange,
     onDelete,
     revision = 0,
     workspace = '',
   }: {
+    id: string
     node: PlaybookNode
     onChange: (patch: Record<string, unknown>) => void
     onDelete: () => void
@@ -51,6 +55,36 @@
     }
   })
 
+  // Available playbooks from /api/playbooks (for the playbook-node reference
+  // selector), filtered to this node's own workspace (review R1-I8): the
+  // aggregated endpoint spans every registered project, and an unfiltered id
+  // can silently resolve to another project's playbook of the same id at run
+  // time. The web app has no separate listing for the global playbook store
+  // yet (apb_core::store resolves `scope: global` from the machine config
+  // dir, not from any project's registry) - "current workspace" is the full
+  // set of ids this node can actually resolve today.
+  let playbookOptions = $state<{ id: string; project: string }[]>([])
+  $effect(() => {
+    void workspace
+    let cancelled = false
+    fetchPlaybooks()
+      .then((list) => {
+        if (cancelled) return
+        const seen = new Set<string>()
+        const opts: { id: string; project: string }[] = []
+        for (const p of list) {
+          if (p.workspace_id !== workspace || seen.has(p.id)) continue
+          seen.add(p.id)
+          opts.push({ id: p.id, project: p.project })
+        }
+        playbookOptions = opts
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  })
+
   // Local field state, re-synced only when the node (id) or version (revision)
   // changes - not on every keystroke, else the yaml round-trip rolls back text.
   let f = $state<Record<string, string>>({})
@@ -71,9 +105,62 @@
         timeout_seconds: num(n.timeout_seconds),
         isolation: str(n.isolation),
         success_check: str(n.success_check),
+        playbook: playbookRefToField(n.playbook),
+        instruction: str(n.instruction),
       }
     })
   })
+
+  // Start-node "input prompt" run draft: a per-run seed the operator can edit
+  // before running, stored server-side outside the playbook YAML/version.
+  const DRAFT_AUTOSAVE_DEBOUNCE_MS = 500
+  let draft = $state('')
+  // Quiet inline status for the last load/save attempt (review I9 frontend
+  // part): errors used to be swallowed by `.catch(() => {})`, so a failed
+  // autosave looked identical to a successful one. Cleared on the next
+  // successful save/load; null renders nothing.
+  let draftError = $state<string | null>(null)
+  let draftTimer: ReturnType<typeof setTimeout> | undefined
+  $effect(() => {
+    void node.id
+    if (node.type !== 'start') return
+    let cancelled = false
+    fetchInputDraft(id, workspace)
+      .then((r) => {
+        if (cancelled) return
+        draft = r.instruction ?? ''
+        draftError = null
+      })
+      .catch(() => {
+        if (!cancelled) draftError = 'draft failed to load'
+      })
+    return () => {
+      cancelled = true
+      // Cancel any pending debounced save from the previous node/props before
+      // re-running for a new node (or on destroy) - otherwise a stale timer
+      // fires after teardown or writes onto the wrong playbook (id/workspace
+      // have already moved on since PlaybookEdit is never remounted).
+      clearTimeout(draftTimer)
+      draftTimer = undefined
+    }
+  })
+  function onDraftInput(v: string) {
+    draft = v
+    clearTimeout(draftTimer)
+    // Capture id/workspace at schedule time so even if this timer somehow
+    // survived a node switch, it could not write to a different playbook.
+    const saveId = id
+    const saveWs = workspace
+    draftTimer = setTimeout(() => {
+      saveInputDraft(saveId, v, saveWs)
+        .then(() => {
+          draftError = null
+        })
+        .catch(() => {
+          draftError = 'draft not saved'
+        })
+    }, DRAFT_AUTOSAVE_DEBOUNCE_MS)
+  }
 
   function str(v: unknown): string {
     return typeof v === 'string' ? v : v == null ? '' : String(v)
@@ -85,6 +172,10 @@
   function setProfile(raw: string) {
     f.profile = raw
     onChange({ profile: fieldToProfile(raw) })
+  }
+  function setPlaybookRef(raw: string) {
+    f.playbook = raw
+    onChange({ playbook: fieldToPlaybookRef(raw) })
   }
   function setStr(key: string, raw: string) {
     f[key] = raw
@@ -120,11 +211,40 @@
     </Button>
   </div>
 
+  <datalist id="apb-profile-options">
+    {#each profiles as p (p.scope + '/' + p.name)}
+      <option value={`${p.scope}/${p.name}`}>
+        {p.trusted ? '' : '(untrusted) '}{p.scope}/{p.name}
+      </option>
+    {/each}
+  </datalist>
+
+  <datalist id="apb-playbook-options">
+    {#each playbookOptions as p (p.id)}
+      <option value={p.id}>{p.id}{p.project ? ` (${p.project})` : ''}</option>
+    {/each}
+  </datalist>
+
   <Field.FieldGroup class="gap-3">
     <Field.Field>
       <Field.FieldLabel for="np-title">title</Field.FieldLabel>
       <Input id="np-title" value={f.title} oninput={(e) => setStr('title', e.currentTarget.value)} />
     </Field.Field>
+
+    {#if kind === 'start'}
+      <Field.Field>
+        <Field.FieldLabel for="np-input">input prompt (run draft, not versioned)</Field.FieldLabel>
+        <Textarea
+          id="np-input"
+          rows={4}
+          value={draft}
+          oninput={(e) => onDraftInput(e.currentTarget.value)}
+        />
+        {#if draftError}
+          <p class="text-xs text-muted-foreground">{draftError}</p>
+        {/if}
+      </Field.Field>
+    {/if}
 
     {#if kind === 'agent_task'}
       <Field.Field>
@@ -145,13 +265,6 @@
           value={f.profile}
           oninput={(e) => setProfile(e.currentTarget.value)}
         />
-        <datalist id="apb-profile-options">
-          {#each profiles as p (p.scope + '/' + p.name)}
-            <option value={`${p.scope}/${p.name}`}>
-              {p.trusted ? '' : '(untrusted) '}{p.scope}/{p.name}
-            </option>
-          {/each}
-        </datalist>
       </Field.Field>
       <Field.Field>
         <Field.FieldLabel for="np-retries">max_retries</Field.FieldLabel>
@@ -228,6 +341,45 @@
       <Field.Field>
         <Field.FieldLabel for="np-outcome">outcome</Field.FieldLabel>
         <Input id="np-outcome" value={f.outcome} oninput={(e) => setStr('outcome', e.currentTarget.value)} />
+      </Field.Field>
+      <Field.Field>
+        <Field.FieldLabel for="np-finish-prompt">prompt (compose the run answer; optional)</Field.FieldLabel>
+        <Textarea
+          id="np-finish-prompt"
+          rows={4}
+          value={f.prompt}
+          oninput={(e) => setStr('prompt', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field>
+        <Field.FieldLabel for="np-finish-profile">profile</Field.FieldLabel>
+        <Input
+          id="np-finish-profile"
+          list="apb-profile-options"
+          placeholder="name (scope auto) or scope/name"
+          value={f.profile}
+          oninput={(e) => setProfile(e.currentTarget.value)}
+        />
+      </Field.Field>
+    {:else if kind === 'playbook'}
+      <Field.Field>
+        <Field.FieldLabel for="np-pb-ref">playbook</Field.FieldLabel>
+        <Input
+          id="np-pb-ref"
+          list="apb-playbook-options"
+          placeholder={'id (scope auto) or scope/id, e.g. global/child'}
+          value={f.playbook}
+          oninput={(e) => setPlaybookRef(e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field>
+        <Field.FieldLabel for="np-pb-instr">instruction (rendered, becomes the child input)</Field.FieldLabel>
+        <Textarea
+          id="np-pb-instr"
+          rows={4}
+          value={f.instruction}
+          oninput={(e) => setStr('instruction', e.currentTarget.value)}
+        />
       </Field.Field>
     {/if}
   </Field.FieldGroup>

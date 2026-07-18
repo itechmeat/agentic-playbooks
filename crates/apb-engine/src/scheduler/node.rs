@@ -339,7 +339,150 @@ pub(crate) fn execute_node(
         NodeKind::Wait { .. } => Err(EngineError::Invalid(format!(
             "node `{node_id}` (wait) must be handled by drive"
         ))),
+        NodeKind::Playbook { .. } => Err(EngineError::Invalid(format!(
+            "node `{node_id}` (playbook) must be handled by drive"
+        ))),
     }
+}
+
+/// Composes the run answer for a finish-with-prompt (spec B). A reduced
+/// `agent_task`: the profile chain + SOUL come from the run manifest (identical
+/// resolution/trust to an agent_task), the prompt renders with the full
+/// standard context, but no skills are delivered and there is no success_check
+/// and no isolation. Timeout/retries fall back to `defaults`. Returns
+/// (status, answer, events); drive writes the events (single writer).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_finish_answer(
+    playbook: &Playbook,
+    run_dir: &Path,
+    workdir: &Path,
+    node_id: &str,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    prompt: &str,
+) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
+    let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
+    let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
+        .into_iter()
+        .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
+        .collect();
+    let text = render(
+        prompt,
+        &cfg.params,
+        cfg.instruction.as_deref(),
+        &state.outputs,
+        &state.reviews,
+        &hooks,
+        &context,
+    );
+    let retries = playbook.defaults.max_retries.unwrap_or(0);
+    let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
+    let grant_autonomy = apb_core::effects::effective(playbook)
+        .iter()
+        .any(|e| !matches!(e, apb_core::schema::Effect::FsRead));
+
+    let manifest = crate::manifest::read(run_dir)?.ok_or_else(|| {
+        EngineError::Invalid(format!("finish node `{node_id}` has no execution manifest"))
+    })?;
+    let entry = manifest.for_node(node_id).cloned().ok_or_else(|| {
+        EngineError::Invalid(format!("no manifest entry for finish node `{node_id}`"))
+    })?;
+    if entry.chain.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "finish node `{node_id}` has an empty executor chain"
+        )));
+    }
+
+    // Cancellation happens at drive-loop boundaries (the top-of-loop
+    // control.jsonl scan and join:any teardown), never mid-agent: like the
+    // inline agent_task path (which drive calls with a fresh `AtomicBool`), this
+    // finish-answer agent runs synchronously on the drive thread, so this local
+    // token is never set during the call (review I1, accepted as pre-existing).
+    let cancel = AtomicBool::new(false);
+    let mut events: Vec<EventPayload> = Vec::new();
+    let mut attempt: u32 = 0;
+    let mut last_msg = String::new();
+    let mut last_timed_out = false;
+    for (idx, ri) in entry.chain.iter().enumerate() {
+        if idx > 0 {
+            events.push(EventPayload::FallbackTriggered {
+                node: node_id.into(),
+                from: entry.chain[idx - 1].agent_id.clone(),
+                to: ri.agent_id.clone(),
+                profile: Some(entry.key()),
+            });
+        }
+        let adapter = crate::adapter::ClaudeAdapter {
+            program: ri.canonical_executable.to_string_lossy().into_owned(),
+            spec: ri.spec.clone(),
+        };
+        for try_i in 0..=retries {
+            attempt += 1;
+            if try_i > 0 {
+                events.push(EventPayload::RetryStarted {
+                    node: node_id.into(),
+                    attempt,
+                });
+            }
+            events.push(EventPayload::AttemptStarted {
+                node: node_id.into(),
+                attempt,
+                agent: ri.agent_id.clone(),
+                soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
+                skills_mode: None,
+            });
+            let stream_log = run_dir
+                .join("agent-stream")
+                .join(format!("{node_id}-{attempt}.jsonl"));
+            let task = AgentTask {
+                prompt: &text,
+                model: &ri.model,
+                workdir,
+                timeout,
+                stream_log: Some(&stream_log),
+                soul: Some(entry.soul.as_str()),
+                grant_autonomy,
+            };
+            match adapter.run_cancellable(&task, &cancel) {
+                Ok(report) => {
+                    events.push(EventPayload::AttemptFinished {
+                        node: node_id.into(),
+                        attempt,
+                        status: report.status.as_str().into(),
+                    });
+                    if report.status == NodeStatus::Succeeded {
+                        return Ok((NodeStatus::Succeeded, report.summary, events));
+                    }
+                    last_msg = report.summary;
+                    last_timed_out = false;
+                }
+                Err((class, msg)) => {
+                    last_timed_out = class == ErrorClass::Timeout;
+                    events.push(EventPayload::AttemptFinished {
+                        node: node_id.into(),
+                        attempt,
+                        status: if last_timed_out {
+                            "timed_out"
+                        } else {
+                            "failed"
+                        }
+                        .into(),
+                    });
+                    last_msg = msg;
+                    if class == ErrorClass::Transport || class == ErrorClass::Timeout {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let final_status = if last_timed_out {
+        NodeStatus::TimedOut
+    } else {
+        NodeStatus::Failed
+    };
+    Ok((final_status, last_msg, events))
 }
 
 /// Materializes profile skills as REAL copies from the run snapshot into the
@@ -413,6 +556,262 @@ pub(crate) fn copy_tree(src: &Path, dst: &Path) -> Result<(), EngineError> {
         }
     }
     Ok(())
+}
+
+/// The run id of the latest ChildRunStarted for `node_id`, if any.
+pub(crate) fn latest_child_run(events: &[Event], node_id: &str) -> Option<String> {
+    events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::ChildRunStarted { node_id: n, run_id } if n == node_id => {
+            Some(run_id.clone())
+        }
+        _ => None,
+    })
+}
+
+/// Whether a run directory has reached a terminal run status.
+///
+/// Honest errors (review I7/R1-I9): the child's event log is the sole source of
+/// truth for terminality, so an unreadable/corrupt child dir must NOT be guessed
+/// at. The old `read_all(..).unwrap_or_default()` folded a read failure into an
+/// empty log, which reads as "not terminal" and would make the reattach path in
+/// `run_playbook_node` resume the same broken child forever. Returning the read
+/// error instead propagates as a hard node/run failure: this cannot loop (no
+/// silent reattach) and cannot fake success (no empty-log Running/Succeeded).
+/// `read_all` already returns Ok(empty) for a genuinely absent log, so only a
+/// real IO/parse fault surfaces here.
+pub(crate) fn run_is_terminal(root: &Path, run_id: &str) -> Result<bool, EngineError> {
+    let dir = root.join(".apb/runs").join(run_id);
+    let events = read_all(&dir)?;
+    Ok(matches!(
+        RunState::fold(&events).run_status,
+        RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
+    ))
+}
+
+/// The parent run's definition origin (from its RunProvenance event), used to
+/// resolve a child's `scope: auto` the same way the policy gate does (parent
+/// origin first, then global). Defaults to Project when the label is absent.
+fn parent_run_origin(run_dir: &Path) -> apb_core::scope::Origin {
+    use apb_core::scope::Origin;
+    let events = read_all(run_dir).unwrap_or_default();
+    for e in &events {
+        if let EventPayload::RunProvenance {
+            origin: Some(label),
+            ..
+        } = &e.payload
+        {
+            return if label == "global" {
+                Origin::Global
+            } else {
+                Origin::Project { workspace_id: None }
+            };
+        }
+    }
+    Origin::Project { workspace_id: None }
+}
+
+/// Executes a `playbook` node (spec C): starts (or, on resume, reattaches to) a
+/// full child run and maps its terminal state to this node's status/output. The
+/// child runs in-process, synchronously, with `allow_shared_workdir: true` (the
+/// parent already holds the workdir lock; see the module notes). ChildRunStarted
+/// is appended here (drive thread, single writer) BEFORE the child is driven.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_playbook_node(
+    root: &Path,
+    run_dir: &Path,
+    log: &mut EventLog,
+    _playbook: &Playbook,
+    cfg: &RunConfig,
+    run_id: &str,
+    node_id: &str,
+    child_ref: &apb_core::schema::QualifiedPlaybookRef,
+    node_instruction: Option<&str>,
+) -> Result<(NodeStatus, String), EngineError> {
+    // Depth backstop.
+    if cfg.depth + 1 > MAX_SUBPLAYBOOK_DEPTH {
+        return Ok((
+            NodeStatus::Failed,
+            format!(
+                "sub-playbook depth limit ({}) exceeded",
+                MAX_SUBPLAYBOOK_DEPTH
+            ),
+        ));
+    }
+
+    // Resume reattach: a still-running child from a prior ChildRunStarted is
+    // resumed, not restarted (the event log is the source of truth). The child
+    // runs on this drive thread while the parent still holds the workdir lock,
+    // so its resume must allow the shared workdir (no second acquire).
+    //
+    // Single read (review M1): this `events` snapshot is reused below for the
+    // instruction render context. No log write happens between the reattach
+    // check and that render (the reattach branch returns before any append, and
+    // ChildRunStarted is written only much later), so reading once is sound.
+    let events = read_all(run_dir)?;
+    if let Some(existing) = latest_child_run(&events, node_id)
+        && !run_is_terminal(root, &existing)?
+    {
+        let res = resume_inner(root, &existing, None, false, true)?;
+        return Ok(map_child_outcome(root, &existing, res.outcome));
+    }
+
+    // Render the node instruction with the parent context; the result is the
+    // child's explicit instruction (Part A precedence). Absent -> None (child
+    // falls back to its own draft). Reuses the `events` read above (review M1).
+    let child_instruction = match node_instruction {
+        Some(t) => {
+            let context = build_context_for_render(run_dir, &events)?;
+            let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
+                .into_iter()
+                .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
+                .collect();
+            let state = RunState::fold(&events);
+            Some(render(
+                t,
+                &cfg.params,
+                cfg.instruction.as_deref(),
+                &state.outputs,
+                &state.reviews,
+                &hooks,
+                &context,
+            ))
+        }
+        None => None,
+    };
+
+    // Resolve the child reference. A gate pin (cfg.expected_children) fixes the
+    // scope + version verbatim (anti-TOCTOU); without a pin (CLI path) we live
+    // resolve with the same candidate order the policy gate uses: an explicit
+    // scope pins the origin, `auto` prefers the parent origin then global.
+    use apb_core::profile::ProfileScope;
+    use apb_core::scope::{Origin, PlaybookRef, scope_candidates};
+    // Fail-closed pins (review I4): `expected_children == None` is the ungated
+    // (CLI) path and lives-resolves. But a gated run (`Some(map)`) MUST carry a
+    // pin for every playbook node its permit walked; a missing entry means this
+    // node was outside the verified tree, so we FAIL the node rather than
+    // silently live-resolving unverified content.
+    let pin = match &cfg.expected_children {
+        None => None,
+        Some(map) => match map.get(node_id) {
+            Some(p) => Some(p),
+            None => {
+                return Ok((
+                    NodeStatus::Failed,
+                    format!(
+                        "sub-playbook node `{node_id}`: run permit carried no pin for it; refusing to live-resolve under a gated run"
+                    ),
+                ));
+            }
+        },
+    };
+    let resolved = if let Some(p) = pin {
+        // The pin's scope is a resolved origin (never `Auto`), so map it back to
+        // a concrete `Origin` (review I2 - no string comparison).
+        let origin = match p.scope {
+            ProfileScope::Global => Origin::Global,
+            _ => Origin::Project { workspace_id: None },
+        };
+        let cref = PlaybookRef {
+            origin,
+            id: child_ref.id.clone(),
+            version: Some(p.version.clone()),
+        };
+        apb_core::store::resolve(root, &cref)
+            .map_err(|e| EngineError::Invalid(format!("sub-playbook `{}`: {e}", child_ref.id)))?
+    } else {
+        let candidates = scope_candidates(child_ref.scope, &parent_run_origin(run_dir));
+        let mut resolved_opt = None;
+        for cand in &candidates {
+            let cref = PlaybookRef {
+                origin: cand.clone(),
+                id: child_ref.id.clone(),
+                version: None,
+            };
+            if let Ok(r) = apb_core::store::resolve(root, &cref) {
+                resolved_opt = Some(r);
+                break;
+            }
+        }
+        resolved_opt.ok_or_else(|| {
+            EngineError::Invalid(format!(
+                "sub-playbook `{}` (node `{}`) did not resolve in any candidate scope",
+                child_ref.id, node_id
+            ))
+        })?
+    };
+
+    let opts = RunOptions {
+        instruction: child_instruction,
+        allow_shared_workdir: true,
+        parent_run: Some(run_id.to_string()),
+        depth: cfg.depth + 1,
+        expected_digest: pin.map(|p| p.playbook_digest.clone()),
+        expected_profile_bundles: pin.map(|p| p.profile_bundles.clone()),
+        expected_children: pin.map(|p| p.children.clone()),
+        ..Default::default()
+    };
+
+    // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
+    let t = PrepareTarget {
+        definition_parent: resolved.definition_parent.clone(),
+        execution_root: resolved.execution_root.clone(),
+        origin_label: resolved.origin_label,
+    };
+    let mut cp = prepare_run_target(&t, &resolved.id, Some(&resolved.version), opts)?;
+    let child_run_id = cp.run_id.clone();
+    log.append(EventPayload::ChildRunStarted {
+        node_id: node_id.to_string(),
+        run_id: child_run_id.clone(),
+    })?;
+    let res = drive(
+        cp.playbook.clone(),
+        &cp.run_dir,
+        &resolved.execution_root,
+        &mut cp.log,
+        &cp.cfg,
+        cp.start_node.clone(),
+        cp.run_id.clone(),
+        RunMode::Autonomous,
+        cp.supervisor_expected,
+    )?;
+    Ok(map_child_outcome(root, &child_run_id, res.outcome))
+}
+
+/// Maps a child run's terminal status to the parent node's (status, output).
+///
+/// Honest errors (review I7/R1-I9): on a Succeeded child we must read its event
+/// log to compose the answer. The old `read_all(..).unwrap_or_default()` turned
+/// an unreadable/corrupt child dir into an empty log, which then yielded node
+/// SUCCESS with an empty answer - a corrupted run masquerading as a legit
+/// promptless finish. We now distinguish the two: a genuine read failure FAILS
+/// the parent node with a diagnostic naming the child run id and the error,
+/// while a successful read whose `run_answer` is None (a promptless finish, a
+/// legitimately empty answer) stays Succeeded with "".
+fn map_child_outcome(root: &Path, child_run_id: &str, outcome: RunStatus) -> (NodeStatus, String) {
+    match outcome {
+        RunStatus::Succeeded => {
+            let dir = root.join(".apb/runs").join(child_run_id);
+            match read_all(&dir) {
+                Ok(events) => {
+                    let answer = crate::progress::run_answer(&dir, &events).unwrap_or_default();
+                    (NodeStatus::Succeeded, answer)
+                }
+                Err(e) => (
+                    NodeStatus::Failed,
+                    format!(
+                        "sub-playbook child run `{child_run_id}` succeeded but its events could not be read: {e}"
+                    ),
+                ),
+            }
+        }
+        other => (
+            NodeStatus::Failed,
+            format!(
+                "sub-playbook child run `{child_run_id}` ended {}",
+                other.as_str()
+            ),
+        ),
+    }
 }
 
 /// Whether a node is slow (external work - agent or script), such that it

@@ -94,6 +94,52 @@ fn node_without_profile_or_executor_is_v18() {
 }
 
 #[test]
+fn finish_with_prompt_without_binding_is_v18() {
+    // A finish-with-prompt runs an agent, so with no node profile and no
+    // defaults.profile it must trip the same V18 "no binding" error an
+    // agent_task does.
+    let src = "schema: 1\nid: w\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success, prompt: \"compose\" }\nedges:\n  - { from: start, to: done }\n";
+    let playbook = Playbook::from_yaml(src).unwrap();
+    let ctx = ValidationContext::default();
+    let r = validate(&playbook, &ctx);
+    assert!(
+        errors(&r).contains(&"V18"),
+        "expected V18, got {:?}",
+        errors(&r)
+    );
+}
+
+#[test]
+fn finish_with_prompt_ok_with_defaults_profile() {
+    let src = "schema: 1\nid: w\nname: W\nversion: 1.0.0\ndefaults:\n  profile: architect\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success, prompt: \"compose\" }\nedges:\n  - { from: start, to: done }\n";
+    let playbook = Playbook::from_yaml(src).unwrap();
+    let ctx = ValidationContext {
+        profiles: vec!["architect".into()],
+        ..Default::default()
+    };
+    let r = validate(&playbook, &ctx);
+    assert!(r.is_valid(), "expected valid, got {:?}", errors(&r));
+}
+
+#[test]
+fn finish_with_prompt_scope_project_in_global_playbook_is_v14() {
+    // An explicit finish profile gets the same V14 scope check as an agent_task:
+    // a project-scoped profile cannot be referenced from a global playbook.
+    let src = "schema: 1\nid: w\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success, prompt: \"compose\", profile: { name: architect, scope: project } }\nedges:\n  - { from: start, to: done }\n";
+    let playbook = Playbook::from_yaml(src).unwrap();
+    let ctx = ValidationContext {
+        profiles: vec!["architect".into()],
+        playbook_origin: PlaybookOrigin::Global,
+    };
+    let r = validate(&playbook, &ctx);
+    assert!(
+        errors(&r).contains(&"V14"),
+        "expected V14, got {:?}",
+        errors(&r)
+    );
+}
+
+#[test]
 fn node_without_executor_ok_when_defaults_profile_present() {
     let src = "schema: 1\nid: w\nname: W\nversion: 1.0.0\ndefaults:\n  profile: architect\nnodes:\n  - { id: start, type: start }\n  - { id: t, type: agent_task, prompt: \"do\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: t }\n  - { from: t, to: done }\n";
     let playbook = Playbook::from_yaml(src).unwrap();

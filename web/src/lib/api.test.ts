@@ -3,7 +3,9 @@ import {
   createPlaybook,
   deletePlaybook,
   fetchDiff,
+  fetchInputDraft,
   fetchPlaybook,
+  saveInputDraft,
   saveLayout,
   updatePlaybook,
 } from './api'
@@ -120,6 +122,38 @@ describe('saveLayout', () => {
   it('throws on non-ok response', async () => {
     fetchMock.mockResolvedValueOnce(new Response('fail', { status: 500 }))
     await expect(saveLayout('demo', '1.0.0', {})).rejects.toThrow()
+  })
+})
+
+describe('input draft', () => {
+  it('GETs and PUTs /api/playbooks/{id}/input-draft', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: 'x' }))
+    const got = await fetchInputDraft('p')
+    expect(got).toEqual({ instruction: 'x' })
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: 'hi' }))
+    const saved = await saveInputDraft('p', 'hi')
+    expect(saved).toEqual({ instruction: 'hi' })
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ instruction: 'hi' }),
+    })
+  })
+
+  it('adds ?workspace= to select a project on the global dashboard', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: null }))
+    await fetchInputDraft('p', 'ws-abc')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft?workspace=ws-abc')
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: null }))
+    await saveInputDraft('p', 'hi', 'ws-abc')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft?workspace=ws-abc', {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ instruction: 'hi' }),
+    })
   })
 })
 

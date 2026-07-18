@@ -178,6 +178,7 @@ impl WfMcp {
     /// The `playbook_run` branch for `supervise: "self"`: starts the
     /// playbook in the background, computes capabilities from the
     /// supervisor policy, and mints a token for the calling session.
+    #[allow(clippy::too_many_arguments)]
     fn run_supervised_self(
         &self,
         id: String,
@@ -186,6 +187,7 @@ impl WfMcp {
         instruction: Option<String>,
         expected_digest: String,
         expected_bundles: BTreeMap<String, String>,
+        expected_children: BTreeMap<String, apb_engine::run_config::ChildExpectation>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
@@ -200,6 +202,7 @@ impl WfMcp {
             instruction,
             Some(expected_digest),
             Some(expected_bundles),
+            Some(expected_children),
         );
         let value = match started {
             Ok(v) => v,

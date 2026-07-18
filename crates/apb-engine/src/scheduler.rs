@@ -81,7 +81,17 @@ pub struct RunOptions {
     /// skill/profile could have changed in between). The CLI path does not pass
     /// them and does not change the semantics.
     pub expected_profile_bundles: Option<BTreeMap<String, String>>,
+    /// Parent run id when this run is a sub-playbook child (spec C).
+    pub parent_run: Option<String>,
+    /// Sub-playbook nesting depth of THIS run (0 for a top-level run).
+    pub depth: usize,
+    /// Verified sub-playbook pins from the gate, keyed by playbook-node id.
+    pub expected_children: Option<BTreeMap<String, crate::run_config::ChildExpectation>>,
 }
+
+/// Defense-in-depth backstop for sub-playbook nesting (spec C). A child that
+/// would exceed this depth fails its parent node.
+pub const MAX_SUBPLAYBOOK_DEPTH: usize = 5;
 
 /// Counter for generating unique supervisor tokens within a single engine
 /// process (in addition to the timestamp in the token itself - in case of
@@ -414,6 +424,49 @@ pub fn run_cancel(root: &Path, run_id: &str) -> Result<(), EngineError> {
             reason: "run_cancel".into(),
         },
     )?;
+    // Propagate the abort into any non-terminal sub-playbook children (spec C):
+    // an operator abort of the parent must reach a child that is blocking the
+    // parent (e.g. a child paused on human_review).
+    abort_children(root, run_id)?;
+    Ok(())
+}
+
+/// Posts Abort to every non-terminal sub-playbook child of `run_id`, recursively
+/// (spec C). Best-effort per child; a child that no longer exists is skipped.
+/// This is how an operator abort of the parent reaches a child that is blocking
+/// the parent (e.g. a child paused on human_review): the child's own drive loop
+/// scans its control.jsonl at every iteration boundary and returns Aborted, which
+/// the parent maps to a failed node.
+fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineError> {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let events = read_all(&run_dir)?;
+    for e in &events {
+        if let EventPayload::ChildRunStarted { run_id: child, .. } = &e.payload {
+            let child_dir = root.join(".apb/runs").join(child);
+            if child_dir.is_dir()
+                && !matches!(
+                    RunState::fold(&read_all(&child_dir)?).run_status,
+                    RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
+                )
+            {
+                // Best-effort per child (a child that raced to terminal or lost
+                // its dir must not block the parent abort), but no longer
+                // silent: a failed post is logged with the child run id so an
+                // operator can tell an un-propagated abort from a clean one
+                // (review I7/R1-I9). apb-engine has no tracing facility, so this
+                // is an eprintln, matching the progress/snapshot warnings.
+                if let Err(e) = crate::control::post_control(
+                    &child_dir,
+                    Control::Abort {
+                        reason: "parent aborted".into(),
+                    },
+                ) {
+                    eprintln!("apb: warning: failed to post abort to child run `{child}`: {e}");
+                }
+                abort_children(root, child)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -631,7 +684,46 @@ fn drive(
             .kind
             .clone();
 
-        if let NodeKind::Finish { outcome: o } = &node_kind {
+        if let NodeKind::Finish {
+            outcome: o,
+            prompt,
+            profile: _,
+        } = &node_kind
+        {
+            // A finish-with-prompt composes the run answer via an agent (spec
+            // B); a finish without a prompt is instant with an empty output
+            // (unchanged). NodeStarted + attempt events are written only for the
+            // agent path.
+            let answer_output = if let Some(p) = prompt {
+                log.append(EventPayload::NodeStarted {
+                    node: current.clone(),
+                    attempt: 1,
+                })?;
+                let (st, out, evs) = execute_finish_answer(
+                    &playbook, run_dir, &workdir, &current, &run_id, &state, cfg, p,
+                )?;
+                for ev in evs {
+                    log.append(ev)?;
+                }
+                if st != NodeStatus::Succeeded {
+                    log.append(EventPayload::NodeFinished {
+                        node: current.clone(),
+                        status: st.as_str().into(),
+                        attempt: 1,
+                        output: out.clone(),
+                    })?;
+                    log.append(EventPayload::RunFinished {
+                        outcome: "failed".into(),
+                    })?;
+                    return Ok(RunResult {
+                        run_id,
+                        outcome: RunStatus::Failed,
+                    });
+                }
+                out
+            } else {
+                String::new()
+            };
             let outcome = match o {
                 Outcome::Success => RunStatus::Succeeded,
                 Outcome::Failure => RunStatus::Failed,
@@ -644,7 +736,7 @@ fn drive(
                 node: current.clone(),
                 status: "succeeded".into(),
                 attempt: 1,
-                output: String::new(),
+                output: answer_output,
             })?;
             if outcome == RunStatus::Succeeded
                 && let Some(applied) = last_applied_patch.as_ref()
@@ -656,19 +748,16 @@ fn drive(
         }
 
         // Context compaction before rendering the prompt: only if the upcoming
-        // node (current or an agent_task in the frontier) actually substitutes
-        // {{run.context}}. Triggered by drive (the sole writer) so that the
-        // ContextCompacted event lands in the log before the context is read in
-        // execute_node. Disabled if context_max_bytes is not set.
-        let renders_context = matches!(
-            node_kind,
-            NodeKind::AgentTask { .. } | NodeKind::Prompt { .. }
-        ) || frontier.iter().any(|n| {
-            matches!(
-                playbook.node(n).map(|x| &x.kind),
-                Some(NodeKind::AgentTask { .. })
-            )
-        });
+        // node (current or a frontier node) actually renders the run context
+        // (`NodeKind::renders_context`: agent_task, prompt, finish-with-prompt,
+        // or a playbook node with an instruction template - review R1-M3).
+        // Triggered by drive (the sole writer) so that the ContextCompacted
+        // event lands in the log before the context is read in execute_node.
+        // Disabled if context_max_bytes is not set.
+        let renders_context = node_kind.renders_context()
+            || frontier
+                .iter()
+                .any(|n| playbook.node(n).is_some_and(|x| x.kind.renders_context()));
         if renders_context
             && let Some(ev) = maybe_compact_context(run_dir, &workdir, cfg, &read_all(run_dir)?)?
         {
@@ -907,6 +996,32 @@ fn drive(
                 NodeStatus::Failed,
                 "join: upstream branch failed".to_string(),
             )
+        } else if let NodeKind::Playbook {
+            playbook: child_ref,
+            instruction: node_instr,
+        } = &node_kind
+        {
+            // A sub-playbook node runs a full child run in-process on this drive
+            // thread (spec C). It is NOT is_agent_or_script, so it never enters the
+            // parallel fast path; run_playbook_node takes &mut EventLog and appends
+            // ChildRunStarted itself (single writer). Intercepted here before
+            // execute_node (whose Playbook arm is only a defensive error).
+            steps += 1;
+            log.append(EventPayload::NodeStarted {
+                node: current.clone(),
+                attempt: 1,
+            })?;
+            run_playbook_node(
+                root,
+                run_dir,
+                log,
+                &playbook,
+                cfg,
+                &run_id,
+                &current,
+                child_ref,
+                node_instr.as_deref(),
+            )?
         } else {
             steps += 1;
             log.append(EventPayload::NodeStarted {
@@ -1116,6 +1231,8 @@ pub struct RunSummary {
     pub started_ts: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<crate::progress::ProgressSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run: Option<String>,
 }
 
 pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
@@ -1149,12 +1266,16 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             })
             .unwrap_or_else(|| (run_id.clone(), 0));
         let progress = crate::progress::from_run_dir(&entry.path(), &events);
+        let parent_run = crate::run_config::read_run_config(&entry.path())
+            .ok()
+            .and_then(|c| c.parent_run);
         out.push(RunSummary {
             run_id,
             playbook,
             status: state.run_status.as_str().into(),
             started_ts,
             progress,
+            parent_run,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.started_ts));
@@ -1211,6 +1332,21 @@ pub fn resume_with(
     from_node: Option<&str>,
     allow_environment_drift: bool,
 ) -> Result<RunResult, EngineError> {
+    resume_inner(root, run_id, from_node, allow_environment_drift, false)
+}
+
+/// Shared implementation behind `resume`/`resume_with`. `allow_shared_workdir`
+/// mirrors `RunOptions::allow_shared_workdir`: a sub-playbook child reattached
+/// on resume runs on the parent's drive thread while the parent still holds the
+/// PID-keyed workdir lock, so its own resume must skip a second acquire
+/// (which would return WorkdirBusy). The public entry points pass `false`.
+fn resume_inner(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    allow_shared_workdir: bool,
+) -> Result<RunResult, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
@@ -1256,12 +1392,12 @@ pub fn resume_with(
     log.append(EventPayload::RunPaused {
         reason: format!("resume from `{start_node}`"),
     })?;
-    let is_write = playbook
-        .nodes
-        .iter()
-        .any(|n| matches!(n.kind, NodeKind::AgentTask { .. } | NodeKind::Script { .. }));
+    // Mirrors prepare's predicate (`NodeKind::takes_workdir_lock`): a resumed
+    // parent with a sub-playbook node (or a finish-with-prompt agent node)
+    // still takes the shared workdir lock.
+    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let _guard = if is_write {
-        acquire(root, false)?
+        acquire(root, allow_shared_workdir)?
     } else {
         None
     };

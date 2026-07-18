@@ -13,30 +13,24 @@
 
 use std::collections::BTreeSet;
 
-use crate::schema::{Effect, NodeKind, Playbook};
+use crate::schema::{Effect, Playbook};
 
-/// Effects conservatively derived from the definition. Nodes that execute
-/// arbitrary code or an agent are considered capable of file writes, network
-/// access, and external actions. The match is deliberately exhaustive: a new
-/// `NodeKind` variant will be a compile error here, forcing the author to
-/// explicitly decide its effects instead of silently getting an empty set -
-/// so do NOT add a `_ => {}` here.
+/// Effects conservatively derived from the definition. An acting node - one
+/// that runs an agent, runs a script, or runs a sub-playbook in the shared
+/// workdir - is considered capable of file writes, network access, and
+/// external actions. Membership is exactly `NodeKind::takes_workdir_lock`
+/// (= `runs_agent() || Script || Playbook`): effects and the workdir-lock
+/// predicate share one definition so they can never diverge (review I5/M3).
+/// The compile-time "a new variant must be classified" guard now lives in
+/// `NodeKind::runs_agent`, which `takes_workdir_lock` builds on.
 pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
     let mut set = BTreeSet::new();
     for n in &playbook.nodes {
-        match &n.kind {
-            NodeKind::Start
-            | NodeKind::Prompt { .. }
-            | NodeKind::Condition { .. }
-            | NodeKind::HumanReview { .. }
-            | NodeKind::Wait { .. }
-            | NodeKind::Finish { .. } => {}
-            NodeKind::AgentTask { .. } | NodeKind::Script { .. } => {
-                set.insert(Effect::FsRead);
-                set.insert(Effect::FsWrite);
-                set.insert(Effect::Network);
-                set.insert(Effect::External);
-            }
+        if n.kind.takes_workdir_lock() {
+            set.insert(Effect::FsRead);
+            set.insert(Effect::FsWrite);
+            set.insert(Effect::Network);
+            set.insert(Effect::External);
         }
     }
     set

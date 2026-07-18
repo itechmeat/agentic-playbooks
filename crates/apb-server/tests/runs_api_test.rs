@@ -241,6 +241,13 @@ async fn run_detail_has_statuses_and_events() {
     assert_eq!(json["progress"]["percent"], 100);
     assert_eq!(json["model"]["nodes"][0]["type"], "start");
     assert!(json["events"].as_array().unwrap().len() >= 3);
+    // Detail progress now comes from the child-credit-aware
+    // `progress::from_run_dir` (review R1-I5), not the plain `compute` fold.
+    // A full child-credit fixture is out of scope here; assert shape only.
+    assert!(json["progress"]["percent"].is_number());
+    // review R1-I6: detail carries a `children` array (empty for a run with
+    // no `agent_task`/`playbook` sub-runs), mirroring MCP `run_status`.
+    assert_eq!(json["children"], serde_json::json!([]));
 }
 
 #[tokio::test]

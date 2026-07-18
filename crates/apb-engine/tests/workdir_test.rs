@@ -16,6 +16,9 @@ fn run_config_round_trips() {
         context_max_bytes: None,
         context_compact_model: None,
         overrides: None,
+        parent_run: None,
+        depth: 0,
+        expected_children: None,
     };
     write_run_config(dir.path(), &cfg).unwrap();
     let back = read_run_config(dir.path()).unwrap();

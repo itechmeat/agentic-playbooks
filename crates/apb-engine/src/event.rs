@@ -171,6 +171,16 @@ pub enum EventPayload {
         #[serde(default)]
         label: Option<String>,
     },
+    /// A sub-playbook node started a full child run (spec C). Written by drive
+    /// (via run_playbook_node) before it drives the child, so a resume can
+    /// reattach to a still-running child by its `run_id`. Fields default so old
+    /// logs read unchanged.
+    ChildRunStarted {
+        #[serde(default)]
+        node_id: String,
+        #[serde(default)]
+        run_id: String,
+    },
     /// Resume proceeded despite a change in the agent binary's fingerprint
     /// between start and resume (spec 3.6, `--allow-environment-drift`).
     /// Recorded in the log rather than swallowed silently.

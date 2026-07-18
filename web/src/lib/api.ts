@@ -150,6 +150,16 @@ export const fetchPlaybooks = () => getJson<PlaybookSummary[]>('/api/playbooks')
 export const fetchPlaybook = (id: string, workspace = '', version?: string) =>
   getJson<PlaybookDetail>(`${pb(id)}${qs({ workspace, version })}`)
 
+export const fetchInputDraft = (id: string, workspace = '') =>
+  getJson<{ instruction: string | null }>(`${pb(id)}/input-draft${qs({ workspace })}`)
+
+export const saveInputDraft = (id: string, instruction: string, workspace = '') =>
+  requestJson<{ instruction: string | null }>(`${pb(id)}/input-draft${qs({ workspace })}`, {
+    method: 'PUT',
+    headers: jsonHeaders,
+    body: JSON.stringify({ instruction }),
+  })
+
 export const fetchRuns = () => getJson<RunSummary[]>('/api/runs')
 export const fetchRun = (id: string, workspace = '') =>
   getJson<RunDetail>(`${run(id)}${qs({ workspace })}`)
