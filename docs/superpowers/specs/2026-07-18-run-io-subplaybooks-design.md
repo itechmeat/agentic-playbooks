@@ -1,7 +1,7 @@
 # Run input, finish answer, and sub-playbooks - design
 
 Date: 2026-07-18
-Status: approved, awaiting implementation
+Status: implemented, in review
 
 ## Goal
 
@@ -269,6 +269,20 @@ New node kind, schema 2 additive:
   retry-new-child, resume-reattach, abort-propagation); output mapping test
   (child answer -> node output); progress enrichment test; V22 test; runs
   list parent/child grouping test.
+
+## Known limitations (accepted at review, tracked for follow-up)
+
+- Cross-workspace `execute_plan` runs carry no child pins: the plan token
+  holds only the parent digest and profile bundles, so per-child bundle-trust
+  acknowledgment and child drift-pinning apply only to the local
+  `playbook_run` path. The whole-tree effects union still reaches the consent
+  surface via preflight, and the parent digest stays trust-gated.
+- Automated tests cover the child success path, permit/cycle/effects
+  policy, and progress credit; the reattach-on-resume and abort-propagation
+  paths are implemented and review-verified but not yet exercised by tests.
+- `run_report` progress uses the pure fold (no child credit) while
+  `run_status` uses the enriched read; a running child shows slightly lower
+  percent in reports than in status.
 
 ## Compatibility notes
 
