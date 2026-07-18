@@ -1,7 +1,7 @@
 use apb_core::schema::Playbook;
 use apb_core::validate::{Severity, ValidationContext, validate};
 
-const VALID: &str = include_str!("fixtures/valid.yaml");
+const VALID: &str = include_str!("../fixtures/valid.yaml");
 
 fn ctx() -> ValidationContext {
     ValidationContext {

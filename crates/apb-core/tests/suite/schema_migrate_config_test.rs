@@ -4,17 +4,13 @@
 
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use apb_core::registry::init_project;
 use apb_core::schema_migrate::{apply, plan};
 
 // Both tests mutate the process-global APB_CONFIG_DIR; serialize them so cargo
 // doesn't run them concurrently in the same process.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::common::env_lock as lock;
 
 fn seed_playbook(root: &Path, id: &str, body: &str) {
     let dir = root.join(".apb/playbooks").join(id).join("1.0.0");

@@ -8,7 +8,7 @@ use apb_core::versioning::{
     read_provenance, should_promote,
 };
 
-const VALID: &str = include_str!("fixtures/valid.yaml");
+const VALID: &str = include_str!("../fixtures/valid.yaml");
 
 fn seed(root: &Path) {
     init_project(root).unwrap();

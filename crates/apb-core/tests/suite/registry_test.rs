@@ -2,7 +2,7 @@ use apb_core::registry::{Registry, RegistryError, init_project};
 use std::fs;
 use std::path::Path;
 
-const VALID: &str = include_str!("fixtures/valid.yaml");
+const VALID: &str = include_str!("../fixtures/valid.yaml");
 
 fn seed(root: &Path) {
     init_project(root).unwrap();

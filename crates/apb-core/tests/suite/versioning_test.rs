@@ -8,7 +8,7 @@ use apb_core::versioning::{
     version_diff,
 };
 
-const VALID: &str = include_str!("fixtures/valid.yaml");
+const VALID: &str = include_str!("../fixtures/valid.yaml");
 
 fn seed(root: &Path) {
     init_project(root).unwrap();

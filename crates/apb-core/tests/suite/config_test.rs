@@ -1,5 +1,7 @@
 use apb_core::config::{GlobalConfig, program_in_path};
 
+use crate::common::env_lock;
+
 // program_in_path via a direct path (doesn't touch the PATH env, so it's safe
 // as a standalone #[test]): on Unix a regular file without the exec bit does
 // not count as a program, while one with the bit set does.
@@ -34,9 +36,13 @@ fn program_in_path_checks_executable_bit() {
 
 // Loading the global config via APB_CONFIG_DIR. All phases run sequentially
 // in one test: env var changes are process-global, so this can't be split
-// into parallel #[test]s (it would race over APB_CONFIG_DIR).
+// into parallel #[test]s (it would race over APB_CONFIG_DIR). This test
+// previously ran unguarded (safe only because it had its own test binary);
+// now that it shares a process with every other module in this crate's
+// integration binary, it must take the shared lock too.
 #[test]
 fn global_config_load_paths() {
+    let _l = env_lock();
     let dir = tempfile::tempdir().unwrap();
     unsafe {
         std::env::set_var("APB_CONFIG_DIR", dir.path());

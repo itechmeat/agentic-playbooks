@@ -1,15 +1,9 @@
 //! The models table overlay and the onboarding-state roundtrip. The env is
 //! global - guarded by a shared Mutex, with APB_CONFIG_DIR set for the test's duration.
 
-use std::sync::{Mutex, MutexGuard};
-
 use apb_core::models_table::{self, Coverage, OnboardingState};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::common::env_lock as lock;
 
 fn with_cfg(dir: &std::path::Path) {
     unsafe {
@@ -17,9 +11,26 @@ fn with_cfg(dir: &std::path::Path) {
     }
 }
 
+// Restores APB_CONFIG_DIR on drop (including on panic/early-return, unlike a
+// plain statement at the end of the test body). Formerly this crate's
+// models-table tests ran in their own process (one file = one binary), so
+// leaving APB_CONFIG_DIR pointed at a (by-then-dropped) tempdir at test end
+// was harmless - the process exited right after. Now that this module shares
+// a process with every other module in the consolidated integration binary,
+// an unrestored APB_CONFIG_DIR would leak into whichever test runs next.
+struct EnvGuard;
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("APB_CONFIG_DIR");
+        }
+    }
+}
+
 #[test]
 fn overlay_adds_model_overrides_price_and_brings_subscriptions() {
     let _l = lock();
+    let _g = EnvGuard;
     let cfg = tempfile::tempdir().unwrap();
     with_cfg(cfg.path());
     std::fs::write(
@@ -60,6 +71,7 @@ fn overlay_adds_model_overrides_price_and_brings_subscriptions() {
 #[test]
 fn overlay_null_clears_nullable_builtin_field() {
     let _l = lock();
+    let _g = EnvGuard;
     let cfg = tempfile::tempdir().unwrap();
     with_cfg(cfg.path());
     // An explicit `null` clears a builtin value to unknown (different from "the
@@ -83,6 +95,7 @@ fn overlay_null_clears_nullable_builtin_field() {
 #[test]
 fn overlay_creates_new_row_field_wise() {
     let _l = lock();
+    let _g = EnvGuard;
     let cfg = tempfile::tempdir().unwrap();
     with_cfg(cfg.path());
     // The patch creates a new model, setting only some fields: the rest fall
@@ -112,6 +125,7 @@ fn overlay_creates_new_row_field_wise() {
 #[test]
 fn no_overlay_returns_builtin_without_subscriptions() {
     let _l = lock();
+    let _g = EnvGuard;
     let cfg = tempfile::tempdir().unwrap();
     with_cfg(cfg.path());
     let t = models_table::load_merged().unwrap();
@@ -122,6 +136,7 @@ fn no_overlay_returns_builtin_without_subscriptions() {
 #[test]
 fn corrupt_overlay_yields_error_not_builtin() {
     let _l = lock();
+    let _g = EnvGuard;
     let cfg = tempfile::tempdir().unwrap();
     with_cfg(cfg.path());
     // A present but malformed overlay must not silently fall back to builtin.
@@ -140,6 +155,7 @@ fn corrupt_overlay_yields_error_not_builtin() {
 #[test]
 fn corrupt_onboarding_state_yields_error() {
     let _l = lock();
+    let _g = EnvGuard;
     let cfg = tempfile::tempdir().unwrap();
     with_cfg(cfg.path());
     let state_dir = cfg.path().join("state");
@@ -154,6 +170,7 @@ fn corrupt_onboarding_state_yields_error() {
 #[test]
 fn onboarding_roundtrip_and_declined() {
     let _l = lock();
+    let _g = EnvGuard;
     let cfg = tempfile::tempdir().unwrap();
     with_cfg(cfg.path());
     assert_eq!(

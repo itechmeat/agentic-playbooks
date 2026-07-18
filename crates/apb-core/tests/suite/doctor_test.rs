@@ -4,6 +4,8 @@ use std::path::Path;
 use apb_core::doctor::{CheckStatus, diagnose};
 use apb_core::registry::init_project;
 
+use crate::common::env_lock;
+
 fn seed_playbook(root: &Path, id: &str, body: &str) {
     let dir = root.join(format!(".apb/playbooks/{id}/1.0.0"));
     fs::create_dir_all(&dir).unwrap();
@@ -163,13 +165,6 @@ fn doctor_reports_clean_then_flags_invalid_playbook() {
     unsafe {
         std::env::remove_var("APB_CONFIG_DIR");
     }
-}
-
-// The env is global - serialize tests that modify PATH/APB_CONFIG_DIR.
-use std::sync::{Mutex, MutexGuard};
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-fn env_lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
 }
 
 #[cfg(unix)]

@@ -1,6 +1,5 @@
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use apb_core::profile::{ProfileScope, QualifiedProfileRef, SkillRef};
 use apb_core::profile_store::{PlaybookOrigin, ProfileError, compute_bundle, resolve_profile};
@@ -8,10 +7,7 @@ use apb_core::skills::{ensure_claude_bridge, resolve_skill};
 
 // Env mutations (HOME, APB_CONFIG_DIR) are serialized: integration tests run
 // in parallel within the same process.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::common::env_lock as lock;
 
 struct EnvGuard;
 impl Drop for EnvGuard {

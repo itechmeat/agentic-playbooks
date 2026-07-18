@@ -1,7 +1,7 @@
 use apb_core::migration::{MigrationError, validate_migration};
 use apb_core::schema::Playbook;
 
-const VALID: &str = include_str!("fixtures/valid.yaml");
+const VALID: &str = include_str!("../fixtures/valid.yaml");
 
 fn playbook() -> Playbook {
     Playbook::from_yaml(VALID).unwrap()

@@ -1,18 +1,15 @@
 //! Detection tests using stub scripts. The env is global - all tests share one
 //! Mutex; PATH/HOME/APB_CONFIG_DIR are set for the duration of the test.
-
-#![cfg(unix)]
+//!
+//! Unix-only: the outer `#[cfg(unix)]` now lives on this module's `mod` line
+//! in `../main.rs` (this file's former inner `#![cfg(unix)]` attribute is not
+//! valid on a file included via `#[path]` as a non-root module).
 
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use apb_core::detect::{self, AgentCategory, Authority};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::common::env_lock as lock;
 
 /// Writes an executable sh script `name` into `dir`; each invocation appends
 /// its arguments to `counter` (to count the number of spawns).
@@ -41,6 +38,38 @@ struct Env {
     home: std::path::PathBuf,
     cfg: std::path::PathBuf,
     counter: std::path::PathBuf,
+    orig_path: Option<std::ffi::OsString>,
+    orig_home: Option<std::ffi::OsString>,
+    orig_cfg: Option<std::ffi::OsString>,
+    orig_cwd: std::path::PathBuf,
+}
+
+// Restores PATH/HOME/APB_CONFIG_DIR/CWD to their pre-test values. Formerly
+// this crate's detect tests ran in their own process (one file = one
+// binary), so leaving these process-global settings mutated at test end was
+// harmless - the process exited right after. Now that this module shares a
+// process with every other module in the consolidated integration binary,
+// an unrestored PATH/HOME/APB_CONFIG_DIR/CWD leaks into whichever test runs
+// next and can make unrelated checks fail nondeterministically (e.g. a
+// doctor_test check that expects the real PATH to still contain `sh`).
+impl Drop for Env {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.orig_path {
+                Some(v) => std::env::set_var("PATH", v),
+                None => std::env::remove_var("PATH"),
+            }
+            match &self.orig_home {
+                Some(v) => std::env::set_var("HOME", v),
+                None => std::env::remove_var("HOME"),
+            }
+            match &self.orig_cfg {
+                Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
+                None => std::env::remove_var("APB_CONFIG_DIR"),
+            }
+        }
+        let _ = std::env::set_current_dir(&self.orig_cwd);
+    }
 }
 
 /// Prepares a hermetic environment: an empty bin in PATH, fresh HOME and APB_CONFIG_DIR.
@@ -49,6 +78,10 @@ fn setup() -> Env {
     let home = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
     let counter = bin.path().join("_calls");
+    let orig_path = std::env::var_os("PATH");
+    let orig_home = std::env::var_os("HOME");
+    let orig_cfg = std::env::var_os("APB_CONFIG_DIR");
+    let orig_cwd = std::env::current_dir().unwrap();
     unsafe {
         std::env::set_var("PATH", bin.path());
         std::env::set_var("HOME", home.path());
@@ -59,6 +92,10 @@ fn setup() -> Env {
         home: home.path().to_path_buf(),
         cfg: cfg.path().to_path_buf(),
         counter,
+        orig_path,
+        orig_home,
+        orig_cfg,
+        orig_cwd,
         _bin: bin,
         _home: home,
         _cfg: cfg,
