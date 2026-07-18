@@ -6,6 +6,23 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
 
+/// Anti-TOCTOU pin of one sub-playbook child, verified in the parent's policy
+/// gate and handed to the engine verbatim (spec C). The engine starts the child
+/// against this pinned version and rejects any digest/bundle drift. `children`
+/// recursively pins the child's own sub-playbook nodes, keyed by the child's
+/// node id.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ChildExpectation {
+    pub id: String,
+    pub scope: String,
+    pub version: String,
+    pub playbook_digest: String,
+    #[serde(default)]
+    pub profile_bundles: BTreeMap<String, String>,
+    #[serde(default)]
+    pub children: BTreeMap<String, ChildExpectation>,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
     #[serde(default)]

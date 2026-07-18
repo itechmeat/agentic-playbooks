@@ -6,11 +6,13 @@
 use std::path::Path;
 
 use apb_core::config::program_in_path;
+use apb_core::profile::ProfileScope;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::Registry;
 use apb_core::schema::{Effect, NodeKind, Playbook};
 use apb_core::scope::{Origin, PlaybookRef, digest_str};
 use apb_core::trust::{Lifecycle, TrustStore, read_lifecycle};
+use apb_engine::run_config::ChildExpectation;
 use serde_json::{Value, json};
 
 /// String name of an effect, for plans/catalog.
@@ -70,6 +72,14 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
 pub struct RunPermit {
     pub playbook_digest: String,
     pub profile_bundles: std::collections::BTreeMap<String, String>,
+    /// Verified sub-playbook pins, keyed by THIS playbook's playbook-node id
+    /// (spec C). The engine receives it verbatim and rejects drift.
+    pub children: std::collections::BTreeMap<String, ChildExpectation>,
+    /// The set of effects the user consents to for this run: the union of the
+    /// parent's effective effects and every pinned child's effective effects
+    /// (recursively). Same string names and shape as `Preflight::effects`; this
+    /// is the gate-output effects channel for a direct in-project run.
+    pub effects: Vec<String>,
 }
 
 /// Checks whether a run is permitted. `Ok(RunPermit)` - the run may proceed (digest +
@@ -149,15 +159,179 @@ pub fn check_run(
         supervised,
     )?;
 
+    // Sub-playbook pins (spec C): walk the reference tree in the same gate pass,
+    // detect cycles, trust-check each child's bundles alongside the parent's, and
+    // accumulate the effects the user consents to (parent UNION every pinned
+    // child, recursively). Seed the effects set and the cycle path with the
+    // parent itself so a child that points back at the parent is a cycle.
+    let mut effects: std::collections::BTreeSet<Effect> =
+        apb_core::effects::effective(&loaded.playbook);
+    let parent_scope = if matches!(wref.origin, Origin::Global) {
+        "global"
+    } else {
+        "project"
+    };
+    let mut cpath: Vec<(String, String)> = vec![(parent_scope.to_string(), wref.id.clone())];
+    let mut child_untrusted: Vec<String> = Vec::new();
+    let children = collect_children(
+        root,
+        &loaded.playbook,
+        &wref.origin,
+        acknowledge_untrusted,
+        &mut cpath,
+        &mut child_untrusted,
+        &mut effects,
+    )?;
+    if !child_untrusted.is_empty() {
+        return Err(json!({
+            "policy": "untrusted_profile_requires_acknowledge",
+            "profiles": child_untrusted,
+            "detail": "a sub-playbook binds an untrusted profile bundle; run again with acknowledge_untrusted: true after user confirmation",
+        }));
+    }
+
     // Applicability preflight (spec 5.2), in the execution root (current project).
     if let Some(req) = &loaded.playbook.requires {
         check_requires(root, req, &wref.id)?;
     }
 
+    let effects: Vec<String> = effects.iter().map(|e| effect_str(e).to_string()).collect();
     Ok(RunPermit {
         playbook_digest: digest,
         profile_bundles,
+        children,
+        effects,
     })
+}
+
+/// Recursively collects and verifies the sub-playbook pins of `playbook`.
+/// `origin` is where THIS playbook's definition came from (drives `scope: auto`
+/// resolution of its children: parent origin first, then global, mirroring
+/// profile scope resolution). `path` holds the `(scope, id)` pairs on the
+/// current branch for cycle detection; a repeated pair is a cycle. On an
+/// untrusted child bundle the key is pushed to `untrusted` (the caller turns a
+/// non-empty list into the standard refusal). `effects` accumulates the union of
+/// every pinned child's effective effects. Returns the node-id -> ChildExpectation
+/// map for `playbook`.
+#[allow(clippy::too_many_arguments)]
+fn collect_children(
+    root: &Path,
+    playbook: &Playbook,
+    origin: &Origin,
+    acknowledge_untrusted: bool,
+    path: &mut Vec<(String, String)>,
+    untrusted: &mut Vec<String>,
+    effects: &mut std::collections::BTreeSet<Effect>,
+) -> Result<std::collections::BTreeMap<String, ChildExpectation>, Value> {
+    let mut out = std::collections::BTreeMap::new();
+    for n in &playbook.nodes {
+        let NodeKind::Playbook { playbook: pref, .. } = &n.kind else {
+            continue;
+        };
+        // Scope resolution: an explicit scope pins the origin; `auto` prefers the
+        // parent's origin, then global (mirrors profile scope: auto ordering).
+        let candidates: Vec<Origin> = match pref.scope {
+            ProfileScope::Global => vec![Origin::Global],
+            ProfileScope::Project => vec![Origin::Project { workspace_id: None }],
+            ProfileScope::Auto => match origin {
+                Origin::Global => vec![Origin::Global],
+                Origin::Project { .. } => {
+                    vec![Origin::Project { workspace_id: None }, Origin::Global]
+                }
+            },
+        };
+        // First candidate scope in which the child resolves wins.
+        let mut resolved_opt = None;
+        for cand in &candidates {
+            let cref = PlaybookRef {
+                origin: cand.clone(),
+                id: pref.id.clone(),
+                version: None,
+            };
+            if let Ok(r) = apb_core::store::resolve(root, &cref) {
+                resolved_opt = Some((cand.clone(), r));
+                break;
+            }
+        }
+        let Some((child_origin, resolved)) = resolved_opt else {
+            return Err(json!({
+                "policy": "not_found",
+                "detail": format!(
+                    "sub-playbook `{}` (node `{}`) did not resolve in any candidate scope",
+                    pref.id, n.id
+                ),
+            }));
+        };
+        let scope_str = if matches!(child_origin, Origin::Global) {
+            "global"
+        } else {
+            "project"
+        };
+        let pair = (scope_str.to_string(), resolved.id.clone());
+        if path.contains(&pair) {
+            let mut cycle: Vec<String> = path.iter().map(|(s, i)| format!("{s}/{i}")).collect();
+            cycle.push(format!("{scope_str}/{}", resolved.id));
+            return Err(json!({ "policy": "sub_playbook_cycle", "cycle": cycle }));
+        }
+        // Load the child definition to walk its own children + collect bundles.
+        let reg = Registry::open_dir(&resolved.definition_parent)
+            .map_err(|e| json!({ "policy": "not_found", "detail": e.to_string() }))?;
+        let loaded = reg
+            .load(&resolved.id, Some(&resolved.version))
+            .map_err(|e| json!({ "policy": "not_found", "detail": e.to_string() }))?;
+        // Fold this child's effective effects into the consented union.
+        effects.extend(apb_core::effects::effective(&loaded.playbook));
+        let worigin = if matches!(child_origin, Origin::Global) {
+            PlaybookOrigin::Global
+        } else {
+            PlaybookOrigin::Project
+        };
+        // Child profile bundles (nodes + finish-with-prompt), trust-checked.
+        let mut bundles = std::collections::BTreeMap::new();
+        let store = TrustStore::load();
+        for r in collect_profile_refs(&loaded.playbook, false) {
+            match profile_store::compute_bundle(root, worigin, &r) {
+                Ok((lp, _pairs, bundle)) => {
+                    let key = format!("{}/{}", profile_store::scope_str(lp.scope), lp.name);
+                    if !acknowledge_untrusted
+                        && !store.is_approved(&bundle)
+                        && !untrusted.contains(&key)
+                    {
+                        untrusted.push(key.clone());
+                    }
+                    bundles.insert(key, bundle);
+                }
+                Err(e) => {
+                    return Err(json!({ "policy": "profile_unresolved", "detail": e.to_string() }));
+                }
+            }
+        }
+        // Recurse into the child's own sub-playbook nodes on the current branch.
+        path.push(pair);
+        let grand = collect_children(
+            root,
+            &loaded.playbook,
+            &child_origin,
+            acknowledge_untrusted,
+            path,
+            untrusted,
+            effects,
+        )?;
+        path.pop();
+
+        out.insert(
+            n.id.clone(),
+            ChildExpectation {
+                id: resolved.id.clone(),
+                scope: scope_str.to_string(),
+                version: resolved.version.clone(),
+                playbook_digest: resolved.digest.clone(),
+                profile_bundles: bundles,
+                children: grand,
+            },
+        );
+    }
+    Ok(out)
 }
 
 /// Checks trust for the bundle of every profile the playbook references
