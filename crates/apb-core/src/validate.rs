@@ -59,6 +59,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     let mut r = ValidationReport::default();
     check_unique_ids(playbook, &mut r); // V01, V02
     check_expected_duration(playbook, &mut r); // V19, V20
+    check_finish(playbook, &mut r); // V21
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     if r.is_valid() {
@@ -155,7 +156,15 @@ fn check_expected_duration(playbook: &Playbook, r: &mut ValidationReport) {
                     ),
                 );
             }
-            None if matches!(n.kind, NodeKind::AgentTask { .. } | NodeKind::Script { .. }) => {
+            None if matches!(n.kind, NodeKind::AgentTask { .. } | NodeKind::Script { .. })
+                || matches!(
+                    n.kind,
+                    NodeKind::Finish {
+                        prompt: Some(_),
+                        ..
+                    }
+                ) =>
+            {
                 r.warn(
                     "V19",
                     Some(&n.id),
@@ -167,6 +176,29 @@ fn check_expected_duration(playbook: &Playbook, r: &mut ValidationReport) {
                 );
             }
             _ => {}
+        }
+    }
+}
+
+/// V21 (error): a finish node that binds a `profile` but has no `prompt`. A
+/// profile without a prompt can never execute (a finish without a prompt is
+/// instant and free), so it is an authoring mistake.
+fn check_finish(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        if let NodeKind::Finish {
+            prompt: None,
+            profile: Some(_),
+            ..
+        } = &n.kind
+        {
+            r.error(
+                "V21",
+                Some(&n.id),
+                format!(
+                    "finish node `{}` binds a profile but has no prompt; a profile without a prompt can never execute",
+                    n.id
+                ),
+            );
         }
     }
 }

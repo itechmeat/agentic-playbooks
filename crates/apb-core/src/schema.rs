@@ -107,10 +107,13 @@ impl Node {
         {
             return s;
         }
-        match self.kind {
+        match &self.kind {
             NodeKind::AgentTask { .. } | NodeKind::Script { .. } => {
                 crate::duration::DEFAULT_TASK_SECONDS
             }
+            NodeKind::Finish {
+                prompt: Some(_), ..
+            } => crate::duration::DEFAULT_TASK_SECONDS,
             _ => 0,
         }
     }
@@ -357,6 +360,24 @@ edges: []
         assert_eq!(pb.node("b").unwrap().expected_seconds(), 300);
         assert_eq!(pb.node("c").unwrap().expected_seconds(), 90);
         assert_eq!(pb.node("p1").unwrap().expected_seconds(), 0);
+    }
+
+    #[test]
+    fn finish_with_prompt_defaults_to_task_seconds() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: f1, type: finish, outcome: success }
+  - { id: f2, type: finish, outcome: success, prompt: "x" }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        assert_eq!(pb.node("f1").unwrap().expected_seconds(), 0);
+        assert_eq!(pb.node("f2").unwrap().expected_seconds(), 120);
     }
 
     #[test]

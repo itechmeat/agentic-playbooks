@@ -101,6 +101,54 @@ fn boolean_expected_duration_is_v20() {
 }
 
 #[test]
+fn v21_errors_on_finish_profile_without_prompt() {
+    let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: f, type: finish, outcome: success, profile: writer }
+edges:
+  - { from: s, to: f }
+"#;
+    let pb = Playbook::from_yaml(yaml).unwrap();
+    let r = validate(&pb, &ValidationContext::default());
+    assert!(!r.is_valid());
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.code == "V21" && i.node.as_deref() == Some("f"))
+    );
+}
+
+#[test]
+fn v19_warns_on_finish_with_prompt_without_estimate() {
+    let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: f, type: finish, outcome: success, prompt: "compose" }
+edges:
+  - { from: s, to: f }
+"#;
+    let pb = Playbook::from_yaml(yaml).unwrap();
+    let r = validate(&pb, &ValidationContext::default());
+    assert!(r.is_valid(), "V19 is a warning");
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.code == "V19" && i.node.as_deref() == Some("f"))
+    );
+}
+
+#[test]
 fn invalid_expected_duration_serialize_round_trips_the_raw_value() {
     // The Invalid variant keeps the author's raw scalar verbatim, so
     // re-serializing the parsed playbook preserves it (e.g. `1.5`).
