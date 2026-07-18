@@ -1,8 +1,8 @@
 //! /api/profiles: the list of profiles with trust status and creation via
-//! POST. The only test in this binary (its own cargo process), so the env
-//! (APB_CONFIG_DIR/HOME) is set without a Mutex - there is no race with
-//! other tests. POST auto-approves the bundle in the TrustStore, so we
-//! isolate the config into a temp directory.
+//! POST. Mutates process-wide env (APB_CONFIG_DIR/HOME), so it takes
+//! `common::env_lock()` to serialize against other env-mutating tests in
+//! this consolidated binary (see `crate::common`). POST auto-approves the
+//! bundle in the TrustStore, so we isolate the config into a temp directory.
 
 use apb_server::{AppState, build_router};
 use axum::body::Body;
@@ -41,6 +41,7 @@ async fn post_json(
 
 #[tokio::test]
 async fn profiles_list_then_create_then_trusted() {
+    let _guard = crate::common::env_lock().await;
     let proj = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();

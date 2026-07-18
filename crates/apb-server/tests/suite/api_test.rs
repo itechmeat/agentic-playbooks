@@ -5,7 +5,7 @@ use http_body_util::BodyExt;
 use std::fs;
 use tower::ServiceExt;
 
-const VALID: &str = include_str!("../../apb-core/tests/fixtures/valid.yaml");
+const VALID: &str = include_str!("../../../apb-core/tests/fixtures/valid.yaml");
 
 fn seed() -> tempfile::TempDir {
     let dir = tempfile::tempdir().unwrap();

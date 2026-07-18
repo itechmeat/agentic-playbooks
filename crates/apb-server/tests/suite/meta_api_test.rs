@@ -1,7 +1,8 @@
 //! /api/agents, /api/models, /api/skills - the read endpoints that feed the
-//! profile form's agent/model combobox and skills toggle list. Own cargo
-//! process, so env (APB_CONFIG_DIR / HOME / probe timeout) is set without a
-//! Mutex.
+//! profile form's agent/model combobox and skills toggle list. Mutates
+//! process-wide env (APB_CONFIG_DIR / HOME / probe timeout), so it takes
+//! `common::env_lock()` to serialize against other env-mutating tests in
+//! this consolidated binary (see `crate::common`).
 
 use apb_server::{AppState, build_router};
 use axum::body::Body;
@@ -22,6 +23,7 @@ async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Valu
 
 #[tokio::test]
 async fn agents_models_and_skills_endpoints() {
+    let _guard = crate::common::env_lock().await;
     let proj = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
