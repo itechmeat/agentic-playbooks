@@ -186,6 +186,51 @@ impl Registry {
         Ok(fs::read_to_string(p)?.trim().to_string())
     }
 
+    fn meta_dir(&self, id: &str) -> PathBuf {
+        self.playbooks_dir().join(id).join("meta")
+    }
+
+    /// Reads the run "input prompt" draft for a playbook (spec A). The draft is
+    /// plain text stored at `<base>/playbooks/<id>/meta/instruction-draft.md`,
+    /// a non-version sibling (the version listing excludes `layouts` and
+    /// `meta`), so it never collides with a version dir and is not part of any
+    /// digest. `Ok(None)` when no draft has been saved.
+    pub fn read_instruction_draft(&self, id: &str) -> Result<Option<String>, RegistryError> {
+        if !is_safe_segment(id) {
+            return Err(RegistryError::NotFound(id.into()));
+        }
+        let p = self.meta_dir(id).join("instruction-draft.md");
+        if !p.is_file() {
+            return Ok(None);
+        }
+        Ok(Some(fs::read_to_string(p)?))
+    }
+
+    /// Writes (or, for an empty `text`, clears) the run input draft. Atomic via
+    /// `fsutil::atomic_write`. Bypasses the definition-change path entirely: no
+    /// version bump, no digest change, no freeze interaction (a frozen playbook
+    /// still accepts draft edits - the draft is run input, not definition
+    /// content).
+    pub fn write_instruction_draft(&self, id: &str, text: &str) -> Result<(), RegistryError> {
+        if !is_safe_segment(id) {
+            return Err(RegistryError::NotFound(id.into()));
+        }
+        let pb_dir = self.playbooks_dir().join(id);
+        if !pb_dir.is_dir() {
+            return Err(RegistryError::NotFound(id.into()));
+        }
+        let p = self.meta_dir(id).join("instruction-draft.md");
+        if text.is_empty() {
+            if p.is_file() {
+                fs::remove_file(&p)?;
+            }
+            return Ok(());
+        }
+        fs::create_dir_all(self.meta_dir(id))?;
+        atomic_write(&p, text.as_bytes())?;
+        Ok(())
+    }
+
     pub fn load(&self, id: &str, version: Option<&str>) -> Result<LoadedPlaybook, RegistryError> {
         let base = self.playbooks_dir().join(id);
         if !base.is_dir() {
