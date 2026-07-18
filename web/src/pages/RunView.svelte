@@ -170,6 +170,15 @@
       </Card.Root>
     {/if}
 
+    {#if detail?.instruction}
+      <Card.Root>
+        <Card.Header><Card.Title class="text-sm">Run input</Card.Title></Card.Header>
+        <Card.Content>
+          <pre class="whitespace-pre-wrap break-words text-xs text-muted-foreground">{detail.instruction}</pre>
+        </Card.Content>
+      </Card.Root>
+    {/if}
+
     <Tabs.Root bind:value={tab} class="min-h-0 flex-1">
       <Tabs.List class="w-full">
         <Tabs.Trigger value="events">events</Tabs.Trigger>

@@ -2,6 +2,7 @@
   import { untrack } from 'svelte'
   import type { PlaybookNode } from './types'
   import { profileToField, fieldToProfile } from './profileref'
+  import { fetchInputDraft, saveInputDraft } from './api'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Textarea } from '$lib/components/ui/textarea'
@@ -11,12 +12,14 @@
   import Trash2 from '@lucide/svelte/icons/trash-2'
 
   let {
+    id,
     node,
     onChange,
     onDelete,
     revision = 0,
     workspace = '',
   }: {
+    id: string
     node: PlaybookNode
     onChange: (patch: Record<string, unknown>) => void
     onDelete: () => void
@@ -75,6 +78,41 @@
     })
   })
 
+  // Start-node "input prompt" run draft: a per-run seed the operator can edit
+  // before running, stored server-side outside the playbook YAML/version.
+  let draft = $state('')
+  let draftTimer: ReturnType<typeof setTimeout> | undefined
+  $effect(() => {
+    void node.id
+    if (node.type !== 'start') return
+    let cancelled = false
+    fetchInputDraft(id, workspace)
+      .then((r) => {
+        if (!cancelled) draft = r.instruction ?? ''
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+      // Cancel any pending debounced save from the previous node/props before
+      // re-running for a new node (or on destroy) - otherwise a stale timer
+      // fires after teardown or writes onto the wrong playbook (id/workspace
+      // have already moved on since PlaybookEdit is never remounted).
+      clearTimeout(draftTimer)
+      draftTimer = undefined
+    }
+  })
+  function onDraftInput(v: string) {
+    draft = v
+    clearTimeout(draftTimer)
+    // Capture id/workspace at schedule time so even if this timer somehow
+    // survived a node switch, it could not write to a different playbook.
+    const saveId = id
+    const saveWs = workspace
+    draftTimer = setTimeout(() => {
+      saveInputDraft(saveId, v, saveWs).catch(() => {})
+    }, 500)
+  }
+
   function str(v: unknown): string {
     return typeof v === 'string' ? v : v == null ? '' : String(v)
   }
@@ -125,6 +163,18 @@
       <Field.FieldLabel for="np-title">title</Field.FieldLabel>
       <Input id="np-title" value={f.title} oninput={(e) => setStr('title', e.currentTarget.value)} />
     </Field.Field>
+
+    {#if kind === 'start'}
+      <Field.Field>
+        <Field.FieldLabel for="np-input">input prompt (run draft, not versioned)</Field.FieldLabel>
+        <Textarea
+          id="np-input"
+          rows={4}
+          value={draft}
+          oninput={(e) => onDraftInput(e.currentTarget.value)}
+        />
+      </Field.Field>
+    {/if}
 
     {#if kind === 'agent_task'}
       <Field.Field>

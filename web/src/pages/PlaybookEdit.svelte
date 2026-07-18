@@ -337,6 +337,7 @@
         class="absolute right-2 top-2 z-[6] max-h-[calc(100%-1rem)] w-60 overflow-auto rounded-md border border-border bg-background p-3 shadow-md"
       >
         <NodePanel
+          {id}
           node={selectedNode as PlaybookNodeType}
           onChange={onNodePatch}
           onDelete={onDeleteNode}
