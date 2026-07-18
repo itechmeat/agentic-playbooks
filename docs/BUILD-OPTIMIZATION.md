@@ -91,13 +91,39 @@ rustflags = ["-C", "link-arg=-fuse-ld=mold"]
 Linking a hundred test binaries is where most wall-clock goes; mold cuts
 that several-fold. On macOS the system linker is already reasonable.
 
+### 8. One integration-test binary per crate
+
+Cargo compiles and links every file directly under `crates/<c>/tests/*.rs`
+as its own binary. Each fresh binary also pays a per-launch cost on macOS
+(security scan). So integration tests live as modules of a single binary
+per crate, never as loose `tests/*.rs` files:
+
+```rust
+// crates/<c>/tests/main.rs  (the only file directly under tests/)
+#[path = "suite/foo.rs"] mod foo;   // former tests/foo.rs, now tests/suite/foo.rs
+#[cfg(unix)]
+#[path = "suite/bar.rs"] mod bar;   // outer #[cfg], never a #![cfg] inside the module
+mod common;                          // shared helpers + the ONE env lock
+```
+
+Rules when adding or moving a test:
+- Put the file under `tests/suite/` and add one `mod` line to `tests/main.rs`.
+  Do not create a new `tests/*.rs` at the top level.
+- All modules share ONE process, so tests run as parallel threads across
+  modules. Every test that mutates process-global state (env vars via
+  `set_var`/`remove_var`, `set_current_dir`, PATH) must acquire the single
+  shared lock from `tests/suite/common` and restore the original value with
+  a `Drop` guard (so a panic cannot leak state into a sibling module). Do
+  not add a second per-file lock. Sync tests use `std::sync::Mutex`; async
+  tests holding the guard across `.await` use `tokio::sync::Mutex`.
+- `include_str!`/`include!` paths are relative to the source file: a file
+  under `tests/suite/` needs one extra `../` versus `tests/`.
+
 ## Future options (not adopted yet)
 
-- **cargo-nextest**: faster test execution and better reports, but it runs
-  each test in its own process. Engine tests currently serialize env-var
-  mutation through an in-process mutex (`ENV_LOCK`); migrating requires
-  nextest test groups before it is safe. Revisit if test wall-clock
-  becomes the bottleneck again.
-- **Consolidating integration test files**: merging the many per-file test
-  binaries into a few per crate (files become modules) removes most link
-  jobs permanently. Worth doing as a dedicated refactor, not piecemeal.
+- **cargo-nextest**: faster scheduling and better reports, but it runs each
+  test in its own process (one spawn per test). On a host where each binary
+  spawn is scanned, that trades the binary-count win above for a test-count
+  cost, so only adopt it alongside the macOS Developer Tools exemption.
+  It also cannot see the in-process `ENV_LOCK`, so env-mutating tests would
+  need nextest test groups first.
