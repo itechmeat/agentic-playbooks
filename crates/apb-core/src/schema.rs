@@ -262,6 +262,16 @@ pub enum NodeKind {
     },
     Finish {
         outcome: Outcome,
+        /// Optional finish prompt (spec B). When set, an agent composes the run
+        /// answer from the accumulated run context; the agent's output becomes
+        /// this node's output. Absent -> instant, free, empty output (unchanged).
+        #[serde(default)]
+        prompt: Option<String>,
+        /// Profile binding for the finish agent (spec B). Meaningful only with
+        /// `prompt`; falls back to `defaults.profile`. Validator V21 errors on a
+        /// profile without a prompt (a binding that can never execute).
+        #[serde(default)]
+        profile: Option<QualifiedProfileRef>,
     },
 }
 
@@ -347,5 +357,42 @@ edges: []
         assert_eq!(pb.node("b").unwrap().expected_seconds(), 300);
         assert_eq!(pb.node("c").unwrap().expected_seconds(), 90);
         assert_eq!(pb.node("p1").unwrap().expected_seconds(), 0);
+    }
+
+    #[test]
+    fn finish_parses_with_and_without_prompt_profile() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: f1, type: finish, outcome: success }
+  - { id: f2, type: finish, outcome: success, prompt: "compose", profile: writer }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let f1 = &pb.node("f1").unwrap().kind;
+        let f2 = &pb.node("f2").unwrap().kind;
+        assert!(matches!(
+            f1,
+            NodeKind::Finish {
+                prompt: None,
+                profile: None,
+                ..
+            }
+        ));
+        match f2 {
+            NodeKind::Finish {
+                prompt: Some(p),
+                profile: Some(pr),
+                ..
+            } => {
+                assert_eq!(p, "compose");
+                assert_eq!(pr.name, "writer");
+            }
+            _ => panic!("expected finish with prompt+profile"),
+        }
     }
 }

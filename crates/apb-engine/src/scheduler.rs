@@ -631,7 +631,7 @@ fn drive(
             .kind
             .clone();
 
-        if let NodeKind::Finish { outcome: o } = &node_kind {
+        if let NodeKind::Finish { outcome: o, .. } = &node_kind {
             let outcome = match o {
                 Outcome::Success => RunStatus::Succeeded,
                 Outcome::Failure => RunStatus::Failed,
