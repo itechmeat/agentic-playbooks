@@ -98,6 +98,7 @@ dependencies = [
 name = "apb-core"
 version = "0.1.0"
 dependencies = [
+ "percent-encoding",
  "serde",
  "serde_json",
  "serde_yaml_ng",

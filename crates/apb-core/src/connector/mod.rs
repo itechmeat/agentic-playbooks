@@ -4,5 +4,9 @@
 //! template rendering, account config, and the on-disk store are added by
 //! later tasks in sibling modules.
 
+pub mod common;
 pub mod def;
+pub mod template;
+pub use common::*;
 pub use def::*;
+pub use template::*;

@@ -3,30 +3,16 @@
 //!
 //! A connector links a playbook node to an external HTTP service through a
 //! declarative manifest: an auth block, the account fields the connector
-//! needs, and a set of callable functions (HTTP or mock). This module only
-//! parses and structurally validates that manifest; template placeholder
-//! validation (e.g. `{{secret.*}}` only allowed in `auth`) is added by
-//! `validate_templates` in a later task, once the template parser exists.
+//! needs, and a set of callable functions (HTTP or mock). Besides the
+//! structural checks below, `from_yaml` also runs `validate_templates`,
+//! which enforces the secret-placement policy over the template placeholders
+//! parsed by `super::template` (e.g. `{{secret.*}}` only allowed in `auth`).
 
 use std::collections::BTreeMap;
 
 use serde::{Deserialize, Serialize};
 
-/// Error parsing or looking up a connector definition. Mirrors
-/// `profile::ProfileError` in shape, but stays a separate type since
-/// connectors are a distinct concept with their own failure modes (no
-/// scope/case-fold concerns at this layer).
-#[derive(Debug, thiserror::Error)]
-pub enum ConnectorError {
-    #[error("invalid connector: {0}")]
-    Invalid(String),
-    #[error("connector `{0}` not found")]
-    NotFound(String),
-    #[error("io error: {0}")]
-    Io(#[from] std::io::Error),
-    #[error("yaml error: {0}")]
-    Yaml(String),
-}
+use super::common::{ConnectorError, validate_snake_name};
 
 /// How the connector authenticates outgoing requests. The tag `kind`
 /// selects the variant; each variant only accepts the fields it needs, so
@@ -74,31 +60,6 @@ pub struct MockSpec {
 
 fn default_timeout() -> u64 {
     30
-}
-
-/// Validates a machine-facing identifier (function name or account field
-/// name): `[a-z0-9][a-z0-9_]*`, at most 64 chars. Snake_case is for these
-/// API-style identifiers (matching template keys like
-/// `{{account.base_url}}`); folder-level connector names stay hyphen slugs
-/// via `crate::profile::validate_profile_name`.
-pub fn validate_snake_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("name is empty".into());
-    }
-    if name.len() > 64 {
-        return Err(format!("name `{name}` exceeds 64 chars"));
-    }
-    let mut chars = name.chars();
-    let first = chars.next().unwrap();
-    if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return Err(format!("name `{name}` must start with [a-z0-9]"));
-    }
-    for c in chars {
-        if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '_' {
-            return Err(format!("name `{name}` allows only [a-z0-9_]"));
-        }
-    }
-    Ok(())
 }
 
 /// One callable function of the connector: either an HTTP call (`method` +
@@ -249,6 +210,8 @@ impl ConnectorDoc {
             }
         }
 
+        validate_templates(&doc)?;
+
         Ok(doc)
     }
 
@@ -275,6 +238,165 @@ impl ConnectorDoc {
             .filter(|f| f.secret)
             .map(|f| f.name.clone())
             .collect()
+    }
+}
+
+/// The two `AccountField` names, split by secrecy: non-secret names that
+/// `{{account.*}}` placeholders may reference, and secret names that
+/// `{{secret.*}}` placeholders may reference.
+struct FieldNames<'a> {
+    account: std::collections::HashSet<&'a str>,
+    secret: std::collections::HashSet<&'a str>,
+}
+
+impl<'a> FieldNames<'a> {
+    fn from_fields(fields: &'a [AccountField]) -> Self {
+        let mut account = std::collections::HashSet::new();
+        let mut secret = std::collections::HashSet::new();
+        for field in fields {
+            if field.secret {
+                secret.insert(field.name.as_str());
+            } else {
+                account.insert(field.name.as_str());
+            }
+        }
+        FieldNames { account, secret }
+    }
+
+    /// Checks that an `Account` or `Secret` placeholder names a declared
+    /// account field of the matching secrecy. `Args` is always allowed here;
+    /// callers reject `Args` themselves where it is out of place (auth).
+    fn check(
+        &self,
+        ns: crate::connector::template::Namespace,
+        name: &str,
+    ) -> Result<(), ConnectorError> {
+        use crate::connector::template::Namespace;
+        match ns {
+            Namespace::Account => {
+                if !self.account.contains(name) {
+                    return Err(ConnectorError::Invalid(format!(
+                        "placeholder `{{{{account.{name}}}}}` names an unknown or secret account field"
+                    )));
+                }
+            }
+            Namespace::Secret => {
+                if !self.secret.contains(name) {
+                    return Err(ConnectorError::Invalid(format!(
+                        "placeholder `{{{{secret.{name}}}}}` names an unknown or non-secret account field"
+                    )));
+                }
+            }
+            Namespace::Args => {}
+        }
+        Ok(())
+    }
+}
+
+/// Validates every template placeholder in the connector against the
+/// secret-placement policy: `{{secret.*}}` is allowed only inside `auth`
+/// (any occurrence in a function's `url`, `query`, or `body` is rejected);
+/// `{{args.*}}` and bare `{{args}}` are not allowed inside `auth`; every
+/// `{{account.*}}` / `{{secret.*}}` placeholder must name a declared account
+/// field of the matching secrecy. Called at the end of `ConnectorDoc::from_yaml`.
+pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
+    use crate::connector::template::{Namespace, placeholders};
+
+    let fields = FieldNames::from_fields(&doc.account_fields);
+
+    for f in &doc.functions {
+        if let Some(url) = &f.url {
+            for (ns, name) in placeholders(url)? {
+                reject_secret(ns, &format!("function `{}` url", f.name))?;
+                fields.check(ns, &name)?;
+            }
+        }
+        for value in f.query.values() {
+            for (ns, name) in placeholders(value)? {
+                reject_secret(ns, &format!("function `{}` query", f.name))?;
+                fields.check(ns, &name)?;
+            }
+        }
+        if let Some(body) = &f.body {
+            validate_body_templates(body, &f.name, &fields)?;
+        }
+    }
+
+    if let Some(auth) = &doc.auth {
+        for template in auth_templates(auth) {
+            for (ns, name) in placeholders(template)? {
+                if ns == Namespace::Args {
+                    return Err(ConnectorError::Invalid(
+                        "args placeholders are not allowed in auth templates".to_string(),
+                    ));
+                }
+                fields.check(ns, &name)?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Errors if `ns` is `Secret`: secret placeholders are confined to `auth`, so
+/// any occurrence found while walking a function's `url`/`query`/`body` is a
+/// hard error naming where it was found.
+fn reject_secret(
+    ns: crate::connector::template::Namespace,
+    where_: &str,
+) -> Result<(), ConnectorError> {
+    if ns == crate::connector::template::Namespace::Secret {
+        return Err(ConnectorError::Invalid(format!(
+            "secret placeholders are allowed only in auth ({where_})"
+        )));
+    }
+    Ok(())
+}
+
+/// Walks a `body` JSON value, validating the placeholders in every string
+/// leaf (arrays and objects recurse; non-string scalars carry no
+/// placeholders).
+fn validate_body_templates(
+    value: &serde_json::Value,
+    function_name: &str,
+    fields: &FieldNames,
+) -> Result<(), ConnectorError> {
+    use crate::connector::template::placeholders;
+
+    match value {
+        serde_json::Value::String(s) => {
+            for (ns, name) in placeholders(s)? {
+                reject_secret(ns, &format!("function `{function_name}` body"))?;
+                fields.check(ns, &name)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                validate_body_templates(item, function_name, fields)?;
+            }
+            Ok(())
+        }
+        serde_json::Value::Object(map) => {
+            for v in map.values() {
+                validate_body_templates(v, function_name, fields)?;
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+/// The template strings carried by an `AuthSpec`, in a uniform list
+/// regardless of variant.
+fn auth_templates(auth: &AuthSpec) -> Vec<&str> {
+    match auth {
+        AuthSpec::Header { value_template, .. } => vec![value_template.as_str()],
+        AuthSpec::Query { value_template, .. } => vec![value_template.as_str()],
+        AuthSpec::Basic {
+            username_template,
+            password_template,
+        } => vec![username_template.as_str(), password_template.as_str()],
     }
 }
 
@@ -436,21 +558,5 @@ functions:
     fn auth_variants_reject_foreign_fields() {
         let y = "name: x\nversion: 0.1.0\nauth:\n  kind: header\n  header: Authorization\n  value_template: t\n  param: extra\nfunctions:\n  - name: f\n    description: a\n    method: GET\n    url: http://a\n";
         assert!(ConnectorDoc::from_yaml(y, "x").is_err());
-    }
-
-    #[test]
-    fn validate_snake_name_accepts_snake_case() {
-        assert!(validate_snake_name("list_issues").is_ok());
-        assert!(validate_snake_name("base_url").is_ok());
-        assert!(validate_snake_name("ping").is_ok());
-        assert!(validate_snake_name("a1_b2").is_ok());
-    }
-
-    #[test]
-    fn validate_snake_name_rejects_hyphen_and_uppercase() {
-        assert!(validate_snake_name("list-issues").is_err());
-        assert!(validate_snake_name("ListIssues").is_err());
-        assert!(validate_snake_name("").is_err());
-        assert!(validate_snake_name(&"a".repeat(65)).is_err());
     }
 }
