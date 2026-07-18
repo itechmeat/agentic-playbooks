@@ -642,6 +642,9 @@ pub fn playbook_run(
         overrides: None,
         expected_digest,
         expected_profile_bundles,
+        parent_run: None,
+        depth: 0,
+        expected_children: None,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -673,6 +676,9 @@ pub fn playbook_run_background(
         overrides: None,
         expected_digest,
         expected_profile_bundles,
+        parent_run: None,
+        depth: 0,
+        expected_children: None,
     };
     let run_id = run_background(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -826,6 +832,9 @@ pub fn playbook_run_supervised(
         overrides: None,
         expected_digest,
         expected_profile_bundles,
+        parent_run: None,
+        depth: 0,
+        expected_children: None,
     };
     let run_id = run_background(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

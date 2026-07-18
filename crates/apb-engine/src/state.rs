@@ -151,6 +151,9 @@ impl RunState {
                 EventPayload::EnvironmentDriftAccepted { .. } => {}
                 // Progress is an audit-only cycle report, it does not change state.
                 EventPayload::RunProgress { .. } => {}
+                // A child-run marker is an audit record; the node's own status
+                // events carry the run-state effect.
+                EventPayload::ChildRunStarted { .. } => {}
                 EventPayload::ReviewRequested { .. } => {}
                 EventPayload::ReviewDecided {
                     node,

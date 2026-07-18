@@ -81,7 +81,17 @@ pub struct RunOptions {
     /// skill/profile could have changed in between). The CLI path does not pass
     /// them and does not change the semantics.
     pub expected_profile_bundles: Option<BTreeMap<String, String>>,
+    /// Parent run id when this run is a sub-playbook child (spec C).
+    pub parent_run: Option<String>,
+    /// Sub-playbook nesting depth of THIS run (0 for a top-level run).
+    pub depth: usize,
+    /// Verified sub-playbook pins from the gate, keyed by playbook-node id.
+    pub expected_children: Option<BTreeMap<String, crate::run_config::ChildExpectation>>,
 }
+
+/// Defense-in-depth backstop for sub-playbook nesting (spec C). A child that
+/// would exceed this depth fails its parent node.
+pub const MAX_SUBPLAYBOOK_DEPTH: usize = 5;
 
 /// Counter for generating unique supervisor tokens within a single engine
 /// process (in addition to the timestamp in the token itself - in case of

@@ -199,6 +199,9 @@ pub(crate) fn run_cmd(
         overrides,
         expected_digest: None,
         expected_profile_bundles: None,
+        parent_run: None,
+        depth: 0,
+        expected_children: None,
     };
     match run(root, name, version, opts) {
         Ok(res) => {
@@ -344,6 +347,9 @@ pub(crate) fn drive_supervised_child(
         overrides: None,
         expected_digest: None,
         expected_profile_bundles: None,
+        parent_run: None,
+        depth: 0,
+        expected_children: None,
     };
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,

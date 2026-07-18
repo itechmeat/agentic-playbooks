@@ -355,6 +355,9 @@ pub(crate) fn prepare_run_target(
         context_max_bytes: opts.context_max_bytes,
         context_compact_model: opts.context_compact_model.clone(),
         overrides: opts.overrides.clone(),
+        parent_run: opts.parent_run.clone(),
+        depth: opts.depth,
+        expected_children: opts.expected_children.clone(),
     };
     write_run_config(&run_dir, &cfg)?;
 

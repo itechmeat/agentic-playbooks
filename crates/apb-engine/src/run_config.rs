@@ -48,6 +48,18 @@ pub struct RunConfig {
     /// creating a new version. None/empty - the playbook matches its version exactly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub overrides: Option<apb_core::overrides::RunOverrides>,
+    /// The parent run id, when this run is a Part C sub-playbook child.
+    #[serde(default)]
+    pub parent_run: Option<String>,
+    /// Sub-playbook nesting depth (spec C). A top-level run is 0; each child is
+    /// parent depth + 1. Enforced against `MAX_SUBPLAYBOOK_DEPTH`.
+    #[serde(default)]
+    pub depth: usize,
+    /// Verified sub-playbook pins from the policy gate, keyed by this run's
+    /// playbook-node id (spec C). `None` on the CLI path (no gate) -> children
+    /// resolve live without a drift check.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_children: Option<BTreeMap<String, ChildExpectation>>,
 }
 
 pub fn write_run_config(run_dir: &Path, cfg: &RunConfig) -> Result<(), EngineError> {
