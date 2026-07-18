@@ -35,7 +35,8 @@ pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
             | NodeKind::Script { .. }
             | NodeKind::Finish {
                 prompt: Some(_), ..
-            } => {
+            }
+            | NodeKind::Playbook { .. } => {
                 set.insert(Effect::FsRead);
                 set.insert(Effect::FsWrite);
                 set.insert(Effect::Network);

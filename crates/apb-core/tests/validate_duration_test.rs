@@ -149,6 +149,31 @@ edges:
 }
 
 #[test]
+fn v22_errors_on_empty_playbook_reference() {
+    let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: c, type: playbook, playbook: "" }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: c }
+  - { from: c, to: f }
+"#;
+    let pb = Playbook::from_yaml(yaml).unwrap();
+    let r = validate(&pb, &ValidationContext::default());
+    assert!(!r.is_valid());
+    assert!(
+        r.issues
+            .iter()
+            .any(|i| i.code == "V22" && i.node.as_deref() == Some("c"))
+    );
+}
+
+#[test]
 fn invalid_expected_duration_serialize_round_trips_the_raw_value() {
     // The Invalid variant keeps the author's raw scalar verbatim, so
     // re-serializing the parsed playbook preserves it (e.g. `1.5`).

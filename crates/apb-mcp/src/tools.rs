@@ -725,6 +725,7 @@ fn node_kind_label(kind: &apb_core::schema::NodeKind) -> &'static str {
         HumanReview { .. } => "human_review",
         Wait { .. } => "wait",
         Finish { .. } => "finish",
+        Playbook { .. } => "playbook",
     }
 }
 

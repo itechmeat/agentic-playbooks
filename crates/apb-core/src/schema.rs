@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use crate::profile::QualifiedProfileRef;
+use crate::profile::{ProfileScope, QualifiedProfileRef};
 
 #[derive(Debug, thiserror::Error)]
 pub enum SchemaError {
@@ -114,6 +114,7 @@ impl Node {
             NodeKind::Finish {
                 prompt: Some(_), ..
             } => crate::duration::DEFAULT_TASK_SECONDS,
+            NodeKind::Playbook { .. } => crate::duration::DEFAULT_TASK_SECONDS,
             _ => 0,
         }
     }
@@ -202,6 +203,42 @@ impl ExpectedDuration {
     }
 }
 
+/// A reference to a playbook (spec C): id + scope. Two YAML forms - a bare
+/// string (shorthand, `scope: auto`) or an object `{ id, scope }`. Always
+/// serialized as an object. Mirrors `QualifiedProfileRef` but keyed by `id`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct QualifiedPlaybookRef {
+    pub id: String,
+    pub scope: ProfileScope,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PlaybookRefFull {
+    id: String,
+    #[serde(default)]
+    scope: ProfileScope,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum PlaybookRefForm {
+    Short(String),
+    Full(PlaybookRefFull),
+}
+
+impl<'de> Deserialize<'de> for QualifiedPlaybookRef {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match PlaybookRefForm::deserialize(d)? {
+            PlaybookRefForm::Short(id) => Self {
+                id,
+                scope: ProfileScope::Auto,
+            },
+            PlaybookRefForm::Full(PlaybookRefFull { id, scope }) => Self { id, scope },
+        })
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Node {
     pub id: String,
@@ -275,6 +312,17 @@ pub enum NodeKind {
         /// profile without a prompt (a binding that can never execute).
         #[serde(default)]
         profile: Option<QualifiedProfileRef>,
+    },
+    Playbook {
+        /// The child playbook to run (spec C). `scope: auto` resolves the
+        /// parent's origin registry first, then global.
+        playbook: QualifiedPlaybookRef,
+        /// Template rendered with the parent run's context; the result becomes
+        /// the child run's `instruction` (Part A precedence: this explicit value
+        /// wins over the child's draft). Absent -> the child falls back to its
+        /// own draft.
+        #[serde(default)]
+        instruction: Option<String>,
     },
 }
 
@@ -378,6 +426,41 @@ edges: []
         let pb = Playbook::from_yaml(yaml).unwrap();
         assert_eq!(pb.node("f1").unwrap().expected_seconds(), 0);
         assert_eq!(pb.node("f2").unwrap().expected_seconds(), 120);
+    }
+
+    #[test]
+    fn playbook_node_parses_both_ref_forms() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: c1, type: playbook, playbook: child, instruction: "go" }
+  - { id: c2, type: playbook, playbook: { id: child, scope: global } }
+  - { id: f, type: finish, outcome: success }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        match &pb.node("c1").unwrap().kind {
+            NodeKind::Playbook {
+                playbook,
+                instruction,
+            } => {
+                assert_eq!(playbook.id, "child");
+                assert_eq!(playbook.scope, crate::profile::ProfileScope::Auto);
+                assert_eq!(instruction.as_deref(), Some("go"));
+            }
+            _ => panic!("c1 not a playbook node"),
+        }
+        match &pb.node("c2").unwrap().kind {
+            NodeKind::Playbook { playbook, .. } => {
+                assert_eq!(playbook.scope, crate::profile::ProfileScope::Global);
+            }
+            _ => panic!("c2 not a playbook node"),
+        }
+        assert_eq!(pb.node("c1").unwrap().expected_seconds(), 120);
     }
 
     #[test]

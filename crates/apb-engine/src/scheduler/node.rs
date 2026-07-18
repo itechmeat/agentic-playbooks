@@ -339,6 +339,9 @@ pub(crate) fn execute_node(
         NodeKind::Wait { .. } => Err(EngineError::Invalid(format!(
             "node `{node_id}` (wait) must be handled by drive"
         ))),
+        NodeKind::Playbook { .. } => Err(EngineError::Invalid(format!(
+            "node `{node_id}` (playbook) must be handled by drive"
+        ))),
     }
 }
 

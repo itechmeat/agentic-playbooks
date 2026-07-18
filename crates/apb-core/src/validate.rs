@@ -60,6 +60,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_unique_ids(playbook, &mut r); // V01, V02
     check_expected_duration(playbook, &mut r); // V19, V20
     check_finish(playbook, &mut r); // V21
+    check_playbook_ref(playbook, &mut r); // V22
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     if r.is_valid() {
@@ -163,7 +164,8 @@ fn check_expected_duration(playbook: &Playbook, r: &mut ValidationReport) {
                         prompt: Some(_),
                         ..
                     }
-                ) =>
+                )
+                || matches!(n.kind, NodeKind::Playbook { .. }) =>
             {
                 r.warn(
                     "V19",
@@ -196,6 +198,26 @@ fn check_finish(playbook: &Playbook, r: &mut ValidationReport) {
                 Some(&n.id),
                 format!(
                     "finish node `{}` binds a profile but has no prompt; a profile without a prompt can never execute",
+                    n.id
+                ),
+            );
+        }
+    }
+}
+
+/// V22 (error): a playbook node whose reference id is empty or not a safe path
+/// segment. Resolvability of the reference is a gate/adopt concern (the offline
+/// validator cannot see other playbooks).
+fn check_playbook_ref(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        if let NodeKind::Playbook { playbook: pref, .. } = &n.kind
+            && (pref.id.is_empty() || !crate::registry::is_safe_segment(&pref.id))
+        {
+            r.error(
+                "V22",
+                Some(&n.id),
+                format!(
+                    "playbook node `{}` has an empty or invalid playbook reference",
                     n.id
                 ),
             );
