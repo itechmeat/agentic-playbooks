@@ -52,22 +52,75 @@ impl ManifestProfile {
     }
 }
 
+/// A connector account recorded in the manifest: identity + non-secret field
+/// values + the env-var names holding secret field values + its content
+/// digest. Secret fields never carry the raw secret value into the manifest -
+/// `env` maps the field name to the ENV VAR NAME that holds it at runtime.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestAccount {
+    pub name: String,
+    pub default: bool,
+    /// Non-secret field values.
+    pub fields: BTreeMap<String, String>,
+    /// Secret field name -> ENV VAR NAME (not the secret value itself).
+    pub env: BTreeMap<String, String>,
+    /// `account_digest`.
+    pub digest: String,
+}
+
+/// A connector recorded in the manifest: identity + digest + the accounts
+/// snapshotted for this run.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestConnector {
+    pub name: String,
+    pub digest: String,
+    pub accounts: Vec<ManifestAccount>,
+}
+
+/// A single node's grant against one connector: which accounts, which
+/// functions, and an optional per-run call budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestConnectorGrant {
+    pub connector: String,
+    /// Account names granted to this node.
+    pub accounts: Vec<String>,
+    pub functions: Vec<String>,
+    pub max_calls: Option<u32>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RunExecutionManifest {
     /// Profiles used, one per unique `(scope, name)`.
     pub profiles: Vec<ManifestProfile>,
     /// Binding from `node_id` (or `supervisor`) -> profile key `<scope>/<name>`.
     pub node_bindings: BTreeMap<String, String>,
+    /// Connectors used, one per unique connector name.
+    #[serde(default)]
+    pub connectors: Vec<ManifestConnector>,
+    /// Binding from `node_id` -> the grants that node holds.
+    #[serde(default)]
+    pub connector_grants: BTreeMap<String, Vec<ManifestConnectorGrant>>,
 }
 
 impl RunExecutionManifest {
     pub fn is_empty(&self) -> bool {
-        self.profiles.is_empty()
+        self.profiles.is_empty() && self.connectors.is_empty()
     }
 
     pub fn for_node(&self, node_id: &str) -> Option<&ManifestProfile> {
         let key = self.node_bindings.get(node_id)?;
         self.profiles.iter().find(|p| &p.key() == key)
+    }
+
+    pub fn connector(&self, name: &str) -> Option<&ManifestConnector> {
+        self.connectors.iter().find(|c| c.name == name)
+    }
+
+    pub fn grants_for(&self, node_id: &str) -> &[ManifestConnectorGrant] {
+        self.connector_grants
+            .get(node_id)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 }
 
