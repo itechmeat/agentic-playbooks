@@ -32,6 +32,24 @@ pub(crate) fn prepare_run(
     prepare_run_target(&t, id, version, opts)
 }
 
+/// Renders a param `default` (a free-form YAML scalar) into the plain-string
+/// representation the params map (`BTreeMap<String, String>`) uses everywhere:
+/// a string yields its bare content, a bool/number its natural text, and any
+/// non-scalar its trimmed YAML serialization. This matches how callers already
+/// hand params in as strings, so a defaulted param and an explicitly passed one
+/// render identically.
+fn stringify_param_default(v: &serde_yaml_ng::Value) -> String {
+    match v {
+        serde_yaml_ng::Value::String(s) => s.clone(),
+        serde_yaml_ng::Value::Bool(b) => b.to_string(),
+        serde_yaml_ng::Value::Number(n) => n.to_string(),
+        other => serde_yaml_ng::to_string(other)
+            .unwrap_or_default()
+            .trim_end()
+            .to_string(),
+    }
+}
+
 pub(crate) fn soul_delivery_str(d: SoulDelivery) -> String {
     match d {
         SoulDelivery::Native => "native".to_string(),
@@ -328,17 +346,37 @@ pub(crate) fn prepare_run_target(
     // otherwise the playbook's autosaved draft, read at start time; otherwise
     // None. Resolved once here so every surface (MCP, CLI, server, and a Part C
     // sub-playbook child) shares the rule. A blank draft is treated as absent.
+    //
+    // Honest errors (review I7/R1-I9): a real IO error reading the draft
+    // (unreadable file, permission fault) must fail the run start, not silently
+    // start with different input. `read_instruction_draft` already returns
+    // Ok(None) for an absent draft, so only a genuine fault propagates through
+    // `?`; the old `.ok().flatten()` swallowed both cases alike.
     let instruction = match opts.instruction.clone() {
         Some(i) => Some(i),
         None => reg
-            .read_instruction_draft(id)
-            .ok()
-            .flatten()
+            .read_instruction_draft(id)?
             .filter(|s| !s.trim().is_empty()),
     };
 
+    // Schema-default fill (review I6/R1-I2): every declared param that the
+    // caller did NOT supply falls back to its `default` from the playbook
+    // schema. This is the SINGLE normalization point for ALL runs - top-level
+    // and sub-playbook children (which arrive here with an empty params map)
+    // alike - so a playbook that relies on a param default renders the default
+    // instead of the empty string the template renderer substitutes for a
+    // missing param.
+    let mut params = opts.params.clone();
+    for p in &playbook.params {
+        if let Some(default) = &p.default
+            && !params.contains_key(&p.name)
+        {
+            params.insert(p.name.clone(), stringify_param_default(default));
+        }
+    }
+
     let cfg = RunConfig {
-        params: opts.params.clone(),
+        params,
         instruction,
         supervisor_expected: opts.supervisor_expected,
         max_patches_per_run: opts.max_patches_per_run,

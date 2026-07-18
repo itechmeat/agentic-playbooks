@@ -157,8 +157,11 @@ pub fn from_run_dir_with_root(
     events: &[Event],
 ) -> Option<ProgressSummary> {
     let pb = load_run_playbook(run_dir)?;
-    let mut summary = compute(&pb, events);
-    let (done, total) = weighted(&pb, events);
+    // Build the group structure ONCE and feed it to both folds (review I3),
+    // instead of `compute` and `weighted` each rebuilding it independently.
+    let gc = GroupContext::build(&pb, events);
+    let mut summary = compute_with(&pb, events, &gc);
+    let (done, total) = weighted_with(&pb, events, &gc);
     if total == 0 {
         return Some(summary);
     }
@@ -181,6 +184,12 @@ pub fn from_run_dir_with_root(
             continue;
         };
         let child_dir = root.join(".apb/runs").join(&child);
+        // Display-only (review I7/R1-I9): this is a progress-percentage
+        // enrichment, not a control decision. An unreadable child event log
+        // credits 0 extra seconds (the child simply contributes no fractional
+        // progress this poll) rather than failing the parent's status read.
+        // Unlike `map_child_outcome`/`run_is_terminal`, no correctness or
+        // terminality choice hinges on it, so `unwrap_or_default` is deliberate.
         let child_events = crate::event::read_all(&child_dir).unwrap_or_default();
         if let Some(cp) = from_run_dir_with_root(root, &child_dir, &child_events) {
             extra += (cp.percent as u128) * (n.expected_seconds() as u128) / 100;
@@ -194,9 +203,78 @@ pub fn from_run_dir_with_root(
     Some(summary)
 }
 
+/// Group structure shared by `weighted` and `compute`, built ONCE per progress
+/// request (review I3). Both folds previously rebuilt the SCC groups, the
+/// node->group map, the cyclic flags, and the latest per-group report
+/// independently; `from_run_dir_with_root` called both, so these structures
+/// were built three times per request. This carries them so a single build
+/// feeds every consumer. `group_of` owns its keys (rather than borrowing from
+/// `groups`) so the whole context can live in one owned struct.
+struct GroupContext {
+    groups: Vec<Vec<String>>,
+    /// Per group: is it cyclic (multi-node SCC, or a single node with a self-loop).
+    cyclic: Vec<bool>,
+    /// Latest `RunProgress` (done, total) reported for each cyclic group.
+    report_of: BTreeMap<usize, (u64, u64)>,
+    /// Latest `RunProgress` label overall (display copy), if any.
+    label: Option<String>,
+}
+
+impl GroupContext {
+    fn build(playbook: &Playbook, events: &[Event]) -> GroupContext {
+        let groups = sccs(playbook);
+        let mut group_of: BTreeMap<String, usize> = BTreeMap::new();
+        for (gi, g) in groups.iter().enumerate() {
+            for id in g {
+                group_of.insert(id.clone(), gi);
+            }
+        }
+        let self_loops: BTreeSet<&str> = playbook
+            .edges
+            .iter()
+            .filter(|e| e.from == e.to)
+            .map(|e| e.from.as_str())
+            .collect();
+        let cyclic: Vec<bool> = groups
+            .iter()
+            .map(|g| g.len() > 1 || (g.len() == 1 && self_loops.contains(g[0].as_str())))
+            .collect();
+
+        // Latest report per group and the latest label overall.
+        let mut report_of: BTreeMap<usize, (u64, u64)> = BTreeMap::new();
+        let mut label: Option<String> = None;
+        for e in events {
+            if let EventPayload::RunProgress {
+                node_id,
+                done,
+                total,
+                label: lbl,
+            } = &e.payload
+            {
+                if let Some(&gi) = group_of.get(node_id.as_str()) {
+                    let total_c = if *total == 0 { 1 } else { *total };
+                    let done_c = (*done).min(total_c);
+                    report_of.insert(gi, (done_c, total_c));
+                }
+                if lbl.is_some() {
+                    label = lbl.clone();
+                }
+            }
+        }
+        GroupContext {
+            groups,
+            cyclic,
+            report_of,
+            label,
+        }
+    }
+}
+
 /// Weighted (done, total) seconds for the run, the raw numerator/denominator
-/// behind `compute`'s percent. Pure fold - no child awareness.
-fn weighted(playbook: &Playbook, events: &[Event]) -> (u128, u128) {
+/// behind `compute`'s percent. Pure fold - no child awareness. Takes the shared
+/// `GroupContext` so the SCC/group structure is built once per request (review
+/// I3); `compute_with` and `from_run_dir_with_root` are the only callers.
+fn weighted_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> (u128, u128) {
     let state = RunState::fold(events);
     let status = |id: &str| state.nodes.get(id).copied().unwrap_or(NodeStatus::Pending);
     let counted = |id: &str| !matches!(status(id), NodeStatus::Skipped | NodeStatus::Cancelled);
@@ -218,40 +296,9 @@ fn weighted(playbook: &Playbook, events: &[Event]) -> (u128, u128) {
         })
         .collect();
 
-    let groups = sccs(playbook);
-    let mut group_of: BTreeMap<&str, usize> = BTreeMap::new();
-    for (gi, g) in groups.iter().enumerate() {
-        for id in g {
-            group_of.insert(id.as_str(), gi);
-        }
-    }
-    let self_loops: BTreeSet<&str> = playbook
-        .edges
-        .iter()
-        .filter(|e| e.from == e.to)
-        .map(|e| e.from.as_str())
-        .collect();
-    let cyclic: Vec<bool> = groups
-        .iter()
-        .map(|g| g.len() > 1 || (g.len() == 1 && self_loops.contains(g[0].as_str())))
-        .collect();
-
-    // Latest report per group and the latest label overall.
-    let mut report_of: BTreeMap<usize, (u64, u64)> = BTreeMap::new();
-    for e in events {
-        if let EventPayload::RunProgress {
-            node_id,
-            done,
-            total,
-            ..
-        } = &e.payload
-            && let Some(&gi) = group_of.get(node_id.as_str())
-        {
-            let total_c = if *total == 0 { 1 } else { *total };
-            let done_c = (*done).min(total_c);
-            report_of.insert(gi, (done_c, total_c));
-        }
-    }
+    let groups = &gc.groups;
+    let cyclic = &gc.cyclic;
+    let report_of = &gc.report_of;
 
     let mut total: u128 = 0;
     let mut done: u128 = 0;
@@ -298,54 +345,25 @@ fn weighted(playbook: &Playbook, events: &[Event]) -> (u128, u128) {
 }
 
 /// Computes the progress summary from events + the run's playbook version.
+/// Thin wrapper that builds a fresh `GroupContext`; hot paths call
+/// `compute_with` with a shared one (review I3).
 pub fn compute(playbook: &Playbook, events: &[Event]) -> ProgressSummary {
+    compute_with(playbook, events, &GroupContext::build(playbook, events))
+}
+
+fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> ProgressSummary {
     let state = RunState::fold(events);
     let status = |id: &str| state.nodes.get(id).copied().unwrap_or(NodeStatus::Pending);
 
-    // Group structure and latest per-group report, needed for the plan_key
-    // identity below (label/waiting/plan_key logic stays here; the done/total
-    // accumulation that also needs them moved into `weighted`).
-    let groups = sccs(playbook);
-    let mut group_of: BTreeMap<&str, usize> = BTreeMap::new();
-    for (gi, g) in groups.iter().enumerate() {
-        for id in g {
-            group_of.insert(id.as_str(), gi);
-        }
-    }
-    let self_loops: BTreeSet<&str> = playbook
-        .edges
-        .iter()
-        .filter(|e| e.from == e.to)
-        .map(|e| e.from.as_str())
-        .collect();
-    let cyclic: Vec<bool> = groups
-        .iter()
-        .map(|g| g.len() > 1 || (g.len() == 1 && self_loops.contains(g[0].as_str())))
-        .collect();
+    // Group structure, per-group report and the latest label come from the
+    // shared `GroupContext` (label/waiting/plan_key logic stays here; the
+    // done/total accumulation that also needs them lives in `weighted_with`).
+    let groups = &gc.groups;
+    let cyclic = &gc.cyclic;
+    let report_of = &gc.report_of;
+    let label = gc.label.clone();
 
-    // Latest report per group and the latest label overall.
-    let mut report_of: BTreeMap<usize, (u64, u64)> = BTreeMap::new();
-    let mut label: Option<String> = None;
-    for e in events {
-        if let EventPayload::RunProgress {
-            node_id,
-            done,
-            total,
-            label: lbl,
-        } = &e.payload
-        {
-            if let Some(&gi) = group_of.get(node_id.as_str()) {
-                let total_c = if *total == 0 { 1 } else { *total };
-                let done_c = (*done).min(total_c);
-                report_of.insert(gi, (done_c, total_c));
-            }
-            if lbl.is_some() {
-                label = lbl.clone();
-            }
-        }
-    }
-
-    let (done, total) = weighted(playbook, events);
+    let (done, total) = weighted_with(playbook, events, gc);
     let mut percent: u8 = done
         .saturating_mul(100)
         .checked_div(total)

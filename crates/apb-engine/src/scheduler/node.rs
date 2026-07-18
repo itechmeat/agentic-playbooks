@@ -394,6 +394,11 @@ pub(crate) fn execute_finish_answer(
         )));
     }
 
+    // Cancellation happens at drive-loop boundaries (the top-of-loop
+    // control.jsonl scan and join:any teardown), never mid-agent: like the
+    // inline agent_task path (which drive calls with a fresh `AtomicBool`), this
+    // finish-answer agent runs synchronously on the drive thread, so this local
+    // token is never set during the call (review I1, accepted as pre-existing).
     let cancel = AtomicBool::new(false);
     let mut events: Vec<EventPayload> = Vec::new();
     let mut attempt: u32 = 0;
@@ -564,13 +569,23 @@ pub(crate) fn latest_child_run(events: &[Event], node_id: &str) -> Option<String
 }
 
 /// Whether a run directory has reached a terminal run status.
-pub(crate) fn run_is_terminal(root: &Path, run_id: &str) -> bool {
+///
+/// Honest errors (review I7/R1-I9): the child's event log is the sole source of
+/// truth for terminality, so an unreadable/corrupt child dir must NOT be guessed
+/// at. The old `read_all(..).unwrap_or_default()` folded a read failure into an
+/// empty log, which reads as "not terminal" and would make the reattach path in
+/// `run_playbook_node` resume the same broken child forever. Returning the read
+/// error instead propagates as a hard node/run failure: this cannot loop (no
+/// silent reattach) and cannot fake success (no empty-log Running/Succeeded).
+/// `read_all` already returns Ok(empty) for a genuinely absent log, so only a
+/// real IO/parse fault surfaces here.
+pub(crate) fn run_is_terminal(root: &Path, run_id: &str) -> Result<bool, EngineError> {
     let dir = root.join(".apb/runs").join(run_id);
-    let events = read_all(&dir).unwrap_or_default();
-    matches!(
+    let events = read_all(&dir)?;
+    Ok(matches!(
         RunState::fold(&events).run_status,
         RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
-    )
+    ))
 }
 
 /// The parent run's definition origin (from its RunProvenance event), used to
@@ -627,9 +642,14 @@ pub(crate) fn run_playbook_node(
     // resumed, not restarted (the event log is the source of truth). The child
     // runs on this drive thread while the parent still holds the workdir lock,
     // so its resume must allow the shared workdir (no second acquire).
+    //
+    // Single read (review M1): this `events` snapshot is reused below for the
+    // instruction render context. No log write happens between the reattach
+    // check and that render (the reattach branch returns before any append, and
+    // ChildRunStarted is written only much later), so reading once is sound.
     let events = read_all(run_dir)?;
     if let Some(existing) = latest_child_run(&events, node_id)
-        && !run_is_terminal(root, &existing)
+        && !run_is_terminal(root, &existing)?
     {
         let res = resume_inner(root, &existing, None, false, true)?;
         return Ok(map_child_outcome(root, &existing, res.outcome));
@@ -637,16 +657,15 @@ pub(crate) fn run_playbook_node(
 
     // Render the node instruction with the parent context; the result is the
     // child's explicit instruction (Part A precedence). Absent -> None (child
-    // falls back to its own draft).
+    // falls back to its own draft). Reuses the `events` read above (review M1).
     let child_instruction = match node_instruction {
         Some(t) => {
-            let events_now = read_all(run_dir)?;
-            let context = build_context_for_render(run_dir, &events_now)?;
+            let context = build_context_for_render(run_dir, &events)?;
             let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
                 .into_iter()
                 .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
                 .collect();
-            let state = RunState::fold(&events_now);
+            let state = RunState::fold(&events);
             Some(render(
                 t,
                 &cfg.params,
@@ -759,13 +778,31 @@ pub(crate) fn run_playbook_node(
 }
 
 /// Maps a child run's terminal status to the parent node's (status, output).
+///
+/// Honest errors (review I7/R1-I9): on a Succeeded child we must read its event
+/// log to compose the answer. The old `read_all(..).unwrap_or_default()` turned
+/// an unreadable/corrupt child dir into an empty log, which then yielded node
+/// SUCCESS with an empty answer - a corrupted run masquerading as a legit
+/// promptless finish. We now distinguish the two: a genuine read failure FAILS
+/// the parent node with a diagnostic naming the child run id and the error,
+/// while a successful read whose `run_answer` is None (a promptless finish, a
+/// legitimately empty answer) stays Succeeded with "".
 fn map_child_outcome(root: &Path, child_run_id: &str, outcome: RunStatus) -> (NodeStatus, String) {
     match outcome {
         RunStatus::Succeeded => {
             let dir = root.join(".apb/runs").join(child_run_id);
-            let answer = crate::progress::run_answer(&dir, &read_all(&dir).unwrap_or_default())
-                .unwrap_or_default();
-            (NodeStatus::Succeeded, answer)
+            match read_all(&dir) {
+                Ok(events) => {
+                    let answer = crate::progress::run_answer(&dir, &events).unwrap_or_default();
+                    (NodeStatus::Succeeded, answer)
+                }
+                Err(e) => (
+                    NodeStatus::Failed,
+                    format!(
+                        "sub-playbook child run `{child_run_id}` succeeded but its events could not be read: {e}"
+                    ),
+                ),
+            }
         }
         other => (
             NodeStatus::Failed,

@@ -449,12 +449,20 @@ fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineError> {
                     RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
                 )
             {
-                let _ = crate::control::post_control(
+                // Best-effort per child (a child that raced to terminal or lost
+                // its dir must not block the parent abort), but no longer
+                // silent: a failed post is logged with the child run id so an
+                // operator can tell an un-propagated abort from a clean one
+                // (review I7/R1-I9). apb-engine has no tracing facility, so this
+                // is an eprintln, matching the progress/snapshot warnings.
+                if let Err(e) = crate::control::post_control(
                     &child_dir,
                     Control::Abort {
                         reason: "parent aborted".into(),
                     },
-                );
+                ) {
+                    eprintln!("apb: warning: failed to post abort to child run `{child}`: {e}");
+                }
                 abort_children(root, child)?;
             }
         }
