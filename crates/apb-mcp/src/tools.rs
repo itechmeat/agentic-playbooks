@@ -700,6 +700,20 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         .collect();
     let progress = apb_engine::progress::from_run_dir(&dir, &events);
     let answer = apb_engine::progress::run_answer(&dir, &events);
+    let children: Vec<Value> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            apb_engine::event::EventPayload::ChildRunStarted { node_id, run_id } => {
+                let child_dir = dir.parent().map(|p| p.join(run_id));
+                let status = child_dir
+                    .and_then(|d| read_all(&d).ok())
+                    .map(|ev| RunState::fold(&ev).run_status.as_str().to_string())
+                    .unwrap_or_else(|| "unknown".to_string());
+                Some(json!({ "node_id": node_id, "run_id": run_id, "status": status }))
+            }
+            _ => None,
+        })
+        .collect();
     Ok(json!({
         "run_id": run_id,
         "run_status": state.run_status.as_str(),
@@ -707,6 +721,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "outputs": state.outputs,
         "progress": progress,
         "answer": answer,
+        "children": children,
     }))
 }
 

@@ -1226,6 +1226,8 @@ pub struct RunSummary {
     pub started_ts: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub progress: Option<crate::progress::ProgressSummary>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_run: Option<String>,
 }
 
 pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
@@ -1259,12 +1261,16 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             })
             .unwrap_or_else(|| (run_id.clone(), 0));
         let progress = crate::progress::from_run_dir(&entry.path(), &events);
+        let parent_run = crate::run_config::read_run_config(&entry.path())
+            .ok()
+            .and_then(|c| c.parent_run);
         out.push(RunSummary {
             run_id,
             playbook,
             status: state.run_status.as_str().into(),
             started_ts,
             progress,
+            parent_run,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.started_ts));

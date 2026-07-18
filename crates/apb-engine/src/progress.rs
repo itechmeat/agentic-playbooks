@@ -134,12 +134,69 @@ pub fn load_run_playbook(run_dir: &Path) -> Option<Playbook> {
 /// Computes the progress summary for a run directory, or `None` when the
 /// playbook snapshot is missing or unparseable. The rule "missing or
 /// unparseable snapshot means no progress" lives here and only here.
+///
+/// Delegates to `from_run_dir_with_root` with the run root derived from the
+/// run dir: a run lives at `<root>/.apb/runs/<id>`, so three parents up from
+/// the run dir is the project root.
 pub fn from_run_dir(run_dir: &Path, events: &[Event]) -> Option<ProgressSummary> {
-    load_run_playbook(run_dir).map(|pb| compute(&pb, events))
+    let root = run_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .and_then(|p| p.parent())
+        .unwrap_or(run_dir);
+    from_run_dir_with_root(root, run_dir, events)
 }
 
-/// Computes the progress summary from events + the run's playbook version.
-pub fn compute(playbook: &Playbook, events: &[Event]) -> ProgressSummary {
+/// Progress for a run dir with child credit (spec C): base weighted totals
+/// plus, for each RUNNING `playbook` node whose latest child is non-terminal,
+/// a fractional credit `child_percent/100 * expected_seconds(node)` added to
+/// done. The pure `compute` fold stays untouched; this enrichment lives here.
+pub fn from_run_dir_with_root(
+    root: &Path,
+    run_dir: &Path,
+    events: &[Event],
+) -> Option<ProgressSummary> {
+    let pb = load_run_playbook(run_dir)?;
+    let mut summary = compute(&pb, events);
+    let (done, total) = weighted(&pb, events);
+    if total == 0 {
+        return Some(summary);
+    }
+    let state = RunState::fold(events);
+    let mut extra: u128 = 0;
+    for n in &pb.nodes {
+        if !matches!(n.kind, NodeKind::Playbook { .. }) {
+            continue;
+        }
+        // A node currently Running with a non-terminal child.
+        if state.nodes.get(&n.id).copied() != Some(NodeStatus::Running) {
+            continue;
+        }
+        let Some(child) = events.iter().rev().find_map(|e| match &e.payload {
+            EventPayload::ChildRunStarted { node_id, run_id } if node_id == &n.id => {
+                Some(run_id.clone())
+            }
+            _ => None,
+        }) else {
+            continue;
+        };
+        let child_dir = root.join(".apb/runs").join(&child);
+        let child_events = crate::event::read_all(&child_dir).unwrap_or_default();
+        if let Some(cp) = from_run_dir_with_root(root, &child_dir, &child_events) {
+            extra += (cp.percent as u128) * (n.expected_seconds() as u128) / 100;
+        }
+    }
+    let enriched = (done + extra).min(total);
+    summary.percent = (enriched.saturating_mul(100) / total).min(100) as u8;
+    if matches!(state.run_status, RunStatus::Succeeded) {
+        summary.percent = 100;
+    }
+    Some(summary)
+}
+
+/// Weighted (done, total) seconds for the run, the raw numerator/denominator
+/// behind `compute`'s percent. Pure fold - no child awareness.
+fn weighted(playbook: &Playbook, events: &[Event]) -> (u128, u128) {
     let state = RunState::fold(events);
     let status = |id: &str| state.nodes.get(id).copied().unwrap_or(NodeStatus::Pending);
     let counted = |id: &str| !matches!(status(id), NodeStatus::Skipped | NodeStatus::Cancelled);
@@ -181,23 +238,18 @@ pub fn compute(playbook: &Playbook, events: &[Event]) -> ProgressSummary {
 
     // Latest report per group and the latest label overall.
     let mut report_of: BTreeMap<usize, (u64, u64)> = BTreeMap::new();
-    let mut label: Option<String> = None;
     for e in events {
         if let EventPayload::RunProgress {
             node_id,
             done,
             total,
-            label: lbl,
+            ..
         } = &e.payload
+            && let Some(&gi) = group_of.get(node_id.as_str())
         {
-            if let Some(&gi) = group_of.get(node_id.as_str()) {
-                let total_c = if *total == 0 { 1 } else { *total };
-                let done_c = (*done).min(total_c);
-                report_of.insert(gi, (done_c, total_c));
-            }
-            if lbl.is_some() {
-                label = lbl.clone();
-            }
+            let total_c = if *total == 0 { 1 } else { *total };
+            let done_c = (*done).min(total_c);
+            report_of.insert(gi, (done_c, total_c));
         }
     }
 
@@ -242,6 +294,58 @@ pub fn compute(playbook: &Playbook, events: &[Event]) -> ProgressSummary {
         }
     }
 
+    (done, total)
+}
+
+/// Computes the progress summary from events + the run's playbook version.
+pub fn compute(playbook: &Playbook, events: &[Event]) -> ProgressSummary {
+    let state = RunState::fold(events);
+    let status = |id: &str| state.nodes.get(id).copied().unwrap_or(NodeStatus::Pending);
+
+    // Group structure and latest per-group report, needed for the plan_key
+    // identity below (label/waiting/plan_key logic stays here; the done/total
+    // accumulation that also needs them moved into `weighted`).
+    let groups = sccs(playbook);
+    let mut group_of: BTreeMap<&str, usize> = BTreeMap::new();
+    for (gi, g) in groups.iter().enumerate() {
+        for id in g {
+            group_of.insert(id.as_str(), gi);
+        }
+    }
+    let self_loops: BTreeSet<&str> = playbook
+        .edges
+        .iter()
+        .filter(|e| e.from == e.to)
+        .map(|e| e.from.as_str())
+        .collect();
+    let cyclic: Vec<bool> = groups
+        .iter()
+        .map(|g| g.len() > 1 || (g.len() == 1 && self_loops.contains(g[0].as_str())))
+        .collect();
+
+    // Latest report per group and the latest label overall.
+    let mut report_of: BTreeMap<usize, (u64, u64)> = BTreeMap::new();
+    let mut label: Option<String> = None;
+    for e in events {
+        if let EventPayload::RunProgress {
+            node_id,
+            done,
+            total,
+            label: lbl,
+        } = &e.payload
+        {
+            if let Some(&gi) = group_of.get(node_id.as_str()) {
+                let total_c = if *total == 0 { 1 } else { *total };
+                let done_c = (*done).min(total_c);
+                report_of.insert(gi, (done_c, total_c));
+            }
+            if lbl.is_some() {
+                label = lbl.clone();
+            }
+        }
+    }
+
+    let (done, total) = weighted(playbook, events);
     let mut percent: u8 = done
         .saturating_mul(100)
         .checked_div(total)
@@ -986,5 +1090,58 @@ edges:
         ];
         // Last pass: (15000 - 10000) / 1000 = 5.
         assert_eq!(node_durations_seconds(&events).get("a"), Some(&5));
+    }
+
+    #[test]
+    fn running_child_contributes_fractional_credit() {
+        // A parent with one playbook node (expected 100s) plus a 100s task, so a
+        // half-done child contributes 50s of 200s -> 25 percent.
+        let tmp = tempfile::tempdir().unwrap();
+        let parent_dir = tmp.path().join(".apb/runs/parent-1");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        std::fs::write(
+            parent_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: c, type: playbook, playbook: child, expected_duration: 100 }\n  - { id: a, type: agent_task, prompt: hi, expected_duration: 100 }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: c }\n  - { from: c, to: a }\n  - { from: a, to: f }\n",
+        )
+        .unwrap();
+        // A child run at 50 percent (one 100s task node done of two).
+        let child_dir = tmp.path().join(".apb/runs/child-1");
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(
+            child_dir.join("playbook.yaml"),
+            "schema: 2\nid: child\nname: child\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi, expected_duration: 100 }\n  - { id: b, type: agent_task, prompt: hi, expected_duration: 100 }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: b }\n  - { from: b, to: f }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            child_dir.join("events.jsonl"),
+            "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"child\",\"version\":\"1.0.0\"}\n{\"seq\":1,\"ts\":0,\"type\":\"node_finished\",\"node\":\"a\",\"status\":\"succeeded\",\"attempt\":1,\"output\":\"\"}\n{\"seq\":2,\"ts\":0,\"type\":\"node_started\",\"node\":\"b\",\"attempt\":1}\n",
+        )
+        .unwrap();
+        let parent_events = vec![
+            ev(
+                0,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                EventPayload::NodeStarted {
+                    node: "c".into(),
+                    attempt: 1,
+                },
+            ),
+            ev(
+                2,
+                EventPayload::ChildRunStarted {
+                    node_id: "c".into(),
+                    run_id: "child-1".into(),
+                },
+            ),
+        ];
+        // Root is the temp dir; from_run_dir must find child-1 under root/.apb/runs.
+        let p = from_run_dir_with_root(tmp.path(), &parent_dir, &parent_events).unwrap();
+        assert_eq!(p.percent, 25);
     }
 }
