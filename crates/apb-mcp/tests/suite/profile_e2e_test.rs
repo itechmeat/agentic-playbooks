@@ -1,23 +1,21 @@
-#![cfg(unix)]
 //! End-to-end profile scenario (spec 2026-07-12, Task 14): profile_write through
 //! the MCP logic -> a playbook referencing the profile -> a run on a stub agent ->
 //! Succeeded. Then editing the skill on disk -> the gate (check_run) refuses with
 //! `untrusted_profile_requires_acknowledge` until the user confirms.
+//!
+//! Unix-only: the former `#![cfg(unix)]` inner attribute now lives as an
+//! outer `#[cfg(unix)]` on this module's `mod` declaration in `../main.rs`.
 
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use apb_core::scope::{Origin, PlaybookRef};
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 use apb_mcp::profile_tools::{self, ExecutorInput};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::common::env_lock as lock;
 
 struct EnvGuard;
 impl Drop for EnvGuard {

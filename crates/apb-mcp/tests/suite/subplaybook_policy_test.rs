@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use apb_core::profile::ProfileScope;
 use apb_core::registry::{Registry, init_project};
@@ -9,11 +8,9 @@ use apb_engine::run_config::read_run_config;
 use apb_mcp::policy::{check_run, preflight};
 
 // Env isolation: TrustStore is keyed on the global config dir, so every test
-// runs under its own temp APB_CONFIG_DIR and serializes env mutation.
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+// runs under its own temp APB_CONFIG_DIR and serializes env mutation on the
+// shared lock (see suite/common.rs).
+use crate::common::env_lock as lock;
 
 struct EnvGuard;
 impl Drop for EnvGuard {

@@ -11,8 +11,10 @@ use apb_mcp::tools::{
 
 // Cargo runs #[test] functions in parallel within one process, so tests
 // that mutate the shared APB_AGENT_CMD environment variable race each other unless
-// access is serialized. Same trick as in supervised_drive_test.rs.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+// access is serialized. Serialized on the shared lock (see suite/common.rs),
+// since consolidation means other modules' tests run as threads in this same
+// process too.
+use crate::common::env_lock;
 
 const POLL_DEADLINE: Duration = Duration::from_secs(5);
 const POLL_STEP: Duration = Duration::from_millis(20);
@@ -152,7 +154,7 @@ fn supervised_wake_context_append_and_retry_recovers() {
     seed(dir.path(), "supflow_mcp", WF_SUPERVISED);
 
     let prog = flaky_agent(dir.path());
-    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = env_lock();
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }

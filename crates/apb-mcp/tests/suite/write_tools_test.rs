@@ -4,7 +4,7 @@ use std::path::Path;
 use apb_core::registry::Registry;
 use apb_mcp::tools::{ToolError, playbook_create, playbook_delete, playbook_get, playbook_update};
 
-const VALID: &str = include_str!("../../apb-core/tests/fixtures/valid.yaml");
+const VALID: &str = include_str!("../../../apb-core/tests/fixtures/valid.yaml");
 
 fn seed(root: &Path) {
     apb_core::registry::init_project(root).unwrap();

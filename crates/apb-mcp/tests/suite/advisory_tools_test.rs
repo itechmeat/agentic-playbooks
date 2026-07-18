@@ -1,17 +1,26 @@
 //! Advisory tools: the onboarding howto flag, subscriptions_set, adopt codes,
 //! independence of the catalog revision from the profile count. Env is global - under a
-//! shared Mutex; PATH is empty (detection finds no one - model codes are deterministic).
+//! shared Mutex; PATH is set to an empty temp dir for the duration of each test (detection
+//! finds no one - model codes are deterministic), then restored by `Ctx`'s `Drop` impl.
+//!
+//! Restoring PATH matters specifically because of test consolidation: this file used to run
+//! in its own process, so clobbering PATH for the whole process lifetime was harmless. Now
+//! all modules share one process, and other modules' tests shell out to real commands (e.g.
+//! `trial_tools_test`'s `git`, and scripts using `touch`) - leaving PATH pointed at an empty
+//! dir after this file's tests broke `touch` for every test that ran after these in the same
+//! binary (observed directly: `supervisor_tools_test`'s flaky-agent script failed every time
+//! with `touch: command not found` once these tests had run first). APB_CONFIG_DIR/HOME/
+//! APB_NO_REGISTRY are still just removed (not restored to a prior value) on Drop, matching
+//! the `EnvGuard` idiom the other env-mutating files in this suite already use for those same
+//! two vars - every test that depends on them sets its own value before reading it, so an
+//! absent value is always safe, whereas PATH is read by code this test doesn't control.
 
+use std::ffi::OsString;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use apb_mcp::advisory_tools;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-
-fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::common::env_lock as lock;
 
 struct Ctx {
     _proj: tempfile::TempDir,
@@ -19,6 +28,21 @@ struct Ctx {
     _home: tempfile::TempDir,
     _bin: tempfile::TempDir,
     root: std::path::PathBuf,
+    orig_path: Option<OsString>,
+}
+
+impl Drop for Ctx {
+    fn drop(&mut self) {
+        unsafe {
+            match self.orig_path.take() {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+            std::env::remove_var("APB_CONFIG_DIR");
+            std::env::remove_var("HOME");
+            std::env::remove_var("APB_NO_REGISTRY");
+        }
+    }
 }
 
 fn setup() -> Ctx {
@@ -26,6 +50,7 @@ fn setup() -> Ctx {
     let cfg = tempfile::tempdir().unwrap();
     let home = tempfile::tempdir().unwrap();
     let bin = tempfile::tempdir().unwrap();
+    let orig_path = std::env::var_os("PATH");
     unsafe {
         std::env::set_var("APB_CONFIG_DIR", cfg.path());
         std::env::set_var("HOME", home.path());
@@ -38,6 +63,7 @@ fn setup() -> Ctx {
         _cfg: cfg,
         _home: home,
         _bin: bin,
+        orig_path,
     }
 }
 

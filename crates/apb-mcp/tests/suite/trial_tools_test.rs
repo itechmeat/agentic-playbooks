@@ -1,6 +1,5 @@
 use std::path::Path;
 use std::process::Command;
-use std::sync::{Mutex, MutexGuard};
 
 use apb_core::registry::init_project;
 use apb_core::scope::{Origin, PlaybookRef};
@@ -8,10 +7,7 @@ use apb_core::trust::{Lifecycle, write_lifecycle};
 use apb_mcp::policy::check_run;
 use apb_mcp::tools::{playbook_approve, playbook_trial};
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::common::env_lock as lock;
 
 struct EnvGuard;
 impl Drop for EnvGuard {
@@ -65,11 +61,11 @@ const IRREVERSIBLE: &str = "schema: 1\nid: __ID__\nname: __ID__\nversion: 1.0.0\
 
 #[test]
 fn trial_of_fs_writing_playbook_runs_in_worktree_and_reports_diff() {
+    let _l = lock();
     if !git_available() {
         eprintln!("git not available, skipping");
         return;
     }
-    let _l = lock();
     let cfg = tempfile::tempdir().unwrap();
     let proj = tempfile::tempdir().unwrap();
     unsafe {

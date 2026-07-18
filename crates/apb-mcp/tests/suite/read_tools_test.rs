@@ -2,7 +2,7 @@ use apb_mcp::tools::{playbook_get, playbook_list, playbook_validate};
 use std::fs;
 use std::path::Path;
 
-const VALID: &str = include_str!("../../apb-core/tests/fixtures/valid.yaml");
+const VALID: &str = include_str!("../../../apb-core/tests/fixtures/valid.yaml");
 
 fn seed(root: &Path) {
     apb_core::registry::init_project(root).unwrap();

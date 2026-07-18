@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
 
 use apb_core::registry::init_project;
 use apb_core::scope::{Origin, PlaybookRef};
@@ -7,10 +6,7 @@ use apb_mcp::policy::check_run;
 use apb_mcp::tools::{playbook_capture, playbook_catalog, suggestion_dismiss};
 use serde_json::json;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
-fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
-}
+use crate::common::env_lock as lock;
 
 struct EnvGuard;
 impl Drop for EnvGuard {
