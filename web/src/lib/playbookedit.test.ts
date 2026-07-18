@@ -233,6 +233,28 @@ describe('removeEdge', () => {
   })
 })
 
+describe('playbook node (add + update)', () => {
+  it('adds a playbook node and sets its reference and instruction', () => {
+    const src = [
+      'schema: 2',
+      'id: p',
+      'name: p',
+      'version: 1.0.0',
+      'nodes:',
+      '  - { id: s, type: start }',
+      'edges: []',
+      '',
+    ].join('\n')
+    const doc = parseDocument(src)
+    const withNode = addNode(doc, 'playbook', 'c')
+    const withPatch = updateNode(withNode, 'c', { playbook: 'child', instruction: 'go' })
+    const yaml = withPatch.toString()
+    expect(yaml).toContain('type: playbook')
+    expect(yaml).toContain('playbook: child')
+    expect(yaml).toContain('instruction: go')
+  })
+})
+
 describe('suggestNodeId', () => {
   it('returns kind-N for the first occurrence', () => {
     const doc = docOf(FULL_YAML)

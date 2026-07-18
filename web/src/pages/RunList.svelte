@@ -66,12 +66,17 @@
             {#each items as r (`${r.workspace_id}/${r.run_id}`)}
               <Table.Row>
                 <Table.Cell class="font-mono text-xs">
-                  <a
-                    href={`#/run/${encodeURIComponent(r.workspace_id)}/${encodeURIComponent(r.run_id)}`}
-                    class="font-medium text-foreground hover:underline"
-                  >
-                    {r.run_id}
-                  </a>
+                  <span class={r.parent_run ? 'pl-4' : ''}>
+                    <a
+                      href={`#/run/${encodeURIComponent(r.workspace_id)}/${encodeURIComponent(r.run_id)}`}
+                      class="font-medium text-foreground hover:underline"
+                    >
+                      {r.run_id}
+                    </a>
+                    {#if r.parent_run}
+                      <span class="block text-muted-foreground">child of {r.parent_run}</span>
+                    {/if}
+                  </span>
                 </Table.Cell>
                 <Table.Cell>{r.playbook}</Table.Cell>
                 <Table.Cell>

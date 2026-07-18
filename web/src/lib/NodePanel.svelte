@@ -2,7 +2,7 @@
   import { untrack } from 'svelte'
   import type { PlaybookNode } from './types'
   import { profileToField, fieldToProfile } from './profileref'
-  import { fetchInputDraft, saveInputDraft } from './api'
+  import { fetchInputDraft, saveInputDraft, fetchPlaybooks } from './api'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Textarea } from '$lib/components/ui/textarea'
@@ -54,6 +54,22 @@
     }
   })
 
+  // Available playbooks from /api/playbooks (for the playbook-node reference
+  // selector). Fetched once on mount - the list is global (not per-workspace),
+  // so there is no reactive dependency to re-fetch on.
+  let playbookOptions = $state<string[]>([])
+  $effect(() => {
+    let cancelled = false
+    fetchPlaybooks()
+      .then((list) => {
+        if (!cancelled) playbookOptions = Array.from(new Set(list.map((p) => p.id)))
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  })
+
   // Local field state, re-synced only when the node (id) or version (revision)
   // changes - not on every keystroke, else the yaml round-trip rolls back text.
   let f = $state<Record<string, string>>({})
@@ -74,6 +90,8 @@
         timeout_seconds: num(n.timeout_seconds),
         isolation: str(n.isolation),
         success_check: str(n.success_check),
+        playbook: str(n.playbook),
+        instruction: str(n.instruction),
       }
     })
   })
@@ -163,6 +181,12 @@
       <option value={`${p.scope}/${p.name}`}>
         {p.trusted ? '' : '(untrusted) '}{p.scope}/{p.name}
       </option>
+    {/each}
+  </datalist>
+
+  <datalist id="apb-playbook-options">
+    {#each playbookOptions as pbid (pbid)}
+      <option value={pbid}></option>
     {/each}
   </datalist>
 
@@ -297,6 +321,26 @@
           placeholder="name (scope auto) or scope/name"
           value={f.profile}
           oninput={(e) => setProfile(e.currentTarget.value)}
+        />
+      </Field.Field>
+    {:else if kind === 'playbook'}
+      <Field.Field>
+        <Field.FieldLabel for="np-pb-ref">playbook</Field.FieldLabel>
+        <Input
+          id="np-pb-ref"
+          list="apb-playbook-options"
+          placeholder={'id (scope auto) or use { id, scope } in YAML'}
+          value={f.playbook}
+          oninput={(e) => setStr('playbook', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field>
+        <Field.FieldLabel for="np-pb-instr">instruction (rendered, becomes the child input)</Field.FieldLabel>
+        <Textarea
+          id="np-pb-instr"
+          rows={4}
+          value={f.instruction}
+          oninput={(e) => setStr('instruction', e.currentTarget.value)}
         />
       </Field.Field>
     {/if}

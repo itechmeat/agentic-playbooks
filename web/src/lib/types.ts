@@ -64,6 +64,7 @@ export interface RunSummary {
   workspace_id: string
   project: string
   progress?: ProgressSummary | null
+  parent_run?: string | null
 }
 
 export interface WfEvent {
