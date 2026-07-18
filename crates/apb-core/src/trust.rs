@@ -85,6 +85,15 @@ pub enum Kind {
     #[default]
     Playbook,
     ProfileBundle,
+    Connector,
+    ConnectorAccount,
+}
+
+/// Trust record id for a connector account approval: `"connector/account"`,
+/// e.g. `"jira/project-board"`. Used as the `id` field of a `TrustRecord`
+/// with `Kind::ConnectorAccount`; approval itself stays keyed by digest.
+pub fn account_trust_id(connector: &str, account: &str) -> String {
+    format!("{connector}/{account}")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -284,6 +293,68 @@ mod tests {
         assert!(TrustStore::load().is_approved("sha256:cc"));
         store.revoke("sha256:cc").unwrap();
         assert!(!TrustStore::load().is_approved("sha256:cc"));
+    }
+
+    #[test]
+    fn account_trust_id_formats_connector_and_account() {
+        assert_eq!(
+            account_trust_id("jira", "project-board"),
+            "jira/project-board"
+        );
+    }
+
+    #[test]
+    fn connector_and_account_kinds_approve_and_survive_reload() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        }
+        let _g = EnvGuard;
+
+        let mut store = TrustStore::load();
+        assert!(!store.is_approved("sha256:connector-ee"));
+        assert!(!store.is_approved("sha256:account-ff"));
+
+        store
+            .approve_kind(
+                "sha256:connector-ee",
+                "jira",
+                Kind::Connector,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+        let account_id = account_trust_id("jira", "project-board");
+        store
+            .approve_kind(
+                "sha256:account-ff",
+                &account_id,
+                Kind::ConnectorAccount,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+
+        let reloaded = TrustStore::load();
+        assert!(reloaded.is_approved("sha256:connector-ee"));
+        assert!(reloaded.is_approved("sha256:account-ff"));
+
+        // Serialization roundtrip keeps the kind (serde snake_case).
+        let raw = std::fs::read_to_string(cfg.path().join("trust.json")).unwrap();
+        assert!(raw.contains("\"connector\""));
+        assert!(raw.contains("\"connector_account\""));
+        let parsed: TrustStore = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed.approved.get("sha256:connector-ee").unwrap().kind,
+            Kind::Connector
+        );
+        assert_eq!(
+            parsed.approved.get("sha256:account-ff").unwrap().kind,
+            Kind::ConnectorAccount
+        );
+        assert_eq!(
+            parsed.approved.get("sha256:account-ff").unwrap().id,
+            "jira/project-board"
+        );
     }
 
     #[test]
