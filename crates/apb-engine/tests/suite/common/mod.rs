@@ -1,8 +1,27 @@
 //! Shared test helpers for the engine (schema 2). Not a separate test binary -
-//! included via `mod common;`.
+//! declared once as `mod common;` in `../main.rs` and reached from every suite
+//! module via `use crate::common;`.
 #![allow(dead_code)]
 
 use std::path::Path;
+use std::sync::{Mutex, MutexGuard};
+
+/// One process-wide lock serializing every test that mutates shared env
+/// (`APB_AGENT_CMD`, `APB_CONFIG_DIR`, `HOME`, `PATH`,
+/// `APB_SUPERVISOR_HEARTBEAT_MS`, `APB_TEST_DUMP`, ...). Before consolidation
+/// each file was its own process, so per-file `static ENV_LOCK`s sufficed;
+/// now that all 46 former files run as modules (threads) of one binary, only a
+/// single shared lock prevents one module's env mutation from racing another's.
+/// `std::sync::Mutex` (not `tokio::sync::Mutex`) is correct here: every
+/// env-mutating test in this crate is a plain `#[test]` - none are
+/// `#[tokio::test]` and none hold the guard across an `.await` - so a sync
+/// mutex, poison-tolerant via `unwrap_or_else(|e| e.into_inner())`, is the
+/// minimal correct choice.
+pub static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+pub fn env_lock() -> MutexGuard<'static, ()> {
+    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+}
 
 /// Writes `content` to `path` and fsyncs. On Linux, `fs::write` without
 /// fsync can cause the following `execve` to fail with `ETXTBSY` when the

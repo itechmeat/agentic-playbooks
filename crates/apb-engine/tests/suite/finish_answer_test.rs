@@ -1,18 +1,16 @@
-#![cfg(unix)]
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::MutexGuard;
 
 use apb_core::registry::init_project;
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::{RunState, RunStatus};
 
-mod common;
+use crate::common;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    common::env_lock()
 }
 struct EnvGuard;
 impl Drop for EnvGuard {

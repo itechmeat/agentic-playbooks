@@ -6,7 +6,7 @@ use apb_core::registry::init_project;
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
-mod common;
+use crate::common;
 
 // The agent self-reports success (echo ok -> no block -> success), but the
 // success_check script decides the final status: exit 1 -> node Failed ->
@@ -56,6 +56,7 @@ fn ok_agent(root: &Path) -> String {
 // Both branches sequentially: APB_AGENT_CMD is process-global.
 #[test]
 fn success_check_overrides_agent_self_assessment() {
+    let _env = common::env_lock();
     // 1. The check fails (exit 1) -> node Failed despite echo ok.
     let fail = tempfile::tempdir().unwrap();
     seed(fail.path(), 1);

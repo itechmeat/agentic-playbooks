@@ -6,6 +6,8 @@ use std::time::Duration;
 use apb_engine::script::run_script;
 use apb_engine::state::NodeStatus;
 
+use crate::common::env_lock;
+
 fn write_script(dir: &Path, rel: &str, body: &str) {
     let p = dir.join(rel);
     fs::create_dir_all(p.parent().unwrap()).unwrap();
@@ -24,6 +26,7 @@ fn in_path(program: &str) -> bool {
 // would race over it.
 #[test]
 fn runner_registry_resolution() {
+    let _env = env_lock();
     let ver = tempfile::tempdir().unwrap();
     let work = tempfile::tempdir().unwrap();
     write_script(ver.path(), "scripts/ok.sh", "echo hello");

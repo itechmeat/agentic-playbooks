@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
@@ -9,10 +9,44 @@ use apb_engine::scheduler::{RunMode, RunOptions, run_background};
 use apb_engine::state::{RunState, RunStatus};
 use apb_engine::{PersistedSession, find_session_by_token};
 
+/// Restores `PATH` to its captured value (or unsets it) on drop. Used by the
+/// fallback-spawn test, which clobbers `PATH` to force the primary agent to
+/// fail; a Drop guard keeps a panic from leaking that clobbered `PATH` to
+/// other modules in the consolidated test binary.
+struct PathGuard(Option<std::ffi::OsString>);
+impl Drop for PathGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.0 {
+                Some(p) => std::env::set_var("PATH", p),
+                None => std::env::remove_var("PATH"),
+            }
+        }
+    }
+}
+
+/// Restores `APB_SUPERVISOR_HEARTBEAT_MS` to its captured value (or unsets
+/// it) on drop. Same rationale as `PathGuard`: the heartbeat-lost test below
+/// clobbers this var to force a near-zero threshold, then relies on plain
+/// cleanup at the end of the function; a panic before that cleanup (e.g. an
+/// `.unwrap()` or a `wait_for_terminal` timeout) would leak the stale "0"
+/// value to sibling supervisor tests in the consolidated binary that never
+/// set it themselves.
+struct HeartbeatMsGuard(Option<std::ffi::OsString>);
+impl Drop for HeartbeatMsGuard {
+    fn drop(&mut self) {
+        unsafe {
+            match &self.0 {
+                Some(v) => std::env::set_var("APB_SUPERVISOR_HEARTBEAT_MS", v),
+                None => std::env::remove_var("APB_SUPERVISOR_HEARTBEAT_MS"),
+            }
+        }
+    }
+}
+
 // Both environment variables this file controls (APB_AGENT_CMD and
 // APB_SUPERVISOR_HEARTBEAT_MS) are shared across the cargo test process (parallel
 // #[test] threads) - the same serialize-guard trick as in supervised_drive_test.rs.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const POLL_DEADLINE: Duration = Duration::from_secs(5);
 const POLL_STEP: Duration = Duration::from_millis(20);
@@ -125,7 +159,7 @@ fn initial_spawn_writes_brief_and_persists_session() {
     let invocation_file = dir.path().join("supervisor_invocation.txt");
     let prog = agent_stub(dir.path(), &invocation_file);
 
-    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = common::env_lock();
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }
@@ -294,7 +328,7 @@ fn supervise_with_defaults_profile_only_spawns_and_delivers_soul() {
 
     let invocation_file = dir.path().join("supervisor_invocation.txt");
     let prog = agent_stub(dir.path(), &invocation_file);
-    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = common::env_lock();
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }
@@ -380,8 +414,13 @@ edges:
     .unwrap();
     set_executable(&claude_stub);
 
-    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-    let saved_path = std::env::var("PATH").ok();
+    let _env = common::env_lock();
+    // Drop-based restore (not a manual statement) so a panic in the run below
+    // cannot leak a clobbered PATH into sibling modules of the consolidated
+    // binary - the apb-mcp consolidation was bitten by exactly this. `_path`
+    // is declared after `_env`, so it drops first: PATH is restored while the
+    // env lock is still held.
+    let _path = PathGuard(std::env::var_os("PATH"));
     unsafe {
         std::env::remove_var("APB_AGENT_CMD");
         std::env::set_var("PATH", bin.path());
@@ -395,14 +434,6 @@ edges:
     let run_id = run_background(dir.path(), "bgspv4", None, opts).unwrap();
     let run_dir = run_dir_of(dir.path(), &run_id);
     let status = wait_for_terminal(&run_dir);
-
-    unsafe {
-        match saved_path {
-            Some(p) => std::env::set_var("PATH", p),
-            None => std::env::remove_var("PATH"),
-        }
-    }
-    drop(_env);
 
     assert_eq!(status, RunStatus::Succeeded);
     // Fallback claude is chosen and recorded (primary codex failed to spawn).
@@ -430,7 +461,14 @@ fn heartbeat_lost_triggers_single_respawn() {
     let invocation_file = dir.path().join("supervisor_invocation.txt");
     let prog = agent_stub(dir.path(), &invocation_file);
 
-    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = common::env_lock();
+    // Drop-based restore (not just the manual cleanup below) so a panic
+    // between here and that cleanup (e.g. the `.unwrap()` or
+    // `wait_for_terminal` call below) cannot leak the near-zero heartbeat
+    // threshold into sibling supervisor tests in the consolidated binary.
+    // Declared after `_env` so it drops first: the var is restored while
+    // the shared env lock is still held.
+    let _heartbeat = HeartbeatMsGuard(std::env::var_os("APB_SUPERVISOR_HEARTBEAT_MS"));
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
         std::env::set_var("APB_SUPERVISOR_HEARTBEAT_MS", "0");

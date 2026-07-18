@@ -4,7 +4,7 @@ use apb_engine::state::NodeStatus;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-mod common;
+use crate::common;
 
 // Prepares a stub agent: a shell script with the given body.
 fn stub_agent(dir: &std::path::Path, body: &str) -> String {

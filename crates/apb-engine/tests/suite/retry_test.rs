@@ -5,12 +5,11 @@ use apb_engine::state::RunStatus;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 
-mod common;
+use crate::common;
 
 // Cargo runs #[test] fns in parallel threads within one process, so tests that
 // mutate the shared global env var APB_AGENT_CMD race with each other unless
 // serialized. Hold this lock across the entire set_var..run..remove_var span.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 // Agent stub: fails until a marker file is created; creates it on the first invocation.
 // So: 1st invocation - fail, 2nd - success. Check that retry carries it through.
@@ -65,7 +64,7 @@ fn retry_recovers_flaky_agent() {
     common::seed_main(dir.path());
 
     let prog = flaky_agent(dir.path());
-    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = common::env_lock();
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }
@@ -128,7 +127,7 @@ fn fallback_recovers_when_primary_fails() {
     // Flaky stub: the first invocation (primary=claude-code) fails and leaves a marker,
     // the second invocation (fallback=claude, same program) - success.
     let prog = flaky_agent(dir.path());
-    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = common::env_lock();
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }
@@ -208,7 +207,7 @@ fn whole_chain_exhaustion_fails_run() {
 
     // The stub always fails - both primary(claude-code) and fallback(claude) get exhausted.
     let prog = always_fail_agent(dir.path());
-    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = common::env_lock();
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }

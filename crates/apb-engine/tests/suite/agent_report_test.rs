@@ -6,7 +6,7 @@ use apb_core::registry::init_project;
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
-mod common;
+use crate::common;
 
 // An agent node branching on node_status: success -> ok, otherwise -> no (fallback).
 // The node status must come from the agent report block (spec 6.2), not from the
@@ -56,6 +56,7 @@ fn seed(root: &Path) {
 // parallel #[test]s would race over it.
 #[test]
 fn node_status_comes_from_agent_report_block() {
+    let _env = common::env_lock();
     // 1. Self-reported failure with return code 0 -> failure branch.
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());

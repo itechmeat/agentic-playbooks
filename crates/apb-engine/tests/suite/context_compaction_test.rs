@@ -8,7 +8,7 @@ use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
-mod common;
+use crate::common;
 
 // Three agent_task nodes in a row, each printing a large output. With a small
 // context_max_bytes, the engine must compact old sections into context_compact.md
@@ -57,6 +57,7 @@ fn seed(root: &Path) {
 
 #[test]
 fn context_compaction_writes_artifact_and_keeps_primary_intact() {
+    let _env = common::env_lock();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let prog = write_blob_agent(dir.path());

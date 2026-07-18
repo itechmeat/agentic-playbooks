@@ -7,7 +7,7 @@ use apb_core::registry::init_project;
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
-mod common;
+use crate::common;
 
 const PLAYBOOK: &str = r#"
 schema: 2
@@ -60,6 +60,7 @@ fn seed_profile_with_soul_and_skill(root: &Path) {
 
 #[test]
 fn run_with_overrides_snapshots_effective_playbook() {
+    let _env = common::env_lock();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let prog = write_ok_agent(dir.path());
@@ -96,6 +97,7 @@ fn run_with_overrides_snapshots_effective_playbook() {
 
 #[test]
 fn ephemeral_executor_recorded_in_manifest() {
+    let _env = common::env_lock();
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path()).unwrap();
     let wdir = dir.path().join(".apb/playbooks/ov/1.0.0");

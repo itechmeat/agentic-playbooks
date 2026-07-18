@@ -8,7 +8,7 @@ use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
-mod common;
+use crate::common;
 
 // agent_task with timeout_seconds: 1 and an agent sleeping 5s. The engine must kill
 // the process on timeout (~1s), mark the attempt timed_out, the node - TimedOut,
@@ -51,6 +51,7 @@ fn seed(root: &Path) {
 
 #[test]
 fn agent_task_timeout_kills_and_fails() {
+    let _env = common::env_lock();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let prog = write_slow_agent(dir.path());

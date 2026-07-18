@@ -1,4 +1,3 @@
-#![cfg(unix)]
 //! Task 6: resolving profiles into a run, manifest, snapshots, env drift, skill delivery.
 //! The stub agent (via APB_AGENT_CMD) dumps the received argv into the file APB_TEST_DUMP -
 //! this way the test sees what actually went to the agent (prompt with advisory line, SOUL, etc.).
@@ -6,17 +5,16 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::MutexGuard;
 
 use apb_core::registry::init_project;
 use apb_engine::scheduler::{RunOptions, resume_with, run};
 use apb_engine::state::RunStatus;
 
-mod common;
+use crate::common;
 
-static ENV_LOCK: Mutex<()> = Mutex::new(());
 fn lock() -> MutexGuard<'static, ()> {
-    ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner())
+    common::env_lock()
 }
 
 struct EnvGuard;

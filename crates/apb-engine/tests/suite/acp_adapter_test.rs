@@ -9,7 +9,7 @@ use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, ErrorClass};
 use apb_engine::invocation::builtin;
 use apb_engine::state::NodeStatus;
 
-mod common;
+use crate::common;
 
 // Stub agent that prints given stream-json lines. Ignores its own
 // arguments (-p/--model/--output-format/--verbose), the same way a real agent

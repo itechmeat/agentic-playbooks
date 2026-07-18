@@ -6,7 +6,7 @@ use apb_core::registry::init_project;
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
-mod common;
+use crate::common;
 
 // The profile references the `mock` agent, whose program is set in the global
 // config (agents.mock.program). A successful run without APB_AGENT_CMD proves
@@ -46,6 +46,7 @@ fn seed(root: &Path) {
 
 #[test]
 fn agent_program_from_config_is_used() {
+    let _env = common::env_lock();
     let proj = tempfile::tempdir().unwrap();
     seed(proj.path());
 

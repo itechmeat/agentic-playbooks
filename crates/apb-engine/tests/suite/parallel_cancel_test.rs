@@ -8,7 +8,7 @@ use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
-mod common;
+use crate::common;
 
 // Two agent_task branches in join:any: the fast one (prompt "fast") finishes right away,
 // the slow one (prompt "slow") sleeps 5s. Once join:any is satisfied, the engine must
@@ -59,6 +59,7 @@ fn seed(root: &Path) {
 
 #[test]
 fn join_any_kills_slower_branch() {
+    let _env = common::env_lock();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     let prog = write_mock_agent(dir.path());

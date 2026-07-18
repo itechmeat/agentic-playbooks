@@ -9,6 +9,8 @@ use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, run_background_resolved};
 use apb_engine::state::{RunState, RunStatus};
 
+use crate::common::env_lock;
+
 const POLL_DEADLINE: Duration = Duration::from_secs(5);
 const POLL_STEP: Duration = Duration::from_millis(20);
 
@@ -52,6 +54,7 @@ fn seed_global(config_dir: &Path) {
 // (otherwise a race over the shared env).
 #[test]
 fn global_playbook_runs_in_project_root_with_provenance() {
+    let _env = env_lock();
     let config = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
     // SAFETY: the only env setter in this test binary.

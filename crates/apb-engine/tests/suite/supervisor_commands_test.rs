@@ -1,4 +1,4 @@
-mod common;
+use crate::common;
 use std::fs;
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -15,7 +15,6 @@ use apb_engine::state::{RunState, RunStatus};
 // The same trick as in supervised_drive_test.rs: tests in this file mutate the
 // process-wide env var APB_AGENT_CMD, so such scenarios are serialized
 // via a shared mutex over the whole set_var..run..remove_var span.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 const POLL_DEADLINE: Duration = Duration::from_secs(5);
 const POLL_STEP: Duration = Duration::from_millis(20);
@@ -192,7 +191,7 @@ fn context_append_then_retry_recovers_after_wake() {
     seed(dir.path(), "ctxsup", WF_SUPERVISED);
 
     let prog = flaky_agent(dir.path());
-    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _env = common::env_lock();
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }

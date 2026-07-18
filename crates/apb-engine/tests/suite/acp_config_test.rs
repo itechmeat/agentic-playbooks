@@ -6,7 +6,7 @@ use apb_core::registry::init_project;
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
-mod common;
+use crate::common;
 
 // Run an agent with the acp transport selected FROM the global config. Success
 // plus the presence of a per-attempt stream log prove that the streaming
@@ -51,6 +51,7 @@ fn seed(root: &Path) {
 
 #[test]
 fn acp_transport_selected_from_config_streams_run() {
+    let _env = common::env_lock();
     let proj = tempfile::tempdir().unwrap();
     seed(proj.path());
 
