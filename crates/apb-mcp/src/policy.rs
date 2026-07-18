@@ -6,6 +6,7 @@
 use std::path::Path;
 
 use apb_core::config::program_in_path;
+use apb_core::profile::ProfileScope;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::Registry;
 use apb_core::schema::{Effect, NodeKind, Playbook};
@@ -43,11 +44,7 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
         .load(id, version)
         .map_err(|e| json!({ "policy": "not_found", "detail": e.to_string() }))?;
     let playbook_dir = root.join(".apb/playbooks").join(id);
-    match read_lifecycle(&playbook_dir) {
-        Lifecycle::Active => {}
-        Lifecycle::Draft => return Err(json!({ "policy": "draft_requires_trial", "id": id })),
-        Lifecycle::Retired => return Err(json!({ "policy": "retired_not_runnable", "id": id })),
-    }
+    check_lifecycle(&playbook_dir, id)?;
     if let Some(req) = &loaded.playbook.requires {
         check_requires(root, req, id)?;
     }
@@ -180,26 +177,11 @@ pub fn check_run(
 
     // Lifecycle: draft/retired does not run through the normal path - only via trial.
     let playbook_dir = definition_parent.join("playbooks").join(&wref.id);
-    match read_lifecycle(&playbook_dir) {
-        Lifecycle::Active => {}
-        Lifecycle::Draft => {
-            return Err(json!({ "policy": "draft_requires_trial", "id": wref.id }));
-        }
-        Lifecycle::Retired => {
-            return Err(json!({ "policy": "retired_not_runnable", "id": wref.id }));
-        }
-    }
+    check_lifecycle(&playbook_dir, &wref.id)?;
 
     // Digest-based trust: unapproved content requires an explicit acknowledge.
     let digest = digest_str(&loaded.yaml);
-    if !acknowledge_untrusted && !TrustStore::load().is_approved(&digest) {
-        return Err(json!({
-            "policy": "untrusted_requires_acknowledge",
-            "id": wref.id,
-            "digest": digest,
-            "detail": "run again with acknowledge_untrusted: true after user confirmation",
-        }));
-    }
+    check_digest_trust(&wref.id, &digest, acknowledge_untrusted)?;
 
     // Profile bundle trust (spec 5.1): the profile plus the actual content of its
     // skills are trusted as a unit. An unapproved bundle requires acknowledge.
@@ -306,6 +288,24 @@ fn collect_children(
         let loaded = reg
             .load(&resolved.id, Some(&resolved.version))
             .map_err(|e| json!({ "policy": "not_found", "detail": e.to_string() }))?;
+        // Recursive gate (C1): every child runs through the SAME pipeline the
+        // parent gets in `check_run` - lifecycle (draft/retired), digest-based
+        // trust, and `requires` applicability - so a draft/retired/untrusted or
+        // inapplicable child cannot be reached through a parent that passed its
+        // own gate. Refusals carry the child id (and digest for trust) so the
+        // caller can tell WHICH playbook in the tree refused. Trust is gated by
+        // `acknowledge_untrusted` exactly as for the parent, which is how
+        // `preflight` (acknowledge = true) still enforces lifecycle/requires on
+        // children while staying read-only about trust.
+        let child_playbook_dir = resolved
+            .definition_parent
+            .join("playbooks")
+            .join(&resolved.id);
+        check_lifecycle(&child_playbook_dir, &resolved.id)?;
+        check_digest_trust(&resolved.id, &resolved.digest, acknowledge_untrusted)?;
+        if let Some(req) = &loaded.playbook.requires {
+            check_requires(root, req, &resolved.id)?;
+        }
         // Fold this child's effective effects into the consented union.
         effects.extend(apb_core::effects::effective(&loaded.playbook));
         let worigin = if matches!(child_origin, Origin::Global) {
@@ -346,11 +346,18 @@ fn collect_children(
         )?;
         path.pop();
 
+        // Typed scope (review I2): the pin records the resolved origin, never
+        // `Auto`. Built from `child_origin` (already resolved to Global or
+        // Project), so `ProfileScope::Auto` cannot appear by construction.
+        let child_scope = match &child_origin {
+            Origin::Global => ProfileScope::Global,
+            Origin::Project { .. } => ProfileScope::Project,
+        };
         out.insert(
             n.id.clone(),
             ChildExpectation {
                 id: resolved.id.clone(),
-                scope: scope_str.to_string(),
+                scope: child_scope,
                 version: resolved.version.clone(),
                 playbook_digest: resolved.digest.clone(),
                 profile_bundles: bundles,
@@ -361,10 +368,12 @@ fn collect_children(
     Ok(out)
 }
 
-/// Checks trust for the bundle of every profile the playbook references
-/// (nodes + supervisor, accounting for defaults). An unapproved bundle without acknowledge -
-/// refusal `untrusted_profile_requires_acknowledge` with the list of `<scope>/<name>`.
-/// Collects the playbook's profile references (nodes + supervisor, accounting for defaults).
+/// Collects every profile reference a playbook binds, accounting for defaults.
+/// A reference comes from each node that has an effective profile - both
+/// `agent_task` nodes and `finish` nodes that carry a `prompt` (a finish
+/// prompt is an executor step, see `NodeKind::effective_profile_ref`) - and,
+/// when `supervised`, the supervisor profile. The trust decision on these
+/// bundles is made by the caller (`check_profile_bundles` / `collect_children`).
 ///
 /// Does not account for the run-local ephemeral executor (`overrides`): the gate only sees
 /// the playbook definition. This is safe only because the surfaces do NOT
@@ -514,6 +523,36 @@ fn is_safe_relative(p: &str) -> bool {
                 | std::path::Component::RootDir
         )
     })
+}
+
+/// Lifecycle gate shared by the parent (`check_run` / `preflight`) and every
+/// sub-playbook child (`collect_children`): a draft or retired definition
+/// refuses with the SAME policy keys the parent uses, carrying `id` so the
+/// caller can tell WHICH playbook in the tree refused.
+fn check_lifecycle(playbook_dir: &Path, id: &str) -> Result<(), Value> {
+    match read_lifecycle(playbook_dir) {
+        Lifecycle::Active => Ok(()),
+        Lifecycle::Draft => Err(json!({ "policy": "draft_requires_trial", "id": id })),
+        Lifecycle::Retired => Err(json!({ "policy": "retired_not_runnable", "id": id })),
+    }
+}
+
+/// Digest-based trust gate shared by the parent and every child: an unapproved
+/// definition digest refuses unless `acknowledge_untrusted` (the caller
+/// confirmed with the user). `id`/`digest` name the offending playbook so a
+/// tree refusal points at the exact child. Gating on `acknowledge_untrusted` is
+/// what lets `preflight` (which passes `true`) stay read-only and skip child
+/// trust while still enforcing lifecycle and `requires`.
+fn check_digest_trust(id: &str, digest: &str, acknowledge_untrusted: bool) -> Result<(), Value> {
+    if !acknowledge_untrusted && !TrustStore::load().is_approved(digest) {
+        return Err(json!({
+            "policy": "untrusted_requires_acknowledge",
+            "id": id,
+            "digest": digest,
+            "detail": "run again with acknowledge_untrusted: true after user confirmation",
+        }));
+    }
+    Ok(())
 }
 
 /// Checks `requires` applicability: files - only safe relative

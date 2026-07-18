@@ -664,13 +664,33 @@ pub(crate) fn run_playbook_node(
     // scope + version verbatim (anti-TOCTOU); without a pin (CLI path) we live
     // resolve with the same candidate order the policy gate uses: an explicit
     // scope pins the origin, `auto` prefers the parent origin then global.
+    use apb_core::profile::ProfileScope;
     use apb_core::scope::{Origin, PlaybookRef, scope_candidates};
-    let pin = cfg.expected_children.as_ref().and_then(|m| m.get(node_id));
+    // Fail-closed pins (review I4): `expected_children == None` is the ungated
+    // (CLI) path and lives-resolves. But a gated run (`Some(map)`) MUST carry a
+    // pin for every playbook node its permit walked; a missing entry means this
+    // node was outside the verified tree, so we FAIL the node rather than
+    // silently live-resolving unverified content.
+    let pin = match &cfg.expected_children {
+        None => None,
+        Some(map) => match map.get(node_id) {
+            Some(p) => Some(p),
+            None => {
+                return Ok((
+                    NodeStatus::Failed,
+                    format!(
+                        "sub-playbook node `{node_id}`: run permit carried no pin for it; refusing to live-resolve under a gated run"
+                    ),
+                ));
+            }
+        },
+    };
     let resolved = if let Some(p) = pin {
-        let origin = if p.scope == "global" {
-            Origin::Global
-        } else {
-            Origin::Project { workspace_id: None }
+        // The pin's scope is a resolved origin (never `Auto`), so map it back to
+        // a concrete `Origin` (review I2 - no string comparison).
+        let origin = match p.scope {
+            ProfileScope::Global => Origin::Global,
+            _ => Origin::Project { workspace_id: None },
         };
         let cref = PlaybookRef {
             origin,

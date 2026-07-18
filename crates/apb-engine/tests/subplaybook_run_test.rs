@@ -54,3 +54,49 @@ fn parent_runs_child_and_records_child_run_started() {
     let parent_state = RunState::fold(&events);
     assert_eq!(parent_state.outputs.get("c").map(|s| s.as_str()), Some(""));
 }
+
+#[test]
+fn gated_run_with_no_pin_for_node_fails_closed() {
+    // Fail-closed pins (review I4): a gated run (expected_children is Some) that
+    // carries NO pin for a playbook node must FAIL that node, not silently
+    // live-resolve unverified content. Some(empty map) proves the case.
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    write_pb(dir.path(), "parent", PARENT);
+    write_pb(dir.path(), "child", CHILD);
+
+    let opts = RunOptions {
+        expected_children: Some(std::collections::BTreeMap::new()),
+        ..RunOptions::default()
+    };
+    let res = run(dir.path(), "parent", None, opts).expect("run completes");
+
+    // The security property: node `c` FAILED with the no-pin diagnostic and NO
+    // child run was ever started (the engine refused to live-resolve unverified
+    // content under a gated run). Autonomous mode still routes past the failed
+    // node to the success finish, so the run outcome itself is not the signal.
+    let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    let diag = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::NodeFinished {
+                node,
+                status,
+                output,
+                ..
+            } if node == "c" && status == "failed" => Some(output.clone()),
+            _ => None,
+        })
+        .expect("node c finished failed");
+    assert!(
+        diag.contains("no pin") && diag.contains('c'),
+        "diagnostic names the node and the missing pin: {diag}"
+    );
+    let child_started = events.iter().any(
+        |e| matches!(&e.payload, EventPayload::ChildRunStarted { node_id, .. } if node_id == "c"),
+    );
+    assert!(
+        !child_started,
+        "no child run may start when the pin is missing"
+    );
+}

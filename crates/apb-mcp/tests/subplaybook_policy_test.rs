@@ -1,9 +1,10 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use apb_core::profile::ProfileScope;
 use apb_core::registry::{Registry, init_project};
 use apb_core::scope::{Origin, PlaybookRef, digest_str};
-use apb_core::trust::{OriginKind, TrustStore};
+use apb_core::trust::{Lifecycle, OriginKind, TrustStore, write_lifecycle};
 use apb_engine::run_config::read_run_config;
 use apb_mcp::policy::{check_run, preflight};
 
@@ -55,6 +56,15 @@ const CHILD_CYCLE: &str = "schema: 2\nid: child\nname: child\nversion: 1.0.0\nno
 const PARENT_EFFECTS: &str = "schema: 2\nid: parent\nname: parent\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: c, type: playbook, playbook: worker }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: c }\n  - { from: c, to: f }\n";
 const WORKER: &str = "schema: 2\nid: worker\nname: worker\nversion: 1.0.0\neffects: [secrets]\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: \"do it\" }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n";
 
+// A child that requires a command that is not on PATH, so its applicability
+// preflight (`requires`) fails - proving the child goes through the same
+// `check_requires` the parent does.
+const CHILD_REQUIRES: &str = "schema: 2\nid: child\nname: child\nversion: 1.0.0\nrequires:\n  commands: [apb-definitely-not-a-real-command-zzz]\nnodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: f }\n";
+
+fn set_lifecycle(root: &Path, id: &str, lc: Lifecycle) {
+    write_lifecycle(&root.join(".apb/playbooks").join(id), lc).unwrap();
+}
+
 fn wref() -> PlaybookRef {
     PlaybookRef {
         origin: Origin::Project { workspace_id: None },
@@ -86,7 +96,7 @@ fn recursive_permit_pins_child() {
     let permit = check_run(dir.path(), &wref(), false, false).expect("permit");
     let child = permit.children.get("c").expect("child pinned at node c");
     assert_eq!(child.id, "child");
-    assert_eq!(child.scope, "project");
+    assert_eq!(child.scope, ProfileScope::Project);
     assert_eq!(child.version, "1.0.0");
     assert!(!child.playbook_digest.is_empty());
     assert!(child.children.is_empty());
@@ -183,6 +193,121 @@ fn gated_run_threads_child_pins_into_parent_config() {
         .expect("parent config carries expected_children");
     let child = children.get("c").expect("child pinned at node c");
     assert_eq!(child.id, "child");
-    assert_eq!(child.scope, "project");
+    assert_eq!(child.scope, ProfileScope::Project);
     assert_eq!(child.version, "1.0.0");
+}
+
+// C1 (release blocker): the recursive gate must run the SAME pipeline on each
+// child that the parent gets, and every refusal must name the child.
+
+#[test]
+fn untrusted_child_digest_refuses_and_acknowledge_allows() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path());
+
+    init_project(dir.path()).unwrap();
+    write_pb(dir.path(), "parent", PARENT);
+    write_pb(dir.path(), "child", CHILD_OK);
+    // Only the parent is approved; the child's own digest is untrusted.
+    approve(dir.path(), "parent");
+
+    let refusal = check_run(dir.path(), &wref(), false, false).unwrap_err();
+    assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
+    assert_eq!(refusal["id"], "child", "refusal names the untrusted child");
+    assert!(
+        refusal["digest"].as_str().is_some_and(|d| !d.is_empty()),
+        "refusal carries the child digest"
+    );
+
+    // Acknowledging untrusted content lets the whole tree through.
+    let permit = check_run(dir.path(), &wref(), true, false).expect("acknowledged permit");
+    assert!(permit.children.contains_key("c"));
+}
+
+#[test]
+fn draft_child_refuses_naming_child() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path());
+
+    init_project(dir.path()).unwrap();
+    write_pb(dir.path(), "parent", PARENT);
+    write_pb(dir.path(), "child", CHILD_OK);
+    approve(dir.path(), "parent");
+    approve(dir.path(), "child");
+    set_lifecycle(dir.path(), "child", Lifecycle::Draft);
+
+    let refusal = check_run(dir.path(), &wref(), false, false).unwrap_err();
+    assert_eq!(refusal["policy"], "draft_requires_trial");
+    assert_eq!(refusal["id"], "child");
+}
+
+#[test]
+fn retired_child_refuses_naming_child() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path());
+
+    init_project(dir.path()).unwrap();
+    write_pb(dir.path(), "parent", PARENT);
+    write_pb(dir.path(), "child", CHILD_OK);
+    approve(dir.path(), "parent");
+    approve(dir.path(), "child");
+    set_lifecycle(dir.path(), "child", Lifecycle::Retired);
+
+    let refusal = check_run(dir.path(), &wref(), false, false).unwrap_err();
+    assert_eq!(refusal["policy"], "retired_not_runnable");
+    assert_eq!(refusal["id"], "child");
+}
+
+#[test]
+fn child_with_unmet_requires_refuses_naming_child() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path());
+
+    init_project(dir.path()).unwrap();
+    write_pb(dir.path(), "parent", PARENT);
+    write_pb(dir.path(), "child", CHILD_REQUIRES);
+    approve(dir.path(), "parent");
+    approve(dir.path(), "child");
+
+    let refusal = check_run(dir.path(), &wref(), false, false).unwrap_err();
+    assert_eq!(refusal["policy"], "requires_unmet");
+    assert_eq!(refusal["id"], "child");
+    let missing = refusal["missing"].as_array().expect("missing list");
+    assert!(
+        missing
+            .iter()
+            .any(|m| m.as_str() == Some("command:apb-definitely-not-a-real-command-zzz")),
+        "names the unmet command"
+    );
+}
+
+#[test]
+fn draft_child_also_refuses_through_preflight() {
+    // preflight (prepare_run) shares the same tree walk, so child lifecycle is
+    // enforced there too even though preflight is read-only about trust.
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path());
+
+    init_project(dir.path()).unwrap();
+    write_pb(dir.path(), "parent", PARENT);
+    write_pb(dir.path(), "child", CHILD_OK);
+    approve(dir.path(), "parent");
+    approve(dir.path(), "child");
+    set_lifecycle(dir.path(), "child", Lifecycle::Draft);
+
+    let refusal = preflight(dir.path(), "parent", None)
+        .err()
+        .expect("preflight refuses a draft child");
+    assert_eq!(refusal["policy"], "draft_requires_trial");
+    assert_eq!(refusal["id"], "child");
 }

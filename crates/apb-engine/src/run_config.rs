@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use apb_core::fsutil::atomic_write;
+use apb_core::profile::ProfileScope;
 use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
@@ -14,7 +15,14 @@ use crate::error::EngineError;
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChildExpectation {
     pub id: String,
-    pub scope: String,
+    /// The concrete origin the gate resolved this child to (review I2). Always
+    /// `Project` or `Global` - never `Auto`, which is enforced by construction:
+    /// pins are built from an already-resolved `Origin` in `collect_children`,
+    /// and `Origin` has no auto variant. `ProfileScope`'s snake_case serde
+    /// serializes to the same lowercase `"project"`/`"global"` strings the
+    /// field held as a `String`, so on-disk run configs are unchanged and old
+    /// ones still deserialize.
+    pub scope: ProfileScope,
     pub version: String,
     pub playbook_digest: String,
     #[serde(default)]
@@ -114,4 +122,48 @@ fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), EngineError> {
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The typed `scope` field (review I2) must serialize to the SAME lowercase
+    /// strings the field used as a `String`, and an on-disk config written with
+    /// those strings must still deserialize. Proves the format is unchanged.
+    #[test]
+    fn child_expectation_scope_on_disk_strings_are_stable() {
+        let child = ChildExpectation {
+            id: "child".into(),
+            scope: ProfileScope::Project,
+            version: "1.0.0".into(),
+            playbook_digest: "sha256:abc".into(),
+            profile_bundles: BTreeMap::new(),
+            children: BTreeMap::new(),
+        };
+        let yaml = serde_yaml_ng::to_string(&child).unwrap();
+        assert!(
+            yaml.contains("scope: project"),
+            "project scope must serialize to the bare `project` string, got:\n{yaml}"
+        );
+
+        let global = ChildExpectation {
+            scope: ProfileScope::Global,
+            ..child.clone()
+        };
+        assert!(
+            serde_yaml_ng::to_string(&global)
+                .unwrap()
+                .contains("scope: global")
+        );
+
+        // Old configs (pre-typing) stored the same strings; they must still load.
+        let legacy = "id: child\nscope: global\nversion: 1.0.0\nplaybook_digest: sha256:abc\n";
+        let parsed: ChildExpectation = serde_yaml_ng::from_str(legacy).unwrap();
+        assert_eq!(parsed.scope, ProfileScope::Global);
+
+        // Full roundtrip preserves the value.
+        let round: ChildExpectation = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(round, child);
+    }
 }
