@@ -106,10 +106,10 @@ All structs `#[serde(deny_unknown_fields)]`, mirroring `ProfileDoc` style.
 `from_yaml` validation rules (each failure is `ConnectorError::Invalid` with a message naming the offender):
 1. `name` passes `validate_profile_name` and equals `expected_name`.
 2. `version` is non-empty.
-3. Function names pass `validate_profile_name` and are unique.
+3. Function names pass `validate_snake_name` (new fn in def.rs: `[a-z0-9][a-z0-9_]*`, max 64 - snake_case for machine-facing identifiers, matching the spec examples `list_issues`, `base_url`) and are unique.
 4. Each function is HTTP xor mock: (`method` and `url` both present, `mock` absent) or (`mock` present, `method`/`url`/`query`/`body` absent).
 5. `healthcheck`, when present, names an existing function.
-6. Account field names pass `validate_profile_name` and are unique.
+6. Account field names pass `validate_snake_name` and are unique.
 
 Do NOT validate secret placement here - that needs the template parser (Task 3 adds `def.rs::validate_templates`).
 

@@ -117,10 +117,15 @@ functions:
 
 Rules:
 
-- `name` must equal the folder name; mismatch is a validation error.
+- `name` must equal the folder name; mismatch is a validation error. The
+  connector name follows the same hyphen-slug rule as profiles and skills
+  (`[a-z0-9][a-z0-9-]*`, max 64).
 - Unknown fields are rejected (`deny_unknown_fields`), matching profile
   parsing style.
-- Function names are slugs, unique within the connector.
+- Function names and account field names are snake_case identifiers
+  (`[a-z0-9][a-z0-9_]*`, max 64), unique within the connector. Snake case
+  matches API operation and template-key conventions (`{{account.base_url}}`,
+  `list_issues`); the hyphen rule applies only to folder-level names.
 - A function is either HTTP (`method` + `url` present) or mock (`mock`
   present), never both.
 - The `auth` block shape depends on `kind`: `header` uses `header` +
