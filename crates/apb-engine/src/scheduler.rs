@@ -424,6 +424,41 @@ pub fn run_cancel(root: &Path, run_id: &str) -> Result<(), EngineError> {
             reason: "run_cancel".into(),
         },
     )?;
+    // Propagate the abort into any non-terminal sub-playbook children (spec C):
+    // an operator abort of the parent must reach a child that is blocking the
+    // parent (e.g. a child paused on human_review).
+    abort_children(root, run_id)?;
+    Ok(())
+}
+
+/// Posts Abort to every non-terminal sub-playbook child of `run_id`, recursively
+/// (spec C). Best-effort per child; a child that no longer exists is skipped.
+/// This is how an operator abort of the parent reaches a child that is blocking
+/// the parent (e.g. a child paused on human_review): the child's own drive loop
+/// scans its control.jsonl at every iteration boundary and returns Aborted, which
+/// the parent maps to a failed node.
+fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineError> {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let events = read_all(&run_dir)?;
+    for e in &events {
+        if let EventPayload::ChildRunStarted { run_id: child, .. } = &e.payload {
+            let child_dir = root.join(".apb/runs").join(child);
+            if child_dir.is_dir()
+                && !matches!(
+                    RunState::fold(&read_all(&child_dir)?).run_status,
+                    RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
+                )
+            {
+                let _ = crate::control::post_control(
+                    &child_dir,
+                    Control::Abort {
+                        reason: "parent aborted".into(),
+                    },
+                );
+                abort_children(root, child)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -956,6 +991,32 @@ fn drive(
                 NodeStatus::Failed,
                 "join: upstream branch failed".to_string(),
             )
+        } else if let NodeKind::Playbook {
+            playbook: child_ref,
+            instruction: node_instr,
+        } = &node_kind
+        {
+            // A sub-playbook node runs a full child run in-process on this drive
+            // thread (spec C). It is NOT is_agent_or_script, so it never enters the
+            // parallel fast path; run_playbook_node takes &mut EventLog and appends
+            // ChildRunStarted itself (single writer). Intercepted here before
+            // execute_node (whose Playbook arm is only a defensive error).
+            steps += 1;
+            log.append(EventPayload::NodeStarted {
+                node: current.clone(),
+                attempt: 1,
+            })?;
+            run_playbook_node(
+                root,
+                run_dir,
+                log,
+                &playbook,
+                cfg,
+                &run_id,
+                &current,
+                child_ref,
+                node_instr.as_deref(),
+            )?
         } else {
             steps += 1;
             log.append(EventPayload::NodeStarted {
@@ -1260,6 +1321,21 @@ pub fn resume_with(
     from_node: Option<&str>,
     allow_environment_drift: bool,
 ) -> Result<RunResult, EngineError> {
+    resume_inner(root, run_id, from_node, allow_environment_drift, false)
+}
+
+/// Shared implementation behind `resume`/`resume_with`. `allow_shared_workdir`
+/// mirrors `RunOptions::allow_shared_workdir`: a sub-playbook child reattached
+/// on resume runs on the parent's drive thread while the parent still holds the
+/// PID-keyed workdir lock, so its own resume must skip a second acquire
+/// (which would return WorkdirBusy). The public entry points pass `false`.
+fn resume_inner(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+    allow_shared_workdir: bool,
+) -> Result<RunResult, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
@@ -1305,12 +1381,17 @@ pub fn resume_with(
     log.append(EventPayload::RunPaused {
         reason: format!("resume from `{start_node}`"),
     })?;
-    let is_write = playbook
-        .nodes
-        .iter()
-        .any(|n| matches!(n.kind, NodeKind::AgentTask { .. } | NodeKind::Script { .. }));
+    // Mirrors prepare's predicate: a `playbook` node also writes (its child runs
+    // in the shared workdir), so a resumed parent with a sub-playbook node still
+    // takes the lock.
+    let is_write = playbook.nodes.iter().any(|n| {
+        matches!(
+            n.kind,
+            NodeKind::AgentTask { .. } | NodeKind::Script { .. } | NodeKind::Playbook { .. }
+        )
+    });
     let _guard = if is_write {
-        acquire(root, false)?
+        acquire(root, allow_shared_workdir)?
     } else {
         None
     };

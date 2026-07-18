@@ -553,6 +553,220 @@ pub(crate) fn copy_tree(src: &Path, dst: &Path) -> Result<(), EngineError> {
     Ok(())
 }
 
+/// The run id of the latest ChildRunStarted for `node_id`, if any.
+pub(crate) fn latest_child_run(events: &[Event], node_id: &str) -> Option<String> {
+    events.iter().rev().find_map(|e| match &e.payload {
+        EventPayload::ChildRunStarted { node_id: n, run_id } if n == node_id => {
+            Some(run_id.clone())
+        }
+        _ => None,
+    })
+}
+
+/// Whether a run directory has reached a terminal run status.
+pub(crate) fn run_is_terminal(root: &Path, run_id: &str) -> bool {
+    let dir = root.join(".apb/runs").join(run_id);
+    let events = read_all(&dir).unwrap_or_default();
+    matches!(
+        RunState::fold(&events).run_status,
+        RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
+    )
+}
+
+/// The parent run's definition origin (from its RunProvenance event), used to
+/// resolve a child's `scope: auto` the same way the policy gate does (parent
+/// origin first, then global). Defaults to Project when the label is absent.
+fn parent_run_origin(run_dir: &Path) -> apb_core::scope::Origin {
+    use apb_core::scope::Origin;
+    let events = read_all(run_dir).unwrap_or_default();
+    for e in &events {
+        if let EventPayload::RunProvenance {
+            origin: Some(label),
+            ..
+        } = &e.payload
+        {
+            return if label == "global" {
+                Origin::Global
+            } else {
+                Origin::Project { workspace_id: None }
+            };
+        }
+    }
+    Origin::Project { workspace_id: None }
+}
+
+/// Executes a `playbook` node (spec C): starts (or, on resume, reattaches to) a
+/// full child run and maps its terminal state to this node's status/output. The
+/// child runs in-process, synchronously, with `allow_shared_workdir: true` (the
+/// parent already holds the workdir lock; see the module notes). ChildRunStarted
+/// is appended here (drive thread, single writer) BEFORE the child is driven.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn run_playbook_node(
+    root: &Path,
+    run_dir: &Path,
+    log: &mut EventLog,
+    _playbook: &Playbook,
+    cfg: &RunConfig,
+    run_id: &str,
+    node_id: &str,
+    child_ref: &apb_core::schema::QualifiedPlaybookRef,
+    node_instruction: Option<&str>,
+) -> Result<(NodeStatus, String), EngineError> {
+    // Depth backstop.
+    if cfg.depth + 1 > MAX_SUBPLAYBOOK_DEPTH {
+        return Ok((
+            NodeStatus::Failed,
+            format!(
+                "sub-playbook depth limit ({}) exceeded",
+                MAX_SUBPLAYBOOK_DEPTH
+            ),
+        ));
+    }
+
+    // Resume reattach: a still-running child from a prior ChildRunStarted is
+    // resumed, not restarted (the event log is the source of truth). The child
+    // runs on this drive thread while the parent still holds the workdir lock,
+    // so its resume must allow the shared workdir (no second acquire).
+    let events = read_all(run_dir)?;
+    if let Some(existing) = latest_child_run(&events, node_id)
+        && !run_is_terminal(root, &existing)
+    {
+        let res = resume_inner(root, &existing, None, false, true)?;
+        return Ok(map_child_outcome(root, &existing, res.outcome));
+    }
+
+    // Render the node instruction with the parent context; the result is the
+    // child's explicit instruction (Part A precedence). Absent -> None (child
+    // falls back to its own draft).
+    let child_instruction = match node_instruction {
+        Some(t) => {
+            let events_now = read_all(run_dir)?;
+            let context = build_context_for_render(run_dir, &events_now)?;
+            let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
+                .into_iter()
+                .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
+                .collect();
+            let state = RunState::fold(&events_now);
+            Some(render(
+                t,
+                &cfg.params,
+                cfg.instruction.as_deref(),
+                &state.outputs,
+                &state.reviews,
+                &hooks,
+                &context,
+            ))
+        }
+        None => None,
+    };
+
+    // Resolve the child reference. A gate pin (cfg.expected_children) fixes the
+    // scope + version verbatim (anti-TOCTOU); without a pin (CLI path) we live
+    // resolve with the same candidate order the policy gate uses: an explicit
+    // scope pins the origin, `auto` prefers the parent origin then global.
+    use apb_core::profile::ProfileScope;
+    use apb_core::scope::{Origin, PlaybookRef};
+    let pin = cfg.expected_children.as_ref().and_then(|m| m.get(node_id));
+    let resolved = if let Some(p) = pin {
+        let origin = if p.scope == "global" {
+            Origin::Global
+        } else {
+            Origin::Project { workspace_id: None }
+        };
+        let cref = PlaybookRef {
+            origin,
+            id: child_ref.id.clone(),
+            version: Some(p.version.clone()),
+        };
+        apb_core::store::resolve(root, &cref)
+            .map_err(|e| EngineError::Invalid(format!("sub-playbook `{}`: {e}", child_ref.id)))?
+    } else {
+        let candidates: Vec<Origin> = match child_ref.scope {
+            ProfileScope::Global => vec![Origin::Global],
+            ProfileScope::Project => vec![Origin::Project { workspace_id: None }],
+            ProfileScope::Auto => match parent_run_origin(run_dir) {
+                Origin::Global => vec![Origin::Global],
+                Origin::Project { .. } => {
+                    vec![Origin::Project { workspace_id: None }, Origin::Global]
+                }
+            },
+        };
+        let mut resolved_opt = None;
+        for cand in &candidates {
+            let cref = PlaybookRef {
+                origin: cand.clone(),
+                id: child_ref.id.clone(),
+                version: None,
+            };
+            if let Ok(r) = apb_core::store::resolve(root, &cref) {
+                resolved_opt = Some(r);
+                break;
+            }
+        }
+        resolved_opt.ok_or_else(|| {
+            EngineError::Invalid(format!(
+                "sub-playbook `{}` (node `{}`) did not resolve in any candidate scope",
+                child_ref.id, node_id
+            ))
+        })?
+    };
+
+    let opts = RunOptions {
+        instruction: child_instruction,
+        allow_shared_workdir: true,
+        parent_run: Some(run_id.to_string()),
+        depth: cfg.depth + 1,
+        expected_digest: pin.map(|p| p.playbook_digest.clone()),
+        expected_profile_bundles: pin.map(|p| p.profile_bundles.clone()),
+        expected_children: pin.map(|p| p.children.clone()),
+        ..Default::default()
+    };
+
+    // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
+    let t = PrepareTarget {
+        definition_parent: resolved.definition_parent.clone(),
+        execution_root: resolved.execution_root.clone(),
+        origin_label: resolved.origin_label,
+    };
+    let mut cp = prepare_run_target(&t, &resolved.id, Some(&resolved.version), opts)?;
+    let child_run_id = cp.run_id.clone();
+    log.append(EventPayload::ChildRunStarted {
+        node_id: node_id.to_string(),
+        run_id: child_run_id.clone(),
+    })?;
+    let res = drive(
+        cp.playbook.clone(),
+        &cp.run_dir,
+        &resolved.execution_root,
+        &mut cp.log,
+        &cp.cfg,
+        cp.start_node.clone(),
+        cp.run_id.clone(),
+        RunMode::Autonomous,
+        cp.supervisor_expected,
+    )?;
+    Ok(map_child_outcome(root, &child_run_id, res.outcome))
+}
+
+/// Maps a child run's terminal status to the parent node's (status, output).
+fn map_child_outcome(root: &Path, child_run_id: &str, outcome: RunStatus) -> (NodeStatus, String) {
+    match outcome {
+        RunStatus::Succeeded => {
+            let dir = root.join(".apb/runs").join(child_run_id);
+            let answer = crate::progress::run_answer(&dir, &read_all(&dir).unwrap_or_default())
+                .unwrap_or_default();
+            (NodeStatus::Succeeded, answer)
+        }
+        other => (
+            NodeStatus::Failed,
+            format!(
+                "sub-playbook child run `{child_run_id}` ended {}",
+                other.as_str()
+            ),
+        ),
+    }
+}
+
 /// Whether a node is slow (external work - agent or script), such that it
 /// makes sense to execute it in parallel with other branches.
 pub(crate) fn is_agent_or_script(playbook: &Playbook, node: &str) -> bool {

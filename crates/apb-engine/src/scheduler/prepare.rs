@@ -299,10 +299,18 @@ pub(crate) fn prepare_run_target(
         .id
         .clone();
 
-    let is_write = playbook
-        .nodes
-        .iter()
-        .any(|n| matches!(n.kind, NodeKind::AgentTask { .. } | NodeKind::Script { .. }));
+    // A run takes the shared workdir lock if it has any node that writes to the
+    // workdir. Besides agent_task/script this includes a `playbook` node: its
+    // child runs in-process under the parent's lock (with allow_shared_workdir),
+    // so the PARENT must hold the lock even when its only acting node is the
+    // sub-playbook one - otherwise nothing guards the shared workdir the child
+    // writes to.
+    let is_write = playbook.nodes.iter().any(|n| {
+        matches!(
+            n.kind,
+            NodeKind::AgentTask { .. } | NodeKind::Script { .. } | NodeKind::Playbook { .. }
+        )
+    });
     let guard = if is_write {
         acquire(root, opts.allow_shared_workdir)?
     } else {
