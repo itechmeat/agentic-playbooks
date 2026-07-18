@@ -15,6 +15,7 @@ use sha2::{Digest, Sha256};
 
 use super::common::ConnectorError;
 use super::def::ConnectorDoc;
+use super::secrets::parse_env_ref;
 
 /// One configured account for a connector. `name` is a hyphen slug
 /// (user-facing, validated with `crate::profile::validate_profile_name`,
@@ -112,26 +113,6 @@ pub fn load_merged(root: &Path, name: &str) -> Result<Vec<Account>, ConnectorErr
         .collect();
     merged.extend(project);
     Ok(merged)
-}
-
-/// Parses a `{{env.VAR}}` secret reference: the whole value must be exactly
-/// that placeholder (no surrounding text), with `VAR` matching
-/// `[A-Z][A-Z0-9_]*`. Returns the env var name, or `None` if the value is
-/// not a valid reference (a literal secret, extra text, lowercase, etc).
-/// Task 5's secrets module re-exports or moves this as needed.
-pub fn parse_env_ref(value: &str) -> Option<String> {
-    let inner = value.strip_prefix("{{env.")?.strip_suffix("}}")?;
-    let mut chars = inner.chars();
-    let first = chars.next()?;
-    if !first.is_ascii_uppercase() {
-        return None;
-    }
-    for c in chars {
-        if !c.is_ascii_uppercase() && !c.is_ascii_digit() && c != '_' {
-            return None;
-        }
-    }
-    Some(inner.to_string())
 }
 
 /// Validates a merged account list against the connector's declared
@@ -749,27 +730,6 @@ accounts:
             &[("base_url", "https://a"), ("token", "literal")],
         );
         assert!(env_refs(&doc, &account).is_empty());
-    }
-
-    // --- parse_env_ref -------------------------------------------------
-
-    #[test]
-    fn parse_env_ref_accepts_valid_reference() {
-        assert_eq!(
-            parse_env_ref("{{env.JIRA_TOKEN}}"),
-            Some("JIRA_TOKEN".to_string())
-        );
-        assert_eq!(parse_env_ref("{{env.A}}"), Some("A".to_string()));
-    }
-
-    #[test]
-    fn parse_env_ref_rejects_malformed_values() {
-        assert_eq!(parse_env_ref("literal"), None);
-        assert_eq!(parse_env_ref("{{env.lower}}"), None);
-        assert_eq!(parse_env_ref("prefix {{env.A}}"), None);
-        assert_eq!(parse_env_ref("{{env.A}} suffix"), None);
-        assert_eq!(parse_env_ref("{{env.}}"), None);
-        assert_eq!(parse_env_ref("{{secret.a}}"), None);
     }
 
     // --- default_account -------------------------------------------------
