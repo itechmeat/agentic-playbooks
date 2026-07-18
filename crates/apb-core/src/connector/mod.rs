@@ -5,8 +5,10 @@
 //! later tasks in sibling modules.
 
 pub mod common;
+pub mod config;
 pub mod def;
 pub mod template;
 pub use common::*;
+pub use config::*;
 pub use def::*;
 pub use template::*;
