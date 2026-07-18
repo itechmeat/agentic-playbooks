@@ -648,6 +648,8 @@ pub fn playbook_run(
         parent_run: None,
         depth: 0,
         expected_children,
+        expected_connectors: Default::default(),
+        expected_connector_accounts: Default::default(),
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -684,6 +686,8 @@ pub fn playbook_run_background(
         parent_run: None,
         depth: 0,
         expected_children,
+        expected_connectors: Default::default(),
+        expected_connector_accounts: Default::default(),
     };
     let run_id = run_background(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -857,6 +861,8 @@ pub fn playbook_run_supervised(
         parent_run: None,
         depth: 0,
         expected_children,
+        expected_connectors: Default::default(),
+        expected_connector_accounts: Default::default(),
     };
     let run_id = run_background(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

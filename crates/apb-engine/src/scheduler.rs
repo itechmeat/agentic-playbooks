@@ -81,6 +81,15 @@ pub struct RunOptions {
     /// skill/profile could have changed in between). The CLI path does not pass
     /// them and does not change the semantics.
     pub expected_profile_bundles: Option<BTreeMap<String, String>>,
+    /// Expected connector tree digests `name -> tree digest`, captured by the
+    /// policy gate (spec 6). Verified verbatim against the live resolution at
+    /// run start; a playbook that binds connectors with an empty map is refused
+    /// (the gate result must always be passed). Mirrors the profile-bundle pin.
+    pub expected_connectors: BTreeMap<String, String>,
+    /// Expected connector account digests `"connector/account" -> account
+    /// digest`, captured by the policy gate (spec 6). Verified verbatim at run
+    /// start alongside `expected_connectors`.
+    pub expected_connector_accounts: BTreeMap<String, String>,
     /// Parent run id when this run is a sub-playbook child (spec C).
     pub parent_run: Option<String>,
     /// Sub-playbook nesting depth of THIS run (0 for a top-level run).

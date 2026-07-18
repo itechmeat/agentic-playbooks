@@ -202,6 +202,8 @@ pub(crate) fn run_cmd(
         parent_run: None,
         depth: 0,
         expected_children: None,
+        expected_connectors: Default::default(),
+        expected_connector_accounts: Default::default(),
     };
     match run(root, name, version, opts) {
         Ok(res) => {
@@ -350,6 +352,8 @@ pub(crate) fn drive_supervised_child(
         parent_run: None,
         depth: 0,
         expected_children: None,
+        expected_connectors: Default::default(),
+        expected_connector_accounts: Default::default(),
     };
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,

@@ -291,10 +291,15 @@ after start reads only the manifest.
    (section 7), verifies every required env name resolves (early failure
    with a message naming the account and the variable), and adds two maps to
    the `RunPermit`: `connector name -> tree digest` and
-   `(connector, account) -> account digest`. Both maps are computed once and
-   handed to the engine verbatim, never recomputed.
+   `(connector, account) -> account digest`. The account map covers EVERY
+   merged account of every connector the playbook uses, not only the
+   accounts nodes are granted: any merged account is reachable through
+   config-level behavior (default flags, later grant edits), so trust and
+   drift detection cover the full merged set. Both maps are computed once
+   and handed to the engine verbatim, never recomputed.
 2. **Run start**: the engine re-verifies both permit maps against the live
-   files, copies each used `connector.yaml` into `runs/<id>/connectors/`,
+   files, bidirectionally and with exact key-set match (an unexpected,
+   missing, or digest-drifted entry in either direction refuses the run), copies each used `connector.yaml` into `runs/<id>/connectors/`,
    and writes into the write-once manifest: connector digests, the merged
    non-secret account fields (values, not just names), per-node grants
    (resolved account names and function names), and the required env variable

@@ -19,6 +19,8 @@ fn run_config_round_trips() {
         parent_run: None,
         depth: 0,
         expected_children: None,
+        expected_connectors: Default::default(),
+        expected_connector_accounts: Default::default(),
     };
     write_run_config(dir.path(), &cfg).unwrap();
     let back = read_run_config(dir.path()).unwrap();
