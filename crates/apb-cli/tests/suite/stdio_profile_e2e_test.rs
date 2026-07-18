@@ -1,4 +1,3 @@
-#![cfg(unix)]
 //! End-to-end stdio-MCP e2e (completion-plan Task 13): a real `apb mcp`
 //! server, real tool schemas, and the server-side policy-to-permit handoff
 //! (not in-process Rust calls). profile_write -> playbook_create ->

@@ -2,7 +2,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 use std::fs;
 
-const VALID: &str = include_str!("../../apb-core/tests/fixtures/valid.yaml");
+const VALID: &str = include_str!("../../../apb-core/tests/fixtures/valid.yaml");
 
 fn playbook() -> Command {
     Command::cargo_bin("apb").unwrap()
