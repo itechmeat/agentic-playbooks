@@ -324,9 +324,23 @@ pub(crate) fn prepare_run_target(
     copy_scripts(&version_dir, &run_dir)?;
     // The run's webhook hook secrets (for wait nodes, spec 6.7).
     crate::hooks::generate_hooks(&run_dir, &playbook)?;
+
+    // Run input precedence (spec A): an explicitly passed instruction wins;
+    // otherwise the playbook's autosaved draft, read at start time; otherwise
+    // None. Resolved once here so every surface (MCP, CLI, server, and a Part C
+    // sub-playbook child) shares the rule. A blank draft is treated as absent.
+    let instruction = match opts.instruction.clone() {
+        Some(i) => Some(i),
+        None => reg
+            .read_instruction_draft(id)
+            .ok()
+            .flatten()
+            .filter(|s| !s.trim().is_empty()),
+    };
+
     let cfg = RunConfig {
         params: opts.params.clone(),
-        instruction: opts.instruction.clone(),
+        instruction,
         supervisor_expected: opts.supervisor_expected,
         max_patches_per_run: opts.max_patches_per_run,
         context_max_bytes: opts.context_max_bytes,
