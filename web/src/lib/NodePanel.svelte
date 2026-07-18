@@ -158,6 +158,14 @@
     </Button>
   </div>
 
+  <datalist id="apb-profile-options">
+    {#each profiles as p (p.scope + '/' + p.name)}
+      <option value={`${p.scope}/${p.name}`}>
+        {p.trusted ? '' : '(untrusted) '}{p.scope}/{p.name}
+      </option>
+    {/each}
+  </datalist>
+
   <Field.FieldGroup class="gap-3">
     <Field.Field>
       <Field.FieldLabel for="np-title">title</Field.FieldLabel>
@@ -195,13 +203,6 @@
           value={f.profile}
           oninput={(e) => setProfile(e.currentTarget.value)}
         />
-        <datalist id="apb-profile-options">
-          {#each profiles as p (p.scope + '/' + p.name)}
-            <option value={`${p.scope}/${p.name}`}>
-              {p.trusted ? '' : '(untrusted) '}{p.scope}/{p.name}
-            </option>
-          {/each}
-        </datalist>
       </Field.Field>
       <Field.Field>
         <Field.FieldLabel for="np-retries">max_retries</Field.FieldLabel>
@@ -278,6 +279,25 @@
       <Field.Field>
         <Field.FieldLabel for="np-outcome">outcome</Field.FieldLabel>
         <Input id="np-outcome" value={f.outcome} oninput={(e) => setStr('outcome', e.currentTarget.value)} />
+      </Field.Field>
+      <Field.Field>
+        <Field.FieldLabel for="np-finish-prompt">prompt (compose the run answer; optional)</Field.FieldLabel>
+        <Textarea
+          id="np-finish-prompt"
+          rows={4}
+          value={f.prompt}
+          oninput={(e) => setStr('prompt', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field>
+        <Field.FieldLabel for="np-finish-profile">profile</Field.FieldLabel>
+        <Input
+          id="np-finish-profile"
+          list="apb-profile-options"
+          placeholder="name (scope auto) or scope/name"
+          value={f.profile}
+          oninput={(e) => setProfile(e.currentTarget.value)}
+        />
       </Field.Field>
     {/if}
   </Field.FieldGroup>

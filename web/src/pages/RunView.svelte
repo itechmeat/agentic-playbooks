@@ -95,6 +95,13 @@
   </div>
 {/if}
 
+{#if detail?.answer}
+  <div class="border-b border-border px-4 py-2">
+    <div class="text-xs font-semibold text-muted-foreground">Answer</div>
+    <pre class="mt-1 whitespace-pre-wrap break-words text-sm">{detail.answer}</pre>
+  </div>
+{/if}
+
 <div class="flex min-h-0 flex-1">
   <div class="relative min-h-0 min-w-0 flex-1">
     <SvelteFlow

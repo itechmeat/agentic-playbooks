@@ -112,6 +112,7 @@ export interface RunDetail {
   nodes: Record<string, string>
   outputs: Record<string, string>
   instruction: string | null
+  answer?: string | null
   params: Record<string, string>
   model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[] } | null
   layout: { nodes?: LayoutNode[] } | null

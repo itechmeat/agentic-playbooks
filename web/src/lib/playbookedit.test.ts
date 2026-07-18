@@ -154,6 +154,24 @@ describe('updateNode', () => {
     updateNode(doc, 'plan', { prompt: 'x' })
     expect(doc.toString()).toBe(before)
   })
+
+  it('sets prompt and profile on a finish node', () => {
+    const src = [
+      'schema: 2',
+      'id: p',
+      'name: p',
+      'version: 1.0.0',
+      'nodes:',
+      '  - { id: f, type: finish, outcome: success }',
+      'edges: []',
+      '',
+    ].join('\n')
+    const doc = parseDocument(src)
+    const next = updateNode(doc, 'f', { prompt: 'compose', profile: 'writer' })
+    const yaml = next.toString()
+    expect(yaml).toContain('prompt: compose')
+    expect(yaml).toContain('profile: writer')
+  })
 })
 
 describe('addEdge', () => {
