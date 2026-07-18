@@ -516,6 +516,13 @@ fn drive(
     supervisor_expected: bool,
 ) -> Result<RunResult, EngineError> {
     let workdir = root.to_path_buf();
+    // Adapter env scrubbing (spec 4.3): the union of every env var name
+    // referenced by ANY installed connector config (both scopes), computed once
+    // per run and removed from every spawned agent's environment - even runs
+    // that use no connector, so a token for connector X can never leak into an
+    // unrelated run's agent. `apb connector call`, spawned as a child of the
+    // agent, resolves secrets from the dotenv files itself.
+    let env_scrub = apb_core::connector::resolve::all_referenced_env_names(root);
     let mut current = start_node;
     // The other active branch heads (besides `current`). A linear run keeps the
     // frontier empty - behavior identical to the old single `current`. A fork
@@ -709,7 +716,7 @@ fn drive(
                     attempt: 1,
                 })?;
                 let (st, out, evs) = execute_finish_answer(
-                    &playbook, run_dir, &workdir, &current, &run_id, &state, cfg, p,
+                    &playbook, run_dir, &workdir, &current, &run_id, &state, cfg, p, &env_scrub,
                 )?;
                 for ev in evs {
                     log.append(ev)?;
@@ -768,7 +775,8 @@ fn drive(
                 .iter()
                 .any(|n| playbook.node(n).is_some_and(|x| x.kind.renders_context()));
         if renders_context
-            && let Some(ev) = maybe_compact_context(run_dir, &workdir, cfg, &read_all(run_dir)?)?
+            && let Some(ev) =
+                maybe_compact_context(run_dir, &workdir, cfg, &read_all(run_dir)?, &env_scrub)?
         {
             log.append(ev)?;
         }
@@ -813,6 +821,7 @@ fn drive(
                     let op = prompt_overrides.remove(n);
                     let tx = tx.clone();
                     let cancel_c = Arc::clone(&cancel);
+                    let scrub_c = env_scrub.clone();
                     std::thread::spawn(move || {
                         let res = execute_node(
                             &playbook_c,
@@ -824,6 +833,7 @@ fn drive(
                             &cfg_c,
                             op,
                             &cancel_c,
+                            &scrub_c,
                         );
                         let _ = tx.send((node, res));
                     });
@@ -1048,6 +1058,7 @@ fn drive(
                 cfg,
                 override_prompt,
                 &AtomicBool::new(false),
+                &env_scrub,
             )?;
             for ev in evs {
                 log.append(ev)?;

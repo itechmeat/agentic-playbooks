@@ -7,12 +7,15 @@
 
 use std::collections::BTreeMap;
 use std::ffi::OsString;
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apb_core::connector::config::account_digest;
 use apb_core::connector::resolve::resolve_playbook;
 use apb_core::schema::Playbook;
+use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, ConnectorEnvPolicy};
 use apb_engine::connector_run::snapshot_connectors;
+use apb_engine::invocation::builtin;
 
 use crate::common;
 
@@ -139,6 +142,66 @@ fn expected_maps(
         }
     }
     (connectors, accounts)
+}
+
+/// Writes an executable stub agent that dumps its environment to stdout, so a
+/// test can inspect exactly what the spawned agent inherited.
+fn env_dump_agent(dir: &Path) -> String {
+    let path = dir.join("env-dump.sh");
+    common::write_sync(&path, "#!/bin/sh\nenv\n");
+    let mut perm = std::fs::metadata(&path).unwrap().permissions();
+    perm.set_mode(0o755);
+    std::fs::set_permissions(&path, perm).unwrap();
+    path.to_string_lossy().to_string()
+}
+
+#[test]
+fn adapter_scrubs_connector_env_and_injects_run_context() {
+    let _lock = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    // A connector token present in the parent process environment: without
+    // scrubbing the spawned agent would inherit it.
+    let _token = set_str("MOCK_SCRUB_TOKEN", "super-secret");
+
+    let ad = ClaudeAdapter {
+        program: env_dump_agent(dir.path()),
+        spec: builtin("claude").unwrap(),
+    };
+    let policy = ConnectorEnvPolicy {
+        scrub: vec!["MOCK_SCRUB_TOKEN".to_string()],
+        run_dir: Some(dir.path().to_path_buf()),
+        node_id: Some("node-a".to_string()),
+    };
+    let report = ad
+        .run(&AgentTask {
+            prompt: "hi",
+            model: "haiku",
+            workdir: dir.path(),
+            timeout: None,
+            stream_log: None,
+            soul: None,
+            grant_autonomy: false,
+            connector_policy: &policy,
+        })
+        .unwrap();
+
+    // The scrubbed connector token never reaches the agent's environment.
+    assert!(
+        !report.raw.contains("MOCK_SCRUB_TOKEN"),
+        "scrubbed connector var leaked into the agent env: {}",
+        report.raw
+    );
+    // The run-context env the connector-call child reads is present.
+    assert!(
+        report.raw.contains("APB_RUN_DIR="),
+        "APB_RUN_DIR missing from the agent env: {}",
+        report.raw
+    );
+    assert!(
+        report.raw.contains("APB_NODE_ID=node-a"),
+        "APB_NODE_ID missing or wrong in the agent env: {}",
+        report.raw
+    );
 }
 
 #[test]
