@@ -70,6 +70,10 @@ pub fn build_router(state: AppState) -> Router {
             post(promote_version_handler),
         )
         .route("/api/playbooks/{id}/frozen", put(set_frozen_handler))
+        .route(
+            "/api/playbooks/{id}/input-draft",
+            get(get_input_draft_handler).put(put_input_draft_handler),
+        )
         .route("/api/playbooks/{id}/run", post(run_playbook_handler))
         .route("/api/profiles", get(list_profiles).post(write_profile))
         .route(
@@ -330,6 +334,66 @@ async fn set_frozen_handler(
     };
     match reg.set_frozen(&id, body.frozen) {
         Ok(()) => Json(serde_json::json!({ "id": id, "frozen": body.frozen })).into_response(),
+        Err(RegistryError::NotFound(what)) => (StatusCode::NOT_FOUND, what).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// GET /api/playbooks/{id}/input-draft: the saved run "input prompt" draft for
+/// this playbook (spec A), or `null` if none has been saved yet.
+async fn get_input_draft_handler(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<WsQuery>,
+) -> impl IntoResponse {
+    if !is_safe_id(&id) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let reg = match Registry::open(&root) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match reg.read_instruction_draft(&id) {
+        Ok(v) => Json(serde_json::json!({ "instruction": v })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+#[derive(Deserialize)]
+struct InputDraftBody {
+    #[serde(default)]
+    instruction: Option<String>,
+}
+
+/// PUT /api/playbooks/{id}/input-draft: stores (or, for an empty/absent
+/// `instruction`, clears) the run input draft.
+async fn put_input_draft_handler(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<WsQuery>,
+    Json(body): Json<InputDraftBody>,
+) -> impl IntoResponse {
+    if !is_safe_id(&id) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let reg = match Registry::open(&root) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let text = body.instruction.unwrap_or_default();
+    match reg.write_instruction_draft(&id, &text) {
+        Ok(()) => {
+            let out = if text.is_empty() { None } else { Some(text) };
+            Json(serde_json::json!({ "instruction": out })).into_response()
+        }
         Err(RegistryError::NotFound(what)) => (StatusCode::NOT_FOUND, what).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
