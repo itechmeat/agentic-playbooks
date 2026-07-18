@@ -693,12 +693,14 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         .map(|(k, v)| (k.clone(), v.as_str().to_string()))
         .collect();
     let progress = apb_engine::progress::from_run_dir(&dir, &events);
+    let answer = apb_engine::progress::run_answer(&dir, &events);
     Ok(json!({
         "run_id": run_id,
         "run_status": state.run_status.as_str(),
         "nodes": nodes,
         "outputs": state.outputs,
         "progress": progress,
+        "answer": answer,
     }))
 }
 
@@ -761,6 +763,7 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let progress = pb
         .as_ref()
         .map(|p| apb_engine::progress::compute(p, &events));
+    let answer = apb_engine::progress::run_answer(&dir, &events);
 
     let nodes: BTreeMap<String, String> = state
         .nodes
@@ -773,6 +776,7 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "nodes": nodes,
         "outputs": state.outputs,
         "progress": progress,
+        "answer": answer,
     });
 
     // duration_table is always present (empty when there is no snapshot), as

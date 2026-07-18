@@ -937,6 +937,7 @@ async fn get_run_handler(
     let progress = loaded_pb
         .as_ref()
         .map(|pb| apb_engine::progress::compute(pb, &events));
+    let answer = apb_engine::progress::run_answer(&run_dir, &events);
 
     // The saved graph layout for the run's playbook version, so the run view
     // shows the same node arrangement the author laid out in the editor rather
@@ -975,6 +976,7 @@ async fn get_run_handler(
         "hooks": hooks,
         "events": events,
         "progress": progress,
+        "answer": answer,
     }))
     .into_response()
 }

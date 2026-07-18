@@ -308,6 +308,25 @@ pub fn compute(playbook: &Playbook, events: &[Event]) -> ProgressSummary {
     }
 }
 
+/// The run answer (spec B): the non-empty output of the succeeded finish node.
+/// Derived purely by fold from the run's events + snapshot; `None` when the
+/// finish had no prompt (empty output), the finish has not run, or the snapshot
+/// is missing. Multiple finish nodes: the first with a non-empty output wins.
+pub fn run_answer(run_dir: &Path, events: &[Event]) -> Option<String> {
+    let pb = load_run_playbook(run_dir)?;
+    let state = RunState::fold(events);
+    for n in &pb.nodes {
+        if matches!(n.kind, NodeKind::Finish { .. })
+            && state.nodes.get(&n.id).copied() == Some(NodeStatus::Succeeded)
+            && let Some(out) = state.outputs.get(&n.id)
+            && !out.is_empty()
+        {
+            return Some(out.clone());
+        }
+    }
+    None
+}
+
 /// Measured wall time per node in whole seconds, from NodeStarted to
 /// NodeFinished; the last completion of a node wins (loops overwrite).
 pub fn node_durations_seconds(events: &[Event]) -> BTreeMap<String, u64> {
@@ -860,6 +879,68 @@ edges:
         ];
         // (4500 - 1000) / 1000 = 3 (integer seconds).
         assert_eq!(node_durations_seconds(&events).get("a"), Some(&3));
+    }
+
+    #[test]
+    fn run_answer_is_the_finish_output() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success, prompt: \"c\" }\nedges:\n  - { from: s, to: f }\n",
+        )
+        .unwrap();
+        let events = vec![
+            ev(
+                0,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                EventPayload::NodeFinished {
+                    node: "f".into(),
+                    status: "succeeded".into(),
+                    attempt: 1,
+                    output: "THE ANSWER".into(),
+                },
+            ),
+        ];
+        assert_eq!(run_answer(&run_dir, &events).as_deref(), Some("THE ANSWER"));
+    }
+
+    #[test]
+    fn run_answer_none_for_empty_finish() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: f }\n",
+        )
+        .unwrap();
+        let events = vec![
+            ev(
+                0,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                EventPayload::NodeFinished {
+                    node: "f".into(),
+                    status: "succeeded".into(),
+                    attempt: 1,
+                    output: String::new(),
+                },
+            ),
+        ];
+        assert_eq!(run_answer(&run_dir, &events), None);
     }
 
     #[test]
