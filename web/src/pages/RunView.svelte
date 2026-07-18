@@ -32,6 +32,7 @@
   const pending = $derived(detail ? pendingReviews(detail.events) : [])
   const waiting = $derived(detail ? pendingWaits(detail.events) : [])
   const hookEntries = $derived(Object.entries(detail?.hooks ?? {}))
+  const children = $derived(detail?.children ?? [])
 
   async function decide(node: string, decision: string) {
     deciding = `${node}:${decision}`
@@ -141,6 +142,30 @@
                   </Button>
                 {/each}
               </div>
+            </div>
+          {/each}
+        </Card.Content>
+      </Card.Root>
+    {/if}
+
+    {#if children.length}
+      <Card.Root>
+        <Card.Header><Card.Title class="text-sm">Child runs</Card.Title></Card.Header>
+        <Card.Content class="flex flex-col gap-2">
+          {#each children as c (c.run_id)}
+            <div class="flex flex-wrap items-center gap-2">
+              <a
+                href={`#/run/${encodeURIComponent(workspace)}/${encodeURIComponent(c.run_id)}`}
+                class="font-mono text-xs hover:underline"
+              >
+                {c.node_id}
+              </a>
+              <Badge
+                variant={runStatusClass(c.status) ? 'outline' : 'secondary'}
+                class={runStatusClass(c.status)}
+              >
+                {c.status}
+              </Badge>
             </div>
           {/each}
         </Card.Content>

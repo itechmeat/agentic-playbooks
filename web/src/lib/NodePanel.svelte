@@ -2,6 +2,7 @@
   import { untrack } from 'svelte'
   import type { PlaybookNode } from './types'
   import { profileToField, fieldToProfile } from './profileref'
+  import { playbookRefToField, fieldToPlaybookRef } from './playbookref'
   import { fetchInputDraft, saveInputDraft, fetchPlaybooks } from './api'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
@@ -55,14 +56,28 @@
   })
 
   // Available playbooks from /api/playbooks (for the playbook-node reference
-  // selector). Fetched once on mount - the list is global (not per-workspace),
-  // so there is no reactive dependency to re-fetch on.
-  let playbookOptions = $state<string[]>([])
+  // selector), filtered to this node's own workspace (review R1-I8): the
+  // aggregated endpoint spans every registered project, and an unfiltered id
+  // can silently resolve to another project's playbook of the same id at run
+  // time. The web app has no separate listing for the global playbook store
+  // yet (apb_core::store resolves `scope: global` from the machine config
+  // dir, not from any project's registry) - "current workspace" is the full
+  // set of ids this node can actually resolve today.
+  let playbookOptions = $state<{ id: string; project: string }[]>([])
   $effect(() => {
+    void workspace
     let cancelled = false
     fetchPlaybooks()
       .then((list) => {
-        if (!cancelled) playbookOptions = Array.from(new Set(list.map((p) => p.id)))
+        if (cancelled) return
+        const seen = new Set<string>()
+        const opts: { id: string; project: string }[] = []
+        for (const p of list) {
+          if (p.workspace_id !== workspace || seen.has(p.id)) continue
+          seen.add(p.id)
+          opts.push({ id: p.id, project: p.project })
+        }
+        playbookOptions = opts
       })
       .catch(() => {})
     return () => {
@@ -90,7 +105,7 @@
         timeout_seconds: num(n.timeout_seconds),
         isolation: str(n.isolation),
         success_check: str(n.success_check),
-        playbook: str(n.playbook),
+        playbook: playbookRefToField(n.playbook),
         instruction: str(n.instruction),
       }
     })
@@ -98,7 +113,13 @@
 
   // Start-node "input prompt" run draft: a per-run seed the operator can edit
   // before running, stored server-side outside the playbook YAML/version.
+  const DRAFT_AUTOSAVE_DEBOUNCE_MS = 500
   let draft = $state('')
+  // Quiet inline status for the last load/save attempt (review I9 frontend
+  // part): errors used to be swallowed by `.catch(() => {})`, so a failed
+  // autosave looked identical to a successful one. Cleared on the next
+  // successful save/load; null renders nothing.
+  let draftError = $state<string | null>(null)
   let draftTimer: ReturnType<typeof setTimeout> | undefined
   $effect(() => {
     void node.id
@@ -106,9 +127,13 @@
     let cancelled = false
     fetchInputDraft(id, workspace)
       .then((r) => {
-        if (!cancelled) draft = r.instruction ?? ''
+        if (cancelled) return
+        draft = r.instruction ?? ''
+        draftError = null
       })
-      .catch(() => {})
+      .catch(() => {
+        if (!cancelled) draftError = 'draft failed to load'
+      })
     return () => {
       cancelled = true
       // Cancel any pending debounced save from the previous node/props before
@@ -127,8 +152,14 @@
     const saveId = id
     const saveWs = workspace
     draftTimer = setTimeout(() => {
-      saveInputDraft(saveId, v, saveWs).catch(() => {})
-    }, 500)
+      saveInputDraft(saveId, v, saveWs)
+        .then(() => {
+          draftError = null
+        })
+        .catch(() => {
+          draftError = 'draft not saved'
+        })
+    }, DRAFT_AUTOSAVE_DEBOUNCE_MS)
   }
 
   function str(v: unknown): string {
@@ -141,6 +172,10 @@
   function setProfile(raw: string) {
     f.profile = raw
     onChange({ profile: fieldToProfile(raw) })
+  }
+  function setPlaybookRef(raw: string) {
+    f.playbook = raw
+    onChange({ playbook: fieldToPlaybookRef(raw) })
   }
   function setStr(key: string, raw: string) {
     f[key] = raw
@@ -185,8 +220,8 @@
   </datalist>
 
   <datalist id="apb-playbook-options">
-    {#each playbookOptions as pbid (pbid)}
-      <option value={pbid}></option>
+    {#each playbookOptions as p (p.id)}
+      <option value={p.id}>{p.id}{p.project ? ` (${p.project})` : ''}</option>
     {/each}
   </datalist>
 
@@ -205,6 +240,9 @@
           value={draft}
           oninput={(e) => onDraftInput(e.currentTarget.value)}
         />
+        {#if draftError}
+          <p class="text-xs text-muted-foreground">{draftError}</p>
+        {/if}
       </Field.Field>
     {/if}
 
@@ -329,9 +367,9 @@
         <Input
           id="np-pb-ref"
           list="apb-playbook-options"
-          placeholder={'id (scope auto) or use { id, scope } in YAML'}
+          placeholder={'id (scope auto) or scope/id, e.g. global/child'}
           value={f.playbook}
-          oninput={(e) => setStr('playbook', e.currentTarget.value)}
+          oninput={(e) => setPlaybookRef(e.currentTarget.value)}
         />
       </Field.Field>
       <Field.Field>

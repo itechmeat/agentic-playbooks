@@ -253,6 +253,30 @@ describe('playbook node (add + update)', () => {
     expect(yaml).toContain('playbook: child')
     expect(yaml).toContain('instruction: go')
   })
+
+  // review R1-I7: NodePanel's playbook-ref field must round-trip an
+  // object-form ref ({ id, scope }) through updateNode without collapsing it
+  // to a bare string (which would silently reset an explicit scope to auto).
+  it('preserves an object-form playbook ref (with scope) on update', () => {
+    const src = [
+      'schema: 2',
+      'id: p',
+      'name: p',
+      'version: 1.0.0',
+      'nodes:',
+      '  - { id: c, type: playbook, playbook: { id: child, scope: global } }',
+      'edges: []',
+      '',
+    ].join('\n')
+    const doc = parseDocument(src)
+    const next = updateNode(doc, 'c', { playbook: { id: 'child', scope: 'global' } })
+    const node = items(next, 'nodes').find((n) => n.get('id') === 'c')!
+    const ref = node.get('playbook') as { get: (k: string) => unknown }
+    expect(ref.get('id')).toBe('child')
+    expect(ref.get('scope')).toBe('global')
+    const yaml = next.toString()
+    expect(yaml).toContain('scope: global')
+  })
 })
 
 describe('suggestNodeId', () => {

@@ -934,10 +934,33 @@ async fn get_run_handler(
         ),
         None => (serde_json::Value::Null, id.clone(), String::new()),
     };
-    let progress = loaded_pb
-        .as_ref()
-        .map(|pb| apb_engine::progress::compute(pb, &events));
+    let progress = apb_engine::progress::from_run_dir(&run_dir, &events);
     let answer = apb_engine::progress::run_answer(&run_dir, &events);
+
+    // Child runs started from this run (spec review R1-I6): mirrors MCP
+    // `run_status`'s pattern exactly - one entry per `ChildRunStarted` event,
+    // with the child's current status folded from its own run dir. An
+    // unreadable child event log (deleted/corrupt run dir) reports `"unknown"`
+    // rather than failing the parent's detail read.
+    let children: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            apb_engine::event::EventPayload::ChildRunStarted { node_id, run_id } => {
+                let child_dir = run_dir.parent().map(|p| p.join(run_id));
+                let status = child_dir
+                    .and_then(|d| apb_engine::event::read_all(&d).ok())
+                    .map(|ev| {
+                        apb_engine::state::RunState::fold(&ev)
+                            .run_status
+                            .as_str()
+                            .to_string()
+                    })
+                    .unwrap_or_else(|| "unknown".to_string());
+                Some(serde_json::json!({ "node_id": node_id, "run_id": run_id, "status": status }))
+            }
+            _ => None,
+        })
+        .collect();
 
     // The saved graph layout for the run's playbook version, so the run view
     // shows the same node arrangement the author laid out in the editor rather
@@ -977,6 +1000,7 @@ async fn get_run_handler(
         "events": events,
         "progress": progress,
         "answer": answer,
+        "children": children,
     }))
     .into_response()
 }

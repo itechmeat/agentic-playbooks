@@ -120,4 +120,9 @@ export interface RunDetail {
   hooks?: Record<string, string>
   events: WfEvent[]
   progress?: ProgressSummary | null
+  // Sub-runs started by a `playbook` node in this run (review R1-I6), one
+  // entry per `ChildRunStarted` event. Empty (not absent) when there are
+  // none; `status` is folded from the child run's own event log, `"unknown"`
+  // if that log could not be read.
+  children?: { node_id: string; run_id: string; status: string }[]
 }

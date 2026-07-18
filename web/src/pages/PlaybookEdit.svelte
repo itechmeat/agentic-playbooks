@@ -40,7 +40,7 @@
   let projects = $state<Project[]>([])
   let targetWorkspace = $state('')
 
-  const NODE_KINDS = ['start', 'agent_task', 'script', 'condition', 'finish'] as const
+  const NODE_KINDS = ['start', 'agent_task', 'script', 'condition', 'finish', 'playbook'] as const
 
   let yamlText = $state('')
   let idInput = $state('')

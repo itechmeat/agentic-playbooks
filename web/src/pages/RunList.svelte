@@ -1,5 +1,6 @@
 <script lang="ts">
   import { fetchRuns } from '../lib/api'
+  import { groupRunsByParent } from '../lib/runlist'
   import { subscribeChanges } from '../lib/ws'
   import type { RunSummary } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -17,7 +18,10 @@
 
   async function load() {
     try {
-      items = await fetchRuns()
+      // Reverse-chronological order otherwise puts a child run above its
+      // parent (review R1-M4) - group so each child sits right after its
+      // parent instead.
+      items = groupRunsByParent(await fetchRuns())
     } catch (e) {
       toast.error('Failed to load runs', { description: String(e) })
     } finally {
