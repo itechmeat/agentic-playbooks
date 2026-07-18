@@ -52,7 +52,16 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
     if let Some(req) = &loaded.playbook.requires {
         check_requires(root, req, id)?;
     }
-    let effects = apb_core::effects::effective(&loaded.playbook)
+    // The consent surface shows the WHOLE tree's effects at parent start (spec
+    // C): the parent's effective effects UNION every pinned child's, recursively.
+    // Reuse the same walk `check_run` uses so both derive the identical union
+    // from one resolution. A cross-workspace playbook is always project-scoped
+    // here; `acknowledge_untrusted: true` skips trust marking (trust is enforced
+    // separately at execute-plan time), keeping preflight read-only.
+    let origin = Origin::Project { workspace_id: None };
+    let tree = resolve_tree(root, &loaded.playbook, &origin, id, true)?;
+    let effects = tree
+        .effects
         .iter()
         .map(|e| effect_str(e).to_string())
         .collect();
@@ -75,11 +84,56 @@ pub struct RunPermit {
     /// Verified sub-playbook pins, keyed by THIS playbook's playbook-node id
     /// (spec C). The engine receives it verbatim and rejects drift.
     pub children: std::collections::BTreeMap<String, ChildExpectation>,
-    /// The set of effects the user consents to for this run: the union of the
-    /// parent's effective effects and every pinned child's effective effects
-    /// (recursively). Same string names and shape as `Preflight::effects`; this
-    /// is the gate-output effects channel for a direct in-project run.
-    pub effects: Vec<String>,
+}
+
+/// One-pass walk of a playbook's sub-playbook tree (spec C), shared by the local
+/// run gate (`check_run`) and the cross-workspace consent surface (`preflight`)
+/// so both derive the SAME children pins and recursive effects union from a
+/// single resolution instead of duplicating it.
+struct TreeResolution {
+    /// Node-id -> verified child pin for THIS playbook (recursive).
+    children: std::collections::BTreeMap<String, ChildExpectation>,
+    /// Union of the parent's effective effects and every pinned child's
+    /// effective effects (recursively). Rendered with `effect_str`, matching
+    /// `Preflight::effects`.
+    effects: std::collections::BTreeSet<Effect>,
+    /// `<scope>/<name>` keys of child profile bundles that are not approved
+    /// (empty when `acknowledge_untrusted` is set).
+    untrusted: Vec<String>,
+}
+
+/// Seeds the effects union and cycle path with the parent itself, then walks and
+/// verifies its sub-playbook tree once. `parent_id`/`origin` identify the parent
+/// for cycle detection and `auto` scope resolution of its children.
+fn resolve_tree(
+    root: &Path,
+    playbook: &Playbook,
+    origin: &Origin,
+    parent_id: &str,
+    acknowledge_untrusted: bool,
+) -> Result<TreeResolution, Value> {
+    let mut effects: std::collections::BTreeSet<Effect> = apb_core::effects::effective(playbook);
+    let parent_scope = if matches!(origin, Origin::Global) {
+        "global"
+    } else {
+        "project"
+    };
+    let mut path: Vec<(String, String)> = vec![(parent_scope.to_string(), parent_id.to_string())];
+    let mut untrusted: Vec<String> = Vec::new();
+    let children = collect_children(
+        root,
+        playbook,
+        origin,
+        acknowledge_untrusted,
+        &mut path,
+        &mut untrusted,
+        &mut effects,
+    )?;
+    Ok(TreeResolution {
+        children,
+        effects,
+        untrusted,
+    })
 }
 
 /// Checks whether a run is permitted. `Ok(RunPermit)` - the run may proceed (digest +
@@ -160,32 +214,21 @@ pub fn check_run(
     )?;
 
     // Sub-playbook pins (spec C): walk the reference tree in the same gate pass,
-    // detect cycles, trust-check each child's bundles alongside the parent's, and
-    // accumulate the effects the user consents to (parent UNION every pinned
-    // child, recursively). Seed the effects set and the cycle path with the
-    // parent itself so a child that points back at the parent is a cycle.
-    let mut effects: std::collections::BTreeSet<Effect> =
-        apb_core::effects::effective(&loaded.playbook);
-    let parent_scope = if matches!(wref.origin, Origin::Global) {
-        "global"
-    } else {
-        "project"
-    };
-    let mut cpath: Vec<(String, String)> = vec![(parent_scope.to_string(), wref.id.clone())];
-    let mut child_untrusted: Vec<String> = Vec::new();
-    let children = collect_children(
+    // detect cycles, and trust-check each child's bundles alongside the parent's.
+    // The recursive effects union that this walk also accumulates is the user's
+    // consent surface, exposed through `preflight` (which shares this walk); the
+    // local run gate only needs the verified pins.
+    let tree = resolve_tree(
         root,
         &loaded.playbook,
         &wref.origin,
+        &wref.id,
         acknowledge_untrusted,
-        &mut cpath,
-        &mut child_untrusted,
-        &mut effects,
     )?;
-    if !child_untrusted.is_empty() {
+    if !tree.untrusted.is_empty() {
         return Err(json!({
             "policy": "untrusted_profile_requires_acknowledge",
-            "profiles": child_untrusted,
+            "profiles": tree.untrusted,
             "detail": "a sub-playbook binds an untrusted profile bundle; run again with acknowledge_untrusted: true after user confirmation",
         }));
     }
@@ -195,12 +238,10 @@ pub fn check_run(
         check_requires(root, req, &wref.id)?;
     }
 
-    let effects: Vec<String> = effects.iter().map(|e| effect_str(e).to_string()).collect();
     Ok(RunPermit {
         playbook_digest: digest,
         profile_bundles,
-        children,
-        effects,
+        children: tree.children,
     })
 }
 

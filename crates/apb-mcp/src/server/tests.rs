@@ -430,6 +430,7 @@ async fn capability_gate_blocks_retry_when_observe_only() {
         None,
         None,
         None,
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -484,6 +485,7 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
         None,
         None,
         None,
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -534,6 +536,7 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
         "noagent_sv",
         None,
         BTreeMap::new(),
+        None,
         None,
         None,
         None,

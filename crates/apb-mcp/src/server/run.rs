@@ -291,6 +291,7 @@ impl WfMcp {
                 instruction,
                 permit.playbook_digest,
                 permit.profile_bundles,
+                permit.children,
             );
         }
 
@@ -304,6 +305,7 @@ impl WfMcp {
                 params,
                 expected_digest: Some(permit.playbook_digest),
                 expected_profile_bundles: Some(permit.profile_bundles),
+                expected_children: Some(permit.children),
                 ..Default::default()
             };
             if background == Some(true) {
@@ -330,6 +332,7 @@ impl WfMcp {
                 instruction,
                 Some(permit.playbook_digest),
                 Some(permit.profile_bundles),
+                Some(permit.children),
             ));
         }
         to_call_tool_result(tools::playbook_run(
@@ -340,6 +343,7 @@ impl WfMcp {
             instruction,
             Some(permit.playbook_digest),
             Some(permit.profile_bundles),
+            Some(permit.children),
         ))
     }
 

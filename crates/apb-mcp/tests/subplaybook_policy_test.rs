@@ -4,7 +4,8 @@ use std::sync::{Mutex, MutexGuard};
 use apb_core::registry::{Registry, init_project};
 use apb_core::scope::{Origin, PlaybookRef, digest_str};
 use apb_core::trust::{OriginKind, TrustStore};
-use apb_mcp::policy::check_run;
+use apb_engine::run_config::read_run_config;
+use apb_mcp::policy::{check_run, preflight};
 
 // Env isolation: TrustStore is keyed on the global config dir, so every test
 // runs under its own temp APB_CONFIG_DIR and serializes env mutation.
@@ -113,7 +114,7 @@ fn cycle_is_refused() {
 }
 
 #[test]
-fn child_effects_surface_through_parent_gate() {
+fn child_effects_surface_through_prepare_run_consent() {
     let _l = lock();
     let cfg = tempfile::tempdir().unwrap();
     let dir = tempfile::tempdir().unwrap();
@@ -125,12 +126,63 @@ fn child_effects_surface_through_parent_gate() {
     approve(dir.path(), "parent");
     approve(dir.path(), "worker");
 
-    let permit = check_run(dir.path(), &wref(), false, false).expect("permit");
-    // The child's acting effects surface on the parent's gate output.
-    assert!(permit.effects.iter().any(|e| e == "fs_write"));
-    assert!(permit.effects.iter().any(|e| e == "network"));
-    assert!(permit.effects.iter().any(|e| e == "external"));
+    // GAP 2: the consent surface (preflight -> playbook_prepare_run.plan.effects)
+    // shows the WHOLE tree's effects. The child's acting effects surface on the
+    // parent's preflight output, proving the recursive union.
+    let pf = preflight(dir.path(), "parent", None).expect("preflight");
+    assert!(pf.effects.iter().any(|e| e == "fs_write"));
+    assert!(pf.effects.iter().any(|e| e == "network"));
+    assert!(pf.effects.iter().any(|e| e == "external"));
     // `secrets` is declared-only: it can only reach the parent through the
     // recursive effects union, proving the union (not just node inference).
-    assert!(permit.effects.iter().any(|e| e == "secrets"));
+    assert!(pf.effects.iter().any(|e| e == "secrets"));
+}
+
+#[test]
+fn gated_run_threads_child_pins_into_parent_config() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path());
+
+    init_project(dir.path()).unwrap();
+    // Control-only parent + child (no agent nodes): the gated run completes
+    // synchronously without an executor.
+    write_pb(dir.path(), "parent", PARENT);
+    write_pb(dir.path(), "child", CHILD_OK);
+    approve(dir.path(), "parent");
+    approve(dir.path(), "child");
+
+    // The gate produces the pins...
+    let permit = check_run(dir.path(), &wref(), false, false).expect("permit");
+    assert!(
+        permit.children.contains_key("c"),
+        "gate pinned child at node c"
+    );
+
+    // ...and the MCP run path must thread them into the engine verbatim
+    // (anti-TOCTOU). Run through the same tools-layer entry the server uses.
+    let out = apb_mcp::tools::playbook_run(
+        dir.path(),
+        "parent",
+        None,
+        std::collections::BTreeMap::new(),
+        None,
+        Some(permit.playbook_digest.clone()),
+        Some(permit.profile_bundles.clone()),
+        Some(permit.children.clone()),
+    )
+    .expect("gated run");
+    let run_id = out["run_id"].as_str().expect("run_id");
+
+    // The PARENT run's persisted config carries the pins keyed by playbook-node id.
+    let run_dir = dir.path().join(".apb/runs").join(run_id);
+    let cfg_read = read_run_config(&run_dir).expect("read run config");
+    let children = cfg_read
+        .expected_children
+        .expect("parent config carries expected_children");
+    let child = children.get("c").expect("child pinned at node c");
+    assert_eq!(child.id, "child");
+    assert_eq!(child.scope, "project");
+    assert_eq!(child.version, "1.0.0");
 }

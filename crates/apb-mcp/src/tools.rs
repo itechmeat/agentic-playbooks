@@ -9,6 +9,7 @@ use apb_core::versioning::{
 };
 use apb_engine::control::Control;
 use apb_engine::event::read_all;
+use apb_engine::run_config::ChildExpectation;
 use apb_engine::state::RunState;
 use apb_engine::{
     EngineError, RunMode, RunOptions, list_runs, post_supervisor_command, resume, run,
@@ -621,6 +622,7 @@ fn resolve_run_dir(root: &Path, run_id: &str) -> Result<std::path::PathBuf, Tool
     Ok(dir)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn playbook_run(
     root: &Path,
     id: &str,
@@ -629,6 +631,7 @@ pub fn playbook_run(
     instruction: Option<String>,
     expected_digest: Option<String>,
     expected_profile_bundles: Option<BTreeMap<String, String>>,
+    expected_children: Option<BTreeMap<String, ChildExpectation>>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -644,7 +647,7 @@ pub fn playbook_run(
         expected_profile_bundles,
         parent_run: None,
         depth: 0,
-        expected_children: None,
+        expected_children,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -655,6 +658,7 @@ pub fn playbook_run(
 /// then polls `run_status`/`run_events` and resolves reviews via `review_decide`.
 /// Needed because some hosts (e.g. ChatGPT Apps) have a tool-call timeout of
 /// ~60s, while a run can take minutes (design doc, section 13.5).
+#[allow(clippy::too_many_arguments)]
 pub fn playbook_run_background(
     root: &Path,
     id: &str,
@@ -663,6 +667,7 @@ pub fn playbook_run_background(
     instruction: Option<String>,
     expected_digest: Option<String>,
     expected_profile_bundles: Option<BTreeMap<String, String>>,
+    expected_children: Option<BTreeMap<String, ChildExpectation>>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -678,7 +683,7 @@ pub fn playbook_run_background(
         expected_profile_bundles,
         parent_run: None,
         depth: 0,
-        expected_children: None,
+        expected_children,
     };
     let run_id = run_background(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -823,6 +828,7 @@ pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<
 
 /// Starts a playbook in supervised mode without waiting for it to finish.
 /// The supervisor access token is minted by the server layer (Phase 4b, Task 3), not this function.
+#[allow(clippy::too_many_arguments)]
 pub fn playbook_run_supervised(
     root: &Path,
     id: &str,
@@ -831,6 +837,7 @@ pub fn playbook_run_supervised(
     instruction: Option<String>,
     expected_digest: Option<String>,
     expected_profile_bundles: Option<BTreeMap<String, String>>,
+    expected_children: Option<BTreeMap<String, ChildExpectation>>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence supervisor_expected: false
@@ -849,7 +856,7 @@ pub fn playbook_run_supervised(
         expected_profile_bundles,
         parent_run: None,
         depth: 0,
-        expected_children: None,
+        expected_children,
     };
     let run_id = run_background(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
