@@ -342,6 +342,141 @@ pub(crate) fn execute_node(
     }
 }
 
+/// Composes the run answer for a finish-with-prompt (spec B). A reduced
+/// `agent_task`: the profile chain + SOUL come from the run manifest (identical
+/// resolution/trust to an agent_task), the prompt renders with the full
+/// standard context, but no skills are delivered and there is no success_check
+/// and no isolation. Timeout/retries fall back to `defaults`. Returns
+/// (status, answer, events); drive writes the events (single writer).
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn execute_finish_answer(
+    playbook: &Playbook,
+    run_dir: &Path,
+    workdir: &Path,
+    node_id: &str,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    prompt: &str,
+) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
+    let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
+    let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
+        .into_iter()
+        .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
+        .collect();
+    let text = render(
+        prompt,
+        &cfg.params,
+        cfg.instruction.as_deref(),
+        &state.outputs,
+        &state.reviews,
+        &hooks,
+        &context,
+    );
+    let retries = playbook.defaults.max_retries.unwrap_or(0);
+    let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
+    let grant_autonomy = apb_core::effects::effective(playbook)
+        .iter()
+        .any(|e| !matches!(e, apb_core::schema::Effect::FsRead));
+
+    let manifest = crate::manifest::read(run_dir)?.ok_or_else(|| {
+        EngineError::Invalid(format!("finish node `{node_id}` has no execution manifest"))
+    })?;
+    let entry = manifest.for_node(node_id).cloned().ok_or_else(|| {
+        EngineError::Invalid(format!("no manifest entry for finish node `{node_id}`"))
+    })?;
+    if entry.chain.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "finish node `{node_id}` has an empty executor chain"
+        )));
+    }
+
+    let cancel = AtomicBool::new(false);
+    let mut events: Vec<EventPayload> = Vec::new();
+    let mut attempt: u32 = 0;
+    let mut last_msg = String::new();
+    let mut last_timed_out = false;
+    for (idx, ri) in entry.chain.iter().enumerate() {
+        if idx > 0 {
+            events.push(EventPayload::FallbackTriggered {
+                node: node_id.into(),
+                from: entry.chain[idx - 1].agent_id.clone(),
+                to: ri.agent_id.clone(),
+                profile: Some(entry.key()),
+            });
+        }
+        let adapter = crate::adapter::ClaudeAdapter {
+            program: ri.canonical_executable.to_string_lossy().into_owned(),
+            spec: ri.spec.clone(),
+        };
+        for try_i in 0..=retries {
+            attempt += 1;
+            if try_i > 0 {
+                events.push(EventPayload::RetryStarted {
+                    node: node_id.into(),
+                    attempt,
+                });
+            }
+            events.push(EventPayload::AttemptStarted {
+                node: node_id.into(),
+                attempt,
+                agent: ri.agent_id.clone(),
+                soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
+                skills_mode: None,
+            });
+            let stream_log = run_dir
+                .join("agent-stream")
+                .join(format!("{node_id}-{attempt}.jsonl"));
+            let task = AgentTask {
+                prompt: &text,
+                model: &ri.model,
+                workdir,
+                timeout,
+                stream_log: Some(&stream_log),
+                soul: Some(entry.soul.as_str()),
+                grant_autonomy,
+            };
+            match adapter.run_cancellable(&task, &cancel) {
+                Ok(report) => {
+                    events.push(EventPayload::AttemptFinished {
+                        node: node_id.into(),
+                        attempt,
+                        status: report.status.as_str().into(),
+                    });
+                    if report.status == NodeStatus::Succeeded {
+                        return Ok((NodeStatus::Succeeded, report.summary, events));
+                    }
+                    last_msg = report.summary;
+                    last_timed_out = false;
+                }
+                Err((class, msg)) => {
+                    last_timed_out = class == ErrorClass::Timeout;
+                    events.push(EventPayload::AttemptFinished {
+                        node: node_id.into(),
+                        attempt,
+                        status: if last_timed_out {
+                            "timed_out"
+                        } else {
+                            "failed"
+                        }
+                        .into(),
+                    });
+                    last_msg = msg;
+                    if class == ErrorClass::Transport || class == ErrorClass::Timeout {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    let final_status = if last_timed_out {
+        NodeStatus::TimedOut
+    } else {
+        NodeStatus::Failed
+    };
+    Ok((final_status, last_msg, events))
+}
+
 /// Materializes profile skills as REAL copies from the run snapshot into the
 /// isolated per-node workdir (completion-plan Task 3). The source is the snapshot
 /// (`run_dir/profiles/<scope>/<name>/skills/<sscope>/<sname>`), NOT the live

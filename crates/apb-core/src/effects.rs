@@ -30,8 +30,12 @@ pub fn inferred(playbook: &Playbook) -> BTreeSet<Effect> {
             | NodeKind::Condition { .. }
             | NodeKind::HumanReview { .. }
             | NodeKind::Wait { .. }
-            | NodeKind::Finish { .. } => {}
-            NodeKind::AgentTask { .. } | NodeKind::Script { .. } => {
+            | NodeKind::Finish { prompt: None, .. } => {}
+            NodeKind::AgentTask { .. }
+            | NodeKind::Script { .. }
+            | NodeKind::Finish {
+                prompt: Some(_), ..
+            } => {
                 set.insert(Effect::FsRead);
                 set.insert(Effect::FsWrite);
                 set.insert(Effect::Network);

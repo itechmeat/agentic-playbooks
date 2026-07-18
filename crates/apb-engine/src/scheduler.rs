@@ -631,7 +631,46 @@ fn drive(
             .kind
             .clone();
 
-        if let NodeKind::Finish { outcome: o, .. } = &node_kind {
+        if let NodeKind::Finish {
+            outcome: o,
+            prompt,
+            profile: _,
+        } = &node_kind
+        {
+            // A finish-with-prompt composes the run answer via an agent (spec
+            // B); a finish without a prompt is instant with an empty output
+            // (unchanged). NodeStarted + attempt events are written only for the
+            // agent path.
+            let answer_output = if let Some(p) = prompt {
+                log.append(EventPayload::NodeStarted {
+                    node: current.clone(),
+                    attempt: 1,
+                })?;
+                let (st, out, evs) = execute_finish_answer(
+                    &playbook, run_dir, &workdir, &current, &run_id, &state, cfg, p,
+                )?;
+                for ev in evs {
+                    log.append(ev)?;
+                }
+                if st != NodeStatus::Succeeded {
+                    log.append(EventPayload::NodeFinished {
+                        node: current.clone(),
+                        status: st.as_str().into(),
+                        attempt: 1,
+                        output: out.clone(),
+                    })?;
+                    log.append(EventPayload::RunFinished {
+                        outcome: "failed".into(),
+                    })?;
+                    return Ok(RunResult {
+                        run_id,
+                        outcome: RunStatus::Failed,
+                    });
+                }
+                out
+            } else {
+                String::new()
+            };
             let outcome = match o {
                 Outcome::Success => RunStatus::Succeeded,
                 Outcome::Failure => RunStatus::Failed,
@@ -644,7 +683,7 @@ fn drive(
                 node: current.clone(),
                 status: "succeeded".into(),
                 attempt: 1,
-                output: String::new(),
+                output: answer_output,
             })?;
             if outcome == RunStatus::Succeeded
                 && let Some(applied) = last_applied_patch.as_ref()

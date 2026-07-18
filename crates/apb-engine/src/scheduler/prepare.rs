@@ -58,11 +58,20 @@ pub(crate) fn build_run_manifest(
 ) -> Result<RunExecutionManifest, EngineError> {
     let mut bindings: Vec<(String, apb_core::profile::QualifiedProfileRef)> = Vec::new();
     for n in &playbook.nodes {
-        if let NodeKind::AgentTask { profile, .. } = &n.kind
-            && let Some(pref) = profile
+        let pref = match &n.kind {
+            NodeKind::AgentTask { profile, .. } => profile
                 .clone()
-                .or_else(|| playbook.defaults.profile.clone())
-        {
+                .or_else(|| playbook.defaults.profile.clone()),
+            NodeKind::Finish {
+                prompt: Some(_),
+                profile,
+                ..
+            } => profile
+                .clone()
+                .or_else(|| playbook.defaults.profile.clone()),
+            _ => None,
+        };
+        if let Some(pref) = pref {
             bindings.push((n.id.clone(), pref));
         }
     }
