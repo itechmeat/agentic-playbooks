@@ -46,6 +46,8 @@ mod connector_healthcheck;
 mod connector_manifest;
 #[path = "suite/connector_run.rs"]
 mod connector_run;
+#[path = "suite/connector_smtp.rs"]
+mod connector_smtp;
 #[path = "suite/context_compaction_test.rs"]
 mod context_compaction_test;
 #[path = "suite/context_test.rs"]

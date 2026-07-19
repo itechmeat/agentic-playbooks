@@ -23,9 +23,10 @@ use serde_json::{Value, json};
 use crate::connector_result::{CallError, CallErrorCode, CallOk, redact_message};
 
 /// The outcome of preparing an smtp call: a terminal dry-run render, or a
-/// ready-to-send call.
+/// ready-to-send call. Public so the offline envelope render (`build` with
+/// `dry_run: true`) can serve slice 4's contract-test runner (spec obligation).
 #[derive(Debug)]
-pub(crate) enum SmtpBuild {
+pub enum SmtpBuild {
     DryRun(Value),
     Call(Box<SmtpCall>),
 }
@@ -89,7 +90,7 @@ impl SmtpCall {
     /// sends the message (or, for a verify function, only probes the
     /// connection). Refuses to proceed in plaintext when `use_tls` is set but
     /// the server does not advertise STARTTLS. The `QUIT` is best-effort.
-    pub(crate) fn send(self) -> Result<CallOk, CallError> {
+    pub fn send(self) -> Result<CallOk, CallError> {
         let timeout = std::time::Duration::from_secs(self.timeout_sec);
         let hello = ClientId::default();
 
@@ -176,7 +177,7 @@ impl SmtpCall {
 /// connecting or touching secrets; a real build additionally resolves the
 /// connection parameters. Bad addresses are `invalid_args` and are caught
 /// before any connection.
-pub(crate) fn build(
+pub fn build(
     spec: &SmtpSpec,
     account: &BTreeMap<String, String>,
     args: &Value,
