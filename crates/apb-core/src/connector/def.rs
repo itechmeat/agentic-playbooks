@@ -102,6 +102,8 @@ pub struct FunctionSpec {
     pub args_schema: Option<serde_json::Value>,
     #[serde(default)]
     pub examples: Vec<ExampleSpec>,
+    #[serde(default)]
+    pub response_pick: Vec<String>,
     #[serde(default = "default_timeout")]
     pub timeout_sec: u64,
     #[serde(default)]
@@ -205,6 +207,17 @@ impl ConnectorDoc {
                         )));
                     }
                 }
+            }
+
+            // response_pick projects an HTTP response body (spec 4.5); a mock
+            // returns an authored payload, so a projection there is meaningless.
+            // NOTE(smtp-slice): extend this guard with `|| is_smtp` when the
+            // smtp function kind lands.
+            if !f.response_pick.is_empty() && is_mock {
+                return Err(ConnectorError::Invalid(format!(
+                    "function `{}` sets response_pick but is a mock; response_pick is only valid on HTTP functions",
+                    f.name
+                )));
             }
         }
 
@@ -644,6 +657,22 @@ functions:
     #[test]
     fn account_field_name_with_underscore_is_accepted() {
         let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: base_url\nfunctions:\n  - name: f\n    description: a\n    method: GET\n    url: http://a\n";
+        assert!(ConnectorDoc::from_yaml(y, "x").is_ok());
+    }
+
+    #[test]
+    fn response_pick_on_mock_is_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    response_pick: [a, b]\n    mock: { status: 200, body: { a: 1 } }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(
+            err.contains("f") && err.contains("response_pick"),
+            "was: {err}"
+        );
+    }
+
+    #[test]
+    fn response_pick_on_http_is_accepted() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: http://a\n    response_pick: [number, user.login]\n";
         assert!(ConnectorDoc::from_yaml(y, "x").is_ok());
     }
 

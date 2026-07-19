@@ -131,6 +131,9 @@ pub struct CallOk {
     pub truncated: bool,
     /// The raw `Link` response header, when the service sent one (spec 4.4).
     pub link: Option<String>,
+    /// True when the function's `response_pick` projection was applied to
+    /// `body` (spec 4.5), so the caller knows it holds a subset.
+    pub picked: bool,
 }
 
 /// The metadata a reached call (mock or HTTP, ok or error) records in the
@@ -162,6 +165,9 @@ pub fn execute(req: CallRequest) -> (Value, bool) {
             });
             if let Some(link) = &ok.link {
                 value["link"] = json!(link);
+            }
+            if ok.picked {
+                value["picked"] = json!(true);
             }
             (value, true)
         }
@@ -261,6 +267,9 @@ struct HttpCall {
     /// Rendered per-function headers (spec 4.4). Values use `account.*`/`args.*`
     /// only; `secret.*` is forbidden here by `validate_templates`.
     headers: BTreeMap<String, String>,
+    /// The effective `response_pick` projection (spec 4.5); empty when the
+    /// function declares none or `--full` bypasses it.
+    response_pick: Vec<String>,
     auth: Option<AuthSpec>,
     secrets: BTreeMap<String, String>,
     account_fields: BTreeMap<String, String>,
@@ -396,8 +405,21 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
         maccount,
         &req.args,
         req.root,
-        req.dry_run,
+        CallMode {
+            dry_run: req.dry_run,
+            full: req.full,
+        },
     )
+}
+
+/// The two call-mode flags `build_prepared` needs: `dry_run` renders without
+/// executing or resolving secrets, `full` bypasses the `response_pick`
+/// projection (spec 4.5). Bundled so the shared render entry point stays within
+/// a sane argument count.
+#[derive(Debug, Clone, Copy)]
+struct CallMode {
+    dry_run: bool,
+    full: bool,
 }
 
 /// Shared gate + render logic (pipeline steps 5-8): validates args against the
@@ -415,8 +437,9 @@ fn build_prepared(
     maccount: &ManifestAccount,
     args: &Value,
     root: &Path,
-    dry_run: bool,
+    mode: CallMode,
 ) -> Result<Prepared, CallError> {
+    let CallMode { dry_run, full } = mode;
     // 5. Validate args against the function schema.
     if let Some(schema) = &function.args_schema {
         validate_args(schema, args)?;
@@ -505,6 +528,12 @@ fn build_prepared(
             pre_auth_url,
             rendered_body,
             headers,
+            // `--full` bypasses the projection (spec 4.5), returning the raw body.
+            response_pick: if full {
+                Vec::new()
+            } else {
+                function.response_pick.clone()
+            },
             auth: auth.cloned(),
             secrets,
             account_fields,
@@ -645,7 +674,11 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
         &maccount,
         &json!({}),
         root,
-        false,
+        // A reachability probe returns the raw body; never project it.
+        CallMode {
+            dry_run: false,
+            full: true,
+        },
     )
 }
 
@@ -954,6 +987,10 @@ impl HttpCall {
         let mut mapped = map_status(status, body, truncated, retry_after);
         if let Ok(ok) = &mut mapped {
             ok.link = link;
+            if !self.response_pick.is_empty() {
+                ok.body = project(&ok.body, &self.response_pick);
+                ok.picked = true;
+            }
         }
         (mapped, Some(status))
     }
@@ -1107,6 +1144,7 @@ fn map_status(
             body,
             truncated,
             link: None,
+            picked: false,
         });
     }
     let mut err = match status {
@@ -1158,6 +1196,47 @@ fn encode_args_for_url(args: &Value) -> Value {
                 })
                 .collect(),
         ),
+        other => other.clone(),
+    }
+}
+
+/// Projects `body` down to the dot-separated field chains in `paths`
+/// (spec 4.5). Objects keep the named field; arrays (top-level or midway
+/// through a chain) map the projection over their elements; a path absent
+/// from the body is silently dropped.
+fn project(body: &Value, paths: &[String]) -> Value {
+    let split: Vec<Vec<&str>> = paths.iter().map(|p| p.split('.').collect()).collect();
+    let refs: Vec<&[&str]> = split.iter().map(Vec::as_slice).collect();
+    project_value(body, &refs)
+}
+
+fn project_value(source: &Value, paths: &[&[&str]]) -> Value {
+    match source {
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|it| project_value(it, paths)).collect())
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, val) in map {
+                let mut sub: Vec<&[&str]> = Vec::new();
+                let mut terminal = false;
+                for p in paths {
+                    if p.first() == Some(&key.as_str()) {
+                        if p.len() == 1 {
+                            terminal = true;
+                        } else {
+                            sub.push(&p[1..]);
+                        }
+                    }
+                }
+                if terminal {
+                    out.insert(key.clone(), val.clone());
+                } else if !sub.is_empty() {
+                    out.insert(key.clone(), project_value(val, &sub));
+                }
+            }
+            Value::Object(out)
+        }
         other => other.clone(),
     }
 }
@@ -1249,6 +1328,45 @@ fn append_event(req: &CallRequest, meta: &EventMeta) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn project_keeps_named_object_fields_and_nested_paths() {
+        let body = json!({
+            "number": 7, "title": "t", "extra": "drop",
+            "user": { "login": "octo", "id": 1 }
+        });
+        let picked = project(
+            &body,
+            &["number".into(), "title".into(), "user.login".into()],
+        );
+        assert_eq!(
+            picked,
+            json!({ "number": 7, "title": "t", "user": { "login": "octo" } })
+        );
+    }
+
+    #[test]
+    fn project_maps_over_arrays_at_top_level_and_midway() {
+        let body = json!([
+            { "number": 1, "labels": [ { "name": "bug", "color": "red" }, { "name": "p1" } ], "x": 9 },
+            { "number": 2, "labels": [] }
+        ]);
+        let picked = project(&body, &["number".into(), "labels.name".into()]);
+        assert_eq!(
+            picked,
+            json!([
+                { "number": 1, "labels": [ { "name": "bug" }, { "name": "p1" } ] },
+                { "number": 2, "labels": [] }
+            ])
+        );
+    }
+
+    #[test]
+    fn project_drops_missing_paths_silently() {
+        let body = json!({ "a": 1 });
+        let picked = project(&body, &["a".into(), "b.c".into()]);
+        assert_eq!(picked, json!({ "a": 1 }));
+    }
 
     #[test]
     fn base64_matches_known_vectors() {

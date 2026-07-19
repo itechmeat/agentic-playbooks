@@ -70,6 +70,12 @@ functions:
     url: "{{account.base_url}}/u"
     headers:
       User-Agent: custom-agent/9
+  - name: list_pick
+    description: list with a projection
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/pick"
+    response_pick: [number, user.login, labels.name]
   - name: ping
     description: A canned mock, no network
     mock: { status: 200, body: { ok: true } }
@@ -147,6 +153,25 @@ fn call<'a>(
         args,
         dry_run,
         full: false,
+    })
+}
+
+fn call_full<'a>(
+    run_dir: &'a Path,
+    root: &'a Path,
+    function: &'a str,
+    args: serde_json::Value,
+) -> (serde_json::Value, bool) {
+    execute(CallRequest {
+        run_dir,
+        root,
+        node_id: NODE,
+        connector: CONNECTOR,
+        function,
+        account: None,
+        args,
+        dry_run: false,
+        full: true,
     })
 }
 
@@ -1070,4 +1095,59 @@ fn absent_link_header_omits_the_field() {
     );
     assert!(ok);
     assert!(value.get("link").is_none(), "link must be absent: {value}");
+}
+
+#[test]
+fn response_pick_projects_by_default_and_full_bypasses_it() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let raw = r#"[{"number":1,"title":"x","user":{"login":"octo","id":9},"labels":[{"name":"bug","color":"red"}]}]"#;
+    let server = common::spawn_http(200, "OK", &[], raw.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_pick"],
+        None,
+    );
+
+    // Default: projected body, picked: true.
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_pick",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok, "{value}");
+    assert_eq!(value["picked"], serde_json::json!(true));
+    assert_eq!(
+        value["body"],
+        serde_json::json!([
+            { "number": 1, "user": { "login": "octo" }, "labels": [ { "name": "bug" } ] }
+        ])
+    );
+
+    // --full: raw body, no picked marker. Needs a fresh one-shot server and a
+    // fresh run dir (the run manifest is write-once).
+    let run2 = tempfile::tempdir().unwrap();
+    let server2 = common::spawn_http(200, "OK", &[], raw.to_string());
+    seed_run(
+        run2.path(),
+        vec![account(&server2.base_url)],
+        &["acct1"],
+        &["list_pick"],
+        None,
+    );
+    let (full, ok2) = call_full(run2.path(), root.path(), "list_pick", serde_json::json!({}));
+    assert!(ok2, "{full}");
+    assert!(
+        full.get("picked").is_none(),
+        "full must not mark picked: {full}"
+    );
+    assert_eq!(full["body"][0]["title"], serde_json::json!("x"));
+    assert_eq!(full["body"][0]["user"]["id"], serde_json::json!(9));
 }
