@@ -26,3 +26,4 @@ uuid = { version = "1", features = ["v4"] }
 percent-encoding = "2"
 ureq = { version = "2", features = ["json"] }
 jsonschema = { version = "0.26", default-features = false }
+shell-words = "1"
