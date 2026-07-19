@@ -403,6 +403,11 @@ export interface PlayCallRequest {
   account: string | null
   args: Record<string, unknown>
   dryRun: boolean
+  // Bypasses the function's response_pick projection (spec 4.5 / 2026-07-19
+  // section 7 post-review fix), mirroring the CLI's --full debugging
+  // escape. false (the playground default) applies the projection like a
+  // normal agent call, so a projected function's `picked` flag reads true.
+  full: boolean
 }
 
 interface PlayCallRequestDto {
@@ -410,14 +415,16 @@ interface PlayCallRequestDto {
   account: string | null
   args: Record<string, unknown>
   dry_run: boolean
+  full: boolean
 }
 
 // POST /api/connectors/{name}/call: the dashboard playground's manual call
 // (design doc 2026-07-19-official-connectors-design section 7). Wraps the
 // same live execution path the healthcheck probe uses, extended with an
-// arbitrary function, args, and a dry-run flag. Like the healthcheck probe,
-// the server answers HTTP 200 even for a refused or failed call - the
-// outcome is carried in the body's `ok`/`error`, never as an HTTP error.
+// arbitrary function, args, a dry-run flag, and a full flag. Like the
+// healthcheck probe, the server answers HTTP 200 even for a refused or
+// failed call - the outcome is carried in the body's `ok`/`error`, never as
+// an HTTP error.
 export const callConnector = (name: string, req: PlayCallRequest, workspace = '') =>
   requestJson<PlayCallResult>(`${conn(name)}/call${qs({ workspace })}`, {
     method: 'POST',
@@ -427,5 +434,6 @@ export const callConnector = (name: string, req: PlayCallRequest, workspace = ''
       account: req.account,
       args: req.args,
       dry_run: req.dryRun,
+      full: req.full,
     } satisfies PlayCallRequestDto),
   })

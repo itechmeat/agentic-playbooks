@@ -1168,17 +1168,24 @@ struct ConnectorCallBody {
     args: serde_json::Value,
     #[serde(default)]
     dry_run: bool,
+    /// `--full` bypasses the function's `response_pick` projection (spec 4.5
+    /// / 2026-07-19-official-connectors-design section 7 post-review fix);
+    /// omitted or `false` (the default) applies the projection like a
+    /// normal agent call.
+    #[serde(default)]
+    full: bool,
 }
 
 /// POST /api/connectors/{name}/call: the dashboard playground's manual call
 /// (spec 2026-07-19-official-connectors-design section 7). Wraps the same
 /// live execution path the healthcheck probe uses
 /// (`apb_engine::connector_call::play_call`), extended with an arbitrary
-/// function name, args, and a dry-run flag. Like the healthcheck probe, the
-/// server answers HTTP 200 even for a refused or failed call - the outcome
-/// is carried in the body's `ok`/`error`, never as an HTTP error status.
-/// Account defaulting (an omitted or null `account`) is resolved inside
-/// `play_call`, mirroring the CLI's single-or-default selection rule.
+/// function name, args, a dry-run flag, and a `full` flag. Like the
+/// healthcheck probe, the server answers HTTP 200 even for a refused or
+/// failed call - the outcome is carried in the body's `ok`/`error`, never as
+/// an HTTP error status. Account defaulting (an omitted or null `account`)
+/// is resolved inside `play_call`, mirroring the CLI's single-or-default
+/// selection rule.
 async fn call_connector_handler(
     State(state): State<AppState>,
     AxPath(name): AxPath<String>,
@@ -1205,6 +1212,7 @@ async fn call_connector_handler(
         &body.function,
         &args,
         body.dry_run,
+        body.full,
     );
     Json(value).into_response()
 }

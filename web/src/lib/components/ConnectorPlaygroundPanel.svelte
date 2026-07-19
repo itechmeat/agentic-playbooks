@@ -44,6 +44,7 @@
   let selectedFunction = $state('')
   let selectedAccount = $state('')
   let dryRun = $state(true)
+  let full = $state(false)
   let rawMode = $state(false)
   let formValues = $state<Record<string, string | boolean>>({})
   let rawArgsText = $state('')
@@ -105,6 +106,7 @@
           account: selectedAccount || null,
           args,
           dryRun,
+          full,
         },
         workspace,
       )
@@ -198,6 +200,11 @@
         <Field.Field orientation="horizontal">
           <Switch id="pg-dry-run" bind:checked={dryRun} />
           <Field.FieldLabel for="pg-dry-run" class="font-normal">Dry run</Field.FieldLabel>
+        </Field.Field>
+
+        <Field.Field orientation="horizontal">
+          <Switch id="pg-full" bind:checked={full} />
+          <Field.FieldLabel for="pg-full" class="font-normal">Full body</Field.FieldLabel>
         </Field.Field>
 
         {#if simpleOk}

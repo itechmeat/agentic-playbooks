@@ -107,6 +107,12 @@ functions:
     method: GET
     url: "{{account.base_url}}/items"
     args_schema: { type: object, properties: { q: { type: string } } }
+  - name: list_pick
+    description: list with a projection
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/pick"
+    response_pick: [items]
   - name: ping
     description: Reachability check
     mock: { status: 200, body: { ok: true } }
@@ -696,6 +702,82 @@ async fn call_endpoint_real_call_reaches_a_live_mock_http_server() {
     assert!(
         req.contains("Authorization: Bearer secret-value"),
         "auth header missing/wrong:\n{req}"
+    );
+}
+
+/// The `full` flag (spec 2026-07-19-official-connectors-design section 7
+/// post-review fix): omitted or `false` applies the function's
+/// `response_pick` projection like a normal agent call (and marks
+/// `picked: true`); `full: true` bypasses it and returns the raw body with
+/// no `picked` marker, mirroring the CLI's `--full` debugging escape.
+#[tokio::test]
+async fn call_endpoint_full_flag_controls_the_response_pick_projection() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g_cfg = setup(cfg.path(), root.path());
+    let _g_tok = set_var(TOKEN_VAR, "secret-value");
+
+    let raw_body = r#"{"items":["a","b"],"extra":"drop"}"#;
+
+    // Default (full omitted): the projection applies, picked: true.
+    let server = crate::common::spawn_http(200, "OK", &[], raw_body.to_string());
+    let path = config::project_config_path(root.path(), CONNECTOR);
+    std::fs::write(
+        &path,
+        format!(
+            "accounts:\n  - name: acct1\n    default: true\n    base_url: {}\n    token: \"{{{{env.{TOKEN_VAR}}}}}\"\n",
+            server.base_url
+        ),
+    )
+    .unwrap();
+    approve_connector_and_account(root.path(), "acct1");
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/call"),
+        serde_json::json!({ "function": "list_pick", "account": "acct1", "args": {}, "dry_run": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["ok"],
+        serde_json::json!(true),
+        "projected call: {json}"
+    );
+    assert_eq!(json["picked"], serde_json::json!(true));
+    assert_eq!(json["body"], serde_json::json!({"items": ["a", "b"]}));
+
+    // full: true bypasses the projection. A changed base_url changes the
+    // account digest, so it needs a fresh one-shot server plus re-approval.
+    let server2 = crate::common::spawn_http(200, "OK", &[], raw_body.to_string());
+    std::fs::write(
+        &path,
+        format!(
+            "accounts:\n  - name: acct1\n    default: true\n    base_url: {}\n    token: \"{{{{env.{TOKEN_VAR}}}}}\"\n",
+            server2.base_url
+        ),
+    )
+    .unwrap();
+    approve_connector_and_account(root.path(), "acct1");
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/call"),
+        serde_json::json!({ "function": "list_pick", "account": "acct1", "args": {}, "dry_run": false, "full": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ok"], serde_json::json!(true), "full call: {json}");
+    assert!(
+        json.get("picked").is_none(),
+        "full must not mark picked: {json}"
+    );
+    assert_eq!(
+        json["body"],
+        serde_json::json!({"items": ["a", "b"], "extra": "drop"})
     );
 }
 

@@ -597,8 +597,10 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
     // per the healthcheck contract - it is a reachability probe, not a data
     // call. Delegates account resolution, trust gating, and rendering to
     // the shared playground preparation path so the two live-call callers
-    // never duplicate that logic.
-    prepare_play_call(root, name, Some(account), &hc_name, &json!({}), false)
+    // never duplicate that logic. `full: true` keeps the probe's existing
+    // behavior: a reachability check shows the raw body, never a
+    // `response_pick` projection.
+    prepare_play_call(root, name, Some(account), &hc_name, &json!({}), false, true)
 }
 
 /// Live playground call (dashboard slice 6, spec
@@ -610,8 +612,11 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
 /// the request without touching secrets and a real call gets the same
 /// trust gating, URL hardening, auth injection, and interim redaction as
 /// any other call. `account: None` selects the single or default
-/// configured account, exactly like the CLI's `select_account`. Returns
-/// the same `{ "ok": bool, ... }` shape `execute`/`healthcheck` do.
+/// configured account, exactly like the CLI's `select_account`. `full`
+/// mirrors the CLI's `--full` escape (spec 4.5): `false` (the playground's
+/// default) applies the function's `response_pick` projection like a normal
+/// agent call, `true` bypasses it and returns the raw body. Returns the
+/// same `{ "ok": bool, ... }` shape `execute`/`healthcheck` do.
 pub fn play_call(
     root: &Path,
     name: &str,
@@ -619,8 +624,9 @@ pub fn play_call(
     function_name: &str,
     args: &Value,
     dry_run: bool,
+    full: bool,
 ) -> (Value, bool) {
-    match prepare_play_call(root, name, account, function_name, args, dry_run) {
+    match prepare_play_call(root, name, account, function_name, args, dry_run, full) {
         Ok(Prepared::DryRun(v)) => (v, true),
         Ok(Prepared::Call(prepared)) => {
             let (result, _status) = prepared.dispatch();
@@ -645,6 +651,12 @@ pub fn play_call(
 /// `dry_run: true`), so gating it would refuse a safe, secret-free render
 /// for no security benefit - the gate exists to guard secret egress, and a
 /// dry-run has none to guard.
+///
+/// `full` threads straight into `CallMode` exactly like a real agent call's
+/// `--full`: it is NOT hardcoded here, so a playground call without it
+/// applies the function's `response_pick` projection (and can mark
+/// `picked: true`) the same as any other call; `prepare_healthcheck` passes
+/// `true` to keep the reachability probe showing the raw body.
 fn prepare_play_call(
     root: &Path,
     name: &str,
@@ -652,6 +664,7 @@ fn prepare_play_call(
     function_name: &str,
     args: &Value,
     dry_run: bool,
+    full: bool,
 ) -> Result<Prepared, CallError> {
     let loaded = store::load(name)
         .map_err(|e| CallError::new(CallErrorCode::Config, format!("connector `{name}`: {e}")))?;
@@ -741,12 +754,11 @@ fn prepare_play_call(
         &maccount,
         args,
         root,
-        // The playground returns the raw body, like the healthcheck probe:
-        // never project through `response_pick`.
-        CallMode {
-            dry_run,
-            full: true,
-        },
+        // `full` is the caller's real flag, not hardcoded: `prepare_healthcheck`
+        // passes `true` (a reachability probe shows the raw body), the
+        // playground's `play_call` passes whatever the caller asked for
+        // (default `false`, applying `response_pick` like a normal call).
+        CallMode { dry_run, full },
     )
 }
 

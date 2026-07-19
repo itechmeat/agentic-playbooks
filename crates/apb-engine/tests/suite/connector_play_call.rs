@@ -2,11 +2,16 @@
 //! (`connector_call::play_call`, spec 2026-07-19-official-connectors-design
 //! section 7). Generalizes the `healthcheck` probe pipeline (live connector
 //! definition, live merged account config, no run context) to an arbitrary
-//! function, args, and an optional dry-run. Mirrors
+//! function, args, an optional dry-run, and an explicit `full` flag. Mirrors
 //! `connector_healthcheck.rs`'s structure and fixtures.
 //!
 //! Trust gating: a real call is gated exactly like the healthcheck probe. A
 //! dry-run resolves no secrets and is therefore NOT gated.
+//!
+//! `full`: unlike the healthcheck probe (always `full: true`, a raw
+//! reachability check), the playground's default is `false`, so a call whose
+//! function declares `response_pick` gets the same projection - and can mark
+//! `picked: true` - as a normal agent call.
 //!
 //! Every test takes `common::env_lock()`: `APB_CONFIG_DIR` and the fixture's
 //! secret env var are process-wide state shared with every other module in
@@ -112,6 +117,12 @@ functions:
     method: GET
     url: "{{account.base_url}}/items"
     args_schema: { type: object, properties: { q: { type: string } } }
+  - name: list_pick
+    description: list with a projection
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/pick"
+    response_pick: [items]
   - name: ping
     description: Reachability check
     mock: { status: 200, body: { ok: true } }
@@ -139,6 +150,7 @@ fn dry_run_renders_without_secrets_or_trust_approval() {
         "list_items",
         &json!({}),
         true,
+        false,
     );
     assert!(
         ok,
@@ -171,6 +183,7 @@ fn real_call_on_unapproved_connector_is_permission_denied() {
         Some("acct1"),
         "list_items",
         &json!({}),
+        false,
         false,
     );
     assert!(
@@ -207,6 +220,7 @@ fn approved_real_call_reaches_the_url_with_auth() {
         "list_items",
         &json!({}),
         false,
+        false,
     );
     assert!(ok, "approved real call should succeed: {value}");
     assert_eq!(value["status"], json!(200));
@@ -238,6 +252,7 @@ fn unknown_function_name_is_config_error() {
         "no_such_function",
         &json!({}),
         true,
+        false,
     );
     assert!(!ok);
     assert_eq!(value["error"]["code"], json!("config"));
@@ -258,7 +273,15 @@ fn single_configured_account_is_auto_selected() {
         "accounts:\n  - name: only-one\n    base_url: https://solo.example\n    token: \"{{env.NOPE}}\"\n",
     );
 
-    let (value, ok) = play_call(root.path(), CONNECTOR, None, "list_items", &json!({}), true);
+    let (value, ok) = play_call(
+        root.path(),
+        CONNECTOR,
+        None,
+        "list_items",
+        &json!({}),
+        true,
+        false,
+    );
     assert!(ok, "the single account should be auto-selected: {value}");
     assert_eq!(value["url"], json!("https://solo.example/items"));
 }
@@ -275,12 +298,88 @@ fn ambiguous_accounts_without_default_is_config_error() {
         "accounts:\n  - name: a\n    base_url: https://a.example\n    token: \"{{env.NOPE}}\"\n  - name: b\n    base_url: https://b.example\n    token: \"{{env.NOPE}}\"\n",
     );
 
-    let (value, ok) = play_call(root.path(), CONNECTOR, None, "list_items", &json!({}), true);
+    let (value, ok) = play_call(
+        root.path(),
+        CONNECTOR,
+        None,
+        "list_items",
+        &json!({}),
+        true,
+        false,
+    );
     assert!(!ok);
     assert_eq!(value["error"]["code"], json!("config"));
     let msg = value["error"]["message"].as_str().unwrap();
     assert!(
         msg.contains('a') && msg.contains('b'),
         "message should list choices: {msg}"
+    );
+}
+
+#[test]
+fn full_false_applies_response_pick_and_full_true_bypasses_it() {
+    let _lock = common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g_cfg = set_var("APB_CONFIG_DIR", cfg.path());
+    let _g_tok = set_var(TOKEN_VAR, "play-secret-value");
+    write_connector(cfg.path(), HTTP_YAML);
+
+    let raw = r#"{"items":["a","b"],"extra":"drop"}"#;
+    let server = common::spawn_http(200, "OK", &[], raw.to_string());
+    write_account(
+        root.path(),
+        &format!(
+            "accounts:\n  - name: acct1\n    default: true\n    base_url: {}\n    token: \"{{{{env.{TOKEN_VAR}}}}}\"\n",
+            server.base_url
+        ),
+    );
+    approve_connector();
+    approve_account(root.path(), "acct1");
+
+    // Default (full: false): the projection applies, like a normal agent call.
+    let (value, ok) = play_call(
+        root.path(),
+        CONNECTOR,
+        Some("acct1"),
+        "list_pick",
+        &json!({}),
+        false,
+        false,
+    );
+    assert!(ok, "projected call should succeed: {value}");
+    assert_eq!(value["picked"], json!(true));
+    assert_eq!(value["body"], json!({ "items": ["a", "b"] }));
+
+    // full: true bypasses the projection (spec 7 debugging escape). A fresh
+    // one-shot server: the first server already consumed its single response.
+    // A changed `base_url` changes the account digest, so it must be
+    // re-approved (trust is keyed by content digest, spec 9).
+    let server2 = common::spawn_http(200, "OK", &[], raw.to_string());
+    write_account(
+        root.path(),
+        &format!(
+            "accounts:\n  - name: acct1\n    default: true\n    base_url: {}\n    token: \"{{{{env.{TOKEN_VAR}}}}}\"\n",
+            server2.base_url
+        ),
+    );
+    approve_account(root.path(), "acct1");
+    let (full, ok2) = play_call(
+        root.path(),
+        CONNECTOR,
+        Some("acct1"),
+        "list_pick",
+        &json!({}),
+        false,
+        true,
+    );
+    assert!(ok2, "full call should succeed: {full}");
+    assert!(
+        full.get("picked").is_none(),
+        "full must not mark picked: {full}"
+    );
+    assert_eq!(
+        full["body"],
+        json!({ "items": ["a", "b"], "extra": "drop" })
     );
 }
