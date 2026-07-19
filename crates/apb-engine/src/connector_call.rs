@@ -57,84 +57,12 @@ pub struct CallRequest<'a> {
     pub full: bool,
 }
 
-/// The structured error code taxonomy (spec section 8). The wire form is the
-/// snake_case string from [`CallErrorCode::as_str`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallErrorCode {
-    Config,
-    Permission,
-    InvalidArgs,
-    Auth,
-    NotFound,
-    RateLimited,
-    Service,
-    Network,
-    Timeout,
-}
-
-impl CallErrorCode {
-    /// The wire string used in the result JSON and the event `outcome`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CallErrorCode::Config => "config",
-            CallErrorCode::Permission => "permission",
-            CallErrorCode::InvalidArgs => "invalid_args",
-            CallErrorCode::Auth => "auth",
-            CallErrorCode::NotFound => "not_found",
-            CallErrorCode::RateLimited => "rate_limited",
-            CallErrorCode::Service => "service",
-            CallErrorCode::Network => "network",
-            CallErrorCode::Timeout => "timeout",
-        }
-    }
-}
-
-/// A structured call error (spec section 8).
-#[derive(Debug, Clone)]
-pub struct CallError {
-    pub code: CallErrorCode,
-    pub message: String,
-    pub http_status: Option<u16>,
-    pub retry_after_sec: Option<u64>,
-}
-
-impl CallError {
-    fn new(code: CallErrorCode, message: impl Into<String>) -> Self {
-        CallError {
-            code,
-            message: message.into(),
-            http_status: None,
-            retry_after_sec: None,
-        }
-    }
-
-    /// The `{ "ok": false, "error": { ... } }` result JSON.
-    fn to_json(&self) -> Value {
-        let mut err = serde_json::Map::new();
-        err.insert("code".into(), json!(self.code.as_str()));
-        err.insert("message".into(), json!(self.message));
-        if let Some(s) = self.http_status {
-            err.insert("http_status".into(), json!(s));
-        }
-        if let Some(r) = self.retry_after_sec {
-            err.insert("retry_after_sec".into(), json!(r));
-        }
-        json!({ "ok": false, "error": Value::Object(err) })
-    }
-}
-
-/// A successful call result (spec section 8).
-#[derive(Debug)]
-pub struct CallOk {
-    pub status: u16,
-    pub body: Value,
-    pub truncated: bool,
-    /// The raw `Link` response header, when the service sent one (spec 4.4).
-    pub link: Option<String>,
-    /// True when the function's `response_pick` projection was applied to
-    /// `body` (spec 4.5), so the caller knows it holds a subset.
-    pub picked: bool,
-}
+// The result taxonomy (`CallError`, `CallErrorCode`, `CallOk`) and the interim
+// message redaction live in `connector_result`, the shared sink both the HTTP
+// and SMTP call paths point at (keeps the file graph acyclic). Re-exported here
+// so the public path `apb_engine::connector_call::{CallError, ...}` is stable.
+pub use crate::connector_result::{CallError, CallErrorCode, CallOk};
+use crate::connector_result::redact_message;
 
 /// The metadata a reached call (mock or HTTP, ok or error) records in the
 /// event log. A dry-run or a gate rejection records nothing, so those never
@@ -161,19 +89,7 @@ pub fn execute(req: CallRequest) -> (Value, bool) {
         Outcome::DryRun(value) => (value, true),
         Outcome::Ok(ok, meta) => {
             append_event(&req, &meta);
-            let mut value = json!({
-                "ok": true,
-                "status": ok.status,
-                "body": ok.body,
-                "truncated": ok.truncated,
-            });
-            if let Some(link) = &ok.link {
-                value["link"] = json!(link);
-            }
-            if ok.picked {
-                value["picked"] = json!(true);
-            }
-            (value, true)
+            (ok.to_success_json(), true)
         }
         Outcome::Executed(err, meta) => {
             append_event(&req, &meta);
@@ -263,6 +179,11 @@ enum PreparedCall {
     // Boxed: `HttpCall` is much larger than `Mock`, so the variant is boxed to
     // keep the enum small (clippy `large_enum_variant`).
     Http(Box<HttpCall>),
+    // Boxed for the same reason: `SmtpCall` carries the built message bytes.
+    Smtp {
+        account: String,
+        call: Box<crate::connector_smtp::SmtpCall>,
+    },
 }
 
 /// An HTTP call ready to send.
@@ -292,6 +213,7 @@ impl PreparedCall {
         match self {
             PreparedCall::Mock { account, .. } => account,
             PreparedCall::Http(h) => &h.account,
+            PreparedCall::Smtp { account, .. } => account,
         }
     }
 
@@ -301,6 +223,7 @@ impl PreparedCall {
         match self {
             PreparedCall::Mock { .. } => String::new(),
             PreparedCall::Http(h) => h.pre_auth_url.clone(),
+            PreparedCall::Smtp { call, .. } => call.endpoint(),
         }
     }
 
@@ -309,6 +232,7 @@ impl PreparedCall {
     fn event_extra(&self) -> (Option<String>, Option<u32>) {
         match self {
             PreparedCall::Mock { .. } | PreparedCall::Http(_) => (None, None),
+            PreparedCall::Smtp { call, .. } => call.event_extra(),
         }
     }
 
@@ -320,6 +244,9 @@ impl PreparedCall {
                 (map_status(status, body, false, None), Some(status))
             }
             PreparedCall::Http(h) => h.send(),
+            // An smtp call has no HTTP status; the event log records the
+            // endpoint plus subject/recipient count, never a status code.
+            PreparedCall::Smtp { call, .. } => (call.send(), None),
         }
     }
 }
@@ -481,6 +408,30 @@ fn build_prepared(
         resolve_secrets(root, maccount)?
     };
 
+    // 7b. SMTP: render the message/connection off the same resolved secrets and
+    // account fields, or produce a dry-run envelope without connecting. An smtp
+    // function has no URL/query/body/header rendering (those are HTTP-only), so
+    // this branch is terminal.
+    if let Some(smtp) = &function.smtp {
+        return match crate::connector_smtp::build(
+            smtp,
+            &account_fields,
+            args,
+            &secrets,
+            redactions,
+            dry_run,
+            function.timeout_sec,
+        )? {
+            crate::connector_smtp::SmtpBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
+            crate::connector_smtp::SmtpBuild::Call(call) => {
+                Ok(Prepared::Call(Box::new(PreparedCall::Smtp {
+                    account: account_name,
+                    call,
+                })))
+            }
+        };
+    }
+
     // 8. Render URL, query, body; enforce 6.1; build the pre-auth URL.
     let ctx = RenderCtx {
         account: &account_fields,
@@ -579,15 +530,7 @@ pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
         Ok(Prepared::Call(prepared)) => {
             let (result, _status) = prepared.dispatch();
             match result {
-                Ok(ok) => (
-                    json!({
-                        "ok": true,
-                        "status": ok.status,
-                        "body": ok.body,
-                        "truncated": ok.truncated,
-                    }),
-                    true,
-                ),
+                Ok(ok) => (ok.to_success_json(), true),
                 Err(err) => (err.to_json(), false),
             }
         }
@@ -1054,11 +997,17 @@ impl HttpCall {
         // 12. Interim literal secret redaction (see the TODO below).
         let body = self.redact(body);
         let mut mapped = map_status(status, body, truncated, retry_after);
-        if let Ok(ok) = &mut mapped {
-            ok.link = link;
+        if let Ok(CallOk::Http {
+            link: link_slot,
+            body: body_slot,
+            picked,
+            ..
+        }) = &mut mapped
+        {
+            *link_slot = link;
             if !self.response_pick.is_empty() {
-                ok.body = project(&ok.body, &self.response_pick);
-                ok.picked = true;
+                *body_slot = project(body_slot, &self.response_pick);
+                *picked = true;
             }
         }
         (mapped, Some(status))
@@ -1133,19 +1082,6 @@ impl HttpCall {
     }
 }
 
-/// Applies the interim literal redaction to a plain message string: every
-/// occurrence of a resolved secret value is replaced with
-/// `[redacted:<ENV_NAME>]`. Used for error messages (the body uses
-/// `redact_value` over its string leaves).
-fn redact_message(mut msg: String, redactions: &[(String, String)]) -> String {
-    for (secret, var) in redactions {
-        if msg.contains(secret.as_str()) {
-            msg = msg.replace(secret.as_str(), &format!("[redacted:{var}]"));
-        }
-    }
-    msg
-}
-
 /// Recursively redacts secret values in a JSON value's string leaves.
 fn redact_value(value: Value, redactions: &[(String, String)]) -> Value {
     match value {
@@ -1208,7 +1144,7 @@ fn map_status(
     retry_after: Option<u64>,
 ) -> Result<CallOk, CallError> {
     if (200..300).contains(&status) {
-        return Ok(CallOk {
+        return Ok(CallOk::Http {
             status,
             body,
             truncated,
@@ -1488,16 +1424,6 @@ mod tests {
             map_status(503, json!({}), false, None).unwrap_err().code,
             CallErrorCode::Service
         );
-    }
-
-    #[test]
-    fn redact_message_scrubs_secret_in_error_text() {
-        let redactions = vec![("super-secret-xyz".to_string(), "MOCK_TOKEN".to_string())];
-        let msg = "Connection Failed: http://127.0.0.1:9/items?api_key=super-secret-xyz refused"
-            .to_string();
-        let out = redact_message(msg, &redactions);
-        assert!(!out.contains("super-secret-xyz"), "secret leaked: {out}");
-        assert!(out.contains("[redacted:MOCK_TOKEN]"), "not redacted: {out}");
     }
 
     #[test]
