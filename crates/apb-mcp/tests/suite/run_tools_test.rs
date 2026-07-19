@@ -33,7 +33,19 @@ fn run_then_inspect() {
     seed(dir.path());
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run = playbook_run(dir.path(), "noagent", None, params, None, None, None, None).unwrap();
+    let run = playbook_run(
+        dir.path(),
+        "noagent",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap();
     assert_eq!(run["outcome"], "succeeded");
     let run_id = run["run_id"].as_str().unwrap().to_string();
 
@@ -200,8 +212,19 @@ fn run_status_carries_answer_key() {
     seed(dir.path());
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let started =
-        playbook_run(dir.path(), "noagent", None, params, None, None, None, None).unwrap();
+    let started = playbook_run(
+        dir.path(),
+        "noagent",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap();
     let run_id = started["run_id"].as_str().unwrap();
     let status = run_status(dir.path(), run_id).unwrap();
     assert!(status.get("answer").is_some(), "answer key present");
@@ -217,8 +240,19 @@ fn run_status_children_empty_for_childless_run() {
     seed(dir.path());
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let started =
-        playbook_run(dir.path(), "noagent", None, params, None, None, None, None).unwrap();
+    let started = playbook_run(
+        dir.path(),
+        "noagent",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+    )
+    .unwrap();
     let status = run_status(dir.path(), started["run_id"].as_str().unwrap()).unwrap();
     assert_eq!(status["children"].as_array().unwrap().len(), 0);
 }

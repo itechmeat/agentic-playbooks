@@ -21,6 +21,8 @@ mod advisory_tools_test;
 mod capture_tools_test;
 #[path = "suite/catalog_tools_test.rs"]
 mod catalog_tools_test;
+#[path = "suite/connector_policy.rs"]
+mod connector_policy;
 #[path = "suite/patch_tool_test.rs"]
 mod patch_tool_test;
 #[path = "suite/policy_test.rs"]

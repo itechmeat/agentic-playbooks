@@ -229,3 +229,61 @@ fn show_reports_functions_and_account_fields() {
     // Never the secret value itself.
     assert!(!stdout.contains("shh-secret-value"));
 }
+
+// --- approve --------------------------------------------------------------
+
+#[test]
+fn approve_marks_connector_then_account_as_trusted() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    write_widget_account(dir.path(), "WIDGET_TOKEN");
+
+    // Before approval the connector lists as unapproved.
+    let before = apb_ok(dir.path(), &["connector", "list"]);
+    let before_out = String::from_utf8_lossy(&before.stdout);
+    assert!(
+        before_out.contains("unapproved"),
+        "connector should start unapproved: {before_out}"
+    );
+
+    // Approve the connector tree digest.
+    let ca = apb_ok(dir.path(), &["connector", "approve", "widget"]);
+    assert!(
+        String::from_utf8_lossy(&ca.stdout).contains("approved connector `widget`"),
+        "approve should confirm the connector"
+    );
+    let after = apb_ok(dir.path(), &["connector", "list"]);
+    let after_out = String::from_utf8_lossy(&after.stdout);
+    assert!(
+        after_out.contains("approved") && !after_out.contains("unapproved"),
+        "connector should list as approved after approval: {after_out}"
+    );
+
+    // Approve one account: the CLI prints the non-secret fields approved and
+    // never the secret value.
+    let aa = apb_ok(
+        dir.path(),
+        &["connector", "approve", "widget", "--account", "default"],
+    );
+    let aa_out = String::from_utf8_lossy(&aa.stdout);
+    let v: serde_json::Value = serde_json::from_str(aa_out.trim())
+        .unwrap_or_else(|e| panic!("account approve not JSON ({e}): {aa_out}"));
+    assert_eq!(v["approved"], serde_json::json!("widget/default"));
+    assert_eq!(
+        v["fields"]["base_url"],
+        serde_json::json!("https://example.com")
+    );
+    // The token field keeps its raw env ref, never a resolved secret value.
+    assert_eq!(
+        v["fields"]["token"],
+        serde_json::json!("{{env.WIDGET_TOKEN}}")
+    );
+
+    // An unknown account is a clean error, not a panic.
+    let bad = playbook(
+        dir.path(),
+        &["connector", "approve", "widget", "--account", "nope"],
+    );
+    assert!(!bad.status.success(), "unknown account must fail");
+}

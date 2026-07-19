@@ -178,6 +178,8 @@ fn gated_run_threads_child_pins_into_parent_config() {
         Some(permit.playbook_digest.clone()),
         Some(permit.profile_bundles.clone()),
         Some(permit.children.clone()),
+        permit.connectors.clone(),
+        permit.connector_accounts.clone(),
     )
     .expect("gated run");
     let run_id = out["run_id"].as_str().expect("run_id");

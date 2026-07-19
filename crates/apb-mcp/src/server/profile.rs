@@ -29,6 +29,21 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "List installed connectors an agent_task node can bind (spec connectors): each with version, trust state, exposed function names, and configured account names. No account field or secret values. Read this before writing a node `connectors` binding.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn connectors_list(
+        &self,
+        Parameters(WorkspaceArg { workspace }): Parameters<WorkspaceArg>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(crate::tools::connectors_list(&root))
+    }
+
+    #[tool(
         description = "Get a profile's full content (profile.yaml + SOUL.md) and digests.",
         annotations(read_only_hint = true)
     )]

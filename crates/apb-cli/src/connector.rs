@@ -14,7 +14,7 @@ use apb_core::connector::config::{self};
 use apb_core::connector::secrets;
 use apb_core::connector::store::{self, LoadedConnector};
 use apb_core::doctor::{Check, CheckStatus};
-use apb_core::trust::{Kind, TrustStore, account_trust_id};
+use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
 use clap::Subcommand;
 use serde_json::{Value, json};
 
@@ -46,6 +46,17 @@ pub(crate) enum ConnectorAction {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Approve trust for a connector or one of its accounts. With no flag,
+    /// approves the connector's current tree digest; with --account, approves
+    /// that account's current non-secret-field digest. A deliberate user
+    /// action: connector and account trust guard secret egress and are never
+    /// bypassed by a run's acknowledge_untrusted (spec 7).
+    Approve {
+        name: String,
+        /// Approve this account's digest instead of the connector digest
+        #[arg(long)]
+        account: Option<String>,
+    },
     /// Check every installed connector: manifest, config, env resolution,
     /// trust status, healthcheck declaration
     Doctor,
@@ -68,6 +79,7 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
             args,
             dry_run,
         } => call_cmd(root, &name, &function, account, args, dry_run),
+        ConnectorAction::Approve { name, account } => approve_cmd(root, &name, account.as_deref()),
         ConnectorAction::Doctor => doctor_cmd(root),
         ConnectorAction::Env { name } => env_cmd(root, name),
         ConnectorAction::Init { name } => init_cmd(&name),
@@ -221,6 +233,75 @@ fn show_cmd(root: &Path, name: &str) -> ExitCode {
     });
     print_json(&out);
     ExitCode::SUCCESS
+}
+
+// --- approve ----------------------------------------------------------
+
+/// Approves the connector's current tree digest, or with `account` the current
+/// non-secret-field digest of that account (spec 7). Prints the concrete fields
+/// approved for an account so the user sees exactly what they trusted. Secret
+/// fields carry only their raw `{{env.VAR}}` reference in the config, never the
+/// value, so printing every field is safe.
+fn approve_cmd(root: &Path, name: &str, account: Option<&str>) -> ExitCode {
+    let loaded = match store::load(name) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("connector error: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    match account {
+        None => {
+            let mut trust = TrustStore::load();
+            if let Err(e) = trust.approve_kind(
+                &loaded.digest,
+                name,
+                Kind::Connector,
+                OriginKind::LocallyApproved,
+            ) {
+                eprintln!("connector error: cannot record approval: {e}");
+                return ExitCode::from(2);
+            }
+            println!("approved connector `{name}` (digest {})", loaded.digest);
+            ExitCode::SUCCESS
+        }
+        Some(acct_name) => {
+            let accounts = match config::load_merged(root, name) {
+                Ok(a) => a,
+                Err(e) => {
+                    eprintln!("connector error: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            let Some(account) = accounts.iter().find(|a| a.name == acct_name) else {
+                eprintln!("connector error: account `{acct_name}` not configured for `{name}`");
+                return ExitCode::from(2);
+            };
+            let digest = config::account_digest(account);
+            let id = account_trust_id(name, acct_name);
+            let mut trust = TrustStore::load();
+            if let Err(e) = trust.approve_kind(
+                &digest,
+                &id,
+                Kind::ConnectorAccount,
+                OriginKind::LocallyApproved,
+            ) {
+                eprintln!("connector error: cannot record approval: {e}");
+                return ExitCode::from(2);
+            }
+            // Show the non-secret identity approved (name, default, fields).
+            let fields = serde_json::Map::from_iter(
+                account.fields.iter().map(|(k, v)| (k.clone(), json!(v))),
+            );
+            print_json(&json!({
+                "approved": id,
+                "digest": digest,
+                "default": account.default,
+                "fields": Value::Object(fields),
+            }));
+            ExitCode::SUCCESS
+        }
+    }
 }
 
 // --- call -------------------------------------------------------------

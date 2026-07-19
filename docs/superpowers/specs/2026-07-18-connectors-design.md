@@ -562,6 +562,12 @@ top:
 - No client-side rate limiting or per-account concurrency control; parallel
   nodes calling the same account rely on the service's own limits, surfaced
   to agents as `rate_limited` errors.
+- Sub-playbook children that bind connectors are gated (trust, accounts,
+  env) at the parent's policy check, but the child-spawn path does not yet
+  carry the child's own permit maps (`ChildExpectation` has no connector
+  fields), so such a child run refuses fail-closed at start. Same posture
+  for cross-workspace plans (the plan token carries no connector permit).
+  Threading child and cross-workspace connector permits is a follow-up.
 
 ## 14. Threat model
 
