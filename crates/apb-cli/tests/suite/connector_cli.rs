@@ -544,6 +544,10 @@ fn call_accepts_the_full_flag() {
         &["connector", "call", "widget", "ping", "--full"],
     );
     let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "call without run context must exit non-zero"
+    );
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(v["error"]["code"], serde_json::json!("config"));
 }

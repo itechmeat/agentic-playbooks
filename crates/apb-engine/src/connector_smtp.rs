@@ -89,7 +89,10 @@ impl SmtpCall {
     /// Connects, optionally upgrades to TLS via STARTTLS, authenticates, and
     /// sends the message (or, for a verify function, only probes the
     /// connection). Refuses to proceed in plaintext when `use_tls` is set but
-    /// the server does not advertise STARTTLS. The `QUIT` is best-effort.
+    /// the server does not advertise STARTTLS, and refuses to AUTH when
+    /// credentials are present over a non-TLS connection (the password would go
+    /// in cleartext); the sole plaintext opt-in is a credential-less relay. The
+    /// `QUIT` is best-effort.
     pub fn send(self) -> Result<CallOk, CallError> {
         let timeout = std::time::Duration::from_secs(self.timeout_sec);
         let hello = ClientId::default();
@@ -118,6 +121,18 @@ impl SmtpCall {
             })?;
             conn.starttls(&tls, &hello)
                 .map_err(|e| self.map_err(Stage::Starttls, e))?;
+        }
+
+        // AUTH transmits the password. Refuse to authenticate over a plaintext
+        // connection: if credentials are present but the connection was not
+        // upgraded to TLS, fail before any AUTH so the password never leaves in
+        // cleartext. The one plaintext opt-in is a credential-less relay.
+        if !self.use_tls && (self.username.is_some() || self.password.is_some()) {
+            let _ = conn.quit();
+            return Err(CallError::new(
+                CallErrorCode::Config,
+                "smtp credentials over a plaintext connection are refused; set use_tls to true, or drop username and password for an unauthenticated relay",
+            ));
         }
 
         if let (Some(user), Some(pass)) = (self.username.as_ref(), self.password.as_ref()) {
@@ -434,10 +449,20 @@ fn render_connection(spec: &SmtpSpec, ctx: &RenderCtx) -> Result<Connection, Cal
     })
 }
 
-/// Renders an optional connection field (username/password) strictly: a
-/// present-but-unresolvable placeholder is a config error (connection inputs
-/// come from trusted account config, not lenient call args). An empty render
-/// is treated as absent.
+/// Renders an optional connection field (username/password) presence-aware,
+/// mirroring `render_optional` but over the account and secret namespaces.
+/// Before rendering, the placeholders are scanned: if the template references
+/// an `{{account.X}}` key absent from the account map, or a `{{secret.X}}` key
+/// absent from the secrets map, the field is treated as absent (`Ok(None)`).
+/// This lets the unauthenticated-relay setup that PUBLIC.md documents simply
+/// omit the optional `username`/`password` account fields to mean "no
+/// credentials", rather than forcing an empty placeholder.
+///
+/// A PRESENT reference whose value still fails to render is a hard config
+/// error (a malformed placeholder stays loud); an empty render is treated as
+/// absent. Note that a configured-but-unresolvable secret fails earlier, at
+/// secret resolution, before this point is reached. Required connection fields
+/// (host/port/use_tls) never use this path and stay strict.
 fn render_conn_opt(
     template: Option<&str>,
     ctx: &RenderCtx,
@@ -445,6 +470,16 @@ fn render_conn_opt(
 ) -> Result<Option<String>, CallError> {
     match template {
         Some(t) => {
+            for (ns, name) in placeholders(t).map_err(|e| render_err(field, e))? {
+                let absent = match ns {
+                    Namespace::Account => !ctx.account.contains_key(name.as_str()),
+                    Namespace::Secret => !ctx.secrets.contains_key(name.as_str()),
+                    _ => false,
+                };
+                if absent {
+                    return Ok(None);
+                }
+            }
             let v = render_raw(t, ctx).map_err(|e| render_err(field, e))?;
             Ok(if v.is_empty() { None } else { Some(v) })
         }

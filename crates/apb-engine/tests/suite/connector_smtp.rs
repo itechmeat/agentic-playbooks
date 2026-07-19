@@ -1,9 +1,13 @@
 //! Slice-3 smtp execution tests. A blocking std-thread SMTP listener records
-//! the whole conversation (EHLO, AUTH, MAIL/RCPT/DATA, QUIT) so we can assert
-//! on the rendered envelope and MIME structure without a network or a real TLS
-//! stack. STARTTLS itself is not exercised here (a real handshake needs a
-//! self-signed cert); live smoke tests cover real TLS. The non-TLS send and
-//! verify paths, plus a use_tls-refuses-plaintext unit, are covered here.
+//! the whole conversation (EHLO, MAIL/RCPT/DATA, QUIT) so we can assert on the
+//! rendered envelope and MIME structure without a network or a real TLS stack.
+//! STARTTLS itself is not exercised here (a real handshake needs a self-signed
+//! cert); live smoke tests cover real TLS. Because AUTH transmits a password,
+//! it is refused over a plaintext connection, so these offline tests exercise
+//! only the credential-less (unauthenticated-relay) send and verify paths; the
+//! authenticated paths now run only under TLS and are covered by the env-gated
+//! live smokes. A use_tls-refuses-plaintext unit and a
+//! credentials-over-plaintext-refused unit round out the offline coverage.
 //!
 //! No process-global state is touched (each test binds its own 127.0.0.1:0
 //! listener), so no shared env lock is needed.
@@ -140,6 +144,9 @@ fn send_spec() -> SmtpSpec {
     .unwrap()
 }
 
+/// An authenticated account (username present). Paired with `secrets()`, its
+/// `{{account.username}}`/`{{secret.password}}` placeholders resolve, so a send
+/// against it carries credentials.
 fn account(host: &str, port: u16, use_tls: bool) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("host".into(), host.into()),
@@ -150,21 +157,37 @@ fn account(host: &str, port: u16, use_tls: bool) -> BTreeMap<String, String> {
     ])
 }
 
+/// The unauthenticated-relay account: it omits the optional `username` field,
+/// and is paired with empty secrets. The `{{account.username}}` and
+/// `{{secret.password}}` placeholders reference absent keys, so the connection
+/// resolves with no credentials and no AUTH is attempted.
+fn account_no_creds(host: &str, port: u16, use_tls: bool) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("host".into(), host.into()),
+        ("port".into(), port.to_string()),
+        ("use_tls".into(), use_tls.to_string()),
+        ("from_email".into(), "a@b.c".into()),
+    ])
+}
+
 fn secrets() -> BTreeMap<String, String> {
     BTreeMap::from([("password".into(), "pw".into())])
 }
 
 #[test]
 fn send_over_plaintext_delivers_multipart() {
+    // Credential-less (unauthenticated-relay) send over plaintext: the account
+    // omits `username` and the secrets are empty, so no AUTH is attempted. This
+    // is the explicit opt-in for a plaintext connection.
     let srv = spawn_smtp(false, true);
     let spec = send_spec();
     let args =
         json!({"to": "x@y.z, w@y.z", "subject": "Hi", "body_text": "T", "body_html": "<p>T</p>"});
     let call = match build(
         &spec,
-        &account(&srv.host, srv.port, false),
+        &account_no_creds(&srv.host, srv.port, false),
         &args,
-        &secrets(),
+        &BTreeMap::new(),
         Vec::new(),
         false,
         15,
@@ -182,16 +205,19 @@ fn send_over_plaintext_delivers_multipart() {
 
     let r = srv.recorded();
     assert!(r.ehlo && r.quit);
-    assert!(r.auth_plain.is_some(), "AUTH PLAIN expected");
+    assert!(
+        r.auth_plain.is_none(),
+        "no AUTH over a credential-less plaintext relay"
+    );
     assert_eq!(r.rcpt_to.len(), 2);
     assert!(r.data.contains("Subject: Hi"));
     assert!(r.data.to_lowercase().contains("multipart/alternative"));
-    // No credential ever appears in the recorded message body.
-    assert!(!r.data.contains("pw"));
 }
 
 #[test]
-fn verify_authenticates_and_quits() {
+fn verify_connects_and_quits() {
+    // Credential-less verify over plaintext: connects, EHLOs, and quits without
+    // AUTH or mail. (Authenticated verify runs only under TLS, via live smokes.)
     let srv = spawn_smtp(false, true);
     let spec: SmtpSpec = serde_yaml_ng::from_str(
         "connection:\n  host: \"{{account.host}}\"\n  port: \"{{account.port}}\"\n  use_tls: \"{{account.use_tls}}\"\n  username: \"{{account.username}}\"\n  password: \"{{secret.password}}\"\nverify: true\n",
@@ -199,9 +225,9 @@ fn verify_authenticates_and_quits() {
     .unwrap();
     let call = match build(
         &spec,
-        &account(&srv.host, srv.port, false),
+        &account_no_creds(&srv.host, srv.port, false),
         &json!({}),
-        &secrets(),
+        &BTreeMap::new(),
         Vec::new(),
         false,
         15,
@@ -214,8 +240,56 @@ fn verify_authenticates_and_quits() {
     let ok = call.send().unwrap();
     assert_eq!(ok.body()["verified"], json!(true));
     let r = srv.recorded();
-    assert!(r.ehlo && r.auth_plain.is_some() && r.quit);
+    assert!(r.ehlo && r.quit);
+    assert!(
+        r.auth_plain.is_none(),
+        "no AUTH over a credential-less plaintext relay"
+    );
     assert!(r.mail_from.is_none(), "verify must not send mail");
+}
+
+#[test]
+fn credentials_over_plaintext_are_refused() {
+    // Credentials present but use_tls false: the send must refuse with a config
+    // error before AUTH and before MAIL FROM, so the password is never put on
+    // the wire in cleartext.
+    let srv = spawn_smtp(false, true);
+    let spec = send_spec();
+    let args = json!({"to": "x@y.z", "subject": "Hi", "body_text": "T"});
+    let call = match build(
+        &spec,
+        &account(&srv.host, srv.port, false),
+        &args,
+        &secrets(),
+        Vec::new(),
+        false,
+        15,
+    )
+    .unwrap()
+    {
+        SmtpBuild::Call(c) => c,
+        _ => panic!("expected call"),
+    };
+    let err = call.send().unwrap_err();
+    assert_eq!(err.code, CallErrorCode::Config);
+    let r = srv.recorded();
+    assert!(
+        r.auth_plain.is_none() && r.mail_from.is_none(),
+        "must refuse before any AUTH or MAIL FROM"
+    );
+}
+
+#[test]
+fn absent_host_still_fails_loudly() {
+    // Finding B keeps REQUIRED connection fields strict: an account missing the
+    // `host` key fails to render with a config error, never silently "absent".
+    let srv = spawn_smtp(false, true);
+    let spec = send_spec();
+    let args = json!({"to": "x@y.z", "subject": "Hi", "body_text": "T"});
+    let mut acct = account_no_creds(&srv.host, srv.port, false);
+    acct.remove("host");
+    let err = build(&spec, &acct, &args, &BTreeMap::new(), Vec::new(), false, 15).unwrap_err();
+    assert_eq!(err.code, CallErrorCode::Config);
 }
 
 #[test]
