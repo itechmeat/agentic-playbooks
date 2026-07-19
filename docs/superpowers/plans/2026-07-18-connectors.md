@@ -1,5 +1,12 @@
 # Connectors Implementation Plan
 
+> **Status: COMPLETED (2026-07-19).** All 19 tasks (plus a 17.5 follow-up for
+> usage stats) are implemented, reviewed, and merged into the feature branch;
+> the design spec is marked implemented. This document is kept as an archival
+> record of the plan as executed - the unchecked step boxes below reflect the
+> plan template, not pending work. Progress ledger:
+> `.superpowers/sdd/progress.md`.
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** Connector infrastructure for apb: folder-based declarative HTTP connectors, layered account configs with env-referenced secrets, node-level grants, trust gating, `apb connector call` channel, dashboard UI, and a fake `mock-tracker` connector for tests.
@@ -35,7 +42,9 @@
 - Commit: `docs/superpowers/specs/2026-07-18-connectors-design.md` (already on disk, uncommitted)
 - Commit: `docs/superpowers/plans/2026-07-18-connectors.md` (this file)
 
-**Steps:**
+**Steps** (controller-owned: branch creation, pulling, staging, and committing
+are git operations, which per Global Constraints belong to the controller,
+never to implementer subagents):
 
 - [ ] **Step 1: Create the story branch from main**
 

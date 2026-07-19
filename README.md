@@ -147,7 +147,7 @@ Profiles and environment:
 ```text
 apb detect          detect installed coding agents (local checks only)
 apb profile         list / show / write / edit agent profiles
-apb connector       list / show / call / approve / doctor connectors to external services
+apb connector       list / show / call / approve / doctor / env / init - connectors to external services
 apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
 apb adopt           adoption readiness report for a playbook
 apb doctor          diagnose agents, profiles, runners, playbooks

@@ -164,9 +164,13 @@ Rules:
 
 ### 3.2 PUBLIC.md
 
-Frontmatter fields (all optional except `display_name` and `summary`):
-`display_name`, `summary`, `tags` (list), `publisher`, `homepage`, `icon`
-(relative path inside the folder). The markdown body is the long description.
+Frontmatter fields, all optional: `display_name`, `summary`, `tags` (list),
+`publisher`, `homepage`, `icon` (relative path inside the folder). A missing
+PUBLIC.md, missing frontmatter, or unparsable frontmatter never breaks
+loading: the storefront falls back to defaults with `display_name` set to the
+folder name and every other field empty. Unknown frontmatter keys are
+ignored (the storefront is forward-compatible; the machine part stays
+strict). The markdown body is the long description.
 The engine never reads PUBLIC.md at run time; the dashboard and any future
 marketplace render it. The tree digest covers the whole folder, so editing
 PUBLIC.md also drops trust, which is correct: the storefront is part of what
@@ -419,14 +423,17 @@ Error codes:
 | `auth` | the service answered 401 or 403 |
 | `not_found` | the service answered 404 |
 | `rate_limited` | the service answered 429; `retry_after_sec` populated when the service provides it |
-| `service` | the service answered 5xx |
+| `service` | any other non-2xx answer: 3xx (redirects are not followed, per section 6.1), 4xx other than 401/403/404/429, and 5xx |
 | `network` | connection failure |
 | `timeout` | the per-function timeout elapsed |
 
-The HTTP-status mapping above is the default; a connector may override the
-mapping for specific statuses per function when a service abuses status codes.
-There are no automatic retries: the agent decides, and the structured code
-plus `retry_after_sec` give it enough to decide well. Exit code is 0 when
+The complete default mapping is therefore: 2xx is success; 401 and 403 map to
+`auth`; 404 to `not_found`; 429 to `rate_limited`; every other status
+(3xx, remaining 4xx, 5xx) maps to `service`. The mapping is fixed; a
+per-function override for services that abuse status codes is a possible
+future extension of `FunctionSpec`, not part of this story. There are no
+automatic retries: the agent decides, and the structured code plus
+`retry_after_sec` give it enough to decide well. Exit code is 0 when
 `ok: true`, non-zero otherwise, so shell-level checks also work.
 
 Messages inside `error.message` are machine-facing English; any user-facing

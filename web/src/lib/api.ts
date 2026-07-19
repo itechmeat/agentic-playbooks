@@ -339,9 +339,10 @@ export interface HealthcheckResult {
 }
 
 // The executor's structured outcome, returned verbatim (design doc section
-// 9/8). A trust-gated refusal comes back as a normal `ok:false` body with
-// `error.code === "permission"`, not an HTTP error status, so this is a plain
-// getJson-style call, not requestJson.
+// 9/8). The server answers HTTP 200 even for failures, so a trust-gated
+// refusal arrives as a normal `ok:false` body with `error.code === "permission"`,
+// never as an HTTP error. requestJson's non-ok branch only fires on
+// transport-level or server-level HTTP errors, not on healthcheck outcomes.
 export const runConnectorHealthcheck = (name: string, account: string, workspace = '') =>
   requestJson<HealthcheckResult>(
     `${conn(name)}/healthcheck/${encodeURIComponent(account)}${qs({ workspace })}`,
