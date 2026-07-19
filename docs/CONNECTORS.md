@@ -130,3 +130,56 @@ apb connector init <name>       scaffold a new connector folder from a template
 the engine when a node executes a call); outside a run use `--dry-run` to render
 a call without executing it, or the dashboard healthcheck to probe an account.
 `--args -` reads the JSON arguments from stdin.
+
+## Official connectors
+
+Four official connectors ship inside the `apb` binary and install with
+`apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`.
+Installing from the binary records trust for the connector's tree digest
+in the same action, since the bytes are already part of the binary you
+are running; `apb connector install --from-dir <path>` (the development
+loop for this repository, `connectors/<name>/`) keeps the normal approve
+flow.
+
+### github
+
+Account fields: `api_base` (`https://api.github.com`, or your GHES API
+base) and `token` (secret). Prefer `token: "{{cmd:gh auth token}}"` when
+`gh auth login` has already run; otherwise `{{env.GITHUB_TOKEN}}` with a
+personal access token scoped `repo` (or `public_repo`) and `workflow`
+for `dispatch_workflow`. Healthcheck: `get_rate_limit`.
+
+### telegram
+
+Account fields: `api_base` (`https://api.telegram.org`, overridable for
+a self-hosted Bot API server) and `token` (secret) - the token
+[@BotFather](https://t.me/BotFather) gives you for a new bot. The bot
+must already be a member of a chat before `send_message` reaches it.
+Healthcheck: `get_me`.
+
+### smtp
+
+Account fields: `host`, `port`, `from_email` (all required), and
+`username`, `password` (secret), `from_name`, `use_tls` (all optional).
+Set `use_tls` explicitly (there is no engine-level default for account
+fields): `true` for STARTTLS on port 587, the common case. Healthcheck:
+`verify` (connects, negotiates STARTTLS, authenticates, sends nothing).
+
+### sentry
+
+Account fields: `base_url` (`https://sentry.io`, or self-hosted),
+`org` (the organization slug), and `token` (secret). Create the token at
+Settings > Auth Tokens with scopes `project:read`, `event:read`,
+`issue:write` for issue functions and `project:releases` for
+`create_release`/`create_deploy`. `list_issues` paginates through the
+call result's `link` field: pass the cursor it returns back into the
+next call's `cursor` argument. Healthcheck: `list_projects`.
+
+### Demo playbooks
+
+`examples/playbooks/sentry-triage.yaml` and
+`examples/playbooks/release-announce.yaml` exercise the four connectors
+end to end and double as reference examples for grant allowlists and
+`max_calls`. They validate in CI against fake accounts and are not run
+against real services there; run them manually once your own accounts
+are configured and approved.
