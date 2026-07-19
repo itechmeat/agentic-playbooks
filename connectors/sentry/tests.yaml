@@ -1,0 +1,45 @@
+cases:
+  - function: list_projects
+    account: { base_url: https://sentry.io, org: acme }
+    args: {}
+    expect:
+      method: GET
+      url: https://sentry.io/api/0/organizations/acme/projects/
+
+  - function: list_issues
+    account: { base_url: https://sentry.io, org: acme }
+    args: { query: "is:unresolved", project: "-1", cursor: "" }
+    expect:
+      method: GET
+      url: "https://sentry.io/api/0/organizations/acme/issues/?cursor=&project=-1&query=is%3Aunresolved"
+
+  - function: get_issue
+    account: { base_url: https://sentry.io, org: acme }
+    args: { issue_id: "123456" }
+    expect:
+      method: GET
+      url: https://sentry.io/api/0/issues/123456/
+
+  - function: update_issue
+    account: { base_url: https://sentry.io, org: acme }
+    args: { issue_id: "123456", status: resolved }
+    expect:
+      method: PUT
+      url: https://sentry.io/api/0/issues/123456/
+      body_contains: { status: resolved }
+
+  - function: create_release
+    account: { base_url: https://sentry.io, org: acme }
+    args: { version: 1.4.0, projects: [site] }
+    expect:
+      method: POST
+      url: https://sentry.io/api/0/organizations/acme/releases/
+      body_contains: { version: 1.4.0, projects: [site] }
+
+  - function: create_deploy
+    account: { base_url: https://sentry.io, org: acme }
+    args: { version: 1.4.0, environment: production }
+    expect:
+      method: POST
+      url: https://sentry.io/api/0/organizations/acme/releases/1.4.0/deploys/
+      body_contains: { environment: production }

@@ -1,0 +1,100 @@
+name: sentry
+version: 0.1.0
+healthcheck: list_projects
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: org
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: list_projects
+    description: List projects in the organization
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/0/organizations/{{account.org}}/projects/"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [id, slug, name, platform]
+
+  - name: list_issues
+    description: Search issues in the organization, filtered by project, query, and cursor
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/0/organizations/{{account.org}}/issues/"
+    query:
+      query: "{{args.query}}"
+      project: "{{args.project}}"
+      cursor: "{{args.cursor}}"
+    args_schema:
+      type: object
+      properties:
+        query: { type: string, description: "Sentry search syntax, e.g. is:unresolved" }
+        project: { type: string, description: "numeric project id or slug; -1 searches every project the token can access" }
+        cursor: { type: string, description: "pass the cursor from the previous response's link field; empty on the first call" }
+      required: [query, project, cursor]
+    examples:
+      - args: { query: "is:unresolved", project: "-1", cursor: "" }
+        note: "project accepts a numeric project id or -1 for every project the token can access; leave cursor empty on the first call and pass the value from the previous response's link field afterward."
+    response_pick: [id, shortId, title, status, level, count, culprit, permalink]
+
+  - name: get_issue
+    description: Get one issue by internal id
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/0/issues/{{args.issue_id}}/"
+    args_schema:
+      type: object
+      properties:
+        issue_id: { type: string }
+      required: [issue_id]
+    response_pick: [id, shortId, title, status, level, count, culprit, permalink, firstSeen, lastSeen]
+
+  - name: update_issue
+    description: Update an issue's status or assignee
+    method: PUT
+    url: "{{account.base_url}}/api/0/issues/{{args.issue_id}}/"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        issue_id: { type: string }
+        status: { type: string, enum: [unresolved, resolved, ignored] }
+        assignedTo: { type: string, description: "username, email, or team slug" }
+      required: [issue_id]
+    examples:
+      - args: { issue_id: "123456", status: resolved }
+        note: "status and assignedTo can be set in the same call."
+
+  - name: create_release
+    description: Create a release
+    method: POST
+    url: "{{account.base_url}}/api/0/organizations/{{account.org}}/releases/"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        version: { type: string }
+        projects: { type: array, items: { type: string } }
+        ref: { type: string }
+        url: { type: string }
+      required: [version, projects]
+
+  - name: create_deploy
+    description: Record a deploy of a release to an environment
+    method: POST
+    url: "{{account.base_url}}/api/0/organizations/{{account.org}}/releases/{{args.version}}/deploys/"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        version: { type: string }
+        environment: { type: string }
+        name: { type: string }
+        url: { type: string }
+      required: [version, environment]
