@@ -1,6 +1,6 @@
 //! Resolving the agent invocation form (spec 2026-07-12, sections 6.2-6.3).
 //!
-//! The invocation form is data (`InvocationDef`), not code: the built-in five
+//! The invocation form is data (`InvocationDef`), not code: the built-in six
 //! are provided by `builtin`, custom agents come from the global config's
 //! `agents:`. `resolve_invocation` fixes the agent, model, invocation form,
 //! SOUL delivery method, canonical binary path, and its fingerprint - all of
@@ -91,7 +91,7 @@ pub fn spec_for(agent_id: &str, global: &GlobalConfig) -> Result<InvocationDef, 
         .and_then(|a| a.invocation.clone())
         .or_else(|| builtin(agent_id))
         // Agent is defined in config but without an explicit form and is not
-        // one of the built-in five: historical compatibility falls back to
+        // one of the built-in six: historical compatibility falls back to
         // the claude form (`-p {prompt} --model {model}`).
         .or_else(|| global.agents.get(agent_id).and(builtin("claude")))
         .ok_or_else(|| {
@@ -304,7 +304,7 @@ mod tests {
     }
 
     #[test]
-    fn builtin_five_agents_present_and_valid() {
+    fn builtin_six_agents_present_and_valid() {
         for id in ["claude", "agy", "codex", "opencode", "hermes"] {
             builtin(id).unwrap().validate().unwrap();
         }

@@ -158,7 +158,7 @@ fn adopt_check_model(
         other => other,
     };
     let Some(info) = agents.iter().find(|a| a.agent == probe_id) else {
-        // The agent is not among the built-in top five - nothing to check against.
+        // The agent is not among the built-in top six - nothing to check against.
         findings.push(json!({ "code": "model_unverifiable", "ref": profile_key, "agent": agent, "model": model }));
         return;
     };
