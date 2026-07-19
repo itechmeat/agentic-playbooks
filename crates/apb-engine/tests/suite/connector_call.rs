@@ -1414,3 +1414,126 @@ fn dry_run_does_not_execute_cmd_secret() {
         "dry-run must not execute the secret command"
     );
 }
+
+// -- smtp end-to-end coverage through `execute` (slice 3, Task 7) --
+
+/// An smtp connector snapshot named like `CONNECTOR` so the shared `call`
+/// helper can drive it. Sends over the connection block (password from the
+/// env-backed secret) with an individually-templated optional body.
+const SMTP_YAML: &str = r#"
+name: mock-tracker
+version: 0.1.0
+account_fields:
+  - name: host
+    required: true
+  - name: port
+    required: true
+  - name: use_tls
+  - name: from_email
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: send_email
+    description: Send an email
+    smtp:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        password: "{{secret.token}}"
+      message:
+        from_email: "{{account.from_email}}"
+        to: "{{args.to}}"
+        subject: "{{args.subject}}"
+        body_text: "{{args.body_text}}"
+    args_schema: { type: object, properties: { to: { type: string }, subject: { type: string } }, required: [to, subject] }
+"#;
+
+/// Writes an smtp run manifest (one connector, one grant for `NODE`) and the
+/// copied smtp connector snapshot into `run_dir`.
+fn seed_smtp_run(run_dir: &Path) {
+    let mut m = RunExecutionManifest::default();
+    m.connectors.push(ManifestConnector {
+        name: CONNECTOR.to_string(),
+        digest: "sha256:test".to_string(),
+        accounts: vec![ManifestAccount {
+            name: "acct1".to_string(),
+            default: true,
+            fields: BTreeMap::from([
+                ("host".to_string(), "smtp.example.com".to_string()),
+                ("port".to_string(), "587".to_string()),
+                ("use_tls".to_string(), "true".to_string()),
+                ("from_email".to_string(), "a@b.c".to_string()),
+                ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
+            ]),
+            env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+            cmd: BTreeMap::new(),
+            digest: "sha256:acct".to_string(),
+        }],
+    });
+    m.connector_grants.insert(
+        NODE.to_string(),
+        vec![ManifestConnectorGrant {
+            connector: CONNECTOR.to_string(),
+            accounts: vec!["acct1".to_string()],
+            functions: vec!["send_email".to_string()],
+            max_calls: None,
+        }],
+    );
+    manifest::write(run_dir, &m).unwrap();
+    let cdir = run_dir.join("connectors");
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join(format!("{CONNECTOR}.yaml")), SMTP_YAML).unwrap();
+}
+
+#[test]
+fn smtp_dry_run_renders_envelope_and_records_no_event() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    // No secret seeded: dry-run must not need it.
+    seed_smtp_run(run.path());
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "send_email",
+        None,
+        serde_json::json!({"to": "x@y.z", "subject": "Hi", "body_text": "T"}),
+        true,
+    );
+    assert!(ok, "dry-run should succeed: {value}");
+    assert_eq!(value["dry_run"], serde_json::json!(true));
+    assert_eq!(value["envelope"]["from"], serde_json::json!("a@b.c"));
+    assert_eq!(value["envelope"]["to"], serde_json::json!(["x@y.z"]));
+    assert_eq!(value["envelope"]["subject"], serde_json::json!("Hi"));
+    assert!(
+        !value.to_string().contains("port"),
+        "dry-run must not leak the connection block"
+    );
+    let events = read_all(run.path()).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::ConnectorCall { .. }))
+    );
+}
+
+#[test]
+fn smtp_bad_address_is_invalid_args() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_smtp_run(run.path());
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "send_email",
+        None,
+        serde_json::json!({"to": "not-an-email", "subject": "Hi", "body_text": "T"}),
+        true,
+    );
+    assert!(!ok);
+    assert_eq!(value["error"]["code"], serde_json::json!("invalid_args"));
+}

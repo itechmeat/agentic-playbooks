@@ -494,6 +494,8 @@ fn write_connector_call_event(
         outcome: outcome.into(),
         http_status: None,
         duration_ms,
+        smtp_subject: None,
+        smtp_recipients: None,
     })
     .unwrap();
 }
