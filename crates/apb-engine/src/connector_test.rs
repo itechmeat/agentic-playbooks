@@ -83,7 +83,7 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
             headers,
             body_contains,
         ),
-        ExpectKind::Smtp(envelope) => eval_smtp(envelope),
+        ExpectKind::Smtp(envelope) => eval_smtp(doc, function, &case.account, &args, envelope),
     }
 }
 
@@ -183,14 +183,94 @@ fn eval_http(
     Ok(())
 }
 
-/// The smtp expectation arm lands with Task 9 (it renders the envelope via
-/// `connector_smtp::build` in dry-run mode and matches the present envelope
-/// fields). Until then an smtp case is an explicit failure.
-fn eval_smtp(_envelope: &Envelope) -> Result<(), String> {
-    Err(
-        "smtp envelope expectations are not yet supported by the offline runner (Task 9)"
-            .to_string(),
+/// Matches an smtp `envelope` expectation. Renders the function's envelope
+/// offline through `connector_smtp::build` in dry-run mode (secrets stubbed, no
+/// connection), then compares only the envelope fields the expectation carries
+/// (cross-slice obligation 5): an absent field is not asserted. An empty
+/// `envelope: {}` asserts only that the render succeeded - the shape a verify
+/// function uses, since a verify render produces no envelope at all.
+fn eval_smtp(
+    doc: &ConnectorDoc,
+    function: &FunctionSpec,
+    account: &BTreeMap<String, String>,
+    args: &Value,
+    expected: &Envelope,
+) -> Result<(), String> {
+    let spec = function.smtp.as_ref().ok_or_else(|| {
+        format!(
+            "function `{}` is not an smtp function but the case expects an envelope",
+            function.name
+        )
+    })?;
+    let secrets: BTreeMap<String, String> = doc
+        .secret_fields()
+        .into_iter()
+        .map(|f| (f, SECRET_STUB.to_string()))
+        .collect();
+    let built = crate::connector_smtp::build(
+        spec,
+        account,
+        args,
+        &secrets,
+        Vec::new(),
+        true,
+        function.timeout_sec,
     )
+    .map_err(|e| format!("render failed: {}", e.message))?;
+    let json = match built {
+        crate::connector_smtp::SmtpBuild::DryRun(v) => v,
+        crate::connector_smtp::SmtpBuild::Call(_) => {
+            return Err("smtp dry-run unexpectedly produced a live call".to_string());
+        }
+    };
+
+    // Empty envelope (a verify case): the render succeeding is the whole
+    // assertion; there is nothing else to compare.
+    if expected.from.is_none() && expected.to.is_none() && expected.subject.is_none() {
+        return Ok(());
+    }
+
+    let env = json.get("envelope").ok_or_else(|| {
+        "expected an smtp envelope but the function rendered none (a verify function has no \
+         envelope; assert it with an empty `envelope: {}`)"
+            .to_string()
+    })?;
+    if let Some(from) = &expected.from {
+        let got = env.get("from").and_then(Value::as_str).unwrap_or_default();
+        if got != from {
+            return Err(format!(
+                "envelope from mismatch: expected `{from}`, rendered `{got}`"
+            ));
+        }
+    }
+    if let Some(to) = &expected.to {
+        let got: Vec<String> = env
+            .get("to")
+            .and_then(Value::as_array)
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default();
+        if &got != to {
+            return Err(format!(
+                "envelope to mismatch: expected {to:?}, rendered {got:?}"
+            ));
+        }
+    }
+    if let Some(subject) = &expected.subject {
+        let got = env
+            .get("subject")
+            .and_then(Value::as_str)
+            .unwrap_or_default();
+        if got != subject {
+            return Err(format!(
+                "envelope subject mismatch: expected `{subject}`, rendered `{got}`"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Subset match: every key of `expected` (recursively for nested objects) must
@@ -254,6 +334,52 @@ functions:
 
     fn doc() -> ConnectorDoc {
         ConnectorDoc::from_yaml(YAML, "example").unwrap()
+    }
+
+    const SMTP_YAML: &str = r#"
+name: mailer
+version: 0.1.0
+account_fields:
+  - name: host
+    required: true
+  - name: port
+    required: true
+  - name: use_tls
+    required: true
+  - name: from_email
+    required: true
+  - name: password
+    required: true
+    secret: true
+functions:
+  - name: send_email
+    description: d
+    smtp:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        password: "{{secret.password}}"
+      message:
+        from_email: "{{account.from_email}}"
+        to: "{{args.to}}"
+        subject: "{{args.subject}}"
+        body_text: "{{args.body_text}}"
+      verify: false
+  - name: verify
+    description: d
+    read_only: true
+    smtp:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        password: "{{secret.password}}"
+      verify: true
+"#;
+
+    fn smtp_doc() -> ConnectorDoc {
+        ConnectorDoc::from_yaml(SMTP_YAML, "mailer").unwrap()
     }
 
     #[test]
@@ -335,6 +461,43 @@ functions:
         // The default UA is not "MISSING", so this asserts the key is present and
         // compared (mismatch), proving the header map carries the default UA.
         assert!(report.results[0].detail.contains("header mismatch"));
+    }
+
+    #[test]
+    fn smtp_envelope_match_passes() {
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: send_email\n    account: { host: smtp.example.com, port: \"587\", use_tls: \"true\", from_email: a@b.c }\n    args: { to: x@y.z, subject: Hi, body_text: T }\n    expect:\n      envelope: { from: a@b.c, to: [x@y.z], subject: Hi }\n",
+        )
+        .unwrap();
+        let report = run_tests(&smtp_doc(), &tests);
+        assert!(report.all_passed(), "{:?}", failing(&report));
+    }
+
+    #[test]
+    fn smtp_envelope_subject_mismatch_fails() {
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: send_email\n    account: { host: smtp.example.com, port: \"587\", use_tls: \"true\", from_email: a@b.c }\n    args: { to: x@y.z, subject: Hi, body_text: T }\n    expect:\n      envelope: { from: a@b.c, to: [x@y.z], subject: Nope }\n",
+        )
+        .unwrap();
+        let report = run_tests(&smtp_doc(), &tests);
+        assert!(!report.all_passed());
+        assert!(
+            report.results[0].detail.contains("subject mismatch"),
+            "detail: {}",
+            report.results[0].detail
+        );
+    }
+
+    #[test]
+    fn smtp_empty_envelope_on_verify_passes() {
+        // Cross-slice obligation 5: an empty `envelope: {}` on a verify function
+        // asserts only that the connection renders without error.
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: verify\n    account: { host: smtp.example.com, port: \"587\", use_tls: \"true\" }\n    expect:\n      envelope: {}\n",
+        )
+        .unwrap();
+        let report = run_tests(&smtp_doc(), &tests);
+        assert!(report.all_passed(), "{:?}", failing(&report));
     }
 
     #[test]
