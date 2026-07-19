@@ -1,0 +1,256 @@
+name: asana
+version: 0.1.0
+healthcheck: get_me
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+account_fields:
+  - name: api_base
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_me
+    description: Get the authenticated user's identity
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [data.gid, data.name, data.email]
+
+  - name: list_workspaces
+    description: List workspaces the authenticated user can access
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/workspaces"
+    query:
+      limit: "{{args.limit}}"
+      offset: "{{args.offset}}"
+    args_schema:
+      type: object
+      properties:
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: string, description: "pagination offset from a previous response's next_page.offset" }
+      required: [limit]
+    response_pick: [data.gid, data.name, next_page.offset]
+
+  - name: list_projects
+    description: List projects in a workspace
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects"
+    query:
+      workspace: "{{args.workspace}}"
+      limit: "{{args.limit}}"
+      offset: "{{args.offset}}"
+      opt_fields: "name,archived,permalink_url"
+    args_schema:
+      type: object
+      properties:
+        workspace: { type: string, description: "workspace gid" }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: string, description: "pagination offset from a previous response's next_page.offset" }
+      required: [workspace, limit]
+    response_pick: [data.gid, data.name, data.archived, data.permalink_url, next_page.offset]
+
+  - name: list_sections
+    description: List sections in a project
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/sections"
+    query:
+      opt_fields: "name"
+    args_schema:
+      type: object
+      properties:
+        project: { type: string, description: "project gid" }
+      required: [project]
+    response_pick: [data.gid, data.name]
+
+  - name: list_tasks
+    description: List tasks in a project
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/tasks"
+    query:
+      project: "{{args.project}}"
+      limit: "{{args.limit}}"
+      offset: "{{args.offset}}"
+      completed_since: "{{args.completed_since}}"
+      opt_fields: "name,completed,assignee.name,due_on,permalink_url"
+    args_schema:
+      type: object
+      properties:
+        project: { type: string, description: "project gid" }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        offset: { type: string, description: "pagination offset from a previous response's next_page.offset" }
+        completed_since: { type: string, description: "now for open tasks only, or an ISO 8601 timestamp" }
+      required: [project, limit]
+    response_pick: [data.gid, data.name, data.completed, data.assignee.name, data.due_on, data.permalink_url, next_page.offset]
+
+  - name: get_task
+    description: Get one task by gid
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/tasks/{{args.task}}"
+    query:
+      opt_fields: "name,notes,completed,assignee.name,due_on,permalink_url,projects.name,memberships.section.name,created_at,modified_at"
+    args_schema:
+      type: object
+      properties:
+        task: { type: string, description: "task gid" }
+      required: [task]
+    response_pick: [data.gid, data.name, data.notes, data.completed, data.assignee.name, data.due_on, data.permalink_url, data.projects.name, data.memberships.section.name, data.created_at, data.modified_at]
+
+  - name: create_task
+    description: Create a task in a project
+    method: POST
+    url: "{{account.api_base}}/tasks"
+    body:
+      data:
+        name: "{{args.name}}"
+        notes: "{{args.notes}}"
+        projects: ["{{args.project}}"]
+        assignee: "{{args.assignee}}"
+        due_on: "{{args.due_on}}"
+    args_schema:
+      type: object
+      properties:
+        project: { type: string, description: "project gid" }
+        name: { type: string }
+        notes: { type: string }
+        assignee: { type: string, description: "user gid or email" }
+        due_on: { type: string, description: "YYYY-MM-DD" }
+      required: [project, name]
+    examples:
+      - args: { project: "1200", name: "Ship the release" }
+        note: "notes, assignee, and due_on are optional; an omitted optional field is dropped from the request body rather than sent as null."
+    response_pick: [data.gid, data.name, data.permalink_url]
+
+  - name: update_task
+    description: Update a task's name, notes, completion, assignee, or due date
+    method: PUT
+    url: "{{account.api_base}}/tasks/{{args.task}}"
+    body:
+      data:
+        name: "{{args.name}}"
+        notes: "{{args.notes}}"
+        completed: "{{args.completed}}"
+        assignee: "{{args.assignee}}"
+        due_on: "{{args.due_on}}"
+    args_schema:
+      type: object
+      properties:
+        task: { type: string, description: "task gid" }
+        name: { type: string }
+        notes: { type: string }
+        completed: { type: boolean }
+        assignee: { type: string, description: "user gid or email" }
+        due_on: { type: string, description: "YYYY-MM-DD" }
+      required: [task]
+    examples:
+      - args: { task: "1201", completed: true }
+        note: "any subset of name, notes, completed, assignee, due_on may be set in one call; every field left out is unchanged on the task."
+    response_pick: [data.gid, data.name, data.completed, data.permalink_url]
+
+  - name: add_comment
+    description: Add a comment story to a task
+    method: POST
+    url: "{{account.api_base}}/tasks/{{args.task}}/stories"
+    body:
+      data:
+        text: "{{args.text}}"
+    args_schema:
+      type: object
+      properties:
+        task: { type: string, description: "task gid" }
+        text: { type: string }
+      required: [task, text]
+    response_pick: [data.gid, data.created_at]
+
+  - name: list_comments
+    description: List comment and activity stories on a task
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/tasks/{{args.task}}/stories"
+    query:
+      opt_fields: "text,created_by.name,created_at,resource_subtype"
+    args_schema:
+      type: object
+      properties:
+        task: { type: string, description: "task gid" }
+      required: [task]
+    response_pick: [data.gid, data.text, data.created_by.name, data.created_at, data.resource_subtype]
+
+  - name: list_subtasks
+    description: List subtasks of a task
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/tasks/{{args.task}}/subtasks"
+    query:
+      opt_fields: "name,completed,assignee.name,due_on"
+    args_schema:
+      type: object
+      properties:
+        task: { type: string, description: "task gid" }
+      required: [task]
+    response_pick: [data.gid, data.name, data.completed, data.assignee.name, data.due_on]
+
+  - name: create_subtask
+    description: Create a subtask under a task
+    method: POST
+    url: "{{account.api_base}}/tasks/{{args.task}}/subtasks"
+    body:
+      data:
+        name: "{{args.name}}"
+        notes: "{{args.notes}}"
+        assignee: "{{args.assignee}}"
+        due_on: "{{args.due_on}}"
+    args_schema:
+      type: object
+      properties:
+        task: { type: string, description: "task gid" }
+        name: { type: string }
+        notes: { type: string }
+        assignee: { type: string, description: "user gid or email" }
+        due_on: { type: string, description: "YYYY-MM-DD" }
+      required: [task, name]
+    response_pick: [data.gid, data.name, data.permalink_url]
+
+  - name: add_task_to_section
+    description: Move a task into a section
+    method: POST
+    url: "{{account.api_base}}/sections/{{args.section}}/addTask"
+    body:
+      data:
+        task: "{{args.task}}"
+    args_schema:
+      type: object
+      properties:
+        section: { type: string, description: "section gid" }
+        task: { type: string, description: "task gid" }
+      required: [section, task]
+
+  - name: search_tasks
+    description: Search tasks in a workspace by name (typeahead, fuzzy match)
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/workspaces/{{args.workspace}}/typeahead"
+    query:
+      resource_type: "task"
+      query: "{{args.query}}"
+      count: "{{args.count}}"
+      opt_fields: "name,completed,permalink_url"
+    args_schema:
+      type: object
+      properties:
+        workspace: { type: string, description: "workspace gid" }
+        query: { type: string, description: "fuzzy name match text" }
+        count: { type: integer, minimum: 1, maximum: 100 }
+      required: [workspace, query]
+    examples:
+      - args: { workspace: "1100", query: "release" }
+        note: "typeahead is a fuzzy name match against task titles, not a full-text search; count is optional and defaults to the API's own limit when omitted."
+    response_pick: [data.gid, data.name, data.completed, data.permalink_url]

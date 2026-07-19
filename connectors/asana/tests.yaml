@@ -1,0 +1,127 @@
+cases:
+  - function: get_me
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: {}
+    expect:
+      method: GET
+      url: https://app.asana.com/api/1.0/users/me
+
+  - function: list_workspaces
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { limit: 50 }
+    expect:
+      method: GET
+      url: "https://app.asana.com/api/1.0/workspaces?limit=50"
+
+  - function: list_projects
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { workspace: "1000", limit: 50 }
+    expect:
+      method: GET
+      url: "https://app.asana.com/api/1.0/projects?limit=50&opt_fields=name,archived,permalink_url&workspace=1000"
+
+  - function: list_sections
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { project: "9000" }
+    expect:
+      method: GET
+      url: "https://app.asana.com/api/1.0/projects/9000/sections?opt_fields=name"
+
+  - function: list_tasks
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { project: "9000", limit: 25 }
+    expect:
+      method: GET
+      url: "https://app.asana.com/api/1.0/tasks?limit=25&opt_fields=name,completed,assignee.name,due_on,permalink_url&project=9000"
+
+  - function: get_task
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { task: "5000" }
+    expect:
+      method: GET
+      url: "https://app.asana.com/api/1.0/tasks/5000?opt_fields=name,notes,completed,assignee.name,due_on,permalink_url,projects.name,memberships.section.name,created_at,modified_at"
+
+  - function: create_task
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { project: "1200", name: "Ship the release", notes: "Final QA pass", assignee: "user@example.com", due_on: "2026-08-01" }
+    expect:
+      method: POST
+      url: https://app.asana.com/api/1.0/tasks
+      body_contains:
+        data:
+          name: "Ship the release"
+          notes: "Final QA pass"
+          projects: ["1200"]
+          assignee: "user@example.com"
+          due_on: "2026-08-01"
+
+  - function: create_task
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { project: "1200", name: "Ship the release" }
+    expect:
+      method: POST
+      url: https://app.asana.com/api/1.0/tasks
+      body_contains:
+        data:
+          name: "Ship the release"
+
+  - function: update_task
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { task: "1", completed: true }
+    expect:
+      method: PUT
+      url: https://app.asana.com/api/1.0/tasks/1
+      body_contains:
+        data:
+          completed: true
+
+  - function: add_comment
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { task: "5000", text: "Looks good to me." }
+    expect:
+      method: POST
+      url: https://app.asana.com/api/1.0/tasks/5000/stories
+      body_contains:
+        data:
+          text: "Looks good to me."
+
+  - function: list_comments
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { task: "5000" }
+    expect:
+      method: GET
+      url: "https://app.asana.com/api/1.0/tasks/5000/stories?opt_fields=text,created_by.name,created_at,resource_subtype"
+
+  - function: list_subtasks
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { task: "5000" }
+    expect:
+      method: GET
+      url: "https://app.asana.com/api/1.0/tasks/5000/subtasks?opt_fields=name,completed,assignee.name,due_on"
+
+  - function: create_subtask
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { task: "5000", name: "Write tests" }
+    expect:
+      method: POST
+      url: https://app.asana.com/api/1.0/tasks/5000/subtasks
+      body_contains:
+        data:
+          name: "Write tests"
+
+  - function: add_task_to_section
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { section: "7000", task: "5000" }
+    expect:
+      method: POST
+      url: https://app.asana.com/api/1.0/sections/7000/addTask
+      body_contains:
+        data:
+          task: "5000"
+
+  - function: search_tasks
+    account: { api_base: https://app.asana.com/api/1.0 }
+    args: { workspace: "1100", query: "release" }
+    expect:
+      method: GET
+      url: "https://app.asana.com/api/1.0/workspaces/1100/typeahead?opt_fields=name,completed,permalink_url&query=release&resource_type=task"
