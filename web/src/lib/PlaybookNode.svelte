@@ -1,8 +1,9 @@
 <script lang="ts">
   import { Handle, Position } from '@xyflow/svelte'
   import { cn } from '$lib/utils'
+  import { Badge } from '$lib/components/ui/badge'
 
-  let { data }: { data: { title: string; kind: string; status?: string } } = $props()
+  let { data }: { data: { title: string; kind: string; status?: string; cached?: boolean } } = $props()
 
   // start - entry point, must have no incoming edge;
   // finish - terminal, must have no outgoing edge.
@@ -37,8 +38,15 @@
   {#if hasTarget}<Handle type="target" position={Position.Top} />{/if}
   <span class="block text-[11px] text-muted-foreground">{data.kind}</span>
   <strong class="block text-sm">{data.title}</strong>
-  {#if data.status}
-    <span class="mt-0.5 block text-[11px] text-muted-foreground">{data.status}</span>
+  {#if data.status || data.cached}
+    <div class="mt-0.5 flex items-center gap-1">
+      {#if data.status}
+        <span class="text-[11px] text-muted-foreground">{data.status}</span>
+      {/if}
+      {#if data.cached}
+        <Badge variant="secondary" class="h-4 rounded-sm px-1 py-0 text-[10px] leading-none">cached</Badge>
+      {/if}
+    </div>
   {/if}
   {#if hasSource}<Handle type="source" position={Position.Bottom} />{/if}
 </div>
