@@ -551,17 +551,17 @@ fn call_accepts_the_full_flag() {
 // --- install --------------------------------------------------------------
 
 #[test]
-fn install_embedded_example_records_trust_and_lists_approved() {
+fn install_embedded_github_records_trust_and_lists_approved() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
 
-    let out = apb_ok(dir.path(), &["connector", "install", "example"]);
+    let out = apb_ok(dir.path(), &["connector", "install", "github"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("installed connector `example`"),
+        stdout.contains("installed connector `github`"),
         "install should confirm: {stdout}"
     );
-    let cfg = dir.path().join("cfg/connectors/example");
+    let cfg = dir.path().join("cfg/connectors/github");
     assert!(cfg.join("connector.yaml").is_file());
     assert!(cfg.join("tests.yaml").is_file());
 
@@ -569,7 +569,7 @@ fn install_embedded_example_records_trust_and_lists_approved() {
     let list = apb_ok(dir.path(), &["connector", "list"]);
     let list_out = String::from_utf8_lossy(&list.stdout);
     assert!(
-        list_out.contains("example") && list_out.contains("approved"),
+        list_out.contains("github") && list_out.contains("approved"),
         "installed connector should list as approved: {list_out}"
     );
 }
@@ -578,19 +578,19 @@ fn install_embedded_example_records_trust_and_lists_approved() {
 fn install_same_digest_is_a_noop_and_differing_refuses_without_force() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
-    apb_ok(dir.path(), &["connector", "install", "example"]);
+    apb_ok(dir.path(), &["connector", "install", "github"]);
 
     // Re-install: same digest, a no-op that still succeeds.
-    let again = apb_ok(dir.path(), &["connector", "install", "example"]);
+    let again = apb_ok(dir.path(), &["connector", "install", "github"]);
     assert!(String::from_utf8_lossy(&again.stdout).contains("already installed"));
 
     // Mutate the installed folder so it differs from the embedded version.
-    let manifest = dir.path().join("cfg/connectors/example/connector.yaml");
+    let manifest = dir.path().join("cfg/connectors/github/connector.yaml");
     let mut body = fs::read_to_string(&manifest).unwrap();
     body.push_str("# local edit\n");
     fs::write(&manifest, body).unwrap();
 
-    let refused = playbook(dir.path(), &["connector", "install", "example"]);
+    let refused = playbook(dir.path(), &["connector", "install", "github"]);
     assert!(!refused.status.success(), "differing target must refuse");
     assert!(
         String::from_utf8_lossy(&refused.stderr).contains("--force"),
@@ -598,7 +598,7 @@ fn install_same_digest_is_a_noop_and_differing_refuses_without_force() {
     );
 
     // --force overwrites and restores the embedded content.
-    apb_ok(dir.path(), &["connector", "install", "example", "--force"]);
+    apb_ok(dir.path(), &["connector", "install", "github", "--force"]);
     let restored = fs::read_to_string(&manifest).unwrap();
     assert!(!restored.contains("# local edit"), "force should overwrite");
 }
@@ -643,22 +643,22 @@ fn list_shows_embedded_available_section_before_install_and_hides_after() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
 
-    // Before install: `example` appears under the available section.
+    // Before install: `github` appears under the available section.
     let before = apb_ok(dir.path(), &["connector", "list"]);
     let before_out = String::from_utf8_lossy(&before.stdout);
     assert!(
-        before_out.contains("AVAILABLE") && before_out.contains("example"),
-        "available section should list the embedded example: {before_out}"
+        before_out.contains("AVAILABLE") && before_out.contains("github"),
+        "available section should list the embedded github: {before_out}"
     );
 
-    apb_ok(dir.path(), &["connector", "install", "example"]);
+    apb_ok(dir.path(), &["connector", "install", "github"]);
 
-    // After install: `example` is an installed row, no longer under available.
+    // After install: `github` is an installed row, no longer under available.
     let after = apb_ok(dir.path(), &["connector", "list"]);
     let after_out = String::from_utf8_lossy(&after.stdout);
     let available_block = after_out.split("AVAILABLE").nth(1).unwrap_or("");
     assert!(
-        !available_block.contains("example"),
+        !available_block.contains("github"),
         "installed connector must not appear under available: {after_out}"
     );
 }
@@ -666,24 +666,24 @@ fn list_shows_embedded_available_section_before_install_and_hides_after() {
 // --- test -----------------------------------------------------------------
 
 #[test]
-fn test_runs_embedded_example_cases_and_passes() {
+fn test_runs_embedded_github_cases_and_passes() {
     let dir = tempfile::tempdir().unwrap();
     setup(dir.path());
 
     // Embedded connector, not installed: `test` resolves it from the binary.
-    let out = apb_ok(dir.path(), &["connector", "test", "example"]);
+    let out = apb_ok(dir.path(), &["connector", "test", "github"]);
     let stdout = String::from_utf8_lossy(&out.stdout);
     assert!(
-        stdout.contains("[pass] ping"),
-        "ping case should pass: {stdout}"
+        stdout.contains("[pass] get_rate_limit"),
+        "get_rate_limit case should pass: {stdout}"
     );
     assert!(
-        stdout.contains("[pass] get_item"),
-        "get_item case should pass: {stdout}"
+        stdout.contains("[pass] list_issues"),
+        "list_issues case should pass: {stdout}"
     );
     assert!(
-        stdout.contains("[pass] create_item"),
-        "create_item should pass: {stdout}"
+        stdout.contains("[pass] create_issue"),
+        "create_issue should pass: {stdout}"
     );
 }
 

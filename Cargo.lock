@@ -107,9 +107,11 @@ dependencies = [
  "apb-server",
  "assert_cmd",
  "clap",
+ "jsonschema",
  "open",
  "predicates",
  "serde_json",
+ "serde_yaml_ng",
  "tempfile",
  "tokio",
 ]

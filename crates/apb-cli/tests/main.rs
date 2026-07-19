@@ -18,6 +18,8 @@ mod connector_cli;
 mod mcp_cli_test;
 #[path = "suite/mcp_supervise_test.rs"]
 mod mcp_supervise_test;
+#[path = "suite/official_connectors_gate.rs"]
+mod official_connectors_gate;
 #[path = "suite/phase9_cli_test.rs"]
 mod phase9_cli_test;
 #[path = "suite/profile_cli_test.rs"]

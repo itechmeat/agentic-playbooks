@@ -1,0 +1,161 @@
+cases:
+  - function: get_rate_limit
+    account: { api_base: https://api.github.com }
+    args: {}
+    expect:
+      method: GET
+      url: https://api.github.com/rate_limit
+      headers:
+        Accept: application/vnd.github+json
+        X-GitHub-Api-Version: "2022-11-28"
+
+  - function: list_issues
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, state: open, labels: "", page: 1 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/issues?labels=&page=1&state=open
+
+  - function: get_issue
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 42 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/issues/42
+
+  - function: create_issue
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, title: "Broken build" }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/issues
+      body_contains: { title: "Broken build" }
+
+  - function: update_issue
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 42, state: closed }
+    expect:
+      method: PATCH
+      url: https://api.github.com/repos/acme/site/issues/42
+      body_contains: { state: closed }
+
+  - function: comment_issue
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 42, body: "Looking into this." }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/issues/42/comments
+      body_contains: { body: "Looking into this." }
+
+  - function: add_labels
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 42, labels: [bug] }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/issues/42/labels
+      body_contains: { labels: [bug] }
+
+  - function: remove_label
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 42, name: bug }
+    expect:
+      method: DELETE
+      url: https://api.github.com/repos/acme/site/issues/42/labels/bug
+
+  - function: add_assignees
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 42, assignees: [octocat] }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/issues/42/assignees
+      body_contains: { assignees: [octocat] }
+
+  - function: list_pulls
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, state: open, base: "", page: 1 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/pulls?base=&page=1&state=open
+
+  - function: get_pull
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 7 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/pulls/7
+
+  - function: create_pull
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, title: "Add feature", head: feature-branch, base: main }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/pulls
+      body_contains: { title: "Add feature", head: feature-branch, base: main }
+
+  - function: merge_pull
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 7 }
+    expect:
+      method: PUT
+      url: https://api.github.com/repos/acme/site/pulls/7/merge
+      body_contains: { number: 7 }
+
+  - function: request_reviewers
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 7, reviewers: [octocat] }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/pulls/7/requested_reviewers
+      body_contains: { reviewers: [octocat] }
+
+  - function: create_review
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 7, event: APPROVE }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/pulls/7/reviews
+      body_contains: { event: APPROVE }
+
+  - function: create_release
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, tag_name: v1.4.0 }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/releases
+      body_contains: { tag_name: v1.4.0 }
+
+  - function: get_release_by_tag
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, tag: v1.4.0 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/releases/tags/v1.4.0
+
+  - function: dispatch_workflow
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, workflow_file: release.yml, ref: main }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/actions/workflows/release.yml/dispatches
+      body_contains: { ref: main }
+
+  - function: list_workflow_runs
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, workflow_file: release.yml, page: 1 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/actions/workflows/release.yml/runs?page=1
+
+  - function: list_check_runs
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, ref: abc123 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/commits/abc123/check-runs
+
+  - function: get_combined_status
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, ref: abc123 }
+    expect:
+      method: GET
+      url: https://api.github.com/repos/acme/site/commits/abc123/status
