@@ -670,9 +670,16 @@ mod tests {
 
     #[cfg(unix)]
     fn write_stub(dir: &Path, name: &str, script: &str) -> PathBuf {
+        use std::io::Write;
         use std::os::unix::fs::PermissionsExt;
         let path = dir.join(name);
-        std::fs::write(&path, script).unwrap();
+        // create + write_all + sync_all before exec: without the sync, an
+        // immediate execve of the freshly written file can fail with ETXTBSY
+        // on Linux (see engine tests/suite/common write_sync, PR #10).
+        let mut f = std::fs::File::create(&path).unwrap();
+        f.write_all(script.as_bytes()).unwrap();
+        f.sync_all().unwrap();
+        drop(f);
         let mut perms = std::fs::metadata(&path).unwrap().permissions();
         perms.set_mode(0o755);
         std::fs::set_permissions(&path, perms).unwrap();
