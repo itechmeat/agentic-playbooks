@@ -7,8 +7,8 @@
 //!
 //! `Expectation` is one struct with all optional fields (not an untagged enum)
 //! so `deny_unknown_fields` actually applies (serde ignores it inside untagged
-//! variants); `resolve` discriminates by shape - `envelope` -> smtp,
-//! `status`/`body` -> mock, otherwise HTTP (`method` + `url`).
+//! variants); `resolve` discriminates by shape - `imap` -> imap, `envelope` ->
+//! smtp, `status`/`body` -> mock, otherwise HTTP (`method` + `url`).
 //!
 //! Envelope semantics (cross-slice obligation 5): every `Envelope` field is
 //! optional so the empty `envelope: {}` form (used by slice 5 for smtp `verify`
@@ -46,8 +46,8 @@ pub struct TestCase {
 }
 
 /// The expected rendered result. Shape-discriminated by `resolve`: exactly one
-/// of the HTTP (`method` + `url`), smtp (`envelope`), or mock (`status` +
-/// `body`) shapes.
+/// of the imap (`imap`), HTTP (`method` + `url`), smtp (`envelope`), or mock
+/// (`status` + `body`) shapes.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expectation {
@@ -65,6 +65,8 @@ pub struct Expectation {
     pub status: Option<u16>,
     #[serde(default)]
     pub body: Option<Value>,
+    #[serde(default)]
+    pub imap: Option<ImapExpect>,
 }
 
 /// The smtp envelope a case asserts. Every field is optional (cross-slice
@@ -81,6 +83,19 @@ pub struct Envelope {
     pub subject: Option<String>,
 }
 
+/// The imap expectation a case asserts (wave 2): the op the rendered call
+/// must use, the folder it must target (if any), and a subset of `params` the
+/// rendered call's params must contain.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImapExpect {
+    pub op: String,
+    #[serde(default)]
+    pub folder: Option<String>,
+    #[serde(default)]
+    pub params_contains: Option<BTreeMap<String, String>>,
+}
+
 /// The resolved, shape-typed view of an `Expectation`, borrowed from it.
 pub enum ExpectKind<'a> {
     Http {
@@ -94,13 +109,18 @@ pub enum ExpectKind<'a> {
         status: u16,
         body: &'a Value,
     },
+    Imap(&'a ImapExpect),
 }
 
 impl Expectation {
-    /// Discriminates the expectation shape. `envelope` -> smtp; `status` or
-    /// `body` -> mock; otherwise HTTP (which requires `method` and `url`). An
-    /// incomplete shape is an error naming what is missing.
+    /// Discriminates the expectation shape. `imap` -> imap; `envelope` ->
+    /// smtp; `status` or `body` -> mock; otherwise HTTP (which requires
+    /// `method` and `url`). An incomplete shape is an error naming what is
+    /// missing.
     pub fn resolve(&self) -> Result<ExpectKind<'_>, String> {
+        if let Some(imap) = &self.imap {
+            return Ok(ExpectKind::Imap(imap));
+        }
         if let Some(env) = &self.envelope {
             return Ok(ExpectKind::Smtp(env));
         }
@@ -115,7 +135,7 @@ impl Expectation {
             return Ok(ExpectKind::Mock { status, body });
         }
         let method = self.method.as_deref().ok_or_else(|| {
-            "expectation must be http (`method` + `url`), smtp (`envelope`), or mock (`status` + `body`)".to_string()
+            "expectation must be imap (`imap`), http (`method` + `url`), smtp (`envelope`), or mock (`status` + `body`)".to_string()
         })?;
         let url = self
             .url
@@ -227,5 +247,30 @@ cases:
         let yaml = "cases:\n  - function: ping\n    expect: { body: { ok: true } }\n";
         let doc = TestsDoc::from_yaml(yaml).unwrap();
         assert!(doc.cases[0].expect.resolve().is_err());
+    }
+
+    // -- imap expectation (wave 2) --
+
+    #[test]
+    fn imap_expect_parses_and_resolves() {
+        let yaml = "cases:\n  - function: search_inbox\n    expect:\n      imap:\n        op: search\n        folder: INBOX\n        params_contains: { limit: \"20\" }\n";
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        match doc.cases[0].expect.resolve().unwrap() {
+            ExpectKind::Imap(imap) => {
+                assert_eq!(imap.op, "search");
+                assert_eq!(imap.folder.as_deref(), Some("INBOX"));
+                assert_eq!(
+                    imap.params_contains.as_ref().unwrap().get("limit"),
+                    Some(&"20".to_string())
+                );
+            }
+            _ => panic!("imap expectation must resolve to imap"),
+        }
+    }
+
+    #[test]
+    fn imap_expect_unknown_key_rejected() {
+        let yaml = "cases:\n  - function: f\n    expect:\n      imap: { op: x, bogus: 1 }\n";
+        assert!(TestsDoc::from_yaml(yaml).is_err());
     }
 }
