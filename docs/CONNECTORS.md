@@ -183,3 +183,11 @@ end to end and double as reference examples for grant allowlists and
 `max_calls`. They validate in CI against fake accounts and are not run
 against real services there; run them manually once your own accounts
 are configured and approved.
+
+### Coverage note
+
+Write functions (issue creation, merges, releases, sends) are verified
+by the offline contract tests in each connector's `tests.yaml`; the
+env-gated live smoke tests exercise each connector's healthcheck plus
+one read-only function against the real service. Write paths are not
+called against real services by any automated test.
