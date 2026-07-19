@@ -32,6 +32,9 @@ pub enum AuthSpec {
         username_template: String,
         password_template: String,
     },
+    Path {
+        value_template: String,
+    },
 }
 
 /// One field of the schema of an account for this connector (e.g.
@@ -287,7 +290,7 @@ impl<'a> FieldNames<'a> {
                     )));
                 }
             }
-            Namespace::Args => {}
+            Namespace::Args | Namespace::Auth => {}
         }
         Ok(())
     }
@@ -303,16 +306,35 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
     use crate::connector::template::{Namespace, placeholders};
 
     let fields = FieldNames::from_fields(&doc.account_fields);
+    let is_path_auth = matches!(doc.auth, Some(AuthSpec::Path { .. }));
 
     for f in &doc.functions {
         if let Some(url) = &f.url {
+            let mut auth_markers = 0;
             for (ns, name) in placeholders(url)? {
+                if ns == Namespace::Auth {
+                    auth_markers += 1;
+                    continue;
+                }
                 reject_secret(ns, &format!("function `{}` url", f.name))?;
                 fields.check(ns, &name)?;
+            }
+            if is_path_auth && auth_markers != 1 {
+                return Err(ConnectorError::Invalid(format!(
+                    "function `{}` url must contain the `{{{{auth}}}}` placeholder exactly once for path auth (found {auth_markers})",
+                    f.name
+                )));
+            }
+            if !is_path_auth && auth_markers > 0 {
+                return Err(ConnectorError::Invalid(format!(
+                    "function `{}` url uses `{{{{auth}}}}` but the connector does not use path auth",
+                    f.name
+                )));
             }
         }
         for value in f.query.values() {
             for (ns, name) in placeholders(value)? {
+                reject_auth(ns, &format!("function `{}` query", f.name))?;
                 reject_secret(ns, &format!("function `{}` query", f.name))?;
                 fields.check(ns, &name)?;
             }
@@ -325,6 +347,7 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
     if let Some(auth) = &doc.auth {
         for template in auth_templates(auth) {
             for (ns, name) in placeholders(template)? {
+                reject_auth(ns, "auth template")?;
                 if ns == Namespace::Args {
                     return Err(ConnectorError::Invalid(
                         "args placeholders are not allowed in auth templates".to_string(),
@@ -335,6 +358,21 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         }
     }
 
+    Ok(())
+}
+
+/// Errors if `ns` is `Auth`: the `{{auth}}` marker is confined to a
+/// function `url`, so any occurrence found while walking a query, body, or
+/// auth template is a hard error naming where it was found (spec 4.3).
+fn reject_auth(
+    ns: crate::connector::template::Namespace,
+    where_: &str,
+) -> Result<(), ConnectorError> {
+    if ns == crate::connector::template::Namespace::Auth {
+        return Err(ConnectorError::Invalid(format!(
+            "the `{{{{auth}}}}` placeholder is allowed only in a function url ({where_})"
+        )));
+    }
     Ok(())
 }
 
@@ -366,6 +404,7 @@ fn validate_body_templates(
     match value {
         serde_json::Value::String(s) => {
             for (ns, name) in placeholders(s)? {
+                reject_auth(ns, &format!("function `{function_name}` body"))?;
                 reject_secret(ns, &format!("function `{function_name}` body"))?;
                 fields.check(ns, &name)?;
             }
@@ -397,6 +436,7 @@ fn auth_templates(auth: &AuthSpec) -> Vec<&str> {
             username_template,
             password_template,
         } => vec![username_template.as_str(), password_template.as_str()],
+        AuthSpec::Path { value_template } => vec![value_template.as_str()],
     }
 }
 
@@ -552,6 +592,34 @@ functions:
     fn account_field_name_with_underscore_is_accepted() {
         let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: base_url\nfunctions:\n  - name: f\n    description: a\n    method: GET\n    url: http://a\n";
         assert!(ConnectorDoc::from_yaml(y, "x").is_ok());
+    }
+
+    #[test]
+    fn path_auth_requires_auth_placeholder_exactly_once() {
+        let ok = "name: t\nversion: 0.1.0\nauth:\n  kind: path\n  value_template: \"bot{{secret.token}}\"\naccount_fields:\n  - name: base_url\n  - name: token\n    secret: true\nfunctions:\n  - name: get_me\n    description: probe\n    read_only: true\n    method: GET\n    url: \"{{account.base_url}}/{{auth}}/getMe\"\n";
+        assert!(ConnectorDoc::from_yaml(ok, "t").is_ok());
+
+        let missing = "name: t\nversion: 0.1.0\nauth:\n  kind: path\n  value_template: \"bot{{secret.token}}\"\naccount_fields:\n  - name: base_url\n  - name: token\n    secret: true\nfunctions:\n  - name: get_me\n    description: probe\n    method: GET\n    url: \"{{account.base_url}}/getMe\"\n";
+        let err = ConnectorDoc::from_yaml(missing, "t")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("get_me") && err.contains("auth"), "was: {err}");
+
+        let twice = "name: t\nversion: 0.1.0\nauth:\n  kind: path\n  value_template: \"bot{{secret.token}}\"\naccount_fields:\n  - name: base_url\n  - name: token\n    secret: true\nfunctions:\n  - name: get_me\n    description: probe\n    method: GET\n    url: \"{{account.base_url}}/{{auth}}/{{auth}}/getMe\"\n";
+        assert!(ConnectorDoc::from_yaml(twice, "t").is_err());
+    }
+
+    #[test]
+    fn auth_placeholder_without_path_auth_is_rejected() {
+        let y = "name: t\nversion: 0.1.0\nauth:\n  kind: header\n  header: Authorization\n  value_template: \"Bearer {{secret.token}}\"\naccount_fields:\n  - name: base_url\n  - name: token\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: \"{{account.base_url}}/{{auth}}/x\"\n";
+        let err = ConnectorDoc::from_yaml(y, "t").unwrap_err().to_string();
+        assert!(err.contains("auth") && err.contains("path"), "was: {err}");
+    }
+
+    #[test]
+    fn auth_placeholder_in_query_or_body_is_rejected() {
+        let y = "name: t\nversion: 0.1.0\nauth:\n  kind: path\n  value_template: \"bot{{secret.token}}\"\naccount_fields:\n  - name: base_url\n  - name: token\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: \"{{account.base_url}}/{{auth}}/x\"\n    query: { k: \"{{auth}}\" }\n";
+        assert!(ConnectorDoc::from_yaml(y, "t").is_err());
     }
 
     #[test]

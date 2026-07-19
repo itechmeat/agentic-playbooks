@@ -28,6 +28,11 @@ pub enum Namespace {
     Account,
     Args,
     Secret,
+    /// The reserved `{{auth}}` URL marker (spec 4.3). Not an account field:
+    /// it renders to the literal `{{auth}}` so the pre-auth URL keeps the
+    /// placeholder unrendered; the executor substitutes the encoded auth
+    /// path segment later.
+    Auth,
 }
 
 /// The values a template renders against: resolved account fields, the
@@ -101,6 +106,9 @@ fn parse_inner(inner: &str, template: &str) -> Result<(Namespace, String), Conne
     if inner == "args" {
         return Ok((Namespace::Args, String::new()));
     }
+    if inner == "auth" {
+        return Ok((Namespace::Auth, String::new()));
+    }
     let (ns_str, name) = inner.split_once('.').ok_or_else(|| {
         ConnectorError::Invalid(format!(
             "malformed placeholder `{{{{{inner}}}}}` in template `{template}`"
@@ -170,6 +178,7 @@ fn resolve(
             })?;
             scalar_to_string(value, name, template)
         }
+        Namespace::Auth => Ok("{{auth}}".to_string()),
     }
 }
 
@@ -277,6 +286,19 @@ mod tests {
             args,
             secrets,
         }
+    }
+
+    #[test]
+    fn auth_marker_renders_to_itself_and_scans_as_auth_namespace() {
+        use crate::connector::template::Namespace;
+        let found = placeholders("{{account.base_url}}/{{auth}}/getMe").unwrap();
+        assert!(found.iter().any(|(ns, _)| *ns == Namespace::Auth));
+        let account = BTreeMap::new();
+        let args = serde_json::json!({});
+        let secrets = BTreeMap::new();
+        let ctx = empty_ctx(&account, &args, &secrets);
+        // The pre-auth URL keeps the literal placeholder unrendered (spec 4.3).
+        assert_eq!(render_raw("x/{{auth}}/y", &ctx).unwrap(), "x/{{auth}}/y");
     }
 
     #[test]
