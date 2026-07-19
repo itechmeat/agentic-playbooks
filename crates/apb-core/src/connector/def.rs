@@ -462,6 +462,9 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         if let Some(body) = &f.body {
             validate_body_templates(body, &f.name, &fields)?;
         }
+        if let Some(smtp) = &f.smtp {
+            validate_smtp_templates(smtp, &f.name, &fields)?;
+        }
     }
 
     if let Some(auth) = &doc.auth {
@@ -478,6 +481,76 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         }
     }
 
+    Ok(())
+}
+
+/// Validates the placeholders in an `smtp` function (spec 4.2). The
+/// `connection` block follows auth-adjacent rules: `account.*` is allowed and
+/// `secret.*` only via the `password` field; `args.*` is rejected. The
+/// `message` block follows function-body rules: `account.*` and `args.*` only,
+/// `secret.*` rejected. The reserved `{{auth}}` marker is a function-url-only
+/// construct and is rejected in both blocks.
+fn validate_smtp_templates(
+    smtp: &SmtpSpec,
+    function_name: &str,
+    fields: &FieldNames,
+) -> Result<(), ConnectorError> {
+    use crate::connector::template::{Namespace, placeholders};
+
+    // Connection: account allowed, args rejected, secret only via `password`.
+    let conn = &smtp.connection;
+    let non_password: [&str; 3] = [
+        conn.host.as_str(),
+        conn.port.as_str(),
+        conn.use_tls.as_str(),
+    ];
+    for template in non_password.iter().copied().chain(conn.username.as_deref()) {
+        for (ns, name) in placeholders(template)? {
+            reject_auth(ns, &format!("function `{function_name}` smtp connection"))?;
+            if ns == Namespace::Args {
+                return Err(ConnectorError::Invalid(format!(
+                    "args placeholders are not allowed in smtp connection of function `{function_name}`"
+                )));
+            }
+            reject_secret(ns, &format!("function `{function_name}` smtp connection"))?;
+            fields.check(ns, &name)?;
+        }
+    }
+    if let Some(password) = &conn.password {
+        for (ns, name) in placeholders(password)? {
+            reject_auth(
+                ns,
+                &format!("function `{function_name}` smtp connection password"),
+            )?;
+            if ns == Namespace::Args {
+                return Err(ConnectorError::Invalid(format!(
+                    "args placeholders are not allowed in smtp connection password of function `{function_name}`"
+                )));
+            }
+            fields.check(ns, &name)?;
+        }
+    }
+
+    // Message: account/args only, secret rejected.
+    if let Some(msg) = &smtp.message {
+        let strings: [Option<&str>; 8] = [
+            Some(msg.from_email.as_str()),
+            msg.from_name.as_deref(),
+            Some(msg.to.as_str()),
+            msg.cc.as_deref(),
+            msg.bcc.as_deref(),
+            Some(msg.subject.as_str()),
+            msg.body_text.as_deref(),
+            msg.body_html.as_deref(),
+        ];
+        for template in strings.into_iter().flatten() {
+            for (ns, name) in placeholders(template)? {
+                reject_auth(ns, &format!("function `{function_name}` smtp message"))?;
+                reject_secret(ns, &format!("function `{function_name}` smtp message"))?;
+                fields.check(ns, &name)?;
+            }
+        }
+    }
     Ok(())
 }
 
@@ -895,5 +968,44 @@ functions:
         assert!(ConnectorDoc::from_yaml(with_msg, "x").is_err());
         let no_msg = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n";
         assert!(ConnectorDoc::from_yaml(no_msg, "x").is_err());
+    }
+
+    #[test]
+    fn smtp_password_allows_secret_placeholder() {
+        assert!(ConnectorDoc::from_yaml(SMTP_YAML, "smtp").is_ok());
+    }
+
+    #[test]
+    fn secret_in_smtp_message_is_rejected() {
+        let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: password\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n      message: { from_email: a@b.c, to: \"{{secret.password}}\", subject: s }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err();
+        assert!(err.to_string().contains("secret"), "message was: {err}");
+    }
+
+    #[test]
+    fn secret_in_smtp_host_is_rejected() {
+        let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: token\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: \"{{secret.token}}\", port: \"25\", use_tls: \"false\" }\n      verify: true\n";
+        assert!(ConnectorDoc::from_yaml(y, "x").is_err());
+    }
+
+    #[test]
+    fn args_in_smtp_connection_is_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: \"{{args.host}}\", port: \"25\", use_tls: \"false\" }\n      verify: true\n";
+        assert!(ConnectorDoc::from_yaml(y, "x").is_err());
+    }
+
+    #[test]
+    fn unknown_account_field_in_smtp_message_is_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n      message: { from_email: \"{{account.nope}}\", to: \"{{args.to}}\", subject: s }\n";
+        assert!(ConnectorDoc::from_yaml(y, "x").is_err());
+    }
+
+    #[test]
+    fn auth_placeholder_in_smtp_connection_or_message_is_rejected() {
+        let conn = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: \"{{auth}}\", port: \"25\", use_tls: \"false\" }\n      verify: true\n";
+        let err = ConnectorDoc::from_yaml(conn, "x").unwrap_err().to_string();
+        assert!(err.contains("auth"), "message was: {err}");
+        let msg = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n      message: { from_email: a@b.c, to: \"{{auth}}\", subject: s }\n";
+        assert!(ConnectorDoc::from_yaml(msg, "x").is_err());
     }
 }
