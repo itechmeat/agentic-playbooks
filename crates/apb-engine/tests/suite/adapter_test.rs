@@ -77,7 +77,7 @@ fn adapter_for_maps_known_and_rejects_unknown() {
 fn hermes_adapter_sends_z_flag_prefixed_soul_and_model_flag() {
     let dir = tempfile::tempdir().unwrap();
     let ad = ClaudeAdapter {
-        program: stub_agent(dir.path(), "printf '<<<%s>>>\\x01' \"$@\""),
+        program: stub_agent(dir.path(), "printf '<<<%s>>>\\001' \"$@\""),
         spec: builtin("hermes").unwrap(),
     };
     let report = ad
