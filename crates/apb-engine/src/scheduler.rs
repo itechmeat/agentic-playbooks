@@ -1057,16 +1057,36 @@ fn drive(
             // non-cacheable node, in which case this collapses to the plain
             // execute path. On a hit we skip execution entirely; on a miss we
             // execute and then let `admit` decide whether the result is stored.
+            //
+            // Agent-task key parts come from the run's own immutable manifest
+            // snapshot (bundle digest + primary agent/model + the node's
+            // connector digests), and the prompt is rendered via the same
+            // shared helper `execute_node` uses so the key can never drift from
+            // what the agent receives. A script node leaves all of these empty
+            // (Task 5 behavior, unchanged).
+            let mut rendered_prompt: Option<String> = None;
+            let mut bundle_digest: Option<String> = None;
+            let mut agent_model: Option<(String, String)> = None;
+            let mut connector_digests: Vec<String> = Vec::new();
+            if let NodeKind::AgentTask { prompt, .. } = &node_kind
+                && let Some((bundle, agent, model, digests)) =
+                    cache::agent_key_parts(run_dir, &current)
+            {
+                rendered_prompt = Some(render_node_prompt(run_dir, &run_id, &state, cfg, prompt)?);
+                bundle_digest = Some(bundle);
+                agent_model = Some((agent, model));
+                connector_digests = digests;
+            }
             let cache_ctx = cache::prepare(
                 &playbook,
                 &current,
                 &workdir,
                 run_dir,
                 cfg,
-                None,
-                None,
-                None,
-                vec![],
+                rendered_prompt.as_deref(),
+                bundle_digest.as_deref(),
+                agent_model.as_ref().map(|(a, m)| (a.as_str(), m.as_str())),
+                connector_digests,
             );
             if let Some(hit) = cache_ctx.as_ref().and_then(|c| c.lookup(cfg)) {
                 let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
@@ -1102,7 +1122,21 @@ fn drive(
                 if let Some(ctx) = &cache_ctx
                     && st == NodeStatus::Succeeded
                 {
-                    log.append(ctx.admit(&workdir, &run_id, &playbook, &out, true, false, &[]))?;
+                    // Scan the run log for this node's connector calls (written
+                    // out of band by the connector-call subprocess) and verify
+                    // each against the read_only set in the run's connector
+                    // snapshot. A script node makes none, so this is (true,
+                    // false) - identical to Task 5's admission.
+                    let (calls_ok, had_calls) = cache::verify_connector_calls(run_dir, &current);
+                    log.append(ctx.admit(
+                        &workdir,
+                        &run_id,
+                        &playbook,
+                        &out,
+                        calls_ok,
+                        had_calls,
+                        &[],
+                    ))?;
                 }
                 (st, out)
             }

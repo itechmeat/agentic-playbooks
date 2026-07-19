@@ -13,6 +13,7 @@ use apb_core::cache::{
 use apb_core::content::sha256_hex;
 use apb_core::fingerprint::{files_fingerprint, git_fingerprint};
 use apb_core::schema::CacheMode;
+use std::collections::HashMap;
 
 /// Everything the drive loop needs to look up and later admit one node's
 /// cached result. Built once, before execution, so the pre-execution
@@ -25,7 +26,7 @@ pub(crate) struct NodeCacheCtx {
     /// Workspace fingerprint captured in `prepare`, before the node ran.
     pre_fingerprint: String,
     node_id: String,
-    /// Cache record `node_type`; always `"script"` in this task.
+    /// Cache record `node_type`: `"script"` or `"agent_task"`.
     node_type: &'static str,
     bundle_digest: Option<String>,
     /// Declared output globs, excluded from the post-execution fingerprint so
@@ -35,9 +36,9 @@ pub(crate) struct NodeCacheCtx {
 
 /// Builds the cache context for `node_id`, or `None` when the node is not
 /// cache-eligible: the run disables caching, the node does not declare
-/// `cache: auto`, the node is not a script (the agent_task arm lands in Task
-/// 6), or no workspace fingerprint can be computed (for example, not a git
-/// work tree). Any of these paths simply skips the cache for this node.
+/// `cache: auto`, the node is neither a script nor an agent_task, or no
+/// workspace fingerprint can be computed (for example, not a git work tree).
+/// Any of these paths simply skips the cache for this node.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare(
     playbook: &Playbook,
@@ -57,11 +58,26 @@ pub(crate) fn prepare(
     if node.cache_mode() != CacheMode::Auto {
         return None;
     }
-    // Task 5 caches script nodes only; agent_task is Task 6.
-    let (script, runner) = match &node.kind {
-        NodeKind::Script { script, runner, .. } => (script, runner),
-        _ => return None,
-    };
+    // Script and agent_task nodes participate; every other kind skips the
+    // cache. A script folds in its script digest + runner; an agent_task folds
+    // in the caller-supplied rendered prompt + bundle digest + agent/model +
+    // connector digests instead (all None/empty for a script). The script body
+    // is resolved from the run snapshot exactly as `run_script` does: the
+    // node's `script` value already carries the `scripts/` prefix, so it joins
+    // directly onto `run_dir` (no extra `scripts` segment).
+    let (script_digest, runner, node_type): (Option<String>, Option<String>, &'static str) =
+        match &node.kind {
+            NodeKind::Script { script, runner, .. } => {
+                let script_bytes = std::fs::read(run_dir.join(script)).ok()?;
+                (
+                    Some(sha256_hex(&script_bytes)),
+                    Some(runner.clone()),
+                    "script",
+                )
+            }
+            NodeKind::AgentTask { .. } => (None, None, "agent_task"),
+            _ => return None,
+        };
 
     let exclude = node
         .outputs
@@ -73,17 +89,12 @@ pub(crate) fn prepare(
         _ => git_fingerprint(workdir, &[])?,
     };
 
-    // The script is resolved from the run snapshot exactly as `run_script`
-    // does: the node's `script` value already carries the `scripts/` prefix,
-    // so it joins directly onto `run_dir` (no extra `scripts` segment).
-    let script_bytes = std::fs::read(run_dir.join(script)).ok()?;
-    let script_digest = sha256_hex(&script_bytes);
     let node_def = serde_json::to_string(node).ok()?;
     let key = cache_key(&KeyParts {
         format: apb_core::cache::CACHE_FORMAT,
         node_def: &node_def,
-        script_digest: Some(script_digest.as_str()),
-        runner: Some(runner.as_str()),
+        script_digest: script_digest.as_deref(),
+        runner: runner.as_deref(),
         rendered_prompt,
         bundle_digest,
         agent: agent_model.map(|(a, _)| a),
@@ -98,10 +109,102 @@ pub(crate) fn prepare(
         ttl: node.cache_ttl_seconds(),
         pre_fingerprint: fingerprint,
         node_id: node_id.to_string(),
-        node_type: "script",
+        node_type,
         bundle_digest: bundle_digest.map(str::to_string),
         exclude,
     })
+}
+
+/// The agent_task key parts read from the run's immutable manifest snapshot:
+/// the profile bundle digest, the primary executor's agent and model, and the
+/// node's connector digests (deduped and sorted). All come from the run's own
+/// snapshot, never live profile/connector files (anti-TOCTOU: the manifest is
+/// the truth for the run). `None` when there is no manifest or the node has no
+/// profile binding, which simply skips the cache for the node.
+pub(crate) fn agent_key_parts(
+    run_dir: &Path,
+    node_id: &str,
+) -> Option<(String, String, String, Vec<String>)> {
+    let manifest = crate::manifest::read(run_dir).ok().flatten()?;
+    let entry = manifest.for_node(node_id)?;
+    let primary = entry.chain.first()?;
+    let bundle = entry.bundle_digest.clone();
+    let agent = primary.agent_id.clone();
+    let model = primary.model.clone();
+    let mut digests: Vec<String> = manifest
+        .grants_for(node_id)
+        .iter()
+        .filter_map(|g| manifest.connector(&g.connector).map(|c| c.digest.clone()))
+        .collect();
+    digests.sort();
+    digests.dedup();
+    Some((bundle, agent, model, digests))
+}
+
+/// Classifies the connector calls a just-executed node actually made, reading
+/// the run's event log and the run's connector snapshot. Returns
+/// `(connector_calls_ok, had_connector_calls)`: `ok` is true only when every
+/// reached `ConnectorCall` names a `read_only` function of its connector; an
+/// unknown connector or an unreadable/unparsable snapshot counts as NOT ok
+/// (fail closed). Only calls since the node's most recent `NodeStarted` are
+/// considered, so a resume never re-judges a prior execution's calls. No calls
+/// yields `(true, false)`, matching a script node (which makes none).
+pub(crate) fn verify_connector_calls(run_dir: &Path, node_id: &str) -> (bool, bool) {
+    // The connector-call subprocess appends `ConnectorCall` events straight to
+    // events.jsonl (out of band from `execute_node`'s returned events), so the
+    // run log - not the returned `evs` - is the source of truth here.
+    let events = match crate::event::read_all(run_dir) {
+        Ok(e) => e,
+        // Cannot read the log to verify: fail closed (no store), never a run error.
+        Err(_) => return (false, false),
+    };
+    let from = events
+        .iter()
+        .rposition(
+            |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == node_id),
+        )
+        .map(|i| i + 1)
+        .unwrap_or(0);
+    let calls: Vec<(&str, &str)> = events[from..]
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::ConnectorCall {
+                node_id: n,
+                connector,
+                function,
+                ..
+            } if n == node_id => Some((connector.as_str(), function.as_str())),
+            _ => None,
+        })
+        .collect();
+    if calls.is_empty() {
+        return (true, false);
+    }
+    let mut read_only: HashMap<&str, Option<Vec<String>>> = HashMap::new();
+    let mut ok = true;
+    for (connector, function) in &calls {
+        let set = read_only
+            .entry(connector)
+            .or_insert_with(|| load_read_only(run_dir, connector));
+        let is_read_only = set
+            .as_ref()
+            .is_some_and(|fns| fns.iter().any(|f| f == function));
+        if !is_read_only {
+            ok = false;
+        }
+    }
+    (ok, true)
+}
+
+/// Loads the `read_only` function set for `connector` from the run snapshot
+/// (`run_dir/connectors/<name>.yaml`), the very file `connector_call` reads
+/// during execution. `None` on a missing or unparsable snapshot (an unknown
+/// connector), so the caller fails closed.
+fn load_read_only(run_dir: &Path, connector: &str) -> Option<Vec<String>> {
+    let path = run_dir.join("connectors").join(format!("{connector}.yaml"));
+    let yaml = std::fs::read_to_string(&path).ok()?;
+    let doc = apb_core::connector::def::ConnectorDoc::from_yaml(&yaml, connector).ok()?;
+    Some(doc.read_only_functions())
 }
 
 impl NodeCacheCtx {
