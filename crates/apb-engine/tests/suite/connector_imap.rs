@@ -703,7 +703,7 @@ fn dry_run_renders_without_connecting() {
         &spec,
         &account("imap.example.com", 993, "password"),
         &args,
-        &BTreeMap::new(),
+        &secrets("super-secret"),
         Vec::new(),
         true,
         30,

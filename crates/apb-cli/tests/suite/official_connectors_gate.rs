@@ -89,8 +89,9 @@ fn every_official_connector_folder_is_complete() {
         // 4. args_schema is a JSON Schema object; every url-embedded args
         //    placeholder is in `required` (a missing routing arg breaks
         //    rendering, not just schema validation); response_pick is
-        //    declared iff the function is read_only and never on smtp
-        //    functions; every example validates against args_schema.
+        //    required on read_only HTTP functions, and is forbidden by the
+        //    core validator on smtp and imap functions, so those are
+        //    excluded here; every example validates against args_schema.
         for f in &doc.functions {
             let schema = f
                 .args_schema
