@@ -635,3 +635,30 @@ fn install_from_dir_installs_without_recording_trust() {
         "--from-dir must not seed trust"
     );
 }
+
+// --- list available section ------------------------------------------------
+
+#[test]
+fn list_shows_embedded_available_section_before_install_and_hides_after() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    // Before install: `example` appears under the available section.
+    let before = apb_ok(dir.path(), &["connector", "list"]);
+    let before_out = String::from_utf8_lossy(&before.stdout);
+    assert!(
+        before_out.contains("AVAILABLE") && before_out.contains("example"),
+        "available section should list the embedded example: {before_out}"
+    );
+
+    apb_ok(dir.path(), &["connector", "install", "example"]);
+
+    // After install: `example` is an installed row, no longer under available.
+    let after = apb_ok(dir.path(), &["connector", "list"]);
+    let after_out = String::from_utf8_lossy(&after.stdout);
+    let available_block = after_out.split("AVAILABLE").nth(1).unwrap_or("");
+    assert!(
+        !available_block.contains("example"),
+        "installed connector must not appear under available: {after_out}"
+    );
+}

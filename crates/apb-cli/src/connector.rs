@@ -6,6 +6,7 @@
 //! else here is a read-only or scaffolding convenience for a human or an
 //! agent debugging outside a run.
 
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -125,44 +126,74 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
 
 fn list_cmd(root: &Path) -> ExitCode {
     let summaries = store::list();
+    let official = apb_core::connector::official::list();
+
     if summaries.is_empty() {
-        println!("no connectors installed (see `apb connector init <name>`)");
-        return ExitCode::SUCCESS;
-    }
-
-    let trust = TrustStore::load();
-    let approved_connector_ids = trust.approved_record_ids(Kind::Connector);
-
-    let mut rows: Vec<[String; 4]> = vec![[
-        "NAME".to_string(),
-        "VERSION".to_string(),
-        "TRUST".to_string(),
-        "ACCOUNTS".to_string(),
-    ]];
-    for s in &summaries {
-        let trust_state = match store::load(&s.name) {
-            Ok(loaded) => {
-                if trust.is_approved(&loaded.digest) {
-                    "approved"
-                } else if approved_connector_ids.iter().any(|id| id == &s.name) {
-                    "changed"
-                } else {
-                    "unapproved"
+        println!(
+            "no connectors installed (see `apb connector install <name>` or `apb connector init <name>`)"
+        );
+    } else {
+        let trust = TrustStore::load();
+        let approved_connector_ids = trust.approved_record_ids(Kind::Connector);
+        let mut rows: Vec<[String; 4]> = vec![[
+            "NAME".to_string(),
+            "VERSION".to_string(),
+            "TRUST".to_string(),
+            "ACCOUNTS".to_string(),
+        ]];
+        for s in &summaries {
+            let trust_state = match store::load(&s.name) {
+                Ok(loaded) => {
+                    if trust.is_approved(&loaded.digest) {
+                        "approved"
+                    } else if approved_connector_ids.iter().any(|id| id == &s.name) {
+                        "changed"
+                    } else {
+                        "unapproved"
+                    }
                 }
+                Err(_) => "invalid",
+            };
+            let accounts_count = config::load_merged(root, &s.name)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            rows.push([
+                s.name.clone(),
+                s.version.clone(),
+                trust_state.to_string(),
+                accounts_count.to_string(),
+            ]);
+        }
+        print_table(&rows);
+
+        // Version-drift notes: an installed connector whose embedded version
+        // differs (a binary upgrade shipped a newer manifest).
+        for s in &summaries {
+            if let Some(o) = official.iter().find(|o| o.name == s.name)
+                && o.version != s.version
+            {
+                println!(
+                    "note: `{}` installed {}, embedded {} (reinstall with --force to upgrade)",
+                    s.name, s.version, o.version
+                );
             }
-            Err(_) => "invalid",
-        };
-        let accounts_count = config::load_merged(root, &s.name)
-            .map(|a| a.len())
-            .unwrap_or(0);
-        rows.push([
-            s.name.clone(),
-            s.version.clone(),
-            trust_state.to_string(),
-            accounts_count.to_string(),
-        ]);
+        }
     }
-    print_table(&rows);
+
+    let installed: HashSet<&str> = summaries.iter().map(|s| s.name.as_str()).collect();
+    let available: Vec<&apb_core::connector::official::OfficialConnector> = official
+        .iter()
+        .filter(|o| !installed.contains(o.name.as_str()))
+        .collect();
+    if !available.is_empty() {
+        println!();
+        println!("AVAILABLE (embedded, not installed):");
+        for o in &available {
+            println!("  {}  {}", o.name, o.version);
+        }
+        println!("install one with `apb connector install <name>`");
+    }
+
     ExitCode::SUCCESS
 }
 
