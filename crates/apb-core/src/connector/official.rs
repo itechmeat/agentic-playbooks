@@ -99,31 +99,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn list_includes_the_seed_example_connector() {
+    fn list_includes_the_official_github_connector() {
         let all = list();
-        let example = all
+        let github = all
             .iter()
-            .find(|c| c.name == "example")
-            .expect("embedded `example` connector must be present");
-        assert_eq!(example.version, "0.1.0");
-        assert!(example.files.contains_key("connector.yaml"));
-        assert!(example.files.contains_key("tests.yaml"));
-        assert!(example.files.contains_key("PUBLIC.md"));
+            .find(|c| c.name == "github")
+            .expect("embedded `github` connector must be present");
+        assert_eq!(github.version, "0.1.0");
+        assert!(github.files.contains_key("connector.yaml"));
+        assert!(github.files.contains_key("tests.yaml"));
+        assert!(github.files.contains_key("PUBLIC.md"));
     }
 
     #[test]
     fn get_returns_a_connector_whose_manifest_parses() {
-        let c = get("example").expect("example present");
+        let c = get("github").expect("github present");
         let yaml = std::str::from_utf8(c.files.get("connector.yaml").unwrap()).unwrap();
-        let doc = crate::connector::def::ConnectorDoc::from_yaml(yaml, "example").unwrap();
+        let doc = crate::connector::def::ConnectorDoc::from_yaml(yaml, "github").unwrap();
         assert_eq!(doc.version, "0.1.0");
     }
 
     #[test]
     fn write_to_materializes_every_file_under_the_target() {
-        let c = get("example").unwrap();
+        let c = get("github").unwrap();
         let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("example");
+        let dir = tmp.path().join("github");
         c.write_to(&dir).unwrap();
         assert!(dir.join("connector.yaml").is_file());
         assert!(dir.join("tests.yaml").is_file());
