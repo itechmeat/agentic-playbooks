@@ -61,8 +61,8 @@ pub struct CallRequest<'a> {
 // message redaction live in `connector_result`, the shared sink both the HTTP
 // and SMTP call paths point at (keeps the file graph acyclic). Re-exported here
 // so the public path `apb_engine::connector_call::{CallError, ...}` is stable.
-pub use crate::connector_result::{CallError, CallErrorCode, CallOk};
 use crate::connector_result::redact_message;
+pub use crate::connector_result::{CallError, CallErrorCode, CallOk};
 
 /// The metadata a reached call (mock or HTTP, ok or error) records in the
 /// event log. A dry-run or a gate rejection records nothing, so those never
@@ -367,6 +367,89 @@ struct CallMode {
     full: bool,
 }
 
+/// The rendered HTTP shape of a function - method, the pre-auth URL (function
+/// query included, auth NOT), the rendered body, and the effective request
+/// headers (function `headers` plus the default `User-Agent` unless a function
+/// header overrides it) - produced without touching the network. Shared by the
+/// dry-run terminal, the live send path, and the offline `tests.yaml` runner
+/// (`connector_test`), so a contract test renders exactly what a `--dry-run`
+/// call renders.
+pub struct RenderedRequest {
+    pub method: String,
+    pub pre_auth_url: String,
+    pub rendered_body: Option<Value>,
+    /// The headers that would be sent: the rendered per-function `headers` with
+    /// the default `User-Agent` folded in unless a function header already names
+    /// it (case-insensitively). Auth headers are NOT included here (auth is
+    /// injected on the wire, after this render).
+    pub headers: BTreeMap<String, String>,
+}
+
+/// Renders a function's method, pre-auth URL, body, and headers against the
+/// given non-secret account fields, args, and secrets. `secrets` is threaded
+/// through so the render context stays uniform with the live send path (the
+/// secret-placement policy forbids `{{secret.*}}` outside `auth`, so it does
+/// not affect the URL/body here). Args substituted into the URL are
+/// percent-encoded; account prefixes stay raw (spec 6.1), matching the previous
+/// inline logic exactly. The default `User-Agent` (spec 4.4) is folded into the
+/// header map unless a function header overrides it.
+pub(crate) fn render_http(
+    function: &FunctionSpec,
+    account_fields: &BTreeMap<String, String>,
+    args: &Value,
+    secrets: &BTreeMap<String, String>,
+) -> Result<RenderedRequest, CallError> {
+    let ctx = RenderCtx {
+        account: account_fields,
+        args,
+        secrets,
+    };
+    let method = function.method.clone().unwrap_or_else(|| "GET".to_string());
+    // The URL base renders with raw substitution EXCEPT that `{{args.*}}` values
+    // are pre-encoded: an account field used as a URL prefix (`base_url`) is
+    // trusted config that must keep its `://` (spec 6.1) and so cannot go through
+    // whole-value percent-encoding, while argument values in a path segment must
+    // still be encoded so they cannot inject traversal or extra query structure.
+    let url_args = encode_args_for_url(args);
+    let url_ctx = RenderCtx {
+        account: account_fields,
+        args: &url_args,
+        secrets,
+    };
+    let base = render_raw(function.url.as_deref().unwrap_or(""), &url_ctx)
+        .map_err(|e| CallError::new(CallErrorCode::Config, format!("URL render failed: {e}")))?;
+    let query = render_query(function, &ctx)?;
+    let pre_auth_url = assemble_url(&base, &query);
+    validate_url(&pre_auth_url)?;
+    let rendered_body = match &function.body {
+        Some(b) => Some(render_body(b, &ctx).map_err(|e| {
+            CallError::new(CallErrorCode::Config, format!("body render failed: {e}"))
+        })?),
+        None => None,
+    };
+    let mut headers = BTreeMap::new();
+    for (name, template) in &function.headers {
+        let value = render_raw(template, &ctx).map_err(|e| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("header `{name}` render failed: {e}"),
+            )
+        })?;
+        headers.insert(name.clone(), value);
+    }
+    // Default User-Agent (spec 4.4) unless a function header already names it.
+    let has_ua = headers.keys().any(|k| k.eq_ignore_ascii_case("user-agent"));
+    if !has_ua {
+        headers.insert("User-Agent".to_string(), USER_AGENT.to_string());
+    }
+    Ok(RenderedRequest {
+        method,
+        pre_auth_url,
+        rendered_body,
+        headers,
+    })
+}
+
 /// Shared gate + render logic (pipeline steps 5-8): validates args against the
 /// function's schema, returns a mock immediately (no network, no secrets), or
 /// resolves secrets and renders the URL/query/body with the 6.1 hardening.
@@ -432,71 +515,30 @@ fn build_prepared(
         };
     }
 
-    // 8. Render URL, query, body; enforce 6.1; build the pre-auth URL.
-    let ctx = RenderCtx {
-        account: &account_fields,
-        args,
-        secrets: &secrets,
-    };
-    let method = function.method.clone().unwrap_or_else(|| "GET".to_string());
-    // The URL base renders with raw substitution EXCEPT that `{{args.*}}`
-    // values are pre-encoded: an account field used as a URL prefix
-    // (`base_url`) is trusted config that must keep its `://` (spec 6.1) and so
-    // cannot go through whole-value percent-encoding, while argument values in
-    // a path segment must still be encoded so they cannot inject traversal or
-    // extra query structure. `secret.*` is not permitted in a URL (enforced by
-    // `validate_templates`), so pre-encoding only args is sufficient.
-    //
-    // DO NOT "fix" this by percent-encoding `{{account.*}}` too: non-prefix
-    // account values are intentionally left raw. Account fields are trusted
-    // (pinned by the per-account digest in the trust store), and encoding them
-    // would corrupt a `base_url` prefix (its `://` and any path). Only
-    // untrusted `{{args.*}}` needs encoding, which is what happens here.
-    let url_args = encode_args_for_url(args);
-    let url_ctx = RenderCtx {
-        account: &account_fields,
-        args: &url_args,
-        secrets: &secrets,
-    };
-    let base = render_raw(function.url.as_deref().unwrap_or(""), &url_ctx)
-        .map_err(|e| CallError::new(CallErrorCode::Config, format!("URL render failed: {e}")))?;
-    let query = render_query(function, &ctx)?;
-    let pre_auth_url = assemble_url(&base, &query);
-    validate_url(&pre_auth_url)?;
-    let rendered_body = match &function.body {
-        Some(b) => Some(render_body(b, &ctx).map_err(|e| {
-            CallError::new(CallErrorCode::Config, format!("body render failed: {e}"))
-        })?),
-        None => None,
-    };
-    let mut headers = BTreeMap::new();
-    for (name, template) in &function.headers {
-        let value = render_raw(template, &ctx).map_err(|e| {
-            CallError::new(
-                CallErrorCode::Config,
-                format!("header `{name}` render failed: {e}"),
-            )
-        })?;
-        headers.insert(name.clone(), value);
-    }
+    // 8. Render URL, query, body, and headers (shared with the offline test
+    // runner via `render_http`); enforce 6.1; build the pre-auth URL. The
+    // default User-Agent and any function headers are folded into
+    // `rendered.headers` there, so the same bytes reach the wire and a contract
+    // test alike.
+    let rendered = render_http(function, &account_fields, args, &secrets)?;
 
     if dry_run {
         return Ok(Prepared::DryRun(json!({
             "ok": true,
             "dry_run": true,
-            "method": method,
-            "url": pre_auth_url,
-            "body": rendered_body.unwrap_or(Value::Null),
+            "method": rendered.method,
+            "url": rendered.pre_auth_url,
+            "body": rendered.rendered_body.unwrap_or(Value::Null),
         })));
     }
 
     Ok(Prepared::Call(Box::new(PreparedCall::Http(Box::new(
         HttpCall {
             account: account_name,
-            method,
-            pre_auth_url,
-            rendered_body,
-            headers,
+            method: rendered.method,
+            pre_auth_url: rendered.pre_auth_url,
+            rendered_body: rendered.rendered_body,
+            headers: rendered.headers,
             // `--full` bypasses the projection (spec 4.5), returning the raw body.
             response_pick: if full {
                 Vec::new()
@@ -946,15 +988,9 @@ impl HttpCall {
         };
 
         let mut request = agent.request(&self.method, &request_url);
-        // Default User-Agent (spec 4.4) unless a function header overrides it,
-        // then the function headers themselves.
-        let has_ua = self
-            .headers
-            .keys()
-            .any(|k| k.eq_ignore_ascii_case("user-agent"));
-        if !has_ua {
-            request = request.set("User-Agent", USER_AGENT);
-        }
+        // Headers were fully assembled by `render_http` (function headers plus
+        // the default User-Agent unless overridden, spec 4.4), so send them
+        // verbatim.
         for (name, value) in &self.headers {
             request = request.set(name, value);
         }
@@ -1335,6 +1371,45 @@ fn append_event(req: &CallRequest, meta: &EventMeta) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_http_builds_method_url_body_and_headers_offline() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: api_base\n    required: true\nfunctions:\n  - name: create\n    description: d\n    method: POST\n    url: \"{{account.api_base}}/items/{{args.id}}\"\n    body: \"{{args}}\"\n    headers: { X-Trace: \"{{args.id}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("create").unwrap();
+        let mut account = BTreeMap::new();
+        account.insert(
+            "api_base".to_string(),
+            "https://api.example.com".to_string(),
+        );
+        let args = json!({ "id": "4 2", "title": "Hi" });
+        let secrets = BTreeMap::new();
+        let r = render_http(f, &account, &args, &secrets).unwrap();
+        assert_eq!(r.method, "POST");
+        // args are percent-encoded into the URL path (space -> %20).
+        assert_eq!(r.pre_auth_url, "https://api.example.com/items/4%202");
+        assert_eq!(r.rendered_body, Some(json!({ "id": "4 2", "title": "Hi" })));
+        // The function header renders, and the default User-Agent is applied.
+        assert_eq!(r.headers.get("X-Trace").map(String::as_str), Some("4 2"));
+        assert_eq!(
+            r.headers.get("User-Agent").map(String::as_str),
+            Some(USER_AGENT)
+        );
+    }
+
+    #[test]
+    fn render_http_lets_a_function_header_override_the_default_user_agent() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: g\n    description: d\n    method: GET\n    url: \"https://api.example.com/x\"\n    headers: { User-Agent: custom-ua }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("g").unwrap();
+        let r = render_http(f, &BTreeMap::new(), &json!({}), &BTreeMap::new()).unwrap();
+        assert_eq!(
+            r.headers.get("User-Agent").map(String::as_str),
+            Some("custom-ua")
+        );
+    }
 
     #[test]
     fn project_keeps_named_object_fields_and_nested_paths() {

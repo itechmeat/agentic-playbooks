@@ -158,7 +158,8 @@ fn secrets() -> BTreeMap<String, String> {
 fn send_over_plaintext_delivers_multipart() {
     let srv = spawn_smtp(false, true);
     let spec = send_spec();
-    let args = json!({"to": "x@y.z, w@y.z", "subject": "Hi", "body_text": "T", "body_html": "<p>T</p>"});
+    let args =
+        json!({"to": "x@y.z, w@y.z", "subject": "Hi", "body_text": "T", "body_html": "<p>T</p>"});
     let call = match build(
         &spec,
         &account(&srv.host, srv.port, false),
