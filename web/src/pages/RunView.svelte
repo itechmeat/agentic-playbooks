@@ -5,6 +5,7 @@
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { interventionJournal } from '../lib/journal'
   import { pendingReviews } from '../lib/reviews'
+  import { cachedNodeIds } from '../lib/runcache'
   import { pendingWaits } from '../lib/waits'
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
@@ -51,7 +52,7 @@
       const d = await fetchRun(id, workspace)
       detail = d
       if (d.model) {
-        const flow = toFlow(d.model, d.layout, d.nodes)
+        const flow = toFlow(d.model, d.layout, d.nodes, cachedNodeIds(d.events))
         nodes = flow.nodes
         edges = flow.edges
       }

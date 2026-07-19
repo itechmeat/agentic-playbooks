@@ -31,6 +31,22 @@ pub struct ChildExpectation {
     pub children: BTreeMap<String, ChildExpectation>,
 }
 
+/// Run-level cache policy (spec 2026-07-19-node-cache-design). Overrides,
+/// never widens, a node's own `cache` declaration: `Off`/`Refresh` apply to
+/// the whole run regardless of what individual nodes declare.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheRunMode {
+    /// Honor each node's own cache declaration (lookup and admission).
+    #[default]
+    Auto,
+    /// `--no-cache`: no lookup and no admission anywhere in the run.
+    Off,
+    /// `--refresh-cache`: skip lookup (never a hit) but still admit, so a
+    /// fresh execution overwrites any stale cached result.
+    Refresh,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
     #[serde(default)]
@@ -77,6 +93,10 @@ pub struct RunConfig {
     /// `"connector/account" -> account digest` (spec 6).
     #[serde(default)]
     pub expected_connector_accounts: BTreeMap<String, String>,
+    /// Node-cache policy for the run (spec 2026-07-19). Defaults to `Auto`, so
+    /// existing on-disk configs without the field read unchanged.
+    #[serde(default)]
+    pub cache: CacheRunMode,
 }
 
 pub fn write_run_config(run_dir: &Path, cfg: &RunConfig) -> Result<(), EngineError> {

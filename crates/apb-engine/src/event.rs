@@ -75,6 +75,11 @@ pub enum EventPayload {
         status: String,
         attempt: u32,
         output: String,
+        /// Declared node artifacts captured on execution (or replayed from the
+        /// cache record on a hit). Additive to existing logs: old events carry
+        /// no artifacts and deserialize with an empty list.
+        #[serde(default)]
+        artifacts: Vec<apb_core::cache::ArtifactRef>,
     },
     RetryStarted {
         node: String,
@@ -222,6 +227,29 @@ pub enum EventPayload {
         smtp_subject: Option<String>,
         #[serde(default)]
         smtp_recipients: Option<u32>,
+    },
+    /// Node cache (spec 2026-07-19-node-cache-design). A cache lookup for a
+    /// cacheable node always ends in exactly one of `NodeCacheHit` or
+    /// `NodeCacheMiss`; `NodeCacheStored`/`NodeCacheRejected` then report the
+    /// post-execution admission decision on a miss. Additive variants: old logs
+    /// read unchanged and never carry them.
+    NodeCacheHit {
+        node: String,
+        key: String,
+        /// The run that originally produced the cached result.
+        source_run: String,
+    },
+    NodeCacheMiss {
+        node: String,
+        key: String,
+    },
+    NodeCacheStored {
+        node: String,
+        key: String,
+    },
+    NodeCacheRejected {
+        node: String,
+        reason: String,
     },
 }
 

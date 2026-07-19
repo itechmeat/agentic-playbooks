@@ -53,4 +53,15 @@ describe('toFlow', () => {
     const { nodes } = toFlow(playbook, null)
     expect(nodes[0].data.status).toBeUndefined()
   })
+
+  it('flags nodes present in cachedIds', () => {
+    const { nodes } = toFlow(playbook, null, undefined, new Set(['a']))
+    expect(nodes.find((n) => n.id === 'a')!.data.cached).toBe(true)
+    expect(nodes.find((n) => n.id === 'start')!.data.cached).toBe(false)
+  })
+
+  it('leaves cached undefined when no cachedIds given', () => {
+    const { nodes } = toFlow(playbook, null)
+    expect(nodes[0].data.cached).toBeUndefined()
+  })
 })

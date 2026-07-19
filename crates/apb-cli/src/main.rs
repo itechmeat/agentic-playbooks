@@ -1,3 +1,4 @@
+mod cache;
 mod connector;
 mod manage;
 mod profile;
@@ -10,6 +11,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use crate::cache::{CacheCmd, cache_cmd};
 use crate::connector::{ConnectorAction, connector_cmd};
 use crate::manage::{
     ProjectsAction, adopt_cmd, detect_cmd, export_cmd, import_cmd, migrate_cmd, projects_cmd,
@@ -111,6 +113,15 @@ enum Command {
         /// without creating a new version
         #[arg(long)]
         overrides: Option<PathBuf>,
+        /// Disable the node result cache for this run: no lookup and no
+        /// admission anywhere in the run, regardless of what individual
+        /// nodes declare
+        #[arg(long, conflicts_with = "refresh_cache")]
+        no_cache: bool,
+        /// Skip cache lookup (never a hit) but still write fresh results, so
+        /// a fresh execution overwrites any stale cached result
+        #[arg(long)]
+        refresh_cache: bool,
     },
     /// List runs
     Runs,
@@ -128,6 +139,11 @@ enum Command {
         decision: String,
         #[arg(long, default_value = "")]
         note: String,
+    },
+    /// Inspect and manage the project-local node result cache
+    Cache {
+        #[command(subcommand)]
+        cmd: CacheCmd,
     },
     /// Start web server (see Task 8/13)
     Serve {
@@ -203,6 +219,8 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             supervise,
             overrides,
+            no_cache,
+            refresh_cache,
         }) => run_cmd(
             &root,
             &name,
@@ -212,6 +230,8 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             supervise,
             overrides.as_deref(),
+            no_cache,
+            refresh_cache,
         ),
         Some(Command::Runs) => runs_cmd(&root),
         Some(Command::Resume { run_id, from_node }) => {
@@ -229,6 +249,7 @@ fn main() -> ExitCode {
         Some(Command::Projects { action }) => projects_cmd(action),
         Some(Command::Profile { action }) => profile_cmd(&root, action),
         Some(Command::Connector { action }) => connector_cmd(&root, action),
+        Some(Command::Cache { cmd }) => cache_cmd(&root, cmd),
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
         Some(Command::Detect { refresh }) => detect_cmd(refresh),
         Some(Command::Adopt { name }) => adopt_cmd(&root, name.as_deref()),

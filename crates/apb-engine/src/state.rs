@@ -157,6 +157,14 @@ impl RunState {
                 // A connector call is an audit record (spec 6.2); it does not
                 // change run state.
                 EventPayload::ConnectorCall { .. } => {}
+                // Node-cache events (spec 2026-07-19) are audit records: a hit
+                // is reported alongside the node's own NodeStarted/NodeFinished
+                // (which carry the run-state effect), and miss/stored/rejected
+                // only annotate the admission decision.
+                EventPayload::NodeCacheHit { .. }
+                | EventPayload::NodeCacheMiss { .. }
+                | EventPayload::NodeCacheStored { .. }
+                | EventPayload::NodeCacheRejected { .. } => {}
                 EventPayload::ReviewRequested { .. } => {}
                 EventPayload::ReviewDecided {
                     node,

@@ -21,6 +21,7 @@ fn builds_context_sections_in_seq_order() {
                 status: "failed".into(),
                 attempt: 1,
                 output: "2 errors".into(),
+                artifacts: Vec::new(),
             },
         ),
         ev(
@@ -30,6 +31,7 @@ fn builds_context_sections_in_seq_order() {
                 status: "succeeded".into(),
                 attempt: 1,
                 output: "patched".into(),
+                artifacts: Vec::new(),
             },
         ),
     ];

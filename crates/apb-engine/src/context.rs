@@ -26,6 +26,7 @@ fn sections(events: &[Event]) -> Vec<Section> {
                 status,
                 attempt,
                 output,
+                ..
             } => {
                 let mut text = String::new();
                 let _ = write!(

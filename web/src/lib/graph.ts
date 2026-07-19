@@ -4,7 +4,7 @@ import type { PlaybookDetail } from './types'
 export interface FlowNode {
   id: string
   position: { x: number; y: number }
-  data: { title: string; kind: string; status?: string }
+  data: { title: string; kind: string; status?: string; cached?: boolean }
   type: 'playbookNode'
 }
 
@@ -34,6 +34,7 @@ export function toFlow(
   playbook: PlaybookModel,
   layout: WfLayout,
   statuses?: Record<string, string>,
+  cachedIds?: Set<string>,
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
   const stored = new Map<string, { x: number; y: number }>()
   for (const n of layout?.nodes ?? []) stored.set(n.id, { x: n.x, y: n.y })
@@ -59,7 +60,7 @@ export function toFlow(
     id: n.id,
     type: 'playbookNode',
     position: stored.get(n.id) ?? auto.get(n.id) ?? { x: 0, y: 0 },
-    data: { title: n.title ?? n.id, kind: n.type, status: statuses?.[n.id] },
+    data: { title: n.title ?? n.id, kind: n.type, status: statuses?.[n.id], cached: cachedIds?.has(n.id) },
   }))
 
   const edges: FlowEdge[] = playbook.edges.map((e, i) => ({

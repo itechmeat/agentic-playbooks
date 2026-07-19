@@ -25,7 +25,9 @@ use crate::inspect::{should_declare_lost, supervisor_silence_ms, write_superviso
 use crate::manifest::{ManifestProfile, ManifestSkill, RunExecutionManifest};
 use crate::parallel::{self, JoinReadiness};
 use crate::review::read_reviews_after;
-use crate::run_config::{RunConfig, copy_scripts, snapshot_playbook, write_run_config};
+use crate::run_config::{
+    CacheRunMode, RunConfig, copy_scripts, snapshot_playbook, write_run_config,
+};
 use crate::script::run_script;
 use crate::signals::read_signals_after;
 use crate::state::{NodeStatus, RunState, RunStatus};
@@ -33,6 +35,7 @@ use crate::workdir::acquire;
 
 /// Run mode: autonomous (as in phases 1-3, behavior unchanged) or
 /// supervised (the engine stops on a wake event and waits for a command).
+mod cache;
 mod node;
 mod patch;
 mod prepare;
@@ -96,6 +99,9 @@ pub struct RunOptions {
     pub depth: usize,
     /// Verified sub-playbook pins from the gate, keyed by playbook-node id.
     pub expected_children: Option<BTreeMap<String, crate::run_config::ChildExpectation>>,
+    /// Node-cache policy for the run (spec 2026-07-19). `Auto` by default via
+    /// `RunConfig`; the CLI maps `--no-cache`/`--refresh-cache` onto it.
+    pub cache: CacheRunMode,
 }
 
 /// Defense-in-depth backstop for sub-playbook nesting (spec C). A child that
@@ -727,6 +733,7 @@ fn drive(
                         status: st.as_str().into(),
                         attempt: 1,
                         output: out.clone(),
+                        artifacts: Vec::new(),
                     })?;
                     log.append(EventPayload::RunFinished {
                         outcome: "failed".into(),
@@ -753,6 +760,7 @@ fn drive(
                 status: "succeeded".into(),
                 attempt: 1,
                 output: answer_output,
+                artifacts: Vec::new(),
             })?;
             if outcome == RunStatus::Succeeded
                 && let Some(applied) = last_applied_patch.as_ref()
@@ -851,6 +859,9 @@ fn drive(
                         status: status.as_str().into(),
                         attempt: 1,
                         output,
+                        // The concurrent batch path does not run through the
+                        // node cache, so it captures no declared artifacts.
+                        artifacts: Vec::new(),
                     })?;
                     batch_statuses.push(status);
                     // If this branch successfully fed a join:any - cancel the others.
@@ -910,6 +921,11 @@ fn drive(
         // human_review: pauses until a decision from the reviews.jsonl channel (written by
         // `apb review` / MCP / HTTP); only drive writes events. The Nth decision for
         // a node is consumed once there are already N ReviewDecided events for it.
+        //
+        // Declared artifacts to record on the shared `NodeFinished` below. Only
+        // the node-cache branch sets it (captured on a store, replayed on a
+        // hit); every other branch leaves it empty.
+        let mut node_artifacts: Vec<apb_core::cache::ArtifactRef> = Vec::new();
         let (status, output) = if let NodeKind::HumanReview { options } = &node_kind {
             let events = read_all(run_dir)?;
             let decided = review_decided_count(&events, &current);
@@ -1047,29 +1063,127 @@ fn drive(
                 node: current.clone(),
                 attempt: 1,
             })?;
-            let override_prompt = prompt_overrides.remove(&current);
-            let (st, out, evs) = execute_node(
-                &playbook,
-                run_dir,
-                &workdir,
-                &current,
-                &run_id,
-                &state,
-                cfg,
-                override_prompt,
-                &AtomicBool::new(false),
-                &env_scrub,
-            )?;
-            for ev in evs {
-                log.append(ev)?;
+            // Node cache (spec 2026-07-19). `prepare` returns `None` for any
+            // non-cacheable node, in which case this collapses to the plain
+            // execute path. On a hit we skip execution entirely; on a miss we
+            // execute and then let `admit` decide whether the result is stored.
+            //
+            // Agent-task key parts come from the run's own immutable manifest
+            // snapshot (bundle digest + primary agent/model + the node's
+            // connector digests), and the prompt is rendered via the same
+            // shared helper `execute_node` uses so the key can never drift from
+            // what the agent receives. A script node leaves all of these empty
+            // (Task 5 behavior, unchanged).
+            let mut rendered_prompt: Option<String> = None;
+            let mut bundle_digest: Option<String> = None;
+            let mut agent_model: Option<(String, String)> = None;
+            let mut connector_digests: Vec<String> = Vec::new();
+            if let NodeKind::AgentTask { prompt, .. } = &node_kind
+                && let Some((bundle, agent, model, digests)) =
+                    cache::agent_key_parts(run_dir, &current)
+            {
+                rendered_prompt = Some(render_node_prompt(run_dir, &run_id, &state, cfg, prompt)?);
+                bundle_digest = Some(bundle);
+                agent_model = Some((agent, model));
+                connector_digests = digests;
             }
-            (st, out)
+            let cache_ctx = cache::prepare(
+                &playbook,
+                &current,
+                &workdir,
+                run_dir,
+                cfg,
+                rendered_prompt.as_deref(),
+                bundle_digest.as_deref(),
+                agent_model.as_ref().map(|(a, m)| (a.as_str(), m.as_str())),
+                connector_digests,
+            );
+            // A hit is only taken once its declared artifacts are restored to
+            // the workspace. If restore fails (a missing or tampered artifact
+            // object), we drop the hit entirely and fall through to the miss
+            // path, so a failed hit never leaves a `NodeCacheHit` without the
+            // files it promised (no partial event pair).
+            let hit = match cache_ctx.as_ref().and_then(|c| c.lookup(cfg)) {
+                Some(entry) => {
+                    let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
+                    match cache::restore_artifacts(&entry, ctx.store(), run_dir, &workdir) {
+                        Ok(()) => Some(entry),
+                        Err(_) => None,
+                    }
+                }
+                None => None,
+            };
+            if let Some(entry) = hit {
+                let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
+                log.append(EventPayload::NodeCacheHit {
+                    node: current.clone(),
+                    key: ctx.key.clone(),
+                    source_run: entry.record.provenance.run_id.clone(),
+                })?;
+                node_artifacts = entry.record.artifacts.clone();
+                (NodeStatus::Succeeded, entry.output)
+            } else {
+                if let Some(ctx) = &cache_ctx {
+                    log.append(EventPayload::NodeCacheMiss {
+                        node: current.clone(),
+                        key: ctx.key.clone(),
+                    })?;
+                }
+                let override_prompt = prompt_overrides.remove(&current);
+                let (st, out, evs) = execute_node(
+                    &playbook,
+                    run_dir,
+                    &workdir,
+                    &current,
+                    &run_id,
+                    &state,
+                    cfg,
+                    override_prompt,
+                    &AtomicBool::new(false),
+                    &env_scrub,
+                )?;
+                for ev in evs {
+                    log.append(ev)?;
+                }
+                if let Some(ctx) = &cache_ctx
+                    && st == NodeStatus::Succeeded
+                {
+                    // Scan the run log for this node's connector calls (written
+                    // out of band by the connector-call subprocess) and verify
+                    // each against the read_only set in the run's connector
+                    // snapshot. A script node makes none, so this is (true,
+                    // false) - identical to Task 5's admission.
+                    let (calls_ok, had_calls) = cache::verify_connector_calls(run_dir, &current);
+                    let node = playbook.node(&current).expect("a cache ctx implies a node");
+                    // Capture the node's declared output artifacts. A capture
+                    // error (an unreadable matched file or a path escaping its
+                    // scope root) rejects admission outright: storing a record
+                    // that references artifacts we could not read would be a
+                    // lie. It never fails the run.
+                    match cache::capture_artifacts(node, run_dir, &workdir) {
+                        Ok(captured) => {
+                            node_artifacts = captured.iter().map(|(a, _)| a.clone()).collect();
+                            log.append(ctx.admit(
+                                &workdir, &run_id, &playbook, &out, calls_ok, had_calls, &captured,
+                            ))?;
+                        }
+                        Err(reason) => {
+                            log.append(EventPayload::NodeCacheRejected {
+                                node: current.clone(),
+                                reason: format!("artifact capture failed: {reason}"),
+                            })?;
+                        }
+                    }
+                }
+                (st, out)
+            }
         };
         log.append(EventPayload::NodeFinished {
             node: current.clone(),
             status: status.as_str().into(),
             attempt: 1,
             output: output.clone(),
+            artifacts: node_artifacts,
         })?;
 
         rebuild_context_md(run_dir)?;

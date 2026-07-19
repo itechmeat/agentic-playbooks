@@ -3,6 +3,37 @@
 
 use super::*;
 
+/// Renders a node's prompt template with the full standard context (compaction
+/// summary + uncompacted tail if drive recorded ContextCompacted, otherwise the
+/// full context), run hooks, params, prior outputs, and reviews. This is the
+/// single rendering sequence shared by `execute_node` (the prompt the agent
+/// actually receives) and the drive-loop cache-key computation, so the two can
+/// never drift: a prompt that changes changes the key. `run_id` comes from the
+/// caller rather than being re-derived from the path, matching every other
+/// render site.
+pub(crate) fn render_node_prompt(
+    run_dir: &Path,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    prompt: &str,
+) -> Result<String, EngineError> {
+    let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
+    let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
+        .into_iter()
+        .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
+        .collect();
+    Ok(render(
+        prompt,
+        &cfg.params,
+        cfg.instruction.as_deref(),
+        &state.outputs,
+        &state.reviews,
+        &hooks,
+        &context,
+    ))
+}
+
 /// A single execution of a node. Returns (NodeStatus, output, events).
 /// Events (AttemptStarted/Finished, RetryStarted, FallbackTriggered) are NOT
 /// written here but returned: the caller (drive) writes them - the sole writer of
@@ -24,33 +55,13 @@ pub(crate) fn execute_node(
     let node = playbook
         .node(node_id)
         .ok_or_else(|| EngineError::NotFound(node_id.into()))?;
-    // Context accounting for compaction: summary + the uncompacted tail, if drive
-    // recorded ContextCompacted; otherwise the full context. The compaction itself
-    // is triggered by drive (the sole writer of the event) - what reaches here is
-    // already the finished result.
-    let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
-    // Run hooks as map key -> relative endpoint path (for the
-    // {{run.hooks.<key>}} template); the monitor is added by the host. We take
-    // run_id from the caller (drive) rather than re-deriving it from the path.
-    let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
-        .into_iter()
-        .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
-        .collect();
     let mut events: Vec<EventPayload> = Vec::new();
     match &node.kind {
         NodeKind::Start => Ok((NodeStatus::Succeeded, String::new(), events)),
         NodeKind::Prompt { prompt } => {
             let text = match &override_prompt {
                 Some(p) => p.clone(),
-                None => render(
-                    prompt,
-                    &cfg.params,
-                    cfg.instruction.as_deref(),
-                    &state.outputs,
-                    &state.reviews,
-                    &hooks,
-                    &context,
-                ),
+                None => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
             Ok((NodeStatus::Succeeded, text, events))
         }
@@ -66,15 +77,7 @@ pub(crate) fn execute_node(
         } => {
             let mut text = match &override_prompt {
                 Some(p) => p.clone(),
-                None => render(
-                    prompt,
-                    &cfg.params,
-                    cfg.instruction.as_deref(),
-                    &state.outputs,
-                    &state.reviews,
-                    &hooks,
-                    &context,
-                ),
+                None => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
@@ -985,6 +988,7 @@ pub(crate) fn advance_frontier(
                     status: "cancelled".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 })?;
             }
         }

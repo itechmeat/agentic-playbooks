@@ -41,6 +41,7 @@ fn fold_records_review_decision() {
                 status: "succeeded".into(),
                 attempt: 1,
                 output: "approved".into(),
+                artifacts: Vec::new(),
             },
         ),
     ];

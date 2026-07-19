@@ -420,6 +420,7 @@ pub(crate) fn prepare_run_target(
         expected_children: opts.expected_children.clone(),
         expected_connectors: opts.expected_connectors.clone(),
         expected_connector_accounts: opts.expected_connector_accounts.clone(),
+        cache: opts.cache,
     };
     write_run_config(&run_dir, &cfg)?;
 

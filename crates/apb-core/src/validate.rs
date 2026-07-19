@@ -2,7 +2,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
-use crate::schema::{EdgeCondition, FunctionsAllow, Isolation, NodeKind, Playbook};
+use crate::schema::{
+    CacheMode, CacheSpec, EdgeCondition, FunctionsAllow, Isolation, NodeKind, Playbook,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -62,6 +64,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_finish(playbook, &mut r); // V21
     check_playbook_ref(playbook, &mut r); // V22
     check_connectors(playbook, &mut r); // V23, V24, V25, V26
+    check_cache(playbook, &mut r); // V27, V28, V29
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     if r.is_valid() {
@@ -312,6 +315,69 @@ fn check_connector_list(
             );
         }
     }
+}
+
+/// V27 (error): `cache: auto` on a node kind the engine never caches - only
+/// `agent_task` and `script` execute deterministically enough for a cached
+/// result to be reused. V28 (warning): a `ttl` set while the cache mode is
+/// `off`; the ttl can never take effect while caching stays disabled. V29
+/// (error): an `inputs.files` or `outputs.files` entry that is not a valid
+/// glob pattern.
+fn check_cache(playbook: &Playbook, r: &mut ValidationReport) {
+    for node in &playbook.nodes {
+        let cacheable = matches!(
+            node.kind,
+            NodeKind::AgentTask { .. } | NodeKind::Script { .. }
+        );
+        if node.cache_mode() == CacheMode::Auto && !cacheable {
+            r.error(
+                "V27",
+                Some(&node.id),
+                format!(
+                    "node `{}` sets cache: auto but only agent_task and script nodes are cached",
+                    node.id
+                ),
+            );
+        }
+        if let Some(CacheSpec::Config(c)) = &node.cache
+            && c.ttl.is_some()
+            && c.mode == CacheMode::Off
+        {
+            r.warn(
+                "V28",
+                Some(&node.id),
+                format!(
+                    "node `{}` sets a cache ttl but cache mode is off; the ttl has no effect",
+                    node.id
+                ),
+            );
+        }
+        for nf in [&node.inputs, &node.outputs].into_iter().flatten() {
+            if let Err(bad) = build_globset(&nf.files) {
+                r.error(
+                    "V29",
+                    Some(&node.id),
+                    format!(
+                        "node `{}` has an invalid glob `{bad}` in inputs/outputs files",
+                        node.id
+                    ),
+                );
+            }
+        }
+    }
+}
+
+/// Compiles glob patterns into a `GlobSet`. Shared by the validator (V29)
+/// and by later cache-fingerprinting tasks, so the compiled matcher and the
+/// error reporting stay identical between validate-time and run-time. On
+/// failure, returns the offending pattern rather than the underlying
+/// `globset` error so callers can report exactly which glob is invalid.
+pub fn build_globset(globs: &[String]) -> Result<globset::GlobSet, String> {
+    let mut builder = globset::GlobSetBuilder::new();
+    for g in globs {
+        builder.add(globset::Glob::new(g).map_err(|_| g.clone())?);
+    }
+    builder.build().map_err(|_| globs.join(","))
 }
 
 fn adjacency(playbook: &Playbook) -> HashMap<&str, Vec<&str>> {
@@ -849,5 +915,75 @@ edges:
     fn v26_max_calls_zero_is_rejected() {
         let bad = GOOD.replace("max_calls: 50", "max_calls: 0");
         assert!(codes(&bad).contains(&"V26"));
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    /// Wraps a `nodes:`/`edges:` YAML fragment with the schema 2 preamble
+    /// every playbook needs (schema/id/name/version), following the style of
+    /// `connector_tests::GOOD` above.
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    /// All issues (errors and warnings) as `(code, severity)` pairs, so a
+    /// warning-only code like V28 can be asserted without losing severity.
+    fn codes(pb: &Playbook) -> Vec<(&'static str, Severity)> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .map(|i| (i.code, i.severity))
+            .collect()
+    }
+
+    #[test]
+    fn v27_cache_on_uncacheable_kind() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: c, type: condition, cache: auto }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V27", Severity::Error)));
+    }
+
+    #[test]
+    fn v28_ttl_without_auto_mode() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, cache: { mode: off, ttl: 1h } }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V28", Severity::Warning)));
+    }
+
+    #[test]
+    fn v29_invalid_glob() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - id: a
+    type: agent_task
+    prompt: hi
+    cache: auto
+    inputs: { files: ["src/[**"] }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V29", Severity::Error)));
     }
 }
