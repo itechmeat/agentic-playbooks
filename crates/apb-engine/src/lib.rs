@@ -4,6 +4,7 @@ pub mod connector_prompt;
 pub mod connector_result;
 pub mod connector_run;
 pub mod connector_smtp;
+pub mod connector_test;
 pub mod context;
 pub mod control;
 pub mod error;
