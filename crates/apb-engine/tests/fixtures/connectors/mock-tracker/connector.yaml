@@ -27,7 +27,12 @@ functions:
     method: GET
     url: "{{account.base_url}}/items"
     query: { q: "{{args.q}}" }
+    headers:
+      X-Api-Version: "2024-01"
     args_schema: { type: object, properties: { q: { type: string } }, required: [q] }
+    examples:
+      - args: { q: bug }
+        note: filter items by text
   - name: create_item
     description: Create an item over HTTP
     method: POST

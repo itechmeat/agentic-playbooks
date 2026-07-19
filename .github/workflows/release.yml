@@ -13,6 +13,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # The release body comes from a notes file reviewed in the release PR;
+      # failing early here is deliberate - no silent fallback to an empty or
+      # auto-generated body.
+      - name: Require release notes for this tag
+        run: |
+          notes="docs/release-notes/${GITHUB_REF_NAME}.md"
+          if [ ! -f "$notes" ]; then
+            echo "::error::missing $notes - prepare release notes in the release PR before tagging"
+            exit 1
+          fi
+
       - name: Install bun
         uses: oven-sh/setup-bun@v2
 
@@ -91,6 +102,7 @@ jobs:
       - name: Upload to release
         uses: softprops/action-gh-release@v2
         with:
+          body_path: docs/release-notes/${{ github.ref_name }}.md
           files: |
             apb-${{ matrix.target }}.tar.gz
             apb-${{ matrix.target }}.tar.gz.sha256

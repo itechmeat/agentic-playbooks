@@ -63,7 +63,9 @@ pub fn instruction_block(
     );
     out.push_str(
         "`--args -` reads the JSON arguments from stdin (use it for large payloads). \
-         `--dry-run` previews the request (method, URL, body) without executing it.\n",
+         `--dry-run` previews the request (method, URL, body) without executing it. \
+         Calls return a trimmed subset of the response by default; add `--full` to \
+         get the complete body when debugging.\n",
     );
 
     for grant in grants {
@@ -111,6 +113,13 @@ pub fn instruction_block(
                     if let Some(schema) = &f.args_schema {
                         out.push_str(&format!("  args: {}\n", compact_json(schema)));
                     }
+                    for ex in &f.examples {
+                        out.push_str(&format!(
+                            "  example: {} - {}\n",
+                            compact_json(&ex.args),
+                            ex.note
+                        ));
+                    }
                 }
                 None => out.push_str(&format!("- {fn_name}\n")),
             }
@@ -144,6 +153,7 @@ mod tests {
                     ("token".to_string(), "{{env.MOCK_TOKEN}}".to_string()),
                 ]),
                 env: BTreeMap::from([("token".to_string(), "MOCK_TOKEN".to_string())]),
+                cmd: BTreeMap::new(),
                 digest: "sha256:a".to_string(),
             }],
         }
@@ -167,6 +177,9 @@ functions:
     method: GET
     url: "{{account.base_url}}/items"
     args_schema: { type: object, properties: { q: { type: string } } }
+    examples:
+      - args: { q: bug }
+        note: filter items by text
   - name: create_item
     description: Create an item
     deprecated: use create_item_v2
@@ -251,6 +264,24 @@ functions:
         assert!(
             out.contains("(deprecated: use create_item_v2)"),
             "deprecated marker/reason missing: {out}"
+        );
+    }
+
+    #[test]
+    fn documents_full_flag_and_renders_examples() {
+        let grants = vec![grant(&["list_items"])];
+        let out = instruction_block(&grants, &[sample_connector()], &sample_docs());
+        assert!(
+            out.contains("--full"),
+            "the --full escape should be documented: {out}"
+        );
+        assert!(
+            out.contains("filter items by text"),
+            "example note missing: {out}"
+        );
+        assert!(
+            out.contains(r#"{"q":"bug"}"#),
+            "example args missing: {out}"
         );
     }
 

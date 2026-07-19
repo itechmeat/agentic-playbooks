@@ -64,6 +64,12 @@ pub struct ManifestAccount {
     pub fields: BTreeMap<String, String>,
     /// Secret field name -> ENV VAR NAME (not the secret value itself).
     pub env: BTreeMap<String, String>,
+    /// Secret field name -> the shell command line that produces the secret
+    /// at call time (spec 4.1), never the secret value itself. Empty for an
+    /// env-sourced or non-secret account; disjoint from `env` (a secret field
+    /// is exactly one of the two forms).
+    #[serde(default)]
+    pub cmd: BTreeMap<String, String>,
     /// `account_digest`.
     pub digest: String,
 }
@@ -189,4 +195,28 @@ pub fn read(run_dir: &Path) -> Result<Option<RunExecutionManifest>, EngineError>
     let raw = std::fs::read_to_string(&path)?;
     let m = serde_yaml_ng::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))?;
     Ok(Some(m))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn manifest_account_cmd_defaults_to_empty_and_roundtrips() {
+        let acct = ManifestAccount {
+            name: "a".to_string(),
+            default: false,
+            fields: BTreeMap::from([("base_url".to_string(), "https://x".to_string())]),
+            env: BTreeMap::new(),
+            cmd: BTreeMap::from([("token".to_string(), "gh auth token".to_string())]),
+            digest: "sha256:x".to_string(),
+        };
+        let yaml = serde_yaml_ng::to_string(&acct).unwrap();
+        let back: ManifestAccount = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(back, acct);
+        // An older manifest without `cmd` still parses (serde default).
+        let legacy = "name: a\ndefault: false\nfields: {}\nenv: {}\ndigest: sha256:x\n";
+        let parsed: ManifestAccount = serde_yaml_ng::from_str(legacy).unwrap();
+        assert!(parsed.cmd.is_empty());
+    }
 }

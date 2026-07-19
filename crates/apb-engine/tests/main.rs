@@ -44,8 +44,12 @@ mod connector_e2e;
 mod connector_healthcheck;
 #[path = "suite/connector_manifest.rs"]
 mod connector_manifest;
+#[path = "suite/connector_play_call.rs"]
+mod connector_play_call;
 #[path = "suite/connector_run.rs"]
 mod connector_run;
+#[path = "suite/connector_smtp.rs"]
+mod connector_smtp;
 #[path = "suite/context_compaction_test.rs"]
 mod context_compaction_test;
 #[path = "suite/context_test.rs"]

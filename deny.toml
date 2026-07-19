@@ -10,6 +10,10 @@ allow = [
     # MIT-0 is MIT without the attribution clause. Pulled in by borrow-or-share
     # (ureq's URI parsing dependency).
     "MIT-0",
+    # 0BSD (BSD Zero Clause) is public-domain-equivalent, the same class as
+    # MIT-0/CC0/Unlicense already allowed here. Pulled in by quoted_printable
+    # (lettre's MIME encoding dependency for the smtp connector kind).
+    "0BSD",
     "Apache-2.0",
     "Apache-2.0 WITH LLVM-exception",
     "BSD-2-Clause",

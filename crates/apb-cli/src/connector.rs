@@ -6,11 +6,13 @@
 //! else here is a read-only or scaffolding convenience for a human or an
 //! agent debugging outside a run.
 
+use std::collections::HashSet;
 use std::io::Read;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use apb_core::connector::config::{self};
+use apb_core::connector::def::ConnectorDoc;
 use apb_core::connector::secrets;
 use apb_core::connector::store::{self, LoadedConnector};
 use apb_core::doctor::{Check, CheckStatus};
@@ -45,6 +47,10 @@ pub(crate) enum ConnectorAction {
         /// secrets
         #[arg(long)]
         dry_run: bool,
+        /// Return the complete response body, skipping the function's
+        /// response_pick projection (spec 4.5 debugging escape)
+        #[arg(long)]
+        full: bool,
     },
     /// Approve trust for a connector or one of its accounts. With no flag,
     /// approves the connector's current tree digest; with --account, approves
@@ -75,6 +81,31 @@ pub(crate) enum ConnectorAction {
     },
     /// Scaffold a new connector folder from the embedded template
     Init { name: String },
+    /// Install an embedded official connector into the global store and record
+    /// its trust in the same action; or install any folder on disk with
+    /// --from-dir (validated, but no trust recorded - the normal approve flow
+    /// applies). Refuses a differing existing target unless --force; a
+    /// same-digest reinstall is a no-op.
+    Install {
+        /// Name of the embedded connector to install; omit only with --from-dir
+        name: Option<String>,
+        /// Install from this folder instead of the embedded set (no trust)
+        #[arg(long)]
+        from_dir: Option<PathBuf>,
+        /// Overwrite an existing, differing target
+        #[arg(long)]
+        force: bool,
+    },
+    /// Run a connector's offline contract tests (tests.yaml). Resolves an
+    /// installed connector, an embedded one, or a folder on disk (--dir).
+    /// Fully offline; exits non-zero on any failing case.
+    Test {
+        /// Installed or embedded connector name; omit only with --dir
+        name: Option<String>,
+        /// Test the connector folder at this path instead
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
@@ -87,11 +118,18 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
             account,
             args,
             dry_run,
-        } => call_cmd(root, &name, &function, account, args, dry_run),
+            full,
+        } => call_cmd(root, &name, &function, account, args, dry_run, full),
         ConnectorAction::Approve { name, account } => approve_cmd(root, &name, account.as_deref()),
         ConnectorAction::Doctor => doctor_cmd(root),
         ConnectorAction::Env { name, write } => env_cmd(root, name, write),
         ConnectorAction::Init { name } => init_cmd(&name),
+        ConnectorAction::Install {
+            name,
+            from_dir,
+            force,
+        } => install_cmd(name, from_dir, force),
+        ConnectorAction::Test { name, dir } => test_cmd(name, dir),
     }
 }
 
@@ -99,44 +137,74 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
 
 fn list_cmd(root: &Path) -> ExitCode {
     let summaries = store::list();
+    let official = apb_core::connector::official::list();
+
     if summaries.is_empty() {
-        println!("no connectors installed (see `apb connector init <name>`)");
-        return ExitCode::SUCCESS;
-    }
-
-    let trust = TrustStore::load();
-    let approved_connector_ids = trust.approved_record_ids(Kind::Connector);
-
-    let mut rows: Vec<[String; 4]> = vec![[
-        "NAME".to_string(),
-        "VERSION".to_string(),
-        "TRUST".to_string(),
-        "ACCOUNTS".to_string(),
-    ]];
-    for s in &summaries {
-        let trust_state = match store::load(&s.name) {
-            Ok(loaded) => {
-                if trust.is_approved(&loaded.digest) {
-                    "approved"
-                } else if approved_connector_ids.iter().any(|id| id == &s.name) {
-                    "changed"
-                } else {
-                    "unapproved"
+        println!(
+            "no connectors installed (see `apb connector install <name>` or `apb connector init <name>`)"
+        );
+    } else {
+        let trust = TrustStore::load();
+        let approved_connector_ids = trust.approved_record_ids(Kind::Connector);
+        let mut rows: Vec<[String; 4]> = vec![[
+            "NAME".to_string(),
+            "VERSION".to_string(),
+            "TRUST".to_string(),
+            "ACCOUNTS".to_string(),
+        ]];
+        for s in &summaries {
+            let trust_state = match store::load(&s.name) {
+                Ok(loaded) => {
+                    if trust.is_approved(&loaded.digest) {
+                        "approved"
+                    } else if approved_connector_ids.iter().any(|id| id == &s.name) {
+                        "changed"
+                    } else {
+                        "unapproved"
+                    }
                 }
+                Err(_) => "invalid",
+            };
+            let accounts_count = config::load_merged(root, &s.name)
+                .map(|a| a.len())
+                .unwrap_or(0);
+            rows.push([
+                s.name.clone(),
+                s.version.clone(),
+                trust_state.to_string(),
+                accounts_count.to_string(),
+            ]);
+        }
+        print_table(&rows);
+
+        // Version-drift notes: an installed connector whose embedded version
+        // differs (a binary upgrade shipped a newer manifest).
+        for s in &summaries {
+            if let Some(o) = official.iter().find(|o| o.name == s.name)
+                && o.version != s.version
+            {
+                println!(
+                    "note: `{}` installed {}, embedded {} (reinstall with --force to upgrade)",
+                    s.name, s.version, o.version
+                );
             }
-            Err(_) => "invalid",
-        };
-        let accounts_count = config::load_merged(root, &s.name)
-            .map(|a| a.len())
-            .unwrap_or(0);
-        rows.push([
-            s.name.clone(),
-            s.version.clone(),
-            trust_state.to_string(),
-            accounts_count.to_string(),
-        ]);
+        }
     }
-    print_table(&rows);
+
+    let installed: HashSet<&str> = summaries.iter().map(|s| s.name.as_str()).collect();
+    let available: Vec<&apb_core::connector::official::OfficialConnector> = official
+        .iter()
+        .filter(|o| !installed.contains(o.name.as_str()))
+        .collect();
+    if !available.is_empty() {
+        println!();
+        println!("AVAILABLE (embedded, not installed):");
+        for o in &available {
+            println!("  {}  {}", o.name, o.version);
+        }
+        println!("install one with `apb connector install <name>`");
+    }
+
     ExitCode::SUCCESS
 }
 
@@ -322,6 +390,7 @@ fn call_cmd(
     account: Option<String>,
     args: Option<String>,
     dry_run: bool,
+    full: bool,
 ) -> ExitCode {
     let run_dir = std::env::var("APB_RUN_DIR").ok();
     let node_id = std::env::var("APB_NODE_ID").ok();
@@ -375,6 +444,7 @@ fn call_cmd(
         account: account.as_deref(),
         args: parsed_args,
         dry_run,
+        full,
     };
     let (value, ok) = apb_engine::connector_call::execute(req);
     print_call_result(&value);
@@ -751,6 +821,250 @@ fn init_cmd(name: &str) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+// --- test -----------------------------------------------------------------
+
+fn test_cmd(name: Option<String>, dir: Option<PathBuf>) -> ExitCode {
+    let (doc, tests) = match load_test_target(name.as_deref(), dir.as_deref()) {
+        Ok(pair) => pair,
+        Err(msg) => {
+            eprintln!("connector error: {msg}");
+            return ExitCode::from(2);
+        }
+    };
+    let report = apb_engine::connector_test::run_tests(&doc, &tests);
+    for r in &report.results {
+        if r.passed {
+            println!("[pass] {}", r.function);
+        } else {
+            println!("[fail] {}: {}", r.function, r.detail);
+        }
+    }
+    if report.all_passed() {
+        println!("{} case(s) passed", report.results.len());
+        ExitCode::SUCCESS
+    } else {
+        let failed = report.results.iter().filter(|r| !r.passed).count();
+        eprintln!("connector test: {failed} case(s) failed");
+        ExitCode::from(1)
+    }
+}
+
+/// Resolves the `(ConnectorDoc, TestsDoc)` pair for `apb connector test` from,
+/// in precedence order: a folder (--dir), an installed connector, then an
+/// embedded one.
+fn load_test_target(
+    name: Option<&str>,
+    dir: Option<&Path>,
+) -> Result<(ConnectorDoc, apb_core::connector::contract::TestsDoc), String> {
+    use apb_core::connector::contract::TestsDoc;
+
+    if let Some(dir) = dir {
+        let dir_name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("cannot derive a connector name from {}", dir.display()))?;
+        let yaml = std::fs::read_to_string(dir.join("connector.yaml"))
+            .map_err(|e| format!("cannot read {}/connector.yaml: {e}", dir.display()))?;
+        let doc = ConnectorDoc::from_yaml(&yaml, dir_name).map_err(|e| e.to_string())?;
+        let tests_raw = std::fs::read_to_string(dir.join("tests.yaml"))
+            .map_err(|e| format!("cannot read {}/tests.yaml: {e}", dir.display()))?;
+        let tests = TestsDoc::from_yaml(&tests_raw).map_err(|e| e.to_string())?;
+        return Ok((doc, tests));
+    }
+
+    let name = name.ok_or_else(|| "provide a connector name or --dir <path>".to_string())?;
+
+    // Installed connector first.
+    if let Ok(loaded) = store::load(name) {
+        let tests_raw = std::fs::read_to_string(loaded.dir.join("tests.yaml"))
+            .map_err(|e| format!("connector `{name}` has no readable tests.yaml: {e}"))?;
+        let tests = TestsDoc::from_yaml(&tests_raw).map_err(|e| e.to_string())?;
+        return Ok((loaded.doc, tests));
+    }
+
+    // Otherwise an embedded connector.
+    let official = apb_core::connector::official::get(name)
+        .ok_or_else(|| format!("`{name}` is neither installed nor an embedded connector"))?;
+    let yaml = official
+        .files
+        .get("connector.yaml")
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .ok_or_else(|| format!("embedded `{name}` has no readable connector.yaml"))?;
+    let doc = ConnectorDoc::from_yaml(yaml, name).map_err(|e| e.to_string())?;
+    let tests_raw = official
+        .files
+        .get("tests.yaml")
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .ok_or_else(|| format!("embedded `{name}` has no tests.yaml"))?;
+    let tests = TestsDoc::from_yaml(tests_raw).map_err(|e| e.to_string())?;
+    Ok((doc, tests))
+}
+
+// --- install --------------------------------------------------------------
+
+fn install_cmd(name: Option<String>, from_dir: Option<PathBuf>, force: bool) -> ExitCode {
+    match from_dir {
+        Some(dir) => install_from_dir(&dir, force),
+        None => match name {
+            Some(n) => install_embedded(&n, force),
+            None => {
+                eprintln!("connector error: provide a connector name or --from-dir <path>");
+                ExitCode::from(2)
+            }
+        },
+    }
+}
+
+/// Records connector trust for a freshly installed embedded connector. Origin
+/// is `Bundled`: the bytes came from the trusted binary the user already runs.
+fn record_connector_trust(name: &str, digest: &str) {
+    let mut trust = TrustStore::load();
+    if let Err(e) = trust.approve_kind(digest, name, Kind::Connector, OriginKind::Bundled) {
+        eprintln!("connector warning: installed `{name}` but could not record trust: {e}");
+    }
+}
+
+fn install_embedded(name: &str, force: bool) -> ExitCode {
+    if let Err(e) = apb_core::profile::validate_profile_name(name) {
+        eprintln!("connector error: invalid connector name `{name}`: {e}");
+        return ExitCode::from(2);
+    }
+    let Some(official) = apb_core::connector::official::get(name) else {
+        eprintln!("connector error: `{name}` is not an embedded official connector");
+        return ExitCode::from(2);
+    };
+    let Some(base) = store::connectors_dir() else {
+        eprintln!("connector error: no config directory available");
+        return ExitCode::from(2);
+    };
+    let target = base.join(name);
+    let staging = base.join(format!(".{name}.install-tmp"));
+    let _ = std::fs::remove_dir_all(&staging);
+    if let Err(e) = official.write_to(&staging) {
+        eprintln!("connector error: cannot stage `{name}`: {e}");
+        let _ = std::fs::remove_dir_all(&staging);
+        return ExitCode::from(2);
+    }
+    let limits = apb_core::content::TreeLimits::default();
+    let new_digest = match apb_core::content::tree_digest(&staging, &limits) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            eprintln!("connector error: cannot digest `{name}`: {e}");
+            return ExitCode::from(2);
+        }
+    };
+
+    if target.exists() {
+        let current = apb_core::content::tree_digest(&target, &limits).ok();
+        if current.as_deref() == Some(new_digest.as_str()) {
+            let _ = std::fs::remove_dir_all(&staging);
+            record_connector_trust(name, &new_digest);
+            println!(
+                "connector `{name}` already installed at version {} (no changes)",
+                official.version
+            );
+            return ExitCode::SUCCESS;
+        }
+        if !force {
+            let _ = std::fs::remove_dir_all(&staging);
+            eprintln!(
+                "connector error: `{}` already exists and differs from the embedded version; pass --force to overwrite",
+                target.display()
+            );
+            return ExitCode::from(2);
+        }
+        if let Err(e) = std::fs::remove_dir_all(&target) {
+            let _ = std::fs::remove_dir_all(&staging);
+            eprintln!("connector error: cannot replace {}: {e}", target.display());
+            return ExitCode::from(2);
+        }
+    }
+    if let Err(e) = std::fs::rename(&staging, &target) {
+        let _ = std::fs::remove_dir_all(&staging);
+        eprintln!(
+            "connector error: cannot install into {}: {e}",
+            target.display()
+        );
+        return ExitCode::from(2);
+    }
+    record_connector_trust(name, &new_digest);
+    println!(
+        "installed connector `{name}` version {} and recorded its trust",
+        official.version
+    );
+    ExitCode::SUCCESS
+}
+
+/// Installs a folder on disk with no trust recorded (the explicit local dev
+/// loop). `--force` is accepted for CLI uniformity but has no effect: --from-dir
+/// overwrites freely because it seeds no trust, and the run/probe trust gate
+/// still catches an unapproved digest.
+fn install_from_dir(src: &Path, _force: bool) -> ExitCode {
+    let Some(name) = src.file_name().and_then(|n| n.to_str()).map(str::to_string) else {
+        eprintln!(
+            "connector error: cannot derive a connector name from {}",
+            src.display()
+        );
+        return ExitCode::from(2);
+    };
+    if let Err(e) = apb_core::profile::validate_profile_name(&name) {
+        eprintln!("connector error: folder name `{name}` is not a valid connector name: {e}");
+        return ExitCode::from(2);
+    }
+    // Validate: the manifest must parse and match the folder name.
+    let yaml = match std::fs::read_to_string(src.join("connector.yaml")) {
+        Ok(y) => y,
+        Err(e) => {
+            eprintln!(
+                "connector error: cannot read {}/connector.yaml: {e}",
+                src.display()
+            );
+            return ExitCode::from(2);
+        }
+    };
+    if let Err(e) = ConnectorDoc::from_yaml(&yaml, &name) {
+        eprintln!("connector error: {} does not validate: {e}", src.display());
+        return ExitCode::from(2);
+    }
+    let Some(base) = store::connectors_dir() else {
+        eprintln!("connector error: no config directory available");
+        return ExitCode::from(2);
+    };
+    let target = base.join(&name);
+    let staging = base.join(format!(".{name}.install-tmp"));
+    let _ = std::fs::remove_dir_all(&staging);
+    // TOCTOU-safe copy + digest of the source folder into staging.
+    let limits = apb_core::content::TreeLimits::default();
+    if let Err(e) = apb_core::content::snapshot_tree(src, &staging, &limits) {
+        let _ = std::fs::remove_dir_all(&staging);
+        eprintln!("connector error: cannot copy {}: {e}", src.display());
+        return ExitCode::from(2);
+    }
+    // --from-dir is an explicit local dev action and records no trust, so it
+    // overwrites freely (the run/probe gate still catches an unapproved digest).
+    if target.exists()
+        && let Err(e) = std::fs::remove_dir_all(&target)
+    {
+        let _ = std::fs::remove_dir_all(&staging);
+        eprintln!("connector error: cannot replace {}: {e}", target.display());
+        return ExitCode::from(2);
+    }
+    if let Err(e) = std::fs::rename(&staging, &target) {
+        let _ = std::fs::remove_dir_all(&staging);
+        eprintln!(
+            "connector error: cannot install into {}: {e}",
+            target.display()
+        );
+        return ExitCode::from(2);
+    }
+    println!(
+        "installed connector `{name}` from {} (trust not recorded; approve it before use)",
+        src.display()
+    );
+    ExitCode::SUCCESS
 }
 
 fn scaffold_yaml(name: &str) -> String {

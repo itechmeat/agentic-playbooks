@@ -20,6 +20,7 @@ fn sample_account() -> ManifestAccount {
         default: true,
         fields,
         env,
+        cmd: BTreeMap::new(),
         digest: "sha256:account".to_string(),
     }
 }

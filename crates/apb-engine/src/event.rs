@@ -215,6 +215,13 @@ pub enum EventPayload {
         http_status: Option<u16>,
         #[serde(default)]
         duration_ms: u64,
+        /// SMTP-only: the message subject and total recipient count. `None`
+        /// for HTTP and mock calls and for an smtp `verify`. Bodies and
+        /// credentials are never recorded (spec 4.2).
+        #[serde(default)]
+        smtp_subject: Option<String>,
+        #[serde(default)]
+        smtp_recipients: Option<u32>,
     },
 }
 

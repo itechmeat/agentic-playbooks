@@ -1,0 +1,12 @@
+cases:
+  - function: verify
+    account: { host: smtp.example.com, port: "587", from_email: releases@example.com, from_name: Release Bot, use_tls: "true" }
+    args: {}
+    expect:
+      envelope: {}
+
+  - function: send_email
+    account: { host: smtp.example.com, port: "587", from_email: releases@example.com, from_name: Release Bot, use_tls: "true" }
+    args: { to: ops@example.com, subject: "Release 1.4.0 is live", body_text: "Release shipped." }
+    expect:
+      envelope: { from: releases@example.com, to: [ops@example.com], subject: "Release 1.4.0 is live" }

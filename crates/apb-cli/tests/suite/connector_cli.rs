@@ -532,3 +532,191 @@ fn run_proceeds_past_the_connector_gate_once_approved() {
          stdout={stdout} stderr={stderr}"
     );
 }
+
+#[test]
+fn call_accepts_the_full_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    // No run context, so this still exits config-error, but --full must parse.
+    let out = playbook(
+        dir.path(),
+        &["connector", "call", "widget", "ping", "--full"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        !out.status.success(),
+        "call without run context must exit non-zero"
+    );
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(v["error"]["code"], serde_json::json!("config"));
+}
+
+// --- install --------------------------------------------------------------
+
+#[test]
+fn install_embedded_github_records_trust_and_lists_approved() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    let out = apb_ok(dir.path(), &["connector", "install", "github"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("installed connector `github`"),
+        "install should confirm: {stdout}"
+    );
+    let cfg = dir.path().join("cfg/connectors/github");
+    assert!(cfg.join("connector.yaml").is_file());
+    assert!(cfg.join("tests.yaml").is_file());
+
+    // Embedded install seeds trust: the connector lists as approved.
+    let list = apb_ok(dir.path(), &["connector", "list"]);
+    let list_out = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        list_out.contains("github") && list_out.contains("approved"),
+        "installed connector should list as approved: {list_out}"
+    );
+}
+
+#[test]
+fn install_same_digest_is_a_noop_and_differing_refuses_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "install", "github"]);
+
+    // Re-install: same digest, a no-op that still succeeds.
+    let again = apb_ok(dir.path(), &["connector", "install", "github"]);
+    assert!(String::from_utf8_lossy(&again.stdout).contains("already installed"));
+
+    // Mutate the installed folder so it differs from the embedded version.
+    let manifest = dir.path().join("cfg/connectors/github/connector.yaml");
+    let mut body = fs::read_to_string(&manifest).unwrap();
+    body.push_str("# local edit\n");
+    fs::write(&manifest, body).unwrap();
+
+    let refused = playbook(dir.path(), &["connector", "install", "github"]);
+    assert!(!refused.status.success(), "differing target must refuse");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--force"),
+        "refusal should point at --force"
+    );
+
+    // --force overwrites and restores the embedded content.
+    apb_ok(dir.path(), &["connector", "install", "github", "--force"]);
+    let restored = fs::read_to_string(&manifest).unwrap();
+    assert!(!restored.contains("# local edit"), "force should overwrite");
+}
+
+#[test]
+fn install_from_dir_installs_without_recording_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    // A local connector folder named `widget` (basename is the connector name).
+    let src = dir.path().join("src/widget");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("connector.yaml"),
+        "name: widget\nversion: 0.1.0\nfunctions:\n  - name: ping\n    description: d\n    mock: { status: 200, body: { ok: true } }\n",
+    )
+    .unwrap();
+
+    let out = apb_ok(
+        dir.path(),
+        &["connector", "install", "--from-dir", src.to_str().unwrap()],
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("installed connector `widget`"));
+    assert!(
+        dir.path()
+            .join("cfg/connectors/widget/connector.yaml")
+            .is_file()
+    );
+
+    // No trust recorded: the connector lists as unapproved.
+    let list = apb_ok(dir.path(), &["connector", "list"]);
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("unapproved"),
+        "--from-dir must not seed trust"
+    );
+}
+
+// --- list available section ------------------------------------------------
+
+#[test]
+fn list_shows_embedded_available_section_before_install_and_hides_after() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    // Before install: `github` appears under the available section.
+    let before = apb_ok(dir.path(), &["connector", "list"]);
+    let before_out = String::from_utf8_lossy(&before.stdout);
+    assert!(
+        before_out.contains("AVAILABLE") && before_out.contains("github"),
+        "available section should list the embedded github: {before_out}"
+    );
+
+    apb_ok(dir.path(), &["connector", "install", "github"]);
+
+    // After install: `github` is an installed row, no longer under available.
+    let after = apb_ok(dir.path(), &["connector", "list"]);
+    let after_out = String::from_utf8_lossy(&after.stdout);
+    let available_block = after_out.split("AVAILABLE").nth(1).unwrap_or("");
+    assert!(
+        !available_block.contains("github"),
+        "installed connector must not appear under available: {after_out}"
+    );
+}
+
+// --- test -----------------------------------------------------------------
+
+#[test]
+fn test_runs_embedded_github_cases_and_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    // Embedded connector, not installed: `test` resolves it from the binary.
+    let out = apb_ok(dir.path(), &["connector", "test", "github"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("[pass] get_rate_limit"),
+        "get_rate_limit case should pass: {stdout}"
+    );
+    assert!(
+        stdout.contains("[pass] list_issues"),
+        "list_issues case should pass: {stdout}"
+    );
+    assert!(
+        stdout.contains("[pass] create_issue"),
+        "create_issue should pass: {stdout}"
+    );
+}
+
+#[test]
+fn test_dir_with_a_failing_case_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    let src = dir.path().join("src/widget");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("connector.yaml"),
+        "name: widget\nversion: 0.1.0\naccount_fields:\n  - name: api_base\n    required: true\nfunctions:\n  - name: get_item\n    description: d\n    read_only: true\n    method: GET\n    url: \"{{account.api_base}}/items/{{args.id}}\"\n    args_schema: { type: object, properties: { id: { type: string } }, required: [id] }\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("tests.yaml"),
+        "cases:\n  - function: get_item\n    account: { api_base: https://api.example.com }\n    args: { id: \"42\" }\n    expect: { method: GET, url: https://api.example.com/items/WRONG }\n",
+    )
+    .unwrap();
+
+    let out = playbook(
+        dir.path(),
+        &["connector", "test", "--dir", src.to_str().unwrap()],
+    );
+    assert!(!out.status.success(), "a failing case must exit non-zero");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("[fail] get_item"),
+        "should report the failing case: {stdout}"
+    );
+}

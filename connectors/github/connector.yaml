@@ -1,0 +1,413 @@
+name: github
+version: 0.1.0
+healthcheck: get_rate_limit
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+account_fields:
+  - name: api_base
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_rate_limit
+    description: Check the current GitHub API rate limit status
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/rate_limit"
+    args_schema: { type: object, properties: {}, required: [] }
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response_pick: [resources.core.limit, resources.core.remaining, resources.core.reset]
+
+  - name: list_issues
+    description: List issues in a repository, filtered by state, labels, and page
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/issues"
+    query:
+      state: "{{args.state}}"
+      labels: "{{args.labels}}"
+      page: "{{args.page}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        state: { type: string, enum: [open, closed, all] }
+        labels: { type: string, description: "comma-separated label names, or empty for no label filter" }
+        page: { type: integer, minimum: 1 }
+      required: [owner, repo, state, labels, page]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response_pick: [number, title, state, html_url, user.login, labels.name, pull_request.html_url]
+
+  - name: get_issue
+    description: Get one issue by number
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/issues/{{args.number}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+      required: [owner, repo, number]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response_pick: [number, title, state, html_url, user.login, labels.name, body, comments]
+
+  - name: create_issue
+    description: Create an issue in a repository
+    method: POST
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/issues"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        title: { type: string }
+        body: { type: string }
+        labels: { type: array, items: { type: string } }
+        assignees: { type: array, items: { type: string } }
+      required: [owner, repo, title]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    examples:
+      - args: { owner: acme, repo: site, title: "Broken build on main", labels: [bug, priority-high] }
+        note: "labels is a list of existing label names; a label that does not exist yet must be created first with add_labels or in the repository settings."
+
+  - name: update_issue
+    description: Update an issue's title, body, state, labels, or assignees
+    method: PATCH
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/issues/{{args.number}}"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+        title: { type: string }
+        body: { type: string }
+        state: { type: string, enum: [open, closed] }
+        labels: { type: array, items: { type: string } }
+        assignees: { type: array, items: { type: string } }
+      required: [owner, repo, number]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+
+  - name: comment_issue
+    description: Post a comment on an issue or pull request
+    method: POST
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/issues/{{args.number}}/comments"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+        body: { type: string }
+      required: [owner, repo, number, body]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+
+  - name: add_labels
+    description: Add one or more labels to an issue or pull request
+    method: POST
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/issues/{{args.number}}/labels"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+        labels: { type: array, items: { type: string } }
+      required: [owner, repo, number, labels]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    examples:
+      - args: { owner: acme, repo: site, number: 42, labels: [needs-triage] }
+        note: "labels must already exist on the repository; this function only attaches them."
+
+  - name: remove_label
+    description: Remove one label from an issue or pull request
+    method: DELETE
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/issues/{{args.number}}/labels/{{args.name}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+        name: { type: string }
+      required: [owner, repo, number, name]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+
+  - name: add_assignees
+    description: Add one or more assignees to an issue or pull request
+    method: POST
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/issues/{{args.number}}/assignees"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+        assignees: { type: array, items: { type: string } }
+      required: [owner, repo, number, assignees]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+
+  - name: list_pulls
+    description: List pull requests in a repository, filtered by state, base branch, and page
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/pulls"
+    query:
+      state: "{{args.state}}"
+      base: "{{args.base}}"
+      page: "{{args.page}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        state: { type: string, enum: [open, closed, all] }
+        base: { type: string, description: "base branch name, or empty for no base filter" }
+        page: { type: integer, minimum: 1 }
+      required: [owner, repo, state, base, page]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response_pick: [number, title, state, html_url, user.login, base.ref, head.ref, draft]
+
+  - name: get_pull
+    description: Get one pull request by number
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/pulls/{{args.number}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+      required: [owner, repo, number]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response_pick: [number, title, state, html_url, user.login, mergeable, merged, additions, deletions, changed_files]
+
+  - name: create_pull
+    description: Open a pull request
+    method: POST
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/pulls"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        title: { type: string }
+        head: { type: string }
+        base: { type: string }
+        body: { type: string }
+        draft: { type: boolean }
+      required: [owner, repo, title, head, base]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+
+  - name: merge_pull
+    description: Merge a pull request
+    method: PUT
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/pulls/{{args.number}}/merge"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+        merge_method: { type: string, enum: [merge, squash, rebase] }
+        commit_title: { type: string }
+        commit_message: { type: string }
+        sha: { type: string }
+      required: [owner, repo, number]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+
+  - name: request_reviewers
+    description: Request one or more reviewers on a pull request
+    method: POST
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/pulls/{{args.number}}/requested_reviewers"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+        reviewers: { type: array, items: { type: string } }
+        team_reviewers: { type: array, items: { type: string } }
+      required: [owner, repo, number, reviewers]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+
+  - name: create_review
+    description: Submit a pull request review (approve, request changes, or comment)
+    method: POST
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/pulls/{{args.number}}/reviews"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        number: { type: integer }
+        event: { type: string, enum: [APPROVE, REQUEST_CHANGES, COMMENT] }
+        body: { type: string }
+        commit_id: { type: string }
+      required: [owner, repo, number, event]
+      allOf:
+        - if:
+            properties: { event: { enum: [COMMENT, REQUEST_CHANGES] } }
+          then:
+            required: [body]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+
+  - name: create_release
+    description: Create a release
+    method: POST
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/releases"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        tag_name: { type: string }
+        target_commitish: { type: string }
+        name: { type: string }
+        body: { type: string }
+        draft: { type: boolean }
+        prerelease: { type: boolean }
+        generate_release_notes: { type: boolean }
+      required: [owner, repo, tag_name]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+
+  - name: get_release_by_tag
+    description: Get a release by its tag name
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/releases/tags/{{args.tag}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        tag: { type: string }
+      required: [owner, repo, tag]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response_pick: [id, tag_name, name, html_url, draft, prerelease, published_at]
+
+  - name: dispatch_workflow
+    description: Trigger a workflow_dispatch run of a GitHub Actions workflow
+    method: POST
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/actions/workflows/{{args.workflow_file}}/dispatches"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        workflow_file: { type: string, description: "workflow file name, e.g. release.yml, or its numeric id" }
+        ref: { type: string, description: "branch or tag to run the workflow on" }
+        inputs: { type: object, description: "must match the workflow_dispatch inputs declared in the workflow file" }
+      required: [owner, repo, workflow_file, ref]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    examples:
+      - args: { owner: acme, repo: site, workflow_file: release.yml, ref: main, inputs: { environment: production } }
+        note: "omit inputs entirely when the workflow file declares none."
+
+  - name: list_workflow_runs
+    description: List recent runs of a workflow
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/actions/workflows/{{args.workflow_file}}/runs"
+    query:
+      page: "{{args.page}}"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        workflow_file: { type: string }
+        page: { type: integer, minimum: 1 }
+      required: [owner, repo, workflow_file, page]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response_pick: [workflow_runs.id, workflow_runs.name, workflow_runs.status, workflow_runs.conclusion, workflow_runs.html_url, workflow_runs.run_number]
+
+  - name: list_check_runs
+    description: List check runs for a commit
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/commits/{{args.ref}}/check-runs"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        ref: { type: string }
+      required: [owner, repo, ref]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response_pick: [check_runs.id, check_runs.name, check_runs.status, check_runs.conclusion, check_runs.html_url]
+
+  - name: get_combined_status
+    description: Get the combined commit status (all status checks) for a commit
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/repos/{{args.owner}}/{{args.repo}}/commits/{{args.ref}}/status"
+    args_schema:
+      type: object
+      properties:
+        owner: { type: string }
+        repo: { type: string }
+        ref: { type: string }
+      required: [owner, repo, ref]
+    headers:
+      Accept: application/vnd.github+json
+      X-GitHub-Api-Version: "2022-11-28"
+    response_pick: [state, sha, statuses.state, statuses.context, statuses.description, statuses.target_url]

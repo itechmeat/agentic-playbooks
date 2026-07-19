@@ -1,0 +1,91 @@
+name: telegram
+version: 0.1.0
+healthcheck: get_me
+auth:
+  kind: path
+  value_template: "bot{{secret.token}}"
+account_fields:
+  - name: api_base
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_me
+    description: Verify the bot token and get the bot's own identity
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/{{auth}}/getMe"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [ok, result.id, result.username, result.first_name, result.is_bot]
+
+  - name: send_message
+    description: Send a text message to a chat
+    method: POST
+    url: "{{account.api_base}}/{{auth}}/sendMessage"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        chat_id: { type: string, description: "numeric chat id (quoted) or @channelusername" }
+        text: { type: string }
+        parse_mode: { type: string, enum: [MarkdownV2, HTML] }
+      required: [chat_id, text]
+    examples:
+      - args: { chat_id: "-1001234567890", text: "*Build failed* on `main`", parse_mode: MarkdownV2 }
+        note: "MarkdownV2 requires escaping reserved punctuation (underscore, asterisk, brackets, and others) per the Telegram Bot API formatting spec; plain text with no parse_mode is safer when the content is not authored by hand."
+
+  - name: edit_message_text
+    description: Edit the text of a previously sent message
+    method: POST
+    url: "{{account.api_base}}/{{auth}}/editMessageText"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        chat_id: { type: string }
+        message_id: { type: integer }
+        text: { type: string }
+        parse_mode: { type: string, enum: [MarkdownV2, HTML] }
+      required: [chat_id, message_id, text]
+
+  - name: get_chat
+    description: Get information about a chat
+    read_only: true
+    method: POST
+    url: "{{account.api_base}}/{{auth}}/getChat"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        chat_id: { type: string }
+      required: [chat_id]
+    response_pick: [ok, result.id, result.type, result.title, result.username]
+
+  - name: get_updates
+    description: Long-poll for new updates (messages, callback queries) since the last offset
+    read_only: true
+    timeout_sec: 75
+    method: POST
+    url: "{{account.api_base}}/{{auth}}/getUpdates"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        offset: { type: integer, description: "update_id of the last processed update, plus one" }
+        timeout: { type: integer, minimum: 0, maximum: 60, description: "long-poll seconds, capped below the function timeout" }
+      required: []
+    response_pick: [ok, result.update_id, result.message.message_id, result.message.text, result.message.chat.id, result.message.from.username]
+
+  - name: answer_callback_query
+    description: Acknowledge an inline keyboard button press
+    method: POST
+    url: "{{account.api_base}}/{{auth}}/answerCallbackQuery"
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties:
+        callback_query_id: { type: string }
+        text: { type: string }
+        show_alert: { type: boolean }
+      required: [callback_query_id]

@@ -1,0 +1,49 @@
+schema: 2
+id: release-announce
+name: Release announcement
+description: >-
+  Create a GitHub release, then announce it by email and Telegram.
+version: 1.0.0
+params:
+  - { name: github_owner, type: text, label: "GitHub repository owner" }
+  - { name: github_repo, type: text, label: "GitHub repository name" }
+  - { name: release_tag, type: text, label: "Release tag, e.g. v1.4.0" }
+  - { name: release_notes, type: text, label: "Release notes body" }
+  - { name: announce_email, type: text, label: "Email address to announce the release to" }
+  - { name: telegram_chat_id, type: text, label: "Telegram chat id to announce the release to" }
+defaults:
+  profile: main
+effects: [network, external, irreversible]
+nodes:
+  - { id: start, type: start }
+  - id: create_release
+    type: agent_task
+    prompt: >-
+      Create a GitHub release in {{params.github_owner}}/{{params.github_repo}}
+      tagged {{params.release_tag}} with body {{params.release_notes}}, using
+      the github connector's create_release function.
+    connectors:
+      - { name: github, accounts: [default], functions: [create_release], max_calls: 3 }
+  - id: announce_email
+    type: agent_task
+    prompt: >-
+      Send an email to {{params.announce_email}} announcing release
+      {{params.release_tag}}, using the smtp connector's send_email
+      function. Use {{params.release_notes}} as the body, and include
+      the release link from {{nodes.create_release.output}}.
+    connectors:
+      - { name: smtp, accounts: [default], functions: [send_email], max_calls: 3 }
+  - id: announce_telegram
+    type: agent_task
+    prompt: >-
+      Post a short announcement of release {{params.release_tag}} to
+      Telegram chat {{params.telegram_chat_id}}, using the telegram
+      connector's send_message function.
+    connectors:
+      - { name: telegram, accounts: [default], functions: [send_message], max_calls: 3 }
+  - { id: finish, type: finish, outcome: success }
+edges:
+  - { from: start, to: create_release }
+  - { from: create_release, to: announce_email }
+  - { from: announce_email, to: announce_telegram }
+  - { from: announce_telegram, to: finish }

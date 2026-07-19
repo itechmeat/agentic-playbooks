@@ -142,8 +142,9 @@ pub fn snapshot_connectors(
     }
 
     // 6. Build the manifest pieces. Accounts carry their fields as-is (a secret
-    // field keeps its raw `{{env.VAR}}` reference, never the resolved value),
-    // an `env` map of secret-field -> env var name, and the account digest.
+    // field keeps its raw `{{env.VAR}}` / `{{cmd:...}}` reference, never the
+    // resolved value), an `env` map of secret-field -> env var name, a `cmd`
+    // map of secret-field -> command line, and the account digest.
     let mut connectors = Vec::new();
     for (cname, resolved) in &output.connectors {
         let mut accounts = Vec::new();
@@ -153,6 +154,7 @@ pub fn snapshot_connectors(
                 default: account.default,
                 fields: account.fields.clone(),
                 env: config::env_refs(&resolved.loaded.doc, account),
+                cmd: config::cmd_refs(&resolved.loaded.doc, account),
                 digest: account_digest(account),
             });
         }

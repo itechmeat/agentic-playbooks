@@ -18,6 +18,10 @@ uuid = { version = "1.23.4", features = ["v4"] }
 ureq.workspace = true
 jsonschema.workspace = true
 percent-encoding.workspace = true
+# Native SMTP execution for the `smtp` connector function kind (spec 4.2):
+# blocking low-level SmtpConnection client, STARTTLS via rustls (TLS 1.2+ by
+# default), MIME/multipart built by the library.
+lettre.workspace = true
 
 # Group termination of agent process tree on cancellation/timeout (Unix):
 # kill(-pgid, SIGKILL). libc already in tree transitively, direct dependency

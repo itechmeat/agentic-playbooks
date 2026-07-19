@@ -9,8 +9,12 @@
 //! only reads them from disk/env on demand for the resolving apb process.
 
 use std::collections::BTreeMap;
+use std::io::Read as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
+use std::thread;
+use std::time::{Duration, Instant};
 
 /// Parses a `{{env.VAR}}` secret reference: the whole value must be exactly
 /// that placeholder (no surrounding text), with `VAR` matching
@@ -27,6 +31,21 @@ pub fn parse_env_ref(value: &str) -> Option<String> {
         if !c.is_ascii_uppercase() && !c.is_ascii_digit() && c != '_' {
             return None;
         }
+    }
+    Some(inner.to_string())
+}
+
+/// Parses a `{{cmd:<command line>}}` secret reference: the whole value must
+/// be exactly that placeholder (no surrounding text). Returns the command
+/// line (the text between `{{cmd:` and the trailing `}}`), or `None` when
+/// the value is not a valid reference (a literal, an env reference, empty or
+/// whitespace-only inner text, or extra surrounding text). The command line
+/// is returned verbatim for `shell_words` parsing at resolution time; this
+/// function never executes anything.
+pub fn parse_cmd_ref(value: &str) -> Option<String> {
+    let inner = value.strip_prefix("{{cmd:")?.strip_suffix("}}")?;
+    if inner.trim().is_empty() {
+        return None;
     }
     Some(inner.to_string())
 }
@@ -94,6 +113,115 @@ pub fn resolve_var(root: &Path, var: &str) -> Option<String> {
         }
     }
     None
+}
+
+/// The wall-clock budget for a command-sourced secret (spec 4.1): a helper
+/// that hangs must not stall a call indefinitely.
+pub const CMD_SECRET_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Why a command-sourced secret could not be resolved. Carries a trimmed
+/// single-line stderr excerpt where the process produced one: credential
+/// helpers put diagnostics (not secrets) on stderr, which is what makes an
+/// error actionable. The engine maps this to a `config` call error naming
+/// the account and field.
+#[derive(Debug)]
+pub enum CmdSecretError {
+    /// The command line did not parse into argv, or was empty.
+    Parse(String),
+    /// The binary could not be started (not found on PATH, not executable).
+    Spawn(String),
+    /// The command did not finish within the timeout.
+    Timeout,
+    /// The command exited non-zero. `code` is `None` when killed by a signal.
+    NonZero { code: Option<i32>, stderr: String },
+    /// The command succeeded but produced no non-whitespace output.
+    Empty { stderr: String },
+}
+
+/// Collapses stderr to a single trimmed line and caps its length, so an
+/// error message stays one line and cannot dump an unbounded helper log.
+fn stderr_excerpt(stderr: &[u8]) -> String {
+    const MAX: usize = 200;
+    let text = String::from_utf8_lossy(stderr);
+    let one_line = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if one_line.chars().count() > MAX {
+        let mut s: String = one_line.chars().take(MAX).collect();
+        s.push_str("...");
+        s
+    } else {
+        one_line
+    }
+}
+
+/// Resolves a command-sourced secret (spec 4.1). The command line is parsed
+/// into argv with shell-words rules (quoted arguments supported); NO shell is
+/// involved, so pipes, redirection, and substitution are not interpreted. The
+/// binary is resolved via `PATH`. Stdout with trailing whitespace trimmed is
+/// the secret value. A parse failure, a spawn failure, a non-zero exit, a
+/// timeout, or empty stdout is an error. The resolved value lives only in the
+/// returned `String`; it is never logged here.
+pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<String, CmdSecretError> {
+    let argv = shell_words::split(cmdline).map_err(|e| CmdSecretError::Parse(e.to_string()))?;
+    let (program, args) = argv
+        .split_first()
+        .ok_or_else(|| CmdSecretError::Parse("empty command".to_string()))?;
+
+    let mut child = Command::new(program)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| CmdSecretError::Spawn(format!("{program}: {e}")))?;
+
+    // Drain both pipes on their own threads so a large output cannot deadlock
+    // the child against a full pipe while we wait; keep the child handle so
+    // the deadline can kill it.
+    let mut out_pipe = child.stdout.take().expect("stdout piped");
+    let mut err_pipe = child.stderr.take().expect("stderr piped");
+    let out_join = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = out_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let err_join = thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = err_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    return Err(CmdSecretError::Timeout);
+                }
+                thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => return Err(CmdSecretError::Spawn(e.to_string())),
+        }
+    };
+
+    let stdout = out_join.join().unwrap_or_default();
+    let stderr = err_join.join().unwrap_or_default();
+    let excerpt = stderr_excerpt(&stderr);
+
+    if !status.success() {
+        return Err(CmdSecretError::NonZero {
+            code: status.code(),
+            stderr: excerpt,
+        });
+    }
+    let value = String::from_utf8_lossy(&stdout);
+    let trimmed = value.trim_end();
+    if trimmed.is_empty() {
+        return Err(CmdSecretError::Empty { stderr: excerpt });
+    }
+    Ok(trimmed.to_string())
 }
 
 /// The subset of `vars` that `resolve_var` cannot resolve in any scope,
@@ -182,6 +310,36 @@ mod tests {
         assert_eq!(parse_env_ref("{{env.A}} suffix"), None);
         assert_eq!(parse_env_ref("{{env.}}"), None);
         assert_eq!(parse_env_ref("{{secret.a}}"), None);
+    }
+
+    // --- parse_cmd_ref -----------------------------------------------------
+
+    #[test]
+    fn parse_cmd_ref_accepts_valid_reference() {
+        assert_eq!(
+            parse_cmd_ref("{{cmd:gh auth token}}"),
+            Some("gh auth token".to_string())
+        );
+        assert_eq!(
+            parse_cmd_ref("{{cmd:op read \"op://vault/item/field\"}}"),
+            Some("op read \"op://vault/item/field\"".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_cmd_ref_rejects_malformed_values() {
+        assert_eq!(parse_cmd_ref("literal"), None);
+        assert_eq!(parse_cmd_ref("{{env.TOKEN}}"), None);
+        assert_eq!(parse_cmd_ref("prefix {{cmd:gh}}"), None);
+        assert_eq!(parse_cmd_ref("{{cmd:gh}} suffix"), None);
+        assert_eq!(parse_cmd_ref("{{cmd:}}"), None);
+        assert_eq!(parse_cmd_ref("{{cmd:   }}"), None);
+    }
+
+    #[test]
+    fn parse_env_ref_and_cmd_ref_are_mutually_exclusive() {
+        assert!(parse_env_ref("{{cmd:gh}}").is_none());
+        assert!(parse_cmd_ref("{{env.T}}").is_none());
     }
 
     // --- parse_dotenv --------------------------------------------------
@@ -506,5 +664,108 @@ mod tests {
         write(&project_secrets_path(root.path()), "FOO=bar\n");
         write(&root.path().join(".gitignore"), "/.apb/secrets.env\n");
         assert!(!gitignore_gap(root.path()));
+    }
+
+    // --- resolve_cmd (unix stub executable) --------------------------------
+
+    #[cfg(unix)]
+    fn write_stub(dir: &Path, name: &str, script: &str) -> PathBuf {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join(name);
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cmd_returns_trimmed_stdout() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_stub(
+            dir.path(),
+            "ok-secret",
+            "#!/bin/sh\nprintf 'resolved-token-value\\n\\n'\n",
+        );
+        let out = resolve_cmd(
+            &format!("{} arg1", stub.to_string_lossy()),
+            std::time::Duration::from_secs(10),
+        )
+        .unwrap();
+        assert_eq!(out, "resolved-token-value");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cmd_nonzero_exit_is_error_with_stderr_excerpt() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_stub(
+            dir.path(),
+            "fail-secret",
+            "#!/bin/sh\necho 'gh: not logged in' >&2\nexit 3\n",
+        );
+        match resolve_cmd(&stub.to_string_lossy(), std::time::Duration::from_secs(10)) {
+            Err(CmdSecretError::NonZero { code, stderr }) => {
+                assert_eq!(code, Some(3));
+                assert!(stderr.contains("not logged in"), "stderr excerpt: {stderr}");
+            }
+            other => panic!("expected NonZero, got {other:?}"),
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cmd_empty_output_is_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_stub(dir.path(), "empty-secret", "#!/bin/sh\nexit 0\n");
+        assert!(matches!(
+            resolve_cmd(&stub.to_string_lossy(), std::time::Duration::from_secs(10)),
+            Err(CmdSecretError::Empty { .. })
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cmd_times_out_and_kills_child() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_stub(dir.path(), "slow-secret", "#!/bin/sh\nsleep 30\n");
+        let started = std::time::Instant::now();
+        assert!(matches!(
+            resolve_cmd(
+                &stub.to_string_lossy(),
+                std::time::Duration::from_millis(300)
+            ),
+            Err(CmdSecretError::Timeout)
+        ));
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(5),
+            "timeout did not preempt sleep"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cmd_missing_binary_is_spawn_error() {
+        assert!(matches!(
+            resolve_cmd("apb-no-such-binary-zzz", std::time::Duration::from_secs(10)),
+            Err(CmdSecretError::Spawn(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_cmd_empty_command_is_parse_error() {
+        assert!(matches!(
+            resolve_cmd("   ", std::time::Duration::from_secs(10)),
+            Err(CmdSecretError::Parse(_))
+        ));
+    }
+
+    #[test]
+    fn resolve_cmd_unbalanced_quotes_is_parse_error() {
+        assert!(matches!(
+            resolve_cmd("gh \"unterminated", std::time::Duration::from_secs(10)),
+            Err(CmdSecretError::Parse(_))
+        ));
     }
 }

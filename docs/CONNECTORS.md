@@ -45,17 +45,22 @@ accounts:
 
 The merged list is global accounts plus project accounts; a project account with
 the same name replaces the global one, all others are additive. A `secret: true`
-field must be exactly one `{{env.VAR}}` reference; a literal secret in a config
-file is a validation error. At most one `default: true` per merged list.
+field must be exactly one reference, either `{{env.VAR}}` or `{{cmd:<command>}}`
+(a command whose stdout is the secret, resolved at call time, e.g.
+`token: "{{cmd:gh auth token}}"`); a literal secret in a config file is a
+validation error. At most one `default: true` per merged list.
 
 ## Secrets
 
 An `{{env.VAR}}` reference resolves at call time, in order: the process
 environment, then the project `<project>/.apb/secrets.env`, then the global
 `<config-dir>/secrets.env`. Dotenv files are `KEY=value` lines read only by
-`apb`. Secret values never appear in the run manifest, the event log, CLI output,
-or generated prompts, and the connector env names are scrubbed from every spawned
-agent's environment.
+`apb`. A `{{cmd:<command>}}` reference instead runs the command (shell-words
+argv, no shell, 10 second timeout) at call and healthcheck time and uses its
+trimmed stdout as the value; the command string is part of the account digest,
+so changing it requires re-approval. Secret values never appear in the run
+manifest, the event log, CLI output, or generated prompts, and the connector
+env names are scrubbed from every spawned agent's environment.
 
 List the variables an account still needs (names only, never values) with:
 
@@ -130,3 +135,66 @@ apb connector init <name>       scaffold a new connector folder from a template
 the engine when a node executes a call); outside a run use `--dry-run` to render
 a call without executing it, or the dashboard healthcheck to probe an account.
 `--args -` reads the JSON arguments from stdin.
+
+## Official connectors
+
+Four official connectors ship inside the `apb` binary and install with
+`apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`.
+Installing from the binary records trust for the connector's tree digest
+in the same action, since the bytes are already part of the binary you
+are running; `apb connector install --from-dir <path>` (the development
+loop for this repository, `connectors/<name>/`) keeps the normal approve
+flow.
+
+### github
+
+Account fields: `api_base` (`https://api.github.com`, or your GHES API
+base) and `token` (secret). Prefer `token: "{{cmd:gh auth token}}"` when
+`gh auth login` has already run; otherwise `{{env.GITHUB_TOKEN}}` with a
+personal access token: classic PATs need `repo` (or `public_repo` for
+public repositories); fine-grained PATs need repository access with
+Actions write permission for `dispatch_workflow`. Healthcheck:
+`get_rate_limit`.
+
+### telegram
+
+Account fields: `api_base` (`https://api.telegram.org`, overridable for
+a self-hosted Bot API server) and `token` (secret) - the token
+[@BotFather](https://t.me/BotFather) gives you for a new bot. The bot
+must already be a member of a chat before `send_message` reaches it.
+Healthcheck: `get_me`.
+
+### smtp
+
+Account fields: `host`, `port`, `from_email` (all required), and
+`username`, `password` (secret), `from_name`, `use_tls` (all optional).
+Set `use_tls` explicitly (there is no engine-level default for account
+fields): `true` for STARTTLS on port 587, the common case. Healthcheck:
+`verify` (connects, negotiates STARTTLS, authenticates, sends nothing).
+
+### sentry
+
+Account fields: `base_url` (`https://sentry.io`, or self-hosted),
+`org` (the organization slug), and `token` (secret). Create the token at
+Settings > Auth Tokens with scopes `project:read`, `event:read`,
+`event:write` for issue functions and `project:releases` for
+`create_release`/`create_deploy`. `list_issues` paginates through the
+call result's `link` field: pass the cursor it returns back into the
+next call's `cursor` argument. Healthcheck: `list_projects`.
+
+### Demo playbooks
+
+`examples/playbooks/sentry-triage.yaml` and
+`examples/playbooks/release-announce.yaml` exercise the four connectors
+end to end and double as reference examples for grant allowlists and
+`max_calls`. They validate in CI against fake accounts and are not run
+against real services there; run them manually once your own accounts
+are configured and approved.
+
+### Coverage note
+
+Write functions (issue creation, merges, releases, sends) are verified
+by the offline contract tests in each connector's `tests.yaml`; the
+env-gated live smoke tests exercise each connector's healthcheck plus
+one read-only function against the real service. Write paths are not
+called against real services by any automated test.

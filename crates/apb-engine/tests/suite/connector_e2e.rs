@@ -152,6 +152,7 @@ fn call(
         account,
         args,
         dry_run: false,
+        full: false,
     })
 }
 

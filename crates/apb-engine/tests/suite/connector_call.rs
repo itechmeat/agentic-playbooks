@@ -55,6 +55,27 @@ functions:
     url: "{{account.base_url}}/items"
     body: "{{args}}"
     args_schema: { type: object, properties: { title: { type: string } }, required: [title] }
+  - name: with_headers
+    description: sends custom headers
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/h"
+    headers:
+      X-Api-Version: "2024-01"
+      Accept: application/vnd.test+json
+  - name: ua_override
+    description: overrides the default user agent
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/u"
+    headers:
+      User-Agent: custom-agent/9
+  - name: list_pick
+    description: list with a projection
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/pick"
+    response_pick: [number, user.login, labels.name]
   - name: ping
     description: A canned mock, no network
     mock: { status: 200, body: { ok: true } }
@@ -71,6 +92,7 @@ fn account(base_url: &str) -> ManifestAccount {
             ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
         ]),
         env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+        cmd: BTreeMap::new(),
         digest: "sha256:acct".to_string(),
     }
 }
@@ -114,6 +136,84 @@ fn seed_secret(root: &Path) {
     std::fs::write(path, format!("{SECRET_VAR}={SECRET_VALUE}\n")).unwrap();
 }
 
+/// A connector whose `token` secret is sourced from a command, echoed back by
+/// the `echo` function so redaction can be asserted end to end. The command
+/// itself is bound per-test through the manifest account's `cmd` map, so the
+/// definition carries no path.
+#[cfg(unix)]
+const CMD_CONNECTOR_YAML: &str = r#"
+name: cmd-conn
+version: 0.1.0
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: echo
+    description: Echo whatever the service returns
+    method: GET
+    url: "{{account.base_url}}/echo"
+"#;
+
+#[cfg(unix)]
+fn write_cmd_connector(run_dir: &Path) {
+    let cdir = run_dir.join("connectors");
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join("cmd-conn.yaml"), CMD_CONNECTOR_YAML).unwrap();
+}
+
+#[cfg(unix)]
+fn cmd_account(base_url: &str, stub_path: &str) -> ManifestAccount {
+    ManifestAccount {
+        name: "acct1".to_string(),
+        default: true,
+        fields: BTreeMap::from([
+            ("base_url".to_string(), base_url.to_string()),
+            ("token".to_string(), format!("{{{{cmd:{stub_path}}}}}")),
+        ]),
+        env: BTreeMap::new(),
+        cmd: BTreeMap::from([("token".to_string(), stub_path.to_string())]),
+        digest: "sha256:acct".to_string(),
+    }
+}
+
+#[cfg(unix)]
+fn write_stub(dir: &Path, name: &str, script: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, script).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
+fn seed_cmd_run(run_dir: &Path, account: ManifestAccount) {
+    let mut m = RunExecutionManifest::default();
+    m.connectors.push(ManifestConnector {
+        name: "cmd-conn".to_string(),
+        digest: "sha256:test".to_string(),
+        accounts: vec![account],
+    });
+    m.connector_grants.insert(
+        NODE.to_string(),
+        vec![ManifestConnectorGrant {
+            connector: "cmd-conn".to_string(),
+            accounts: vec!["acct1".to_string()],
+            functions: vec!["echo".to_string()],
+            max_calls: None,
+        }],
+    );
+    manifest::write(run_dir, &m).unwrap();
+}
+
 fn call<'a>(
     run_dir: &'a Path,
     root: &'a Path,
@@ -131,6 +231,26 @@ fn call<'a>(
         account,
         args,
         dry_run,
+        full: false,
+    })
+}
+
+fn call_full<'a>(
+    run_dir: &'a Path,
+    root: &'a Path,
+    function: &'a str,
+    args: serde_json::Value,
+) -> (serde_json::Value, bool) {
+    execute(CallRequest {
+        run_dir,
+        root,
+        node_id: NODE,
+        connector: CONNECTOR,
+        function,
+        account: None,
+        args,
+        dry_run: false,
+        full: true,
     })
 }
 
@@ -611,6 +731,7 @@ functions:
             ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
         ]),
         env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+        cmd: BTreeMap::new(),
         digest: "sha256:acct".to_string(),
     };
     let mut m = RunExecutionManifest::default();
@@ -642,6 +763,7 @@ functions:
         account: None,
         args: serde_json::json!({}),
         dry_run: false,
+        full: false,
     });
     assert!(!ok);
     assert_eq!(value["error"]["code"], serde_json::json!("network"));
@@ -691,6 +813,7 @@ functions:
             default: true,
             fields: BTreeMap::new(),
             env: BTreeMap::new(),
+            cmd: BTreeMap::new(),
             digest: "sha256:a".to_string(),
         }],
     });
@@ -748,10 +871,669 @@ functions:
         account: None,
         args: serde_json::json!({}),
         dry_run: false,
+        full: false,
     });
     assert!(
         ok3,
         "the other connector's budget must be independent: {v3}"
     );
     assert_eq!(v3["status"], serde_json::json!(200));
+}
+
+#[test]
+fn path_auth_renders_token_into_path_segment_keeping_colon() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    // A token with a colon and url-reserved-adjacent bytes.
+    let path = root.path().join(".apb/secrets.env");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, format!("{SECRET_VAR}=111:AAA_bbb-CCC\n")).unwrap();
+
+    let server = common::spawn_http(200, "OK", &[], r#"{"ok":true}"#.to_string());
+    const TELE_YAML: &str = r#"
+name: tele
+version: 0.1.0
+auth:
+  kind: path
+  value_template: "bot{{secret.token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_me
+    description: probe
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/{{auth}}/getMe"
+"#;
+    let acct = ManifestAccount {
+        name: "acct1".to_string(),
+        default: true,
+        fields: BTreeMap::from([
+            ("base_url".to_string(), server.base_url.clone()),
+            ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
+        ]),
+        env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+        cmd: BTreeMap::new(),
+        digest: "sha256:acct".to_string(),
+    };
+    let mut m = RunExecutionManifest::default();
+    m.connectors.push(ManifestConnector {
+        name: "tele".to_string(),
+        digest: "sha256:test".to_string(),
+        accounts: vec![acct],
+    });
+    m.connector_grants.insert(
+        NODE.to_string(),
+        vec![ManifestConnectorGrant {
+            connector: "tele".to_string(),
+            accounts: vec!["acct1".to_string()],
+            functions: vec!["get_me".to_string()],
+            max_calls: None,
+        }],
+    );
+    manifest::write(run.path(), &m).unwrap();
+    let cdir = run.path().join("connectors");
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join("tele.yaml"), TELE_YAML).unwrap();
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "tele",
+        function: "get_me",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(ok, "expected ok: {value}");
+
+    let req = server.captured_request().expect("server saw a request");
+    assert!(
+        req.starts_with("GET /bot111:AAA_bbb-CCC/getMe"),
+        "path segment should keep ':' literal: {req}"
+    );
+    assert!(
+        !req.contains("%3A"),
+        "colon must not be percent-encoded: {req}"
+    );
+
+    // The event log keeps the literal {{auth}}, never the token.
+    let url = read_all(run.path())
+        .unwrap()
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::ConnectorCall { url, .. } => Some(url.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(url.ends_with("/{{auth}}/getMe"), "pre-auth url: {url}");
+    assert!(
+        !url.contains("111:AAA"),
+        "token leaked into event url: {url}"
+    );
+}
+
+#[test]
+fn path_auth_dry_run_keeps_auth_placeholder_and_needs_no_secret() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    const TELE_YAML: &str = r#"
+name: tele
+version: 0.1.0
+auth:
+  kind: path
+  value_template: "bot{{secret.token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_me
+    description: probe
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/{{auth}}/getMe"
+"#;
+    let mut m = RunExecutionManifest::default();
+    m.connectors.push(ManifestConnector {
+        name: "tele".to_string(),
+        digest: "sha256:test".to_string(),
+        accounts: vec![ManifestAccount {
+            name: "acct1".to_string(),
+            default: true,
+            fields: BTreeMap::from([
+                (
+                    "base_url".to_string(),
+                    "https://api.telegram.org".to_string(),
+                ),
+                ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
+            ]),
+            env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+            cmd: BTreeMap::new(),
+            digest: "sha256:a".to_string(),
+        }],
+    });
+    m.connector_grants.insert(
+        NODE.to_string(),
+        vec![ManifestConnectorGrant {
+            connector: "tele".to_string(),
+            accounts: vec!["acct1".to_string()],
+            functions: vec!["get_me".to_string()],
+            max_calls: None,
+        }],
+    );
+    manifest::write(run.path(), &m).unwrap();
+    let cdir = run.path().join("connectors");
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join("tele.yaml"), TELE_YAML).unwrap();
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "tele",
+        function: "get_me",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: true,
+        full: false,
+    });
+    assert!(ok, "dry-run should succeed without a secret: {value}");
+    assert_eq!(
+        value["url"],
+        serde_json::json!("https://api.telegram.org/{{auth}}/getMe")
+    );
+}
+
+#[test]
+fn sends_function_headers_and_default_user_agent() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let server = common::spawn_http(200, "OK", &[], r#"{"ok":true}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["with_headers"],
+        None,
+    );
+    let (_v, ok) = call(
+        run.path(),
+        root.path(),
+        "with_headers",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok);
+    let req = server.captured_request().unwrap();
+    assert!(
+        req.contains("X-Api-Version: 2024-01"),
+        "custom header missing: {req}"
+    );
+    assert!(
+        req.contains("Accept: application/vnd.test+json"),
+        "accept missing: {req}"
+    );
+    assert!(
+        req.contains("User-Agent: apb/"),
+        "default UA missing: {req}"
+    );
+}
+
+#[test]
+fn function_user_agent_overrides_the_default() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let server = common::spawn_http(200, "OK", &[], r#"{"ok":true}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["ua_override"],
+        None,
+    );
+    let (_v, ok) = call(
+        run.path(),
+        root.path(),
+        "ua_override",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok);
+    let req = server.captured_request().unwrap();
+    assert!(
+        req.contains("User-Agent: custom-agent/9"),
+        "override missing: {req}"
+    );
+    assert!(
+        !req.contains("User-Agent: apb/"),
+        "default UA must not also be sent: {req}"
+    );
+}
+
+#[test]
+fn response_link_header_surfaces_in_result() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let link = r#"<https://api.example/next>; rel="next""#;
+    let server = common::spawn_http(200, "OK", &[("Link", link)], r#"{"items":[]}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_items"],
+        None,
+    );
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_items",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok, "{value}");
+    assert_eq!(value["link"], serde_json::json!(link));
+}
+
+#[test]
+fn absent_link_header_omits_the_field() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let server = common::spawn_http(200, "OK", &[], r#"{"items":[]}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_items"],
+        None,
+    );
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_items",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok);
+    assert!(value.get("link").is_none(), "link must be absent: {value}");
+}
+
+#[test]
+fn response_pick_projects_by_default_and_full_bypasses_it() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let raw = r#"[{"number":1,"title":"x","user":{"login":"octo","id":9},"labels":[{"name":"bug","color":"red"}]}]"#;
+    let server = common::spawn_http(200, "OK", &[], raw.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_pick"],
+        None,
+    );
+
+    // Default: projected body, picked: true.
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_pick",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok, "{value}");
+    assert_eq!(value["picked"], serde_json::json!(true));
+    assert_eq!(
+        value["body"],
+        serde_json::json!([
+            { "number": 1, "user": { "login": "octo" }, "labels": [ { "name": "bug" } ] }
+        ])
+    );
+
+    // --full: raw body, no picked marker. Needs a fresh one-shot server and a
+    // fresh run dir (the run manifest is write-once).
+    let run2 = tempfile::tempdir().unwrap();
+    let server2 = common::spawn_http(200, "OK", &[], raw.to_string());
+    seed_run(
+        run2.path(),
+        vec![account(&server2.base_url)],
+        &["acct1"],
+        &["list_pick"],
+        None,
+    );
+    let (full, ok2) = call_full(run2.path(), root.path(), "list_pick", serde_json::json!({}));
+    assert!(ok2, "{full}");
+    assert!(
+        full.get("picked").is_none(),
+        "full must not mark picked: {full}"
+    );
+    assert_eq!(full["body"][0]["title"], serde_json::json!("x"));
+    assert_eq!(full["body"][0]["user"]["id"], serde_json::json!(9));
+}
+
+// --- command-sourced secrets (spec 4.1) --------------------------------
+
+#[cfg(unix)]
+#[test]
+fn cmd_secret_is_resolved_and_injected_as_auth_header() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    let stub = write_stub(
+        stubs.path(),
+        "ok-token",
+        "#!/bin/sh\nprintf 'cmd-secret-42\\n'\n",
+    );
+
+    let server = common::spawn_http(200, "OK", &[], r#"{"ok":true}"#.to_string());
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account(&server.base_url, &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(ok, "expected ok: {value}");
+    let req = server.captured_request().expect("server saw a request");
+    assert!(
+        req.contains("Authorization: Bearer cmd-secret-42"),
+        "auth header wrong:\n{req}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cmd_secret_is_redacted_in_result_body() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    let stub = write_stub(
+        stubs.path(),
+        "ok-token",
+        "#!/bin/sh\nprintf 'cmd-secret-42\\n'\n",
+    );
+
+    // The service echoes the token back in its body.
+    let server = common::spawn_http(200, "OK", &[], r#"{"echo":"cmd-secret-42"}"#.to_string());
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account(&server.base_url, &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(ok, "expected ok: {value}");
+    assert_eq!(
+        value["body"]["echo"],
+        serde_json::json!("[redacted:cmd:token]")
+    );
+    assert!(
+        !value.to_string().contains("cmd-secret-42"),
+        "secret leaked: {value}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cmd_secret_nonzero_exit_is_config_error_naming_account_and_field() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    let stub = write_stub(
+        stubs.path(),
+        "fail-token",
+        "#!/bin/sh\necho 'gh: not logged in' >&2\nexit 4\n",
+    );
+
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account("https://unused.example", &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(!ok);
+    assert_eq!(value["error"]["code"], serde_json::json!("config"));
+    let msg = value["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("acct1") && msg.contains("token"),
+        "names account and field: {msg}"
+    );
+    assert!(
+        msg.contains("not logged in"),
+        "includes stderr excerpt: {msg}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cmd_secret_empty_output_is_config_error() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    let stub = write_stub(stubs.path(), "empty-token", "#!/bin/sh\nexit 0\n");
+
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account("https://unused.example", &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(!ok);
+    assert_eq!(value["error"]["code"], serde_json::json!("config"));
+}
+
+#[cfg(unix)]
+#[test]
+fn dry_run_does_not_execute_cmd_secret() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    // A stub that touches a sentinel iff it ever runs.
+    let sentinel = stubs.path().join("ran.marker");
+    let stub = write_stub(
+        stubs.path(),
+        "sentinel-token",
+        &format!("#!/bin/sh\ntouch '{}'\nprintf 'x\\n'\n", sentinel.display()),
+    );
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account("https://api.example", &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: true,
+        full: false,
+    });
+    assert!(ok, "dry-run should render without secrets: {value}");
+    assert!(
+        !sentinel.exists(),
+        "dry-run must not execute the secret command"
+    );
+}
+
+// -- smtp end-to-end coverage through `execute` (slice 3, Task 7) --
+
+/// An smtp connector snapshot named like `CONNECTOR` so the shared `call`
+/// helper can drive it. Sends over the connection block (password from the
+/// env-backed secret) with an individually-templated optional body.
+const SMTP_YAML: &str = r#"
+name: mock-tracker
+version: 0.1.0
+account_fields:
+  - name: host
+    required: true
+  - name: port
+    required: true
+  - name: use_tls
+  - name: from_email
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: send_email
+    description: Send an email
+    smtp:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        password: "{{secret.token}}"
+      message:
+        from_email: "{{account.from_email}}"
+        to: "{{args.to}}"
+        subject: "{{args.subject}}"
+        body_text: "{{args.body_text}}"
+    args_schema: { type: object, properties: { to: { type: string }, subject: { type: string } }, required: [to, subject] }
+"#;
+
+/// Writes an smtp run manifest (one connector, one grant for `NODE`) and the
+/// copied smtp connector snapshot into `run_dir`.
+fn seed_smtp_run(run_dir: &Path) {
+    let mut m = RunExecutionManifest::default();
+    m.connectors.push(ManifestConnector {
+        name: CONNECTOR.to_string(),
+        digest: "sha256:test".to_string(),
+        accounts: vec![ManifestAccount {
+            name: "acct1".to_string(),
+            default: true,
+            fields: BTreeMap::from([
+                ("host".to_string(), "smtp.example.com".to_string()),
+                ("port".to_string(), "587".to_string()),
+                ("use_tls".to_string(), "true".to_string()),
+                ("from_email".to_string(), "a@b.c".to_string()),
+                ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
+            ]),
+            env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+            cmd: BTreeMap::new(),
+            digest: "sha256:acct".to_string(),
+        }],
+    });
+    m.connector_grants.insert(
+        NODE.to_string(),
+        vec![ManifestConnectorGrant {
+            connector: CONNECTOR.to_string(),
+            accounts: vec!["acct1".to_string()],
+            functions: vec!["send_email".to_string()],
+            max_calls: None,
+        }],
+    );
+    manifest::write(run_dir, &m).unwrap();
+    let cdir = run_dir.join("connectors");
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join(format!("{CONNECTOR}.yaml")), SMTP_YAML).unwrap();
+}
+
+#[test]
+fn smtp_dry_run_renders_envelope_and_records_no_event() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    // No secret seeded: dry-run must not need it.
+    seed_smtp_run(run.path());
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "send_email",
+        None,
+        serde_json::json!({"to": "x@y.z", "subject": "Hi", "body_text": "T"}),
+        true,
+    );
+    assert!(ok, "dry-run should succeed: {value}");
+    assert_eq!(value["dry_run"], serde_json::json!(true));
+    assert_eq!(value["envelope"]["from"], serde_json::json!("a@b.c"));
+    assert_eq!(value["envelope"]["to"], serde_json::json!(["x@y.z"]));
+    assert_eq!(value["envelope"]["subject"], serde_json::json!("Hi"));
+    assert!(
+        !value.to_string().contains("port"),
+        "dry-run must not leak the connection block"
+    );
+    let events = read_all(run.path()).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::ConnectorCall { .. }))
+    );
+}
+
+#[test]
+fn smtp_bad_address_is_invalid_args() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_smtp_run(run.path());
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "send_email",
+        None,
+        serde_json::json!({"to": "not-an-email", "subject": "Hi", "body_text": "T"}),
+        true,
+    );
+    assert!(!ok);
+    assert_eq!(value["error"]["code"], serde_json::json!("invalid_args"));
 }

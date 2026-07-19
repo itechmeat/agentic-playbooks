@@ -31,6 +31,11 @@ use crate::manifest::{self, ManifestAccount, ManifestConnector, ManifestConnecto
 /// truncated and the result marked `"truncated": true`.
 const BODY_CAP: usize = 1024 * 1024;
 
+/// The default User-Agent (spec 4.4): ureq sends its own, and GitHub rejects
+/// requests without one it recognizes. Overridden by a function `headers`
+/// entry naming `User-Agent`.
+const USER_AGENT: &str = concat!("apb/", env!("CARGO_PKG_VERSION"));
+
 /// One connector call request, assembled by the CLI from its arguments and the
 /// run context env variables.
 pub struct CallRequest<'a> {
@@ -47,92 +52,32 @@ pub struct CallRequest<'a> {
     pub args: Value,
     /// `--dry-run`: render and print without executing, resolving no secrets.
     pub dry_run: bool,
+    /// `--full`: return the complete response body, skipping the function's
+    /// `response_pick` projection (spec 4.5 debugging escape).
+    pub full: bool,
 }
 
-/// The structured error code taxonomy (spec section 8). The wire form is the
-/// snake_case string from [`CallErrorCode::as_str`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CallErrorCode {
-    Config,
-    Permission,
-    InvalidArgs,
-    Auth,
-    NotFound,
-    RateLimited,
-    Service,
-    Network,
-    Timeout,
-}
-
-impl CallErrorCode {
-    /// The wire string used in the result JSON and the event `outcome`.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            CallErrorCode::Config => "config",
-            CallErrorCode::Permission => "permission",
-            CallErrorCode::InvalidArgs => "invalid_args",
-            CallErrorCode::Auth => "auth",
-            CallErrorCode::NotFound => "not_found",
-            CallErrorCode::RateLimited => "rate_limited",
-            CallErrorCode::Service => "service",
-            CallErrorCode::Network => "network",
-            CallErrorCode::Timeout => "timeout",
-        }
-    }
-}
-
-/// A structured call error (spec section 8).
-#[derive(Debug, Clone)]
-pub struct CallError {
-    pub code: CallErrorCode,
-    pub message: String,
-    pub http_status: Option<u16>,
-    pub retry_after_sec: Option<u64>,
-}
-
-impl CallError {
-    fn new(code: CallErrorCode, message: impl Into<String>) -> Self {
-        CallError {
-            code,
-            message: message.into(),
-            http_status: None,
-            retry_after_sec: None,
-        }
-    }
-
-    /// The `{ "ok": false, "error": { ... } }` result JSON.
-    fn to_json(&self) -> Value {
-        let mut err = serde_json::Map::new();
-        err.insert("code".into(), json!(self.code.as_str()));
-        err.insert("message".into(), json!(self.message));
-        if let Some(s) = self.http_status {
-            err.insert("http_status".into(), json!(s));
-        }
-        if let Some(r) = self.retry_after_sec {
-            err.insert("retry_after_sec".into(), json!(r));
-        }
-        json!({ "ok": false, "error": Value::Object(err) })
-    }
-}
-
-/// A successful call result (spec section 8).
-#[derive(Debug)]
-pub struct CallOk {
-    pub status: u16,
-    pub body: Value,
-    pub truncated: bool,
-}
+// The result taxonomy (`CallError`, `CallErrorCode`, `CallOk`) and the interim
+// message redaction live in `connector_result`, the shared sink both the HTTP
+// and SMTP call paths point at (keeps the file graph acyclic). Re-exported here
+// so the public path `apb_engine::connector_call::{CallError, ...}` is stable.
+use crate::connector_result::redact_message;
+pub use crate::connector_result::{CallError, CallErrorCode, CallOk};
 
 /// The metadata a reached call (mock or HTTP, ok or error) records in the
 /// event log. A dry-run or a gate rejection records nothing, so those never
 /// consume a `max_calls` budget.
 struct EventMeta {
     account: String,
-    /// Pre-auth rendered URL, `""` for a mock.
+    /// Pre-auth rendered URL, `""` for a mock, `smtp://host:port` for smtp.
     url: String,
     outcome: String,
     http_status: Option<u16>,
     duration_ms: u64,
+    /// SMTP-only: message subject and total recipient count, both `None` for
+    /// HTTP/mock and for smtp `verify`.
+    smtp_subject: Option<String>,
+    smtp_recipients: Option<u32>,
 }
 
 /// Runs the whole call pipeline and returns the JSON document to print plus an
@@ -144,13 +89,7 @@ pub fn execute(req: CallRequest) -> (Value, bool) {
         Outcome::DryRun(value) => (value, true),
         Outcome::Ok(ok, meta) => {
             append_event(&req, &meta);
-            let value = json!({
-                "ok": true,
-                "status": ok.status,
-                "body": ok.body,
-                "truncated": ok.truncated,
-            });
-            (value, true)
+            (ok.to_success_json(), true)
         }
         Outcome::Executed(err, meta) => {
             append_event(&req, &meta);
@@ -182,7 +121,8 @@ fn run(req: &CallRequest) -> Outcome {
     // 6 (mock) / 9-11 (HTTP): from here the call executes and carries event
     // metadata regardless of outcome.
     let account = prepared.account().to_string();
-    let url = prepared.pre_auth_url().to_string();
+    let url = prepared.pre_auth_url();
+    let (smtp_subject, smtp_recipients) = prepared.event_extra();
     let started = Instant::now();
     let (result, http_status) = prepared.dispatch();
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -196,6 +136,8 @@ fn run(req: &CallRequest) -> Outcome {
                 outcome: "ok".to_string(),
                 http_status,
                 duration_ms,
+                smtp_subject,
+                smtp_recipients,
             },
         ),
         Err(err) => {
@@ -209,6 +151,8 @@ fn run(req: &CallRequest) -> Outcome {
                     outcome,
                     http_status,
                     duration_ms,
+                    smtp_subject,
+                    smtp_recipients,
                 },
             )
         }
@@ -232,7 +176,14 @@ enum PreparedCall {
         status: u16,
         body: Value,
     },
-    Http(HttpCall),
+    // Boxed: `HttpCall` is much larger than `Mock`, so the variant is boxed to
+    // keep the enum small (clippy `large_enum_variant`).
+    Http(Box<HttpCall>),
+    // Boxed for the same reason: `SmtpCall` carries the built message bytes.
+    Smtp {
+        account: String,
+        call: Box<crate::connector_smtp::SmtpCall>,
+    },
 }
 
 /// An HTTP call ready to send.
@@ -243,6 +194,12 @@ struct HttpCall {
     /// NOT). This is the URL recorded in the event log.
     pre_auth_url: String,
     rendered_body: Option<Value>,
+    /// Rendered per-function headers (spec 4.4). Values use `account.*`/`args.*`
+    /// only; `secret.*` is forbidden here by `validate_templates`.
+    headers: BTreeMap<String, String>,
+    /// The effective `response_pick` projection (spec 4.5); empty when the
+    /// function declares none or `--full` bypasses it.
+    response_pick: Vec<String>,
     auth: Option<AuthSpec>,
     secrets: BTreeMap<String, String>,
     account_fields: BTreeMap<String, String>,
@@ -256,14 +213,26 @@ impl PreparedCall {
         match self {
             PreparedCall::Mock { account, .. } => account,
             PreparedCall::Http(h) => &h.account,
+            PreparedCall::Smtp { account, .. } => account,
         }
     }
 
-    /// The pre-auth URL for the event log; `""` for a mock.
-    fn pre_auth_url(&self) -> &str {
+    /// The pre-auth URL / endpoint for the event log; `""` for a mock, the
+    /// pre-auth URL for HTTP, `smtp://host:port` for smtp.
+    fn pre_auth_url(&self) -> String {
         match self {
-            PreparedCall::Mock { .. } => "",
-            PreparedCall::Http(h) => &h.pre_auth_url,
+            PreparedCall::Mock { .. } => String::new(),
+            PreparedCall::Http(h) => h.pre_auth_url.clone(),
+            PreparedCall::Smtp { call, .. } => call.endpoint(),
+        }
+    }
+
+    /// SMTP-only event metadata (subject, recipient count). `(None, None)` for
+    /// HTTP and mock, which record neither.
+    fn event_extra(&self) -> (Option<String>, Option<u32>) {
+        match self {
+            PreparedCall::Mock { .. } | PreparedCall::Http(_) => (None, None),
+            PreparedCall::Smtp { call, .. } => call.event_extra(),
         }
     }
 
@@ -275,6 +244,9 @@ impl PreparedCall {
                 (map_status(status, body, false, None), Some(status))
             }
             PreparedCall::Http(h) => h.send(),
+            // An smtp call has no HTTP status; the event log records the
+            // endpoint plus subject/recipient count, never a status code.
+            PreparedCall::Smtp { call, .. } => (call.send(), None),
         }
     }
 }
@@ -378,8 +350,104 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
         maccount,
         &req.args,
         req.root,
-        req.dry_run,
+        CallMode {
+            dry_run: req.dry_run,
+            full: req.full,
+        },
     )
+}
+
+/// The two call-mode flags `build_prepared` needs: `dry_run` renders without
+/// executing or resolving secrets, `full` bypasses the `response_pick`
+/// projection (spec 4.5). Bundled so the shared render entry point stays within
+/// a sane argument count.
+#[derive(Debug, Clone, Copy)]
+struct CallMode {
+    dry_run: bool,
+    full: bool,
+}
+
+/// The rendered HTTP shape of a function - method, the pre-auth URL (function
+/// query included, auth NOT), the rendered body, and the effective request
+/// headers (function `headers` plus the default `User-Agent` unless a function
+/// header overrides it) - produced without touching the network. Shared by the
+/// dry-run terminal, the live send path, and the offline `tests.yaml` runner
+/// (`connector_test`), so a contract test renders exactly what a `--dry-run`
+/// call renders.
+pub struct RenderedRequest {
+    pub method: String,
+    pub pre_auth_url: String,
+    pub rendered_body: Option<Value>,
+    /// The headers that would be sent: the rendered per-function `headers` with
+    /// the default `User-Agent` folded in unless a function header already names
+    /// it (case-insensitively). Auth headers are NOT included here (auth is
+    /// injected on the wire, after this render).
+    pub headers: BTreeMap<String, String>,
+}
+
+/// Renders a function's method, pre-auth URL, body, and headers against the
+/// given non-secret account fields, args, and secrets. `secrets` is threaded
+/// through so the render context stays uniform with the live send path (the
+/// secret-placement policy forbids `{{secret.*}}` outside `auth`, so it does
+/// not affect the URL/body here). Args substituted into the URL are
+/// percent-encoded; account prefixes stay raw (spec 6.1), matching the previous
+/// inline logic exactly. The default `User-Agent` (spec 4.4) is folded into the
+/// header map unless a function header overrides it.
+pub(crate) fn render_http(
+    function: &FunctionSpec,
+    account_fields: &BTreeMap<String, String>,
+    args: &Value,
+    secrets: &BTreeMap<String, String>,
+) -> Result<RenderedRequest, CallError> {
+    let ctx = RenderCtx {
+        account: account_fields,
+        args,
+        secrets,
+    };
+    let method = function.method.clone().unwrap_or_else(|| "GET".to_string());
+    // The URL base renders with raw substitution EXCEPT that `{{args.*}}` values
+    // are pre-encoded: an account field used as a URL prefix (`base_url`) is
+    // trusted config that must keep its `://` (spec 6.1) and so cannot go through
+    // whole-value percent-encoding, while argument values in a path segment must
+    // still be encoded so they cannot inject traversal or extra query structure.
+    let url_args = encode_args_for_url(args);
+    let url_ctx = RenderCtx {
+        account: account_fields,
+        args: &url_args,
+        secrets,
+    };
+    let base = render_raw(function.url.as_deref().unwrap_or(""), &url_ctx)
+        .map_err(|e| CallError::new(CallErrorCode::Config, format!("URL render failed: {e}")))?;
+    let query = render_query(function, &ctx)?;
+    let pre_auth_url = assemble_url(&base, &query);
+    validate_url(&pre_auth_url)?;
+    let rendered_body = match &function.body {
+        Some(b) => Some(render_body(b, &ctx).map_err(|e| {
+            CallError::new(CallErrorCode::Config, format!("body render failed: {e}"))
+        })?),
+        None => None,
+    };
+    let mut headers = BTreeMap::new();
+    for (name, template) in &function.headers {
+        let value = render_raw(template, &ctx).map_err(|e| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("header `{name}` render failed: {e}"),
+            )
+        })?;
+        headers.insert(name.clone(), value);
+    }
+    // Default User-Agent (spec 4.4) unless a function header already names it.
+    let has_ua = headers.keys().any(|k| k.eq_ignore_ascii_case("user-agent"));
+    if !has_ua {
+        headers.insert("User-Agent".to_string(), USER_AGENT.to_string());
+    }
+    Ok(RenderedRequest {
+        method,
+        pre_auth_url,
+        rendered_body,
+        headers,
+    })
 }
 
 /// Shared gate + render logic (pipeline steps 5-8): validates args against the
@@ -397,8 +465,9 @@ fn build_prepared(
     maccount: &ManifestAccount,
     args: &Value,
     root: &Path,
-    dry_run: bool,
+    mode: CallMode,
 ) -> Result<Prepared, CallError> {
+    let CallMode { dry_run, full } = mode;
     // 5. Validate args against the function schema.
     if let Some(schema) = &function.args_schema {
         validate_args(schema, args)?;
@@ -422,65 +491,67 @@ fn build_prepared(
         resolve_secrets(root, maccount)?
     };
 
-    // 8. Render URL, query, body; enforce 6.1; build the pre-auth URL.
-    let ctx = RenderCtx {
-        account: &account_fields,
-        args,
-        secrets: &secrets,
-    };
-    let method = function.method.clone().unwrap_or_else(|| "GET".to_string());
-    // The URL base renders with raw substitution EXCEPT that `{{args.*}}`
-    // values are pre-encoded: an account field used as a URL prefix
-    // (`base_url`) is trusted config that must keep its `://` (spec 6.1) and so
-    // cannot go through whole-value percent-encoding, while argument values in
-    // a path segment must still be encoded so they cannot inject traversal or
-    // extra query structure. `secret.*` is not permitted in a URL (enforced by
-    // `validate_templates`), so pre-encoding only args is sufficient.
-    //
-    // DO NOT "fix" this by percent-encoding `{{account.*}}` too: non-prefix
-    // account values are intentionally left raw. Account fields are trusted
-    // (pinned by the per-account digest in the trust store), and encoding them
-    // would corrupt a `base_url` prefix (its `://` and any path). Only
-    // untrusted `{{args.*}}` needs encoding, which is what happens here.
-    let url_args = encode_args_for_url(args);
-    let url_ctx = RenderCtx {
-        account: &account_fields,
-        args: &url_args,
-        secrets: &secrets,
-    };
-    let base = render_raw(function.url.as_deref().unwrap_or(""), &url_ctx)
-        .map_err(|e| CallError::new(CallErrorCode::Config, format!("URL render failed: {e}")))?;
-    let query = render_query(function, &ctx)?;
-    let pre_auth_url = assemble_url(&base, &query);
-    validate_url(&pre_auth_url)?;
-    let rendered_body = match &function.body {
-        Some(b) => Some(render_body(b, &ctx).map_err(|e| {
-            CallError::new(CallErrorCode::Config, format!("body render failed: {e}"))
-        })?),
-        None => None,
-    };
+    // 7b. SMTP: render the message/connection off the same resolved secrets and
+    // account fields, or produce a dry-run envelope without connecting. An smtp
+    // function has no URL/query/body/header rendering (those are HTTP-only), so
+    // this branch is terminal.
+    if let Some(smtp) = &function.smtp {
+        return match crate::connector_smtp::build(
+            smtp,
+            &account_fields,
+            args,
+            &secrets,
+            redactions,
+            dry_run,
+            function.timeout_sec,
+        )? {
+            crate::connector_smtp::SmtpBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
+            crate::connector_smtp::SmtpBuild::Call(call) => {
+                Ok(Prepared::Call(Box::new(PreparedCall::Smtp {
+                    account: account_name,
+                    call,
+                })))
+            }
+        };
+    }
+
+    // 8. Render URL, query, body, and headers (shared with the offline test
+    // runner via `render_http`); enforce 6.1; build the pre-auth URL. The
+    // default User-Agent and any function headers are folded into
+    // `rendered.headers` there, so the same bytes reach the wire and a contract
+    // test alike.
+    let rendered = render_http(function, &account_fields, args, &secrets)?;
 
     if dry_run {
         return Ok(Prepared::DryRun(json!({
             "ok": true,
             "dry_run": true,
-            "method": method,
-            "url": pre_auth_url,
-            "body": rendered_body.unwrap_or(Value::Null),
+            "method": rendered.method,
+            "url": rendered.pre_auth_url,
+            "body": rendered.rendered_body.unwrap_or(Value::Null),
         })));
     }
 
-    Ok(Prepared::Call(Box::new(PreparedCall::Http(HttpCall {
-        account: account_name,
-        method,
-        pre_auth_url,
-        rendered_body,
-        auth: auth.cloned(),
-        secrets,
-        account_fields,
-        timeout_sec: function.timeout_sec,
-        redactions,
-    }))))
+    Ok(Prepared::Call(Box::new(PreparedCall::Http(Box::new(
+        HttpCall {
+            account: account_name,
+            method: rendered.method,
+            pre_auth_url: rendered.pre_auth_url,
+            rendered_body: rendered.rendered_body,
+            headers: rendered.headers,
+            // `--full` bypasses the projection (spec 4.5), returning the raw body.
+            response_pick: if full {
+                Vec::new()
+            } else {
+                function.response_pick.clone()
+            },
+            auth: auth.cloned(),
+            secrets,
+            account_fields,
+            timeout_sec: function.timeout_sec,
+            redactions,
+        },
+    )))))
 }
 
 /// Live healthcheck probe (spec 2026-07-18-connectors-design section 9): runs
@@ -501,15 +572,7 @@ pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
         Ok(Prepared::Call(prepared)) => {
             let (result, _status) = prepared.dispatch();
             match result {
-                Ok(ok) => (
-                    json!({
-                        "ok": true,
-                        "status": ok.status,
-                        "body": ok.body,
-                        "truncated": ok.truncated,
-                    }),
-                    true,
-                ),
+                Ok(ok) => (ok.to_success_json(), true),
                 Err(err) => (err.to_json(), false),
             }
         }
@@ -518,8 +581,9 @@ pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
 }
 
 /// Resolves the live connector + account for `healthcheck` and gates +
-/// renders its declared healthcheck function through `build_prepared`, with
-/// no arguments (a healthcheck is a reachability probe, not a data call).
+/// renders its declared healthcheck function through the shared
+/// `prepare_play_call`, with no arguments (a healthcheck is a reachability
+/// probe, not a data call) and always live (never dry-run).
 fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepared, CallError> {
     let loaded = store::load(name)
         .map_err(|e| CallError::new(CallErrorCode::Config, format!("connector `{name}`: {e}")))?;
@@ -529,10 +593,85 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
             format!("connector `{name}` declares no healthcheck"),
         )
     })?;
-    let function = loaded.doc.function(&hc_name).cloned().ok_or_else(|| {
+    // A healthcheck is always live (never dry-run) and takes no arguments,
+    // per the healthcheck contract - it is a reachability probe, not a data
+    // call. Delegates account resolution, trust gating, and rendering to
+    // the shared playground preparation path so the two live-call callers
+    // never duplicate that logic. `full: true` keeps the probe's existing
+    // behavior: a reachability check shows the raw body, never a
+    // `response_pick` projection.
+    prepare_play_call(root, name, Some(account), &hc_name, &json!({}), false, true)
+}
+
+/// Live playground call (dashboard slice 6, spec
+/// 2026-07-19-official-connectors-design section 7): the connector detail
+/// page's manual "call a function" panel. Runs an arbitrary function
+/// against the LIVE connector definition and LIVE merged account config
+/// through the exact same gate + render + dispatch pipeline `healthcheck`
+/// uses (`prepare_play_call` and `build_prepared`), so a dry-run renders
+/// the request without touching secrets and a real call gets the same
+/// trust gating, URL hardening, auth injection, and interim redaction as
+/// any other call. `account: None` selects the single or default
+/// configured account, exactly like the CLI's `select_account`. `full`
+/// mirrors the CLI's `--full` escape (spec 4.5): `false` (the playground's
+/// default) applies the function's `response_pick` projection like a normal
+/// agent call, `true` bypasses it and returns the raw body. Returns the
+/// same `{ "ok": bool, ... }` shape `execute`/`healthcheck` do.
+pub fn play_call(
+    root: &Path,
+    name: &str,
+    account: Option<&str>,
+    function_name: &str,
+    args: &Value,
+    dry_run: bool,
+    full: bool,
+) -> (Value, bool) {
+    match prepare_play_call(root, name, account, function_name, args, dry_run, full) {
+        Ok(Prepared::DryRun(v)) => (v, true),
+        Ok(Prepared::Call(prepared)) => {
+            let (result, _status) = prepared.dispatch();
+            match result {
+                Ok(ok) => (ok.to_success_json(), true),
+                Err(err) => (err.to_json(), false),
+            }
+        }
+        Err(e) => (e.to_json(), false),
+    }
+}
+
+/// Shared live-call preparation for both `healthcheck` (fixed function, no
+/// args, always live) and `play_call` (dashboard playground, spec section
+/// 7: arbitrary function, args, optional dry-run). Loads the LIVE
+/// connector definition and LIVE merged account config - no run context,
+/// no manifest, no event log, no grant/budget checks (those are run-scoped
+/// concepts a standalone live call does not have).
+///
+/// Trust gating applies ONLY when `dry_run` is false: a dry-run never
+/// resolves secrets (`build_prepared` skips secret resolution entirely for
+/// `dry_run: true`), so gating it would refuse a safe, secret-free render
+/// for no security benefit - the gate exists to guard secret egress, and a
+/// dry-run has none to guard.
+///
+/// `full` threads straight into `CallMode` exactly like a real agent call's
+/// `--full`: it is NOT hardcoded here, so a playground call without it
+/// applies the function's `response_pick` projection (and can mark
+/// `picked: true`) the same as any other call; `prepare_healthcheck` passes
+/// `true` to keep the reachability probe showing the raw body.
+fn prepare_play_call(
+    root: &Path,
+    name: &str,
+    account: Option<&str>,
+    function_name: &str,
+    args: &Value,
+    dry_run: bool,
+    full: bool,
+) -> Result<Prepared, CallError> {
+    let loaded = store::load(name)
+        .map_err(|e| CallError::new(CallErrorCode::Config, format!("connector `{name}`: {e}")))?;
+    let function = loaded.doc.function(function_name).cloned().ok_or_else(|| {
         CallError::new(
             CallErrorCode::Config,
-            format!("healthcheck function `{hc_name}` is missing from connector `{name}` (drift)"),
+            format!("connector `{name}` declares no function `{function_name}`"),
         )
     })?;
 
@@ -542,41 +681,38 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
             format!("connector `{name}` account config: {e}"),
         )
     })?;
-    let acct = accounts
-        .into_iter()
-        .find(|a| a.name == account)
-        .ok_or_else(|| {
-            CallError::new(
-                CallErrorCode::Config,
-                format!("connector `{name}` has no account `{account}`"),
-            )
-        })?;
+    let acct = select_live_account(&accounts, account)
+        .ok_or_else(|| account_selection_error(name, account, &accounts))?
+        .clone();
 
-    // Trust gate (spec 2026-07-18-connectors-design section 9, updated): the
-    // probe resolves LIVE secrets and sends them to the LIVE config's
-    // base_url, so an unapproved or changed connector/account must never be
-    // probeable - the same guard `apb_mcp::policy::check_connectors` applies
-    // before a real run, checked here before anything below touches a
-    // secret. Connector digest first (a changed folder is a bigger deal than
-    // one account), then the target account's own digest.
-    let trust = TrustStore::load();
-    if !trust.is_approved(&loaded.digest) {
-        return Err(CallError::new(
-            CallErrorCode::Permission,
-            format!(
-                "connector `{name}` is not approved; approve it before probing (see the connector approve flow)"
-            ),
-        ));
-    }
-    let account_digest = config::account_digest(&acct);
-    if !trust.is_approved(&account_digest) {
-        return Err(CallError::new(
-            CallErrorCode::Permission,
-            format!(
-                "account `{}` is not approved; approve it before probing (see the connector approve flow)",
-                account_trust_id(name, account)
-            ),
-        ));
+    if !dry_run {
+        // Trust gate (spec 2026-07-18-connectors-design section 9): a live
+        // call resolves LIVE secrets and sends them to the LIVE config's
+        // base_url, so an unapproved or changed connector/account must
+        // never be callable - the same guard `apb_mcp::policy::check_connectors`
+        // applies before a real run, checked here before anything below
+        // touches a secret. Connector digest first (a changed folder is a
+        // bigger deal than one account), then the target account's own
+        // digest.
+        let trust = TrustStore::load();
+        if !trust.is_approved(&loaded.digest) {
+            return Err(CallError::new(
+                CallErrorCode::Permission,
+                format!(
+                    "connector `{name}` is not approved; approve it before calling (see the connector approve flow)"
+                ),
+            ));
+        }
+        let account_digest = config::account_digest(&acct);
+        if !trust.is_approved(&account_digest) {
+            return Err(CallError::new(
+                CallErrorCode::Permission,
+                format!(
+                    "account `{}` is not approved; approve it before calling (see the connector approve flow)",
+                    account_trust_id(name, &acct.name)
+                ),
+            ));
+        }
     }
 
     let errors = config::validate_accounts(&loaded.doc, std::slice::from_ref(&acct));
@@ -584,14 +720,17 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
         return Err(CallError::new(
             CallErrorCode::Config,
             format!(
-                "connector `{name}` account `{account}` is invalid: {}",
+                "connector `{name}` account `{}` is invalid: {}",
+                acct.name,
                 errors.join("; ")
             ),
         ));
     }
 
     let env = config::env_refs(&loaded.doc, &acct);
-    let secret_keys: std::collections::HashSet<&str> = env.keys().map(String::as_str).collect();
+    let cmd = config::cmd_refs(&loaded.doc, &acct);
+    let secret_keys: std::collections::HashSet<&str> =
+        env.keys().chain(cmd.keys()).map(String::as_str).collect();
     let fields: BTreeMap<String, String> = acct
         .fields
         .iter()
@@ -604,6 +743,7 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
         default: acct.default,
         fields,
         env,
+        cmd,
         digest,
     };
 
@@ -612,9 +752,57 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
         loaded.doc.auth.as_ref(),
         acct.name.clone(),
         &maccount,
-        &json!({}),
+        args,
         root,
-        false,
+        // `full` is the caller's real flag, not hardcoded: `prepare_healthcheck`
+        // passes `true` (a reachability probe shows the raw body), the
+        // playground's `play_call` passes whatever the caller asked for
+        // (default `false`, applying `response_pick` like a normal call).
+        CallMode { dry_run, full },
+    )
+}
+
+/// Picks the account for a live probe/playground call: an explicit name
+/// must match one of the LIVE configured accounts; with none given, the
+/// single configured account is used, else the one flagged `default`, else
+/// no selection (ambiguous, reported by the caller via
+/// `account_selection_error`). Mirrors the CLI pipeline's `select_account`
+/// defaulting rule, minus the grant list (a live call has no grants).
+fn select_live_account<'a>(
+    accounts: &'a [config::Account],
+    account: Option<&str>,
+) -> Option<&'a config::Account> {
+    if let Some(explicit) = account {
+        return accounts.iter().find(|a| a.name == explicit);
+    }
+    if let [only] = accounts {
+        return Some(only);
+    }
+    let defaults: Vec<&config::Account> = accounts.iter().filter(|a| a.default).collect();
+    if let [only] = defaults.as_slice() {
+        return Some(only);
+    }
+    None
+}
+
+fn account_selection_error(
+    name: &str,
+    account: Option<&str>,
+    accounts: &[config::Account],
+) -> CallError {
+    if let Some(explicit) = account {
+        return CallError::new(
+            CallErrorCode::Config,
+            format!("connector `{name}` has no account `{explicit}`"),
+        );
+    }
+    let choices: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
+    CallError::new(
+        CallErrorCode::Config,
+        format!(
+            "connector `{name}` has several accounts and no single default; specify an account (choices: {})",
+            choices.join(", ")
+        ),
     )
 }
 
@@ -727,26 +915,32 @@ fn validate_args(schema: &Value, args: &Value) -> Result<(), CallError> {
     Ok(())
 }
 
-/// The non-secret account fields: every field whose key is NOT an env-backed
-/// (secret) field. Secret fields hold a raw `{{env.VAR}}` reference in the
-/// manifest and must never reach the render context's `account` map.
+/// The non-secret account fields: every field whose key is NOT a secret field
+/// (env-backed or command-backed). Secret fields hold a raw `{{env.VAR}}` /
+/// `{{cmd:...}}` reference in the manifest and must never reach the render
+/// context's `account` map.
 fn non_secret_fields(account: &ManifestAccount) -> BTreeMap<String, String> {
     account
         .fields
         .iter()
-        .filter(|(k, _)| !account.env.contains_key(k.as_str()))
+        .filter(|(k, _)| {
+            !account.env.contains_key(k.as_str()) && !account.cmd.contains_key(k.as_str())
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
 
 /// The resolved secrets map (field name -> value) plus the redaction pairs
-/// (resolved value, ENV var name) the response body is scrubbed against.
+/// (resolved value, redaction label) the response body is scrubbed against.
+/// The label is the ENV var name for env-sourced secrets and `cmd:<field>`
+/// for command-sourced ones.
 type ResolvedSecrets = (BTreeMap<String, String>, Vec<(String, String)>);
 
-/// Resolves every secret field's env var to its value. Returns the secrets map
-/// keyed by FIELD name (for the render context) and the redaction pairs
-/// (resolved value, env var name). A var that resolves nowhere is a Config
-/// error naming it.
+/// Resolves every secret field to its value: env-ref fields via the secrets
+/// resolution chain, cmd-ref fields by executing the command (spec 4.1).
+/// Returns the secrets map keyed by FIELD name (for the render context) and
+/// the redaction pairs (resolved value, redaction label). A var that resolves
+/// nowhere, or a command that fails, is a Config error naming the field.
 fn resolve_secrets(root: &Path, account: &ManifestAccount) -> Result<ResolvedSecrets, CallError> {
     let mut secrets = BTreeMap::new();
     let mut redactions = Vec::new();
@@ -763,7 +957,49 @@ fn resolve_secrets(root: &Path, account: &ManifestAccount) -> Result<ResolvedSec
         }
         secrets.insert(field.clone(), value);
     }
+    for (field, cmdline) in &account.cmd {
+        let value = secrets::resolve_cmd(cmdline, secrets::CMD_SECRET_TIMEOUT)
+            .map_err(|e| cmd_secret_error(&account.name, field, e))?;
+        // resolve_cmd rejects empty output, so the value is always non-empty
+        // and safe to register for redaction. The label carries no secret.
+        redactions.push((value.clone(), format!("cmd:{field}")));
+        secrets.insert(field.clone(), value);
+    }
     Ok((secrets, redactions))
+}
+
+/// Maps a `CmdSecretError` to a `config` call error naming the account and
+/// field and, where the helper produced one, a trimmed stderr excerpt. The
+/// resolved secret is never part of any variant, so nothing sensitive can
+/// reach this message.
+fn cmd_secret_error(account: &str, field: &str, err: secrets::CmdSecretError) -> CallError {
+    use secrets::CmdSecretError as E;
+    let detail = match err {
+        E::Parse(m) => format!("command reference is not valid: {m}"),
+        E::Spawn(m) => format!("command could not start: {m}"),
+        E::Timeout => "command timed out after 10s".to_string(),
+        E::NonZero { code, stderr } => {
+            let code = code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string());
+            if stderr.is_empty() {
+                format!("command exited with status {code}")
+            } else {
+                format!("command exited with status {code}: {stderr}")
+            }
+        }
+        E::Empty { stderr } => {
+            if stderr.is_empty() {
+                "command produced no output".to_string()
+            } else {
+                format!("command produced no output: {stderr}")
+            }
+        }
+    };
+    CallError::new(
+        CallErrorCode::Config,
+        format!("secret for account `{account}` field `{field}`: {detail}"),
+    )
 }
 
 /// Renders the function's query pairs (keys literal, values percent-encoded)
@@ -845,15 +1081,37 @@ impl HttpCall {
             args: &Value::Null,
             secrets: &self.secrets,
         };
-        let request_url = match self.auth_query(&ctx) {
-            Ok(Some((param, value))) => {
-                assemble_url(&self.pre_auth_url, &format!("{param}={value}"))
-            }
-            Ok(None) => self.pre_auth_url.clone(),
-            Err(e) => return (Err(e), None),
+        let request_url = match &self.auth {
+            Some(AuthSpec::Path { value_template }) => match render_raw(value_template, &ctx) {
+                Ok(seg) => self
+                    .pre_auth_url
+                    .replacen("{{auth}}", &encode_path_segment(&seg), 1),
+                Err(e) => {
+                    return (
+                        Err(CallError::new(
+                            CallErrorCode::Config,
+                            format!("auth render failed: {e}"),
+                        )),
+                        None,
+                    );
+                }
+            },
+            _ => match self.auth_query(&ctx) {
+                Ok(Some((param, value))) => {
+                    assemble_url(&self.pre_auth_url, &format!("{param}={value}"))
+                }
+                Ok(None) => self.pre_auth_url.clone(),
+                Err(e) => return (Err(e), None),
+            },
         };
 
         let mut request = agent.request(&self.method, &request_url);
+        // Headers were fully assembled by `render_http` (function headers plus
+        // the default User-Agent unless overridden, spec 4.4), so send them
+        // verbatim.
+        for (name, value) in &self.headers {
+            request = request.set(name, value);
+        }
         // Header / Basic auth injection.
         match self.auth_header(&ctx) {
             Ok(Some((name, value))) => request = request.set(&name, &value),
@@ -886,13 +1144,27 @@ impl HttpCall {
         let retry_after = response
             .header("Retry-After")
             .and_then(|s| s.trim().parse::<u64>().ok());
+        // The `Link` header must be read before the response is consumed by the
+        // body reader; surfaced verbatim in the result (spec 4.4).
+        let link = response.header("Link").map(|s| s.to_string());
         let (body, truncated) = read_body(response);
         // 12. Interim literal secret redaction (see the TODO below).
         let body = self.redact(body);
-        (
-            map_status(status, body, truncated, retry_after),
-            Some(status),
-        )
+        let mut mapped = map_status(status, body, truncated, retry_after);
+        if let Ok(CallOk::Http {
+            link: link_slot,
+            body: body_slot,
+            picked,
+            ..
+        }) = &mut mapped
+        {
+            *link_slot = link;
+            if !self.response_pick.is_empty() {
+                *body_slot = project(body_slot, &self.response_pick);
+                *picked = true;
+            }
+        }
+        (mapped, Some(status))
     }
 
     /// The `query`-kind auth param, already percent-encoded, if auth is a
@@ -964,19 +1236,6 @@ impl HttpCall {
     }
 }
 
-/// Applies the interim literal redaction to a plain message string: every
-/// occurrence of a resolved secret value is replaced with
-/// `[redacted:<ENV_NAME>]`. Used for error messages (the body uses
-/// `redact_value` over its string leaves).
-fn redact_message(mut msg: String, redactions: &[(String, String)]) -> String {
-    for (secret, var) in redactions {
-        if msg.contains(secret.as_str()) {
-            msg = msg.replace(secret.as_str(), &format!("[redacted:{var}]"));
-        }
-    }
-    msg
-}
-
 /// Recursively redacts secret values in a JSON value's string leaves.
 fn redact_value(value: Value, redactions: &[(String, String)]) -> Value {
     match value {
@@ -1039,10 +1298,12 @@ fn map_status(
     retry_after: Option<u64>,
 ) -> Result<CallOk, CallError> {
     if (200..300).contains(&status) {
-        return Ok(CallOk {
+        return Ok(CallOk::Http {
             status,
             body,
             truncated,
+            link: None,
+            picked: false,
         });
     }
     let mut err = match status {
@@ -1096,6 +1357,73 @@ fn encode_args_for_url(args: &Value) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+/// Projects `body` down to the dot-separated field chains in `paths`
+/// (spec 4.5). Objects keep the named field; arrays (top-level or midway
+/// through a chain) map the projection over their elements; a path absent
+/// from the body is silently dropped.
+fn project(body: &Value, paths: &[String]) -> Value {
+    let split: Vec<Vec<&str>> = paths.iter().map(|p| p.split('.').collect()).collect();
+    let refs: Vec<&[&str]> = split.iter().map(Vec::as_slice).collect();
+    project_value(body, &refs)
+}
+
+fn project_value(source: &Value, paths: &[&[&str]]) -> Value {
+    match source {
+        Value::Array(items) => {
+            Value::Array(items.iter().map(|it| project_value(it, paths)).collect())
+        }
+        Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (key, val) in map {
+                let mut sub: Vec<&[&str]> = Vec::new();
+                let mut terminal = false;
+                for p in paths {
+                    if p.first() == Some(&key.as_str()) {
+                        if p.len() == 1 {
+                            terminal = true;
+                        } else {
+                            sub.push(&p[1..]);
+                        }
+                    }
+                }
+                if terminal {
+                    out.insert(key.clone(), val.clone());
+                } else if !sub.is_empty() {
+                    out.insert(key.clone(), project_value(val, &sub));
+                }
+            }
+            Value::Object(out)
+        }
+        other => other.clone(),
+    }
+}
+
+/// Percent-encodes a rendered auth value as one URL path segment per RFC 3986
+/// pchar rules, keeping ':' literal (Telegram tokens embed a colon, spec 4.3).
+/// pchar = unreserved / sub-delims / ':' / '@'.
+fn encode_path_segment(s: &str) -> String {
+    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+    const PCHAR: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~')
+        .remove(b'!')
+        .remove(b'$')
+        .remove(b'&')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')')
+        .remove(b'*')
+        .remove(b'+')
+        .remove(b',')
+        .remove(b';')
+        .remove(b'=')
+        .remove(b':')
+        .remove(b'@');
+    utf8_percent_encode(s, PCHAR).to_string()
 }
 
 /// Percent-encodes a whole string as a single URL component (same set the
@@ -1152,6 +1480,8 @@ fn append_event(req: &CallRequest, meta: &EventMeta) {
             outcome: meta.outcome.clone(),
             http_status: meta.http_status,
             duration_ms: meta.duration_ms,
+            smtp_subject: meta.smtp_subject.clone(),
+            smtp_recipients: meta.smtp_recipients,
         });
     }
 }
@@ -1159,6 +1489,84 @@ fn append_event(req: &CallRequest, meta: &EventMeta) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn render_http_builds_method_url_body_and_headers_offline() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: api_base\n    required: true\nfunctions:\n  - name: create\n    description: d\n    method: POST\n    url: \"{{account.api_base}}/items/{{args.id}}\"\n    body: \"{{args}}\"\n    headers: { X-Trace: \"{{args.id}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("create").unwrap();
+        let mut account = BTreeMap::new();
+        account.insert(
+            "api_base".to_string(),
+            "https://api.example.com".to_string(),
+        );
+        let args = json!({ "id": "4 2", "title": "Hi" });
+        let secrets = BTreeMap::new();
+        let r = render_http(f, &account, &args, &secrets).unwrap();
+        assert_eq!(r.method, "POST");
+        // args are percent-encoded into the URL path (space -> %20).
+        assert_eq!(r.pre_auth_url, "https://api.example.com/items/4%202");
+        assert_eq!(r.rendered_body, Some(json!({ "id": "4 2", "title": "Hi" })));
+        // The function header renders, and the default User-Agent is applied.
+        assert_eq!(r.headers.get("X-Trace").map(String::as_str), Some("4 2"));
+        assert_eq!(
+            r.headers.get("User-Agent").map(String::as_str),
+            Some(USER_AGENT)
+        );
+    }
+
+    #[test]
+    fn render_http_lets_a_function_header_override_the_default_user_agent() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: g\n    description: d\n    method: GET\n    url: \"https://api.example.com/x\"\n    headers: { User-Agent: custom-ua }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("g").unwrap();
+        let r = render_http(f, &BTreeMap::new(), &json!({}), &BTreeMap::new()).unwrap();
+        assert_eq!(
+            r.headers.get("User-Agent").map(String::as_str),
+            Some("custom-ua")
+        );
+    }
+
+    #[test]
+    fn project_keeps_named_object_fields_and_nested_paths() {
+        let body = json!({
+            "number": 7, "title": "t", "extra": "drop",
+            "user": { "login": "octo", "id": 1 }
+        });
+        let picked = project(
+            &body,
+            &["number".into(), "title".into(), "user.login".into()],
+        );
+        assert_eq!(
+            picked,
+            json!({ "number": 7, "title": "t", "user": { "login": "octo" } })
+        );
+    }
+
+    #[test]
+    fn project_maps_over_arrays_at_top_level_and_midway() {
+        let body = json!([
+            { "number": 1, "labels": [ { "name": "bug", "color": "red" }, { "name": "p1" } ], "x": 9 },
+            { "number": 2, "labels": [] }
+        ]);
+        let picked = project(&body, &["number".into(), "labels.name".into()]);
+        assert_eq!(
+            picked,
+            json!([
+                { "number": 1, "labels": [ { "name": "bug" }, { "name": "p1" } ] },
+                { "number": 2, "labels": [] }
+            ])
+        );
+    }
+
+    #[test]
+    fn project_drops_missing_paths_silently() {
+        let body = json!({ "a": 1 });
+        let picked = project(&body, &["a".into(), "b.c".into()]);
+        assert_eq!(picked, json!({ "a": 1 }));
+    }
 
     #[test]
     fn base64_matches_known_vectors() {
@@ -1209,16 +1617,6 @@ mod tests {
             map_status(503, json!({}), false, None).unwrap_err().code,
             CallErrorCode::Service
         );
-    }
-
-    #[test]
-    fn redact_message_scrubs_secret_in_error_text() {
-        let redactions = vec![("super-secret-xyz".to_string(), "MOCK_TOKEN".to_string())];
-        let msg = "Connection Failed: http://127.0.0.1:9/items?api_key=super-secret-xyz refused"
-            .to_string();
-        let out = redact_message(msg, &redactions);
-        assert!(!out.contains("super-secret-xyz"), "secret leaked: {out}");
-        assert!(out.contains("[redacted:MOCK_TOKEN]"), "not redacted: {out}");
     }
 
     #[test]

@@ -90,6 +90,10 @@ fn write_connector(cfg: &Path) {
 name: mock-tracker
 version: 0.1.0
 healthcheck: ping
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
 account_fields:
   - name: base_url
     required: true
@@ -102,6 +106,13 @@ functions:
     read_only: true
     method: GET
     url: "{{account.base_url}}/items"
+    args_schema: { type: object, properties: { q: { type: string } } }
+  - name: list_pick
+    description: list with a projection
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/pick"
+    response_pick: [items]
   - name: ping
     description: Reachability check
     mock: { status: 200, body: { ok: true } }
@@ -494,6 +505,8 @@ fn write_connector_call_event(
         outcome: outcome.into(),
         http_status: None,
         duration_ms,
+        smtp_subject: None,
+        smtp_recipients: None,
     })
     .unwrap();
 }
@@ -566,4 +579,223 @@ async fn stats_endpoint_empty_when_no_calls_recorded() {
     assert_eq!(json["calls"], serde_json::json!(0));
     assert_eq!(json["by_function"], serde_json::json!([]));
     assert_eq!(json["by_outcome"], serde_json::json!({}));
+}
+
+// --- args_schema exposure (slice 6, spec section 7) ------------------------
+
+#[tokio::test]
+async fn detail_endpoint_exposes_function_args_schema() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let functions = json["functions"].as_array().unwrap();
+    let list_items = functions
+        .iter()
+        .find(|f| f["name"] == "list_items")
+        .expect("list_items present");
+    assert_eq!(
+        list_items["args_schema"]["properties"]["q"]["type"],
+        serde_json::json!("string"),
+        "args_schema must be surfaced verbatim: {list_items}"
+    );
+    let ping = functions.iter().find(|f| f["name"] == "ping").unwrap();
+    assert_eq!(
+        ping["args_schema"],
+        serde_json::json!(null),
+        "a function with no args_schema serializes null, not omitted: {ping}"
+    );
+}
+
+// --- POST /api/connectors/{name}/call (slice 6, spec section 7) -----------
+
+#[tokio::test]
+async fn call_endpoint_refuses_unapproved_connector_for_real_call() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    // Neither the connector nor the account is approved.
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/call"),
+        serde_json::json!({ "function": "list_items", "account": "acct1", "args": {}, "dry_run": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ok"], serde_json::json!(false), "call: {json}");
+    assert_eq!(json["error"]["code"], serde_json::json!("permission"));
+}
+
+#[tokio::test]
+async fn call_endpoint_dry_run_works_without_approval_or_secrets() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    // Neither the connector nor the account is approved; TOKEN_VAR is unset.
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/call"),
+        serde_json::json!({ "function": "list_items", "account": "acct1", "args": {}, "dry_run": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ok"], serde_json::json!(true), "dry-run call: {json}");
+    assert_eq!(json["dry_run"], serde_json::json!(true));
+    assert_eq!(json["method"], serde_json::json!("GET"));
+    assert_eq!(
+        json["url"],
+        serde_json::json!("https://first.example.com/items")
+    );
+}
+
+#[tokio::test]
+async fn call_endpoint_real_call_reaches_a_live_mock_http_server() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g_cfg = setup(cfg.path(), root.path());
+    let _g_tok = set_var(TOKEN_VAR, "secret-value");
+
+    // Point acct1's base_url at a spawned one-shot mock server instead of
+    // the fixture's default unreachable https://first.example.com.
+    let server = crate::common::spawn_http(200, "OK", &[], r#"{"items":["a","b"]}"#.to_string());
+    let path = config::project_config_path(root.path(), CONNECTOR);
+    std::fs::write(
+        &path,
+        format!(
+            "accounts:\n  - name: acct1\n    default: true\n    base_url: {}\n    token: \"{{{{env.{TOKEN_VAR}}}}}\"\n",
+            server.base_url
+        ),
+    )
+    .unwrap();
+    approve_connector_and_account(root.path(), "acct1");
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/call"),
+        serde_json::json!({ "function": "list_items", "account": "acct1", "args": {}, "dry_run": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ok"], serde_json::json!(true), "real call: {json}");
+    assert_eq!(json["status"], serde_json::json!(200));
+    assert_eq!(json["body"], serde_json::json!({"items": ["a", "b"]}));
+    // The fixture declares no response_pick, so `picked` must never read true.
+    assert_ne!(
+        json["picked"],
+        serde_json::json!(true),
+        "unexpected pick: {json}"
+    );
+
+    let req = server.captured_request().expect("server saw a request");
+    assert!(
+        req.contains("Authorization: Bearer secret-value"),
+        "auth header missing/wrong:\n{req}"
+    );
+}
+
+/// The `full` flag (spec 2026-07-19-official-connectors-design section 7
+/// post-review fix): omitted or `false` applies the function's
+/// `response_pick` projection like a normal agent call (and marks
+/// `picked: true`); `full: true` bypasses it and returns the raw body with
+/// no `picked` marker, mirroring the CLI's `--full` debugging escape.
+#[tokio::test]
+async fn call_endpoint_full_flag_controls_the_response_pick_projection() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g_cfg = setup(cfg.path(), root.path());
+    let _g_tok = set_var(TOKEN_VAR, "secret-value");
+
+    let raw_body = r#"{"items":["a","b"],"extra":"drop"}"#;
+
+    // Default (full omitted): the projection applies, picked: true.
+    let server = crate::common::spawn_http(200, "OK", &[], raw_body.to_string());
+    let path = config::project_config_path(root.path(), CONNECTOR);
+    std::fs::write(
+        &path,
+        format!(
+            "accounts:\n  - name: acct1\n    default: true\n    base_url: {}\n    token: \"{{{{env.{TOKEN_VAR}}}}}\"\n",
+            server.base_url
+        ),
+    )
+    .unwrap();
+    approve_connector_and_account(root.path(), "acct1");
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/call"),
+        serde_json::json!({ "function": "list_pick", "account": "acct1", "args": {}, "dry_run": false }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["ok"],
+        serde_json::json!(true),
+        "projected call: {json}"
+    );
+    assert_eq!(json["picked"], serde_json::json!(true));
+    assert_eq!(json["body"], serde_json::json!({"items": ["a", "b"]}));
+
+    // full: true bypasses the projection. A changed base_url changes the
+    // account digest, so it needs a fresh one-shot server plus re-approval.
+    let server2 = crate::common::spawn_http(200, "OK", &[], raw_body.to_string());
+    std::fs::write(
+        &path,
+        format!(
+            "accounts:\n  - name: acct1\n    default: true\n    base_url: {}\n    token: \"{{{{env.{TOKEN_VAR}}}}}\"\n",
+            server2.base_url
+        ),
+    )
+    .unwrap();
+    approve_connector_and_account(root.path(), "acct1");
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/call"),
+        serde_json::json!({ "function": "list_pick", "account": "acct1", "args": {}, "dry_run": false, "full": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ok"], serde_json::json!(true), "full call: {json}");
+    assert!(
+        json.get("picked").is_none(),
+        "full must not mark picked: {json}"
+    );
+    assert_eq!(
+        json["body"],
+        serde_json::json!({"items": ["a", "b"], "extra": "drop"})
+    );
+}
+
+#[tokio::test]
+async fn call_endpoint_unknown_function_is_config_error() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/call"),
+        serde_json::json!({ "function": "no_such_fn", "account": "acct1", "args": {}, "dry_run": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["ok"], serde_json::json!(false));
+    assert_eq!(json["error"]["code"], serde_json::json!("config"));
 }
