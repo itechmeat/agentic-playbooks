@@ -367,3 +367,168 @@ fn approve_marks_connector_then_account_as_trusted() {
     );
     assert!(!bad.status.success(), "unknown account must fail");
 }
+
+// --- run: connector permit gate (final-review fix) -------------------------
+//
+// Task 19 review follow-up: `apb run`'s two `RunOptions` sites (foreground and
+// the `__drive-supervised` child) used to pass empty `expected_connectors`/
+// `expected_connector_accounts` unconditionally, so ANY connector-binding
+// playbook was refused by the engine with the opaque "connector bindings
+// present but no connector permit" message - even via the CLI, which is
+// supposed to behave exactly like the MCP and dashboard run paths (both of
+// which already ran the gate). These tests exercise the now-fixed foreground
+// `apb run` path end to end: an unapproved connector-binding playbook must
+// refuse with an actionable message; once approved (via `apb connector
+// approve`, exactly as a user would), the run must get past the connector
+// gate and actually succeed.
+
+const RUN_PLAYBOOK_ID: &str = "conn-pb";
+
+/// A registered playbook whose single agent node binds the `widget` connector
+/// (scaffolded by `connector init`) and an executor profile `main`.
+fn run_playbook_yaml() -> String {
+    format!(
+        r#"schema: 2
+id: {RUN_PLAYBOOK_ID}
+name: {RUN_PLAYBOOK_ID}
+version: 1.0.0
+nodes:
+  - {{ id: s, type: start }}
+  - id: a
+    type: agent_task
+    prompt: hi
+    profile: main
+    connectors: [{{ name: widget, accounts: [default] }}]
+  - {{ id: f, type: finish, outcome: success }}
+edges:
+  - {{ from: s, to: a }}
+  - {{ from: a, to: f }}
+"#
+    )
+}
+
+fn write_run_playbook(dir: &Path) {
+    let vdir = dir
+        .join(".apb/playbooks")
+        .join(RUN_PLAYBOOK_ID)
+        .join("1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), run_playbook_yaml()).unwrap();
+    fs::write(
+        dir.join(".apb/playbooks")
+            .join(RUN_PLAYBOOK_ID)
+            .join("current"),
+        "1.0.0",
+    )
+    .unwrap();
+}
+
+/// Seeds a minimal project-scope profile `main` (agent `claude`, so
+/// `APB_AGENT_CMD` overrides it to the test's stub script regardless of the
+/// configured agent name - see `adapter_for`).
+fn seed_profile_main(dir: &Path) {
+    let pdir = dir.join(".apb/profiles/main");
+    fs::create_dir_all(&pdir).unwrap();
+    fs::write(
+        pdir.join("profile.yaml"),
+        "name: main\ndescription: test\nexecutor:\n  agent: claude\n  model: haiku\n",
+    )
+    .unwrap();
+    fs::write(pdir.join("SOUL.md"), "test soul").unwrap();
+}
+
+/// A stub agent binary: prints a single line and exits 0, enough for the
+/// engine to consider the node complete (mirrors
+/// `stdio_profile_e2e_test.rs`'s `make_stub`).
+fn make_stub_agent(dir: &Path) -> std::path::PathBuf {
+    let path = dir.join("stub-agent.sh");
+    fs::write(&path, "#!/bin/sh\necho done\n").unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    path
+}
+
+/// Common setup for the run-gate tests: project + scaffolded `widget`
+/// connector with its `default` account referencing `WIDGET_TOKEN`, plus the
+/// connector-binding playbook and its executor profile. Connector/account
+/// trust is left for each test to arrange.
+fn setup_run_fixture(dir: &Path) {
+    setup(dir);
+    apb_ok(dir, &["connector", "init", "widget"]);
+    write_widget_account(dir, "WIDGET_TOKEN");
+    write_run_playbook(dir);
+    seed_profile_main(dir);
+}
+
+#[test]
+fn run_refuses_unapproved_connector_binding_playbook_with_actionable_message() {
+    let dir = tempfile::tempdir().unwrap();
+    setup_run_fixture(dir.path());
+    // The secret resolves (so the env-presence check passes and the gate
+    // actually reaches the trust step); connector/account trust is
+    // deliberately left unapproved.
+    let out = playbook_env(
+        dir.path(),
+        &["run", RUN_PLAYBOOK_ID],
+        &[("WIDGET_TOKEN", "shh-secret-value")],
+    );
+    assert!(
+        !out.status.success(),
+        "an unapproved connector-binding playbook must refuse to run"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("untrusted_connector_requires_approve"),
+        "stderr should name the refusal policy code: {stderr}"
+    );
+    assert!(
+        stderr.contains("apb connector approve"),
+        "stderr should point at `apb connector approve`: {stderr}"
+    );
+    assert!(
+        !stderr.contains("connector bindings present but no connector permit"),
+        "the fix must replace the opaque engine message with an actionable one: {stderr}"
+    );
+}
+
+#[test]
+fn run_proceeds_past_the_connector_gate_once_approved() {
+    let dir = tempfile::tempdir().unwrap();
+    setup_run_fixture(dir.path());
+    let stub = make_stub_agent(dir.path());
+
+    // Approve the connector tree digest and the `default` account's digest,
+    // exactly as a user would via `apb connector approve`.
+    apb_ok(dir.path(), &["connector", "approve", "widget"]);
+    apb_ok(
+        dir.path(),
+        &["connector", "approve", "widget", "--account", "default"],
+    );
+
+    let out = playbook_env(
+        dir.path(),
+        &["run", RUN_PLAYBOOK_ID],
+        &[
+            ("WIDGET_TOKEN", "shh-secret-value"),
+            ("APB_AGENT_CMD", stub.to_str().unwrap()),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !stderr.contains("connector bindings present but no connector permit"),
+        "the connector-permit refusal must be gone once approved: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        !stderr.contains("untrusted_connector_requires_approve"),
+        "the connector trust refusal must be gone once approved: stderr={stderr}"
+    );
+    assert!(
+        out.status.success() && stdout.contains("succeeded"),
+        "an approved connector-binding playbook should run its node to completion: \
+         stdout={stdout} stderr={stderr}"
+    );
+}

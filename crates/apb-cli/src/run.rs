@@ -14,6 +14,104 @@ use apb_engine::{
 
 use crate::util::open_registry;
 
+/// Resolves the two connector permit maps for a playbook before it runs
+/// through the CLI (foreground `apb run` and the `__drive-supervised` child
+/// alike). A playbook without any connector binding never calls the gate and
+/// gets the same empty maps `RunOptions` always defaulted to; this is what
+/// keeps a non-connector playbook's behavior byte-for-byte unchanged.
+///
+/// For a connector-binding playbook this is the same seam the dashboard's
+/// `run_playbook_handler` uses (`apb-server/src/lib.rs`) and the same trust
+/// gate an MCP-started run goes through (`policy::check_run`): without it the
+/// engine would see empty `expected_connectors`/`expected_connector_accounts`
+/// and refuse ANY connector-binding run with the opaque "connector bindings
+/// present but no connector permit" message, even though nothing was actually
+/// checked. On `Err` this returns a ready-to-print, actionable message (see
+/// `connector_refusal_message`) instead of the raw refusal JSON.
+fn connector_permits_for(
+    root: &Path,
+    name: &str,
+    version: Option<&str>,
+) -> Result<apb_mcp::policy::ConnectorPermitMaps, String> {
+    let reg = Registry::open(root).map_err(|e| format!("no project here: {e} (run `apb init`)"))?;
+    let loaded = reg
+        .load(name, version)
+        .map_err(|e| format!("cannot load playbook `{name}`: {e}"))?;
+    let binds = loaded
+        .playbook
+        .nodes
+        .iter()
+        .any(|n| !n.kind.connector_bindings().is_empty());
+    if !binds {
+        return Ok((BTreeMap::new(), BTreeMap::new()));
+    }
+    apb_mcp::policy::connector_permit_maps(root, &loaded.playbook)
+        .map_err(|refusal| connector_refusal_message(&refusal))
+}
+
+/// Turns a connector-gate refusal (see `apb_mcp::policy::check_run`'s
+/// connector step) into an actionable CLI message: names the policy code and,
+/// for a trust refusal, points at the exact `apb connector approve` invocation
+/// that clears it; for a missing-env refusal, at `apb connector env --write`.
+/// Falls back to printing the refusal verbatim for a policy code this
+/// function does not special-case (e.g. `connector_unresolved`, `not_found`),
+/// so a future refusal kind still surfaces something useful rather than
+/// nothing.
+fn connector_refusal_message(refusal: &serde_json::Value) -> String {
+    let policy = refusal
+        .get("policy")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown");
+    let strings = |field: &str| -> Vec<String> {
+        refusal
+            .get(field)
+            .and_then(|v| v.as_array())
+            .map(|a| {
+                a.iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    match policy {
+        "untrusted_connector_requires_approve" => {
+            let names = strings("connectors");
+            format!(
+                "run refused ({policy}): connector(s) not approved: {}. Approve each with \
+                 `apb connector approve <name>`, then re-run.",
+                names.join(", ")
+            )
+        }
+        "unapproved_connector_account" => {
+            let ids = strings("accounts");
+            let suggestions: Vec<String> = ids
+                .iter()
+                .map(|id| match id.split_once('/') {
+                    Some((conn, account)) => {
+                        format!("apb connector approve {conn} --account {account}")
+                    }
+                    None => format!("apb connector approve {id}"),
+                })
+                .collect();
+            format!(
+                "run refused ({policy}): connector account(s) not approved: {}. Approve with: \
+                 {}, then re-run.",
+                ids.join(", "),
+                suggestions.join("; ")
+            )
+        }
+        "connector_env_missing" => {
+            let missing = strings("missing");
+            format!(
+                "run refused ({policy}): missing required env var(s): {}. Fill them via \
+                 `apb connector env --write`, then re-run.",
+                missing.join(", ")
+            )
+        }
+        other => format!("run refused ({other}): {refusal}"),
+    }
+}
+
 pub(crate) fn run_list(root: &Path) -> ExitCode {
     let reg = match open_registry(root) {
         Ok(r) => r,
@@ -187,6 +285,14 @@ pub(crate) fn run_cmd(
             allow_shared_workdir,
         );
     }
+    let (expected_connectors, expected_connector_accounts) =
+        match connector_permits_for(root, name, version) {
+            Ok(maps) => maps,
+            Err(msg) => {
+                eprintln!("run failed: {msg}");
+                return ExitCode::from(2);
+            }
+        };
     let opts = RunOptions {
         instruction,
         params: parsed,
@@ -202,8 +308,8 @@ pub(crate) fn run_cmd(
         parent_run: None,
         depth: 0,
         expected_children: None,
-        expected_connectors: Default::default(),
-        expected_connector_accounts: Default::default(),
+        expected_connectors,
+        expected_connector_accounts,
     };
     match run(root, name, version, opts) {
         Ok(res) => {
@@ -337,6 +443,14 @@ pub(crate) fn drive_supervised_child(
             }
         }
     }
+    let (expected_connectors, expected_connector_accounts) =
+        match connector_permits_for(root, name, version) {
+            Ok(maps) => maps,
+            Err(msg) => {
+                let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
+                return ExitCode::from(2);
+            }
+        };
     let opts = RunOptions {
         instruction,
         params: parsed,
@@ -352,8 +466,8 @@ pub(crate) fn drive_supervised_child(
         parent_run: None,
         depth: 0,
         expected_children: None,
-        expected_connectors: Default::default(),
-        expected_connector_accounts: Default::default(),
+        expected_connectors,
+        expected_connector_accounts,
     };
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,
