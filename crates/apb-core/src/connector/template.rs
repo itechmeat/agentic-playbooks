@@ -232,17 +232,44 @@ pub fn render_raw(template: &str, ctx: &RenderCtx) -> Result<String, ConnectorEr
     render(template, ctx, false)
 }
 
+/// Returns `Some(field)` when `s` is exactly `{{args.<field>}}` and nothing
+/// else (no surrounding literal text, no other placeholders). The bare form
+/// `{{args}}` is not a field reference and returns `None`; that whole-object
+/// form is handled separately at the body top level. Used by `render_body`
+/// and by the engine's query renderer (spec 5.1) to apply typed, optional
+/// single-placeholder rendering instead of string interpolation.
+pub fn single_args_placeholder(s: &str) -> Option<&str> {
+    let inner = s.strip_prefix("{{args.")?.strip_suffix("}}")?;
+    if inner.is_empty() || inner.contains("{{") || inner.contains("}}") {
+        return None;
+    }
+    validate_snake_name(inner).ok()?;
+    Some(inner)
+}
+
 /// Renders a body value: a top-level `"{{args}}"` string renders as a clone
-/// of `ctx.args`; otherwise the JSON value is walked and every string leaf is
-/// rendered with `render_raw`.
+/// of `ctx.args` (the wave 1 whole-forward form); a top-level single
+/// placeholder (`"{{args.field}}"`) renders as the typed value of that arg,
+/// or errors naming the field if it is absent (spec 5.1: a whole body must
+/// not silently vanish). Otherwise the JSON value is walked: an object entry
+/// or array element whose value is a single placeholder renders typed when
+/// the arg is present and is dropped when it is absent; every other string
+/// leaf keeps wave 1 interpolation semantics via `render_raw`.
 pub fn render_body(
     body: &serde_json::Value,
     ctx: &RenderCtx,
 ) -> Result<serde_json::Value, ConnectorError> {
-    if let serde_json::Value::String(s) = body
-        && s == "{{args}}"
-    {
-        return Ok(ctx.args.clone());
+    if let serde_json::Value::String(s) = body {
+        if s == "{{args}}" {
+            return Ok(ctx.args.clone());
+        }
+        if let Some(field) = single_args_placeholder(s) {
+            return ctx.args.get(field).cloned().ok_or_else(|| {
+                ConnectorError::Invalid(format!(
+                    "unresolved placeholder `{{{{args.{field}}}}}` in template `{s}`"
+                ))
+            });
+        }
     }
     render_body_walk(body, ctx)
 }
@@ -256,19 +283,41 @@ fn render_body_walk(
         serde_json::Value::Array(items) => {
             let mut out = Vec::with_capacity(items.len());
             for item in items {
-                out.push(render_body_walk(item, ctx)?);
+                if let Some(rendered) = render_body_entry(item, ctx)? {
+                    out.push(rendered);
+                }
             }
             Ok(serde_json::Value::Array(out))
         }
         serde_json::Value::Object(map) => {
             let mut out = serde_json::Map::with_capacity(map.len());
             for (k, v) in map {
-                out.insert(k.clone(), render_body_walk(v, ctx)?);
+                if let Some(rendered) = render_body_entry(v, ctx)? {
+                    out.insert(k.clone(), rendered);
+                }
             }
             Ok(serde_json::Value::Object(out))
         }
         other => Ok(other.clone()),
     }
+}
+
+/// Renders one object-entry or array-element value, applying the
+/// single-placeholder drop rule (spec 5.1): a value that is exactly
+/// `{{args.field}}` resolves to the typed arg clone when present, or `None`
+/// (the caller drops the entry/element) when absent. Every other value
+/// recurses through `render_body_walk` unchanged, so nested containers and
+/// mixed-content strings keep today's interpolation-and-error semantics.
+fn render_body_entry(
+    value: &serde_json::Value,
+    ctx: &RenderCtx,
+) -> Result<Option<serde_json::Value>, ConnectorError> {
+    if let serde_json::Value::String(s) = value
+        && let Some(field) = single_args_placeholder(s)
+    {
+        return Ok(ctx.args.get(field).cloned());
+    }
+    render_body_walk(value, ctx).map(Some)
 }
 
 #[cfg(test)]
@@ -517,5 +566,111 @@ mod tests {
         let ctx = empty_ctx(&account, &args, &secrets);
         let err = render_raw("{{args.n}}", &ctx).unwrap_err();
         assert!(err.to_string().contains("non-scalar"));
+    }
+
+    // -- Typed and optional single-placeholder rendering (spec 5.1) --
+
+    #[test]
+    fn single_args_placeholder_matches_exact_form_only() {
+        assert_eq!(
+            single_args_placeholder("{{args.completed}}"),
+            Some("completed")
+        );
+        // Bare `{{args}}` names the whole args object, not a field.
+        assert_eq!(single_args_placeholder("{{args}}"), None);
+        // Mixed content is not a single placeholder.
+        assert_eq!(single_args_placeholder("v={{args.gone}}"), None);
+        assert_eq!(single_args_placeholder("{{args.a}} {{args.b}}"), None);
+        assert_eq!(single_args_placeholder("plain text"), None);
+    }
+
+    #[test]
+    fn render_body_single_placeholder_is_typed() {
+        let account = BTreeMap::new();
+        let args = serde_json::json!({"completed": true, "projects": ["12"]});
+        let secrets = BTreeMap::new();
+        let ctx = empty_ctx(&account, &args, &secrets);
+        let body = serde_json::json!({
+            "data": {
+                "completed": "{{args.completed}}",
+                "projects": "{{args.projects}}",
+            }
+        });
+        let rendered = render_body(&body, &ctx).unwrap();
+        assert_eq!(
+            rendered,
+            serde_json::json!({
+                "data": {
+                    "completed": true,
+                    "projects": ["12"],
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn render_body_drops_absent_optional_field() {
+        let account = BTreeMap::new();
+        let args = serde_json::json!({"name": "x"});
+        let secrets = BTreeMap::new();
+        let ctx = empty_ctx(&account, &args, &secrets);
+        let body = serde_json::json!({
+            "data": {
+                "name": "{{args.name}}",
+                "notes": "{{args.notes}}",
+            }
+        });
+        let rendered = render_body(&body, &ctx).unwrap();
+        assert_eq!(
+            rendered,
+            serde_json::json!({
+                "data": {
+                    "name": "x",
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn render_body_drops_absent_array_element() {
+        let account = BTreeMap::new();
+        let args = serde_json::json!({"a": 1});
+        let secrets = BTreeMap::new();
+        let ctx = empty_ctx(&account, &args, &secrets);
+        let body = serde_json::json!({"list": ["{{args.a}}", "{{args.b}}"]});
+        let rendered = render_body(&body, &ctx).unwrap();
+        assert_eq!(rendered, serde_json::json!({"list": [1]}));
+    }
+
+    #[test]
+    fn render_body_top_level_single_placeholder_absent_is_error() {
+        let account = BTreeMap::new();
+        let args = serde_json::json!({});
+        let secrets = BTreeMap::new();
+        let ctx = empty_ctx(&account, &args, &secrets);
+        let body = serde_json::json!("{{args.gone}}");
+        let err = render_body(&body, &ctx).unwrap_err();
+        assert!(err.to_string().contains("args.gone"), "message was: {err}");
+    }
+
+    #[test]
+    fn render_body_mixed_content_absent_is_still_error() {
+        let account = BTreeMap::new();
+        let args = serde_json::json!({});
+        let secrets = BTreeMap::new();
+        let ctx = empty_ctx(&account, &args, &secrets);
+        let body = serde_json::json!({"x": "v={{args.gone}}"});
+        let err = render_body(&body, &ctx).unwrap_err();
+        assert!(err.to_string().contains("args.gone"), "message was: {err}");
+    }
+
+    #[test]
+    fn render_body_whole_args_forward_unchanged() {
+        let account = BTreeMap::new();
+        let args = serde_json::json!({"title": "hello", "count": 3});
+        let secrets = BTreeMap::new();
+        let ctx = empty_ctx(&account, &args, &secrets);
+        let body = serde_json::json!("{{args}}");
+        assert_eq!(render_body(&body, &ctx).unwrap(), args);
     }
 }

@@ -20,7 +20,9 @@ use apb_core::connector::config;
 use apb_core::connector::def::{AuthSpec, ConnectorDoc, FunctionSpec};
 use apb_core::connector::secrets;
 use apb_core::connector::store;
-use apb_core::connector::template::{RenderCtx, render_body, render_encoded, render_raw};
+use apb_core::connector::template::{
+    RenderCtx, render_body, render_encoded, render_raw, single_args_placeholder,
+};
 use apb_core::trust::{TrustStore, account_trust_id};
 use serde_json::{Value, json};
 
@@ -1007,6 +1009,16 @@ fn cmd_secret_error(account: &str, field: &str, err: secrets::CmdSecretError) ->
 fn render_query(function: &FunctionSpec, ctx: &RenderCtx) -> Result<String, CallError> {
     let mut parts = Vec::new();
     for (key, template) in &function.query {
+        // spec 5.1: a query value that is exactly `{{args.field}}` drops the
+        // whole pair when the arg is absent, instead of erroring. A present
+        // arg (scalar or not) still goes through `render_encoded` below,
+        // which already renders scalars typed (string verbatim, number/bool
+        // via their JSON text) and turns a non-scalar into a Config error.
+        if let Some(field) = single_args_placeholder(template)
+            && ctx.args.get(field).is_none()
+        {
+            continue;
+        }
         let value = render_encoded(template, ctx).map_err(|e| {
             CallError::new(CallErrorCode::Config, format!("query render failed: {e}"))
         })?;
@@ -1527,6 +1539,44 @@ mod tests {
             r.headers.get("User-Agent").map(String::as_str),
             Some("custom-ua")
         );
+    }
+
+    #[test]
+    fn render_query_drops_absent_single_placeholder_pair() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: list\n    description: d\n    method: GET\n    url: \"https://api.example.com/items\"\n    query: { offset: \"{{args.offset}}\", limit: \"{{args.limit}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("list").unwrap();
+        let args = json!({ "limit": 50 });
+        let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
+        assert_eq!(r.pre_auth_url, "https://api.example.com/items?limit=50");
+    }
+
+    #[test]
+    fn render_query_typed_scalars() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: list\n    description: d\n    method: GET\n    url: \"https://api.example.com/items\"\n    query: { active: \"{{args.active}}\", limit: \"{{args.limit}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("list").unwrap();
+        let args = json!({ "limit": 50, "active": true });
+        let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            r.pre_auth_url,
+            "https://api.example.com/items?active=true&limit=50"
+        );
+    }
+
+    #[test]
+    fn render_query_non_scalar_single_placeholder_is_config_error() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: list\n    description: d\n    method: GET\n    url: \"https://api.example.com/items\"\n    query: { limit: \"{{args.limit}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("list").unwrap();
+        let args = json!({ "limit": [1] });
+        match render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()) {
+            Ok(_) => panic!("expected a config error for a non-scalar query arg"),
+            Err(err) => assert_eq!(err.code, CallErrorCode::Config),
+        }
     }
 
     #[test]
