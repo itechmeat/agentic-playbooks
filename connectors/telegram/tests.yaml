@@ -1,0 +1,46 @@
+cases:
+  - function: get_me
+    account: { api_base: https://api.telegram.org }
+    args: {}
+    expect:
+      method: GET
+      url: "https://api.telegram.org/{{auth}}/getMe"
+
+  - function: send_message
+    account: { api_base: https://api.telegram.org }
+    args: { chat_id: "123456", text: "Deploy finished" }
+    expect:
+      method: POST
+      url: "https://api.telegram.org/{{auth}}/sendMessage"
+      body_contains: { text: "Deploy finished" }
+
+  - function: edit_message_text
+    account: { api_base: https://api.telegram.org }
+    args: { chat_id: "123456", message_id: 42, text: "Deploy finished (updated)" }
+    expect:
+      method: POST
+      url: "https://api.telegram.org/{{auth}}/editMessageText"
+      body_contains: { message_id: 42 }
+
+  - function: get_chat
+    account: { api_base: https://api.telegram.org }
+    args: { chat_id: "123456" }
+    expect:
+      method: POST
+      url: "https://api.telegram.org/{{auth}}/getChat"
+      body_contains: { chat_id: "123456" }
+
+  - function: get_updates
+    account: { api_base: https://api.telegram.org }
+    args: {}
+    expect:
+      method: POST
+      url: "https://api.telegram.org/{{auth}}/getUpdates"
+
+  - function: answer_callback_query
+    account: { api_base: https://api.telegram.org }
+    args: { callback_query_id: abc }
+    expect:
+      method: POST
+      url: "https://api.telegram.org/{{auth}}/answerCallbackQuery"
+      body_contains: { callback_query_id: abc }
