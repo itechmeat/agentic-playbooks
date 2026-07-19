@@ -532,3 +532,18 @@ fn run_proceeds_past_the_connector_gate_once_approved() {
          stdout={stdout} stderr={stderr}"
     );
 }
+
+#[test]
+fn call_accepts_the_full_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    // No run context, so this still exits config-error, but --full must parse.
+    let out = playbook(
+        dir.path(),
+        &["connector", "call", "widget", "ping", "--full"],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
+    assert_eq!(v["error"]["code"], serde_json::json!("config"));
+}

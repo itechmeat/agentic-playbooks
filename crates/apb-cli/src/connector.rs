@@ -45,6 +45,10 @@ pub(crate) enum ConnectorAction {
         /// secrets
         #[arg(long)]
         dry_run: bool,
+        /// Return the complete response body, skipping the function's
+        /// response_pick projection (spec 4.5 debugging escape)
+        #[arg(long)]
+        full: bool,
     },
     /// Approve trust for a connector or one of its accounts. With no flag,
     /// approves the connector's current tree digest; with --account, approves
@@ -87,7 +91,8 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
             account,
             args,
             dry_run,
-        } => call_cmd(root, &name, &function, account, args, dry_run),
+            full,
+        } => call_cmd(root, &name, &function, account, args, dry_run, full),
         ConnectorAction::Approve { name, account } => approve_cmd(root, &name, account.as_deref()),
         ConnectorAction::Doctor => doctor_cmd(root),
         ConnectorAction::Env { name, write } => env_cmd(root, name, write),
@@ -322,6 +327,7 @@ fn call_cmd(
     account: Option<String>,
     args: Option<String>,
     dry_run: bool,
+    full: bool,
 ) -> ExitCode {
     let run_dir = std::env::var("APB_RUN_DIR").ok();
     let node_id = std::env::var("APB_NODE_ID").ok();
@@ -375,7 +381,7 @@ fn call_cmd(
         account: account.as_deref(),
         args: parsed_args,
         dry_run,
-        full: false,
+        full,
     };
     let (value, ok) = apb_engine::connector_call::execute(req);
     print_call_result(&value);
