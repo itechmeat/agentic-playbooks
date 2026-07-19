@@ -1,0 +1,59 @@
+schema: 2
+id: sentry-triage
+name: Sentry issue triage
+description: >-
+  Pull unresolved Sentry issues, have an agent assess which ones are real
+  bugs, file GitHub issues for those, and post a summary to Telegram.
+version: 1.0.0
+params:
+  - { name: sentry_project, type: text, label: "Sentry project id or slug" }
+  - { name: github_owner, type: text, label: "GitHub repository owner" }
+  - { name: github_repo, type: text, label: "GitHub repository name" }
+  - { name: telegram_chat_id, type: text, label: "Telegram chat id to notify" }
+defaults:
+  profile: main
+effects: [network, external]
+nodes:
+  - { id: start, type: start }
+  - id: fetch_issues
+    type: agent_task
+    prompt: >-
+      Fetch unresolved Sentry issues for project {{params.sentry_project}}
+      using the sentry connector's list_issues function with query
+      "is:unresolved" and project set to {{params.sentry_project}}. Leave
+      cursor empty on this first call. List each issue's shortId, title,
+      level, and count.
+    connectors:
+      - { name: sentry, accounts: [default], functions: [list_issues], max_calls: 5 }
+  - id: triage
+    type: agent_task
+    prompt: >-
+      Review the Sentry issues found in {{nodes.fetch_issues.output}}.
+      Decide which ones are real bugs worth filing (skip noise, known
+      flaky errors, and duplicates). Produce a short list of the issues to
+      file, each with a proposed GitHub issue title and body that includes
+      the Sentry permalink.
+  - id: file_github_issues
+    type: agent_task
+    prompt: >-
+      For each issue selected in {{nodes.triage.output}}, create a GitHub
+      issue in {{params.github_owner}}/{{params.github_repo}} using the
+      github connector's create_issue function.
+    connectors:
+      - { name: github, accounts: [default], functions: [create_issue], max_calls: 10 }
+  - id: notify_telegram
+    type: agent_task
+    prompt: >-
+      Post a short summary of the triage results and the GitHub issues
+      filed in {{nodes.file_github_issues.output}} to Telegram chat
+      {{params.telegram_chat_id}} using the telegram connector's
+      send_message function.
+    connectors:
+      - { name: telegram, accounts: [default], functions: [send_message], max_calls: 3 }
+  - { id: finish, type: finish, outcome: success }
+edges:
+  - { from: start, to: fetch_issues }
+  - { from: fetch_issues, to: triage }
+  - { from: triage, to: file_github_issues }
+  - { from: file_github_issues, to: notify_telegram }
+  - { from: notify_telegram, to: finish }

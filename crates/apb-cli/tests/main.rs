@@ -14,6 +14,8 @@ mod advisory_cli_test;
 mod cli_test;
 #[path = "suite/connector_cli.rs"]
 mod connector_cli;
+#[path = "suite/demo_playbooks_test.rs"]
+mod demo_playbooks_test;
 #[path = "suite/mcp_cli_test.rs"]
 mod mcp_cli_test;
 #[path = "suite/mcp_supervise_test.rs"]
