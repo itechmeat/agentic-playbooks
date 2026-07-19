@@ -203,7 +203,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     for agent in &agents {
         let probe_id = detect_probe_id(agent);
         // An agent program explicitly set in the config takes priority over
-        // detect: detect probes the fixed names of the five, but here the
+        // detect: detect probes the fixed names of the six, but here the
         // agent may point at a custom binary (agents.<id>.program).
         if let Some(program) = global.agent_program(agent) {
             if program_in_path(&program) {
