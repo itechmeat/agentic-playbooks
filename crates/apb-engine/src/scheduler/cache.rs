@@ -42,6 +42,10 @@ pub(crate) struct NodeCacheCtx {
 /// `cache: auto`, the node is neither a script nor an agent_task, or no
 /// workspace fingerprint can be computed (for example, not a git work tree).
 /// Any of these paths simply skips the cache for this node.
+///
+/// The key's `workspace_fingerprint` excludes the node's declared
+/// `outputs.files`, the same set `admit` excludes from the post-execution
+/// fingerprint, so a node's own products never shift its key between runs.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare(
     playbook: &Playbook,
@@ -82,14 +86,22 @@ pub(crate) fn prepare(
             _ => return None,
         };
 
+    // Declared outputs are excluded from BOTH the pre-execution fingerprint
+    // (which is also the key's `workspace_fingerprint`) and the post-execution
+    // one in `admit`. Excluding on only one side is asymmetric: a node that
+    // writes a declared output into the workspace and leaves it there would
+    // shift its own key on the next run (never a hit) and drift pre vs post at
+    // admit (never a re-store).
     let exclude = node
         .outputs
         .as_ref()
         .map(|o| o.files.clone())
         .unwrap_or_default();
     let fingerprint = match node.inputs.as_ref() {
-        Some(inp) if !inp.files.is_empty() => files_fingerprint(workdir, &inp.files, &[]).ok()?,
-        _ => git_fingerprint(workdir, &[])?,
+        Some(inp) if !inp.files.is_empty() => {
+            files_fingerprint(workdir, &inp.files, &exclude).ok()?
+        }
+        _ => git_fingerprint(workdir, &exclude)?,
     };
 
     let node_def = serde_json::to_string(node).ok()?;

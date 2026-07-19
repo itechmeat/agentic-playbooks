@@ -20,7 +20,11 @@ pub enum FingerprintError {
 /// `exclude` globs (a node's declared outputs) are filtered out of the dirty
 /// state via a git pathspec exclusion on the diff and a globset filter on
 /// untracked paths, so a node's own products never count as workspace
-/// changes.
+/// changes. The `.apb/` directory is always excluded (from both the diff and
+/// the untracked set), mirroring the `files_fingerprint` walk: the engine
+/// writes run and cache state under `.apb/` every run, so counting it would
+/// change the fingerprint on every run even when the workspace is otherwise
+/// clean, defeating the cache in projects that do not gitignore `.apb/`.
 ///
 /// Returns `None` on any git failure: not a git work tree, git binary
 /// unavailable, or no HEAD commit yet. This is a deliberate "unknown state"
@@ -31,7 +35,7 @@ pub fn git_fingerprint(root: &Path, exclude: &[String]) -> Option<String> {
     let head = git(root, &["rev-parse", "HEAD"])?;
 
     let pathspecs: Vec<String> = exclude.iter().map(|g| format!(":(exclude){g}")).collect();
-    let mut diff_args = vec!["diff", "HEAD", "--binary", "--", "."];
+    let mut diff_args = vec!["diff", "HEAD", "--binary", "--", ".", ":(exclude).apb"];
     diff_args.extend(pathspecs.iter().map(String::as_str));
     let diff = git(root, &diff_args)?;
 
@@ -43,7 +47,7 @@ pub fn git_fingerprint(root: &Path, exclude: &[String]) -> Option<String> {
 
     let mut files: Vec<&str> = untracked
         .split('\0')
-        .filter(|p| !p.is_empty() && !ex.is_match(p))
+        .filter(|p| !p.is_empty() && *p != ".apb" && !p.starts_with(".apb/") && !ex.is_match(p))
         .collect();
     files.sort_unstable();
     for path in files {
@@ -180,6 +184,39 @@ mod tests {
         assert_eq!(clean, git_fingerprint(root, &exclude).unwrap());
         std::fs::write(root.join("undeclared.txt"), "x").unwrap();
         assert_ne!(clean, git_fingerprint(root, &exclude).unwrap());
+    }
+
+    #[test]
+    fn git_fingerprint_excludes_apb_dir() {
+        // A project that does NOT gitignore `.apb/`: the engine writes run and
+        // cache state under `.apb/` every run, and that state must never move
+        // the fingerprint (else the zero-declaration git path never hits).
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        git(root, &["init", "-q"]);
+        git(root, &["config", "user.email", "t@t"]);
+        git(root, &["config", "user.name", "t"]);
+        std::fs::write(root.join("a.txt"), "one").unwrap();
+        git(root, &["add", "."]);
+        git(root, &["commit", "-qm", "c1"]);
+        let base = git_fingerprint(root, &[]).unwrap();
+        // Simulate a run writing cache objects and run state under `.apb/`.
+        std::fs::create_dir_all(root.join(".apb/cache/objects/ab")).unwrap();
+        std::fs::write(root.join(".apb/cache/objects/ab/whatever"), "obj").unwrap();
+        std::fs::create_dir_all(root.join(".apb/runs/r1")).unwrap();
+        std::fs::write(root.join(".apb/runs/r1/events.jsonl"), "{}").unwrap();
+        assert_eq!(
+            base,
+            git_fingerprint(root, &[]).unwrap(),
+            "`.apb/` run and cache state must not change the fingerprint"
+        );
+        // A normal untracked file still changes it.
+        std::fs::write(root.join("undeclared.txt"), "x").unwrap();
+        assert_ne!(
+            base,
+            git_fingerprint(root, &[]).unwrap(),
+            "a normal untracked file must still change the fingerprint"
+        );
     }
 
     #[test]

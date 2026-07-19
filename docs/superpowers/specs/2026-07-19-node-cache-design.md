@@ -284,6 +284,15 @@ A sequence, not a scope cut. Every step passes the project gates
 5. CLI: `apb cache *` subcommands and the `apb run` flags.
 6. Web UI: the `cached` badge and cache events in RunView.
 
+## Known limitations
+
+- Nodes executed on the concurrent branch path (parallel fan-out) bypass the
+  cache entirely: no lookup, no admission, no cache events. Only the
+  sequential drive-loop path is cached. Routing the parallel path through
+  the same lookup/admission wrapper is a follow-up.
+- The git-aware fingerprint requires a git work tree with at least one
+  commit; without one, only nodes with declared `inputs` are cacheable.
+
 ## Future stages (recorded, not designed here)
 
 - TTL-driven revalidation and negative caching for cheap checks.

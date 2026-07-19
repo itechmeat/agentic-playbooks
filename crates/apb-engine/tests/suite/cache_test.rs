@@ -704,6 +704,37 @@ fn declared_artifact_is_captured_then_restored_on_hit() {
     assert_eq!(node_artifacts(&ev2, "gen"), arts);
 }
 
+// Regression (2026-07-19 whole-branch review): a declared workspace output
+// left in place between runs must be excluded from the PRE-execution
+// fingerprint (the cache key's workspace_fingerprint), not only the
+// post-execution one. Otherwise run 2 sees the leftover output, its key
+// differs from run 1's stored key, and it never hits.
+#[test]
+fn declared_artifact_left_in_place_still_hits() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_artifact(root);
+
+    let (_run1, ev1) = run_artifact(root, CacheRunMode::Auto);
+    assert!(has_miss(&ev1, "gen"), "run 1 should miss");
+    assert!(has_stored(&ev1, "gen"), "run 1 should store");
+    assert_eq!(run_count(root), 1);
+
+    // Do NOT delete findings.json: the declared output stays in the workspace.
+    assert!(
+        root.join("findings.json").exists(),
+        "the declared output is left in place between runs"
+    );
+
+    let (_run2, ev2) = run_artifact(root, CacheRunMode::Auto);
+    assert!(
+        hit_source(&ev2, "gen").is_some(),
+        "a declared output left in place must still hit on the second run"
+    );
+    assert!(!has_miss(&ev2, "gen"), "run 2 must not miss");
+    assert_eq!(run_count(root), 1, "the hit must not re-run the script");
+}
+
 // Task 7 scenario 3: a corrupted artifact object makes the hit's restore fail,
 // so the run degrades to a miss and re-executes without failing.
 #[test]
