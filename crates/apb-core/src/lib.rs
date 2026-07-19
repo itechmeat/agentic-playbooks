@@ -7,6 +7,7 @@ pub mod dismiss;
 pub mod doctor;
 pub mod duration;
 pub mod effects;
+pub mod fingerprint;
 pub mod fsutil;
 pub mod migration;
 pub mod models_table;
