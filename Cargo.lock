@@ -120,6 +120,7 @@ version = "0.2.0"
 dependencies = [
  "jsonschema",
  "percent-encoding",
+ "rust-embed",
  "serde",
  "serde_json",
  "serde_yaml_ng",
