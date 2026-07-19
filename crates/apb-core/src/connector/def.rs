@@ -126,6 +126,57 @@ pub struct SmtpSpec {
     pub verify: bool,
 }
 
+/// The IMAP connection block: host/port/TLS/auth method plus credentials.
+/// Every value is a template string. `password` is the one connection field
+/// the secret-placement policy allows `{{secret.*}}` in (spec 3.2, wave 2).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImapConnection {
+    pub host: String,
+    pub port: String,
+    pub use_tls: String,
+    pub auth_method: String,
+    pub username: String,
+    pub password: String,
+}
+
+/// One IMAP operation a function can perform (spec 3.3, wave 2). Each op
+/// accepts its own set of `params`, enforced by `validate_imap_params`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ImapOp {
+    Verify,
+    ListFolders,
+    Search,
+    Fetch,
+    SetFlags,
+}
+
+impl ImapOp {
+    /// The snake_case name of the op, as it appears on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ImapOp::Verify => "verify",
+            ImapOp::ListFolders => "list_folders",
+            ImapOp::Search => "search",
+            ImapOp::Fetch => "fetch",
+            ImapOp::SetFlags => "set_flags",
+        }
+    }
+}
+
+/// The `imap` function kind (spec 3.2, wave 2). Exactly one of a connector's
+/// function kinds. `op` selects the IMAP operation; `params` carries the
+/// op-specific arguments (spec 3.3), validated by `validate_imap_params`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ImapSpec {
+    pub connection: ImapConnection,
+    pub op: ImapOp,
+    #[serde(default)]
+    pub params: BTreeMap<String, String>,
+}
+
 /// One callable function of the connector: either an HTTP call (`method` +
 /// `url`, optionally `query`/`body`) or a `mock` (canned response, no
 /// network). `from_yaml` enforces that a function is exactly one of the two,
@@ -161,6 +212,8 @@ pub struct FunctionSpec {
     pub mock: Option<MockSpec>,
     #[serde(default)]
     pub smtp: Option<SmtpSpec>,
+    #[serde(default)]
+    pub imap: Option<ImapSpec>,
 }
 
 impl FunctionSpec {
@@ -174,6 +227,12 @@ impl FunctionSpec {
     /// 4.2), instead of making an HTTP call or returning a mock.
     pub fn is_smtp(&self) -> bool {
         self.smtp.is_some()
+    }
+
+    /// An imap function reads mailboxes natively (spec 3.2, wave 2), instead
+    /// of making an HTTP call, returning a mock, or sending mail over smtp.
+    pub fn is_imap(&self) -> bool {
+        self.imap.is_some()
     }
 }
 
@@ -238,42 +297,52 @@ impl ConnectorDoc {
             let is_http = f.method.is_some() || f.url.is_some();
             let is_mock = f.mock.is_some();
             let is_smtp = f.smtp.is_some();
-            match (is_http, is_mock, is_smtp) {
-                (false, false, false) => {
+            let is_imap = f.imap.is_some();
+            match [is_http, is_mock, is_smtp, is_imap]
+                .iter()
+                .filter(|set| **set)
+                .count()
+            {
+                0 => {
                     return Err(ConnectorError::Invalid(format!(
-                        "function `{}` is not an HTTP call (method + url), a mock, or an smtp block",
+                        "function `{}` is not an HTTP call (method + url), a mock, an smtp block, or an imap block",
                         f.name
                     )));
                 }
-                (true, false, false) => {
-                    if f.method.is_none() || f.url.is_none() {
-                        return Err(ConnectorError::Invalid(format!(
-                            "function `{}` must set both `method` and `url`",
-                            f.name
-                        )));
+                1 => {
+                    if is_http {
+                        if f.method.is_none() || f.url.is_none() {
+                            return Err(ConnectorError::Invalid(format!(
+                                "function `{}` must set both `method` and `url`",
+                                f.name
+                            )));
+                        }
+                    } else if is_mock {
+                        if !f.query.is_empty() || f.body.is_some() {
+                            return Err(ConnectorError::Invalid(format!(
+                                "mock function `{}` must not set `query` or `body`",
+                                f.name
+                            )));
+                        }
+                    } else if is_smtp {
+                        validate_smtp_shape(f)?;
+                    } else {
+                        validate_imap_shape(f)?;
                     }
                 }
-                (false, true, false) => {
-                    if !f.query.is_empty() || f.body.is_some() {
-                        return Err(ConnectorError::Invalid(format!(
-                            "mock function `{}` must not set `query` or `body`",
-                            f.name
-                        )));
-                    }
-                }
-                (false, false, true) => validate_smtp_shape(f)?,
                 _ => {
                     return Err(ConnectorError::Invalid(format!(
-                        "function `{}` must be exactly one of: an HTTP call, a mock, or an smtp block",
+                        "function `{}` must be exactly one of: an HTTP call, a mock, an smtp block, or an imap block",
                         f.name
                     )));
                 }
             }
 
             // response_pick projects an HTTP response body (spec 4.5); a mock
-            // returns an authored payload and an smtp function returns a send/
-            // verify receipt, so a projection on either is meaningless.
-            if !f.response_pick.is_empty() && (is_mock || is_smtp) {
+            // returns an authored payload, an smtp function returns a send/
+            // verify receipt, and an imap function returns its own op result,
+            // so a projection on any of those is meaningless.
+            if !f.response_pick.is_empty() && (is_mock || is_smtp || is_imap) {
                 return Err(ConnectorError::Invalid(format!(
                     "function `{}` sets response_pick but is not an HTTP function; response_pick is only valid on HTTP functions",
                     f.name
@@ -354,6 +423,77 @@ fn validate_smtp_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
         ))),
         _ => Ok(()),
     }
+}
+
+/// IMAP-internal shape rules (spec 3.2, wave 2): an imap function must not
+/// also carry `query`, `body`, or `headers` (those are HTTP-only), and its
+/// `params` must match what its `op` accepts (spec 3.3).
+fn validate_imap_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
+    let imap = f.imap.as_ref().expect("caller checked is_imap");
+    if !f.query.is_empty() {
+        return Err(ConnectorError::Invalid(format!(
+            "imap function `{}` must not set `query`",
+            f.name
+        )));
+    }
+    if f.body.is_some() {
+        return Err(ConnectorError::Invalid(format!(
+            "imap function `{}` must not set `body`",
+            f.name
+        )));
+    }
+    if !f.headers.is_empty() {
+        return Err(ConnectorError::Invalid(format!(
+            "imap function `{}` must not set `headers`",
+            f.name
+        )));
+    }
+    validate_imap_params(&f.name, imap.op, &imap.params)
+}
+
+/// Validates `params` against the allowed and required keys of `op` (spec
+/// 3.3): `verify` and `list_folders` take no params; `search` requires
+/// `folder` and `limit` with optional `unread_only`, `from_contains`,
+/// `subject_contains`, `since_days`; `fetch` requires `folder` and `uid`;
+/// `set_flags` requires `folder`, `uids`, and `seen`. Any other key is an
+/// error, and any missing required key is an error.
+fn validate_imap_params(
+    function_name: &str,
+    op: ImapOp,
+    params: &BTreeMap<String, String>,
+) -> Result<(), ConnectorError> {
+    let (required, optional): (&[&str], &[&str]) = match op {
+        ImapOp::Verify | ImapOp::ListFolders => (&[], &[]),
+        ImapOp::Search => (
+            &["folder", "limit"],
+            &[
+                "unread_only",
+                "from_contains",
+                "subject_contains",
+                "since_days",
+            ],
+        ),
+        ImapOp::Fetch => (&["folder", "uid"], &[]),
+        ImapOp::SetFlags => (&["folder", "uids", "seen"], &[]),
+    };
+
+    for key in params.keys() {
+        if !required.contains(&key.as_str()) && !optional.contains(&key.as_str()) {
+            return Err(ConnectorError::Invalid(format!(
+                "imap function `{function_name}` op `{}` does not accept param `{key}`",
+                op.as_str()
+            )));
+        }
+    }
+    for key in required {
+        if !params.contains_key(*key) {
+            return Err(ConnectorError::Invalid(format!(
+                "imap function `{function_name}` op `{}` is missing required param `{key}`",
+                op.as_str()
+            )));
+        }
+    }
+    Ok(())
 }
 
 /// The two `AccountField` names, split by secrecy: non-secret names that
@@ -464,6 +604,9 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         if let Some(smtp) = &f.smtp {
             validate_smtp_templates(smtp, &f.name, &fields)?;
         }
+        if let Some(imap) = &f.imap {
+            validate_imap_templates(imap, &f.name, &fields)?;
+        }
     }
 
     if let Some(auth) = &doc.auth {
@@ -548,6 +691,59 @@ fn validate_smtp_templates(
                 reject_secret(ns, &format!("function `{function_name}` smtp message"))?;
                 fields.check(ns, &name)?;
             }
+        }
+    }
+    Ok(())
+}
+
+/// Validates the placeholders in an `imap` function (spec 3.2, wave 2). Every
+/// connection field other than `password`, and every `params` value, follows
+/// function-body rules: `account.*` and `args.*` are allowed, `secret.*` is
+/// rejected. `password` mirrors `SmtpConnection.password` exactly: `args.*`
+/// is rejected, `account.*` and `secret.*` are allowed (it is the one field
+/// the secret-placement policy allows `{{secret.*}}` in). The reserved
+/// `{{auth}}` marker is a function-url-only construct and is rejected
+/// everywhere in the imap block.
+fn validate_imap_templates(
+    imap: &ImapSpec,
+    function_name: &str,
+    fields: &FieldNames,
+) -> Result<(), ConnectorError> {
+    use crate::connector::template::{Namespace, placeholders};
+
+    let conn = &imap.connection;
+    let non_password: [&str; 5] = [
+        conn.host.as_str(),
+        conn.port.as_str(),
+        conn.use_tls.as_str(),
+        conn.auth_method.as_str(),
+        conn.username.as_str(),
+    ];
+    for template in non_password {
+        for (ns, name) in placeholders(template)? {
+            reject_auth(ns, &format!("function `{function_name}` imap connection"))?;
+            reject_secret(ns, &format!("function `{function_name}` imap connection"))?;
+            fields.check(ns, &name)?;
+        }
+    }
+    for (ns, name) in placeholders(conn.password.as_str())? {
+        reject_auth(
+            ns,
+            &format!("function `{function_name}` imap connection password"),
+        )?;
+        if ns == Namespace::Args {
+            return Err(ConnectorError::Invalid(format!(
+                "args placeholders are not allowed in imap connection password of function `{function_name}`"
+            )));
+        }
+        fields.check(ns, &name)?;
+    }
+
+    for value in imap.params.values() {
+        for (ns, name) in placeholders(value)? {
+            reject_auth(ns, &format!("function `{function_name}` imap params"))?;
+            reject_secret(ns, &format!("function `{function_name}` imap params"))?;
+            fields.check(ns, &name)?;
         }
     }
     Ok(())
@@ -1016,5 +1212,116 @@ functions:
         assert!(err.contains("auth"), "message was: {err}");
         let msg = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n      message: { from_email: a@b.c, to: \"{{auth}}\", subject: s }\n";
         assert!(ConnectorDoc::from_yaml(msg, "x").is_err());
+    }
+
+    // -- imap function kind (wave 2) --
+
+    const IMAP_YAML: &str = r#"
+name: imap
+version: 0.1.0
+account_fields:
+  - name: host
+    required: true
+  - name: port
+    required: true
+  - name: use_tls
+  - name: auth_method
+  - name: username
+  - name: password
+    required: true
+    secret: true
+functions:
+  - name: verify
+    description: Probe the IMAP connection without listing anything
+    read_only: true
+    imap:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        auth_method: "{{account.auth_method}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      op: verify
+"#;
+
+    #[test]
+    fn imap_function_parses_minimal() {
+        let doc = ConnectorDoc::from_yaml(IMAP_YAML, "imap").unwrap();
+        let f = doc.function("verify").unwrap();
+        assert!(f.is_imap());
+        let imap = f.imap.as_ref().unwrap();
+        assert_eq!(imap.op, ImapOp::Verify);
+        assert!(imap.params.is_empty());
+    }
+
+    #[test]
+    fn imap_and_mock_together_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: p }\n      op: verify\n    mock: { status: 200, body: {} }\n";
+        assert!(ConnectorDoc::from_yaml(y, "x").is_err());
+    }
+
+    #[test]
+    fn imap_with_http_fields_rejected() {
+        let base = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n";
+        let imap_block = "    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: p }\n      op: verify\n";
+
+        let with_query = format!("{base}    query: {{ k: v }}\n{imap_block}");
+        let err = ConnectorDoc::from_yaml(&with_query, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("query"), "message was: {err}");
+
+        let with_body = format!("{base}    body: {{ a: 1 }}\n{imap_block}");
+        let err = ConnectorDoc::from_yaml(&with_body, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("body"), "message was: {err}");
+
+        let with_headers = format!("{base}    headers: {{ X-A: b }}\n{imap_block}");
+        let err = ConnectorDoc::from_yaml(&with_headers, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("headers"), "message was: {err}");
+
+        let with_response_pick = format!("{base}    response_pick: [a]\n{imap_block}");
+        let err = ConnectorDoc::from_yaml(&with_response_pick, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("response_pick"), "message was: {err}");
+    }
+
+    #[test]
+    fn imap_op_unknown_param_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: p }\n      op: verify\n      params: { folder: X }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("folder"), "message was: {err}");
+    }
+
+    #[test]
+    fn imap_op_missing_required_param_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: p }\n      op: search\n      params: { folder: INBOX }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("limit"), "message was: {err}");
+    }
+
+    #[test]
+    fn imap_secret_in_params_rejected() {
+        let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: password\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: \"{{secret.password}}\" }\n      op: search\n      params: { folder: \"{{secret.password}}\", limit: \"10\" }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("secret"), "message was: {err}");
+    }
+
+    #[test]
+    fn imap_args_in_connection_password_rejected() {
+        let args = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: \"{{args.password}}\" }\n      op: verify\n";
+        let err = ConnectorDoc::from_yaml(args, "x").unwrap_err().to_string();
+        assert!(
+            err.contains("args") && err.contains("password"),
+            "message was: {err}"
+        );
+
+        let account = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: password\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: \"{{account.password}}\" }\n      op: verify\n";
+        assert!(ConnectorDoc::from_yaml(account, "x").is_err());
     }
 }

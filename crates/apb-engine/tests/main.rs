@@ -38,12 +38,16 @@ mod background_supervisor_test;
 mod cache_test;
 #[path = "suite/child_run_event_test.rs"]
 mod child_run_event_test;
+#[path = "suite/connector_asana.rs"]
+mod connector_asana;
 #[path = "suite/connector_call.rs"]
 mod connector_call;
 #[path = "suite/connector_e2e.rs"]
 mod connector_e2e;
 #[path = "suite/connector_healthcheck.rs"]
 mod connector_healthcheck;
+#[path = "suite/connector_imap.rs"]
+mod connector_imap;
 #[path = "suite/connector_manifest.rs"]
 mod connector_manifest;
 #[path = "suite/connector_play_call.rs"]

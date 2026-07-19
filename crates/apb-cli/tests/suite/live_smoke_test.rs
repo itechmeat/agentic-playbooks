@@ -401,3 +401,72 @@ fn live_sentry_healthcheck_and_list_issues() {
         &format!(r#"{{"query":"is:unresolved","project":"{project}","cursor":""}}"#),
     );
 }
+
+#[test]
+#[ignore]
+fn live_asana_healthcheck_and_list_workspaces() {
+    if std::env::var("APB_LIVE_TEST_ASANA")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_ASANA not set");
+        return;
+    }
+    let Some(vals) = require_env(&["ASANA_TOKEN"]) else {
+        return;
+    };
+    let token = &vals[0];
+
+    run_live_probe(
+        "asana",
+        &[("api_base", "https://app.asana.com/api/1.0")],
+        "token",
+        "ASANA_TOKEN",
+        token,
+        "get_me",
+        "{}",
+        "list_workspaces",
+        r#"{"limit":10}"#,
+    );
+}
+
+#[test]
+#[ignore]
+fn live_imap_verify_and_list_folders() {
+    if std::env::var("APB_LIVE_TEST_IMAP")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_IMAP not set");
+        return;
+    }
+    let Some(vals) = require_env(&[
+        "IMAP_TEST_HOST",
+        "IMAP_TEST_PORT",
+        "IMAP_TEST_AUTH_METHOD",
+        "IMAP_TEST_USERNAME",
+        "IMAP_TEST_PASSWORD",
+    ]) else {
+        return;
+    };
+    let (host, port, auth_method, username, password) =
+        (&vals[0], &vals[1], &vals[2], &vals[3], &vals[4]);
+
+    run_live_probe(
+        "imap",
+        &[
+            ("host", host),
+            ("port", port),
+            ("use_tls", "true"),
+            ("auth_method", auth_method),
+            ("username", username),
+        ],
+        "password",
+        "IMAP_TEST_PASSWORD",
+        password,
+        "verify",
+        "{}",
+        "list_folders",
+        "{}",
+    );
+}

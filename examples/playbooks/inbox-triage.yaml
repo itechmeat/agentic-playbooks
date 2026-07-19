@@ -1,0 +1,67 @@
+schema: 2
+id: inbox-triage
+name: Inbox triage
+description: >-
+  Search unread mail, have an agent decide which messages represent
+  actionable work, file an Asana task for each, and mark the processed
+  messages read.
+version: 1.0.0
+params:
+  - { name: mail_folder, type: text, label: "IMAP folder to search" }
+  - { name: asana_project, type: text, label: "Asana project gid to file tasks in" }
+defaults:
+  profile: main
+effects: [network, external, irreversible]
+nodes:
+  - { id: start, type: start }
+  - id: search_inbox
+    type: agent_task
+    prompt: >-
+      Search folder {{params.mail_folder}} for unread messages using the
+      imap connector's search_messages function, with unread_only true
+      and a limit of 20. List each message's uid, from, subject, and
+      date.
+    connectors:
+      - { name: imap, accounts: [default], functions: [search_messages], max_calls: 3 }
+  - id: fetch_messages
+    type: agent_task
+    prompt: >-
+      For each message found in {{nodes.search_inbox.output}}, fetch its
+      full content from folder {{params.mail_folder}} using the imap
+      connector's get_message function, keyed by uid.
+    connectors:
+      - { name: imap, accounts: [default], functions: [get_message], max_calls: 20 }
+  - id: triage
+    type: agent_task
+    prompt: >-
+      Review the messages fetched in {{nodes.fetch_messages.output}}.
+      Decide which ones represent actionable work (a request, a bug
+      report, a task to follow up on) versus noise (newsletters,
+      notifications, automated receipts). Produce a short list of the
+      actionable messages, each with a proposed Asana task name, notes
+      summarizing the message, and its uid.
+  - id: create_tasks
+    type: agent_task
+    prompt: >-
+      For each item selected in {{nodes.triage.output}}, create an Asana
+      task in project {{params.asana_project}} using the asana
+      connector's create_task function, with the proposed name and
+      notes.
+    connectors:
+      - { name: asana, accounts: [default], functions: [create_task], max_calls: 10 }
+  - id: mark_processed
+    type: agent_task
+    prompt: >-
+      Mark every message selected in {{nodes.triage.output}} as read in
+      folder {{params.mail_folder}} using the imap connector's mark_read
+      function, keyed by uid.
+    connectors:
+      - { name: imap, accounts: [default], functions: [mark_read], max_calls: 3 }
+  - { id: finish, type: finish, outcome: success }
+edges:
+  - { from: start, to: search_inbox }
+  - { from: search_inbox, to: fetch_messages }
+  - { from: fetch_messages, to: triage }
+  - { from: triage, to: create_tasks }
+  - { from: create_tasks, to: mark_processed }
+  - { from: mark_processed, to: finish }

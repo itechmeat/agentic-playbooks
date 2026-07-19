@@ -1,5 +1,6 @@
 pub mod adapter;
 pub mod connector_call;
+pub mod connector_imap;
 pub mod connector_prompt;
 pub mod connector_result;
 pub mod connector_run;

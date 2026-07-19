@@ -3,7 +3,7 @@ resolver = "2"
 members = ["crates/apb-core", "crates/apb-server", "crates/apb-cli", "crates/apb-engine", "crates/apb-mcp"]
 
 [workspace.package]
-version = "0.4.0"
+version = "0.5.0"
 edition = "2024"
 license = "Apache-2.0"
 repository = "https://github.com/itechmeat/agentic-playbooks"
@@ -29,3 +29,15 @@ jsonschema = { version = "0.26", default-features = false }
 shell-words = "1"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "hostname"] }
 globset = "0.4"
+# Native IMAP execution for the `imap` connector function kind (spec 3.2, wave
+# 2): blocking client over a plaintext or rustls stream, silent-read discipline
+# (BODY.PEEK, EXAMINE) enforced by the engine.
+imap = { version = "2.4", default-features = false }
+# The envelope/address types `imap::types::Fetch::envelope` returns are defined
+# in imap-proto and are not re-exported by the imap crate, so naming them in
+# the search-result decoder needs this direct dependency (version matched to
+# imap 2.4's transitive pin).
+imap-proto = "0.10"
+mail-parser = "0.11"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-platform-verifier = "0.5"

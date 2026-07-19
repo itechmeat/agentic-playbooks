@@ -22,6 +22,15 @@ percent-encoding.workspace = true
 # blocking low-level SmtpConnection client, STARTTLS via rustls (TLS 1.2+ by
 # default), MIME/multipart built by the library.
 lettre.workspace = true
+# Native IMAP execution for the `imap` connector function kind (spec 3.2, wave
+# 2): blocking IMAP client with a hard silent-read guarantee (BODY.PEEK, read
+# ops open with EXAMINE), message parsing via mail-parser, TLS via rustls with
+# the platform certificate verifier.
+imap.workspace = true
+imap-proto.workspace = true
+mail-parser.workspace = true
+rustls.workspace = true
+rustls-platform-verifier.workspace = true
 
 # Group termination of agent process tree on cancellation/timeout (Unix):
 # kill(-pgid, SIGKILL). libc already in tree transitively, direct dependency
@@ -31,3 +40,5 @@ libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# Decodes the recorded XOAUTH2 SASL payload in the imap listener tests.
+base64 = "0.22"

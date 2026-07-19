@@ -20,7 +20,10 @@ use apb_core::connector::config;
 use apb_core::connector::def::{AuthSpec, ConnectorDoc, FunctionSpec};
 use apb_core::connector::secrets;
 use apb_core::connector::store;
-use apb_core::connector::template::{RenderCtx, render_body, render_encoded, render_raw};
+use apb_core::connector::template::{
+    RenderCtx, render_body, render_encoded, render_raw, resolve_optional_arg,
+    single_args_placeholder,
+};
 use apb_core::trust::{TrustStore, account_trust_id};
 use serde_json::{Value, json};
 
@@ -184,6 +187,12 @@ enum PreparedCall {
         account: String,
         call: Box<crate::connector_smtp::SmtpCall>,
     },
+    // Boxed for the same reason: `ImapCall` carries the resolved connection and
+    // typed op plan. An imap call has no HTTP status, like smtp.
+    Imap {
+        account: String,
+        call: Box<crate::connector_imap::ImapCall>,
+    },
 }
 
 /// An HTTP call ready to send.
@@ -214,6 +223,7 @@ impl PreparedCall {
             PreparedCall::Mock { account, .. } => account,
             PreparedCall::Http(h) => &h.account,
             PreparedCall::Smtp { account, .. } => account,
+            PreparedCall::Imap { account, .. } => account,
         }
     }
 
@@ -224,6 +234,7 @@ impl PreparedCall {
             PreparedCall::Mock { .. } => String::new(),
             PreparedCall::Http(h) => h.pre_auth_url.clone(),
             PreparedCall::Smtp { call, .. } => call.endpoint(),
+            PreparedCall::Imap { call, .. } => call.endpoint(),
         }
     }
 
@@ -233,6 +244,7 @@ impl PreparedCall {
         match self {
             PreparedCall::Mock { .. } | PreparedCall::Http(_) => (None, None),
             PreparedCall::Smtp { call, .. } => call.event_extra(),
+            PreparedCall::Imap { call, .. } => call.event_extra(),
         }
     }
 
@@ -247,6 +259,9 @@ impl PreparedCall {
             // An smtp call has no HTTP status; the event log records the
             // endpoint plus subject/recipient count, never a status code.
             PreparedCall::Smtp { call, .. } => (call.send(), None),
+            // An imap call likewise has no HTTP status; the event log records
+            // only the endpoint (spec 3.4: no subjects).
+            PreparedCall::Imap { call, .. } => (call.send(), None),
         }
     }
 }
@@ -508,6 +523,30 @@ fn build_prepared(
             crate::connector_smtp::SmtpBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
             crate::connector_smtp::SmtpBuild::Call(call) => {
                 Ok(Prepared::Call(Box::new(PreparedCall::Smtp {
+                    account: account_name,
+                    call,
+                })))
+            }
+        };
+    }
+
+    // 7c. IMAP: render the connection/op off the same resolved secrets and
+    // account fields, or produce a dry-run render without connecting. Like
+    // smtp, an imap function has no URL/query/body/header rendering, so this
+    // branch is terminal.
+    if let Some(imap) = &function.imap {
+        return match crate::connector_imap::build(
+            imap,
+            &account_fields,
+            args,
+            &secrets,
+            redactions,
+            dry_run,
+            function.timeout_sec,
+        )? {
+            crate::connector_imap::ImapBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
+            crate::connector_imap::ImapBuild::Call(call) => {
+                Ok(Prepared::Call(Box::new(PreparedCall::Imap {
                     account: account_name,
                     call,
                 })))
@@ -1007,6 +1046,19 @@ fn cmd_secret_error(account: &str, field: &str, err: secrets::CmdSecretError) ->
 fn render_query(function: &FunctionSpec, ctx: &RenderCtx) -> Result<String, CallError> {
     let mut parts = Vec::new();
     for (key, template) in &function.query {
+        // spec 5.1: a query value that is exactly `{{args.field}}` drops the
+        // whole pair when the arg is absent, instead of erroring. An
+        // explicit null arg is treated as absent and dropped too, so a
+        // literal "null" never renders into the query string. A present,
+        // non-null arg (scalar or not) still goes through `render_encoded`
+        // below, which already renders scalars typed (string verbatim,
+        // number/bool via their JSON text) and turns a non-scalar into a
+        // Config error.
+        if let Some(field) = single_args_placeholder(template)
+            && resolve_optional_arg(ctx, field).is_none()
+        {
+            continue;
+        }
         let value = render_encoded(template, ctx).map_err(|e| {
             CallError::new(CallErrorCode::Config, format!("query render failed: {e}"))
         })?;
@@ -1527,6 +1579,57 @@ mod tests {
             r.headers.get("User-Agent").map(String::as_str),
             Some("custom-ua")
         );
+    }
+
+    #[test]
+    fn render_query_drops_absent_single_placeholder_pair() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: list\n    description: d\n    method: GET\n    url: \"https://api.example.com/items\"\n    query: { offset: \"{{args.offset}}\", limit: \"{{args.limit}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("list").unwrap();
+        let args = json!({ "limit": 50 });
+        let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
+        assert_eq!(r.pre_auth_url, "https://api.example.com/items?limit=50");
+    }
+
+    #[test]
+    fn render_query_typed_scalars() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: list\n    description: d\n    method: GET\n    url: \"https://api.example.com/items\"\n    query: { active: \"{{args.active}}\", limit: \"{{args.limit}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("list").unwrap();
+        let args = json!({ "limit": 50, "active": true });
+        let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            r.pre_auth_url,
+            "https://api.example.com/items?active=true&limit=50"
+        );
+    }
+
+    #[test]
+    fn render_query_non_scalar_single_placeholder_is_config_error() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: list\n    description: d\n    method: GET\n    url: \"https://api.example.com/items\"\n    query: { limit: \"{{args.limit}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("list").unwrap();
+        let args = json!({ "limit": [1] });
+        match render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()) {
+            Ok(_) => panic!("expected a config error for a non-scalar query arg"),
+            Err(err) => assert_eq!(err.code, CallErrorCode::Config),
+        }
+    }
+
+    #[test]
+    fn render_query_null_arg_drops_pair() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: list\n    description: d\n    method: GET\n    url: \"https://api.example.com/items\"\n    query: { offset: \"{{args.offset}}\", limit: \"{{args.limit}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("list").unwrap();
+        // `offset` is explicitly null (not merely absent): it must drop the
+        // pair exactly like an absent arg, not render a literal `null`.
+        let args = json!({ "offset": null, "limit": 50 });
+        let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
+        assert_eq!(r.pre_auth_url, "https://api.example.com/items?limit=50");
     }
 
     #[test]

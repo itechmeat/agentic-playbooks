@@ -1,0 +1,147 @@
+name: imap
+version: 0.1.0
+healthcheck: verify
+account_fields:
+  - name: host
+    required: true
+  - name: port
+    required: true
+  - name: use_tls
+    required: false
+  - name: auth_method
+    required: true
+  - name: username
+    required: true
+  - name: password
+    required: true
+    secret: true
+functions:
+  - name: verify
+    description: Probe the IMAP connection (connect, TLS, authenticate) without touching any mailbox
+    read_only: true
+    imap:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        auth_method: "{{account.auth_method}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      op: verify
+    args_schema: { type: object, properties: {}, required: [] }
+
+  - name: list_folders
+    description: List the mailbox folders visible to the account
+    read_only: true
+    imap:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        auth_method: "{{account.auth_method}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      op: list_folders
+    args_schema: { type: object, properties: {}, required: [] }
+
+  - name: search_messages
+    description: Search a folder for messages, reading it without marking anything seen
+    read_only: true
+    imap:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        auth_method: "{{account.auth_method}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      op: search
+      params:
+        folder: "{{args.folder}}"
+        limit: "{{args.limit}}"
+        unread_only: "{{args.unread_only}}"
+        from_contains: "{{args.from_contains}}"
+        subject_contains: "{{args.subject_contains}}"
+        since_days: "{{args.since_days}}"
+    args_schema:
+      type: object
+      properties:
+        folder: { type: string, description: "the mailbox folder to search, for example INBOX" }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        unread_only: { type: boolean }
+        from_contains: { type: string, description: "matches messages whose From header contains this text" }
+        subject_contains: { type: string, description: "matches messages whose Subject header contains this text" }
+        since_days: { type: integer, minimum: 1, description: "only messages received within this many days" }
+      required: [folder, limit]
+    examples:
+      - args: { folder: INBOX, limit: 20, unread_only: true, since_days: 7 }
+        note: "from_contains and subject_contains are optional and, like unread_only and since_days, are simply left out of the call when not needed; searching never marks a message seen."
+
+  - name: get_message
+    description: Fetch one message by uid, reading it without marking it seen
+    read_only: true
+    imap:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        auth_method: "{{account.auth_method}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      op: fetch
+      params:
+        folder: "{{args.folder}}"
+        uid: "{{args.uid}}"
+    args_schema:
+      type: object
+      properties:
+        folder: { type: string, description: "the mailbox folder the message lives in, for example INBOX" }
+        uid: { type: integer, description: "the message's IMAP uid, from a prior search_messages or list result" }
+      required: [folder, uid]
+
+  - name: mark_read
+    description: Mark one or more messages as read (sets the \Seen flag)
+    imap:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        auth_method: "{{account.auth_method}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      op: set_flags
+      params:
+        folder: "{{args.folder}}"
+        uids: "{{args.uids}}"
+        seen: "true"
+    args_schema:
+      type: object
+      properties:
+        folder: { type: string, description: "the mailbox folder the messages live in, for example INBOX" }
+        uids: { type: string, description: "comma-separated uid list, for example \"101,102\"" }
+      required: [folder, uids]
+    examples:
+      - args: { folder: INBOX, uids: "101,102" }
+        note: "mark_read and mark_unread are separate functions, so a grant allowlist can permit one without the other."
+
+  - name: mark_unread
+    description: Mark one or more messages as unread (clears the \Seen flag)
+    imap:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        auth_method: "{{account.auth_method}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      op: set_flags
+      params:
+        folder: "{{args.folder}}"
+        uids: "{{args.uids}}"
+        seen: "false"
+    args_schema:
+      type: object
+      properties:
+        folder: { type: string, description: "the mailbox folder the messages live in, for example INBOX" }
+        uids: { type: string, description: "comma-separated uid list, for example \"101,102\"" }
+      required: [folder, uids]

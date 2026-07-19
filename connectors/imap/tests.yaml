@@ -1,0 +1,57 @@
+cases:
+  - function: verify
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com }
+    args: {}
+    expect:
+      imap: { op: verify }
+
+  - function: list_folders
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com }
+    args: {}
+    expect:
+      imap: { op: list_folders }
+
+  - function: search_messages
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com }
+    args: { folder: INBOX, limit: 20, unread_only: true, since_days: 7 }
+    expect:
+      imap:
+        op: search
+        folder: INBOX
+        params_contains: { limit: "20", unread_only: "true" }
+
+  - function: search_messages
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com }
+    args: { folder: Archive, limit: 5 }
+    expect:
+      imap:
+        op: search
+        folder: Archive
+        params_contains: { limit: "5" }
+
+  - function: get_message
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com }
+    args: { folder: INBOX, uid: 101 }
+    expect:
+      imap:
+        op: fetch
+        folder: INBOX
+        params_contains: { uid: "101" }
+
+  - function: mark_read
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com }
+    args: { folder: INBOX, uids: "101,102" }
+    expect:
+      imap:
+        op: set_flags
+        folder: INBOX
+        params_contains: { uids: "[101,102]", seen: "true" }
+
+  - function: mark_unread
+    account: { host: imap.example.com, port: "993", use_tls: "true", auth_method: password, username: user@example.com }
+    args: { folder: INBOX, uids: "101,102" }
+    expect:
+      imap:
+        op: set_flags
+        folder: INBOX
+        params_contains: { uids: "[101,102]", seen: "false" }
