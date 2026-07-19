@@ -153,6 +153,28 @@ fn stderr_excerpt(stderr: &[u8]) -> String {
     }
 }
 
+/// Spawns `cmd`, retrying briefly on a transient ETXTBSY (errno 26). On
+/// Linux, spawning is fork + exec: between the fork and the child's execve,
+/// the child holds inherited copies of any write file descriptors another
+/// thread has open on some other freshly written executable. If that other
+/// thread's own spawn races the execve for the same window, its exec sees the
+/// file still "open for writing" and fails with ETXTBSY, even though the
+/// executable was already fsynced. The engine's `spawn_in_group`
+/// (`crates/apb-engine/src/adapter.rs`) hit the same race and retries the
+/// same way; mirror it here rather than inventing a second policy.
+fn spawn_retrying_etxtbsy(cmd: &mut Command) -> std::io::Result<std::process::Child> {
+    for _ in 0..20 {
+        match cmd.spawn() {
+            Ok(child) => return Ok(child),
+            Err(e) if e.raw_os_error() == Some(26) => {
+                thread::sleep(Duration::from_millis(10));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    cmd.spawn()
+}
+
 /// Resolves a command-sourced secret (spec 4.1). The command line is parsed
 /// into argv with shell-words rules (quoted arguments supported); NO shell is
 /// involved, so pipes, redirection, and substitution are not interpreted. The
@@ -166,12 +188,12 @@ pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<String, CmdSecret
         .split_first()
         .ok_or_else(|| CmdSecretError::Parse("empty command".to_string()))?;
 
-    let mut child = Command::new(program)
-        .args(args)
+    let mut cmd = Command::new(program);
+    cmd.args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+        .stderr(Stdio::piped());
+    let mut child = spawn_retrying_etxtbsy(&mut cmd)
         .map_err(|e| CmdSecretError::Spawn(format!("{program}: {e}")))?;
 
     // Drain both pipes on their own threads so a large output cannot deadlock
