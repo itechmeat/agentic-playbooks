@@ -651,7 +651,9 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
     }
 
     let env = config::env_refs(&loaded.doc, &acct);
-    let secret_keys: std::collections::HashSet<&str> = env.keys().map(String::as_str).collect();
+    let cmd = config::cmd_refs(&loaded.doc, &acct);
+    let secret_keys: std::collections::HashSet<&str> =
+        env.keys().chain(cmd.keys()).map(String::as_str).collect();
     let fields: BTreeMap<String, String> = acct
         .fields
         .iter()
@@ -664,8 +666,7 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
         default: acct.default,
         fields,
         env,
-        // Command-sourced secrets in a healthcheck are wired in Task 5.
-        cmd: BTreeMap::new(),
+        cmd,
         digest,
     };
 
@@ -793,26 +794,32 @@ fn validate_args(schema: &Value, args: &Value) -> Result<(), CallError> {
     Ok(())
 }
 
-/// The non-secret account fields: every field whose key is NOT an env-backed
-/// (secret) field. Secret fields hold a raw `{{env.VAR}}` reference in the
-/// manifest and must never reach the render context's `account` map.
+/// The non-secret account fields: every field whose key is NOT a secret field
+/// (env-backed or command-backed). Secret fields hold a raw `{{env.VAR}}` /
+/// `{{cmd:...}}` reference in the manifest and must never reach the render
+/// context's `account` map.
 fn non_secret_fields(account: &ManifestAccount) -> BTreeMap<String, String> {
     account
         .fields
         .iter()
-        .filter(|(k, _)| !account.env.contains_key(k.as_str()))
+        .filter(|(k, _)| {
+            !account.env.contains_key(k.as_str()) && !account.cmd.contains_key(k.as_str())
+        })
         .map(|(k, v)| (k.clone(), v.clone()))
         .collect()
 }
 
 /// The resolved secrets map (field name -> value) plus the redaction pairs
-/// (resolved value, ENV var name) the response body is scrubbed against.
+/// (resolved value, redaction label) the response body is scrubbed against.
+/// The label is the ENV var name for env-sourced secrets and `cmd:<field>`
+/// for command-sourced ones.
 type ResolvedSecrets = (BTreeMap<String, String>, Vec<(String, String)>);
 
-/// Resolves every secret field's env var to its value. Returns the secrets map
-/// keyed by FIELD name (for the render context) and the redaction pairs
-/// (resolved value, env var name). A var that resolves nowhere is a Config
-/// error naming it.
+/// Resolves every secret field to its value: env-ref fields via the secrets
+/// resolution chain, cmd-ref fields by executing the command (spec 4.1).
+/// Returns the secrets map keyed by FIELD name (for the render context) and
+/// the redaction pairs (resolved value, redaction label). A var that resolves
+/// nowhere, or a command that fails, is a Config error naming the field.
 fn resolve_secrets(root: &Path, account: &ManifestAccount) -> Result<ResolvedSecrets, CallError> {
     let mut secrets = BTreeMap::new();
     let mut redactions = Vec::new();
@@ -829,7 +836,49 @@ fn resolve_secrets(root: &Path, account: &ManifestAccount) -> Result<ResolvedSec
         }
         secrets.insert(field.clone(), value);
     }
+    for (field, cmdline) in &account.cmd {
+        let value = secrets::resolve_cmd(cmdline, secrets::CMD_SECRET_TIMEOUT)
+            .map_err(|e| cmd_secret_error(&account.name, field, e))?;
+        // resolve_cmd rejects empty output, so the value is always non-empty
+        // and safe to register for redaction. The label carries no secret.
+        redactions.push((value.clone(), format!("cmd:{field}")));
+        secrets.insert(field.clone(), value);
+    }
     Ok((secrets, redactions))
+}
+
+/// Maps a `CmdSecretError` to a `config` call error naming the account and
+/// field and, where the helper produced one, a trimmed stderr excerpt. The
+/// resolved secret is never part of any variant, so nothing sensitive can
+/// reach this message.
+fn cmd_secret_error(account: &str, field: &str, err: secrets::CmdSecretError) -> CallError {
+    use secrets::CmdSecretError as E;
+    let detail = match err {
+        E::Parse(m) => format!("command reference is not valid: {m}"),
+        E::Spawn(m) => format!("command could not start: {m}"),
+        E::Timeout => "command timed out after 10s".to_string(),
+        E::NonZero { code, stderr } => {
+            let code = code
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string());
+            if stderr.is_empty() {
+                format!("command exited with status {code}")
+            } else {
+                format!("command exited with status {code}: {stderr}")
+            }
+        }
+        E::Empty { stderr } => {
+            if stderr.is_empty() {
+                "command produced no output".to_string()
+            } else {
+                format!("command produced no output: {stderr}")
+            }
+        }
+    };
+    CallError::new(
+        CallErrorCode::Config,
+        format!("secret for account `{account}` field `{field}`: {detail}"),
+    )
 }
 
 /// Renders the function's query pairs (keys literal, values percent-encoded)

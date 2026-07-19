@@ -136,6 +136,84 @@ fn seed_secret(root: &Path) {
     std::fs::write(path, format!("{SECRET_VAR}={SECRET_VALUE}\n")).unwrap();
 }
 
+/// A connector whose `token` secret is sourced from a command, echoed back by
+/// the `echo` function so redaction can be asserted end to end. The command
+/// itself is bound per-test through the manifest account's `cmd` map, so the
+/// definition carries no path.
+#[cfg(unix)]
+const CMD_CONNECTOR_YAML: &str = r#"
+name: cmd-conn
+version: 0.1.0
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: echo
+    description: Echo whatever the service returns
+    method: GET
+    url: "{{account.base_url}}/echo"
+"#;
+
+#[cfg(unix)]
+fn write_cmd_connector(run_dir: &Path) {
+    let cdir = run_dir.join("connectors");
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join("cmd-conn.yaml"), CMD_CONNECTOR_YAML).unwrap();
+}
+
+#[cfg(unix)]
+fn cmd_account(base_url: &str, stub_path: &str) -> ManifestAccount {
+    ManifestAccount {
+        name: "acct1".to_string(),
+        default: true,
+        fields: BTreeMap::from([
+            ("base_url".to_string(), base_url.to_string()),
+            ("token".to_string(), format!("{{{{cmd:{stub_path}}}}}")),
+        ]),
+        env: BTreeMap::new(),
+        cmd: BTreeMap::from([("token".to_string(), stub_path.to_string())]),
+        digest: "sha256:acct".to_string(),
+    }
+}
+
+#[cfg(unix)]
+fn write_stub(dir: &Path, name: &str, script: &str) -> String {
+    use std::os::unix::fs::PermissionsExt;
+    let path = dir.join(name);
+    std::fs::write(&path, script).unwrap();
+    let mut perms = std::fs::metadata(&path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&path, perms).unwrap();
+    path.to_string_lossy().into_owned()
+}
+
+#[cfg(unix)]
+fn seed_cmd_run(run_dir: &Path, account: ManifestAccount) {
+    let mut m = RunExecutionManifest::default();
+    m.connectors.push(ManifestConnector {
+        name: "cmd-conn".to_string(),
+        digest: "sha256:test".to_string(),
+        accounts: vec![account],
+    });
+    m.connector_grants.insert(
+        NODE.to_string(),
+        vec![ManifestConnectorGrant {
+            connector: "cmd-conn".to_string(),
+            accounts: vec!["acct1".to_string()],
+            functions: vec!["echo".to_string()],
+            max_calls: None,
+        }],
+    );
+    manifest::write(run_dir, &m).unwrap();
+}
+
 fn call<'a>(
     run_dir: &'a Path,
     root: &'a Path,
@@ -1155,4 +1233,184 @@ fn response_pick_projects_by_default_and_full_bypasses_it() {
     );
     assert_eq!(full["body"][0]["title"], serde_json::json!("x"));
     assert_eq!(full["body"][0]["user"]["id"], serde_json::json!(9));
+}
+
+// --- command-sourced secrets (spec 4.1) --------------------------------
+
+#[cfg(unix)]
+#[test]
+fn cmd_secret_is_resolved_and_injected_as_auth_header() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    let stub = write_stub(
+        stubs.path(),
+        "ok-token",
+        "#!/bin/sh\nprintf 'cmd-secret-42\\n'\n",
+    );
+
+    let server = common::spawn_http(200, "OK", &[], r#"{"ok":true}"#.to_string());
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account(&server.base_url, &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(ok, "expected ok: {value}");
+    let req = server.captured_request().expect("server saw a request");
+    assert!(
+        req.contains("Authorization: Bearer cmd-secret-42"),
+        "auth header wrong:\n{req}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cmd_secret_is_redacted_in_result_body() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    let stub = write_stub(
+        stubs.path(),
+        "ok-token",
+        "#!/bin/sh\nprintf 'cmd-secret-42\\n'\n",
+    );
+
+    // The service echoes the token back in its body.
+    let server = common::spawn_http(200, "OK", &[], r#"{"echo":"cmd-secret-42"}"#.to_string());
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account(&server.base_url, &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(ok, "expected ok: {value}");
+    assert_eq!(
+        value["body"]["echo"],
+        serde_json::json!("[redacted:cmd:token]")
+    );
+    assert!(
+        !value.to_string().contains("cmd-secret-42"),
+        "secret leaked: {value}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cmd_secret_nonzero_exit_is_config_error_naming_account_and_field() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    let stub = write_stub(
+        stubs.path(),
+        "fail-token",
+        "#!/bin/sh\necho 'gh: not logged in' >&2\nexit 4\n",
+    );
+
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account("https://unused.example", &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(!ok);
+    assert_eq!(value["error"]["code"], serde_json::json!("config"));
+    let msg = value["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("acct1") && msg.contains("token"),
+        "names account and field: {msg}"
+    );
+    assert!(
+        msg.contains("not logged in"),
+        "includes stderr excerpt: {msg}"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn cmd_secret_empty_output_is_config_error() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    let stub = write_stub(stubs.path(), "empty-token", "#!/bin/sh\nexit 0\n");
+
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account("https://unused.example", &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(!ok);
+    assert_eq!(value["error"]["code"], serde_json::json!("config"));
+}
+
+#[cfg(unix)]
+#[test]
+fn dry_run_does_not_execute_cmd_secret() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    // A stub that touches a sentinel iff it ever runs.
+    let sentinel = stubs.path().join("ran.marker");
+    let stub = write_stub(
+        stubs.path(),
+        "sentinel-token",
+        &format!("#!/bin/sh\ntouch '{}'\nprintf 'x\\n'\n", sentinel.display()),
+    );
+    write_cmd_connector(run.path());
+    seed_cmd_run(run.path(), cmd_account("https://api.example", &stub));
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "cmd-conn",
+        function: "echo",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: true,
+        full: false,
+    });
+    assert!(ok, "dry-run should render without secrets: {value}");
+    assert!(
+        !sentinel.exists(),
+        "dry-run must not execute the secret command"
+    );
 }
