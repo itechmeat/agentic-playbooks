@@ -80,6 +80,39 @@ pub enum Effect {
     Irreversible,
 }
 
+/// Node-level cache declaration (spec 2026-07-19-node-cache-design). Intent
+/// only: admission additionally requires the engine's post-hoc verification.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum CacheSpec {
+    Mode(CacheMode),
+    Config(CacheConfig),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CacheMode {
+    Auto,
+    #[default]
+    Off,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CacheConfig {
+    #[serde(default)]
+    pub mode: CacheMode,
+    #[serde(default)]
+    pub ttl: Option<String>,
+}
+
+/// File globs a node declares as inputs (fingerprint refinement) or outputs
+/// (captured artifacts, excluded from the post-run fingerprint comparison).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NodeFiles {
+    #[serde(default)]
+    pub files: Vec<String>,
+}
+
 impl Playbook {
     pub fn from_yaml(s: &str) -> Result<Self, SchemaError> {
         let playbook: Playbook = serde_yaml_ng::from_str(s)?;
@@ -112,6 +145,28 @@ impl Node {
             crate::duration::DEFAULT_TASK_SECONDS
         } else {
             0
+        }
+    }
+
+    /// The node's cache mode: `Off` when `cache` is absent, else whatever the
+    /// shorthand or full-form config declares.
+    pub fn cache_mode(&self) -> CacheMode {
+        match &self.cache {
+            None => CacheMode::Off,
+            Some(CacheSpec::Mode(m)) => *m,
+            Some(CacheSpec::Config(c)) => c.mode,
+        }
+    }
+
+    /// The node's cache TTL in seconds, parsed from the full-form `ttl`
+    /// string. `None` for the shorthand form (no TTL) or an unparsable value.
+    pub fn cache_ttl_seconds(&self) -> Option<u64> {
+        match &self.cache {
+            Some(CacheSpec::Config(c)) => c
+                .ttl
+                .as_deref()
+                .and_then(crate::duration::parse_duration_str),
+            _ => None,
         }
     }
 }
@@ -476,6 +531,12 @@ pub struct Node {
     /// default (see `expected_seconds`). Additive to schema 2; no migration.
     #[serde(default)]
     pub expected_duration: Option<ExpectedDuration>,
+    #[serde(default)]
+    pub inputs: Option<NodeFiles>,
+    #[serde(default)]
+    pub outputs: Option<NodeFiles>,
+    #[serde(default)]
+    pub cache: Option<CacheSpec>,
     #[serde(flatten)]
     pub kind: NodeKind,
 }
@@ -621,6 +682,40 @@ pub enum StatusEq {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parses_cache_shorthand_and_full_form() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - id: a
+    type: agent_task
+    prompt: hi
+    cache: auto
+    inputs: { files: ["src/**", "Cargo.toml"] }
+    outputs: { files: ["findings.json"] }
+  - id: b
+    type: script
+    script: lint.sh
+    runner: sh
+    cache: { mode: auto, ttl: 2d }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let a = pb.node("a").unwrap();
+        assert_eq!(a.cache_mode(), CacheMode::Auto);
+        assert_eq!(a.cache_ttl_seconds(), None);
+        assert_eq!(a.inputs.as_ref().unwrap().files.len(), 2);
+        assert_eq!(a.outputs.as_ref().unwrap().files, vec!["findings.json"]);
+        let b = pb.node("b").unwrap();
+        assert_eq!(b.cache_mode(), CacheMode::Auto);
+        assert_eq!(b.cache_ttl_seconds(), Some(172_800));
+        assert_eq!(pb.node("s").unwrap().cache_mode(), CacheMode::Off);
+    }
 
     #[test]
     fn expected_seconds_uses_value_or_kind_default() {

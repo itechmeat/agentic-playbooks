@@ -6,7 +6,7 @@
 pub const DEFAULT_TASK_SECONDS: u64 = 120;
 
 /// Parses an `expected_duration` scalar: a plain integer count of seconds
-/// (`90`), or an integer with a single unit suffix (`30s`, `5m`, `2h`).
+/// (`90`), or an integer with a single unit suffix (`30s`, `5m`, `2h`, `2d`).
 /// Returns None for anything else (empty, float, multi-unit, unknown suffix).
 pub fn parse_duration_str(s: &str) -> Option<u64> {
     let s = s.trim();
@@ -20,6 +20,7 @@ pub fn parse_duration_str(s: &str) -> Option<u64> {
         b's' => (&s[..s.len() - 1], 1u64),
         b'm' => (&s[..s.len() - 1], 60u64),
         b'h' => (&s[..s.len() - 1], 3600u64),
+        b'd' => (&s[..s.len() - 1], 86_400u64),
         _ => return None,
     };
     let n: u64 = num.trim().parse().ok()?;
@@ -36,6 +37,7 @@ mod tests {
         assert_eq!(parse_duration_str("30s"), Some(30));
         assert_eq!(parse_duration_str("5m"), Some(300));
         assert_eq!(parse_duration_str("2h"), Some(7200));
+        assert_eq!(parse_duration_str("2d"), Some(172_800));
         assert_eq!(parse_duration_str("  45s "), Some(45));
     }
 
