@@ -12,7 +12,7 @@ params:
   - { name: telegram_chat_id, type: text, label: "Telegram chat id to notify" }
 defaults:
   profile: main
-effects: [network, external]
+effects: [network, external, irreversible]
 nodes:
   - { id: start, type: start }
   - id: fetch_issues

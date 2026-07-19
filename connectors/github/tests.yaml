@@ -116,6 +116,14 @@ cases:
       url: https://api.github.com/repos/acme/site/pulls/7/reviews
       body_contains: { event: APPROVE }
 
+  - function: create_review
+    account: { api_base: https://api.github.com }
+    args: { owner: acme, repo: site, number: 7, event: REQUEST_CHANGES, body: "Please address the review comments." }
+    expect:
+      method: POST
+      url: https://api.github.com/repos/acme/site/pulls/7/reviews
+      body_contains: { event: REQUEST_CHANGES, body: "Please address the review comments." }
+
   - function: create_release
     account: { api_base: https://api.github.com }
     args: { owner: acme, repo: site, tag_name: v1.4.0 }

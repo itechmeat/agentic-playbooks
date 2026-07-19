@@ -23,7 +23,7 @@ accounts:
 ```
 
 Create the token at Settings > Auth Tokens with scopes `project:read`,
-`event:read`, and `issue:write` for the issue functions, plus
+`event:read`, and `event:write` for the issue functions, plus
 `project:releases` for `create_release` and `create_deploy`.
 
 ## Pagination

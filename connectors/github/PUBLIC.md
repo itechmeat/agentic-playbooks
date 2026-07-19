@@ -35,9 +35,10 @@ accounts:
     token: "{{env.GITHUB_TOKEN}}"
 ```
 
-The token needs the `repo` scope (or `public_repo` for public
-repositories only) for issue, pull request, and release functions, and
-the `workflow` scope for `dispatch_workflow`.
+Classic PATs need the `repo` scope (or `public_repo` for public
+repositories only) for the issue, pull request, release, and
+workflow-dispatch functions; fine-grained PATs need repository access
+with Actions write permission for `dispatch_workflow`.
 
 ## Healthcheck
 

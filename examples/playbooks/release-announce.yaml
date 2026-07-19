@@ -29,8 +29,8 @@ nodes:
     prompt: >-
       Send an email to {{params.announce_email}} announcing release
       {{params.release_tag}}, using the smtp connector's send_email
-      function. Use the release notes from
-      {{nodes.create_release.output}} as the body.
+      function. Use {{params.release_notes}} as the body, and include
+      the release link from {{nodes.create_release.output}}.
     connectors:
       - { name: smtp, accounts: [default], functions: [send_email], max_calls: 3 }
   - id: announce_telegram
