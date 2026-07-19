@@ -118,6 +118,7 @@ dependencies = [
 name = "apb-core"
 version = "0.2.0"
 dependencies = [
+ "jsonschema",
  "percent-encoding",
  "serde",
  "serde_json",

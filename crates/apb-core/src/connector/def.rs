@@ -61,6 +61,16 @@ pub struct MockSpec {
     pub body: serde_json::Value,
 }
 
+/// One authored example call for a function: `args` renders into the agent
+/// instruction block after the description, and the validator checks it
+/// against the function's `args_schema` (spec 4.4).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExampleSpec {
+    pub args: serde_json::Value,
+    pub note: String,
+}
+
 fn default_timeout() -> u64 {
     30
 }
@@ -90,6 +100,8 @@ pub struct FunctionSpec {
     pub body: Option<serde_json::Value>,
     #[serde(default)]
     pub args_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    pub examples: Vec<ExampleSpec>,
     #[serde(default = "default_timeout")]
     pub timeout_sec: u64,
     #[serde(default)]
@@ -216,6 +228,7 @@ impl ConnectorDoc {
         }
 
         validate_templates(&doc)?;
+        validate_examples(&doc)?;
 
         Ok(doc)
     }
@@ -367,6 +380,37 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         }
     }
 
+    Ok(())
+}
+
+/// Validates that every function example's `args` conform to that function's
+/// `args_schema` (spec 4.4), so an example cannot drift from the schema
+/// silently. Functions without an `args_schema` are skipped (nothing to
+/// check against).
+fn validate_examples(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
+    for f in &doc.functions {
+        if f.examples.is_empty() {
+            continue;
+        }
+        let Some(schema) = &f.args_schema else {
+            continue;
+        };
+        let validator = jsonschema::validator_for(schema).map_err(|e| {
+            ConnectorError::Invalid(format!(
+                "function `{}` args_schema is not a valid JSON schema: {e}",
+                f.name
+            ))
+        })?;
+        for (i, ex) in f.examples.iter().enumerate() {
+            if let Some(err) = validator.iter_errors(&ex.args).next() {
+                return Err(ConnectorError::Invalid(format!(
+                    "function `{}` example {} args fail its args_schema: {err}",
+                    f.name,
+                    i + 1
+                )));
+            }
+        }
+    }
     Ok(())
 }
 
@@ -601,6 +645,16 @@ functions:
     fn account_field_name_with_underscore_is_accepted() {
         let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: base_url\nfunctions:\n  - name: f\n    description: a\n    method: GET\n    url: http://a\n";
         assert!(ConnectorDoc::from_yaml(y, "x").is_ok());
+    }
+
+    #[test]
+    fn examples_validate_against_args_schema() {
+        let ok = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: POST\n    url: http://a\n    body: \"{{args}}\"\n    args_schema: { type: object, properties: { title: { type: string } }, required: [title] }\n    examples:\n      - args: { title: hi }\n        note: minimal create\n";
+        assert!(ConnectorDoc::from_yaml(ok, "x").is_ok());
+
+        let bad = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: POST\n    url: http://a\n    body: \"{{args}}\"\n    args_schema: { type: object, properties: { title: { type: string } }, required: [title] }\n    examples:\n      - args: { nope: 1 }\n        note: missing required title\n";
+        let err = ConnectorDoc::from_yaml(bad, "x").unwrap_err().to_string();
+        assert!(err.contains("f") && err.contains("example"), "was: {err}");
     }
 
     #[test]
