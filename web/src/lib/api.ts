@@ -15,8 +15,10 @@ import type {
   ConnectorFunction,
   ConnectorMeta,
   ConnectorTrust,
+  JsonSchema,
 } from './connectors'
 import type { ConnectorFunctionStat, ConnectorStats } from './connectorstats'
+import type { PlayCallResult } from './connectorplay'
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url)
@@ -294,6 +296,7 @@ interface ConnectorFunctionDto {
   description: string
   read_only: boolean
   deprecated: boolean
+  args_schema?: JsonSchema | null
 }
 
 const toConnectorFunction = (d: ConnectorFunctionDto): ConnectorFunction => ({
@@ -301,6 +304,7 @@ const toConnectorFunction = (d: ConnectorFunctionDto): ConnectorFunction => ({
   description: d.description,
   readOnly: d.read_only,
   deprecated: d.deprecated,
+  argsSchema: d.args_schema ?? null,
 })
 
 interface ConnectorDetailDto {
@@ -393,3 +397,35 @@ export const fetchConnectorStats = (name: string, workspace = '') =>
       byOutcome: d.by_outcome,
     }),
   )
+
+export interface PlayCallRequest {
+  function: string
+  account: string | null
+  args: Record<string, unknown>
+  dryRun: boolean
+}
+
+interface PlayCallRequestDto {
+  function: string
+  account: string | null
+  args: Record<string, unknown>
+  dry_run: boolean
+}
+
+// POST /api/connectors/{name}/call: the dashboard playground's manual call
+// (design doc 2026-07-19-official-connectors-design section 7). Wraps the
+// same live execution path the healthcheck probe uses, extended with an
+// arbitrary function, args, and a dry-run flag. Like the healthcheck probe,
+// the server answers HTTP 200 even for a refused or failed call - the
+// outcome is carried in the body's `ok`/`error`, never as an HTTP error.
+export const callConnector = (name: string, req: PlayCallRequest, workspace = '') =>
+  requestJson<PlayCallResult>(`${conn(name)}/call${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({
+      function: req.function,
+      account: req.account,
+      args: req.args,
+      dry_run: req.dryRun,
+    } satisfies PlayCallRequestDto),
+  })

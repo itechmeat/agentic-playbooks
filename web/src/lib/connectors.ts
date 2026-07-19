@@ -27,11 +27,27 @@ export interface ConnectorAccount {
   trust: ConnectorTrust
 }
 
+// A minimal JSON Schema subset: just enough to describe one function's
+// `args_schema` (design doc section 4.4) for the playground's generated
+// form (spec section 7). Not a general JSON Schema type.
+export interface JsonSchemaProperty {
+  type?: string
+  enum?: (string | number)[]
+  description?: string
+  default?: unknown
+}
+export interface JsonSchema {
+  type?: string
+  properties?: Record<string, JsonSchemaProperty>
+  required?: string[]
+}
+
 export interface ConnectorFunction {
   name: string
   description: string
   readOnly: boolean
   deprecated: boolean
+  argsSchema: JsonSchema | null
 }
 
 export interface ConnectorMeta {

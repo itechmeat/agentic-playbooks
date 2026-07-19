@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import {
+  callConnector,
   createPlaybook,
   deletePlaybook,
   fetchDiff,
@@ -172,6 +173,40 @@ describe('fetchDiff', () => {
     expect(result).toEqual(diff)
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/playbooks/demo/diff?from=1.0.0&to=1.0.1',
+    )
+  })
+})
+
+describe('callConnector', () => {
+  it('POSTs to /api/connectors/{name}/call with snake_case dry_run', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, dry_run: true, method: 'GET', url: 'https://x/items', body: null }))
+    await callConnector('mock-tracker', {
+      function: 'list_items',
+      account: 'acct1',
+      args: { q: 'hi' },
+      dryRun: true,
+    })
+    expect(fetchMock).toHaveBeenCalledWith('/api/connectors/mock-tracker/call', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ function: 'list_items', account: 'acct1', args: { q: 'hi' }, dry_run: true }),
+    })
+  })
+
+  it('passes a null account through unchanged (server resolves the default)', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, dry_run: true, method: 'GET', url: 'https://x/items', body: null }))
+    await callConnector('mock-tracker', { function: 'ping', account: null, args: {}, dryRun: true })
+    const [, init] = fetchMock.mock.calls[0]
+    const sent = JSON.parse((init as RequestInit).body as string)
+    expect(sent.account).toBeNull()
+  })
+
+  it('adds ?workspace= to select a project on the global dashboard', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ ok: true, status: 200, body: {}, truncated: false, link: null, picked: false }))
+    await callConnector('mock-tracker', { function: 'ping', account: 'acct1', args: {}, dryRun: false }, 'ws-abc')
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/connectors/mock-tracker/call?workspace=ws-abc',
+      expect.objectContaining({ method: 'POST' }),
     )
   })
 })
