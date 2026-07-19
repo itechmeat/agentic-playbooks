@@ -51,7 +51,9 @@ one place must be propagated everywhere before execution.
   `official::materialize(name, dest)`; `install <name>` seeds trust,
   `install --from-dir` does not.
 - Playground endpoint: `POST /api/connectors/:name/call` with `{ function,
-  account, args, dry_run }`, trust-gated like the healthcheck probe.
+  account, args, dry_run, full }` (`full` optional, default false; true
+  bypasses the function's `response_pick` projection), trust-gated like the
+  healthcheck probe.
 
 ## Cross-slice obligations
 
