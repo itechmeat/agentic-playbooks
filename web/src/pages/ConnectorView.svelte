@@ -10,6 +10,7 @@
   import { errorRate, formatDurationMs, outcomeSummary, type ConnectorStats } from '../lib/connectorstats'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
+  import ConnectorPlaygroundPanel from '$lib/components/ConnectorPlaygroundPanel.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
@@ -324,6 +325,13 @@
           {/if}
         </Card.Content>
       </Card.Root>
+
+      <ConnectorPlaygroundPanel
+        {name}
+        {workspace}
+        functions={detail.functions}
+        accounts={detail.accounts}
+      />
 
       <Card.Root>
         <Card.Header>
