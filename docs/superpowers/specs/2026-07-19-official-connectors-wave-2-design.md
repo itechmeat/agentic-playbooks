@@ -10,10 +10,11 @@ Wave 1 delivered the connector infrastructure and four official connectors
 (github, telegram, smtp, sentry). Wave 2 adds two more, chosen because they
 unlock agent workflows around work management and mail:
 
-- `asana` - task operations over the Asana REST API. A pure manifest: the
-  wave 1 format already covers everything Asana needs (header Bearer auth,
-  nested JSON bodies, response projection, body-carried pagination cursors).
-  Zero engine changes.
+- `asana` - task operations over the Asana REST API. Almost a pure
+  manifest (header Bearer auth, nested JSON bodies, response projection,
+  body-carried pagination cursors all exist since wave 1), plus one small
+  template-engine extension that strict APIs need: typed and optional
+  single-placeholder rendering (section 5.1).
 - `imap` - silent mailbox access for Gmail, Yandex Mail, Outlook, iCloud,
   and any standard IMAP server. One unified connector, not one per provider:
   the protocol is identical and only the connection settings differ, which
@@ -53,6 +54,7 @@ premium search, IMAP IDLE push.
 | Asana auth | Personal Access Token, header Bearer | PATs are Asana's supported integration path for individual accounts and fit the local-first model; OAuth app registration adds nothing for a single-user runner |
 | Asana task search | Workspace typeahead endpoint, not `/workspaces/{gid}/tasks/search` | The search API requires Asana Premium; typeahead works on every tier and covers the find-a-task-by-name agent need |
 | Asana field selection | Fixed `opt_fields` baked into each function's query, projected by `response_pick` | Asana list responses are compact records (gid, name) by default; opt_fields requests exactly the fields the projection exposes, so one round trip returns useful data without kilobytes of unused payload |
+| Asana request bodies | Explicit nested body templates plus a new single-placeholder rendering rule (section 5.1), not the wave 1 `body: "{{args}}"` whole-forward | Asana rejects unrecognized fields in `data`, so routing args must not leak into bodies; `completed` is a boolean and `projects` an array, which string interpolation would corrupt; partial `update_task` needs absent optional fields to disappear rather than render as empty strings |
 | Flaky test | Fix `write_stub` in `secrets.rs` to sync the stub script before exec, same as engine `common::write_sync` from PR #10 | The ETXTBSY race is test-side only: production `resolve_cmd` executes user-installed helpers, not freshly written files. The minimal fix lands where the race lives |
 
 ## 3. The imap function kind
@@ -227,6 +229,35 @@ PUBLIC.md documents per-provider setup:
 
 ## 5. The asana connector manifest
 
+### 5.1 Engine extension: typed and optional single placeholders
+
+Wave 1 body templates render every string leaf by interpolation and treat a
+referenced-but-absent arg as an error, and query values are always sent even
+when they render empty. That fits GitHub (which ignores unknown and empty
+fields) but not Asana, which rejects unrecognized `data` fields, types
+`completed` as a boolean and `projects` as an array, and expects absent
+optional fields to be absent. One rendering rule closes the gap:
+
+- A body string leaf or a query value that consists of exactly one
+  `{{args.<field>}}` placeholder (nothing else in the string) renders as
+  the typed JSON value of that arg: booleans stay booleans, numbers stay
+  numbers, arrays stay arrays. In a query value, a non-scalar arg is a
+  `config` error.
+- If the referenced arg is absent from the call args, the enclosing body
+  object field, body array element, or query pair is dropped from the
+  rendered request. `required` args are still enforced by `args_schema`
+  before rendering, so dropping applies only to genuinely optional args.
+- A top-level body that is a bare single placeholder still errors when the
+  arg is absent (a whole body that silently vanishes is a bug, not an
+  option), and the wave 1 whole-forward `body: "{{args}}"` form is
+  unchanged.
+- Mixed-content templates (`"prefix {{args.x}}"`) keep the wave 1
+  semantics exactly: string interpolation, absent arg is an error.
+
+Existing manifests are unaffected: their body and query args are all
+`required`, so the drop rule never fires, and typed rendering of a string
+arg produces the same string.
+
 Auth: `header`, `Authorization: Bearer {{secret.token}}`. Account fields:
 `api_base` (required, normally `https://app.asana.com/api/1.0`), `token`
 (required, secret) - a Personal Access Token. PUBLIC.md walks through
@@ -352,16 +383,19 @@ Suggested implementation order, each slice independently landable:
 
 1. Flaky test fix in `secrets.rs` (independent of everything).
 2. Core schema: the `imap` function block, op enum, param validation,
-   secret placement extension, validator rules.
-3. Engine: the imap executor (`connector_imap.rs`), TLS and auth, the five
+   secret placement extension, validator rules, the `expect.imap` contract
+   test shape.
+3. Template extension: typed and optional single placeholders in body and
+   query rendering (section 5.1).
+4. Engine: the imap executor (`connector_imap.rs`), TLS and auth, the five
    ops, error mapping, logging, dry-run; the local IMAP listener fixture
    and contract tests.
-4. Contract test runner: the `expect.imap` shape in tests.yaml.
-5. The `asana` manifest folder (manifest, PUBLIC.md, tests.yaml) and its
+5. Contract test runner: `expect.imap` execution in the offline runner.
+6. The `asana` manifest folder (manifest, PUBLIC.md, tests.yaml) and its
    render tests.
-6. The `imap` manifest folder (manifest, PUBLIC.md, tests.yaml).
-7. Demo playbook, docs/CONNECTORS.md sections, live smoke tests.
-8. Version bump and release notes.
+7. The `imap` manifest folder (manifest, PUBLIC.md, tests.yaml).
+8. Demo playbook, docs/CONNECTORS.md sections, live smoke tests.
+9. Version bump and release notes.
 
-Slices 1, 2, and 5 are independent; 3 needs 2; 4 needs 3; 6 needs 2 through
-4; 7 and 8 close the wave.
+Slices 1, 2, and 3 are independent; 4 needs 2; 5 needs 4; 6 needs 3; 7
+needs 2 through 5; 8 and 9 close the wave.
