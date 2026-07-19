@@ -75,6 +75,57 @@ fn default_timeout() -> u64 {
     30
 }
 
+/// The SMTP connection block: host/port/TLS plus optional credentials. Every
+/// value is a template string. `password` is the one non-`auth` location the
+/// secret-placement policy allows `{{secret.*}}` (spec 4.2).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmtpConnection {
+    pub host: String,
+    pub port: String,
+    pub use_tls: String,
+    #[serde(default)]
+    pub username: Option<String>,
+    #[serde(default)]
+    pub password: Option<String>,
+}
+
+/// The SMTP message block. `to`/`cc`/`bcc` are comma-separated address lists.
+/// Message templates follow function-body rules: only `account.*` and
+/// `args.*`, never `secret.*`. `cc`/`bcc`/`from_name`/`body_text`/`body_html`
+/// are optional and rendered leniently at call time (a missing optional arg
+/// means "field absent", not an error - see `connector_smtp::render_optional`).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmtpMessage {
+    pub from_email: String,
+    #[serde(default)]
+    pub from_name: Option<String>,
+    pub to: String,
+    #[serde(default)]
+    pub cc: Option<String>,
+    #[serde(default)]
+    pub bcc: Option<String>,
+    pub subject: String,
+    #[serde(default)]
+    pub body_text: Option<String>,
+    #[serde(default)]
+    pub body_html: Option<String>,
+}
+
+/// The `smtp` function kind (spec 4.2). Exactly one of a connector's function
+/// kinds. `verify: true` probes the connection and carries no `message`;
+/// `verify: false` (the default) sends the `message`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SmtpSpec {
+    pub connection: SmtpConnection,
+    #[serde(default)]
+    pub message: Option<SmtpMessage>,
+    #[serde(default)]
+    pub verify: bool,
+}
+
 /// One callable function of the connector: either an HTTP call (`method` +
 /// `url`, optionally `query`/`body`) or a `mock` (canned response, no
 /// network). `from_yaml` enforces that a function is exactly one of the two,
@@ -108,6 +159,8 @@ pub struct FunctionSpec {
     pub timeout_sec: u64,
     #[serde(default)]
     pub mock: Option<MockSpec>,
+    #[serde(default)]
+    pub smtp: Option<SmtpSpec>,
 }
 
 impl FunctionSpec {
@@ -115,6 +168,12 @@ impl FunctionSpec {
     /// call.
     pub fn is_mock(&self) -> bool {
         self.mock.is_some()
+    }
+
+    /// An smtp function sends email or probes an SMTP server natively (spec
+    /// 4.2), instead of making an HTTP call or returning a mock.
+    pub fn is_smtp(&self) -> bool {
+        self.smtp.is_some()
     }
 }
 
@@ -178,20 +237,15 @@ impl ConnectorDoc {
 
             let is_http = f.method.is_some() || f.url.is_some();
             let is_mock = f.mock.is_some();
-            match (is_http, is_mock) {
-                (true, true) => {
+            let is_smtp = f.smtp.is_some();
+            match (is_http, is_mock, is_smtp) {
+                (false, false, false) => {
                     return Err(ConnectorError::Invalid(format!(
-                        "function `{}` cannot be both an HTTP call and a mock",
+                        "function `{}` is not an HTTP call (method + url), a mock, or an smtp block",
                         f.name
                     )));
                 }
-                (false, false) => {
-                    return Err(ConnectorError::Invalid(format!(
-                        "function `{}` is neither an HTTP call (method + url) nor a mock",
-                        f.name
-                    )));
-                }
-                (true, false) => {
+                (true, false, false) => {
                     if f.method.is_none() || f.url.is_none() {
                         return Err(ConnectorError::Invalid(format!(
                             "function `{}` must set both `method` and `url`",
@@ -199,13 +253,20 @@ impl ConnectorDoc {
                         )));
                     }
                 }
-                (false, true) => {
+                (false, true, false) => {
                     if !f.query.is_empty() || f.body.is_some() {
                         return Err(ConnectorError::Invalid(format!(
                             "mock function `{}` must not set `query` or `body`",
                             f.name
                         )));
                     }
+                }
+                (false, false, true) => validate_smtp_shape(f)?,
+                _ => {
+                    return Err(ConnectorError::Invalid(format!(
+                        "function `{}` must be exactly one of: an HTTP call, a mock, or an smtp block",
+                        f.name
+                    )));
                 }
             }
 
@@ -269,6 +330,30 @@ impl ConnectorDoc {
             .filter(|f| f.secret)
             .map(|f| f.name.clone())
             .collect()
+    }
+}
+
+/// SMTP-internal shape rules (spec 4.2): a `verify: true` function carries no
+/// `message`; a `verify: false` function must carry one. An smtp function must
+/// not also carry `query` or `body` (those are HTTP-only).
+fn validate_smtp_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
+    let smtp = f.smtp.as_ref().expect("caller checked is_smtp");
+    if !f.query.is_empty() || f.body.is_some() {
+        return Err(ConnectorError::Invalid(format!(
+            "smtp function `{}` must not set `query` or `body`",
+            f.name
+        )));
+    }
+    match (smtp.verify, smtp.message.is_some()) {
+        (true, true) => Err(ConnectorError::Invalid(format!(
+            "smtp function `{}` sets `verify: true` and must not carry a `message`",
+            f.name
+        ))),
+        (false, false) => Err(ConnectorError::Invalid(format!(
+            "smtp function `{}` must carry a `message` (or set `verify: true`)",
+            f.name
+        ))),
+        _ => Ok(()),
     }
 }
 
@@ -728,5 +813,87 @@ functions:
     fn auth_variants_reject_foreign_fields() {
         let y = "name: x\nversion: 0.1.0\nauth:\n  kind: header\n  header: Authorization\n  value_template: t\n  param: extra\nfunctions:\n  - name: f\n    description: a\n    method: GET\n    url: http://a\n";
         assert!(ConnectorDoc::from_yaml(y, "x").is_err());
+    }
+
+    // -- smtp function kind (slice 3) --
+
+    const SMTP_YAML: &str = r#"
+name: smtp
+version: 0.1.0
+healthcheck: verify
+account_fields:
+  - name: host
+    required: true
+  - name: port
+    required: true
+  - name: use_tls
+  - name: username
+  - name: from_email
+    required: true
+  - name: from_name
+  - name: password
+    required: true
+    secret: true
+functions:
+  - name: send_email
+    description: Send an email over SMTP
+    smtp:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      message:
+        from_email: "{{account.from_email}}"
+        from_name: "{{account.from_name}}"
+        to: "{{args.to}}"
+        cc: "{{args.cc}}"
+        bcc: "{{args.bcc}}"
+        subject: "{{args.subject}}"
+        body_text: "{{args.body_text}}"
+        body_html: "{{args.body_html}}"
+    args_schema: { type: object, properties: { to: { type: string }, subject: { type: string } }, required: [to, subject] }
+  - name: verify
+    description: Probe the SMTP connection without sending
+    read_only: true
+    smtp:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      verify: true
+"#;
+
+    #[test]
+    fn parses_smtp_send_and_verify() {
+        let doc = ConnectorDoc::from_yaml(SMTP_YAML, "smtp").unwrap();
+        let send = doc.function("send_email").unwrap();
+        assert!(send.is_smtp());
+        assert!(!send.is_mock());
+        let smtp = send.smtp.as_ref().unwrap();
+        assert!(!smtp.verify);
+        assert!(smtp.message.is_some());
+        let verify = doc.function("verify").unwrap();
+        assert!(verify.is_smtp());
+        assert!(verify.read_only);
+        assert!(verify.smtp.as_ref().unwrap().verify);
+        assert!(verify.smtp.as_ref().unwrap().message.is_none());
+    }
+
+    #[test]
+    fn rejects_function_that_is_both_smtp_and_http() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: http://a\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n      verify: true\n";
+        assert!(ConnectorDoc::from_yaml(y, "x").is_err());
+    }
+
+    #[test]
+    fn rejects_verify_with_message_and_send_without_message() {
+        let with_msg = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n      verify: true\n      message: { from_email: a@b.c, to: \"{{args.to}}\", subject: \"{{args.subject}}\" }\n";
+        assert!(ConnectorDoc::from_yaml(with_msg, "x").is_err());
+        let no_msg = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n";
+        assert!(ConnectorDoc::from_yaml(no_msg, "x").is_err());
     }
 }
