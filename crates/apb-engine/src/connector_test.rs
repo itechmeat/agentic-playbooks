@@ -84,6 +84,10 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
             body_contains,
         ),
         ExpectKind::Smtp(envelope) => eval_smtp(doc, function, &case.account, &args, envelope),
+        ExpectKind::Imap(_) => Err(format!(
+            "function `{}`: imap expectations are not supported by this runner yet",
+            function.name
+        )),
     }
 }
 

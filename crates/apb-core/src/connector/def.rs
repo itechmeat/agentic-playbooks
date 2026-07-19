@@ -699,8 +699,9 @@ fn validate_smtp_templates(
 /// Validates the placeholders in an `imap` function (spec 3.2, wave 2). Every
 /// connection field other than `password`, and every `params` value, follows
 /// function-body rules: `account.*` and `args.*` are allowed, `secret.*` is
-/// rejected. `password` is the one field the secret-placement policy allows
-/// `{{secret.*}}` in; it otherwise follows the same rules. The reserved
+/// rejected. `password` mirrors `SmtpConnection.password` exactly: `args.*`
+/// is rejected, `account.*` and `secret.*` are allowed (it is the one field
+/// the secret-placement policy allows `{{secret.*}}` in). The reserved
 /// `{{auth}}` marker is a function-url-only construct and is rejected
 /// everywhere in the imap block.
 fn validate_imap_templates(
@@ -708,7 +709,7 @@ fn validate_imap_templates(
     function_name: &str,
     fields: &FieldNames,
 ) -> Result<(), ConnectorError> {
-    use crate::connector::template::placeholders;
+    use crate::connector::template::{Namespace, placeholders};
 
     let conn = &imap.connection;
     let non_password: [&str; 5] = [
@@ -730,6 +731,11 @@ fn validate_imap_templates(
             ns,
             &format!("function `{function_name}` imap connection password"),
         )?;
+        if ns == Namespace::Args {
+            return Err(ConnectorError::Invalid(format!(
+                "args placeholders are not allowed in imap connection password of function `{function_name}`"
+            )));
+        }
         fields.check(ns, &name)?;
     }
 
@@ -1304,5 +1310,18 @@ functions:
         let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: password\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: \"{{secret.password}}\" }\n      op: search\n      params: { folder: \"{{secret.password}}\", limit: \"10\" }\n";
         let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
         assert!(err.contains("secret"), "message was: {err}");
+    }
+
+    #[test]
+    fn imap_args_in_connection_password_rejected() {
+        let args = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: \"{{args.password}}\" }\n      op: verify\n";
+        let err = ConnectorDoc::from_yaml(args, "x").unwrap_err().to_string();
+        assert!(
+            err.contains("args") && err.contains("password"),
+            "message was: {err}"
+        );
+
+        let account = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: password\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: \"{{account.password}}\" }\n      op: verify\n";
+        assert!(ConnectorDoc::from_yaml(account, "x").is_err());
     }
 }
