@@ -187,6 +187,12 @@ enum PreparedCall {
         account: String,
         call: Box<crate::connector_smtp::SmtpCall>,
     },
+    // Boxed for the same reason: `ImapCall` carries the resolved connection and
+    // typed op plan. An imap call has no HTTP status, like smtp.
+    Imap {
+        account: String,
+        call: Box<crate::connector_imap::ImapCall>,
+    },
 }
 
 /// An HTTP call ready to send.
@@ -217,6 +223,7 @@ impl PreparedCall {
             PreparedCall::Mock { account, .. } => account,
             PreparedCall::Http(h) => &h.account,
             PreparedCall::Smtp { account, .. } => account,
+            PreparedCall::Imap { account, .. } => account,
         }
     }
 
@@ -227,6 +234,7 @@ impl PreparedCall {
             PreparedCall::Mock { .. } => String::new(),
             PreparedCall::Http(h) => h.pre_auth_url.clone(),
             PreparedCall::Smtp { call, .. } => call.endpoint(),
+            PreparedCall::Imap { call, .. } => call.endpoint(),
         }
     }
 
@@ -236,6 +244,7 @@ impl PreparedCall {
         match self {
             PreparedCall::Mock { .. } | PreparedCall::Http(_) => (None, None),
             PreparedCall::Smtp { call, .. } => call.event_extra(),
+            PreparedCall::Imap { call, .. } => call.event_extra(),
         }
     }
 
@@ -250,6 +259,9 @@ impl PreparedCall {
             // An smtp call has no HTTP status; the event log records the
             // endpoint plus subject/recipient count, never a status code.
             PreparedCall::Smtp { call, .. } => (call.send(), None),
+            // An imap call likewise has no HTTP status; the event log records
+            // only the endpoint (spec 3.4: no subjects).
+            PreparedCall::Imap { call, .. } => (call.send(), None),
         }
     }
 }
@@ -511,6 +523,30 @@ fn build_prepared(
             crate::connector_smtp::SmtpBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
             crate::connector_smtp::SmtpBuild::Call(call) => {
                 Ok(Prepared::Call(Box::new(PreparedCall::Smtp {
+                    account: account_name,
+                    call,
+                })))
+            }
+        };
+    }
+
+    // 7c. IMAP: render the connection/op off the same resolved secrets and
+    // account fields, or produce a dry-run render without connecting. Like
+    // smtp, an imap function has no URL/query/body/header rendering, so this
+    // branch is terminal.
+    if let Some(imap) = &function.imap {
+        return match crate::connector_imap::build(
+            imap,
+            &account_fields,
+            args,
+            &secrets,
+            redactions,
+            dry_run,
+            function.timeout_sec,
+        )? {
+            crate::connector_imap::ImapBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
+            crate::connector_imap::ImapBuild::Call(call) => {
+                Ok(Prepared::Call(Box::new(PreparedCall::Imap {
                     account: account_name,
                     call,
                 })))

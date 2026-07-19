@@ -44,6 +44,8 @@ mod connector_call;
 mod connector_e2e;
 #[path = "suite/connector_healthcheck.rs"]
 mod connector_healthcheck;
+#[path = "suite/connector_imap.rs"]
+mod connector_imap;
 #[path = "suite/connector_manifest.rs"]
 mod connector_manifest;
 #[path = "suite/connector_play_call.rs"]
