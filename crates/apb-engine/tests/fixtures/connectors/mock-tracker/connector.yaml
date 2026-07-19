@@ -1,0 +1,36 @@
+name: mock-tracker
+version: 0.1.0
+healthcheck: ping
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: ping
+    description: Fake reachability check
+    mock: { status: 200, body: { ok: true } }
+  - name: fail_auth
+    description: Always answers like an expired token
+    mock: { status: 401, body: { error: unauthorized } }
+  - name: rate_limit
+    description: Always answers like a throttled client
+    mock: { status: 429, body: { error: slow_down } }
+  - name: list_items
+    description: List items over HTTP
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/items"
+    query: { q: "{{args.q}}" }
+    args_schema: { type: object, properties: { q: { type: string } }, required: [q] }
+  - name: create_item
+    description: Create an item over HTTP
+    method: POST
+    url: "{{account.base_url}}/items"
+    body: "{{args}}"
+    args_schema: { type: object, properties: { title: { type: string } }, required: [title] }

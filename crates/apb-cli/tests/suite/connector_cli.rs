@@ -178,6 +178,86 @@ fn env_omits_a_var_once_it_resolves() {
     );
 }
 
+#[test]
+fn env_write_creates_secrets_file_and_gitignores_it() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    write_widget_account(dir.path(), "WIDGET_TOKEN");
+
+    // The token is unset, so `--write` templates it into a fresh secrets.env.
+    let out = apb_ok(dir.path(), &["connector", "env", "widget", "--write"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("WIDGET_TOKEN="),
+        "write output should name the appended key: {stdout}"
+    );
+
+    let secrets = dir.path().join(".apb/secrets.env");
+    let body = fs::read_to_string(&secrets).expect("secrets.env should exist");
+    assert!(
+        body.lines().any(|l| l == "WIDGET_TOKEN="),
+        "secrets.env missing the templated key: {body}"
+    );
+
+    // The project .gitignore now covers the secrets file.
+    let gitignore = fs::read_to_string(dir.path().join(".gitignore")).unwrap_or_default();
+    assert!(
+        gitignore.lines().any(|l| l.trim() == ".apb/secrets.env"),
+        ".gitignore should cover .apb/secrets.env: {gitignore}"
+    );
+
+    // The dotenv is created private (0600) so a token value is not world- or
+    // group-readable.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&secrets).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "secrets.env must be mode 0600, was {mode:o}");
+    }
+}
+
+#[test]
+fn env_write_is_idempotent_and_preserves_existing_lines() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    write_widget_account(dir.path(), "WIDGET_TOKEN");
+
+    // A pre-existing, unrelated line must survive the append untouched.
+    let secrets = dir.path().join(".apb/secrets.env");
+    fs::create_dir_all(secrets.parent().unwrap()).unwrap();
+    fs::write(&secrets, "OTHER=keepme\n").unwrap();
+
+    apb_ok(dir.path(), &["connector", "env", "widget", "--write"]);
+    let after_first = fs::read_to_string(&secrets).unwrap();
+    assert!(
+        after_first.contains("OTHER=keepme"),
+        "the unrelated line was dropped: {after_first}"
+    );
+    assert!(
+        after_first.lines().any(|l| l == "WIDGET_TOKEN="),
+        "the missing key was not appended: {after_first}"
+    );
+
+    // A second `--write` appends nothing: WIDGET_TOKEN is still unresolved but
+    // already sits in the file (empty value), so it is not duplicated.
+    apb_ok(dir.path(), &["connector", "env", "widget", "--write"]);
+    let after_second = fs::read_to_string(&secrets).unwrap();
+    assert_eq!(
+        after_first, after_second,
+        "a second --write must not change the file"
+    );
+    assert_eq!(
+        after_second
+            .lines()
+            .filter(|l| l.starts_with("WIDGET_TOKEN="))
+            .count(),
+        1,
+        "WIDGET_TOKEN must appear exactly once: {after_second}"
+    );
+}
+
 // --- list -------------------------------------------------------------
 
 #[test]

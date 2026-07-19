@@ -147,6 +147,7 @@ Profiles and environment:
 ```text
 apb detect          detect installed coding agents (local checks only)
 apb profile         list / show / write / edit agent profiles
+apb connector       list / show / call / approve / doctor connectors to external services
 apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
 apb adopt           adoption readiness report for a playbook
 apb doctor          diagnose agents, profiles, runners, playbooks
@@ -207,6 +208,7 @@ apb dev                       # Vite HMR + API from the source tree
 ```
 
 More: [docs/INSTALL.md](docs/INSTALL.md), [docs/MCP.md](docs/MCP.md),
+[docs/PROFILES.md](docs/PROFILES.md), [docs/CONNECTORS.md](docs/CONNECTORS.md),
 [docs/HOST-INTEGRATION.md](docs/HOST-INTEGRATION.md).
 
 ## Security

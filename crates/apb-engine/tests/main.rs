@@ -38,6 +38,8 @@ mod background_supervisor_test;
 mod child_run_event_test;
 #[path = "suite/connector_call.rs"]
 mod connector_call;
+#[path = "suite/connector_e2e.rs"]
+mod connector_e2e;
 #[path = "suite/connector_healthcheck.rs"]
 mod connector_healthcheck;
 #[path = "suite/connector_manifest.rs"]

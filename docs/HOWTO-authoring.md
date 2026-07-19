@@ -37,6 +37,30 @@ edit`, or the web profile API (`/api/profiles`); see PROFILES.md. Legacy
 `schema: 1` playbooks with `executors` are migrated with `apb migrate` (a
 migrated reference to a global executor becomes a global-scope profile).
 
+## Connectors (external services)
+
+An `agent_task` node may also bind connectors: named, per-node grants to reach an
+external service (a tracker, a messenger) over declarative HTTP, with secrets
+resolved by `apb` and never handed to the agent. Use the same two-form pattern as
+skills:
+
+```yaml
+nodes:
+  - id: triage
+    type: agent_task
+    profile: dev
+    connectors:
+      - mock-tracker                 # everything allowed
+      - { name: github, functions: read_only, max_calls: 20 }
+```
+
+`functions` is an explicit list or the string `read_only`; `accounts` allowlists
+which configured accounts the node may use; `max_calls` is an optional per-node
+budget. The binding is covered by the playbook digest, but the connector folder
+and each account are digest-pinned separately and must be approved before a run.
+Installing connectors, configuring accounts, secrets, trust, and the
+`apb connector` CLI are covered in CONNECTORS.md.
+
 ## Node types
 
 `start`, `agent_task`, `script`, `prompt`, `condition`, `human_review`,

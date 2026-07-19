@@ -63,7 +63,16 @@ pub(crate) enum ConnectorAction {
     /// Print the env var names configured accounts need that do not
     /// currently resolve, as ready-to-paste `KEY=` lines. Names only, never
     /// values.
-    Env { name: Option<String> },
+    Env {
+        name: Option<String>,
+        /// Append the missing `KEY=` template lines to
+        /// `<root>/.apb/secrets.env` (creating it 0600 when absent),
+        /// preserving existing content and never duplicating a key already in
+        /// the file, then ensure `.gitignore` covers it. Values stay empty for
+        /// the user to fill in. Without this flag, the lines only print.
+        #[arg(long)]
+        write: bool,
+    },
     /// Scaffold a new connector folder from the embedded template
     Init { name: String },
 }
@@ -81,7 +90,7 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
         } => call_cmd(root, &name, &function, account, args, dry_run),
         ConnectorAction::Approve { name, account } => approve_cmd(root, &name, account.as_deref()),
         ConnectorAction::Doctor => doctor_cmd(root),
-        ConnectorAction::Env { name } => env_cmd(root, name),
+        ConnectorAction::Env { name, write } => env_cmd(root, name, write),
         ConnectorAction::Init { name } => init_cmd(&name),
     }
 }
@@ -588,7 +597,7 @@ fn push_healthcheck_check(checks: &mut Vec<Check>, name: &str, loaded: &LoadedCo
 
 // --- env ------------------------------------------------------------------
 
-fn env_cmd(root: &Path, name: Option<String>) -> ExitCode {
+fn env_cmd(root: &Path, name: Option<String>, write: bool) -> ExitCode {
     let names: Vec<String> = match &name {
         Some(n) => {
             let loaded = match store::load(n) {
@@ -616,9 +625,85 @@ fn env_cmd(root: &Path, name: Option<String>) -> ExitCode {
         None => apb_core::connector::resolve::all_referenced_env_names(root),
     };
 
-    let missing = secrets::missing_vars(root, &names);
-    for var in missing {
-        println!("{var}=");
+    // Missing means unresolved; dedup while preserving order (the `None` path
+    // may repeat a var referenced by two accounts).
+    let mut missing = secrets::missing_vars(root, &names);
+    let mut seen = std::collections::HashSet::new();
+    missing.retain(|v| seen.insert(v.clone()));
+
+    if !write {
+        for var in &missing {
+            println!("{var}=");
+        }
+        return ExitCode::SUCCESS;
+    }
+
+    write_secrets_template(root, &missing)
+}
+
+/// The `--write` path of `apb connector env`: append the missing `KEY=`
+/// template lines to `<root>/.apb/secrets.env` (spec 4.2). Existing content is
+/// preserved and a key already present in the file (even with an empty value)
+/// is never duplicated; the file is written atomically at mode 0600 and the
+/// project `.gitignore` is made to cover it. Values are left empty for the user.
+fn write_secrets_template(root: &Path, missing: &[String]) -> ExitCode {
+    let path = secrets::project_secrets_path(root);
+    let existing = std::fs::read_to_string(&path).unwrap_or_default();
+
+    // Keys already in the file, by the part before the first `=` (skip blank
+    // and comment lines), so a var already templated is not appended twice.
+    let present: std::collections::HashSet<String> = existing
+        .lines()
+        .filter_map(|line| {
+            let trimmed = line.trim_start();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                return None;
+            }
+            line.split_once('=').map(|(k, _)| k.trim().to_string())
+        })
+        .collect();
+
+    let to_append: Vec<&String> = missing.iter().filter(|v| !present.contains(*v)).collect();
+
+    if !to_append.is_empty() {
+        let mut content = existing.clone();
+        if !content.is_empty() && !content.ends_with('\n') {
+            content.push('\n');
+        }
+        for var in &to_append {
+            content.push_str(var);
+            content.push_str("=\n");
+        }
+        if let Err(e) = apb_core::fsutil::atomic_write_private(&path, content.as_bytes()) {
+            eprintln!("connector error: cannot write {}: {e}", path.display());
+            return ExitCode::from(2);
+        }
+    }
+
+    // Whenever the secrets file exists, make sure the project .gitignore covers
+    // it (idempotent - never writes a duplicate line).
+    if path.is_file()
+        && let Err(e) = secrets::ensure_gitignored(root)
+    {
+        eprintln!("connector error: cannot update .gitignore: {e}");
+        return ExitCode::from(2);
+    }
+
+    if to_append.is_empty() {
+        println!(
+            "nothing to append; {} already lists the required keys",
+            path.display()
+        );
+    } else {
+        println!(
+            "appended {} template line(s) to {} (fill in the values):",
+            to_append.len(),
+            path.display()
+        );
+        for var in &to_append {
+            println!("  {var}=");
+        }
+        println!(".apb/secrets.env is covered by .gitignore");
     }
     ExitCode::SUCCESS
 }

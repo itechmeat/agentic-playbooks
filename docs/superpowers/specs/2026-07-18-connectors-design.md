@@ -1,7 +1,7 @@
 # Connectors design
 
 Date: 2026-07-18
-Status: approved for planning
+Status: implemented (2026-07-19)
 Depends on: 2026-07-08-workflows-cli-design.md, 2026-07-12-agent-profiles-design.md
 
 ## 1. Purpose and scope
@@ -613,3 +613,29 @@ prevents the guarantees from sounding stronger than they are.
   (encoded, split, embedded). The interim literal redaction (section 6.2)
   catches exact echoes only; the planned redaction layer (separate story)
   addresses LLM-bound scrubbing generically.
+
+## 15. Implementation notes
+
+Implemented across tasks 2 through 19 and verified end to end by the
+`mock-tracker` fixture and the `connector_e2e` suite. The code matches the
+design above; the deviations shipped are exactly the ones already recorded as
+deliberate scope choices, kept here as one list for the reader:
+
+- Connector definitions are global-only (`<config-dir>/connectors/`); the
+  resolution code is shaped for a later project scope without a format change
+  (section 3, Known limitations).
+- Only HTTP and `mock` function kinds ship; the `script:` escape hatch for
+  non-HTTP protocols (IMAP and similar) is deferred, and the manifest schema
+  stays extensible for it (sections 1, 13).
+- The interim literal secret redaction (section 6.2) is temporary and carries
+  a `TODO` pointing at the future programmatic redaction layer; it catches
+  exact literal echoes only, by design.
+- A connector's `skills/` subfolder is reserved and covered by the tree digest
+  but is not delivered into prompts yet (sections 1, 13).
+- Sub-playbook children and cross-workspace plans that bind connectors are
+  gated at the parent's policy check but fail closed at the child's own start:
+  `ChildExpectation` carries no connector permit maps yet, so threading them is
+  a follow-up (section 13).
+
+User-facing documentation lives in `docs/CONNECTORS.md`, with the node-binding
+summary in `docs/HOWTO-authoring.md`.
