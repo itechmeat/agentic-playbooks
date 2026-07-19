@@ -141,11 +141,15 @@ pub struct CallOk {
 /// consume a `max_calls` budget.
 struct EventMeta {
     account: String,
-    /// Pre-auth rendered URL, `""` for a mock.
+    /// Pre-auth rendered URL, `""` for a mock, `smtp://host:port` for smtp.
     url: String,
     outcome: String,
     http_status: Option<u16>,
     duration_ms: u64,
+    /// SMTP-only: message subject and total recipient count, both `None` for
+    /// HTTP/mock and for smtp `verify`.
+    smtp_subject: Option<String>,
+    smtp_recipients: Option<u32>,
 }
 
 /// Runs the whole call pipeline and returns the JSON document to print plus an
@@ -201,7 +205,8 @@ fn run(req: &CallRequest) -> Outcome {
     // 6 (mock) / 9-11 (HTTP): from here the call executes and carries event
     // metadata regardless of outcome.
     let account = prepared.account().to_string();
-    let url = prepared.pre_auth_url().to_string();
+    let url = prepared.pre_auth_url();
+    let (smtp_subject, smtp_recipients) = prepared.event_extra();
     let started = Instant::now();
     let (result, http_status) = prepared.dispatch();
     let duration_ms = started.elapsed().as_millis() as u64;
@@ -215,6 +220,8 @@ fn run(req: &CallRequest) -> Outcome {
                 outcome: "ok".to_string(),
                 http_status,
                 duration_ms,
+                smtp_subject,
+                smtp_recipients,
             },
         ),
         Err(err) => {
@@ -228,6 +235,8 @@ fn run(req: &CallRequest) -> Outcome {
                     outcome,
                     http_status,
                     duration_ms,
+                    smtp_subject,
+                    smtp_recipients,
                 },
             )
         }
@@ -286,11 +295,20 @@ impl PreparedCall {
         }
     }
 
-    /// The pre-auth URL for the event log; `""` for a mock.
-    fn pre_auth_url(&self) -> &str {
+    /// The pre-auth URL / endpoint for the event log; `""` for a mock, the
+    /// pre-auth URL for HTTP, `smtp://host:port` for smtp.
+    fn pre_auth_url(&self) -> String {
         match self {
-            PreparedCall::Mock { .. } => "",
-            PreparedCall::Http(h) => &h.pre_auth_url,
+            PreparedCall::Mock { .. } => String::new(),
+            PreparedCall::Http(h) => h.pre_auth_url.clone(),
+        }
+    }
+
+    /// SMTP-only event metadata (subject, recipient count). `(None, None)` for
+    /// HTTP and mock, which record neither.
+    fn event_extra(&self) -> (Option<String>, Option<u32>) {
+        match self {
+            PreparedCall::Mock { .. } | PreparedCall::Http(_) => (None, None),
         }
     }
 
@@ -1372,6 +1390,8 @@ fn append_event(req: &CallRequest, meta: &EventMeta) {
             outcome: meta.outcome.clone(),
             http_status: meta.http_status,
             duration_ms: meta.duration_ms,
+            smtp_subject: meta.smtp_subject.clone(),
+            smtp_recipients: meta.smtp_recipients,
         });
     }
 }
