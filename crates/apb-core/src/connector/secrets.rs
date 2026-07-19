@@ -31,6 +31,21 @@ pub fn parse_env_ref(value: &str) -> Option<String> {
     Some(inner.to_string())
 }
 
+/// Parses a `{{cmd:<command line>}}` secret reference: the whole value must
+/// be exactly that placeholder (no surrounding text). Returns the command
+/// line (the text between `{{cmd:` and the trailing `}}`), or `None` when
+/// the value is not a valid reference (a literal, an env reference, empty or
+/// whitespace-only inner text, or extra surrounding text). The command line
+/// is returned verbatim for `shell_words` parsing at resolution time; this
+/// function never executes anything.
+pub fn parse_cmd_ref(value: &str) -> Option<String> {
+    let inner = value.strip_prefix("{{cmd:")?.strip_suffix("}}")?;
+    if inner.trim().is_empty() {
+        return None;
+    }
+    Some(inner.to_string())
+}
+
 /// Parses a dotenv file's content into `KEY -> value` pairs. `#` comments
 /// (leading whitespace tolerated) and blank lines are skipped; the value is
 /// everything after the first `=` on a line, with no quote processing. CRLF
@@ -182,6 +197,36 @@ mod tests {
         assert_eq!(parse_env_ref("{{env.A}} suffix"), None);
         assert_eq!(parse_env_ref("{{env.}}"), None);
         assert_eq!(parse_env_ref("{{secret.a}}"), None);
+    }
+
+    // --- parse_cmd_ref -----------------------------------------------------
+
+    #[test]
+    fn parse_cmd_ref_accepts_valid_reference() {
+        assert_eq!(
+            parse_cmd_ref("{{cmd:gh auth token}}"),
+            Some("gh auth token".to_string())
+        );
+        assert_eq!(
+            parse_cmd_ref("{{cmd:op read \"op://vault/item/field\"}}"),
+            Some("op read \"op://vault/item/field\"".to_string())
+        );
+    }
+
+    #[test]
+    fn parse_cmd_ref_rejects_malformed_values() {
+        assert_eq!(parse_cmd_ref("literal"), None);
+        assert_eq!(parse_cmd_ref("{{env.TOKEN}}"), None);
+        assert_eq!(parse_cmd_ref("prefix {{cmd:gh}}"), None);
+        assert_eq!(parse_cmd_ref("{{cmd:gh}} suffix"), None);
+        assert_eq!(parse_cmd_ref("{{cmd:}}"), None);
+        assert_eq!(parse_cmd_ref("{{cmd:   }}"), None);
+    }
+
+    #[test]
+    fn parse_env_ref_and_cmd_ref_are_mutually_exclusive() {
+        assert!(parse_env_ref("{{cmd:gh}}").is_none());
+        assert!(parse_cmd_ref("{{env.T}}").is_none());
     }
 
     // --- parse_dotenv --------------------------------------------------
