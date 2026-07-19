@@ -8,6 +8,14 @@ import type {
   PlaybookSummary,
   WriteResult,
 } from './types'
+import type {
+  ConnectorAccount,
+  ConnectorCard,
+  ConnectorDetail,
+  ConnectorFunction,
+  ConnectorMeta,
+  ConnectorTrust,
+} from './connectors'
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url)
@@ -230,3 +238,118 @@ export const promoteVersion = (id: string, version: string, workspace = '') =>
     `${pb(id)}/versions/${encodeURIComponent(version)}/promote${qs({ workspace })}`,
     { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) },
   )
+
+// Connectors (design doc section 9). The server wire shape is snake_case; the
+// dashboard types in `./connectors` are camelCase, so the mapping happens
+// here, at the fetch boundary, the same way the rest of this file owns the
+// wire<->UI shape.
+const conn = (name: string) => `/api/connectors/${encodeURIComponent(name)}`
+
+interface ConnectorCardDto {
+  name: string
+  version: string
+  display_name: string
+  summary: string
+  tags: string[]
+  trust: ConnectorTrust
+  accounts_total: number
+  accounts_ready: number
+}
+
+const toConnectorCard = (d: ConnectorCardDto): ConnectorCard => ({
+  name: d.name,
+  version: d.version,
+  displayName: d.display_name,
+  summary: d.summary,
+  tags: d.tags,
+  trust: d.trust,
+  accountsTotal: d.accounts_total,
+  accountsReady: d.accounts_ready,
+})
+
+export const fetchConnectors = (workspace = '') =>
+  getJson<ConnectorCardDto[]>(`/api/connectors${qs({ workspace })}`).then((list) =>
+    list.map(toConnectorCard),
+  )
+
+interface ConnectorAccountDto {
+  name: string
+  default: boolean
+  fields: Record<string, string>
+  missing_env: string[]
+  trust: ConnectorTrust
+}
+
+const toConnectorAccount = (d: ConnectorAccountDto): ConnectorAccount => ({
+  name: d.name,
+  default: d.default,
+  fields: d.fields,
+  missingEnv: d.missing_env,
+  trust: d.trust,
+})
+
+interface ConnectorFunctionDto {
+  name: string
+  description: string
+  read_only: boolean
+  deprecated: boolean
+}
+
+const toConnectorFunction = (d: ConnectorFunctionDto): ConnectorFunction => ({
+  name: d.name,
+  description: d.description,
+  readOnly: d.read_only,
+  deprecated: d.deprecated,
+})
+
+interface ConnectorDetailDto {
+  name: string
+  version: string
+  trust: ConnectorTrust
+  meta: ConnectorMeta
+  body_md: string
+  functions: ConnectorFunctionDto[]
+  accounts: ConnectorAccountDto[]
+}
+
+export const fetchConnector = (name: string, workspace = '') =>
+  getJson<ConnectorDetailDto>(`${conn(name)}${qs({ workspace })}`).then(
+    (d): ConnectorDetail => ({
+      name: d.name,
+      version: d.version,
+      trust: d.trust,
+      meta: d.meta,
+      bodyMd: d.body_md,
+      functions: d.functions.map(toConnectorFunction),
+      accounts: d.accounts.map(toConnectorAccount),
+    }),
+  )
+
+export interface HealthcheckError {
+  code: string
+  message: string
+  http_status?: number
+  retry_after_sec?: number
+}
+export interface HealthcheckResult {
+  ok: boolean
+  error?: HealthcheckError
+  [key: string]: unknown
+}
+
+// The executor's structured outcome, returned verbatim (design doc section
+// 9/8). A trust-gated refusal comes back as a normal `ok:false` body with
+// `error.code === "permission"`, not an HTTP error status, so this is a plain
+// getJson-style call, not requestJson.
+export const runConnectorHealthcheck = (name: string, account: string, workspace = '') =>
+  requestJson<HealthcheckResult>(
+    `${conn(name)}/healthcheck/${encodeURIComponent(account)}${qs({ workspace })}`,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) },
+  )
+
+export const approveConnector = (name: string, account: string | null = null, workspace = '') =>
+  requestJson<{ ok: boolean }>(`/api/connectors/approve${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ name, account }),
+  })

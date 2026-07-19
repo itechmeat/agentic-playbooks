@@ -6,6 +6,8 @@
   import RunView from './pages/RunView.svelte'
   import ProfileList from './pages/ProfileList.svelte'
   import ProfileEdit from './pages/ProfileEdit.svelte'
+  import ConnectorList from './pages/ConnectorList.svelte'
+  import ConnectorView from './pages/ConnectorView.svelte'
   import { Toaster } from '$lib/components/ui/sonner'
   import { ModeWatcher } from 'mode-watcher'
 
@@ -58,6 +60,8 @@
     if (h === '#/profile-new') return { ...base, page: 'profile-new' }
     if (h.startsWith('#/profile-edit/'))
       return { ...base, page: 'profile-edit', ...profileRef(h.slice(15)) }
+    if (h === '#/connectors') return { ...base, page: 'connectors' }
+    if (h.startsWith('#/connector/')) return { ...base, page: 'connector', ...wsId(h.slice(12)) }
     return base
   })
 </script>
@@ -78,6 +82,10 @@
   <ProfileEdit name="" scope="project" workspace="" />
 {:else if route.page === 'profile-edit'}
   <ProfileEdit name={route.name} scope={route.scope} workspace={route.workspace} />
+{:else if route.page === 'connectors'}
+  <ConnectorList />
+{:else if route.page === 'connector'}
+  <ConnectorView name={route.id} workspace={route.workspace} />
 {:else}
   <PlaybookList />
 {/if}

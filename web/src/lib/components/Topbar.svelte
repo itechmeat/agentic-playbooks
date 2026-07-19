@@ -4,13 +4,14 @@
   import BookMarked from '@lucide/svelte/icons/book-marked'
   import PlayCircle from '@lucide/svelte/icons/play-circle'
   import UserCog from '@lucide/svelte/icons/user-cog'
+  import Plug from '@lucide/svelte/icons/plug'
 
   let {
     active = '',
     title,
     actions,
   }: {
-    active?: 'playbooks' | 'runs' | 'profiles' | ''
+    active?: 'playbooks' | 'runs' | 'profiles' | 'connectors' | ''
     title?: Snippet
     actions?: Snippet
   } = $props()
@@ -19,6 +20,7 @@
     { key: 'playbooks', label: 'Playbooks', href: '#/', icon: BookMarked },
     { key: 'runs', label: 'Runs', href: '#/runs', icon: PlayCircle },
     { key: 'profiles', label: 'Profiles', href: '#/profiles', icon: UserCog },
+    { key: 'connectors', label: 'Connectors', href: '#/connectors', icon: Plug },
   ] as const
 </script>
 
