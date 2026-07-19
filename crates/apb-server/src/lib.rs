@@ -85,6 +85,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/connectors", get(list_connectors_handler))
         .route("/api/connectors/approve", post(approve_connector_handler))
         .route("/api/connectors/{name}", get(get_connector_handler))
+        .route("/api/connectors/{name}/stats", get(connector_stats_handler))
         .route(
             "/api/connectors/{name}/healthcheck/{account}",
             post(healthcheck_connector_handler),
@@ -904,10 +905,16 @@ fn digest_trust_status(trust: &TrustStore, digest: &str, id: &str, kind: Kind) -
 
 /// GET /api/connectors: installed connectors with their storefront summary,
 /// trust status, and account configuration readiness (spec 9). `trust` is
-/// the connector's OWN digest trust (`approved` | `changed` | `unapproved`);
-/// `accounts_ready` counts configured accounts whose required secret env vars
-/// all currently resolve - a configuration signal, not a trust signal (a
-/// ready account can still be untrusted, and vice versa).
+/// the connector's OWN digest trust (`approved` | `changed` | `unapproved` |
+/// `invalid`); `accounts_ready` counts configured accounts whose required
+/// secret env vars all currently resolve - a configuration signal, not a
+/// trust signal (a ready account can still be untrusted, and vice versa).
+/// `store::list` only parses `connector.yaml`, so a connector that gets this
+/// far already has a manifest that parses; if `store::load` still fails here
+/// (for example the whole-tree digest walk hits an escaping symlink), the
+/// connector is fundamentally broken, not merely un-trust-decided - report
+/// `invalid` rather than `unapproved` so the dashboard can tell the two
+/// apart (spec 9's fourth trust state).
 async fn list_connectors_handler(
     State(state): State<AppState>,
     Query(q): Query<WsQuery>,
@@ -922,7 +929,7 @@ async fn list_connectors_handler(
         let loaded = store::load(&summary.name);
         let trust_state = match &loaded {
             Ok(l) => digest_trust_status(&trust, &l.digest, &summary.name, Kind::Connector),
-            Err(_) => "unapproved",
+            Err(_) => "invalid",
         };
         let accounts = config::load_merged(&root, &summary.name).unwrap_or_default();
         let accounts_ready = match &loaded {
@@ -947,6 +954,110 @@ async fn list_connectors_handler(
         }));
     }
     Json(out).into_response()
+}
+
+/// Runs scanned per `GET /api/connectors/{name}/stats` call, most recent
+/// first (spec 9's usage-stats bullet: "aggregated from existing run event
+/// logs", read-only, no new engine state). Unbounded history scanning would
+/// make this endpoint cost grow with the whole project's lifetime, so it is
+/// capped to the latest N runs by start time - the same ordering
+/// `apb_engine::list_runs` already sorts by. `runs_scanned` in the response
+/// reports how many were actually read, so a caller can tell a small number
+/// apart from "there were more but we capped".
+const STATS_RUN_CAP: usize = 50;
+
+/// GET /api/connectors/{name}/stats: usage stats for one connector,
+/// aggregated by scanning the `ConnectorCall` events (`apb-engine`'s
+/// `event.rs`) of the most recent `STATS_RUN_CAP` runs in the resolved
+/// workspace (spec 9). Calls, error rate, and duration are broken down per
+/// function/account pair as well as summed as `by_outcome`. Purely
+/// read-only: no engine state is written, and `ConnectorCall` events never
+/// carry request/response bodies or secrets by construction (`event.rs`), so
+/// this cannot leak anything the run log itself does not already hold.
+async fn connector_stats_handler(
+    State(state): State<AppState>,
+    AxPath(name): AxPath<String>,
+    Query(q): Query<WsQuery>,
+) -> impl IntoResponse {
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let runs = match apb_engine::list_runs(&root) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let runs_dir = root.join(".apb/runs");
+
+    // (function, account) -> (calls, errors, total_duration_ms). A BTreeMap
+    // keeps the response's `by_function` order deterministic across runs.
+    let mut by_fn: std::collections::BTreeMap<(String, String), (u64, u64, u64)> =
+        std::collections::BTreeMap::new();
+    let mut by_outcome: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut total_calls: u64 = 0;
+    let mut runs_scanned: u64 = 0;
+
+    for run in runs.iter().take(STATS_RUN_CAP) {
+        runs_scanned += 1;
+        let Ok(events) = apb_engine::event::read_all(&runs_dir.join(&run.run_id)) else {
+            continue;
+        };
+        for event in &events {
+            let apb_engine::event::EventPayload::ConnectorCall {
+                connector,
+                function,
+                account,
+                outcome,
+                duration_ms,
+                ..
+            } = &event.payload
+            else {
+                continue;
+            };
+            if connector != &name {
+                continue;
+            }
+            total_calls += 1;
+            let entry = by_fn
+                .entry((function.clone(), account.clone()))
+                .or_insert((0, 0, 0));
+            entry.0 += 1;
+            if outcome != "ok" {
+                entry.1 += 1;
+            }
+            entry.2 += duration_ms;
+            *by_outcome.entry(outcome.clone()).or_insert(0) += 1;
+        }
+    }
+
+    let by_function: Vec<serde_json::Value> = by_fn
+        .into_iter()
+        .map(
+            |((function, account), (calls, errors, total_duration_ms))| {
+                let avg_duration_ms = if calls > 0 {
+                    total_duration_ms as f64 / calls as f64
+                } else {
+                    0.0
+                };
+                serde_json::json!({
+                    "function": function,
+                    "account": account,
+                    "calls": calls,
+                    "errors": errors,
+                    "avg_duration_ms": avg_duration_ms,
+                })
+            },
+        )
+        .collect();
+
+    Json(serde_json::json!({
+        "connector": name,
+        "runs_scanned": runs_scanned,
+        "calls": total_calls,
+        "by_function": by_function,
+        "by_outcome": by_outcome,
+    }))
+    .into_response()
 }
 
 /// GET /api/connectors/{name}: the manifest (functions, account fields),

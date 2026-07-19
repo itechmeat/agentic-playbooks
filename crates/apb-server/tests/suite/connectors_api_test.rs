@@ -214,6 +214,38 @@ async fn list_endpoint_shows_fixture_connector_unapproved() {
     assert_eq!(entry["accounts_ready"], serde_json::json!(0));
 }
 
+/// A connector directory that `store::list` still enumerates (its
+/// `connector.yaml` parses fine, since `list` only reads and parses that one
+/// file) but whose `store::load` fails: an absolute-target symlink inside the
+/// tree makes `content::tree_digest` refuse it (`ContentError::Escape`), and
+/// `load` folds that into `ConnectorError::Invalid`. This is the "connector
+/// installed but broken" case spec 9's fourth trust state exists for.
+#[cfg(unix)]
+#[tokio::test]
+async fn list_endpoint_marks_broken_connector_invalid() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let dir = cfg.path().join("connectors").join(CONNECTOR);
+    std::os::unix::fs::symlink("/nonexistent-absolute-target", dir.join("broken-link")).unwrap();
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/connectors").await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == CONNECTOR)
+        .expect("fixture connector listed");
+    assert_eq!(
+        entry["trust"], "invalid",
+        "a connector whose store::load fails must report invalid, not unapproved: {entry}"
+    );
+}
+
 #[tokio::test]
 async fn approve_endpoint_flips_connector_trust() {
     let _guard = crate::common::env_lock().await;
@@ -437,4 +469,101 @@ async fn run_handler_starts_once_connector_and_account_are_approved() {
         "an approved connector-binding playbook must start: {json}"
     );
     assert!(json["run_id"].is_string(), "expected a run_id: {json}");
+}
+
+// --- usage stats (task 17.5, spec 9's dropped "usage stats" bullet) --------
+
+/// Appends one `ConnectorCall` event to `run_dir`'s event log, creating the
+/// run directory and log if needed - the only event `GET
+/// /api/connectors/{name}/stats` reads from.
+fn write_connector_call_event(
+    run_dir: &Path,
+    connector: &str,
+    function: &str,
+    account: &str,
+    outcome: &str,
+    duration_ms: u64,
+) {
+    let mut log = apb_engine::event::EventLog::create(run_dir).unwrap();
+    log.append(apb_engine::event::EventPayload::ConnectorCall {
+        node_id: "a".into(),
+        connector: connector.into(),
+        function: function.into(),
+        account: account.into(),
+        url: String::new(),
+        outcome: outcome.into(),
+        http_status: None,
+        duration_ms,
+    })
+    .unwrap();
+}
+
+#[tokio::test]
+async fn stats_endpoint_aggregates_connector_calls_across_recent_runs() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let runs_dir = root.path().join(".apb/runs");
+    let run1 = runs_dir.join("run-1");
+    let run2 = runs_dir.join("run-2");
+
+    write_connector_call_event(&run1, CONNECTOR, "list_items", "acct1", "ok", 100);
+    write_connector_call_event(&run1, CONNECTOR, "list_items", "acct1", "auth", 50);
+    write_connector_call_event(&run2, CONNECTOR, "ping", "acct1", "ok", 20);
+    // A call for a DIFFERENT connector, and one for a different function/
+    // account pair, must not bleed into the requested connector's aggregate.
+    write_connector_call_event(&run2, "other-connector", "ping", "acct1", "ok", 5);
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}/stats")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["connector"], CONNECTOR);
+    assert_eq!(json["runs_scanned"], serde_json::json!(2), "stats: {json}");
+    assert_eq!(json["calls"], serde_json::json!(3), "stats: {json}");
+    assert_eq!(
+        json["by_outcome"]["ok"],
+        serde_json::json!(2),
+        "stats: {json}"
+    );
+    assert_eq!(
+        json["by_outcome"]["auth"],
+        serde_json::json!(1),
+        "stats: {json}"
+    );
+
+    let by_function = json["by_function"].as_array().expect("by_function array");
+    let list_items = by_function
+        .iter()
+        .find(|f| f["function"] == "list_items" && f["account"] == "acct1")
+        .unwrap_or_else(|| panic!("list_items/acct1 aggregate present: {json}"));
+    assert_eq!(list_items["calls"], serde_json::json!(2));
+    assert_eq!(list_items["errors"], serde_json::json!(1));
+    assert_eq!(list_items["avg_duration_ms"], serde_json::json!(75.0));
+
+    let ping = by_function
+        .iter()
+        .find(|f| f["function"] == "ping" && f["account"] == "acct1")
+        .unwrap_or_else(|| panic!("ping/acct1 aggregate present: {json}"));
+    assert_eq!(ping["calls"], serde_json::json!(1));
+    assert_eq!(ping["errors"], serde_json::json!(0));
+    assert_eq!(ping["avg_duration_ms"], serde_json::json!(20.0));
+}
+
+#[tokio::test]
+async fn stats_endpoint_empty_when_no_calls_recorded() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}/stats")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["connector"], CONNECTOR);
+    assert_eq!(json["runs_scanned"], serde_json::json!(0));
+    assert_eq!(json["calls"], serde_json::json!(0));
+    assert_eq!(json["by_function"], serde_json::json!([]));
+    assert_eq!(json["by_outcome"], serde_json::json!({}));
 }

@@ -2,10 +2,12 @@
   import {
     approveConnector,
     fetchConnector,
+    fetchConnectorStats,
     runConnectorHealthcheck,
     type HealthcheckResult,
   } from '../lib/api'
   import { accountReady, trustBadge, type ConnectorAccount, type ConnectorDetail } from '../lib/connectors'
+  import { errorRate, formatDurationMs, outcomeSummary, type ConnectorStats } from '../lib/connectorstats'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
   import { Button } from '$lib/components/ui/button'
@@ -18,11 +20,14 @@
   import ShieldCheck from '@lucide/svelte/icons/shield-check'
   import Stethoscope from '@lucide/svelte/icons/stethoscope'
   import ExternalLink from '@lucide/svelte/icons/external-link'
+  import ChartNoAxesColumn from '@lucide/svelte/icons/chart-no-axes-column'
 
   let { name, workspace = '' }: { name: string; workspace?: string } = $props()
 
   let detail = $state<ConnectorDetail | null>(null)
   let loaded = $state(false)
+  let stats = $state<ConnectorStats | null>(null)
+  let statsLoaded = $state(false)
   let approving = $state<string | null>(null) // account name, or '' for the connector itself
   let probing = $state<string | null>(null)
   let probeResults = $state<Record<string, HealthcheckResult>>({})
@@ -44,15 +49,36 @@
     }
   }
 
+  // Usage stats are read-only and best-effort: a failure to load them must
+  // not block or blank out the rest of the connector detail page, so this is
+  // a separate try/catch/loading flag from `load`.
+  async function loadStats(token: number) {
+    try {
+      const s = await fetchConnectorStats(name, workspace)
+      if (token !== loadToken) return
+      stats = s
+    } catch {
+      if (token === loadToken) stats = null
+    } finally {
+      if (token === loadToken) statsLoaded = true
+    }
+  }
+
   $effect(() => {
     void name
     void workspace
     loaded = false
     detail = null
+    statsLoaded = false
+    stats = null
     probeResults = {}
     const token = ++loadToken
     load(token)
-    return subscribeChanges(() => load(token))
+    loadStats(token)
+    return subscribeChanges(() => {
+      load(token)
+      loadStats(token)
+    })
   })
 
   const badgeClass = {
@@ -295,6 +321,67 @@
                 {/each}
               </Table.Body>
             </Table.Root>
+          {/if}
+        </Card.Content>
+      </Card.Root>
+
+      <Card.Root>
+        <Card.Header>
+          <div class="flex items-center gap-2">
+            <ChartNoAxesColumn class="size-4 text-muted-foreground" />
+            <Card.Title class="text-sm">Usage</Card.Title>
+          </div>
+          <Card.Description>
+            Calls, error rate, and duration per function and account, read from recent run
+            event logs. Read only - no new state is recorded here.
+          </Card.Description>
+        </Card.Header>
+        <Card.Content>
+          {#if !statsLoaded}
+            <Skeleton class="h-16 w-full" />
+          {:else if !stats || stats.calls === 0}
+            <p class="text-sm text-muted-foreground">
+              No recorded calls{#if stats} in the last {stats.runsScanned} run{stats.runsScanned === 1
+                ? ''
+                : 's'} scanned{/if}.
+            </p>
+          {:else}
+            <div class="flex flex-col gap-3">
+              <p class="text-sm text-muted-foreground">
+                {stats.calls} call{stats.calls === 1 ? '' : 's'} across {stats.runsScanned} run{stats.runsScanned ===
+                1
+                  ? ''
+                  : 's'} scanned (most recent {stats.runsScanned}) - {outcomeSummary(stats.byOutcome)}.
+              </p>
+              <Table.Root>
+                <Table.Header>
+                  <Table.Row>
+                    <Table.Head>Function</Table.Head>
+                    <Table.Head>Account</Table.Head>
+                    <Table.Head>Calls</Table.Head>
+                    <Table.Head>Error rate</Table.Head>
+                    <Table.Head>Avg duration</Table.Head>
+                  </Table.Row>
+                </Table.Header>
+                <Table.Body>
+                  {#each stats.byFunction as f (`${f.function}:${f.account}`)}
+                    <Table.Row>
+                      <Table.Cell class="font-mono text-xs">{f.function}</Table.Cell>
+                      <Table.Cell class="font-mono text-xs">{f.account}</Table.Cell>
+                      <Table.Cell>{f.calls}</Table.Cell>
+                      <Table.Cell>
+                        {#if f.errors > 0}
+                          <Badge variant="outline" class={badgeClass.warn}>{errorRate(f)}</Badge>
+                        {:else}
+                          {errorRate(f)}
+                        {/if}
+                      </Table.Cell>
+                      <Table.Cell>{formatDurationMs(f.avgDurationMs)}</Table.Cell>
+                    </Table.Row>
+                  {/each}
+                </Table.Body>
+              </Table.Root>
+            </div>
           {/if}
         </Card.Content>
       </Card.Root>

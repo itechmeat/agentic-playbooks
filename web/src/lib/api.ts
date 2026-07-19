@@ -16,6 +16,7 @@ import type {
   ConnectorMeta,
   ConnectorTrust,
 } from './connectors'
+import type { ConnectorFunctionStat, ConnectorStats } from './connectorstats'
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url)
@@ -353,3 +354,41 @@ export const approveConnector = (name: string, account: string | null = null, wo
     headers: jsonHeaders,
     body: JSON.stringify({ name, account }),
   })
+
+interface ConnectorFunctionStatDto {
+  function: string
+  account: string
+  calls: number
+  errors: number
+  avg_duration_ms: number
+}
+
+interface ConnectorStatsDto {
+  connector: string
+  runs_scanned: number
+  calls: number
+  by_function: ConnectorFunctionStatDto[]
+  by_outcome: Record<string, number>
+}
+
+const toConnectorFunctionStat = (d: ConnectorFunctionStatDto): ConnectorFunctionStat => ({
+  function: d.function,
+  account: d.account,
+  calls: d.calls,
+  errors: d.errors,
+  avgDurationMs: d.avg_duration_ms,
+})
+
+// GET /api/connectors/{name}/stats: usage stats aggregated server-side from
+// recent run event logs (design doc section 9). Read-only; the server bounds
+// the run scan itself, `runsScanned` reports how many it actually read.
+export const fetchConnectorStats = (name: string, workspace = '') =>
+  getJson<ConnectorStatsDto>(`${conn(name)}/stats${qs({ workspace })}`).then(
+    (d): ConnectorStats => ({
+      connector: d.connector,
+      runsScanned: d.runs_scanned,
+      calls: d.calls,
+      byFunction: d.by_function.map(toConnectorFunctionStat),
+      byOutcome: d.by_outcome,
+    }),
+  )
