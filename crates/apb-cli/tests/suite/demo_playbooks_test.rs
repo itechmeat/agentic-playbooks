@@ -1,8 +1,8 @@
-//! CI validate test for the two demo playbooks (spec
-//! 2026-07-19-official-connectors-design section 6): installs the four repo
+//! CI validate test for the demo playbooks (spec
+//! 2026-07-19-official-connectors-design section 6): installs the repo
 //! connectors `--from-dir` into a temp project, approves each connector and
 //! its fake `default` account exactly as a user would via `apb connector
-//! approve`, writes fake non-secret account configs, registers the two
+//! approve`, writes fake non-secret account configs, registers the
 //! `examples/playbooks/*.yaml` playbooks as installed playbook versions, and
 //! runs `apb validate` on each. This is what fails the build when a manifest
 //! change (a renamed function, a tightened args_schema) breaks a demo
@@ -124,6 +124,16 @@ fn setup(dir: &Path) -> std::path::PathBuf {
         "sentry",
         "accounts:\n  - name: default\n    base_url: https://sentry.io\n    org: acme\n    token: \"{{env.DEMO_SENTRY_TOKEN}}\"\n",
     );
+    install_and_approve(
+        &root,
+        "asana",
+        "accounts:\n  - name: default\n    api_base: https://app.asana.com/api/1.0\n    token: \"{{env.DEMO_ASANA_TOKEN}}\"\n",
+    );
+    install_and_approve(
+        &root,
+        "imap",
+        "accounts:\n  - name: default\n    host: imap.example.com\n    port: \"993\"\n    use_tls: \"true\"\n    auth_method: password\n    username: mailbox@example.com\n    password: \"{{env.DEMO_IMAP_PASSWORD}}\"\n",
+    );
 
     seed_profile_main(&root);
     root
@@ -164,5 +174,24 @@ fn release_announce_demo_playbook_validates() {
     assert!(
         stdout.contains("release-announce: OK"),
         "release-announce should validate cleanly: {stdout}"
+    );
+}
+
+#[test]
+fn inbox_triage_demo_playbook_validates() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = setup(dir.path());
+    register_playbook(
+        &root,
+        "inbox-triage",
+        "1.0.0",
+        &repo_playbook_yaml("inbox-triage.yaml"),
+    );
+
+    let out = apb_ok(&root, &["validate", "inbox-triage"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("inbox-triage: OK"),
+        "inbox-triage should validate cleanly: {stdout}"
     );
 }

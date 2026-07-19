@@ -138,13 +138,13 @@ a call without executing it, or the dashboard healthcheck to probe an account.
 
 ## Official connectors
 
-Four official connectors ship inside the `apb` binary and install with
-`apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`.
-Installing from the binary records trust for the connector's tree digest
-in the same action, since the bytes are already part of the binary you
-are running; `apb connector install --from-dir <path>` (the development
-loop for this repository, `connectors/<name>/`) keeps the normal approve
-flow.
+Six official connectors ship inside the `apb` binary and install with
+`apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`,
+`asana`, `imap`. Installing from the binary records trust for the
+connector's tree digest in the same action, since the bytes are already
+part of the binary you are running; `apb connector install --from-dir
+<path>` (the development loop for this repository, `connectors/<name>/`)
+keeps the normal approve flow.
 
 ### github
 
@@ -182,14 +182,62 @@ Settings > Auth Tokens with scopes `project:read`, `event:read`,
 call result's `link` field: pass the cursor it returns back into the
 next call's `cursor` argument. Healthcheck: `list_projects`.
 
+### asana
+
+Account fields: `api_base` (`https://app.asana.com/api/1.0`) and
+`token` (secret). Workspace, project, section, and task gids are call
+arguments, not account fields, so one account serves every workspace
+the token can reach. Create the token as a personal access token: in
+Asana, open your profile settings, go to Apps, then Developer apps, and
+create a new personal access token; it acts as the user who created it,
+with that user's full permissions, and there is no separate scope to
+select. `list_workspaces`, `list_projects`, and `list_tasks` take an
+optional `offset` argument: read the next page's offset from the call
+result's `next_page.offset` field and pass it back on the following
+call, omitting it on the first call. `search_tasks` is a fuzzy typeahead
+match against task names, not a full-text search; use `list_tasks` with
+a project filter when a complete, predictable result set matters more.
+Healthcheck: `get_me`.
+
+### imap
+
+Account fields: `host`, `port`, `auth_method` (`password` or `xoauth2`),
+`username` (all required), `password` (secret), and `use_tls` (optional,
+default `true`). One connector serves any IMAP provider, since the
+protocol is identical everywhere and only the connection settings
+differ. `search_messages` and `get_message` open the folder read-only
+with `EXAMINE` and fetch content with `BODY.PEEK[]`, so reading a
+message never marks it seen; only `mark_read` and `mark_unread` change
+anything on the server, and each is a separate, independently grantable
+function. `use_tls` defaults to `true` when omitted; only set it to
+`false` for a local plaintext test fixture, never for a real provider.
+Gmail (`imap.gmail.com`, port `993`) needs 2-Step Verification enabled
+before an app password can be generated; a Google Workspace account
+with app passwords disabled by policy instead uses `auth_method:
+xoauth2` with an access token sourced via `{{cmd:...}}`. Outlook and
+Microsoft 365 (`outlook.office365.com`, port `993`) only accept
+`auth_method: xoauth2`, sourced from an external token helper such as
+`oama` or `mutt_oauth2` with the same `{{cmd:...}}` mechanism; `apb`
+does not implement an OAuth consent flow itself. Yandex Mail
+(`imap.yandex.com`, port `993`) needs IMAP access enabled in the Yandex
+Mail web settings before an app password can be generated. iCloud
+(`imap.mail.me.com`, port `993`) uses an app-specific password from the
+Apple ID account page. No message deletion, no move between folders,
+and no sending: this connector only reads and marks read/unread, and is
+meant to be installed alongside `smtp` for a read-and-reply workflow.
+Healthcheck: `verify` (connects, negotiates TLS, authenticates, without
+opening or reading any mailbox).
+
 ### Demo playbooks
 
 `examples/playbooks/sentry-triage.yaml` and
-`examples/playbooks/release-announce.yaml` exercise the four connectors
-end to end and double as reference examples for grant allowlists and
-`max_calls`. They validate in CI against fake accounts and are not run
-against real services there; run them manually once your own accounts
-are configured and approved.
+`examples/playbooks/release-announce.yaml` exercise the github,
+telegram, smtp, and sentry connectors end to end;
+`examples/playbooks/inbox-triage.yaml` exercises imap and asana the
+same way. All three double as reference examples for grant allowlists
+and `max_calls`. They validate in CI against fake accounts and are not
+run against real services there; run them manually once your own
+accounts are configured and approved.
 
 ### Coverage note
 
