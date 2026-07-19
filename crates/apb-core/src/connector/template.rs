@@ -247,14 +247,30 @@ pub fn single_args_placeholder(s: &str) -> Option<&str> {
     Some(inner)
 }
 
+/// Looks up a single-placeholder arg by field name for the drop rule (spec
+/// 5.1), treating an explicit JSON `null` the same as an absent field: both
+/// return `None`. An explicit `null` carries the same "nothing to send"
+/// intent as a missing key, so it must not leak through as a literal JSON
+/// null in a rendered body or as an error-worthy "present" value in a
+/// rendered query. Shared by `render_body`'s top-level and nested paths and
+/// by the engine's `render_query`.
+pub fn resolve_optional_arg<'a>(ctx: &'a RenderCtx, field: &str) -> Option<&'a serde_json::Value> {
+    match ctx.args.get(field) {
+        Some(serde_json::Value::Null) | None => None,
+        some => some,
+    }
+}
+
 /// Renders a body value: a top-level `"{{args}}"` string renders as a clone
 /// of `ctx.args` (the wave 1 whole-forward form); a top-level single
 /// placeholder (`"{{args.field}}"`) renders as the typed value of that arg,
-/// or errors naming the field if it is absent (spec 5.1: a whole body must
-/// not silently vanish). Otherwise the JSON value is walked: an object entry
-/// or array element whose value is a single placeholder renders typed when
-/// the arg is present and is dropped when it is absent; every other string
-/// leaf keeps wave 1 interpolation semantics via `render_raw`.
+/// or errors naming the field if it is absent or explicitly `null` (spec
+/// 5.1: a whole body must not silently vanish; an explicit null arg is
+/// treated as absent and dropped, and dropping a whole body is instead an
+/// error). Otherwise the JSON value is walked: an object entry or array
+/// element whose value is a single placeholder renders typed when the arg is
+/// present and non-null, and is dropped when it is absent or null; every
+/// other string leaf keeps wave 1 interpolation semantics via `render_raw`.
 pub fn render_body(
     body: &serde_json::Value,
     ctx: &RenderCtx,
@@ -264,7 +280,7 @@ pub fn render_body(
             return Ok(ctx.args.clone());
         }
         if let Some(field) = single_args_placeholder(s) {
-            return ctx.args.get(field).cloned().ok_or_else(|| {
+            return resolve_optional_arg(ctx, field).cloned().ok_or_else(|| {
                 ConnectorError::Invalid(format!(
                     "unresolved placeholder `{{{{args.{field}}}}}` in template `{s}`"
                 ))
@@ -304,10 +320,11 @@ fn render_body_walk(
 
 /// Renders one object-entry or array-element value, applying the
 /// single-placeholder drop rule (spec 5.1): a value that is exactly
-/// `{{args.field}}` resolves to the typed arg clone when present, or `None`
-/// (the caller drops the entry/element) when absent. Every other value
-/// recurses through `render_body_walk` unchanged, so nested containers and
-/// mixed-content strings keep today's interpolation-and-error semantics.
+/// `{{args.field}}` resolves to the typed arg clone when present and
+/// non-null, or `None` (the caller drops the entry/element) when the arg is
+/// absent or explicitly `null`. Every other value recurses through
+/// `render_body_walk` unchanged, so nested containers and mixed-content
+/// strings keep today's interpolation-and-error semantics.
 fn render_body_entry(
     value: &serde_json::Value,
     ctx: &RenderCtx,
@@ -315,7 +332,7 @@ fn render_body_entry(
     if let serde_json::Value::String(s) = value
         && let Some(field) = single_args_placeholder(s)
     {
-        return Ok(ctx.args.get(field).cloned());
+        return Ok(resolve_optional_arg(ctx, field).cloned());
     }
     render_body_walk(value, ctx).map(Some)
 }
@@ -672,5 +689,36 @@ mod tests {
         let ctx = empty_ctx(&account, &args, &secrets);
         let body = serde_json::json!("{{args}}");
         assert_eq!(render_body(&body, &ctx).unwrap(), args);
+    }
+
+    #[test]
+    fn render_body_null_arg_is_dropped_like_absent() {
+        let account = BTreeMap::new();
+        // `name` is explicitly null, `notes` is genuinely absent, `b` (in the
+        // array) is explicitly null: all three must drop, same as an absent
+        // arg, so a literal JSON null never leaks into the rendered body.
+        let args = serde_json::json!({"name": null, "a": 1, "b": null});
+        let secrets = BTreeMap::new();
+        let ctx = empty_ctx(&account, &args, &secrets);
+        let body = serde_json::json!({
+            "data": {
+                "name": "{{args.name}}",
+                "notes": "{{args.notes}}",
+            },
+            "list": ["{{args.a}}", "{{args.b}}"],
+        });
+        let rendered = render_body(&body, &ctx).unwrap();
+        assert_eq!(rendered, serde_json::json!({"data": {}, "list": [1]}));
+    }
+
+    #[test]
+    fn render_body_top_level_single_placeholder_null_is_error() {
+        let account = BTreeMap::new();
+        let args = serde_json::json!({"gone": null});
+        let secrets = BTreeMap::new();
+        let ctx = empty_ctx(&account, &args, &secrets);
+        let body = serde_json::json!("{{args.gone}}");
+        let err = render_body(&body, &ctx).unwrap_err();
+        assert!(err.to_string().contains("args.gone"), "message was: {err}");
     }
 }

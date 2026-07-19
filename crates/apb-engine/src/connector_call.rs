@@ -21,7 +21,8 @@ use apb_core::connector::def::{AuthSpec, ConnectorDoc, FunctionSpec};
 use apb_core::connector::secrets;
 use apb_core::connector::store;
 use apb_core::connector::template::{
-    RenderCtx, render_body, render_encoded, render_raw, single_args_placeholder,
+    RenderCtx, render_body, render_encoded, render_raw, resolve_optional_arg,
+    single_args_placeholder,
 };
 use apb_core::trust::{TrustStore, account_trust_id};
 use serde_json::{Value, json};
@@ -1010,12 +1011,15 @@ fn render_query(function: &FunctionSpec, ctx: &RenderCtx) -> Result<String, Call
     let mut parts = Vec::new();
     for (key, template) in &function.query {
         // spec 5.1: a query value that is exactly `{{args.field}}` drops the
-        // whole pair when the arg is absent, instead of erroring. A present
-        // arg (scalar or not) still goes through `render_encoded` below,
-        // which already renders scalars typed (string verbatim, number/bool
-        // via their JSON text) and turns a non-scalar into a Config error.
+        // whole pair when the arg is absent, instead of erroring. An
+        // explicit null arg is treated as absent and dropped too, so a
+        // literal "null" never renders into the query string. A present,
+        // non-null arg (scalar or not) still goes through `render_encoded`
+        // below, which already renders scalars typed (string verbatim,
+        // number/bool via their JSON text) and turns a non-scalar into a
+        // Config error.
         if let Some(field) = single_args_placeholder(template)
-            && ctx.args.get(field).is_none()
+            && resolve_optional_arg(ctx, field).is_none()
         {
             continue;
         }
@@ -1577,6 +1581,19 @@ mod tests {
             Ok(_) => panic!("expected a config error for a non-scalar query arg"),
             Err(err) => assert_eq!(err.code, CallErrorCode::Config),
         }
+    }
+
+    #[test]
+    fn render_query_null_arg_drops_pair() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: list\n    description: d\n    method: GET\n    url: \"https://api.example.com/items\"\n    query: { offset: \"{{args.offset}}\", limit: \"{{args.limit}}\" }\n    args_schema: { type: object }\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("list").unwrap();
+        // `offset` is explicitly null (not merely absent): it must drop the
+        // pair exactly like an absent arg, not render a literal `null`.
+        let args = json!({ "offset": null, "limit": 50 });
+        let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
+        assert_eq!(r.pre_auth_url, "https://api.example.com/items?limit=50");
     }
 
     #[test]
