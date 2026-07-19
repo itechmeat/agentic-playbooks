@@ -271,12 +271,11 @@ impl ConnectorDoc {
             }
 
             // response_pick projects an HTTP response body (spec 4.5); a mock
-            // returns an authored payload, so a projection there is meaningless.
-            // NOTE(smtp-slice): extend this guard with `|| is_smtp` when the
-            // smtp function kind lands.
-            if !f.response_pick.is_empty() && is_mock {
+            // returns an authored payload and an smtp function returns a send/
+            // verify receipt, so a projection on either is meaningless.
+            if !f.response_pick.is_empty() && (is_mock || is_smtp) {
                 return Err(ConnectorError::Invalid(format!(
-                    "function `{}` sets response_pick but is a mock; response_pick is only valid on HTTP functions",
+                    "function `{}` sets response_pick but is not an HTTP function; response_pick is only valid on HTTP functions",
                     f.name
                 )));
             }
@@ -968,6 +967,16 @@ functions:
         assert!(ConnectorDoc::from_yaml(with_msg, "x").is_err());
         let no_msg = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n";
         assert!(ConnectorDoc::from_yaml(no_msg, "x").is_err());
+    }
+
+    #[test]
+    fn response_pick_on_smtp_is_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    response_pick: [a, b]\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n      verify: true\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err();
+        assert!(
+            err.to_string().contains("response_pick"),
+            "message was: {err}"
+        );
     }
 
     #[test]
