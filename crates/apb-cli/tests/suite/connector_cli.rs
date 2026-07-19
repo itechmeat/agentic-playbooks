@@ -547,3 +547,91 @@ fn call_accepts_the_full_flag() {
     let v: serde_json::Value = serde_json::from_str(stdout.trim()).unwrap();
     assert_eq!(v["error"]["code"], serde_json::json!("config"));
 }
+
+// --- install --------------------------------------------------------------
+
+#[test]
+fn install_embedded_example_records_trust_and_lists_approved() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    let out = apb_ok(dir.path(), &["connector", "install", "example"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("installed connector `example`"),
+        "install should confirm: {stdout}"
+    );
+    let cfg = dir.path().join("cfg/connectors/example");
+    assert!(cfg.join("connector.yaml").is_file());
+    assert!(cfg.join("tests.yaml").is_file());
+
+    // Embedded install seeds trust: the connector lists as approved.
+    let list = apb_ok(dir.path(), &["connector", "list"]);
+    let list_out = String::from_utf8_lossy(&list.stdout);
+    assert!(
+        list_out.contains("example") && list_out.contains("approved"),
+        "installed connector should list as approved: {list_out}"
+    );
+}
+
+#[test]
+fn install_same_digest_is_a_noop_and_differing_refuses_without_force() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "install", "example"]);
+
+    // Re-install: same digest, a no-op that still succeeds.
+    let again = apb_ok(dir.path(), &["connector", "install", "example"]);
+    assert!(String::from_utf8_lossy(&again.stdout).contains("already installed"));
+
+    // Mutate the installed folder so it differs from the embedded version.
+    let manifest = dir.path().join("cfg/connectors/example/connector.yaml");
+    let mut body = fs::read_to_string(&manifest).unwrap();
+    body.push_str("# local edit\n");
+    fs::write(&manifest, body).unwrap();
+
+    let refused = playbook(dir.path(), &["connector", "install", "example"]);
+    assert!(!refused.status.success(), "differing target must refuse");
+    assert!(
+        String::from_utf8_lossy(&refused.stderr).contains("--force"),
+        "refusal should point at --force"
+    );
+
+    // --force overwrites and restores the embedded content.
+    apb_ok(dir.path(), &["connector", "install", "example", "--force"]);
+    let restored = fs::read_to_string(&manifest).unwrap();
+    assert!(!restored.contains("# local edit"), "force should overwrite");
+}
+
+#[test]
+fn install_from_dir_installs_without_recording_trust() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    // A local connector folder named `widget` (basename is the connector name).
+    let src = dir.path().join("src/widget");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("connector.yaml"),
+        "name: widget\nversion: 0.1.0\nfunctions:\n  - name: ping\n    description: d\n    mock: { status: 200, body: { ok: true } }\n",
+    )
+    .unwrap();
+
+    let out = apb_ok(
+        dir.path(),
+        &["connector", "install", "--from-dir", src.to_str().unwrap()],
+    );
+    assert!(String::from_utf8_lossy(&out.stdout).contains("installed connector `widget`"));
+    assert!(
+        dir.path()
+            .join("cfg/connectors/widget/connector.yaml")
+            .is_file()
+    );
+
+    // No trust recorded: the connector lists as unapproved.
+    let list = apb_ok(dir.path(), &["connector", "list"]);
+    assert!(
+        String::from_utf8_lossy(&list.stdout).contains("unapproved"),
+        "--from-dir must not seed trust"
+    );
+}
