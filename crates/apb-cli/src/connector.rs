@@ -96,6 +96,16 @@ pub(crate) enum ConnectorAction {
         #[arg(long)]
         force: bool,
     },
+    /// Run a connector's offline contract tests (tests.yaml). Resolves an
+    /// installed connector, an embedded one, or a folder on disk (--dir).
+    /// Fully offline; exits non-zero on any failing case.
+    Test {
+        /// Installed or embedded connector name; omit only with --dir
+        name: Option<String>,
+        /// Test the connector folder at this path instead
+        #[arg(long)]
+        dir: Option<PathBuf>,
+    },
 }
 
 pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
@@ -119,6 +129,7 @@ pub(crate) fn connector_cmd(root: &Path, action: ConnectorAction) -> ExitCode {
             from_dir,
             force,
         } => install_cmd(name, from_dir, force),
+        ConnectorAction::Test { name, dir } => test_cmd(name, dir),
     }
 }
 
@@ -810,6 +821,85 @@ fn init_cmd(name: &str) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+// --- test -----------------------------------------------------------------
+
+fn test_cmd(name: Option<String>, dir: Option<PathBuf>) -> ExitCode {
+    let (doc, tests) = match load_test_target(name.as_deref(), dir.as_deref()) {
+        Ok(pair) => pair,
+        Err(msg) => {
+            eprintln!("connector error: {msg}");
+            return ExitCode::from(2);
+        }
+    };
+    let report = apb_engine::connector_test::run_tests(&doc, &tests);
+    for r in &report.results {
+        if r.passed {
+            println!("[pass] {}", r.function);
+        } else {
+            println!("[fail] {}: {}", r.function, r.detail);
+        }
+    }
+    if report.all_passed() {
+        println!("{} case(s) passed", report.results.len());
+        ExitCode::SUCCESS
+    } else {
+        let failed = report.results.iter().filter(|r| !r.passed).count();
+        eprintln!("connector test: {failed} case(s) failed");
+        ExitCode::from(1)
+    }
+}
+
+/// Resolves the `(ConnectorDoc, TestsDoc)` pair for `apb connector test` from,
+/// in precedence order: a folder (--dir), an installed connector, then an
+/// embedded one.
+fn load_test_target(
+    name: Option<&str>,
+    dir: Option<&Path>,
+) -> Result<(ConnectorDoc, apb_core::connector::contract::TestsDoc), String> {
+    use apb_core::connector::contract::TestsDoc;
+
+    if let Some(dir) = dir {
+        let dir_name = dir
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| format!("cannot derive a connector name from {}", dir.display()))?;
+        let yaml = std::fs::read_to_string(dir.join("connector.yaml"))
+            .map_err(|e| format!("cannot read {}/connector.yaml: {e}", dir.display()))?;
+        let doc = ConnectorDoc::from_yaml(&yaml, dir_name).map_err(|e| e.to_string())?;
+        let tests_raw = std::fs::read_to_string(dir.join("tests.yaml"))
+            .map_err(|e| format!("cannot read {}/tests.yaml: {e}", dir.display()))?;
+        let tests = TestsDoc::from_yaml(&tests_raw).map_err(|e| e.to_string())?;
+        return Ok((doc, tests));
+    }
+
+    let name = name.ok_or_else(|| "provide a connector name or --dir <path>".to_string())?;
+
+    // Installed connector first.
+    if let Ok(loaded) = store::load(name) {
+        let tests_raw = std::fs::read_to_string(loaded.dir.join("tests.yaml"))
+            .map_err(|e| format!("connector `{name}` has no readable tests.yaml: {e}"))?;
+        let tests = TestsDoc::from_yaml(&tests_raw).map_err(|e| e.to_string())?;
+        return Ok((loaded.doc, tests));
+    }
+
+    // Otherwise an embedded connector.
+    let official = apb_core::connector::official::get(name)
+        .ok_or_else(|| format!("`{name}` is neither installed nor an embedded connector"))?;
+    let yaml = official
+        .files
+        .get("connector.yaml")
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .ok_or_else(|| format!("embedded `{name}` has no readable connector.yaml"))?;
+    let doc = ConnectorDoc::from_yaml(yaml, name).map_err(|e| e.to_string())?;
+    let tests_raw = official
+        .files
+        .get("tests.yaml")
+        .and_then(|b| std::str::from_utf8(b).ok())
+        .ok_or_else(|| format!("embedded `{name}` has no tests.yaml"))?;
+    let tests = TestsDoc::from_yaml(tests_raw).map_err(|e| e.to_string())?;
+    Ok((doc, tests))
 }
 
 // --- install --------------------------------------------------------------

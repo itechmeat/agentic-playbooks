@@ -662,3 +662,57 @@ fn list_shows_embedded_available_section_before_install_and_hides_after() {
         "installed connector must not appear under available: {after_out}"
     );
 }
+
+// --- test -----------------------------------------------------------------
+
+#[test]
+fn test_runs_embedded_example_cases_and_passes() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    // Embedded connector, not installed: `test` resolves it from the binary.
+    let out = apb_ok(dir.path(), &["connector", "test", "example"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("[pass] ping"),
+        "ping case should pass: {stdout}"
+    );
+    assert!(
+        stdout.contains("[pass] get_item"),
+        "get_item case should pass: {stdout}"
+    );
+    assert!(
+        stdout.contains("[pass] create_item"),
+        "create_item should pass: {stdout}"
+    );
+}
+
+#[test]
+fn test_dir_with_a_failing_case_exits_nonzero() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+
+    let src = dir.path().join("src/widget");
+    fs::create_dir_all(&src).unwrap();
+    fs::write(
+        src.join("connector.yaml"),
+        "name: widget\nversion: 0.1.0\naccount_fields:\n  - name: api_base\n    required: true\nfunctions:\n  - name: get_item\n    description: d\n    read_only: true\n    method: GET\n    url: \"{{account.api_base}}/items/{{args.id}}\"\n    args_schema: { type: object, properties: { id: { type: string } }, required: [id] }\n",
+    )
+    .unwrap();
+    fs::write(
+        src.join("tests.yaml"),
+        "cases:\n  - function: get_item\n    account: { api_base: https://api.example.com }\n    args: { id: \"42\" }\n    expect: { method: GET, url: https://api.example.com/items/WRONG }\n",
+    )
+    .unwrap();
+
+    let out = playbook(
+        dir.path(),
+        &["connector", "test", "--dir", src.to_str().unwrap()],
+    );
+    assert!(!out.status.success(), "a failing case must exit non-zero");
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("[fail] get_item"),
+        "should report the failing case: {stdout}"
+    );
+}
