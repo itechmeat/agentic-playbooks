@@ -90,6 +90,7 @@ pub fn build_router(state: AppState) -> Router {
             "/api/connectors/{name}/healthcheck/{account}",
             post(healthcheck_connector_handler),
         )
+        .route("/api/connectors/{name}/call", post(call_connector_handler))
         .route("/api/agents", get(list_agents_handler))
         .route("/api/models", get(list_models_handler))
         .route("/api/skills", get(list_skills_handler))
@@ -1094,6 +1095,7 @@ async fn get_connector_handler(
                 "description": f.description,
                 "read_only": f.read_only,
                 "deprecated": f.deprecated,
+                "args_schema": f.args_schema,
             })
         })
         .collect();
@@ -1154,6 +1156,56 @@ async fn healthcheck_connector_handler(
         Err(e) => return e,
     };
     let (value, _ok) = apb_engine::connector_call::healthcheck(&root, &name, &account);
+    Json(value).into_response()
+}
+
+#[derive(Deserialize)]
+struct ConnectorCallBody {
+    function: String,
+    #[serde(default)]
+    account: Option<String>,
+    #[serde(default)]
+    args: serde_json::Value,
+    #[serde(default)]
+    dry_run: bool,
+}
+
+/// POST /api/connectors/{name}/call: the dashboard playground's manual call
+/// (spec 2026-07-19-official-connectors-design section 7). Wraps the same
+/// live execution path the healthcheck probe uses
+/// (`apb_engine::connector_call::play_call`), extended with an arbitrary
+/// function name, args, and a dry-run flag. Like the healthcheck probe, the
+/// server answers HTTP 200 even for a refused or failed call - the outcome
+/// is carried in the body's `ok`/`error`, never as an HTTP error status.
+/// Account defaulting (an omitted or null `account`) is resolved inside
+/// `play_call`, mirroring the CLI's single-or-default selection rule.
+async fn call_connector_handler(
+    State(state): State<AppState>,
+    AxPath(name): AxPath<String>,
+    Query(q): Query<WsQuery>,
+    Json(body): Json<ConnectorCallBody>,
+) -> impl IntoResponse {
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    // An absent/null `args` in the request body deserializes to
+    // `Value::Null`; the executor's schema validation and template
+    // rendering both expect an object, so normalize here rather than push
+    // that concern into the engine.
+    let args = if body.args.is_null() {
+        serde_json::json!({})
+    } else {
+        body.args
+    };
+    let (value, _ok) = apb_engine::connector_call::play_call(
+        &root,
+        &name,
+        body.account.as_deref(),
+        &body.function,
+        &args,
+        body.dry_run,
+    );
     Json(value).into_response()
 }
 

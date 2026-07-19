@@ -26,3 +26,107 @@ pub static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 pub async fn env_lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().await
 }
+
+// --- Ephemeral one-shot HTTP server (mirrors apb-engine's tests/suite/common/mod.rs) ---
+
+use std::io::{BufRead, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::sync::{Arc, Mutex as StdMutex};
+use std::thread::JoinHandle;
+
+/// A canned one-shot HTTP server on `127.0.0.1:0`: serves a single request
+/// with a fixed response and captures the raw request text for assertions
+/// (e.g. "was the auth header injected"). `base_url` is the
+/// `http://127.0.0.1:<port>` origin to point a connector account's
+/// `base_url` at. The serving thread joins on drop.
+pub struct TestHttpServer {
+    pub base_url: String,
+    addr: std::net::SocketAddr,
+    request: Arc<StdMutex<Option<String>>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl TestHttpServer {
+    pub fn captured_request(&self) -> Option<String> {
+        self.request.lock().unwrap().clone()
+    }
+}
+
+impl Drop for TestHttpServer {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            let _ = std::net::TcpStream::connect(self.addr);
+            let _ = h.join();
+        }
+    }
+}
+
+pub fn spawn_http(
+    status: u16,
+    reason: &str,
+    headers: &[(&str, &str)],
+    body: String,
+) -> TestHttpServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    let mut has_ctype = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("content-type") {
+            has_ctype = true;
+        }
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if !has_ctype {
+        head.push_str("Content-Type: application/json\r\n");
+    }
+    head.push_str("Connection: close\r\n\r\n");
+    let mut response = head.into_bytes();
+    response.extend_from_slice(body.as_bytes());
+
+    let request = Arc::new(StdMutex::new(None));
+    let req_slot = request.clone();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let captured = read_http_request(&mut stream);
+            *req_slot.lock().unwrap() = Some(captured);
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+        }
+    });
+
+    TestHttpServer {
+        base_url,
+        addr,
+        request,
+        handle: Some(handle),
+    }
+}
+
+fn read_http_request(stream: &mut TcpStream) -> String {
+    let mut reader = BufReader::new(stream);
+    let mut head = String::new();
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 || line == "\r\n" {
+            break;
+        }
+        if let Some(rest) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+            content_length = rest.trim().parse().unwrap_or(0);
+        }
+        head.push_str(&line);
+    }
+    head.push_str("\r\n");
+    if content_length > 0 {
+        let mut body = vec![0u8; content_length];
+        let _ = reader.read_exact(&mut body);
+        head.push_str(&String::from_utf8_lossy(&body));
+    }
+    head
+}
