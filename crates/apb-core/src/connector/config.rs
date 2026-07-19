@@ -15,7 +15,7 @@ use sha2::{Digest, Sha256};
 
 use super::common::ConnectorError;
 use super::def::ConnectorDoc;
-use super::secrets::parse_env_ref;
+use super::secrets::{parse_cmd_ref, parse_env_ref};
 
 /// One configured account for a connector. `name` is a hyphen slug
 /// (user-facing, validated with `crate::profile::validate_profile_name`,
@@ -124,7 +124,7 @@ pub fn load_merged(root: &Path, name: &str) -> Result<Vec<Account>, ConnectorErr
 /// 3. field keys not declared in `account_fields` (unknown field);
 /// 4. required fields missing from an account;
 /// 5. a `secret: true` field whose value is not exactly one
-///    `{{env.VAR}}` reference (a literal secret value);
+///    `{{env.VAR}}` or `{{cmd:...}}` reference (a literal secret value);
 /// 6. more than one `default: true` account in the given list. When `accounts`
 ///    is the output of `load_merged`, cross-scope doubles are already
 ///    resolved there (project default wins), so this only fires for a
@@ -160,9 +160,9 @@ pub fn validate_accounts(doc: &ConnectorDoc, accounts: &[Account]) -> Vec<String
                     account.name
                 )),
                 Some(true) => {
-                    if parse_env_ref(value).is_none() {
+                    if parse_env_ref(value).is_none() && parse_cmd_ref(value).is_none() {
                         errors.push(format!(
-                            "account `{}` field `{key}` must be exactly one `{{{{env.VAR}}}}` reference, not a literal value",
+                            "account `{}` field `{key}` must be exactly one `{{{{env.VAR}}}}` or `{{{{cmd:...}}}}` reference, not a literal value",
                             account.name
                         ));
                     }
@@ -203,9 +203,10 @@ fn lp(h: &mut Sha256, bytes: &[u8]) {
 /// sha256 over the domain tag `apb-account-v1\0`, the account name, the
 /// `default` flag, and every field sorted by key (`fields` is a
 /// `BTreeMap`, so iteration order is already sorted). Secret fields
-/// participate with their RAW config value - the `{{env.VAR}}` reference,
-/// never the resolved secret - so renaming the env var an account points
-/// at is a change the trust store sees and the user approves.
+/// participate with their RAW config value - the `{{env.VAR}}` or
+/// `{{cmd:...}}` reference string, never the resolved secret - so switching
+/// a secret's source (renaming the env var, or swapping env for a command)
+/// is a change the trust store sees and the user re-approves.
 pub fn account_digest(account: &Account) -> String {
     let mut h = Sha256::new();
     h.update(b"apb-account-v1\0");
@@ -229,6 +230,23 @@ pub fn env_refs(doc: &ConnectorDoc, account: &Account) -> BTreeMap<String, Strin
             && let Some(var) = parse_env_ref(value)
         {
             out.insert(name, var);
+        }
+    }
+    out
+}
+
+/// The shell command line each secret field sources its value from, keyed by
+/// field name. Only fields declared `secret: true` in `doc` whose value is a
+/// valid `{{cmd:...}}` reference are included; env-ref and invalid fields are
+/// skipped here (rejecting an invalid value is `validate_accounts`'s job).
+/// This never executes the command; it only extracts the reference text.
+pub fn cmd_refs(doc: &ConnectorDoc, account: &Account) -> BTreeMap<String, String> {
+    let mut out = BTreeMap::new();
+    for name in doc.secret_fields() {
+        if let Some(value) = account.fields.get(&name)
+            && let Some(cmd) = parse_cmd_ref(value)
+        {
+            out.insert(name, cmd);
         }
     }
     out
@@ -730,6 +748,76 @@ accounts:
             &[("base_url", "https://a"), ("token", "literal")],
         );
         assert!(env_refs(&doc, &account).is_empty());
+    }
+
+    // --- cmd refs ----------------------------------------------------------
+
+    #[test]
+    fn validate_accepts_cmd_ref_secret() {
+        let doc = jira_doc();
+        let accounts = vec![acct(
+            "prod",
+            true,
+            &[
+                ("base_url", "https://a"),
+                ("token", "{{cmd:gh auth token}}"),
+            ],
+        )];
+        assert!(validate_accounts(&doc, &accounts).is_empty());
+    }
+
+    #[test]
+    fn validate_still_rejects_literal_secret_message_names_both_forms() {
+        let doc = jira_doc();
+        let accounts = vec![acct(
+            "prod",
+            false,
+            &[("base_url", "https://a"), ("token", "sk-literal")],
+        )];
+        let errs = validate_accounts(&doc, &accounts);
+        assert!(
+            errs.iter()
+                .any(|e| e.contains("token") && e.contains("cmd"))
+        );
+    }
+
+    #[test]
+    fn cmd_refs_extracts_command_from_cmd_secret_only() {
+        let doc = jira_doc();
+        let account = acct(
+            "prod",
+            false,
+            &[
+                ("base_url", "https://a"),
+                ("token", "{{cmd:gh auth token}}"),
+            ],
+        );
+        let refs = cmd_refs(&doc, &account);
+        assert_eq!(refs.len(), 1);
+        assert_eq!(refs["token"], "gh auth token");
+        // An env-ref field is not a cmd ref, and vice versa.
+        assert!(env_refs(&doc, &account).is_empty());
+    }
+
+    #[test]
+    fn env_and_cmd_refs_are_disjoint_for_the_same_account() {
+        let doc = jira_doc();
+        let env_account = acct(
+            "e",
+            false,
+            &[("base_url", "https://a"), ("token", "{{env.T}}")],
+        );
+        assert_eq!(env_refs(&doc, &env_account).len(), 1);
+        assert!(cmd_refs(&doc, &env_account).is_empty());
+    }
+
+    #[test]
+    fn digest_changes_when_secret_ref_switches_env_to_cmd() {
+        // Regression pin: the account digest already covers secret field
+        // reference strings, so swapping the source drops account trust.
+        let a = acct("x", false, &[("token", "{{env.T}}")]);
+        let b = acct("x", false, &[("token", "{{cmd:gh auth token}}")]);
+        assert_ne!(account_digest(&a), account_digest(&b));
     }
 
     // --- default_account -------------------------------------------------
