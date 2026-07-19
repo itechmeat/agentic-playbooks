@@ -55,6 +55,21 @@ functions:
     url: "{{account.base_url}}/items"
     body: "{{args}}"
     args_schema: { type: object, properties: { title: { type: string } }, required: [title] }
+  - name: with_headers
+    description: sends custom headers
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/h"
+    headers:
+      X-Api-Version: "2024-01"
+      Accept: application/vnd.test+json
+  - name: ua_override
+    description: overrides the default user agent
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/u"
+    headers:
+      User-Agent: custom-agent/9
   - name: ping
     description: A canned mock, no network
     mock: { status: 200, body: { ok: true } }
@@ -929,5 +944,77 @@ functions:
     assert_eq!(
         value["url"],
         serde_json::json!("https://api.telegram.org/{{auth}}/getMe")
+    );
+}
+
+#[test]
+fn sends_function_headers_and_default_user_agent() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let server = common::spawn_http(200, "OK", &[], r#"{"ok":true}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["with_headers"],
+        None,
+    );
+    let (_v, ok) = call(
+        run.path(),
+        root.path(),
+        "with_headers",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok);
+    let req = server.captured_request().unwrap();
+    assert!(
+        req.contains("X-Api-Version: 2024-01"),
+        "custom header missing: {req}"
+    );
+    assert!(
+        req.contains("Accept: application/vnd.test+json"),
+        "accept missing: {req}"
+    );
+    assert!(
+        req.contains("User-Agent: apb/"),
+        "default UA missing: {req}"
+    );
+}
+
+#[test]
+fn function_user_agent_overrides_the_default() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let server = common::spawn_http(200, "OK", &[], r#"{"ok":true}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["ua_override"],
+        None,
+    );
+    let (_v, ok) = call(
+        run.path(),
+        root.path(),
+        "ua_override",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok);
+    let req = server.captured_request().unwrap();
+    assert!(
+        req.contains("User-Agent: custom-agent/9"),
+        "override missing: {req}"
+    );
+    assert!(
+        !req.contains("User-Agent: apb/"),
+        "default UA must not also be sent: {req}"
     );
 }

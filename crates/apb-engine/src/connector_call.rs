@@ -31,6 +31,11 @@ use crate::manifest::{self, ManifestAccount, ManifestConnector, ManifestConnecto
 /// truncated and the result marked `"truncated": true`.
 const BODY_CAP: usize = 1024 * 1024;
 
+/// The default User-Agent (spec 4.4): ureq sends its own, and GitHub rejects
+/// requests without one it recognizes. Overridden by a function `headers`
+/// entry naming `User-Agent`.
+const USER_AGENT: &str = concat!("apb/", env!("CARGO_PKG_VERSION"));
+
 /// One connector call request, assembled by the CLI from its arguments and the
 /// run context env variables.
 pub struct CallRequest<'a> {
@@ -235,7 +240,9 @@ enum PreparedCall {
         status: u16,
         body: Value,
     },
-    Http(HttpCall),
+    // Boxed: `HttpCall` is much larger than `Mock`, so the variant is boxed to
+    // keep the enum small (clippy `large_enum_variant`).
+    Http(Box<HttpCall>),
 }
 
 /// An HTTP call ready to send.
@@ -246,6 +253,9 @@ struct HttpCall {
     /// NOT). This is the URL recorded in the event log.
     pre_auth_url: String,
     rendered_body: Option<Value>,
+    /// Rendered per-function headers (spec 4.4). Values use `account.*`/`args.*`
+    /// only; `secret.*` is forbidden here by `validate_templates`.
+    headers: BTreeMap<String, String>,
     auth: Option<AuthSpec>,
     secrets: BTreeMap<String, String>,
     account_fields: BTreeMap<String, String>,
@@ -462,6 +472,16 @@ fn build_prepared(
         })?),
         None => None,
     };
+    let mut headers = BTreeMap::new();
+    for (name, template) in &function.headers {
+        let value = render_raw(template, &ctx).map_err(|e| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("header `{name}` render failed: {e}"),
+            )
+        })?;
+        headers.insert(name.clone(), value);
+    }
 
     if dry_run {
         return Ok(Prepared::DryRun(json!({
@@ -473,17 +493,20 @@ fn build_prepared(
         })));
     }
 
-    Ok(Prepared::Call(Box::new(PreparedCall::Http(HttpCall {
-        account: account_name,
-        method,
-        pre_auth_url,
-        rendered_body,
-        auth: auth.cloned(),
-        secrets,
-        account_fields,
-        timeout_sec: function.timeout_sec,
-        redactions,
-    }))))
+    Ok(Prepared::Call(Box::new(PreparedCall::Http(Box::new(
+        HttpCall {
+            account: account_name,
+            method,
+            pre_auth_url,
+            rendered_body,
+            headers,
+            auth: auth.cloned(),
+            secrets,
+            account_fields,
+            timeout_sec: function.timeout_sec,
+            redactions,
+        },
+    )))))
 }
 
 /// Live healthcheck probe (spec 2026-07-18-connectors-design section 9): runs
@@ -873,6 +896,18 @@ impl HttpCall {
         };
 
         let mut request = agent.request(&self.method, &request_url);
+        // Default User-Agent (spec 4.4) unless a function header overrides it,
+        // then the function headers themselves.
+        let has_ua = self
+            .headers
+            .keys()
+            .any(|k| k.eq_ignore_ascii_case("user-agent"));
+        if !has_ua {
+            request = request.set("User-Agent", USER_AGENT);
+        }
+        for (name, value) in &self.headers {
+            request = request.set(name, value);
+        }
         // Header / Basic auth injection.
         match self.auth_header(&ctx) {
             Ok(Some((name, value))) => request = request.set(&name, &value),

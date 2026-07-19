@@ -85,6 +85,8 @@ pub struct FunctionSpec {
     #[serde(default)]
     pub query: BTreeMap<String, String>,
     #[serde(default)]
+    pub headers: BTreeMap<String, String>,
+    #[serde(default)]
     pub body: Option<serde_json::Value>,
     #[serde(default)]
     pub args_schema: Option<serde_json::Value>,
@@ -336,6 +338,13 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
             for (ns, name) in placeholders(value)? {
                 reject_auth(ns, &format!("function `{}` query", f.name))?;
                 reject_secret(ns, &format!("function `{}` query", f.name))?;
+                fields.check(ns, &name)?;
+            }
+        }
+        for value in f.headers.values() {
+            for (ns, name) in placeholders(value)? {
+                reject_auth(ns, &format!("function `{}` headers", f.name))?;
+                reject_secret(ns, &format!("function `{}` headers", f.name))?;
                 fields.check(ns, &name)?;
             }
         }
@@ -592,6 +601,16 @@ functions:
     fn account_field_name_with_underscore_is_accepted() {
         let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: base_url\nfunctions:\n  - name: f\n    description: a\n    method: GET\n    url: http://a\n";
         assert!(ConnectorDoc::from_yaml(y, "x").is_ok());
+    }
+
+    #[test]
+    fn headers_forbid_secret_and_auth_allow_account_and_args() {
+        let ok = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: base_url\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: \"{{account.base_url}}/x\"\n    headers:\n      X-Api-Version: \"2024-01\"\n      X-From: \"{{account.base_url}}\"\n      X-Q: \"{{args.q}}\"\n";
+        assert!(ConnectorDoc::from_yaml(ok, "x").is_ok());
+
+        let sec = "name: x\nversion: 0.1.0\nauth:\n  kind: header\n  header: Authorization\n  value_template: \"Bearer {{secret.token}}\"\naccount_fields:\n  - name: token\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: http://a\n    headers:\n      X-Leak: \"{{secret.token}}\"\n";
+        let err = ConnectorDoc::from_yaml(sec, "x").unwrap_err().to_string();
+        assert!(err.contains("secret") && err.contains("auth"), "was: {err}");
     }
 
     #[test]
