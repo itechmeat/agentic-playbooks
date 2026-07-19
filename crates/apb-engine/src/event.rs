@@ -223,6 +223,29 @@ pub enum EventPayload {
         #[serde(default)]
         smtp_recipients: Option<u32>,
     },
+    /// Node cache (spec 2026-07-19-node-cache-design). A cache lookup for a
+    /// cacheable node always ends in exactly one of `NodeCacheHit` or
+    /// `NodeCacheMiss`; `NodeCacheStored`/`NodeCacheRejected` then report the
+    /// post-execution admission decision on a miss. Additive variants: old logs
+    /// read unchanged and never carry them.
+    NodeCacheHit {
+        node: String,
+        key: String,
+        /// The run that originally produced the cached result.
+        source_run: String,
+    },
+    NodeCacheMiss {
+        node: String,
+        key: String,
+    },
+    NodeCacheStored {
+        node: String,
+        key: String,
+    },
+    NodeCacheRejected {
+        node: String,
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

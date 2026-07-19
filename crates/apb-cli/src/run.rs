@@ -310,6 +310,7 @@ pub(crate) fn run_cmd(
         expected_children: None,
         expected_connectors,
         expected_connector_accounts,
+        cache: Default::default(),
     };
     match run(root, name, version, opts) {
         Ok(res) => {
@@ -468,6 +469,7 @@ pub(crate) fn drive_supervised_child(
         expected_children: None,
         expected_connectors,
         expected_connector_accounts,
+        cache: Default::default(),
     };
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,

@@ -25,7 +25,9 @@ use crate::inspect::{should_declare_lost, supervisor_silence_ms, write_superviso
 use crate::manifest::{ManifestProfile, ManifestSkill, RunExecutionManifest};
 use crate::parallel::{self, JoinReadiness};
 use crate::review::read_reviews_after;
-use crate::run_config::{RunConfig, copy_scripts, snapshot_playbook, write_run_config};
+use crate::run_config::{
+    CacheRunMode, RunConfig, copy_scripts, snapshot_playbook, write_run_config,
+};
 use crate::script::run_script;
 use crate::signals::read_signals_after;
 use crate::state::{NodeStatus, RunState, RunStatus};
@@ -33,6 +35,7 @@ use crate::workdir::acquire;
 
 /// Run mode: autonomous (as in phases 1-3, behavior unchanged) or
 /// supervised (the engine stops on a wake event and waits for a command).
+mod cache;
 mod node;
 mod patch;
 mod prepare;
@@ -96,6 +99,9 @@ pub struct RunOptions {
     pub depth: usize,
     /// Verified sub-playbook pins from the gate, keyed by playbook-node id.
     pub expected_children: Option<BTreeMap<String, crate::run_config::ChildExpectation>>,
+    /// Node-cache policy for the run (spec 2026-07-19). `Auto` by default via
+    /// `RunConfig`; the CLI maps `--no-cache`/`--refresh-cache` onto it.
+    pub cache: CacheRunMode,
 }
 
 /// Defense-in-depth backstop for sub-playbook nesting (spec C). A child that
@@ -1047,23 +1053,59 @@ fn drive(
                 node: current.clone(),
                 attempt: 1,
             })?;
-            let override_prompt = prompt_overrides.remove(&current);
-            let (st, out, evs) = execute_node(
+            // Node cache (spec 2026-07-19). `prepare` returns `None` for any
+            // non-cacheable node, in which case this collapses to the plain
+            // execute path. On a hit we skip execution entirely; on a miss we
+            // execute and then let `admit` decide whether the result is stored.
+            let cache_ctx = cache::prepare(
                 &playbook,
-                run_dir,
-                &workdir,
                 &current,
-                &run_id,
-                &state,
+                &workdir,
+                run_dir,
                 cfg,
-                override_prompt,
-                &AtomicBool::new(false),
-                &env_scrub,
-            )?;
-            for ev in evs {
-                log.append(ev)?;
+                None,
+                None,
+                None,
+                vec![],
+            );
+            if let Some(hit) = cache_ctx.as_ref().and_then(|c| c.lookup(cfg)) {
+                let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
+                log.append(EventPayload::NodeCacheHit {
+                    node: current.clone(),
+                    key: ctx.key.clone(),
+                    source_run: hit.record.provenance.run_id.clone(),
+                })?;
+                (NodeStatus::Succeeded, hit.output)
+            } else {
+                if let Some(ctx) = &cache_ctx {
+                    log.append(EventPayload::NodeCacheMiss {
+                        node: current.clone(),
+                        key: ctx.key.clone(),
+                    })?;
+                }
+                let override_prompt = prompt_overrides.remove(&current);
+                let (st, out, evs) = execute_node(
+                    &playbook,
+                    run_dir,
+                    &workdir,
+                    &current,
+                    &run_id,
+                    &state,
+                    cfg,
+                    override_prompt,
+                    &AtomicBool::new(false),
+                    &env_scrub,
+                )?;
+                for ev in evs {
+                    log.append(ev)?;
+                }
+                if let Some(ctx) = &cache_ctx
+                    && st == NodeStatus::Succeeded
+                {
+                    log.append(ctx.admit(&workdir, &run_id, &playbook, &out, true, false, &[]))?;
+                }
+                (st, out)
             }
-            (st, out)
         };
         log.append(EventPayload::NodeFinished {
             node: current.clone(),

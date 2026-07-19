@@ -34,6 +34,8 @@ mod agent_timeout_test;
 mod background_run_test;
 #[path = "suite/background_supervisor_test.rs"]
 mod background_supervisor_test;
+#[path = "suite/cache_test.rs"]
+mod cache_test;
 #[path = "suite/child_run_event_test.rs"]
 mod child_run_event_test;
 #[path = "suite/connector_call.rs"]
