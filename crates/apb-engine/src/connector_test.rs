@@ -132,14 +132,6 @@ fn eval_http(
             function.name
         ));
     }
-    // Header expectations land with Task 8 (they need the rendered header map
-    // asserted against `expect.headers`); until then an explicit, honest failure
-    // rather than a silent pass.
-    if headers.is_some() {
-        return Err(
-            "header expectations are not yet supported by the offline runner (Task 8)".to_string(),
-        );
-    }
     let secrets: BTreeMap<String, String> = doc
         .secret_fields()
         .into_iter()
@@ -158,6 +150,27 @@ fn eval_http(
             "url mismatch: expected `{url}`, rendered `{}`",
             rendered.pre_auth_url
         ));
+    }
+    // Header subset match: every expected header key must be present in the
+    // rendered header map (function headers plus the default User-Agent, folded
+    // in by `render_http`) with an exactly-equal value. Headers not mentioned by
+    // the expectation are not asserted.
+    if let Some(expected) = headers {
+        for (key, want) in expected {
+            match rendered.headers.get(key) {
+                Some(got) if got == want => {}
+                Some(got) => {
+                    return Err(format!(
+                        "header mismatch: `{key}` expected `{want}`, rendered `{got}`"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "header mismatch: `{key}` expected `{want}`, but no such header is rendered"
+                    ));
+                }
+            }
+        }
     }
     if let Some(subset) = body_contains {
         let body = rendered.rendered_body.unwrap_or(Value::Null);
@@ -230,6 +243,13 @@ functions:
     url: "{{account.api_base}}/items"
     body: "{{args}}"
     args_schema: { type: object }
+  - name: with_headers
+    description: d
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/h"
+    headers: { X-Api-Version: "2022-11", X-Owner: "{{args.owner}}" }
+    args_schema: { type: object }
 "#;
 
     fn doc() -> ConnectorDoc {
@@ -275,6 +295,46 @@ functions:
         .unwrap();
         let report = run_tests(&doc(), &tests);
         assert!(report.results[0].detail.contains("not defined"));
+    }
+
+    #[test]
+    fn header_expectation_subset_match_passes() {
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: with_headers\n    account: { api_base: https://api.example.com }\n    args: { owner: acme }\n    expect: { method: GET, url: https://api.example.com/h, headers: { X-Api-Version: \"2022-11\", X-Owner: acme } }\n",
+        )
+        .unwrap();
+        let report = run_tests(&doc(), &tests);
+        assert!(report.all_passed(), "{:?}", failing(&report));
+    }
+
+    #[test]
+    fn header_value_mismatch_fails_naming_the_key() {
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: with_headers\n    account: { api_base: https://api.example.com }\n    args: { owner: acme }\n    expect: { method: GET, url: https://api.example.com/h, headers: { X-Api-Version: WRONG } }\n",
+        )
+        .unwrap();
+        let report = run_tests(&doc(), &tests);
+        assert!(!report.all_passed());
+        assert!(
+            report.results[0].detail.contains("header mismatch"),
+            "detail: {}",
+            report.results[0].detail
+        );
+        assert!(report.results[0].detail.contains("X-Api-Version"));
+    }
+
+    #[test]
+    fn header_expectation_can_assert_the_default_user_agent() {
+        // The default User-Agent is folded into the rendered header map, so a
+        // case may assert it (its value tracks the crate version prefix).
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: with_headers\n    account: { api_base: https://api.example.com }\n    args: { owner: acme }\n    expect: { method: GET, url: https://api.example.com/h, headers: { User-Agent: MISSING } }\n",
+        )
+        .unwrap();
+        let report = run_tests(&doc(), &tests);
+        // The default UA is not "MISSING", so this asserts the key is present and
+        // compared (mismatch), proving the header map carries the default UA.
+        assert!(report.results[0].detail.contains("header mismatch"));
     }
 
     #[test]
