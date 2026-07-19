@@ -442,7 +442,10 @@ Dashboard, new "Connectors" page:
   never approved);
 - when the manifest declares a `healthcheck`, a per-account probe button that
   invokes it through the regular call path and shows the structured outcome
-  (reachable, `auth` failure, and so on);
+  (reachable, `auth` failure, and so on). The probe resolves live secrets,
+  so it is trust-gated like a run: it refuses with a `permission` error when
+  the connector digest or that account's digest is not approved (approve
+  first, then probe - account pinning covers every secret-sending path);
 - usage stats aggregated from existing run event logs: calls, error rates,
   and durations per connector, function, and account over recent runs. Read
   only, no new engine state.

@@ -33,7 +33,7 @@ pub fn effect_str(e: &Effect) -> &'static str {
 /// The two connector permit maps the gate produces: `connector name -> tree
 /// digest` and `"connector/account" -> account digest`. Handed to the engine
 /// verbatim as `expected_connectors` / `expected_connector_accounts`.
-type ConnectorPermitMaps = (
+pub type ConnectorPermitMaps = (
     std::collections::BTreeMap<String, String>,
     std::collections::BTreeMap<String, String>,
 );
@@ -274,6 +274,23 @@ pub fn check_run(
 /// `base_url` can exfiltrate a token), so unlike playbook/profile trust they
 /// are never bypassable by an acknowledge. Approval happens out of band via
 /// the trust store (the CLI/UI approve flows).
+/// Public seam for the connector trust gate ALONE (spec 6 step 1, 7), for a
+/// caller that does not go through the full `check_run` policy gate but still
+/// must never start a connector-binding run with an empty (and therefore
+/// vacuously-refusing, or worse silently-unverified) permit map - the
+/// dashboard's `POST /api/playbooks/{id}/run` handler in `apb-server`, which
+/// has no MCP tool call in front of it. Runs the EXACT SAME resolution and
+/// trust checks `check_run` runs for its own connector step, so a
+/// dashboard-started run gets the identical connector/account trust decision
+/// an MCP-started run would. Callers must never reimplement this gate at the
+/// call site - always come back through here.
+pub fn connector_permit_maps(
+    root: &Path,
+    playbook: &Playbook,
+) -> Result<ConnectorPermitMaps, Value> {
+    check_connectors(root, playbook, false)
+}
+
 fn check_connectors(
     root: &Path,
     playbook: &Playbook,

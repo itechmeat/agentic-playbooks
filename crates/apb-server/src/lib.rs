@@ -4,9 +4,11 @@ pub mod watch;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use apb_core::connector::{config, secrets, store};
 use apb_core::profile::ProfileScope;
 use apb_core::projects::{self, ProjectAccessError};
 use apb_core::registry::{PlaybookSummary, Registry, RegistryError};
+use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_core::versioning::{
     VersioningError, create_version, delete_playbook, list_versions_with_provenance,
@@ -79,6 +81,13 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/profiles/{name}",
             get(get_profile).delete(delete_profile),
+        )
+        .route("/api/connectors", get(list_connectors_handler))
+        .route("/api/connectors/approve", post(approve_connector_handler))
+        .route("/api/connectors/{name}", get(get_connector_handler))
+        .route(
+            "/api/connectors/{name}/healthcheck/{account}",
+            post(healthcheck_connector_handler),
         )
         .route("/api/agents", get(list_agents_handler))
         .route("/api/models", get(list_models_handler))
@@ -410,6 +419,17 @@ struct RunBody {
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
 /// returns its run_id immediately, so the dashboard can jump straight to the
 /// run view. Mirrors the CLI/MCP background-run path.
+///
+/// A connector-binding playbook additionally needs its two connector permit
+/// maps computed server-side first (Task 15 review follow-up): the dashboard
+/// has no MCP tool call in front of it to run `policy::check_run`, so without
+/// this the engine would see empty `expected_connectors`/
+/// `expected_connector_accounts` maps and refuse ANY connector-binding
+/// playbook (a playbook that binds connectors is never permitted to run with
+/// an empty permit - see `RunOptions::expected_connectors`). This reuses
+/// `apb_mcp::policy::connector_permit_maps`, the exact same resolution and
+/// trust gate `check_run` runs for its own connector step, rather than
+/// duplicating that logic here.
 async fn run_playbook_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
@@ -423,11 +443,37 @@ async fn run_playbook_handler(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let opts = apb_engine::RunOptions {
+    let mut opts = apb_engine::RunOptions {
         instruction: body.instruction,
         params: body.params,
         ..Default::default()
     };
+
+    let reg = match Registry::open(&root) {
+        Ok(r) => r,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    match reg.load(&id, None) {
+        Ok(loaded) => {
+            let binds_connectors = loaded
+                .playbook
+                .nodes
+                .iter()
+                .any(|n| !n.kind.connector_bindings().is_empty());
+            if binds_connectors {
+                match apb_mcp::policy::connector_permit_maps(&root, &loaded.playbook) {
+                    Ok((connectors, connector_accounts)) => {
+                        opts.expected_connectors = connectors;
+                        opts.expected_connector_accounts = connector_accounts;
+                    }
+                    Err(refusal) => return (StatusCode::CONFLICT, Json(refusal)).into_response(),
+                }
+            }
+        }
+        Err(RegistryError::NotFound(what)) => return (StatusCode::NOT_FOUND, what).into_response(),
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+
     match apb_engine::run_background(&root, &id, None, opts) {
         Ok(run_id) => Json(serde_json::json!({ "run_id": run_id })).into_response(),
         Err(apb_engine::EngineError::NotFound(what)) => {
@@ -840,6 +886,229 @@ async fn write_profile(
         )
             .into_response(),
     }
+}
+
+/// Trust status of a digest against the trust store: `"approved"` when the
+/// current digest is approved, `"changed"` when some OTHER digest of the same
+/// `id` was approved before (content moved since), else `"unapproved"`.
+/// Shared by the connector-level and account-level trust fields below.
+fn digest_trust_status(trust: &TrustStore, digest: &str, id: &str, kind: Kind) -> &'static str {
+    if trust.is_approved(digest) {
+        "approved"
+    } else if trust.approved_record_ids(kind).iter().any(|x| x == id) {
+        "changed"
+    } else {
+        "unapproved"
+    }
+}
+
+/// GET /api/connectors: installed connectors with their storefront summary,
+/// trust status, and account configuration readiness (spec 9). `trust` is
+/// the connector's OWN digest trust (`approved` | `changed` | `unapproved`);
+/// `accounts_ready` counts configured accounts whose required secret env vars
+/// all currently resolve - a configuration signal, not a trust signal (a
+/// ready account can still be untrusted, and vice versa).
+async fn list_connectors_handler(
+    State(state): State<AppState>,
+    Query(q): Query<WsQuery>,
+) -> impl IntoResponse {
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let trust = TrustStore::load();
+    let mut out = Vec::new();
+    for summary in store::list() {
+        let loaded = store::load(&summary.name);
+        let trust_state = match &loaded {
+            Ok(l) => digest_trust_status(&trust, &l.digest, &summary.name, Kind::Connector),
+            Err(_) => "unapproved",
+        };
+        let accounts = config::load_merged(&root, &summary.name).unwrap_or_default();
+        let accounts_ready = match &loaded {
+            Ok(l) => accounts
+                .iter()
+                .filter(|a| {
+                    let vars: Vec<String> = config::env_refs(&l.doc, a).into_values().collect();
+                    secrets::missing_vars(&root, &vars).is_empty()
+                })
+                .count(),
+            Err(_) => 0,
+        };
+        out.push(serde_json::json!({
+            "name": summary.name,
+            "version": summary.version,
+            "display_name": summary.meta.display_name,
+            "summary": summary.meta.summary,
+            "tags": summary.meta.tags,
+            "trust": trust_state,
+            "accounts_total": accounts.len(),
+            "accounts_ready": accounts_ready,
+        }));
+    }
+    Json(out).into_response()
+}
+
+/// GET /api/connectors/{name}: the manifest (functions, account fields),
+/// storefront body, and the merged account list with non-secret fields,
+/// missing env var NAMES (never values), and per-account trust status (spec
+/// 9). `missing_env` never carries a value, only the env var name.
+async fn get_connector_handler(
+    State(state): State<AppState>,
+    AxPath(name): AxPath<String>,
+    Query(q): Query<WsQuery>,
+) -> impl IntoResponse {
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let loaded = match store::load(&name) {
+        Ok(l) => l,
+        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    };
+    let accounts_cfg = match config::load_merged(&root, &name) {
+        Ok(a) => a,
+        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    };
+    let trust = TrustStore::load();
+    let secret_fields = loaded.doc.secret_fields();
+
+    let functions: Vec<serde_json::Value> = loaded
+        .doc
+        .functions
+        .iter()
+        .map(|f| {
+            serde_json::json!({
+                "name": f.name,
+                "description": f.description,
+                "read_only": f.read_only,
+                "deprecated": f.deprecated,
+            })
+        })
+        .collect();
+
+    let accounts: Vec<serde_json::Value> = accounts_cfg
+        .iter()
+        .map(|a| {
+            let vars: Vec<String> = config::env_refs(&loaded.doc, a).into_values().collect();
+            let missing_env = secrets::missing_vars(&root, &vars);
+            // Non-secret fields only: a secret field's config value is the raw
+            // `{{env.VAR}}` reference, not the value itself, but the detail
+            // endpoint must never surface anything secret-shaped, even by proxy.
+            let fields: serde_json::Map<String, serde_json::Value> = a
+                .fields
+                .iter()
+                .filter(|(k, _)| !secret_fields.iter().any(|s| s == *k))
+                .map(|(k, v)| (k.clone(), serde_json::json!(v)))
+                .collect();
+            let digest = config::account_digest(a);
+            let id = account_trust_id(&name, &a.name);
+            let acct_trust = digest_trust_status(&trust, &digest, &id, Kind::ConnectorAccount);
+            serde_json::json!({
+                "name": a.name,
+                "default": a.default,
+                "fields": serde_json::Value::Object(fields),
+                "missing_env": missing_env,
+                "trust": acct_trust,
+            })
+        })
+        .collect();
+
+    let connector_trust = digest_trust_status(&trust, &loaded.digest, &name, Kind::Connector);
+
+    Json(serde_json::json!({
+        "name": loaded.name,
+        "version": loaded.doc.version,
+        "trust": connector_trust,
+        "meta": store::public_meta(&loaded.dir),
+        "body_md": store::public_body(&loaded.dir),
+        "functions": functions,
+        "accounts": accounts,
+    }))
+    .into_response()
+}
+
+/// POST /api/connectors/{name}/healthcheck/{account}: runs the connector's
+/// declared healthcheck function LIVE (spec 9's dashboard probe button) and
+/// returns the call executor's JSON verbatim. A mock healthcheck needs no
+/// network; an HTTP healthcheck actually reaches the URL - that live
+/// reachability probe is the point of the button.
+async fn healthcheck_connector_handler(
+    State(state): State<AppState>,
+    AxPath((name, account)): AxPath<(String, String)>,
+    Query(q): Query<WsQuery>,
+) -> impl IntoResponse {
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let (value, _ok) = apb_engine::connector_call::healthcheck(&root, &name, &account);
+    Json(value).into_response()
+}
+
+#[derive(Deserialize)]
+struct ConnectorApproveBody {
+    name: String,
+    #[serde(default)]
+    account: Option<String>,
+}
+
+/// POST /api/connectors/approve: approves the connector's current tree
+/// digest, or (with `account` set) that account's current non-secret-field
+/// digest instead - the dashboard's approve flow for the trust gate that
+/// guards secret egress (spec 7/9). Mirrors `apb connector approve`.
+async fn approve_connector_handler(
+    State(state): State<AppState>,
+    Query(q): Query<WsQuery>,
+    Json(body): Json<ConnectorApproveBody>,
+) -> impl IntoResponse {
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let loaded = match store::load(&body.name) {
+        Ok(l) => l,
+        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    };
+    let mut trust = TrustStore::load();
+    match body.account.as_deref() {
+        None => {
+            if let Err(e) = trust.approve_kind(
+                &loaded.digest,
+                &body.name,
+                Kind::Connector,
+                OriginKind::LocallyApproved,
+            ) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        }
+        Some(acct_name) => {
+            let accounts = match config::load_merged(&root, &body.name) {
+                Ok(a) => a,
+                Err(e) => {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+                }
+            };
+            let Some(account) = accounts.iter().find(|a| a.name == acct_name) else {
+                return (
+                    StatusCode::NOT_FOUND,
+                    format!("account `{acct_name}` not configured for `{}`", body.name),
+                )
+                    .into_response();
+            };
+            let digest = config::account_digest(account);
+            let id = account_trust_id(&body.name, acct_name);
+            if let Err(e) = trust.approve_kind(
+                &digest,
+                &id,
+                Kind::ConnectorAccount,
+                OriginKind::LocallyApproved,
+            ) {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
+            }
+        }
+    }
+    Json(serde_json::json!({ "ok": true })).into_response()
 }
 
 /// GET /api/agents: agents detected on this machine (free detection, cached).

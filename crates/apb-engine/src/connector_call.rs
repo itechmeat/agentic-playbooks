@@ -16,9 +16,12 @@ use std::io::Read;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
+use apb_core::connector::config;
 use apb_core::connector::def::{AuthSpec, ConnectorDoc, FunctionSpec};
 use apb_core::connector::secrets;
+use apb_core::connector::store;
 use apb_core::connector::template::{RenderCtx, render_body, render_encoded, render_raw};
+use apb_core::trust::{TrustStore, account_trust_id};
 use serde_json::{Value, json};
 
 use crate::event::{EventLog, EventPayload};
@@ -368,9 +371,37 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
         )
     })?;
 
+    build_prepared(
+        &function,
+        doc.auth.as_ref(),
+        account_name,
+        maccount,
+        &req.args,
+        req.root,
+        req.dry_run,
+    )
+}
+
+/// Shared gate + render logic (pipeline steps 5-8): validates args against the
+/// function's schema, returns a mock immediately (no network, no secrets), or
+/// resolves secrets and renders the URL/query/body with the 6.1 hardening.
+/// Reused by both the run-scoped `CallRequest` pipeline (`prepare`, above,
+/// which resolves `function`/`maccount` from the manifest + grant) and the
+/// live healthcheck probe (`healthcheck`, below, which resolves them from the
+/// live connector + account config) - the render/dispatch code itself must
+/// never be duplicated between the two callers.
+fn build_prepared(
+    function: &FunctionSpec,
+    auth: Option<&AuthSpec>,
+    account_name: String,
+    maccount: &ManifestAccount,
+    args: &Value,
+    root: &Path,
+    dry_run: bool,
+) -> Result<Prepared, CallError> {
     // 5. Validate args against the function schema.
     if let Some(schema) = &function.args_schema {
-        validate_args(schema, &req.args)?;
+        validate_args(schema, args)?;
     }
 
     // 6. Mock: return the canned response (mapped through the status table by
@@ -385,16 +416,16 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
 
     // 7. Secrets: resolve every env-ref field. Skipped entirely for a dry-run.
     let account_fields = non_secret_fields(maccount);
-    let (secrets, redactions) = if req.dry_run {
+    let (secrets, redactions) = if dry_run {
         (BTreeMap::new(), Vec::new())
     } else {
-        resolve_secrets(req.root, maccount)?
+        resolve_secrets(root, maccount)?
     };
 
     // 8. Render URL, query, body; enforce 6.1; build the pre-auth URL.
     let ctx = RenderCtx {
         account: &account_fields,
-        args: &req.args,
+        args,
         secrets: &secrets,
     };
     let method = function.method.clone().unwrap_or_else(|| "GET".to_string());
@@ -411,7 +442,7 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
     // (pinned by the per-account digest in the trust store), and encoding them
     // would corrupt a `base_url` prefix (its `://` and any path). Only
     // untrusted `{{args.*}}` needs encoding, which is what happens here.
-    let url_args = encode_args_for_url(&req.args);
+    let url_args = encode_args_for_url(args);
     let url_ctx = RenderCtx {
         account: &account_fields,
         args: &url_args,
@@ -419,7 +450,7 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
     };
     let base = render_raw(function.url.as_deref().unwrap_or(""), &url_ctx)
         .map_err(|e| CallError::new(CallErrorCode::Config, format!("URL render failed: {e}")))?;
-    let query = render_query(&function, &ctx)?;
+    let query = render_query(function, &ctx)?;
     let pre_auth_url = assemble_url(&base, &query);
     validate_url(&pre_auth_url)?;
     let rendered_body = match &function.body {
@@ -429,7 +460,7 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
         None => None,
     };
 
-    if req.dry_run {
+    if dry_run {
         return Ok(Prepared::DryRun(json!({
             "ok": true,
             "dry_run": true,
@@ -444,12 +475,147 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
         method,
         pre_auth_url,
         rendered_body,
-        auth: doc.auth.clone(),
+        auth: auth.cloned(),
         secrets,
         account_fields,
         timeout_sec: function.timeout_sec,
         redactions,
     }))))
+}
+
+/// Live healthcheck probe (spec 2026-07-18-connectors-design section 9): runs
+/// ONLY the connector's declared `healthcheck` function against the LIVE
+/// connector definition and LIVE merged account config - no run context, no
+/// manifest, no event log, no grant/budget checks (those are run-scoped
+/// concepts that do not apply to a standalone probe). Reuses the exact same
+/// gate + render + dispatch pipeline a real call goes through
+/// (`build_prepared` and `PreparedCall::dispatch`), so a mock healthcheck
+/// returns its canned response and an HTTP healthcheck actually reaches the
+/// network with the same URL hardening, auth injection, and interim secret
+/// redaction as a normal call - that live reachability probe is the point of
+/// the dashboard's probe button. Returns the same `{ "ok": bool, ... }` shape
+/// `execute` does; the bool mirrors `execute`'s ok hint.
+pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
+    match prepare_healthcheck(root, name, account) {
+        Ok(Prepared::DryRun(v)) => (v, true),
+        Ok(Prepared::Call(prepared)) => {
+            let (result, _status) = prepared.dispatch();
+            match result {
+                Ok(ok) => (
+                    json!({
+                        "ok": true,
+                        "status": ok.status,
+                        "body": ok.body,
+                        "truncated": ok.truncated,
+                    }),
+                    true,
+                ),
+                Err(err) => (err.to_json(), false),
+            }
+        }
+        Err(e) => (e.to_json(), false),
+    }
+}
+
+/// Resolves the live connector + account for `healthcheck` and gates +
+/// renders its declared healthcheck function through `build_prepared`, with
+/// no arguments (a healthcheck is a reachability probe, not a data call).
+fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepared, CallError> {
+    let loaded = store::load(name)
+        .map_err(|e| CallError::new(CallErrorCode::Config, format!("connector `{name}`: {e}")))?;
+    let hc_name = loaded.doc.healthcheck.clone().ok_or_else(|| {
+        CallError::new(
+            CallErrorCode::Config,
+            format!("connector `{name}` declares no healthcheck"),
+        )
+    })?;
+    let function = loaded.doc.function(&hc_name).cloned().ok_or_else(|| {
+        CallError::new(
+            CallErrorCode::Config,
+            format!("healthcheck function `{hc_name}` is missing from connector `{name}` (drift)"),
+        )
+    })?;
+
+    let accounts = config::load_merged(root, name).map_err(|e| {
+        CallError::new(
+            CallErrorCode::Config,
+            format!("connector `{name}` account config: {e}"),
+        )
+    })?;
+    let acct = accounts
+        .into_iter()
+        .find(|a| a.name == account)
+        .ok_or_else(|| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("connector `{name}` has no account `{account}`"),
+            )
+        })?;
+
+    // Trust gate (spec 2026-07-18-connectors-design section 9, updated): the
+    // probe resolves LIVE secrets and sends them to the LIVE config's
+    // base_url, so an unapproved or changed connector/account must never be
+    // probeable - the same guard `apb_mcp::policy::check_connectors` applies
+    // before a real run, checked here before anything below touches a
+    // secret. Connector digest first (a changed folder is a bigger deal than
+    // one account), then the target account's own digest.
+    let trust = TrustStore::load();
+    if !trust.is_approved(&loaded.digest) {
+        return Err(CallError::new(
+            CallErrorCode::Permission,
+            format!(
+                "connector `{name}` is not approved; approve it before probing (see the connector approve flow)"
+            ),
+        ));
+    }
+    let account_digest = config::account_digest(&acct);
+    if !trust.is_approved(&account_digest) {
+        return Err(CallError::new(
+            CallErrorCode::Permission,
+            format!(
+                "account `{}` is not approved; approve it before probing (see the connector approve flow)",
+                account_trust_id(name, account)
+            ),
+        ));
+    }
+
+    let errors = config::validate_accounts(&loaded.doc, std::slice::from_ref(&acct));
+    if !errors.is_empty() {
+        return Err(CallError::new(
+            CallErrorCode::Config,
+            format!(
+                "connector `{name}` account `{account}` is invalid: {}",
+                errors.join("; ")
+            ),
+        ));
+    }
+
+    let env = config::env_refs(&loaded.doc, &acct);
+    let secret_keys: std::collections::HashSet<&str> = env.keys().map(String::as_str).collect();
+    let fields: BTreeMap<String, String> = acct
+        .fields
+        .iter()
+        .filter(|(k, _)| !secret_keys.contains(k.as_str()))
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    let digest = config::account_digest(&acct);
+    let maccount = ManifestAccount {
+        name: acct.name.clone(),
+        default: acct.default,
+        fields,
+        env,
+        digest,
+    };
+
+    build_prepared(
+        &function,
+        loaded.doc.auth.as_ref(),
+        acct.name.clone(),
+        &maccount,
+        &json!({}),
+        root,
+        false,
+    )
 }
 
 /// Account selection (spec 6 step 4): an explicit `--account` must be granted;
