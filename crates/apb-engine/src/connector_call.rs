@@ -664,6 +664,8 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
         default: acct.default,
         fields,
         env,
+        // Command-sourced secrets in a healthcheck are wired in Task 5.
+        cmd: BTreeMap::new(),
         digest,
     };
 

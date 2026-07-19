@@ -92,6 +92,7 @@ fn account(base_url: &str) -> ManifestAccount {
             ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
         ]),
         env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+        cmd: BTreeMap::new(),
         digest: "sha256:acct".to_string(),
     }
 }
@@ -652,6 +653,7 @@ functions:
             ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
         ]),
         env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+        cmd: BTreeMap::new(),
         digest: "sha256:acct".to_string(),
     };
     let mut m = RunExecutionManifest::default();
@@ -733,6 +735,7 @@ functions:
             default: true,
             fields: BTreeMap::new(),
             env: BTreeMap::new(),
+            cmd: BTreeMap::new(),
             digest: "sha256:a".to_string(),
         }],
     });
@@ -837,6 +840,7 @@ functions:
             ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
         ]),
         env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+        cmd: BTreeMap::new(),
         digest: "sha256:acct".to_string(),
     };
     let mut m = RunExecutionManifest::default();
@@ -937,6 +941,7 @@ functions:
                 ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
             ]),
             env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+            cmd: BTreeMap::new(),
             digest: "sha256:a".to_string(),
         }],
     });

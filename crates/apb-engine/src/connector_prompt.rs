@@ -153,6 +153,7 @@ mod tests {
                     ("token".to_string(), "{{env.MOCK_TOKEN}}".to_string()),
                 ]),
                 env: BTreeMap::from([("token".to_string(), "MOCK_TOKEN".to_string())]),
+                cmd: BTreeMap::new(),
                 digest: "sha256:a".to_string(),
             }],
         }
