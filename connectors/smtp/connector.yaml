@@ -1,0 +1,64 @@
+name: smtp
+version: 0.1.0
+healthcheck: verify
+account_fields:
+  - name: host
+    required: true
+  - name: port
+    required: true
+  - name: username
+    required: false
+  - name: password
+    required: false
+    secret: true
+  - name: from_email
+    required: true
+  - name: from_name
+    required: false
+  - name: use_tls
+    required: false
+functions:
+  - name: verify
+    description: Probe the SMTP connection (connect, EHLO, STARTTLS, AUTH) without sending a message
+    read_only: true
+    smtp:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      verify: true
+    args_schema: { type: object, properties: {}, required: [] }
+
+  - name: send_email
+    description: Send an email over SMTP with STARTTLS
+    smtp:
+      connection:
+        host: "{{account.host}}"
+        port: "{{account.port}}"
+        use_tls: "{{account.use_tls}}"
+        username: "{{account.username}}"
+        password: "{{secret.password}}"
+      message:
+        from_email: "{{account.from_email}}"
+        from_name: "{{account.from_name}}"
+        to: "{{args.to}}"
+        cc: "{{args.cc}}"
+        bcc: "{{args.bcc}}"
+        subject: "{{args.subject}}"
+        body_text: "{{args.body_text}}"
+        body_html: "{{args.body_html}}"
+    args_schema:
+      type: object
+      properties:
+        to: { type: string, description: "comma-separated list of recipient addresses" }
+        cc: { type: string, description: "comma-separated list, optional" }
+        bcc: { type: string, description: "comma-separated list, optional" }
+        subject: { type: string }
+        body_text: { type: string }
+        body_html: { type: string, description: "optional; combines with body_text into a multipart message when both are present" }
+      required: [to, subject, body_text]
+    examples:
+      - args: { to: ops@example.com, subject: "Release 1.4.0 is live", body_text: "Release 1.4.0 shipped. See the changelog for details.", cc: team@example.com }
+        note: "to, cc, and bcc each accept a comma-separated list of addresses; add body_html alongside body_text for a richer rendering, leaving body_text as the plain-text fallback."
