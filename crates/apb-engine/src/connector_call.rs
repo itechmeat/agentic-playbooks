@@ -581,8 +581,9 @@ pub fn healthcheck(root: &Path, name: &str, account: &str) -> (Value, bool) {
 }
 
 /// Resolves the live connector + account for `healthcheck` and gates +
-/// renders its declared healthcheck function through `build_prepared`, with
-/// no arguments (a healthcheck is a reachability probe, not a data call).
+/// renders its declared healthcheck function through the shared
+/// `prepare_play_call`, with no arguments (a healthcheck is a reachability
+/// probe, not a data call) and always live (never dry-run).
 fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepared, CallError> {
     let loaded = store::load(name)
         .map_err(|e| CallError::new(CallErrorCode::Config, format!("connector `{name}`: {e}")))?;
@@ -592,10 +593,72 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
             format!("connector `{name}` declares no healthcheck"),
         )
     })?;
-    let function = loaded.doc.function(&hc_name).cloned().ok_or_else(|| {
+    // A healthcheck is always live (never dry-run) and takes no arguments,
+    // per the healthcheck contract - it is a reachability probe, not a data
+    // call. Delegates account resolution, trust gating, and rendering to
+    // the shared playground preparation path so the two live-call callers
+    // never duplicate that logic.
+    prepare_play_call(root, name, Some(account), &hc_name, &json!({}), false)
+}
+
+/// Live playground call (dashboard slice 6, spec
+/// 2026-07-19-official-connectors-design section 7): the connector detail
+/// page's manual "call a function" panel. Runs an arbitrary function
+/// against the LIVE connector definition and LIVE merged account config
+/// through the exact same gate + render + dispatch pipeline `healthcheck`
+/// uses (`prepare_play_call` and `build_prepared`), so a dry-run renders
+/// the request without touching secrets and a real call gets the same
+/// trust gating, URL hardening, auth injection, and interim redaction as
+/// any other call. `account: None` selects the single or default
+/// configured account, exactly like the CLI's `select_account`. Returns
+/// the same `{ "ok": bool, ... }` shape `execute`/`healthcheck` do.
+pub fn play_call(
+    root: &Path,
+    name: &str,
+    account: Option<&str>,
+    function_name: &str,
+    args: &Value,
+    dry_run: bool,
+) -> (Value, bool) {
+    match prepare_play_call(root, name, account, function_name, args, dry_run) {
+        Ok(Prepared::DryRun(v)) => (v, true),
+        Ok(Prepared::Call(prepared)) => {
+            let (result, _status) = prepared.dispatch();
+            match result {
+                Ok(ok) => (ok.to_success_json(), true),
+                Err(err) => (err.to_json(), false),
+            }
+        }
+        Err(e) => (e.to_json(), false),
+    }
+}
+
+/// Shared live-call preparation for both `healthcheck` (fixed function, no
+/// args, always live) and `play_call` (dashboard playground, spec section
+/// 7: arbitrary function, args, optional dry-run). Loads the LIVE
+/// connector definition and LIVE merged account config - no run context,
+/// no manifest, no event log, no grant/budget checks (those are run-scoped
+/// concepts a standalone live call does not have).
+///
+/// Trust gating applies ONLY when `dry_run` is false: a dry-run never
+/// resolves secrets (`build_prepared` skips secret resolution entirely for
+/// `dry_run: true`), so gating it would refuse a safe, secret-free render
+/// for no security benefit - the gate exists to guard secret egress, and a
+/// dry-run has none to guard.
+fn prepare_play_call(
+    root: &Path,
+    name: &str,
+    account: Option<&str>,
+    function_name: &str,
+    args: &Value,
+    dry_run: bool,
+) -> Result<Prepared, CallError> {
+    let loaded = store::load(name)
+        .map_err(|e| CallError::new(CallErrorCode::Config, format!("connector `{name}`: {e}")))?;
+    let function = loaded.doc.function(function_name).cloned().ok_or_else(|| {
         CallError::new(
             CallErrorCode::Config,
-            format!("healthcheck function `{hc_name}` is missing from connector `{name}` (drift)"),
+            format!("connector `{name}` declares no function `{function_name}`"),
         )
     })?;
 
@@ -605,41 +668,38 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
             format!("connector `{name}` account config: {e}"),
         )
     })?;
-    let acct = accounts
-        .into_iter()
-        .find(|a| a.name == account)
-        .ok_or_else(|| {
-            CallError::new(
-                CallErrorCode::Config,
-                format!("connector `{name}` has no account `{account}`"),
-            )
-        })?;
+    let acct = select_live_account(&accounts, account)
+        .ok_or_else(|| account_selection_error(name, account, &accounts))?
+        .clone();
 
-    // Trust gate (spec 2026-07-18-connectors-design section 9, updated): the
-    // probe resolves LIVE secrets and sends them to the LIVE config's
-    // base_url, so an unapproved or changed connector/account must never be
-    // probeable - the same guard `apb_mcp::policy::check_connectors` applies
-    // before a real run, checked here before anything below touches a
-    // secret. Connector digest first (a changed folder is a bigger deal than
-    // one account), then the target account's own digest.
-    let trust = TrustStore::load();
-    if !trust.is_approved(&loaded.digest) {
-        return Err(CallError::new(
-            CallErrorCode::Permission,
-            format!(
-                "connector `{name}` is not approved; approve it before probing (see the connector approve flow)"
-            ),
-        ));
-    }
-    let account_digest = config::account_digest(&acct);
-    if !trust.is_approved(&account_digest) {
-        return Err(CallError::new(
-            CallErrorCode::Permission,
-            format!(
-                "account `{}` is not approved; approve it before probing (see the connector approve flow)",
-                account_trust_id(name, account)
-            ),
-        ));
+    if !dry_run {
+        // Trust gate (spec 2026-07-18-connectors-design section 9): a live
+        // call resolves LIVE secrets and sends them to the LIVE config's
+        // base_url, so an unapproved or changed connector/account must
+        // never be callable - the same guard `apb_mcp::policy::check_connectors`
+        // applies before a real run, checked here before anything below
+        // touches a secret. Connector digest first (a changed folder is a
+        // bigger deal than one account), then the target account's own
+        // digest.
+        let trust = TrustStore::load();
+        if !trust.is_approved(&loaded.digest) {
+            return Err(CallError::new(
+                CallErrorCode::Permission,
+                format!(
+                    "connector `{name}` is not approved; approve it before calling (see the connector approve flow)"
+                ),
+            ));
+        }
+        let account_digest = config::account_digest(&acct);
+        if !trust.is_approved(&account_digest) {
+            return Err(CallError::new(
+                CallErrorCode::Permission,
+                format!(
+                    "account `{}` is not approved; approve it before calling (see the connector approve flow)",
+                    account_trust_id(name, &acct.name)
+                ),
+            ));
+        }
     }
 
     let errors = config::validate_accounts(&loaded.doc, std::slice::from_ref(&acct));
@@ -647,7 +707,8 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
         return Err(CallError::new(
             CallErrorCode::Config,
             format!(
-                "connector `{name}` account `{account}` is invalid: {}",
+                "connector `{name}` account `{}` is invalid: {}",
+                acct.name,
                 errors.join("; ")
             ),
         ));
@@ -678,13 +739,58 @@ fn prepare_healthcheck(root: &Path, name: &str, account: &str) -> Result<Prepare
         loaded.doc.auth.as_ref(),
         acct.name.clone(),
         &maccount,
-        &json!({}),
+        args,
         root,
-        // A reachability probe returns the raw body; never project it.
+        // The playground returns the raw body, like the healthcheck probe:
+        // never project through `response_pick`.
         CallMode {
-            dry_run: false,
+            dry_run,
             full: true,
         },
+    )
+}
+
+/// Picks the account for a live probe/playground call: an explicit name
+/// must match one of the LIVE configured accounts; with none given, the
+/// single configured account is used, else the one flagged `default`, else
+/// no selection (ambiguous, reported by the caller via
+/// `account_selection_error`). Mirrors the CLI pipeline's `select_account`
+/// defaulting rule, minus the grant list (a live call has no grants).
+fn select_live_account<'a>(
+    accounts: &'a [config::Account],
+    account: Option<&str>,
+) -> Option<&'a config::Account> {
+    if let Some(explicit) = account {
+        return accounts.iter().find(|a| a.name == explicit);
+    }
+    if let [only] = accounts {
+        return Some(only);
+    }
+    let defaults: Vec<&config::Account> = accounts.iter().filter(|a| a.default).collect();
+    if let [only] = defaults.as_slice() {
+        return Some(only);
+    }
+    None
+}
+
+fn account_selection_error(
+    name: &str,
+    account: Option<&str>,
+    accounts: &[config::Account],
+) -> CallError {
+    if let Some(explicit) = account {
+        return CallError::new(
+            CallErrorCode::Config,
+            format!("connector `{name}` has no account `{explicit}`"),
+        );
+    }
+    let choices: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
+    CallError::new(
+        CallErrorCode::Config,
+        format!(
+            "connector `{name}` has several accounts and no single default; specify an account (choices: {})",
+            choices.join(", ")
+        ),
     )
 }
 
