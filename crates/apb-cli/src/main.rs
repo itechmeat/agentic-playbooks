@@ -1,3 +1,4 @@
+mod connector;
 mod manage;
 mod profile;
 mod run;
@@ -9,6 +10,7 @@ use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 
+use crate::connector::{ConnectorAction, connector_cmd};
 use crate::manage::{
     ProjectsAction, adopt_cmd, detect_cmd, export_cmd, import_cmd, migrate_cmd, projects_cmd,
     run_init, subscriptions_cmd,
@@ -42,6 +44,11 @@ enum Command {
     Migrate {
         #[arg(long)]
         apply: bool,
+    },
+    /// List or manage connectors (spec 2026-07-18)
+    Connector {
+        #[command(subcommand)]
+        action: ConnectorAction,
     },
     /// Detect installed coding agents. Detection itself is local: apb runs each
     /// agent's --version and reads local config, and makes no network request of
@@ -221,6 +228,7 @@ fn main() -> ExitCode {
         Some(Command::Mcp) => mcp_cmd(&root),
         Some(Command::Projects { action }) => projects_cmd(action),
         Some(Command::Profile { action }) => profile_cmd(&root, action),
+        Some(Command::Connector { action }) => connector_cmd(&root, action),
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
         Some(Command::Detect { refresh }) => detect_cmd(refresh),
         Some(Command::Adopt { name }) => adopt_cmd(&root, name.as_deref()),

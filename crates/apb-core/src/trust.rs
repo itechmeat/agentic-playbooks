@@ -166,6 +166,24 @@ impl TrustStore {
         self.approved.contains_key(digest)
     }
 
+    /// The `id`s of every approved record of the given `kind`, sorted and
+    /// deduped. Lets a caller distinguish "approved" (the current digest is
+    /// in the store) from "changed since approval" (some other digest of
+    /// this same id was approved before) versus "never approved" - `apb
+    /// connector list` uses this to tell an edited-but-previously-trusted
+    /// connector apart from one that was never trusted at all.
+    pub fn approved_record_ids(&self, kind: Kind) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .approved
+            .values()
+            .filter(|r| r.kind == kind)
+            .map(|r| r.id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
+    }
+
     /// Marks the digest as approved and persists it. The read-modify-write runs
     /// under a file lock that re-reads the current store from disk - concurrent
     /// approvals from different processes merge instead of clobbering each
@@ -355,6 +373,47 @@ mod tests {
             parsed.approved.get("sha256:account-ff").unwrap().id,
             "jira/project-board"
         );
+    }
+
+    #[test]
+    fn approved_record_ids_filters_by_kind_sorted_and_deduped() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        }
+        let _g = EnvGuard;
+
+        let mut store = TrustStore::load();
+        assert!(store.approved_record_ids(Kind::Connector).is_empty());
+
+        store
+            .approve_kind(
+                "sha256:widget-old",
+                "widget",
+                Kind::Connector,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+        store
+            .approve_kind(
+                "sha256:zeta",
+                "zeta",
+                Kind::Connector,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+        store
+            .approve_kind(
+                "sha256:unrelated",
+                "widget",
+                Kind::ConnectorAccount,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+
+        let ids = store.approved_record_ids(Kind::Connector);
+        assert_eq!(ids, vec!["widget".to_string(), "zeta".to_string()]);
     }
 
     #[test]
