@@ -7,13 +7,16 @@
 //! rejection, never a run error, so the cache can never fail a run.
 use super::*;
 use apb_core::cache::{
-    ArtifactRef, CacheRecord, CacheStore, CachedEntry, KeyParts, Provenance, Verification,
-    cache_key,
+    ArtifactRef, ArtifactScope, CacheRecord, CacheStore, CachedEntry, KeyParts, Provenance,
+    Verification, cache_key,
 };
 use apb_core::content::sha256_hex;
 use apb_core::fingerprint::{files_fingerprint, git_fingerprint};
-use apb_core::schema::CacheMode;
+use apb_core::fsutil::atomic_write;
+use apb_core::schema::{CacheMode, Node};
+use apb_core::validate::build_globset;
 use std::collections::HashMap;
+use std::path::Component;
 
 /// Everything the drive loop needs to look up and later admit one node's
 /// cached result. Built once, before execution, so the pre-execution
@@ -208,6 +211,12 @@ fn load_read_only(run_dir: &Path, connector: &str) -> Option<Vec<String>> {
 }
 
 impl NodeCacheCtx {
+    /// The cache store this context reads and writes, so the drive loop can
+    /// restore a hit's artifacts through the very store the lookup used.
+    pub(crate) fn store(&self) -> &CacheStore {
+        &self.store
+    }
+
     /// Probes the store for a still-valid cached result. `Refresh` always
     /// skips the lookup (never a hit) so a fresh run overwrites stale entries.
     pub(crate) fn lookup(&self, cfg: &RunConfig) -> Option<CachedEntry> {
@@ -290,9 +299,213 @@ impl NodeCacheCtx {
     }
 }
 
+/// Captures a node's declared output artifacts after a successful execution.
+///
+/// For every glob in `outputs.files` this matches files under `workdir`
+/// (`ArtifactScope::Workspace`) and under `run_dir` (`ArtifactScope::Run`),
+/// recording each as an [`ArtifactRef`] (file name, scope-relative
+/// forward-slash path, content digest) paired with its bytes for storage. The
+/// workspace walk skips `.git` and `.apb` (mirroring the fingerprint walk), so
+/// the run's own state under `.apb` never counts as a declared output; the run
+/// walk skips nothing, so an author who globs a run file (`events.jsonl`, ...)
+/// gets exactly that and nothing is special-cased away. Symlinks are neither
+/// followed nor captured, so a matched path can never escape its scope root.
+///
+/// Returns `Err` if a matched file cannot be read or a matched path escapes
+/// its scope root after normalization. The caller then rejects admission
+/// rather than store a record that references artifacts it could not capture.
+/// It never fails the run.
+pub(crate) fn capture_artifacts(
+    node: &Node,
+    run_dir: &Path,
+    workdir: &Path,
+) -> Result<Vec<(ArtifactRef, Vec<u8>)>, String> {
+    let globs = node
+        .outputs
+        .as_ref()
+        .map(|o| o.files.as_slice())
+        .unwrap_or(&[]);
+    if globs.is_empty() {
+        return Ok(Vec::new());
+    }
+    let set = build_globset(globs).map_err(|g| format!("invalid output glob `{g}`"))?;
+
+    let mut out = Vec::new();
+    // Workspace scope skips `.git`/`.apb`; run scope skips nothing.
+    for (root, scope, skip_internal) in [
+        (workdir, ArtifactScope::Workspace, true),
+        (run_dir, ArtifactScope::Run, false),
+    ] {
+        let mut rels = Vec::new();
+        walk(root, root, skip_internal, &mut rels)
+            .map_err(|e| format!("walk {}: {e}", root.display()))?;
+        rels.sort_unstable();
+        for rel in rels {
+            if !set.is_match(&rel) {
+                continue;
+            }
+            if !is_safe_relative(&rel) {
+                return Err(format!("artifact path `{rel}` escapes its scope root"));
+            }
+            let bytes = std::fs::read(root.join(&rel)).map_err(|e| format!("read {rel}: {e}"))?;
+            let name = Path::new(&rel)
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_else(|| rel.clone());
+            out.push((
+                ArtifactRef {
+                    name,
+                    digest: sha256_hex(&bytes),
+                    scope: scope.clone(),
+                    path: rel,
+                },
+                bytes,
+            ));
+        }
+    }
+    Ok(out)
+}
+
+/// Collects `dir`'s regular files as `root`-relative forward-slash paths.
+///
+/// Mirrors `fingerprint::walk`: `DirEntry::file_type` (no-follow) decides
+/// recursion, so a symlink is never followed and a symlink cycle cannot cause
+/// unbounded recursion; symlinks themselves are neither recursed nor captured.
+/// When `skip_internal`, the `.git` and `.apb` directories are not descended.
+fn walk(
+    root: &Path,
+    dir: &Path,
+    skip_internal: bool,
+    out: &mut Vec<String>,
+) -> std::io::Result<()> {
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let path = entry.path();
+        let name = entry.file_name();
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() {
+            if skip_internal && (name == ".git" || name == ".apb") {
+                continue;
+            }
+            walk(root, &path, skip_internal, out)?;
+        } else if file_type.is_file()
+            && let Ok(rel) = path.strip_prefix(root)
+        {
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    Ok(())
+}
+
+/// Restores a hit's declared artifacts to the workspace before the hit is
+/// taken. Each stored relative path is validated as safe (no absolute path, no
+/// `..` traversal) BEFORE any write, then the bytes are read digest-verified
+/// from the store and atomically written under the scope root. Any failure (an
+/// unsafe path, a missing or tampered object, a write error) returns `Err`,
+/// and the caller degrades the hit to a miss. It never fails the run.
+pub(crate) fn restore_artifacts(
+    entry: &CachedEntry,
+    store: &CacheStore,
+    run_dir: &Path,
+    workdir: &Path,
+) -> Result<(), String> {
+    for a in &entry.record.artifacts {
+        if !is_safe_relative(&a.path) {
+            return Err(format!("unsafe artifact path `{}`", a.path));
+        }
+        let bytes = store
+            .read_object(&a.digest)
+            .ok_or_else(|| format!("artifact object missing or tampered: {}", a.name))?;
+        let root = match a.scope {
+            ArtifactScope::Run => run_dir,
+            ArtifactScope::Workspace => workdir,
+        };
+        atomic_write(&root.join(&a.path), &bytes)
+            .map_err(|e| format!("write artifact `{}`: {e}", a.path))?;
+    }
+    Ok(())
+}
+
+/// True only for a non-empty relative path built entirely of normal segments
+/// (and `.`): rejects absolute paths and any `..` traversal, so a path joined
+/// onto its scope root can never escape into a sibling tree.
+fn is_safe_relative(path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let p = Path::new(path);
+    if p.is_absolute() {
+        return false;
+    }
+    p.components()
+        .all(|c| matches!(c, Component::Normal(_) | Component::CurDir))
+}
+
 fn unix_now() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apb_core::cache::CACHE_FORMAT;
+
+    /// Builds a minimal cache entry whose single artifact carries `path`, so a
+    /// restore exercises the path-safety guard before touching the store.
+    fn entry_with_path(path: &str) -> CachedEntry {
+        CachedEntry {
+            record: CacheRecord {
+                format_version: CACHE_FORMAT,
+                key: "sha256:k".into(),
+                created_at_unix: 0,
+                node_type: "script".into(),
+                provenance: Provenance {
+                    run_id: "r".into(),
+                    playbook_id: "p".into(),
+                    playbook_version: "1.0.0".into(),
+                    node_id: "n".into(),
+                },
+                profile_bundle_digest: None,
+                workspace_fingerprint: "fp".into(),
+                verification: Verification {
+                    workspace_unchanged: true,
+                    connector_calls: "none".into(),
+                },
+                output_digest: "sha256:o".into(),
+                artifacts: vec![ArtifactRef {
+                    name: "x".into(),
+                    digest: "sha256:d".into(),
+                    scope: ArtifactScope::Workspace,
+                    path: path.into(),
+                }],
+                ttl_seconds: None,
+            },
+            output: String::new(),
+        }
+    }
+
+    #[test]
+    fn restore_rejects_parent_traversal_and_absolute_paths() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let store = CacheStore::open(root);
+        for bad in [
+            "../escape.txt",
+            "/etc/passwd",
+            "a/../../b.txt",
+            "sub/../../../x",
+            "",
+        ] {
+            let entry = entry_with_path(bad);
+            assert!(
+                restore_artifacts(&entry, &store, root, root).is_err(),
+                "path `{bad}` must be rejected"
+            );
+        }
+        // A rejected restore must never create a file outside the scope root.
+        assert!(!root.parent().unwrap().join("escape.txt").exists());
+    }
 }

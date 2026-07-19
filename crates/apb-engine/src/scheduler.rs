@@ -733,6 +733,7 @@ fn drive(
                         status: st.as_str().into(),
                         attempt: 1,
                         output: out.clone(),
+                        artifacts: Vec::new(),
                     })?;
                     log.append(EventPayload::RunFinished {
                         outcome: "failed".into(),
@@ -759,6 +760,7 @@ fn drive(
                 status: "succeeded".into(),
                 attempt: 1,
                 output: answer_output,
+                artifacts: Vec::new(),
             })?;
             if outcome == RunStatus::Succeeded
                 && let Some(applied) = last_applied_patch.as_ref()
@@ -857,6 +859,9 @@ fn drive(
                         status: status.as_str().into(),
                         attempt: 1,
                         output,
+                        // The concurrent batch path does not run through the
+                        // node cache, so it captures no declared artifacts.
+                        artifacts: Vec::new(),
                     })?;
                     batch_statuses.push(status);
                     // If this branch successfully fed a join:any - cancel the others.
@@ -916,6 +921,11 @@ fn drive(
         // human_review: pauses until a decision from the reviews.jsonl channel (written by
         // `apb review` / MCP / HTTP); only drive writes events. The Nth decision for
         // a node is consumed once there are already N ReviewDecided events for it.
+        //
+        // Declared artifacts to record on the shared `NodeFinished` below. Only
+        // the node-cache branch sets it (captured on a store, replayed on a
+        // hit); every other branch leaves it empty.
+        let mut node_artifacts: Vec<apb_core::cache::ArtifactRef> = Vec::new();
         let (status, output) = if let NodeKind::HumanReview { options } = &node_kind {
             let events = read_all(run_dir)?;
             let decided = review_decided_count(&events, &current);
@@ -1088,14 +1098,30 @@ fn drive(
                 agent_model.as_ref().map(|(a, m)| (a.as_str(), m.as_str())),
                 connector_digests,
             );
-            if let Some(hit) = cache_ctx.as_ref().and_then(|c| c.lookup(cfg)) {
+            // A hit is only taken once its declared artifacts are restored to
+            // the workspace. If restore fails (a missing or tampered artifact
+            // object), we drop the hit entirely and fall through to the miss
+            // path, so a failed hit never leaves a `NodeCacheHit` without the
+            // files it promised (no partial event pair).
+            let hit = match cache_ctx.as_ref().and_then(|c| c.lookup(cfg)) {
+                Some(entry) => {
+                    let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
+                    match cache::restore_artifacts(&entry, ctx.store(), run_dir, &workdir) {
+                        Ok(()) => Some(entry),
+                        Err(_) => None,
+                    }
+                }
+                None => None,
+            };
+            if let Some(entry) = hit {
                 let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
                 log.append(EventPayload::NodeCacheHit {
                     node: current.clone(),
                     key: ctx.key.clone(),
-                    source_run: hit.record.provenance.run_id.clone(),
+                    source_run: entry.record.provenance.run_id.clone(),
                 })?;
-                (NodeStatus::Succeeded, hit.output)
+                node_artifacts = entry.record.artifacts.clone();
+                (NodeStatus::Succeeded, entry.output)
             } else {
                 if let Some(ctx) = &cache_ctx {
                     log.append(EventPayload::NodeCacheMiss {
@@ -1128,15 +1154,26 @@ fn drive(
                     // snapshot. A script node makes none, so this is (true,
                     // false) - identical to Task 5's admission.
                     let (calls_ok, had_calls) = cache::verify_connector_calls(run_dir, &current);
-                    log.append(ctx.admit(
-                        &workdir,
-                        &run_id,
-                        &playbook,
-                        &out,
-                        calls_ok,
-                        had_calls,
-                        &[],
-                    ))?;
+                    let node = playbook.node(&current).expect("a cache ctx implies a node");
+                    // Capture the node's declared output artifacts. A capture
+                    // error (an unreadable matched file or a path escaping its
+                    // scope root) rejects admission outright: storing a record
+                    // that references artifacts we could not read would be a
+                    // lie. It never fails the run.
+                    match cache::capture_artifacts(node, run_dir, &workdir) {
+                        Ok(captured) => {
+                            node_artifacts = captured.iter().map(|(a, _)| a.clone()).collect();
+                            log.append(ctx.admit(
+                                &workdir, &run_id, &playbook, &out, calls_ok, had_calls, &captured,
+                            ))?;
+                        }
+                        Err(reason) => {
+                            log.append(EventPayload::NodeCacheRejected {
+                                node: current.clone(),
+                                reason: format!("artifact capture failed: {reason}"),
+                            })?;
+                        }
+                    }
                 }
                 (st, out)
             }
@@ -1146,6 +1183,7 @@ fn drive(
             status: status.as_str().into(),
             attempt: 1,
             output: output.clone(),
+            artifacts: node_artifacts,
         })?;
 
         rebuild_context_md(run_dir)?;

@@ -75,6 +75,11 @@ pub enum EventPayload {
         status: String,
         attempt: u32,
         output: String,
+        /// Declared node artifacts captured on execution (or replayed from the
+        /// cache record on a hit). Additive to existing logs: old events carry
+        /// no artifacts and deserialize with an empty list.
+        #[serde(default)]
+        artifacts: Vec<apb_core::cache::ArtifactRef>,
     },
     RetryStarted {
         node: String,

@@ -6,7 +6,8 @@
 //! run dirs) never perturb the git-aware workspace fingerprint between runs.
 
 use crate::common;
-use apb_core::cache::CacheStore;
+use apb_core::cache::{ArtifactRef, ArtifactScope, CacheStore};
+use apb_core::content::sha256_hex;
 use apb_core::registry::init_project;
 use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::run_config::CacheRunMode;
@@ -570,5 +571,174 @@ fn agent_non_read_only_connector_call_is_rejected() {
     assert!(
         !has_stored(&ev1, "t"),
         "a rejected admission must not store"
+    );
+}
+
+// --- declared artifact capture and restore (Task 7) ------------------------
+//
+// The `gen` script writes a DECLARED output (`findings.json`) into the tracked
+// workspace root. Because it is declared, admission excludes it from the
+// post-execution fingerprint comparison (so the run still stores) and captures
+// it as a Workspace-scoped artifact. A later hit restores it byte-identically.
+
+const ARTIFACT_PLAYBOOK: &str = r#"
+schema: 1
+id: artwf
+name: Artifact Playbook
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gen, type: script, script: "scripts/gen.sh", runner: sh, cache: auto, outputs: { files: ["findings.json"] } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gen }
+  - { from: gen, to: done }
+"#;
+
+/// The exact bytes the gen script writes to the workspace `findings.json`.
+const FINDINGS: &str = "{\"findings\":3}";
+
+/// A script that appends a run marker to gitignored `.apb/`, writes the
+/// declared `findings.json` into the workspace root, and prints `generated`.
+fn gen_script() -> String {
+    format!(
+        "echo ran >> .apb/marker.txt\nprintf '%s' '{FINDINGS}' > findings.json\necho generated\n"
+    )
+}
+
+/// Builds a temp project with the `artwf` playbook and an initial git commit.
+fn seed_artifact(root: &Path) {
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/work.txt"), "hello\n").unwrap();
+    std::fs::write(root.join(".gitignore"), ".apb/\n").unwrap();
+
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/artwf/1.0.0");
+    std::fs::create_dir_all(vdir.join("scripts")).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), ARTIFACT_PLAYBOOK).unwrap();
+    common::write_sync(&vdir.join("scripts/gen.sh"), &gen_script());
+    std::fs::write(root.join(".apb/playbooks/artwf/current"), "1.0.0").unwrap();
+
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@t"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "c1"]);
+}
+
+fn run_artifact(root: &Path, cache: CacheRunMode) -> (String, Vec<Event>) {
+    let opts = RunOptions {
+        cache,
+        ..Default::default()
+    };
+    let res = run(root, "artwf", None, opts).unwrap();
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "artifact run should succeed"
+    );
+    let run_dir = root.join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    (res.run_id, events)
+}
+
+/// The declared artifacts recorded on a node's `NodeFinished` event.
+fn node_artifacts(events: &[Event], node: &str) -> Vec<ArtifactRef> {
+    events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::NodeFinished {
+                node: n, artifacts, ..
+            } if n == node => Some(artifacts.clone()),
+            _ => None,
+        })
+        .unwrap_or_default()
+}
+
+/// Absolute path to a content-addressed object in the store, from its digest.
+fn object_path(root: &Path, digest: &str) -> std::path::PathBuf {
+    let hex = digest.trim_start_matches("sha256:");
+    root.join(".apb/cache/objects").join(&hex[..2]).join(hex)
+}
+
+// Task 7 scenario 1+2: run 1 stores despite the declared workspace write and
+// records the captured artifact; deleting the file and re-running restores it
+// byte-identically on the hit.
+#[test]
+fn declared_artifact_is_captured_then_restored_on_hit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_artifact(root);
+
+    // Run 1: the declared workspace write does not block admission.
+    let (_run1, ev1) = run_artifact(root, CacheRunMode::Auto);
+    assert!(has_miss(&ev1, "gen"), "run 1 should miss");
+    assert!(
+        has_stored(&ev1, "gen"),
+        "run 1 stores despite the declared workspace write"
+    );
+    assert_eq!(node_output(&ev1, "gen").as_deref(), Some("generated"));
+
+    // The NodeFinished event carries exactly one Workspace-scoped artifact with
+    // the right relative path and content digest.
+    let arts = node_artifacts(&ev1, "gen");
+    assert_eq!(arts.len(), 1, "one declared artifact captured");
+    assert_eq!(arts[0].name, "findings.json");
+    assert_eq!(arts[0].path, "findings.json");
+    assert_eq!(arts[0].scope, ArtifactScope::Workspace);
+    assert_eq!(arts[0].digest, sha256_hex(FINDINGS.as_bytes()));
+    assert_eq!(run_count(root), 1);
+
+    // Delete the produced file; run 2 must hit and restore it byte-identically.
+    std::fs::remove_file(root.join("findings.json")).unwrap();
+    let (_run2, ev2) = run_artifact(root, CacheRunMode::Auto);
+    assert!(hit_source(&ev2, "gen").is_some(), "run 2 should hit");
+    assert!(!has_miss(&ev2, "gen"), "run 2 should not miss");
+    assert_eq!(run_count(root), 1, "the script must not run again on a hit");
+    assert_eq!(
+        std::fs::read_to_string(root.join("findings.json")).unwrap(),
+        FINDINGS,
+        "the restored artifact is byte-identical"
+    );
+    // The hit's NodeFinished replays the record's artifacts.
+    assert_eq!(node_artifacts(&ev2, "gen"), arts);
+}
+
+// Task 7 scenario 3: a corrupted artifact object makes the hit's restore fail,
+// so the run degrades to a miss and re-executes without failing.
+#[test]
+fn corrupt_artifact_object_degrades_hit_to_miss() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_artifact(root);
+
+    let (_run1, ev1) = run_artifact(root, CacheRunMode::Auto);
+    assert!(has_stored(&ev1, "gen"), "run 1 stores");
+    let arts = node_artifacts(&ev1, "gen");
+    assert_eq!(arts.len(), 1);
+
+    // Tamper with the stored artifact object; its digest no longer verifies.
+    std::fs::write(object_path(root, &arts[0].digest), b"corrupted-bytes").unwrap();
+    // Remove the file so a restore would be the only way it reappears.
+    std::fs::remove_file(root.join("findings.json")).unwrap();
+
+    let (_run2, ev2) = run_artifact(root, CacheRunMode::Auto);
+    assert!(
+        has_miss(&ev2, "gen"),
+        "a failed restore must degrade to a miss"
+    );
+    assert!(
+        hit_source(&ev2, "gen").is_none(),
+        "a failed restore must not record a hit"
+    );
+    assert_eq!(
+        run_count(root),
+        2,
+        "the script re-executes on the degraded miss"
+    );
+    // The re-execution rewrites the file, so it is present and correct again.
+    assert_eq!(
+        std::fs::read_to_string(root.join("findings.json")).unwrap(),
+        FINDINGS
     );
 }

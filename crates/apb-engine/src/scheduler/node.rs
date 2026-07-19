@@ -988,6 +988,7 @@ pub(crate) fn advance_frontier(
                     status: "cancelled".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 })?;
             }
         }

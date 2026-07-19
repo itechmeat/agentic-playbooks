@@ -14,6 +14,7 @@ fn appends_and_reads_events_with_increasing_seq() {
         status: "succeeded".into(),
         attempt: 1,
         output: String::new(),
+        artifacts: Vec::new(),
     })
     .unwrap();
 

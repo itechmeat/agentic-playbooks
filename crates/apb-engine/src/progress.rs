@@ -524,6 +524,7 @@ edges:
                     status: "succeeded".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             ),
         ];
@@ -549,6 +550,7 @@ edges:
                     status: "succeeded".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             ),
         ];
@@ -581,6 +583,7 @@ edges:
                     status: "succeeded".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             ),
             ev(
@@ -590,6 +593,7 @@ edges:
                     status: "skipped".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             ),
         ];
@@ -870,6 +874,7 @@ edges:
                     status: "succeeded".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             ),
         ];
@@ -914,6 +919,7 @@ edges:
                     status: "succeeded".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             ),
         ];
@@ -996,6 +1002,7 @@ edges:
                     status: "succeeded".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             },
         ];
@@ -1028,6 +1035,7 @@ edges:
                     status: "succeeded".into(),
                     attempt: 1,
                     output: "THE ANSWER".into(),
+                    artifacts: Vec::new(),
                 },
             ),
         ];
@@ -1059,6 +1067,7 @@ edges:
                     status: "succeeded".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             ),
         ];
@@ -1085,6 +1094,7 @@ edges:
                     status: "failed".into(),
                     attempt: 1,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             },
             Event {
@@ -1103,6 +1113,7 @@ edges:
                     status: "succeeded".into(),
                     attempt: 2,
                     output: String::new(),
+                    artifacts: Vec::new(),
                 },
             },
         ];

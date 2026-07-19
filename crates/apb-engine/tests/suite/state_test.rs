@@ -26,6 +26,7 @@ fn folds_finished_run() {
                 status: "succeeded".into(),
                 attempt: 1,
                 output: String::new(),
+                artifacts: Vec::new(),
             },
         ),
         ev(
@@ -35,6 +36,7 @@ fn folds_finished_run() {
                 status: "succeeded".into(),
                 attempt: 1,
                 output: "pong".into(),
+                artifacts: Vec::new(),
             },
         ),
         ev(
