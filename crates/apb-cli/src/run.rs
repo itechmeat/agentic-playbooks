@@ -6,6 +6,7 @@ use std::time::{Duration, Instant};
 use apb_core::fsutil::atomic_write;
 use apb_core::registry::{Registry, is_safe_segment};
 use apb_core::validate::{Severity, ValidationContext, validate};
+use apb_engine::run_config::CacheRunMode;
 use apb_engine::state::RunStatus;
 use apb_engine::{
     ReviewCommand, RunMode, RunOptions, drive_prepared, list_runs, post_review,
@@ -229,11 +230,22 @@ pub(crate) fn run_cmd(
     allow_shared_workdir: bool,
     supervise: bool,
     overrides_path: Option<&Path>,
+    no_cache: bool,
+    refresh_cache: bool,
 ) -> ExitCode {
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
         return ExitCode::from(2);
     }
+    // clap's `conflicts_with` already refuses `--no-cache --refresh-cache`
+    // together before we get here; this is just the flags-to-enum mapping.
+    let cache = if no_cache {
+        CacheRunMode::Off
+    } else if refresh_cache {
+        CacheRunMode::Refresh
+    } else {
+        CacheRunMode::Auto
+    };
     let mut parsed = BTreeMap::new();
     for p in params {
         match p.split_once('=') {
@@ -262,6 +274,10 @@ pub(crate) fn run_cmd(
     };
     if supervise && overrides.is_some() {
         eprintln!("--overrides is not yet supported together with --supervise");
+        return ExitCode::from(2);
+    }
+    if supervise && cache != CacheRunMode::Auto {
+        eprintln!("--no-cache/--refresh-cache is not yet supported together with --supervise");
         return ExitCode::from(2);
     }
     if supervise {
@@ -310,7 +326,7 @@ pub(crate) fn run_cmd(
         expected_children: None,
         expected_connectors,
         expected_connector_accounts,
-        cache: Default::default(),
+        cache,
     };
     match run(root, name, version, opts) {
         Ok(res) => {

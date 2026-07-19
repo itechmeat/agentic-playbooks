@@ -10,6 +10,8 @@
 
 #[path = "suite/advisory_cli_test.rs"]
 mod advisory_cli_test;
+#[path = "suite/cache_cli.rs"]
+mod cache_cli;
 #[path = "suite/cli_test.rs"]
 mod cli_test;
 #[path = "suite/connector_cli.rs"]
