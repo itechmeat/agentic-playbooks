@@ -61,7 +61,10 @@ them):
 
 ## 3. Connector folder format
 
-Location: `~/.apb/connectors/<name>/`. The folder name is the connector name
+Location: `<config_dir>/connectors/<name>/`, where `<config_dir>` is apb's
+global config directory resolved by `config::config_dir()`: `APB_CONFIG_DIR`
+override, then `XDG_CONFIG_HOME/apb`, then `~/.config/apb`. The folder name
+is the connector name
 and must pass the existing slug validation (`[a-z0-9][a-z0-9-]*`, max 64,
 `is_safe_segment`). Resolution uses the same candidate-scope pattern as skill
 resolution with a single candidate (global) for now; a project scope
@@ -70,7 +73,7 @@ resolution with a single candidate (global) for now; a project scope
 Contents:
 
 ```
-~/.apb/connectors/jira/
+<config_dir>/connectors/jira/
   connector.yaml   # machine part, the only file the engine reads at run time
   PUBLIC.md        # storefront: YAML frontmatter + markdown body
   skills/          # reserved; covered by the digest, not delivered yet
@@ -173,7 +176,7 @@ the user approved.
 
 ### 4.1 Config files
 
-- Global: `~/.apb/connector-config/<connector>.yaml`
+- Global: `<config_dir>/connector-config/<connector>.yaml`
 - Project: `<root>/.apb/connector-config/<connector>.yaml`
 
 Both files are non-secret and safe to commit and share:
@@ -207,7 +210,7 @@ An `{{env.VAR}}` reference resolves at call time, in order:
 
 1. the process environment of the resolving apb process;
 2. project dotenv `<root>/.apb/secrets.env`;
-3. global dotenv `~/.apb/secrets.env`.
+3. global dotenv `<config_dir>/secrets.env`.
 
 Dotenv files are `KEY=value` lines, written atomically with mode 0600 via
 `apb_core::fsutil`, and are read only by apb. When apb creates the project
@@ -599,7 +602,7 @@ prevents the guarantees from sounding stronger than they are.
 **Not defended (out of scope, by honesty):**
 
 - A deliberately malicious agent with unrestricted shell access. Agents run
-  as the same OS user, so such an agent could read `~/.apb/secrets.env`
+  as the same OS user, so such an agent could read `<config_dir>/secrets.env`
   directly, bypassing every apb-level control. The real guards at that layer
   are the agents' own sandboxing and permission modes; apb's contribution is
   that secrets never appear in anything apb hands to the model, so a
