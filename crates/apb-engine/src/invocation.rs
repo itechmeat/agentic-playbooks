@@ -25,7 +25,7 @@ pub struct ResolvedInvocation {
     pub executable_fingerprint: String,
 }
 
-/// Built-in invocation form for the known five. `None` for unknown agents and
+/// Built-in invocation form for the known six. `None` for unknown agents and
 /// for pi (details will follow once the binary exists).
 pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
     let mk = |argv: &[&str],
@@ -64,6 +64,15 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         )),
         "opencode" => Some(mk(
             &["run", "{prompt}", "-m", "{model}"],
+            SoulDelivery::Prefix,
+            None,
+            &[],
+        )),
+        // hermes one-shot mode prints only the final response text to
+        // stdout and auto-bypasses approvals by design (script mode);
+        // the SOUL travels as a prompt prefix like the other aggregators.
+        "hermes" => Some(mk(
+            &["-z", "{prompt}", "-m", "{model}"],
             SoulDelivery::Prefix,
             None,
             &[],
@@ -296,11 +305,21 @@ mod tests {
 
     #[test]
     fn builtin_five_agents_present_and_valid() {
-        for id in ["claude", "agy", "codex", "opencode"] {
+        for id in ["claude", "agy", "codex", "opencode", "hermes"] {
             builtin(id).unwrap().validate().unwrap();
         }
         assert!(builtin("pi").is_none());
         assert!(builtin("unknown").is_none());
+    }
+
+    #[test]
+    fn builtin_hermes_form() {
+        let spec = builtin("hermes").expect("hermes builtin spec");
+        assert_eq!(spec.argv, vec!["-z", "{prompt}", "-m", "{model}"]);
+        assert_eq!(spec.soul, SoulDelivery::Prefix);
+        assert_eq!(spec.soul_flag, None);
+        assert_eq!(spec.transport, Transport::Headless);
+        assert!(spec.autonomous_args.is_empty());
     }
 
     #[test]
