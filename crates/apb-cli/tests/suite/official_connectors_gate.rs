@@ -122,10 +122,10 @@ fn every_official_connector_folder_is_complete() {
                     }
                 }
             }
-            if f.smtp.is_some() {
+            if f.smtp.is_some() || f.imap.is_some() {
                 assert!(
                     f.response_pick.is_empty(),
-                    "{name}/{}: smtp functions must not set response_pick",
+                    "{name}/{}: smtp/imap functions must not set response_pick",
                     f.name
                 );
             } else if f.read_only {
