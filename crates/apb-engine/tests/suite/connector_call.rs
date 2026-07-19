@@ -131,6 +131,7 @@ fn call<'a>(
         account,
         args,
         dry_run,
+        full: false,
     })
 }
 
@@ -642,6 +643,7 @@ functions:
         account: None,
         args: serde_json::json!({}),
         dry_run: false,
+        full: false,
     });
     assert!(!ok);
     assert_eq!(value["error"]["code"], serde_json::json!("network"));
@@ -748,10 +750,184 @@ functions:
         account: None,
         args: serde_json::json!({}),
         dry_run: false,
+        full: false,
     });
     assert!(
         ok3,
         "the other connector's budget must be independent: {v3}"
     );
     assert_eq!(v3["status"], serde_json::json!(200));
+}
+
+#[test]
+fn path_auth_renders_token_into_path_segment_keeping_colon() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    // A token with a colon and url-reserved-adjacent bytes.
+    let path = root.path().join(".apb/secrets.env");
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(&path, format!("{SECRET_VAR}=111:AAA_bbb-CCC\n")).unwrap();
+
+    let server = common::spawn_http(200, "OK", &[], r#"{"ok":true}"#.to_string());
+    const TELE_YAML: &str = r#"
+name: tele
+version: 0.1.0
+auth:
+  kind: path
+  value_template: "bot{{secret.token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_me
+    description: probe
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/{{auth}}/getMe"
+"#;
+    let acct = ManifestAccount {
+        name: "acct1".to_string(),
+        default: true,
+        fields: BTreeMap::from([
+            ("base_url".to_string(), server.base_url.clone()),
+            ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
+        ]),
+        env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+        digest: "sha256:acct".to_string(),
+    };
+    let mut m = RunExecutionManifest::default();
+    m.connectors.push(ManifestConnector {
+        name: "tele".to_string(),
+        digest: "sha256:test".to_string(),
+        accounts: vec![acct],
+    });
+    m.connector_grants.insert(
+        NODE.to_string(),
+        vec![ManifestConnectorGrant {
+            connector: "tele".to_string(),
+            accounts: vec!["acct1".to_string()],
+            functions: vec!["get_me".to_string()],
+            max_calls: None,
+        }],
+    );
+    manifest::write(run.path(), &m).unwrap();
+    let cdir = run.path().join("connectors");
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join("tele.yaml"), TELE_YAML).unwrap();
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "tele",
+        function: "get_me",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: false,
+        full: false,
+    });
+    assert!(ok, "expected ok: {value}");
+
+    let req = server.captured_request().expect("server saw a request");
+    assert!(
+        req.starts_with("GET /bot111:AAA_bbb-CCC/getMe"),
+        "path segment should keep ':' literal: {req}"
+    );
+    assert!(
+        !req.contains("%3A"),
+        "colon must not be percent-encoded: {req}"
+    );
+
+    // The event log keeps the literal {{auth}}, never the token.
+    let url = read_all(run.path())
+        .unwrap()
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::ConnectorCall { url, .. } => Some(url.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert!(url.ends_with("/{{auth}}/getMe"), "pre-auth url: {url}");
+    assert!(
+        !url.contains("111:AAA"),
+        "token leaked into event url: {url}"
+    );
+}
+
+#[test]
+fn path_auth_dry_run_keeps_auth_placeholder_and_needs_no_secret() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    const TELE_YAML: &str = r#"
+name: tele
+version: 0.1.0
+auth:
+  kind: path
+  value_template: "bot{{secret.token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_me
+    description: probe
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/{{auth}}/getMe"
+"#;
+    let mut m = RunExecutionManifest::default();
+    m.connectors.push(ManifestConnector {
+        name: "tele".to_string(),
+        digest: "sha256:test".to_string(),
+        accounts: vec![ManifestAccount {
+            name: "acct1".to_string(),
+            default: true,
+            fields: BTreeMap::from([
+                (
+                    "base_url".to_string(),
+                    "https://api.telegram.org".to_string(),
+                ),
+                ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
+            ]),
+            env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
+            digest: "sha256:a".to_string(),
+        }],
+    });
+    m.connector_grants.insert(
+        NODE.to_string(),
+        vec![ManifestConnectorGrant {
+            connector: "tele".to_string(),
+            accounts: vec!["acct1".to_string()],
+            functions: vec!["get_me".to_string()],
+            max_calls: None,
+        }],
+    );
+    manifest::write(run.path(), &m).unwrap();
+    let cdir = run.path().join("connectors");
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join("tele.yaml"), TELE_YAML).unwrap();
+
+    let (value, ok) = execute(CallRequest {
+        run_dir: run.path(),
+        root: root.path(),
+        node_id: NODE,
+        connector: "tele",
+        function: "get_me",
+        account: None,
+        args: serde_json::json!({}),
+        dry_run: true,
+        full: false,
+    });
+    assert!(ok, "dry-run should succeed without a secret: {value}");
+    assert_eq!(
+        value["url"],
+        serde_json::json!("https://api.telegram.org/{{auth}}/getMe")
+    );
 }

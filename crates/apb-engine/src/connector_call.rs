@@ -47,6 +47,9 @@ pub struct CallRequest<'a> {
     pub args: Value,
     /// `--dry-run`: render and print without executing, resolving no secrets.
     pub dry_run: bool,
+    /// `--full`: return the complete response body, skipping the function's
+    /// `response_pick` projection (spec 4.5 debugging escape).
+    pub full: bool,
 }
 
 /// The structured error code taxonomy (spec section 8). The wire form is the
@@ -845,12 +848,28 @@ impl HttpCall {
             args: &Value::Null,
             secrets: &self.secrets,
         };
-        let request_url = match self.auth_query(&ctx) {
-            Ok(Some((param, value))) => {
-                assemble_url(&self.pre_auth_url, &format!("{param}={value}"))
-            }
-            Ok(None) => self.pre_auth_url.clone(),
-            Err(e) => return (Err(e), None),
+        let request_url = match &self.auth {
+            Some(AuthSpec::Path { value_template }) => match render_raw(value_template, &ctx) {
+                Ok(seg) => self
+                    .pre_auth_url
+                    .replacen("{{auth}}", &encode_path_segment(&seg), 1),
+                Err(e) => {
+                    return (
+                        Err(CallError::new(
+                            CallErrorCode::Config,
+                            format!("auth render failed: {e}"),
+                        )),
+                        None,
+                    );
+                }
+            },
+            _ => match self.auth_query(&ctx) {
+                Ok(Some((param, value))) => {
+                    assemble_url(&self.pre_auth_url, &format!("{param}={value}"))
+                }
+                Ok(None) => self.pre_auth_url.clone(),
+                Err(e) => return (Err(e), None),
+            },
         };
 
         let mut request = agent.request(&self.method, &request_url);
@@ -1096,6 +1115,32 @@ fn encode_args_for_url(args: &Value) -> Value {
         ),
         other => other.clone(),
     }
+}
+
+/// Percent-encodes a rendered auth value as one URL path segment per RFC 3986
+/// pchar rules, keeping ':' literal (Telegram tokens embed a colon, spec 4.3).
+/// pchar = unreserved / sub-delims / ':' / '@'.
+fn encode_path_segment(s: &str) -> String {
+    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
+    const PCHAR: &AsciiSet = &NON_ALPHANUMERIC
+        .remove(b'-')
+        .remove(b'.')
+        .remove(b'_')
+        .remove(b'~')
+        .remove(b'!')
+        .remove(b'$')
+        .remove(b'&')
+        .remove(b'\'')
+        .remove(b'(')
+        .remove(b')')
+        .remove(b'*')
+        .remove(b'+')
+        .remove(b',')
+        .remove(b';')
+        .remove(b'=')
+        .remove(b':')
+        .remove(b'@');
+    utf8_percent_encode(s, PCHAR).to_string()
 }
 
 /// Percent-encodes a whole string as a single URL component (same set the

@@ -375,6 +375,7 @@ fn call_cmd(
         account: account.as_deref(),
         args: parsed_args,
         dry_run,
+        full: false,
     };
     let (value, ok) = apb_engine::connector_call::execute(req);
     print_call_result(&value);
