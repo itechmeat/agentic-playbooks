@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use apb_core::registry::{Registry, RegistryError, is_safe_segment};
-use apb_core::validate::{Severity, ValidationContext, validate};
+use apb_core::validate::{Issue, Severity, ValidationContext, validate};
 use apb_core::versioning::{
     VersioningError, create_patch_version, create_version, delete_playbook,
 };
@@ -67,7 +67,7 @@ impl From<VersioningError> for ToolError {
 /// `(node ...)` segment when the issue has no node. Shared by every surface
 /// that turns a `VersioningError::Validation` into user-facing text, so the
 /// line format stays identical everywhere it is shown.
-fn render_validation_issues(issues: &[apb_core::validate::Issue]) -> String {
+fn render_validation_issues(issues: &[Issue]) -> String {
     let mut out = String::from("validation failed:");
     for issue in issues {
         let severity = match issue.severity {
