@@ -70,6 +70,29 @@ fn playbook_delete_moves_to_trash() {
 }
 
 #[test]
+fn playbook_update_invalid_playbook_renders_structured_validation_message() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+
+    let invalid = VALID.replace("{{params.task}}", "{{outputs.plan}}");
+    let err = playbook_update(dir.path(), "implement-task", &invalid).unwrap_err();
+    match err {
+        ToolError::Engine(msg) => {
+            assert!(
+                msg.starts_with("validation failed:"),
+                "expected `validation failed:` prefix, got: {msg}"
+            );
+            assert!(
+                msg.lines()
+                    .any(|l| l.starts_with("- V13 error (node `plan`):")),
+                "expected a `- V13 error (node `plan`):` line, got: {msg}"
+            );
+        }
+        other => panic!("expected Engine, got {other:?}"),
+    }
+}
+
+#[test]
 fn playbook_create_invalid_yaml_is_engine_error() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());

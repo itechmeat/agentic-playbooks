@@ -54,12 +54,39 @@ impl From<VersioningError> for ToolError {
     fn from(e: VersioningError) -> Self {
         match e {
             VersioningError::NotFound(w) => ToolError::NotFound(w),
-            VersioningError::Validation(codes) => {
-                ToolError::Engine(format!("validation failed: {codes:?}"))
+            VersioningError::Validation(issues) => {
+                ToolError::Engine(render_validation_issues(&issues))
             }
             other => ToolError::Engine(other.to_string()),
         }
     }
+}
+
+/// Renders a validation failure as `validation failed:` followed by one line
+/// per issue: `- <code> <severity> (node \`<id>\`): <message>`, omitting the
+/// `(node ...)` segment when the issue has no node. Shared by every surface
+/// that turns a `VersioningError::Validation` into user-facing text, so the
+/// line format stays identical everywhere it is shown.
+fn render_validation_issues(issues: &[apb_core::validate::Issue]) -> String {
+    let mut out = String::from("validation failed:");
+    for issue in issues {
+        let severity = match issue.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        out.push_str("\n- ");
+        out.push_str(issue.code);
+        out.push(' ');
+        out.push_str(severity);
+        if let Some(node) = &issue.node {
+            out.push_str(" (node `");
+            out.push_str(node);
+            out.push_str("`)");
+        }
+        out.push_str(": ");
+        out.push_str(&issue.message);
+    }
+    out
 }
 
 /// Creates a new playbook or a new minor version of an existing one.

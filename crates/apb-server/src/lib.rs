@@ -220,11 +220,14 @@ fn tag_summary(summary: &PlaybookSummary, workspace_id: &str, project: &str) -> 
 fn versioning_error(e: VersioningError) -> Response {
     match e {
         VersioningError::NotFound(what) => (StatusCode::NOT_FOUND, what).into_response(),
-        VersioningError::Validation(codes) => (
-            StatusCode::BAD_REQUEST,
-            Json(serde_json::json!({ "error": "validation", "codes": codes })),
-        )
-            .into_response(),
+        VersioningError::Validation(issues) => {
+            let codes: Vec<&str> = issues.iter().map(|i| i.code).collect();
+            (
+                StatusCode::BAD_REQUEST,
+                Json(serde_json::json!({ "error": "validation", "codes": codes })),
+            )
+                .into_response()
+        }
         VersioningError::Schema(msg) => (
             StatusCode::BAD_REQUEST,
             Json(serde_json::json!({ "error": "schema", "message": msg })),

@@ -12,7 +12,7 @@ pub enum Severity {
     Warning,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Issue {
     pub code: &'static str,
     pub severity: Severity,
@@ -727,7 +727,7 @@ fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
                 r.error(
                     "V13",
                     Some(owner),
-                    format!("template `{{{{{cap}}}}}` cannot be resolved"),
+                    format!("template `{{{{{cap}}}}}` cannot be resolved{V13_KNOWN_NAMESPACES}"),
                 );
             }
         }
@@ -738,10 +738,20 @@ fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
             NodeKind::AgentTask { prompt, .. } | NodeKind::Prompt { prompt } => {
                 check_text(&n.id, prompt, r)
             }
+            NodeKind::Playbook {
+                instruction: Some(instruction),
+                ..
+            } => check_text(&n.id, instruction, r),
             _ => {}
         }
     }
 }
+
+/// V13 message suffix: names the resolvable template namespaces so an author
+/// hitting an unresolved template sees the full set of valid forms, not just
+/// the one they got wrong.
+const V13_KNOWN_NAMESPACES: &str = "; known namespaces: params.*, nodes.<id>.output, \
+    nodes.<id>.report, nodes.<id>.review_note, run.instruction, run.context, run.hooks.*";
 
 fn template_refs(text: &str) -> Vec<String> {
     // no regex dependency: manual scan for {{ ... }}
