@@ -812,6 +812,19 @@ accounts:
     }
 
     #[test]
+    fn validate_does_not_execute_the_cmd_ref() {
+        let doc = jira_doc();
+        // A command that would exit non-zero if run; validation must accept the
+        // reference form without executing anything.
+        let accounts = vec![acct(
+            "prod",
+            false,
+            &[("base_url", "https://a"), ("token", "{{cmd:false}}")],
+        )];
+        assert!(validate_accounts(&doc, &accounts).is_empty());
+    }
+
+    #[test]
     fn digest_changes_when_secret_ref_switches_env_to_cmd() {
         // Regression pin: the account digest already covers secret field
         // reference strings, so swapping the source drops account trust.

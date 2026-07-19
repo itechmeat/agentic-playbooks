@@ -361,3 +361,50 @@ fn missing_env_var_refuses() {
         "lists the unresolved env vars: {refusal}"
     );
 }
+
+#[cfg(unix)]
+#[test]
+fn cmd_secret_passes_env_gate_without_executing_command() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let stubs = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path(), "https://first.example.com");
+
+    // A stub that touches a sentinel iff it ever runs.
+    use std::os::unix::fs::PermissionsExt;
+    let sentinel = stubs.path().join("ran.marker");
+    let stub = stubs.path().join("cmd-token");
+    std::fs::write(
+        &stub,
+        format!("#!/bin/sh\ntouch '{}'\nprintf 'x\\n'\n", sentinel.display()),
+    )
+    .unwrap();
+    let mut p = std::fs::metadata(&stub).unwrap().permissions();
+    p.set_mode(0o755);
+    std::fs::set_permissions(&stub, p).unwrap();
+
+    // Rewrite acct1 to source its token from the command (no env var).
+    let path = config::project_config_path(root.path(), CONNECTOR_NAME);
+    std::fs::write(
+        &path,
+        format!(
+            "accounts:\n  - name: acct1\n    base_url: https://first.example.com\n    token: \"{{{{cmd:{}}}}}\"\n  - name: acct2\n    base_url: https://second.example.com\n    token: \"{{{{env.{TOKEN_B}}}}}\"\n",
+            stub.to_string_lossy()
+        ),
+    )
+    .unwrap();
+
+    approve_connector();
+    approve_accounts(root.path(), &parsed_playbook());
+
+    // The gate must not report a missing env var for the cmd-sourced acct1,
+    // and must not execute the command. It permits (acct2's env var is set by
+    // `setup`, and both accounts are approved after the rewrite).
+    let result = check_run(root.path(), &wref(), false, false);
+    assert!(result.is_ok(), "gate should permit: {result:?}");
+    assert!(
+        !sentinel.exists(),
+        "the policy gate must never execute a secret command"
+    );
+}
