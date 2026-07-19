@@ -27,7 +27,7 @@ const MAX_RENAME_ATTEMPTS: u32 = 100;
 pub enum VersioningError {
     #[error("playbook `{0}` not found")]
     NotFound(String),
-    #[error("validation failed: {0:?}")]
+    #[error("{}", crate::validate::render_issues(.0))]
     Validation(Vec<Issue>),
     #[error("schema error: {0}")]
     Schema(String),

@@ -20,6 +20,36 @@ pub struct Issue {
     pub node: Option<String>,
 }
 
+/// Renders a validation failure as `validation failed:` followed by one line
+/// per issue: `- <code> <severity> (node \`<id>\`): <message>`, omitting the
+/// `(node ...)` segment when the issue has no node. This is the single
+/// canonical rendering for a `Vec<Issue>` becoming user-facing text:
+/// `VersioningError::Validation`'s `Display` goes through it (so every
+/// transitive wrapper - `BundleError`, `EngineError`, ... - renders the same
+/// lines for free), and the MCP layer delegates to it too, so the format
+/// never drifts between surfaces.
+pub fn render_issues(issues: &[Issue]) -> String {
+    let mut out = String::from("validation failed:");
+    for issue in issues {
+        let severity = match issue.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        out.push_str("\n- ");
+        out.push_str(issue.code);
+        out.push(' ');
+        out.push_str(severity);
+        if let Some(node) = &issue.node {
+            out.push_str(" (node `");
+            out.push_str(node);
+            out.push_str("`)");
+        }
+        out.push_str(": ");
+        out.push_str(&issue.message);
+    }
+    out
+}
+
 #[derive(Debug, Default)]
 pub struct ValidationReport {
     pub issues: Vec<Issue>,

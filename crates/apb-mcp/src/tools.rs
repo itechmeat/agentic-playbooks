@@ -63,30 +63,12 @@ impl From<VersioningError> for ToolError {
 }
 
 /// Renders a validation failure as `validation failed:` followed by one line
-/// per issue: `- <code> <severity> (node \`<id>\`): <message>`, omitting the
-/// `(node ...)` segment when the issue has no node. Shared by every surface
-/// that turns a `VersioningError::Validation` into user-facing text, so the
-/// line format stays identical everywhere it is shown.
+/// per issue. Delegates to `apb_core::validate::render_issues`, the single
+/// canonical rendering shared with `VersioningError::Validation`'s own
+/// `Display` impl, so this surface can never drift from any other consumer
+/// of the same `Vec<Issue>`.
 fn render_validation_issues(issues: &[Issue]) -> String {
-    let mut out = String::from("validation failed:");
-    for issue in issues {
-        let severity = match issue.severity {
-            Severity::Error => "error",
-            Severity::Warning => "warning",
-        };
-        out.push_str("\n- ");
-        out.push_str(issue.code);
-        out.push(' ');
-        out.push_str(severity);
-        if let Some(node) = &issue.node {
-            out.push_str(" (node `");
-            out.push_str(node);
-            out.push_str("`)");
-        }
-        out.push_str(": ");
-        out.push_str(&issue.message);
-    }
-    out
+    apb_core::validate::render_issues(issues)
 }
 
 /// Creates a new playbook or a new minor version of an existing one.
