@@ -129,6 +129,8 @@ pub struct CallOk {
     pub status: u16,
     pub body: Value,
     pub truncated: bool,
+    /// The raw `Link` response header, when the service sent one (spec 4.4).
+    pub link: Option<String>,
 }
 
 /// The metadata a reached call (mock or HTTP, ok or error) records in the
@@ -152,12 +154,15 @@ pub fn execute(req: CallRequest) -> (Value, bool) {
         Outcome::DryRun(value) => (value, true),
         Outcome::Ok(ok, meta) => {
             append_event(&req, &meta);
-            let value = json!({
+            let mut value = json!({
                 "ok": true,
                 "status": ok.status,
                 "body": ok.body,
                 "truncated": ok.truncated,
             });
+            if let Some(link) = &ok.link {
+                value["link"] = json!(link);
+            }
             (value, true)
         }
         Outcome::Executed(err, meta) => {
@@ -940,13 +945,17 @@ impl HttpCall {
         let retry_after = response
             .header("Retry-After")
             .and_then(|s| s.trim().parse::<u64>().ok());
+        // The `Link` header must be read before the response is consumed by the
+        // body reader; surfaced verbatim in the result (spec 4.4).
+        let link = response.header("Link").map(|s| s.to_string());
         let (body, truncated) = read_body(response);
         // 12. Interim literal secret redaction (see the TODO below).
         let body = self.redact(body);
-        (
-            map_status(status, body, truncated, retry_after),
-            Some(status),
-        )
+        let mut mapped = map_status(status, body, truncated, retry_after);
+        if let Ok(ok) = &mut mapped {
+            ok.link = link;
+        }
+        (mapped, Some(status))
     }
 
     /// The `query`-kind auth param, already percent-encoded, if auth is a
@@ -1097,6 +1106,7 @@ fn map_status(
             status,
             body,
             truncated,
+            link: None,
         });
     }
     let mut err = match status {

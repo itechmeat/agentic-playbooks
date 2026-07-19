@@ -1018,3 +1018,56 @@ fn function_user_agent_overrides_the_default() {
         "default UA must not also be sent: {req}"
     );
 }
+
+#[test]
+fn response_link_header_surfaces_in_result() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let link = r#"<https://api.example/next>; rel="next""#;
+    let server = common::spawn_http(200, "OK", &[("Link", link)], r#"{"items":[]}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_items"],
+        None,
+    );
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_items",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok, "{value}");
+    assert_eq!(value["link"], serde_json::json!(link));
+}
+
+#[test]
+fn absent_link_header_omits_the_field() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+    let server = common::spawn_http(200, "OK", &[], r#"{"items":[]}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_items"],
+        None,
+    );
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_items",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok);
+    assert!(value.get("link").is_none(), "link must be absent: {value}");
+}
