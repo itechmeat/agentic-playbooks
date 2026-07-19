@@ -19,6 +19,7 @@ pub(crate) fn execute_node(
     cfg: &RunConfig,
     override_prompt: Option<String>,
     cancel: &AtomicBool,
+    env_scrub: &[String],
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
     let node = playbook
         .node(node_id)
@@ -161,6 +162,30 @@ pub(crate) fn execute_node(
                 );
             }
 
+            // Connector instruction block (spec 6 step 3): when this node holds
+            // grants, tell the agent which connectors/accounts/functions it may
+            // call and how. Built only from the run snapshot (manifest non-secret
+            // fields + snapshotted ConnectorDocs), so no secret reaches the prompt.
+            let grants = manifest.grants_for(node_id);
+            if !grants.is_empty() {
+                let docs =
+                    crate::connector_prompt::load_snapshot_docs(run_dir, &manifest.connectors);
+                let block =
+                    crate::connector_prompt::instruction_block(grants, &manifest.connectors, &docs);
+                if !block.is_empty() {
+                    text = format!("{text}\n\n{block}");
+                }
+            }
+
+            // Connector env isolation (spec 4.3) for every attempt's agent spawn:
+            // scrub inherited connector tokens and hand the agent the run-context
+            // env that `apb connector call` reads.
+            let connector_policy = crate::adapter::ConnectorEnvPolicy {
+                scrub: env_scrub.to_vec(),
+                run_dir: Some(run_dir.to_path_buf()),
+                node_id: Some(node_id.to_string()),
+            };
+
             let mut attempt: u32 = 0;
             let mut last_msg = String::new();
             // The node's final status once all attempts are exhausted: TimedOut if
@@ -240,6 +265,7 @@ pub(crate) fn execute_node(
                         stream_log: Some(&stream_log),
                         soul: soul_text.as_deref(),
                         grant_autonomy,
+                        connector_policy: &connector_policy,
                     };
                     match adapter.run_cancellable(&task, cancel) {
                         Ok(report) => {
@@ -361,6 +387,7 @@ pub(crate) fn execute_finish_answer(
     state: &RunState,
     cfg: &RunConfig,
     prompt: &str,
+    env_scrub: &[String],
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
     let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
@@ -400,6 +427,14 @@ pub(crate) fn execute_finish_answer(
     // finish-answer agent runs synchronously on the drive thread, so this local
     // token is never set during the call (review I1, accepted as pre-existing).
     let cancel = AtomicBool::new(false);
+    // Connector env isolation (spec 4.3): the finish-answer agent is a spawned
+    // agent too, so its inherited connector tokens are scrubbed and it gets the
+    // run-context env.
+    let connector_policy = crate::adapter::ConnectorEnvPolicy {
+        scrub: env_scrub.to_vec(),
+        run_dir: Some(run_dir.to_path_buf()),
+        node_id: Some(node_id.to_string()),
+    };
     let mut events: Vec<EventPayload> = Vec::new();
     let mut attempt: u32 = 0;
     let mut last_msg = String::new();
@@ -443,6 +478,7 @@ pub(crate) fn execute_finish_answer(
                 stream_log: Some(&stream_log),
                 soul: Some(entry.soul.as_str()),
                 grant_autonomy,
+                connector_policy: &connector_policy,
             };
             match adapter.run_cancellable(&task, &cancel) {
                 Ok(report) => {
@@ -838,6 +874,7 @@ pub(crate) fn maybe_compact_context(
     workdir: &Path,
     cfg: &RunConfig,
     events: &[Event],
+    env_scrub: &[String],
 ) -> Result<Option<EventPayload>, EngineError> {
     let Some(max_bytes) = cfg.context_max_bytes else {
         return Ok(None);
@@ -874,6 +911,14 @@ pub(crate) fn maybe_compact_context(
     // stall the entire run. We bound it with a finite deadline; on overrun (as with
     // any model error) compaction is not critical - we work on the full context.
     const COMPACTION_TIMEOUT: Duration = Duration::from_secs(120);
+    // Connector env isolation (spec 4.3): scrub inherited connector tokens even
+    // from this internal summarizer. It performs no connector calls, so it gets
+    // no run-context env.
+    let connector_policy = crate::adapter::ConnectorEnvPolicy {
+        scrub: env_scrub.to_vec(),
+        run_dir: None,
+        node_id: None,
+    };
     let task = AgentTask {
         prompt: &prompt,
         model: &model,
@@ -884,6 +929,7 @@ pub(crate) fn maybe_compact_context(
         // Context compaction only summarizes text; it needs no file or network
         // access, so it stays in the default permission posture.
         grant_autonomy: false,
+        connector_policy: &connector_policy,
     };
     let summary = match adapter.run(&task) {
         Ok(report) => report.summary,

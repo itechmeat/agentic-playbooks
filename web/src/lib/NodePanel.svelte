@@ -3,13 +3,16 @@
   import type { PlaybookNode } from './types'
   import { profileToField, fieldToProfile } from './profileref'
   import { playbookRefToField, fieldToPlaybookRef } from './playbookref'
-  import { fetchInputDraft, saveInputDraft, fetchPlaybooks } from './api'
+  import { parseBinding, serializeBinding, toggleListEntry, type ConnectorBinding } from './connectorbinding'
+  import { trustBadge, type ConnectorCard, type ConnectorDetail } from './connectors'
+  import { fetchInputDraft, saveInputDraft, fetchPlaybooks, fetchConnectors, fetchConnector } from './api'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Textarea } from '$lib/components/ui/textarea'
   import { Badge } from '$lib/components/ui/badge'
   import * as Field from '$lib/components/ui/field'
   import * as Select from '$lib/components/ui/select'
+  import Combobox from '$lib/components/Combobox.svelte'
   import Trash2 from '@lucide/svelte/icons/trash-2'
 
   let {
@@ -85,6 +88,40 @@
     }
   })
 
+  // Installed connectors (design doc section 9's node-form bullet), for the
+  // add-connector combobox and the untrusted-badge lookup.
+  let connectorCards = $state<ConnectorCard[]>([])
+  $effect(() => {
+    let cancelled = false
+    fetchConnectors(workspace)
+      .then((list) => {
+        if (!cancelled) connectorCards = list
+      })
+      .catch(() => {})
+    return () => {
+      cancelled = true
+    }
+  })
+
+  // Per-connector detail (account names, function names/read_only flags),
+  // fetched lazily by name and cached across nodes/renders. `requested`
+  // guards against re-fetching the same name on every reactive pass - it is
+  // a plain Set (not $state), it only gates network calls, it never drives
+  // rendering.
+  let connectorDetails = $state<Record<string, ConnectorDetail>>({})
+  const requestedDetails = new Set<string>()
+  function ensureDetail(name: string) {
+    if (!name || requestedDetails.has(name)) return
+    requestedDetails.add(name)
+    fetchConnector(name, workspace)
+      .then((d) => {
+        connectorDetails = { ...connectorDetails, [name]: d }
+      })
+      .catch(() => {
+        requestedDetails.delete(name) // allow a retry on the next add/select
+      })
+  }
+
   // Local field state, re-synced only when the node (id) or version (revision)
   // changes - not on every keystroke, else the yaml round-trip rolls back text.
   let f = $state<Record<string, string>>({})
@@ -110,6 +147,109 @@
       }
     })
   })
+
+  // Connector bindings (design doc section 5/9): a structural field, so it
+  // gets its own state array rather than living in the plain-string `f`
+  // record, mirroring how `profile`/`playbook` get dedicated parse/serialize
+  // helpers instead of raw string fields.
+  let connBindings = $state<ConnectorBinding[]>([])
+  $effect(() => {
+    void node.id
+    void revision
+    untrack(() => {
+      const raw = node.connectors
+      connBindings = Array.isArray(raw) ? raw.map(parseBinding) : []
+      for (const b of connBindings) ensureDetail(b.name)
+    })
+  })
+
+  function syncConnectors(next: ConnectorBinding[]) {
+    connBindings = next
+    onChange({ connectors: next.length ? next.map(serializeBinding) : undefined })
+  }
+  function addConnector(name: string) {
+    connectorPickerValue = ''
+    if (!name || connBindings.some((b) => b.name === name)) return
+    ensureDetail(name)
+    syncConnectors([...connBindings, { name, functions: 'all' }])
+  }
+  function removeConnector(name: string) {
+    syncConnectors(connBindings.filter((b) => b.name !== name))
+  }
+  function updateBinding(name: string, patch: Partial<ConnectorBinding>) {
+    syncConnectors(connBindings.map((b) => (b.name === name ? { ...b, ...patch } : b)))
+  }
+
+  function accountNames(name: string): string[] {
+    return (connectorDetails[name]?.accounts ?? []).map((a) => a.name)
+  }
+  function functionNames(name: string): string[] {
+    return (connectorDetails[name]?.functions ?? []).map((fn) => fn.name)
+  }
+  function readOnlyFunctionNames(name: string): string[] {
+    return (connectorDetails[name]?.functions ?? []).filter((fn) => fn.readOnly).map((fn) => fn.name)
+  }
+  function isAccountChecked(b: ConnectorBinding, account: string): boolean {
+    return b.accounts === undefined || b.accounts.includes(account)
+  }
+  function toggleAccount(b: ConnectorBinding, account: string) {
+    const next = toggleListEntry(b.accounts, account, accountNames(b.name))
+    updateBinding(b.name, { accounts: next })
+  }
+  // The list a function-checkbox toggle starts from: every function while
+  // the grant is 'all', the connector's read-only set while it is
+  // 'read_only', or the explicit list itself. Any toggle from here produces
+  // a plain list (or collapses back to undefined), never 'read_only' -
+  // manually touching a checkbox always exits the read_only preset.
+  function currentFunctionsList(b: ConnectorBinding): string[] | undefined {
+    if (b.functions === undefined || b.functions === 'all') return undefined
+    if (b.functions === 'read_only') return readOnlyFunctionNames(b.name)
+    return b.functions
+  }
+  function isFunctionChecked(b: ConnectorBinding, fn: string): boolean {
+    if (b.functions === undefined || b.functions === 'all') return true
+    if (b.functions === 'read_only') return readOnlyFunctionNames(b.name).includes(fn)
+    return b.functions.includes(fn)
+  }
+  function toggleFunction(b: ConnectorBinding, fn: string) {
+    const next = toggleListEntry(currentFunctionsList(b), fn, functionNames(b.name))
+    updateBinding(b.name, { functions: next })
+  }
+  function setReadOnlyPreset(b: ConnectorBinding) {
+    updateBinding(b.name, { functions: 'read_only' })
+  }
+  function setMaxCalls(name: string, raw: string) {
+    if (raw === '') {
+      updateBinding(name, { maxCalls: undefined })
+      return
+    }
+    const n = Number(raw)
+    // 0/negative/non-integer max_calls is invalid (validator V26) - ignore
+    // rather than write a broken value; the input already carries min="1".
+    if (!Number.isInteger(n) || n < 1) return
+    updateBinding(name, { maxCalls: n })
+  }
+  function connectorCard(name: string): ConnectorCard | undefined {
+    return connectorCards.find((c) => c.name === name)
+  }
+
+  let connectorPickerValue = $state('')
+  const connectorOptions = $derived(
+    connectorCards
+      .filter((c) => !connBindings.some((b) => b.name === c.name))
+      .map((c) => ({ value: c.name, label: c.displayName || c.name })),
+  )
+  $effect(() => {
+    const v = connectorPickerValue
+    if (v) addConnector(v)
+  })
+
+  const badgeClass = {
+    ok: 'border-success/30 bg-success/15 text-success',
+    warn: 'border-warning/30 bg-warning/15 text-warning',
+    danger: 'border-destructive/30 bg-destructive/15 text-destructive',
+    muted: '',
+  } as const
 
   // Start-node "input prompt" run draft: a per-run seed the operator can edit
   // before running, stored server-side outside the playbook YAML/version.
@@ -308,6 +448,102 @@
           value={f.success_check}
           oninput={(e) => setStr('success_check', e.currentTarget.value)}
         />
+      </Field.Field>
+
+      <Field.Field>
+        <Field.FieldLabel>connectors</Field.FieldLabel>
+        <div class="flex flex-col gap-2">
+          {#each connBindings as b (b.name)}
+            {@const card = connectorCard(b.name)}
+            {@const detail = connectorDetails[b.name]}
+            <div class="flex flex-col gap-2 rounded-md border border-border p-2">
+              <div class="flex items-center gap-2">
+                <span class="truncate font-mono text-xs">{b.name}</span>
+                {#if card && card.trust !== 'approved'}
+                  {@const badge = trustBadge(card.trust)}
+                  <Badge variant="outline" class={badgeClass[badge.tone]}>{badge.label}</Badge>
+                {/if}
+                <Button
+                  variant="ghost"
+                  size="icon"
+                  class="ml-auto size-6 text-muted-foreground hover:text-destructive"
+                  title="Remove connector"
+                  onclick={() => removeConnector(b.name)}
+                >
+                  <Trash2 class="size-3.5" />
+                </Button>
+              </div>
+
+              {#if detail}
+                {#if detail.accounts.length > 0}
+                  <div class="flex flex-col gap-1">
+                    <span class="text-xs text-muted-foreground">accounts (unchecked: not granted)</span>
+                    <div class="flex flex-wrap gap-3">
+                      {#each detail.accounts as a (a.name)}
+                        <label class="flex items-center gap-1 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={isAccountChecked(b, a.name)}
+                            onchange={() => toggleAccount(b, a.name)}
+                          />
+                          {a.name}
+                        </label>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+
+                {#if detail.functions.length > 0}
+                  <div class="flex flex-col gap-1">
+                    <div class="flex items-center gap-2">
+                      <span class="text-xs text-muted-foreground">functions (unchecked: not granted)</span>
+                      <Button
+                        variant={b.functions === 'read_only' ? 'secondary' : 'outline'}
+                        size="sm"
+                        class="h-6 px-2 text-xs"
+                        onclick={() => setReadOnlyPreset(b)}
+                      >
+                        read_only
+                      </Button>
+                    </div>
+                    <div class="flex flex-wrap gap-3">
+                      {#each detail.functions as fn (fn.name)}
+                        <label class="flex items-center gap-1 text-xs">
+                          <input
+                            type="checkbox"
+                            checked={isFunctionChecked(b, fn.name)}
+                            onchange={() => toggleFunction(b, fn.name)}
+                          />
+                          {fn.name}
+                        </label>
+                      {/each}
+                    </div>
+                  </div>
+                {/if}
+              {/if}
+
+              <div class="flex items-center gap-2">
+                <Field.FieldLabel for={`np-conn-max-${b.name}`} class="text-xs">max_calls</Field.FieldLabel>
+                <Input
+                  id={`np-conn-max-${b.name}`}
+                  type="number"
+                  min="1"
+                  class="h-7 w-24"
+                  value={b.maxCalls ?? ''}
+                  oninput={(e) => setMaxCalls(b.name, e.currentTarget.value)}
+                />
+              </div>
+            </div>
+          {/each}
+
+          <Combobox
+            bind:value={connectorPickerValue}
+            options={connectorOptions}
+            placeholder="Add connector..."
+            emptyText="No connectors available"
+            allowCustom={false}
+          />
+        </div>
       </Field.Field>
     {:else if kind === 'script'}
       <Field.Field>

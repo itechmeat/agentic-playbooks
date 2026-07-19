@@ -188,6 +188,8 @@ impl WfMcp {
         expected_digest: String,
         expected_bundles: BTreeMap<String, String>,
         expected_children: BTreeMap<String, apb_engine::run_config::ChildExpectation>,
+        expected_connectors: BTreeMap<String, String>,
+        expected_connector_accounts: BTreeMap<String, String>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
@@ -203,6 +205,8 @@ impl WfMcp {
             Some(expected_digest),
             Some(expected_bundles),
             Some(expected_children),
+            expected_connectors,
+            expected_connector_accounts,
         );
         let value = match started {
             Ok(v) => v,

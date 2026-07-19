@@ -36,6 +36,16 @@ mod background_run_test;
 mod background_supervisor_test;
 #[path = "suite/child_run_event_test.rs"]
 mod child_run_event_test;
+#[path = "suite/connector_call.rs"]
+mod connector_call;
+#[path = "suite/connector_e2e.rs"]
+mod connector_e2e;
+#[path = "suite/connector_healthcheck.rs"]
+mod connector_healthcheck;
+#[path = "suite/connector_manifest.rs"]
+mod connector_manifest;
+#[path = "suite/connector_run.rs"]
+mod connector_run;
 #[path = "suite/context_compaction_test.rs"]
 mod context_compaction_test;
 #[path = "suite/context_test.rs"]

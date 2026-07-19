@@ -1,3 +1,4 @@
+use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
 
 use crate::profile::{ProfileScope, QualifiedProfileRef};
@@ -196,6 +197,15 @@ impl NodeKind {
             _ => None,
         }
     }
+
+    /// This node's connector bindings (spec 2026-07-18-connectors-design
+    /// section 5). An empty slice for every kind except `agent_task`.
+    pub fn connector_bindings(&self) -> &[ConnectorBinding] {
+        match self {
+            NodeKind::AgentTask { connectors, .. } => connectors,
+            _ => &[],
+        }
+    }
 }
 
 /// Whether the raw YAML has traces of schema-1 executors: a top-level
@@ -317,6 +327,146 @@ impl<'de> Deserialize<'de> for QualifiedPlaybookRef {
     }
 }
 
+/// A node's grant for one connector's `functions:` (spec
+/// 2026-07-18-connectors-design section 5): `All` (default, absent field) -
+/// every function callable; `ReadOnly` (`functions: read_only`) - only
+/// functions the connector marks `read_only: true`
+/// (`ConnectorDoc::read_only_functions`); `List` (`functions: [a, b]`) - an
+/// explicit allowlist of function names.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FunctionsAllow {
+    #[default]
+    All,
+    ReadOnly,
+    List(Vec<String>),
+}
+
+/// Intermediate form for `FunctionsAllow`: a bare string (only `read_only` is
+/// accepted) or a sequence of function names.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum FunctionsAllowForm {
+    Str(String),
+    List(Vec<String>),
+}
+
+impl<'de> Deserialize<'de> for FunctionsAllow {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match FunctionsAllowForm::deserialize(d)? {
+            FunctionsAllowForm::Str(s) if s == "read_only" => FunctionsAllow::ReadOnly,
+            FunctionsAllowForm::Str(s) => {
+                return Err(serde::de::Error::custom(format!(
+                    "invalid `functions` value `{s}`; expected `read_only` or a list of function names"
+                )));
+            }
+            FunctionsAllowForm::List(names) => FunctionsAllow::List(names),
+        })
+    }
+}
+
+/// A node's binding of one connector (spec 2026-07-18-connectors-design
+/// section 5): the connector folder name, an optional restriction to a
+/// subset of configured accounts (`None` - all accounts), the functions grant
+/// (`FunctionsAllow`), and an optional per-run call budget. Accepted in YAML
+/// as a bare string (shorthand, everything else default) or as an object.
+/// Structural checks (name format, duplicates, empty/duplicate list entries,
+/// `max_calls == 0`) are validator V23-V26; FS-dependent checks (connector
+/// installed, account/function exists) are a later task.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConnectorBinding {
+    pub name: String,
+    pub accounts: Option<Vec<String>>,
+    pub functions: FunctionsAllow,
+    pub max_calls: Option<u32>,
+}
+
+/// The object form of a connector binding. A separate struct with
+/// `deny_unknown_fields`, mirroring `RefFull` in `profile.rs`, so a typo in a
+/// key is a hard error rather than silently defaulting.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConnectorBindingFull {
+    name: String,
+    #[serde(default)]
+    accounts: Option<Vec<String>>,
+    #[serde(default)]
+    functions: FunctionsAllow,
+    #[serde(default)]
+    max_calls: Option<u32>,
+}
+
+/// An intermediate form for deserializing "string or object", mirroring
+/// `RefForm` in `profile.rs`.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ConnectorBindingForm {
+    Short(String),
+    Full(ConnectorBindingFull),
+}
+
+impl<'de> Deserialize<'de> for ConnectorBinding {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match ConnectorBindingForm::deserialize(d)? {
+            ConnectorBindingForm::Short(name) => Self {
+                name,
+                accounts: None,
+                functions: FunctionsAllow::All,
+                max_calls: None,
+            },
+            ConnectorBindingForm::Full(ConnectorBindingFull {
+                name,
+                accounts,
+                functions,
+                max_calls,
+            }) => Self {
+                name,
+                accounts,
+                functions,
+                max_calls,
+            },
+        })
+    }
+}
+
+/// Serializes back to the bare-string shorthand when `accounts`, `functions`,
+/// and `max_calls` are all default (round-trips the web form cleanly);
+/// otherwise as an object, omitting `functions` entirely when it is `All`
+/// (mirrors the YAML shorthand: an absent field means "every function").
+impl Serialize for ConnectorBinding {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        if self.accounts.is_none()
+            && self.functions == FunctionsAllow::All
+            && self.max_calls.is_none()
+        {
+            return s.serialize_str(&self.name);
+        }
+        let mut len = 1;
+        if self.accounts.is_some() {
+            len += 1;
+        }
+        if self.functions != FunctionsAllow::All {
+            len += 1;
+        }
+        if self.max_calls.is_some() {
+            len += 1;
+        }
+        let mut state = s.serialize_struct("ConnectorBinding", len)?;
+        state.serialize_field("name", &self.name)?;
+        if let Some(accounts) = &self.accounts {
+            state.serialize_field("accounts", accounts)?;
+        }
+        match &self.functions {
+            FunctionsAllow::All => {}
+            FunctionsAllow::ReadOnly => state.serialize_field("functions", "read_only")?,
+            FunctionsAllow::List(names) => state.serialize_field("functions", names)?,
+        }
+        if let Some(max_calls) = self.max_calls {
+            state.serialize_field("max_calls", &max_calls)?;
+        }
+        state.end()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Node {
     pub id: String,
@@ -355,6 +505,13 @@ pub enum NodeKind {
         /// if the agent reported success. `None` - no check is performed.
         #[serde(default)]
         success_check: Option<String>,
+        /// Connector bindings for this node (spec
+        /// 2026-07-18-connectors-design section 5): additive to schema 2, so
+        /// an old playbook without the field parses unchanged. Only
+        /// `agent_task` carries connectors - `NodeKind::connector_bindings`
+        /// returns an empty slice for every other kind.
+        #[serde(default)]
+        connectors: Vec<ConnectorBinding>,
     },
     Script {
         script: String,
@@ -576,5 +733,118 @@ edges: []
             }
             _ => panic!("expected finish with prompt+profile"),
         }
+    }
+
+    #[test]
+    fn connector_bindings_parse_shorthand_and_full_forms() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: a, type: agent_task, prompt: hi, profile: x, connectors: [jira] }
+  - id: b
+    type: agent_task
+    prompt: hi
+    profile: x
+    connectors:
+      - { name: telegram, accounts: [team-bot], functions: [send_message], max_calls: 50 }
+      - { name: github, functions: read_only }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+
+        let a = pb.node("a").unwrap().kind.connector_bindings();
+        assert_eq!(a.len(), 1);
+        assert_eq!(a[0].name, "jira");
+        assert!(a[0].accounts.is_none());
+        assert_eq!(a[0].functions, FunctionsAllow::All);
+        assert!(a[0].max_calls.is_none());
+
+        let b = pb.node("b").unwrap().kind.connector_bindings();
+        assert_eq!(b.len(), 2);
+        assert_eq!(b[0].name, "telegram");
+        assert_eq!(b[0].accounts, Some(vec!["team-bot".to_string()]));
+        assert_eq!(
+            b[0].functions,
+            FunctionsAllow::List(vec!["send_message".to_string()])
+        );
+        assert_eq!(b[0].max_calls, Some(50));
+        assert_eq!(b[1].name, "github");
+        assert!(b[1].accounts.is_none());
+        assert_eq!(b[1].functions, FunctionsAllow::ReadOnly);
+    }
+
+    #[test]
+    fn connector_binding_unknown_field_is_rejected() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: a, type: agent_task, prompt: hi, profile: x, connectors: [{ name: jira, bogus: 1 }] }
+edges: []
+"#;
+        assert!(Playbook::from_yaml(yaml).is_err());
+    }
+
+    #[test]
+    fn nodes_without_connectors_have_empty_bindings() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        assert!(pb.node("s").unwrap().kind.connector_bindings().is_empty());
+        assert!(pb.node("a").unwrap().kind.connector_bindings().is_empty());
+    }
+
+    #[test]
+    fn connector_binding_serializes_to_bare_string_when_all_default() {
+        let bare = ConnectorBinding {
+            name: "jira".into(),
+            accounts: None,
+            functions: FunctionsAllow::All,
+            max_calls: None,
+        };
+        let yaml = serde_yaml_ng::to_string(&bare).unwrap();
+        assert_eq!(yaml.trim(), "jira");
+    }
+
+    #[test]
+    fn connector_binding_serializes_to_object_when_non_default() {
+        let full = ConnectorBinding {
+            name: "telegram".into(),
+            accounts: Some(vec!["team-bot".into()]),
+            functions: FunctionsAllow::List(vec!["send_message".into()]),
+            max_calls: Some(50),
+        };
+        let yaml = serde_yaml_ng::to_string(&full).unwrap();
+        assert!(yaml.contains("name: telegram"));
+        assert!(yaml.contains("team-bot"));
+        assert!(yaml.contains("send_message"));
+        assert!(yaml.contains("max_calls: 50"));
+    }
+
+    #[test]
+    fn connector_binding_read_only_functions_serializes_as_string_and_omits_default_functions() {
+        let read_only = ConnectorBinding {
+            name: "github".into(),
+            accounts: None,
+            functions: FunctionsAllow::ReadOnly,
+            max_calls: None,
+        };
+        let yaml = serde_yaml_ng::to_string(&read_only).unwrap();
+        assert!(yaml.contains("functions: read_only"));
+        assert!(!yaml.contains("accounts"));
+        assert!(!yaml.contains("max_calls"));
     }
 }

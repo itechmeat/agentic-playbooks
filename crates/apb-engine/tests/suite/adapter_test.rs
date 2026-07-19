@@ -34,6 +34,7 @@ fn claude_adapter_success_via_stub() {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
+            connector_policy: &Default::default(),
         })
         .unwrap();
     assert_eq!(report.status, NodeStatus::Succeeded);
@@ -56,6 +57,7 @@ fn claude_adapter_nonzero_exit_is_process_exit() {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
+            connector_policy: &Default::default(),
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::ProcessExit));

@@ -6,12 +6,15 @@
 use std::path::Path;
 
 use apb_core::config::program_in_path;
+use apb_core::connector::config::account_digest;
+use apb_core::connector::resolve::resolve_playbook;
+use apb_core::connector::secrets::missing_vars;
 use apb_core::profile::ProfileScope;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::Registry;
 use apb_core::schema::{Effect, NodeKind, Playbook};
 use apb_core::scope::{Origin, PlaybookRef, digest_str};
-use apb_core::trust::{Lifecycle, TrustStore, read_lifecycle};
+use apb_core::trust::{Lifecycle, TrustStore, account_trust_id, read_lifecycle};
 use apb_engine::run_config::ChildExpectation;
 use serde_json::{Value, json};
 
@@ -26,6 +29,14 @@ pub fn effect_str(e: &Effect) -> &'static str {
         Effect::Irreversible => "irreversible",
     }
 }
+
+/// The two connector permit maps the gate produces: `connector name -> tree
+/// digest` and `"connector/account" -> account digest`. Handed to the engine
+/// verbatim as `expected_connectors` / `expected_connector_accounts`.
+pub type ConnectorPermitMaps = (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+);
 
 /// Preflight facts for the two-phase contract (spec 7).
 pub struct Preflight {
@@ -80,6 +91,18 @@ pub struct RunPermit {
     /// Verified sub-playbook pins, keyed by THIS playbook's playbook-node id
     /// (spec C). The engine receives it verbatim and rejects drift.
     pub children: std::collections::BTreeMap<String, ChildExpectation>,
+    /// Verified connector tree digests, `connector name -> tree digest` (spec
+    /// 6 step 1). Covers every connector THIS playbook binds. Handed to the
+    /// engine verbatim as `expected_connectors`; run-start re-verifies it with
+    /// an exact bidirectional key-set match (`snapshot_connectors`).
+    pub connectors: std::collections::BTreeMap<String, String>,
+    /// Verified connector account digests, `"connector/account" -> account
+    /// digest` (spec 6 step 1). Covers EVERY merged account of every connector
+    /// the playbook uses, not only node-granted ones: any merged account is
+    /// reachable via config-level behavior (default flags, later grant edits),
+    /// so trust and drift detection span the full merged set. Handed to the
+    /// engine verbatim as `expected_connector_accounts`.
+    pub connector_accounts: std::collections::BTreeMap<String, String>,
 }
 
 /// One-pass walk of a playbook's sub-playbook tree (spec C), shared by the local
@@ -194,6 +217,14 @@ pub fn check_run(
         supervised,
     )?;
 
+    // Connector trust (spec 6 step 1, 7): resolve every bound connector,
+    // check env presence, and gate both connector and account digests. Unlike
+    // profile/playbook trust, `acknowledge_untrusted` does NOT bypass this -
+    // connector and account trust guard secret egress, not content taste.
+    // Returns the two permit maps handed to the engine verbatim.
+    let (connectors, connector_accounts) =
+        check_connectors(root, &loaded.playbook, acknowledge_untrusted)?;
+
     // Sub-playbook pins (spec C): walk the reference tree in the same gate pass,
     // detect cycles, and trust-check each child's bundles alongside the parent's.
     // The recursive effects union that this walk also accumulates is the user's
@@ -223,7 +254,143 @@ pub fn check_run(
         playbook_digest: digest,
         profile_bundles,
         children: tree.children,
+        connectors,
+        connector_accounts,
     })
+}
+
+/// Connector trust gate (spec 6 step 1, 7). For a playbook that binds any
+/// connector: resolves every connector once, verifies every required secret
+/// env var resolves (early failure per spec 6 step 1), then gates both the
+/// connector tree digest and every merged account digest against the trust
+/// store. Returns the two permit maps on success:
+/// - `connector name -> tree digest`
+/// - `"connector/account" -> account digest`, covering EVERY merged account
+///   of every connector the playbook uses (not only node-granted ones).
+///
+/// `acknowledge_untrusted` is accepted for signature symmetry with the other
+/// gate checks but is DELIBERATELY NOT consulted: connector and account trust
+/// guard secret egress (a foreign `connector.yaml` or a redirected account
+/// `base_url` can exfiltrate a token), so unlike playbook/profile trust they
+/// are never bypassable by an acknowledge. Approval happens out of band via
+/// the trust store (the CLI/UI approve flows).
+/// Public seam for the connector trust gate ALONE (spec 6 step 1, 7), for a
+/// caller that does not go through the full `check_run` policy gate but still
+/// must never start a connector-binding run with an empty (and therefore
+/// vacuously-refusing, or worse silently-unverified) permit map - the
+/// dashboard's `POST /api/playbooks/{id}/run` handler in `apb-server`, which
+/// has no MCP tool call in front of it. Runs the EXACT SAME resolution and
+/// trust checks `check_run` runs for its own connector step, so a
+/// dashboard-started run gets the identical connector/account trust decision
+/// an MCP-started run would. Callers must never reimplement this gate at the
+/// call site - always come back through here.
+pub fn connector_permit_maps(
+    root: &Path,
+    playbook: &Playbook,
+) -> Result<ConnectorPermitMaps, Value> {
+    check_connectors(root, playbook, false)
+}
+
+fn check_connectors(
+    root: &Path,
+    playbook: &Playbook,
+    acknowledge_untrusted: bool,
+) -> Result<ConnectorPermitMaps, Value> {
+    // Deliberately ignored - see the doc comment above (secret egress).
+    let _ = acknowledge_untrusted;
+
+    let binds = playbook
+        .nodes
+        .iter()
+        .any(|n| !n.kind.connector_bindings().is_empty());
+    if !binds {
+        return Ok((
+            std::collections::BTreeMap::new(),
+            std::collections::BTreeMap::new(),
+        ));
+    }
+
+    // 1. Resolve every bound connector against the live files.
+    let resolution = match resolve_playbook(root, playbook) {
+        Ok(r) => r,
+        Err(errors) => {
+            return Err(json!({ "policy": "connector_unresolved", "errors": errors }));
+        }
+    };
+
+    // 2. Env presence over the union of every used connector's required env.
+    let mut required: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    for resolved in resolution.connectors.values() {
+        for var in &resolved.required_env {
+            required.insert(var.clone());
+        }
+    }
+    let required: Vec<String> = required.into_iter().collect();
+    let missing = missing_vars(root, &required);
+    if !missing.is_empty() {
+        return Err(json!({ "policy": "connector_env_missing", "missing": missing }));
+    }
+
+    // 3. + 4. Trust: connector tree digest first (a changed folder is a bigger
+    // deal than an account), then every merged account digest.
+    let store = TrustStore::load();
+    let mut connectors: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut accounts: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
+    let mut untrusted_connectors: Vec<String> = Vec::new();
+    let mut unapproved_accounts: Vec<String> = Vec::new();
+    let mut account_fields = serde_json::Map::new();
+
+    for (name, resolved) in &resolution.connectors {
+        let digest = resolved.loaded.digest.clone();
+        if !store.is_approved(&digest) {
+            untrusted_connectors.push(name.clone());
+        }
+        connectors.insert(name.clone(), digest);
+
+        for account in &resolved.accounts {
+            let id = account_trust_id(name, &account.name);
+            let adigest = account_digest(account);
+            if !store.is_approved(&adigest) && !unapproved_accounts.contains(&id) {
+                unapproved_accounts.push(id.clone());
+                account_fields.insert(id.clone(), account_display(account));
+            }
+            accounts.insert(id, adigest);
+        }
+    }
+
+    if !untrusted_connectors.is_empty() {
+        return Err(json!({
+            "policy": "untrusted_connector_requires_approve",
+            "connectors": untrusted_connectors,
+            "detail": "approve the connector digest via the approve surface; acknowledge_untrusted does not bypass connector trust",
+        }));
+    }
+    if !unapproved_accounts.is_empty() {
+        return Err(json!({
+            "policy": "unapproved_connector_account",
+            "accounts": unapproved_accounts,
+            "fields": Value::Object(account_fields),
+            "detail": "approve the account digest via the approve surface; acknowledge_untrusted does not bypass account trust",
+        }));
+    }
+
+    Ok((connectors, accounts))
+}
+
+/// Non-secret display of an account for an approval prompt (spec 7: the user
+/// sees the concrete fields they approve). Every value is safe: a secret-marked
+/// field holds only its raw `{{env.VAR}}` reference in the config, never the
+/// resolved secret, so the whole `fields` map plus the `default` flag can be
+/// shown. This mirrors exactly what the account digest pins.
+fn account_display(account: &apb_core::connector::config::Account) -> Value {
+    let fields: serde_json::Map<String, Value> = account
+        .fields
+        .iter()
+        .map(|(k, v)| (k.clone(), json!(v)))
+        .collect();
+    json!({ "default": account.default, "fields": Value::Object(fields) })
 }
 
 /// Recursively collects and verifies the sub-playbook pins of `playbook`.
@@ -306,6 +473,19 @@ fn collect_children(
         if let Some(req) = &loaded.playbook.requires {
             check_requires(root, req, &resolved.id)?;
         }
+        // Connector trust for the child, the SAME gate the parent gets in
+        // `check_run`: a child binding an untrusted connector (or an
+        // unapproved/changed account, or a missing secret env var) is refused
+        // here, naming the connector/account. acknowledge_untrusted does NOT
+        // bypass it (secret egress). The returned maps are intentionally NOT
+        // merged into the parent's permit: the engine verifies EACH run's
+        // connector maps with an exact bidirectional key-set match
+        // (`snapshot_connectors`), and a sub-playbook child executes as its own
+        // run - handing the parent run a child's connector keys would refuse
+        // the parent as "expected but unused". Threading a child run's own
+        // connector maps into that child run belongs in the engine child-spawn
+        // path (ChildExpectation / scheduler), tracked separately.
+        check_connectors(root, &loaded.playbook, acknowledge_untrusted)?;
         // Fold this child's effective effects into the consented union.
         effects.extend(apb_core::effects::effective(&loaded.playbook));
         let worigin = if matches!(child_origin, Origin::Global) {

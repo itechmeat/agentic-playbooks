@@ -189,6 +189,33 @@ pub enum EventPayload {
         was: String,
         now: String,
     },
+    /// A connector call executed by `apb connector call` (spec
+    /// 2026-07-18-connectors-design section 6.2). Records only outcome
+    /// metadata, never request/response bodies. `url` is the URL rendered
+    /// BEFORE auth injection (so `query`-kind auth never reaches the log) and
+    /// is `""` for a mock function. Appended for calls that actually executed
+    /// (mock or HTTP); never for a dry-run or a gate rejection (config,
+    /// permission, invalid_args), so `max_calls` counts only real calls.
+    /// Optional fields default so old logs read unchanged.
+    ConnectorCall {
+        #[serde(default)]
+        node_id: String,
+        #[serde(default)]
+        connector: String,
+        #[serde(default)]
+        function: String,
+        #[serde(default)]
+        account: String,
+        #[serde(default)]
+        url: String,
+        /// `"ok"` or the error code (`auth`, `rate_limited`, ...).
+        #[serde(default)]
+        outcome: String,
+        #[serde(default)]
+        http_status: Option<u16>,
+        #[serde(default)]
+        duration_ms: u64,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

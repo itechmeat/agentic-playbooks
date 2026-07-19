@@ -138,6 +138,8 @@ fn playbook_run_supervised_no_agent_reaches_succeeded() {
         None,
         None,
         None,
+        Default::default(),
+        Default::default(),
     )
     .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();
@@ -168,6 +170,8 @@ fn supervised_wake_context_append_and_retry_recovers() {
         None,
         None,
         None,
+        Default::default(),
+        Default::default(),
     )
     .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();
@@ -281,6 +285,8 @@ fn supervisor_report_write_then_read() {
         None,
         None,
         None,
+        Default::default(),
+        Default::default(),
     )
     .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();
@@ -309,6 +315,8 @@ fn run_continue_from_posts_command() {
         None,
         None,
         None,
+        Default::default(),
+        Default::default(),
     )
     .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();
@@ -460,6 +468,8 @@ fn write_supervisor_session_is_findable_without_in_memory_table() {
         None,
         None,
         None,
+        Default::default(),
+        Default::default(),
     )
     .unwrap();
     let run_id = res["run_id"].as_str().unwrap().to_string();

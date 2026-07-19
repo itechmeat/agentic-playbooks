@@ -10,6 +10,8 @@ mod common;
 
 #[path = "suite/api_test.rs"]
 mod api_test;
+#[path = "suite/connectors_api_test.rs"]
+mod connectors_api_test;
 #[path = "suite/input_draft_api_test.rs"]
 mod input_draft_api_test;
 #[path = "suite/meta_api_test.rs"]

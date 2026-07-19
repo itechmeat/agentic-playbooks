@@ -206,6 +206,12 @@ impl WfMcp {
             .iter()
             .map(|p| (p.key.clone(), p.bundle.clone()))
             .collect();
+        // Connectors are NOT threaded on the cross-workspace path: the signed
+        // plan carries no connector permit, so `expected_connectors` stays
+        // empty. A foreign playbook that binds connectors therefore fails
+        // closed at run start (the engine refuses connector bindings without a
+        // permit) rather than running with unverified connector trust. Full
+        // cross-workspace connector consent is a separate plan-payload change.
         let opts = apb_engine::RunOptions {
             params: payload.params.clone(),
             expected_digest: Some(payload.digest.clone()),
@@ -292,6 +298,8 @@ impl WfMcp {
                 permit.playbook_digest,
                 permit.profile_bundles,
                 permit.children,
+                permit.connectors,
+                permit.connector_accounts,
             );
         }
 
@@ -306,6 +314,8 @@ impl WfMcp {
                 expected_digest: Some(permit.playbook_digest),
                 expected_profile_bundles: Some(permit.profile_bundles),
                 expected_children: Some(permit.children),
+                expected_connectors: permit.connectors,
+                expected_connector_accounts: permit.connector_accounts,
                 ..Default::default()
             };
             if background == Some(true) {
@@ -333,6 +343,8 @@ impl WfMcp {
                 Some(permit.playbook_digest),
                 Some(permit.profile_bundles),
                 Some(permit.children),
+                permit.connectors,
+                permit.connector_accounts,
             ));
         }
         to_call_tool_result(tools::playbook_run(
@@ -344,6 +356,8 @@ impl WfMcp {
             Some(permit.playbook_digest),
             Some(permit.profile_bundles),
             Some(permit.children),
+            permit.connectors,
+            permit.connector_accounts,
         ))
     }
 

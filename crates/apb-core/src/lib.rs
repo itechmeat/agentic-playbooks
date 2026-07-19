@@ -1,5 +1,6 @@
 pub mod bundle;
 pub mod config;
+pub mod connector;
 pub mod content;
 pub mod detect;
 pub mod dismiss;

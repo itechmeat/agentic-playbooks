@@ -45,6 +45,7 @@ fn acp_success_extracts_result_and_streams_to_log() {
             stream_log: Some(&log),
             soul: None,
             grant_autonomy: false,
+            connector_policy: &Default::default(),
         })
         .unwrap();
 
@@ -76,6 +77,7 @@ fn acp_result_is_error_maps_to_failed_status() {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
+            connector_policy: &Default::default(),
         })
         .unwrap();
     // agent_reported_failure: the report is valid, status failure - NOT a transport error.
@@ -97,6 +99,7 @@ fn acp_no_result_event_is_structured_output_missing() {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
+            connector_policy: &Default::default(),
         })
         .unwrap_err();
     assert!(
@@ -119,6 +122,7 @@ fn acp_nonzero_exit_is_process_exit() {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
+            connector_policy: &Default::default(),
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::ProcessExit), "got: {err:?}");
@@ -139,6 +143,7 @@ fn acp_timeout_kills_streaming_agent() {
             stream_log: None,
             soul: None,
             grant_autonomy: false,
+            connector_policy: &Default::default(),
         })
         .unwrap_err();
     let elapsed = started.elapsed();
@@ -167,6 +172,7 @@ fn acp_cancel_stops_streaming_agent() {
                 stream_log: None,
                 soul: None,
                 grant_autonomy: false,
+                connector_policy: &Default::default(),
             },
             &cancel,
         )

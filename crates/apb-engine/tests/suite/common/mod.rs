@@ -57,3 +57,128 @@ pub fn seed_profile(root: &Path, name: &str, agent: &str, model: &str, fallbacks
 pub fn seed_main(root: &Path) {
     seed_profile(root, "main", "claude-code", "haiku", &[]);
 }
+
+// --- Ephemeral one-shot HTTP server (shared with the connector-call tests) ---
+
+use std::io::{BufRead, BufReader, Read as _, Write as _};
+use std::net::{TcpListener, TcpStream};
+use std::sync::Arc;
+use std::thread::JoinHandle;
+
+/// A canned one-shot HTTP server on `127.0.0.1:0`: it serves a single request
+/// with a fixed response and captures the raw request text (head + body) for
+/// assertions such as "was the auth header injected". `base_url` is the
+/// `http://127.0.0.1:<port>` origin to point a connector account's `base_url`
+/// at. The serving thread joins on drop.
+pub struct TestHttpServer {
+    pub base_url: String,
+    addr: std::net::SocketAddr,
+    request: Arc<Mutex<Option<String>>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl TestHttpServer {
+    /// The raw request the server received, once it has served (call after the
+    /// request under test has completed).
+    pub fn captured_request(&self) -> Option<String> {
+        self.request.lock().unwrap().clone()
+    }
+}
+
+impl Drop for TestHttpServer {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            // If the test under test errored out before ever connecting, the
+            // one-shot `accept()` would block forever and this join would
+            // deadlock. Make a throwaway connection to unblock it (best-effort:
+            // if the thread already served and exited, the listener is gone and
+            // this simply fails).
+            let _ = std::net::TcpStream::connect(self.addr);
+            let _ = h.join();
+        }
+    }
+}
+
+/// Spawns a [`TestHttpServer`] that answers one request with `status`/`reason`,
+/// the given extra `headers`, and `body`. `Content-Length` is always set from
+/// `body`; `Content-Type: application/json` is added when the caller supplies
+/// no content type of its own.
+pub fn spawn_http(
+    status: u16,
+    reason: &str,
+    headers: &[(&str, &str)],
+    body: String,
+) -> TestHttpServer {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+
+    let mut head = format!(
+        "HTTP/1.1 {status} {reason}\r\nContent-Length: {}\r\n",
+        body.len()
+    );
+    let mut has_ctype = false;
+    for (k, v) in headers {
+        if k.eq_ignore_ascii_case("content-type") {
+            has_ctype = true;
+        }
+        head.push_str(&format!("{k}: {v}\r\n"));
+    }
+    if !has_ctype {
+        head.push_str("Content-Type: application/json\r\n");
+    }
+    head.push_str("Connection: close\r\n\r\n");
+    let mut response = head.into_bytes();
+    response.extend_from_slice(body.as_bytes());
+
+    let request = Arc::new(Mutex::new(None));
+    let req_slot = request.clone();
+    let handle = std::thread::spawn(move || {
+        if let Ok((mut stream, _)) = listener.accept() {
+            let captured = read_http_request(&mut stream);
+            *req_slot.lock().unwrap() = Some(captured);
+            let _ = stream.write_all(&response);
+            let _ = stream.flush();
+        }
+    });
+
+    TestHttpServer {
+        base_url,
+        addr,
+        request,
+        handle: Some(handle),
+    }
+}
+
+/// Reads one HTTP request (request line + headers, then a `Content-Length`
+/// body when present) and returns the raw text.
+fn read_http_request(stream: &mut TcpStream) -> String {
+    let mut reader = BufReader::new(stream);
+    let mut head = String::new();
+    let mut content_length = 0usize;
+    loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+            break;
+        }
+        if let Some(rest) = line
+            .to_ascii_lowercase()
+            .strip_prefix("content-length:")
+            .map(str::trim)
+        {
+            content_length = rest.parse().unwrap_or(0);
+        }
+        let done = line == "\r\n" || line == "\n";
+        head.push_str(&line);
+        if done {
+            break;
+        }
+    }
+    if content_length > 0 {
+        let mut body = vec![0u8; content_length];
+        if reader.read_exact(&mut body).is_ok() {
+            head.push_str(&String::from_utf8_lossy(&body));
+        }
+    }
+    head
+}

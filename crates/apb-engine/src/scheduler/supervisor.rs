@@ -74,13 +74,21 @@ pub fn spawn_supervisor_agent(
     // Try the executor chain in order: primary spawn failure -> next
     // fallback. We record the actually used element in a diagnostic
     // file (spawn_supervisor_agent does not write events - drive is the sole writer).
+    // Connector env isolation (spec 4.3): the supervisor is a spawned agent, so
+    // scrub the union of installed connector tokens and hand it the run-context
+    // env (its node id in the manifest is `supervisor`).
+    let connector_policy = crate::adapter::ConnectorEnvPolicy {
+        scrub: apb_core::connector::resolve::all_referenced_env_names(root),
+        run_dir: Some(run_dir.clone()),
+        node_id: Some("supervisor".to_string()),
+    };
     let mut last_err: Option<String> = None;
     for inv in &entry.chain {
         let adapter = crate::adapter::ClaudeAdapter {
             program: inv.canonical_executable.to_string_lossy().into_owned(),
             spec: inv.spec.clone(),
         };
-        match adapter.spawn_supervisor(&brief, &inv.model, root, soul) {
+        match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &connector_policy) {
             Ok(()) => {
                 apb_core::fsutil::atomic_write(
                     &run_dir.join("supervisor").join("executor"),

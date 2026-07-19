@@ -85,6 +85,15 @@ pub enum Kind {
     #[default]
     Playbook,
     ProfileBundle,
+    Connector,
+    ConnectorAccount,
+}
+
+/// Trust record id for a connector account approval: `"connector/account"`,
+/// e.g. `"jira/project-board"`. Used as the `id` field of a `TrustRecord`
+/// with `Kind::ConnectorAccount`; approval itself stays keyed by digest.
+pub fn account_trust_id(connector: &str, account: &str) -> String {
+    format!("{connector}/{account}")
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -155,6 +164,24 @@ impl TrustStore {
 
     pub fn is_approved(&self, digest: &str) -> bool {
         self.approved.contains_key(digest)
+    }
+
+    /// The `id`s of every approved record of the given `kind`, sorted and
+    /// deduped. Lets a caller distinguish "approved" (the current digest is
+    /// in the store) from "changed since approval" (some other digest of
+    /// this same id was approved before) versus "never approved" - `apb
+    /// connector list` uses this to tell an edited-but-previously-trusted
+    /// connector apart from one that was never trusted at all.
+    pub fn approved_record_ids(&self, kind: Kind) -> Vec<String> {
+        let mut ids: Vec<String> = self
+            .approved
+            .values()
+            .filter(|r| r.kind == kind)
+            .map(|r| r.id.clone())
+            .collect();
+        ids.sort();
+        ids.dedup();
+        ids
     }
 
     /// Marks the digest as approved and persists it. The read-modify-write runs
@@ -284,6 +311,109 @@ mod tests {
         assert!(TrustStore::load().is_approved("sha256:cc"));
         store.revoke("sha256:cc").unwrap();
         assert!(!TrustStore::load().is_approved("sha256:cc"));
+    }
+
+    #[test]
+    fn account_trust_id_formats_connector_and_account() {
+        assert_eq!(
+            account_trust_id("jira", "project-board"),
+            "jira/project-board"
+        );
+    }
+
+    #[test]
+    fn connector_and_account_kinds_approve_and_survive_reload() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        }
+        let _g = EnvGuard;
+
+        let mut store = TrustStore::load();
+        assert!(!store.is_approved("sha256:connector-ee"));
+        assert!(!store.is_approved("sha256:account-ff"));
+
+        store
+            .approve_kind(
+                "sha256:connector-ee",
+                "jira",
+                Kind::Connector,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+        let account_id = account_trust_id("jira", "project-board");
+        store
+            .approve_kind(
+                "sha256:account-ff",
+                &account_id,
+                Kind::ConnectorAccount,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+
+        let reloaded = TrustStore::load();
+        assert!(reloaded.is_approved("sha256:connector-ee"));
+        assert!(reloaded.is_approved("sha256:account-ff"));
+
+        // Serialization roundtrip keeps the kind (serde snake_case).
+        let raw = std::fs::read_to_string(cfg.path().join("trust.json")).unwrap();
+        assert!(raw.contains("\"connector\""));
+        assert!(raw.contains("\"connector_account\""));
+        let parsed: TrustStore = serde_json::from_str(&raw).unwrap();
+        assert_eq!(
+            parsed.approved.get("sha256:connector-ee").unwrap().kind,
+            Kind::Connector
+        );
+        assert_eq!(
+            parsed.approved.get("sha256:account-ff").unwrap().kind,
+            Kind::ConnectorAccount
+        );
+        assert_eq!(
+            parsed.approved.get("sha256:account-ff").unwrap().id,
+            "jira/project-board"
+        );
+    }
+
+    #[test]
+    fn approved_record_ids_filters_by_kind_sorted_and_deduped() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        }
+        let _g = EnvGuard;
+
+        let mut store = TrustStore::load();
+        assert!(store.approved_record_ids(Kind::Connector).is_empty());
+
+        store
+            .approve_kind(
+                "sha256:widget-old",
+                "widget",
+                Kind::Connector,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+        store
+            .approve_kind(
+                "sha256:zeta",
+                "zeta",
+                Kind::Connector,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+        store
+            .approve_kind(
+                "sha256:unrelated",
+                "widget",
+                Kind::ConnectorAccount,
+                OriginKind::LocallyApproved,
+            )
+            .unwrap();
+
+        let ids = store.approved_record_ids(Kind::Connector);
+        assert_eq!(ids, vec!["widget".to_string(), "zeta".to_string()]);
     }
 
     #[test]

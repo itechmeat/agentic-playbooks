@@ -71,6 +71,8 @@ pub(crate) fn build_run_manifest(
     global: &GlobalConfig,
     run_dir: &Path,
     expected_bundles: Option<&BTreeMap<String, String>>,
+    expected_connectors: &BTreeMap<String, String>,
+    expected_accounts: &BTreeMap<String, String>,
     overrides: Option<&apb_core::overrides::RunOverrides>,
     supervised: bool,
 ) -> Result<RunExecutionManifest, EngineError> {
@@ -99,6 +101,36 @@ pub(crate) fn build_run_manifest(
     }
 
     let mut manifest = RunExecutionManifest::default();
+
+    // Connectors (spec 6): snapshot the bound connectors + per-node grants
+    // into the manifest, verifying the permit maps verbatim. Independent of
+    // whether the playbook has any profile bindings, so it runs BEFORE the
+    // profile early-return (a connector-only playbook still gets a manifest).
+    // When the playbook binds connectors the permit must be present: an empty
+    // `expected_connectors` means the run did not go through the gate, which
+    // is refused (mirrors the profile-bundle invariant - the CLI/MCP callers
+    // must always pass the gate result).
+    let binds_connectors = playbook
+        .nodes
+        .iter()
+        .any(|n| !n.kind.connector_bindings().is_empty());
+    if binds_connectors {
+        if expected_connectors.is_empty() {
+            return Err(EngineError::Invalid(
+                "connector bindings present but no connector permit".into(),
+            ));
+        }
+        let (connectors, grants) = crate::connector_run::snapshot_connectors(
+            root,
+            run_dir,
+            playbook,
+            expected_connectors,
+            expected_accounts,
+        )?;
+        manifest.connectors = connectors;
+        manifest.connector_grants = grants;
+    }
+
     if bindings.is_empty() {
         return Ok(manifest);
     }
@@ -386,6 +418,8 @@ pub(crate) fn prepare_run_target(
         parent_run: opts.parent_run.clone(),
         depth: opts.depth,
         expected_children: opts.expected_children.clone(),
+        expected_connectors: opts.expected_connectors.clone(),
+        expected_connector_accounts: opts.expected_connector_accounts.clone(),
     };
     write_run_config(&run_dir, &cfg)?;
 
@@ -399,6 +433,8 @@ pub(crate) fn prepare_run_target(
         &global,
         &run_dir,
         opts.expected_profile_bundles.as_ref(),
+        &opts.expected_connectors,
+        &opts.expected_connector_accounts,
         opts.overrides.as_ref(),
         opts.supervisor_expected,
     )?;

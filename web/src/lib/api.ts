@@ -8,6 +8,15 @@ import type {
   PlaybookSummary,
   WriteResult,
 } from './types'
+import type {
+  ConnectorAccount,
+  ConnectorCard,
+  ConnectorDetail,
+  ConnectorFunction,
+  ConnectorMeta,
+  ConnectorTrust,
+} from './connectors'
+import type { ConnectorFunctionStat, ConnectorStats } from './connectorstats'
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url)
@@ -229,4 +238,158 @@ export const promoteVersion = (id: string, version: string, workspace = '') =>
   requestJson<{ promoted: string }>(
     `${pb(id)}/versions/${encodeURIComponent(version)}/promote${qs({ workspace })}`,
     { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) },
+  )
+
+// Connectors (design doc section 9). The server wire shape is snake_case; the
+// dashboard types in `./connectors` are camelCase, so the mapping happens
+// here, at the fetch boundary, the same way the rest of this file owns the
+// wire<->UI shape.
+const conn = (name: string) => `/api/connectors/${encodeURIComponent(name)}`
+
+interface ConnectorCardDto {
+  name: string
+  version: string
+  display_name: string
+  summary: string
+  tags: string[]
+  trust: ConnectorTrust
+  accounts_total: number
+  accounts_ready: number
+}
+
+const toConnectorCard = (d: ConnectorCardDto): ConnectorCard => ({
+  name: d.name,
+  version: d.version,
+  displayName: d.display_name,
+  summary: d.summary,
+  tags: d.tags,
+  trust: d.trust,
+  accountsTotal: d.accounts_total,
+  accountsReady: d.accounts_ready,
+})
+
+export const fetchConnectors = (workspace = '') =>
+  getJson<ConnectorCardDto[]>(`/api/connectors${qs({ workspace })}`).then((list) =>
+    list.map(toConnectorCard),
+  )
+
+interface ConnectorAccountDto {
+  name: string
+  default: boolean
+  fields: Record<string, string>
+  missing_env: string[]
+  trust: ConnectorTrust
+}
+
+const toConnectorAccount = (d: ConnectorAccountDto): ConnectorAccount => ({
+  name: d.name,
+  default: d.default,
+  fields: d.fields,
+  missingEnv: d.missing_env,
+  trust: d.trust,
+})
+
+interface ConnectorFunctionDto {
+  name: string
+  description: string
+  read_only: boolean
+  deprecated: boolean
+}
+
+const toConnectorFunction = (d: ConnectorFunctionDto): ConnectorFunction => ({
+  name: d.name,
+  description: d.description,
+  readOnly: d.read_only,
+  deprecated: d.deprecated,
+})
+
+interface ConnectorDetailDto {
+  name: string
+  version: string
+  trust: ConnectorTrust
+  meta: ConnectorMeta
+  body_md: string
+  functions: ConnectorFunctionDto[]
+  accounts: ConnectorAccountDto[]
+}
+
+export const fetchConnector = (name: string, workspace = '') =>
+  getJson<ConnectorDetailDto>(`${conn(name)}${qs({ workspace })}`).then(
+    (d): ConnectorDetail => ({
+      name: d.name,
+      version: d.version,
+      trust: d.trust,
+      meta: d.meta,
+      bodyMd: d.body_md,
+      functions: d.functions.map(toConnectorFunction),
+      accounts: d.accounts.map(toConnectorAccount),
+    }),
+  )
+
+export interface HealthcheckError {
+  code: string
+  message: string
+  http_status?: number
+  retry_after_sec?: number
+}
+export interface HealthcheckResult {
+  ok: boolean
+  error?: HealthcheckError
+  [key: string]: unknown
+}
+
+// The executor's structured outcome, returned verbatim (design doc section
+// 9/8). The server answers HTTP 200 even for failures, so a trust-gated
+// refusal arrives as a normal `ok:false` body with `error.code === "permission"`,
+// never as an HTTP error. requestJson's non-ok branch only fires on
+// transport-level or server-level HTTP errors, not on healthcheck outcomes.
+export const runConnectorHealthcheck = (name: string, account: string, workspace = '') =>
+  requestJson<HealthcheckResult>(
+    `${conn(name)}/healthcheck/${encodeURIComponent(account)}${qs({ workspace })}`,
+    { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) },
+  )
+
+export const approveConnector = (name: string, account: string | null = null, workspace = '') =>
+  requestJson<{ ok: boolean }>(`/api/connectors/approve${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ name, account }),
+  })
+
+interface ConnectorFunctionStatDto {
+  function: string
+  account: string
+  calls: number
+  errors: number
+  avg_duration_ms: number
+}
+
+interface ConnectorStatsDto {
+  connector: string
+  runs_scanned: number
+  calls: number
+  by_function: ConnectorFunctionStatDto[]
+  by_outcome: Record<string, number>
+}
+
+const toConnectorFunctionStat = (d: ConnectorFunctionStatDto): ConnectorFunctionStat => ({
+  function: d.function,
+  account: d.account,
+  calls: d.calls,
+  errors: d.errors,
+  avgDurationMs: d.avg_duration_ms,
+})
+
+// GET /api/connectors/{name}/stats: usage stats aggregated server-side from
+// recent run event logs (design doc section 9). Read-only; the server bounds
+// the run scan itself, `runsScanned` reports how many it actually read.
+export const fetchConnectorStats = (name: string, workspace = '') =>
+  getJson<ConnectorStatsDto>(`${conn(name)}/stats${qs({ workspace })}`).then(
+    (d): ConnectorStats => ({
+      connector: d.connector,
+      runsScanned: d.runs_scanned,
+      calls: d.calls,
+      byFunction: d.by_function.map(toConnectorFunctionStat),
+      byOutcome: d.by_outcome,
+    }),
   )

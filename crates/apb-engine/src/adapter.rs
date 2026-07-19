@@ -1,5 +1,5 @@
 use std::io::{BufRead, BufReader, Write as _};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
@@ -63,6 +63,37 @@ pub enum ErrorClass {
     Timeout,
 }
 
+/// Connector isolation applied to every spawned agent process (spec 4.3).
+/// `scrub` is the union of env var names referenced by ANY installed connector
+/// config (both scopes), removed from the child so a connector token can never
+/// be inherited by an agent. `run_dir`/`node_id`, when set, become the
+/// `APB_RUN_DIR`/`APB_NODE_ID` context env that `apb connector call` (a child
+/// of the agent) reads to locate the run manifest and check its grants. The
+/// default is empty: no scrub and no context env, so non-connector spawn paths
+/// are untouched.
+#[derive(Debug, Clone, Default)]
+pub struct ConnectorEnvPolicy {
+    pub scrub: Vec<String>,
+    pub run_dir: Option<PathBuf>,
+    pub node_id: Option<String>,
+}
+
+impl ConnectorEnvPolicy {
+    /// Removes every scrubbed var from `cmd`'s environment and, when set,
+    /// injects the run-context env. Called at every agent spawn site.
+    fn apply(&self, cmd: &mut Command) {
+        for name in &self.scrub {
+            cmd.env_remove(name);
+        }
+        if let Some(dir) = &self.run_dir {
+            cmd.env("APB_RUN_DIR", dir);
+        }
+        if let Some(node) = &self.node_id {
+            cmd.env("APB_NODE_ID", node);
+        }
+    }
+}
+
 pub struct AgentTask<'a> {
     pub prompt: &'a str,
     pub model: &'a str,
@@ -85,6 +116,10 @@ pub struct AgentTask<'a> {
     /// the file-writes and network access the run already declared; kept false
     /// for internal, side-effect-free calls (e.g. context compaction).
     pub grant_autonomy: bool,
+    /// Connector env isolation (spec 4.3): scrubbed var names + optional run
+    /// context env, applied at spawn. Defaults to empty for spawn paths that
+    /// carry no connector exposure.
+    pub connector_policy: &'a ConnectorEnvPolicy,
 }
 
 #[derive(Debug)]
@@ -122,6 +157,7 @@ pub trait AgentAdapter {
         _model: &str,
         _workdir: &Path,
         _soul: Option<&str>,
+        _policy: &ConnectorEnvPolicy,
     ) -> Result<(), (ErrorClass, String)> {
         Ok(())
     }
@@ -303,6 +339,9 @@ impl ClaudeAdapter {
             })
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Connector env isolation (spec 4.3): scrub inherited connector tokens
+        // and inject the run-context env before spawning the agent.
+        task.connector_policy.apply(&mut cmd);
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -395,6 +434,9 @@ impl ClaudeAdapter {
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped());
+        // Connector env isolation (spec 4.3): scrub inherited connector tokens
+        // and inject the run-context env before spawning the agent.
+        task.connector_policy.apply(&mut cmd);
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -556,6 +598,7 @@ impl AgentAdapter for ClaudeAdapter {
         model: &str,
         workdir: &Path,
         soul: Option<&str>,
+        policy: &ConnectorEnvPolicy,
     ) -> Result<(), (ErrorClass, String)> {
         // Goes through build_command using the invocation form (not hardcoded
         // -p/--model), otherwise codex/opencode/custom argv and stdin
@@ -575,6 +618,9 @@ impl AgentAdapter for ClaudeAdapter {
             })
             .stdout(Stdio::null())
             .stderr(Stdio::null());
+        // Connector env isolation (spec 4.3): the supervisor is a spawned agent
+        // too, so its inherited connector tokens are scrubbed before spawn.
+        policy.apply(&mut cmd);
         let mut child = cmd.spawn().map_err(|e| {
             (
                 ErrorClass::ProcessExit,

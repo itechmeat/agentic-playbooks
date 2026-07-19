@@ -68,6 +68,15 @@ pub struct RunConfig {
     /// resolve live without a drift check.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_children: Option<BTreeMap<String, ChildExpectation>>,
+    /// Verified connector tree digests from the policy gate, `name -> tree
+    /// digest` (spec 6). Snapshotted here for audit; the run-start verification
+    /// consumes the same map handed in via `RunOptions`.
+    #[serde(default)]
+    pub expected_connectors: BTreeMap<String, String>,
+    /// Verified connector account digests from the policy gate,
+    /// `"connector/account" -> account digest` (spec 6).
+    #[serde(default)]
+    pub expected_connector_accounts: BTreeMap<String, String>,
 }
 
 pub fn write_run_config(run_dir: &Path, cfg: &RunConfig) -> Result<(), EngineError> {
