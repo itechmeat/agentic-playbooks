@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::MutexGuard;
 
 use apb_core::registry::init_project;
+use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, resume_with, run};
 use apb_engine::state::RunStatus;
 
@@ -108,6 +109,74 @@ fn run_with_profile_snapshots_and_writes_manifest() {
     let manifest = fs::read_to_string(run_dir.join("manifest.yaml")).expect("manifest exists");
     assert!(manifest.contains("bundle_digest"));
     assert!(manifest.contains("arch"));
+}
+
+#[test]
+fn attempt_journaled_at_spawn_with_pid_and_duration() {
+    // Task 2 (spawn-time attempt journaling): a real stub-agent node must
+    // journal attempt_started at spawn (carrying the child pid) strictly before
+    // attempt_finished (carrying duration_ms measured from the spawn instant),
+    // with distinct timestamps. This is the write shape that makes a mid-attempt
+    // crash observable: attempt_started is on disk before the agent returns. The
+    // stub sleeps briefly so the spawn write and the return write land in
+    // distinct milliseconds.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(proj.path(), "arch", "", "", "role");
+    set_env(
+        &make_stub(bin.path(), "sleep 0.05\necho done"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run ok");
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).expect("events readable");
+
+    let started = events
+        .iter()
+        .find(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "t"))
+        .expect("attempt_started for node t");
+    let finished = events
+        .iter()
+        .find(|e| matches!(&e.payload, EventPayload::AttemptFinished { node, .. } if node == "t"))
+        .expect("attempt_finished for node t");
+
+    // Ordering: started strictly before finished in the journal.
+    assert!(
+        started.seq < finished.seq,
+        "attempt_started (seq {}) must precede attempt_finished (seq {})",
+        started.seq,
+        finished.seq
+    );
+    // Distinct, ordered timestamps: the spawn-time write predates the
+    // return-time write. With back-to-back writes these could share a ms.
+    assert!(
+        started.ts < finished.ts,
+        "attempt_started ts {} must be strictly before attempt_finished ts {}",
+        started.ts,
+        finished.ts
+    );
+    // pid captured at spawn from child.id().
+    let EventPayload::AttemptStarted { pid, .. } = &started.payload else {
+        unreachable!("matched AttemptStarted above")
+    };
+    assert!(pid.is_some(), "attempt_started.pid must be Some at spawn");
+    // duration_ms measured from the spawn instant.
+    let EventPayload::AttemptFinished { duration_ms, .. } = &finished.payload else {
+        unreachable!("matched AttemptFinished above")
+    };
+    assert!(
+        duration_ms.is_some(),
+        "attempt_finished.duration_ms must be Some"
+    );
 }
 
 #[test]

@@ -64,11 +64,22 @@ pub enum EventPayload {
         /// workdir; `advisory` - a pointer string with names in the shared workdir.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         skills_mode: Option<String>,
+        /// OS process id of the spawned agent, captured at spawn time (from
+        /// `child.id()`). Written when the attempt is journaled at spawn so a
+        /// mid-attempt crash leaves an identifiable open attempt. `None` for
+        /// old logs and for paths that do not journal the spawn (finish-answer).
+        #[serde(default)]
+        pid: Option<u32>,
     },
     AttemptFinished {
         node: String,
         attempt: u32,
         status: String,
+        /// Wall-clock milliseconds from the agent spawn to this attempt's
+        /// return, measured from the spawn instant. `None` for old logs and
+        /// for paths that do not journal the spawn (finish-answer).
+        #[serde(default)]
+        duration_ms: Option<u64>,
     },
     NodeFinished {
         node: String,

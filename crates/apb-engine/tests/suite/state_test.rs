@@ -55,7 +55,14 @@ fn folds_finished_run() {
 
 #[test]
 fn open_attempt_marks_interrupted() {
-    // attempt_started without attempt_finished => node and run interrupted
+    // Crash-shape simulation (Task 2 fold test): a real mid-attempt crash now
+    // leaves `attempt_started` in the journal (written at spawn time, carrying
+    // the agent pid) with NO matching `attempt_finished`. This hand-built
+    // journal reproduces exactly that shape - a spawn-journaled attempt that
+    // never returned - and asserts the fold at state.rs:184-192 maps the open
+    // attempt to interrupted (node and run). Before spawn-time journaling this
+    // shape could never occur, because both events were written back-to-back at
+    // node return, so a dead node read as `running` forever.
     let events = vec![
         ev(
             0,
@@ -72,6 +79,7 @@ fn open_attempt_marks_interrupted() {
                 agent: "claude-code".into(),
                 soul_delivery: None,
                 skills_mode: None,
+                pid: Some(4242),
             },
         ),
     ];

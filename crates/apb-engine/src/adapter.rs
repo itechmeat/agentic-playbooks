@@ -136,14 +136,22 @@ pub trait AgentAdapter {
     /// running, the implementation periodically checks `cancel` and, if set,
     /// kills the process and returns Err(Transport, "cancelled"). Needed by
     /// parallel branches so join:any can cancel the losing branch (spec 8.4).
-    /// The default ignores `cancel` and just calls `run` (for adapters
-    /// without kill support).
+    ///
+    /// `on_spawn`, when set, is invoked exactly once immediately after the agent
+    /// process is successfully spawned, carrying the child pid (`child.id()`).
+    /// The attempt-journaling path uses it to append `attempt_started` at spawn
+    /// time so a crash mid-attempt leaves an open attempt on disk. It never
+    /// fires if the spawn itself fails.
+    ///
+    /// The default ignores `cancel`/`on_spawn` and just calls `run` (for
+    /// adapters without kill or spawn-hook support).
     fn run_cancellable(
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
+        on_spawn: Option<&dyn Fn(u32)>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
-        let _ = cancel;
+        let _ = (cancel, on_spawn);
         self.run(task)
     }
 
@@ -320,6 +328,7 @@ impl ClaudeAdapter {
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
+        on_spawn: Option<&dyn Fn(u32)>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
         let (argv, stdin_payload) = build_command(
@@ -348,6 +357,11 @@ impl ClaudeAdapter {
                 format!("spawn `{}` failed: {e}", self.program),
             )
         })?;
+        // Attempt journaling (spawn-time): the process exists, so record it now
+        // (pid = child.id()) before any of its work runs.
+        if let Some(cb) = on_spawn {
+            cb(child.id());
+        }
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
         {
@@ -413,6 +427,7 @@ impl ClaudeAdapter {
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
+        on_spawn: Option<&dyn Fn(u32)>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
         // Base argv comes from the invocation form; claude-specific streaming
@@ -443,6 +458,11 @@ impl ClaudeAdapter {
                 format!("spawn `{}` failed: {e}", self.program),
             )
         })?;
+        // Attempt journaling (spawn-time): record the process (pid = child.id())
+        // now, before its streaming work runs.
+        if let Some(cb) = on_spawn {
+            cb(child.id());
+        }
 
         // Read stdout on a background thread: BufReader::lines() blocks
         // line by line, but we also need to poll cancel/timeout concurrently.
@@ -570,18 +590,20 @@ fn parse_stream_result(lines: &[String]) -> Result<AgentReport, (ErrorClass, Str
 
 impl AgentAdapter for ClaudeAdapter {
     fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)> {
-        // A non-cancellable run is a cancellable run with an always-false flag.
-        self.run_cancellable(task, &AtomicBool::new(false))
+        // A non-cancellable run is a cancellable run with an always-false flag
+        // and no spawn hook.
+        self.run_cancellable(task, &AtomicBool::new(false), None)
     }
 
     fn run_cancellable(
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
+        on_spawn: Option<&dyn Fn(u32)>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         match self.spec.transport {
-            Transport::Headless => self.run_headless(task, cancel),
-            Transport::Acp => self.run_acp(task, cancel),
+            Transport::Headless => self.run_headless(task, cancel, on_spawn),
+            Transport::Acp => self.run_acp(task, cancel, on_spawn),
         }
     }
 

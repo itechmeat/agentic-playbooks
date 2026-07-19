@@ -46,6 +46,41 @@ use patch::*;
 use prepare::*;
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
+
+/// A shared append handle over the run's single event log, used only for the
+/// two attempt-lifecycle events that are journaled off the return batch:
+/// `attempt_started` at spawn time (so a crash mid-attempt leaves an open
+/// attempt on disk) and `attempt_finished` at return time. Every OTHER event
+/// keeps drive's direct, return-batch write path.
+///
+/// The log is wrapped in a `Mutex` so the same handle serves both drive paths:
+/// the sequential path holds the sole reference, while the parallel batch path
+/// shares `&Journal` across scoped worker threads. Each append is a single
+/// atomic line write, so lock contention is irrelevant.
+pub(crate) struct Journal<'a> {
+    log: std::sync::Mutex<&'a mut EventLog>,
+}
+
+impl<'a> Journal<'a> {
+    pub(crate) fn new(log: &'a mut EventLog) -> Self {
+        Self {
+            log: std::sync::Mutex::new(log),
+        }
+    }
+
+    /// Appends one event under the lock. Poison-tolerant: a worker thread that
+    /// panicked mid-append would poison the mutex, but the log file itself is
+    /// append-only and a partial line is impossible (a single `writeln!`), so
+    /// recovering the inner guard and continuing is safe.
+    pub(crate) fn append(&self, payload: EventPayload) -> Result<(), EngineError> {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .append(payload)?;
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum RunMode {
     #[default]
@@ -817,70 +852,93 @@ fn drive(
                 // A shared cancel flag: once join:any is ready we set it, and
                 // still-running branches kill their processes (7c-3).
                 let cancel = Arc::new(AtomicBool::new(false));
-                let (tx, rx) = mpsc::channel();
-                for n in &batch {
-                    let playbook_c = playbook.clone();
-                    let rd = run_dir.to_path_buf();
-                    let wd = workdir.clone();
-                    let rid = run_id.clone();
-                    let st = state.clone();
-                    let cfg_c = cfg.clone();
-                    let node = n.clone();
-                    let op = prompt_overrides.remove(n);
-                    let tx = tx.clone();
-                    let cancel_c = Arc::clone(&cancel);
-                    let scrub_c = env_scrub.clone();
-                    std::thread::spawn(move || {
-                        let res = execute_node(
-                            &playbook_c,
-                            &rd,
-                            &wd,
-                            &node,
-                            &rid,
-                            &st,
-                            &cfg_c,
-                            op,
-                            &cancel_c,
-                            &scrub_c,
-                        );
-                        let _ = tx.send((node, res));
-                    });
-                }
-                drop(tx);
-                // Collect completions in readiness order and write their events.
                 let mut batch_statuses: Vec<NodeStatus> = Vec::new();
-                for (node, res) in rx {
-                    let (status, output, evs) = res?;
-                    for ev in evs {
-                        log.append(ev)?;
-                    }
-                    log.append(EventPayload::NodeFinished {
-                        node: node.clone(),
-                        status: status.as_str().into(),
-                        attempt: 1,
-                        output,
-                        // The concurrent batch path does not run through the
-                        // node cache, so it captures no declared artifacts.
-                        artifacts: Vec::new(),
-                    })?;
-                    batch_statuses.push(status);
-                    // If this branch successfully fed a join:any - cancel the others.
-                    if status == NodeStatus::Succeeded {
-                        let state_peek = RunState::fold(&read_all(run_dir)?);
-                        let feeds_ready_any = parallel::successors(&playbook, &node, &state_peek)
-                            .into_iter()
-                            .any(|s| {
-                                parallel::is_join(&playbook, &s)
-                                    && parallel::join_mode(&playbook, &s) == parallel::JoinMode::Any
-                                    && matches!(
-                                        parallel::join_readiness(&playbook, &s, &state_peek),
-                                        JoinReadiness::ReadySuccess
-                                    )
+                // The batch shares ONE journal (the drive's log behind a Mutex)
+                // so each worker thread appends its own attempt_started at spawn
+                // time and attempt_finished at return, while the collector on this
+                // thread appends the returned RetryStarted/FallbackTriggered and
+                // the per-node NodeFinished through the same journal. Scoped
+                // threads let the workers borrow `&Journal` without a 'static
+                // bound; the block scopes the borrow so `log` is free again for
+                // the frontier writes below. Each append is one atomic line
+                // write, so the shared lock is uncontended in practice.
+                {
+                    let journal = Journal::new(&mut *log);
+                    let (tx, rx) = mpsc::channel();
+                    std::thread::scope(|scope| -> Result<(), EngineError> {
+                        for n in &batch {
+                            let playbook_c = playbook.clone();
+                            let rd = run_dir.to_path_buf();
+                            let wd = workdir.clone();
+                            let rid = run_id.clone();
+                            let st = state.clone();
+                            let cfg_c = cfg.clone();
+                            let node = n.clone();
+                            let op = prompt_overrides.remove(n);
+                            let tx = tx.clone();
+                            let cancel_c = Arc::clone(&cancel);
+                            let scrub_c = env_scrub.clone();
+                            let journal_ref = &journal;
+                            scope.spawn(move || {
+                                let res = execute_node(
+                                    &playbook_c,
+                                    &rd,
+                                    &wd,
+                                    &node,
+                                    &rid,
+                                    &st,
+                                    &cfg_c,
+                                    op,
+                                    &cancel_c,
+                                    &scrub_c,
+                                    journal_ref,
+                                );
+                                let _ = tx.send((node, res));
                             });
-                        if feeds_ready_any {
-                            cancel.store(true, Ordering::Relaxed);
                         }
-                    }
+                        drop(tx);
+                        // Collect completions in readiness order and write their events.
+                        for (node, res) in rx {
+                            let (status, output, evs) = res?;
+                            for ev in evs {
+                                journal.append(ev)?;
+                            }
+                            journal.append(EventPayload::NodeFinished {
+                                node: node.clone(),
+                                status: status.as_str().into(),
+                                attempt: 1,
+                                output,
+                                // The concurrent batch path does not run through the
+                                // node cache, so it captures no declared artifacts.
+                                artifacts: Vec::new(),
+                            })?;
+                            batch_statuses.push(status);
+                            // If this branch successfully fed a join:any - cancel the others.
+                            if status == NodeStatus::Succeeded {
+                                let state_peek = RunState::fold(&read_all(run_dir)?);
+                                let feeds_ready_any =
+                                    parallel::successors(&playbook, &node, &state_peek)
+                                        .into_iter()
+                                        .any(|s| {
+                                            parallel::is_join(&playbook, &s)
+                                                && parallel::join_mode(&playbook, &s)
+                                                    == parallel::JoinMode::Any
+                                                && matches!(
+                                                    parallel::join_readiness(
+                                                        &playbook,
+                                                        &s,
+                                                        &state_peek
+                                                    ),
+                                                    JoinReadiness::ReadySuccess
+                                                )
+                                        });
+                                if feeds_ready_any {
+                                    cancel.store(true, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        Ok(())
+                    })?;
                 }
                 rebuild_context_md(run_dir)?;
                 // unknown/interrupted in any branch - pause the run (as in the
@@ -1130,18 +1188,25 @@ fn drive(
                     })?;
                 }
                 let override_prompt = prompt_overrides.remove(&current);
-                let (st, out, evs) = execute_node(
-                    &playbook,
-                    run_dir,
-                    &workdir,
-                    &current,
-                    &run_id,
-                    &state,
-                    cfg,
-                    override_prompt,
-                    &AtomicBool::new(false),
-                    &env_scrub,
-                )?;
+                // The journal borrows `log` for the duration of execute_node so the
+                // node can append attempt_started at spawn time; the block scopes
+                // that borrow so `log` is free again for the return-batch writes.
+                let (st, out, evs) = {
+                    let journal = Journal::new(&mut *log);
+                    execute_node(
+                        &playbook,
+                        run_dir,
+                        &workdir,
+                        &current,
+                        &run_id,
+                        &state,
+                        cfg,
+                        override_prompt,
+                        &AtomicBool::new(false),
+                        &env_scrub,
+                        &journal,
+                    )?
+                };
                 for ev in evs {
                     log.append(ev)?;
                 }

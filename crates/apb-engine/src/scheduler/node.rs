@@ -35,10 +35,15 @@ pub(crate) fn render_node_prompt(
 }
 
 /// A single execution of a node. Returns (NodeStatus, output, events).
-/// Events (AttemptStarted/Finished, RetryStarted, FallbackTriggered) are NOT
-/// written here but returned: the caller (drive) writes them - the sole writer of
-/// events.jsonl. Thanks to this, execute_node never touches the log and can be
-/// run on a background thread for parallel branches (7c-2).
+///
+/// The two attempt-lifecycle events are journaled directly through `journal`:
+/// `attempt_started` at spawn time (so a crash mid-attempt leaves an open
+/// attempt on disk, later folded to interrupted) and `attempt_finished` at
+/// return time (carrying `duration_ms`). Every OTHER event (RetryStarted,
+/// FallbackTriggered) is still returned in the Vec for drive to write in its
+/// return batch - drive remains the sole writer of those. `journal` wraps the
+/// same single log in a Mutex, so this stays safe on the parallel batch's
+/// worker threads (each append is one atomic line write).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -51,6 +56,7 @@ pub(crate) fn execute_node(
     override_prompt: Option<String>,
     cancel: &AtomicBool,
     env_scrub: &[String],
+    journal: &Journal,
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
     let node = playbook
         .node(node_id)
@@ -227,13 +233,6 @@ pub(crate) fn execute_node(
                             attempt,
                         });
                     }
-                    events.push(EventPayload::AttemptStarted {
-                        node: node_id.into(),
-                        attempt,
-                        agent: step.agent.clone(),
-                        soul_delivery: step.soul_delivery.clone(),
-                        skills_mode: Some(skills_mode.to_string()),
-                    });
                     // Attempt working directory. For an isolated node - a FRESH
                     // per-attempt directory `work/<node>/<attempt>` with skills
                     // freshly materialized from the snapshot: a hostile/failed
@@ -270,13 +269,61 @@ pub(crate) fn execute_node(
                         grant_autonomy,
                         connector_policy: &connector_policy,
                     };
-                    match adapter.run_cancellable(&task, cancel) {
+                    // Spawn-time attempt journaling. The adapter invokes `on_spawn`
+                    // right after the agent process starts, so `attempt_started`
+                    // (carrying the child pid) is on disk BEFORE the agent does any
+                    // work: a crash mid-attempt then leaves an open attempt the
+                    // fold maps to interrupted. `spawn_at` records the spawn instant
+                    // for `duration_ms`; `spawn_err` carries an append failure from
+                    // inside the callback back out so it is not swallowed.
+                    let cur_attempt = attempt;
+                    let agent_name = step.agent.clone();
+                    let soul_del = step.soul_delivery.clone();
+                    let smode = Some(skills_mode.to_string());
+                    let spawn_at: std::cell::Cell<Option<std::time::Instant>> =
+                        std::cell::Cell::new(None);
+                    let spawn_err: std::cell::RefCell<Option<EngineError>> =
+                        std::cell::RefCell::new(None);
+                    let on_spawn = |pid: u32| {
+                        spawn_at.set(Some(std::time::Instant::now()));
+                        if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                            node: node_id.to_string(),
+                            attempt: cur_attempt,
+                            agent: agent_name.clone(),
+                            soul_delivery: soul_del.clone(),
+                            skills_mode: smode.clone(),
+                            pid: Some(pid),
+                        }) {
+                            *spawn_err.borrow_mut() = Some(e);
+                        }
+                    };
+                    let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn));
+                    if let Some(e) = spawn_err.borrow_mut().take() {
+                        return Err(e);
+                    }
+                    let spawn_instant = spawn_at.get();
+                    // The spawn itself failed before the callback ran: still journal
+                    // a started (pid unknown) so every attempt_finished is preceded
+                    // by an attempt_started.
+                    if spawn_instant.is_none() {
+                        journal.append(EventPayload::AttemptStarted {
+                            node: node_id.into(),
+                            attempt,
+                            agent: step.agent.clone(),
+                            soul_delivery: step.soul_delivery.clone(),
+                            skills_mode: Some(skills_mode.to_string()),
+                            pid: None,
+                        })?;
+                    }
+                    let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
+                    match outcome {
                         Ok(report) => {
-                            events.push(EventPayload::AttemptFinished {
+                            journal.append(EventPayload::AttemptFinished {
                                 node: node_id.into(),
                                 attempt,
                                 status: report.status.as_str().into(),
-                            });
+                                duration_ms,
+                            })?;
                             if report.status == NodeStatus::Succeeded {
                                 // A deterministic check on top of the self-report (spec 6.2):
                                 // a non-zero check exit code makes the node Failed regardless
@@ -325,11 +372,12 @@ pub(crate) fn execute_node(
                             } else {
                                 "failed"
                             };
-                            events.push(EventPayload::AttemptFinished {
+                            journal.append(EventPayload::AttemptFinished {
                                 node: node_id.into(),
                                 attempt,
                                 status: attempt_status.into(),
-                            });
+                                duration_ms,
+                            })?;
                             last_msg = msg;
                             // A transport error and a timeout break the retry loop for this
                             // executor and go to fallback.
@@ -463,12 +511,16 @@ pub(crate) fn execute_finish_answer(
                     attempt,
                 });
             }
+            // The finish-answer path keeps its return-batch event writes (it is
+            // the terminal answer composition, not a supervised retry-heavy node),
+            // so it does not journal the spawn: pid/duration_ms stay None here.
             events.push(EventPayload::AttemptStarted {
                 node: node_id.into(),
                 attempt,
                 agent: ri.agent_id.clone(),
                 soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
                 skills_mode: None,
+                pid: None,
             });
             let stream_log = run_dir
                 .join("agent-stream")
@@ -483,12 +535,13 @@ pub(crate) fn execute_finish_answer(
                 grant_autonomy,
                 connector_policy: &connector_policy,
             };
-            match adapter.run_cancellable(&task, &cancel) {
+            match adapter.run_cancellable(&task, &cancel, None) {
                 Ok(report) => {
                     events.push(EventPayload::AttemptFinished {
                         node: node_id.into(),
                         attempt,
                         status: report.status.as_str().into(),
+                        duration_ms: None,
                     });
                     if report.status == NodeStatus::Succeeded {
                         return Ok((NodeStatus::Succeeded, report.summary, events));
@@ -507,6 +560,7 @@ pub(crate) fn execute_finish_answer(
                             "failed"
                         }
                         .into(),
+                        duration_ms: None,
                     });
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {

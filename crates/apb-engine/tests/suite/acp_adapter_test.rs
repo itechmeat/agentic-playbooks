@@ -175,6 +175,7 @@ fn acp_cancel_stops_streaming_agent() {
                 connector_policy: &Default::default(),
             },
             &cancel,
+            None,
         )
         .unwrap_err();
     assert!(
