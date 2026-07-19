@@ -52,6 +52,51 @@ describe('isSimpleObjectSchema', () => {
     expect(isSimpleObjectSchema(null)).toBe(false)
     expect(isSimpleObjectSchema(undefined)).toBe(false)
   })
+
+  it('rejects a schema with a root-level oneOf', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { q: { type: 'string' } },
+      oneOf: [{ required: ['q'] }],
+    }
+    expect(isSimpleObjectSchema(schema)).toBe(false)
+  })
+
+  it('rejects a schema with a root-level anyOf', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { q: { type: 'string' } },
+      anyOf: [{ required: ['q'] }],
+    }
+    expect(isSimpleObjectSchema(schema)).toBe(false)
+  })
+
+  it('rejects a schema whose property carries oneOf', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { id: { oneOf: [{ type: 'string' }, { type: 'number' }] } },
+    }
+    expect(isSimpleObjectSchema(schema)).toBe(false)
+  })
+
+  it('rejects a schema whose property carries anyOf', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: { id: { anyOf: [{ type: 'string' }, { type: 'number' }] } },
+    }
+    expect(isSimpleObjectSchema(schema)).toBe(false)
+  })
+
+  it('accepts a schema with an allOf conditional (e.g. github create_review)', () => {
+    const schema: JsonSchema = {
+      type: 'object',
+      properties: {
+        event: { type: 'string', enum: ['APPROVE', 'REQUEST_CHANGES', 'COMMENT'] },
+        body: { type: 'string' },
+      },
+    }
+    expect(isSimpleObjectSchema(schema)).toBe(true)
+  })
 })
 
 describe('buildPlayFields', () => {
@@ -130,6 +175,33 @@ describe('coerceFormValues', () => {
   it('drops an unparsable number rather than sending NaN', () => {
     const out = coerceFormValues(fields, { limit: 'not-a-number', active: false })
     expect(out).not.toHaveProperty('limit')
+  })
+
+  describe('enum fields', () => {
+    const enumFields: PlayField[] = [
+      { name: 'kind', kind: 'enum', required: false, enumValues: ['a', 'b'] },
+      { name: 'priority', kind: 'enum', required: false, enumValues: [1, 2, 3] },
+    ]
+
+    it('coerces a numeric enum serialized as a string back to the original number', () => {
+      const out = coerceFormValues(enumFields, { priority: '2' })
+      expect(out.priority).toBe(2)
+      expect(typeof out.priority).toBe('number')
+    })
+
+    it('passes through a matching string enum value unchanged', () => {
+      expect(coerceFormValues(enumFields, { kind: 'b' })).toEqual({ kind: 'b' })
+    })
+
+    it('omits an unmatched enum value rather than sending it raw', () => {
+      const out = coerceFormValues(enumFields, { kind: 'not-a-member' })
+      expect(out).not.toHaveProperty('kind')
+    })
+
+    it('omits an empty enum value', () => {
+      const out = coerceFormValues(enumFields, { kind: '' })
+      expect(out).not.toHaveProperty('kind')
+    })
   })
 })
 

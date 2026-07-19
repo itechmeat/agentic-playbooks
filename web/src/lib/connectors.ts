@@ -35,11 +35,15 @@ export interface JsonSchemaProperty {
   enum?: (string | number)[]
   description?: string
   default?: unknown
+  oneOf?: unknown[]
+  anyOf?: unknown[]
 }
 export interface JsonSchema {
   type?: string
   properties?: Record<string, JsonSchemaProperty>
   required?: string[]
+  oneOf?: unknown[]
+  anyOf?: unknown[]
 }
 
 export interface ConnectorFunction {

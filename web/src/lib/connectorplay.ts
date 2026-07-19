@@ -36,7 +36,10 @@ function fieldKind(prop: JsonSchemaProperty): PlayFieldKind {
 // generator does not attempt partial coverage of a complex schema.
 export function isSimpleObjectSchema(schema: JsonSchema | null | undefined): boolean {
   if (!schema || schema.type !== 'object' || !schema.properties) return false
-  return Object.values(schema.properties).every((p) => fieldKind(p) !== 'unsupported')
+  if (schema.oneOf || schema.anyOf) return false
+  return Object.values(schema.properties).every(
+    (p) => fieldKind(p) !== 'unsupported' && !p.oneOf && !p.anyOf,
+  )
 }
 
 // Builds the ordered field list for the generated form from an args_schema.
@@ -64,6 +67,12 @@ export function coerceFormValues(
     const raw = values[field.name]
     if (field.kind === 'boolean') {
       out[field.name] = raw === true
+      continue
+    }
+    if (field.kind === 'enum') {
+      if (raw === undefined || raw === '') continue
+      const match = field.enumValues?.find((member) => String(member) === raw)
+      if (match !== undefined) out[field.name] = match
       continue
     }
     if (raw === undefined || raw === '') continue

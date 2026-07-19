@@ -133,9 +133,7 @@
     return result.dry_run ? 'muted' : 'ok'
   })
 
-  const canCall = $derived(
-    !calling && selectedFunction !== '' && (accounts.length === 0 || selectedAccount !== ''),
-  )
+  const canCall = $derived(!calling && selectedFunction !== '' && selectedAccount !== '')
 </script>
 
 <Card.Root>
