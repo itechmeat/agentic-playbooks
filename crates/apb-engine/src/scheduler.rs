@@ -756,9 +756,16 @@ fn drive(
                     node: current.clone(),
                     attempt: 1,
                 })?;
-                let (st, out, evs) = execute_finish_answer(
-                    &playbook, run_dir, &workdir, &current, &run_id, &state, cfg, p, &env_scrub,
-                )?;
+                // The journal borrows `log` so finish-answer can append its
+                // attempt_started at spawn time; the block scopes that borrow so
+                // `log` is free again for the return-batch and NodeFinished writes.
+                let (st, out, evs) = {
+                    let journal = Journal::new(&mut *log);
+                    execute_finish_answer(
+                        &playbook, run_dir, &workdir, &current, &run_id, &state, cfg, p,
+                        &env_scrub, &journal,
+                    )?
+                };
                 for ev in evs {
                     log.append(ev)?;
                 }

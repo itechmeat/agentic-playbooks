@@ -87,3 +87,64 @@ fn open_attempt_marks_interrupted() {
     assert_eq!(s.nodes.get("ping"), Some(&NodeStatus::Interrupted));
     assert_eq!(s.run_status, RunStatus::Interrupted);
 }
+
+#[test]
+fn multi_attempt_open_after_finished_marks_interrupted() {
+    // Crash-shape simulation with a retry: attempt 1 finished (failed), then a
+    // retry spawned attempt 2 which never returned (the crash window). The last
+    // event for `ping` is an open attempt_started, so the fold at
+    // state.rs:184-192 must still map the node (and run) to interrupted - the
+    // earlier finished attempt does not close the later open one.
+    let events = vec![
+        ev(
+            0,
+            EventPayload::RunStarted {
+                playbook: "w".into(),
+                version: "1.0.0".into(),
+            },
+        ),
+        ev(
+            1,
+            EventPayload::AttemptStarted {
+                node: "ping".into(),
+                attempt: 1,
+                agent: "claude-code".into(),
+                soul_delivery: None,
+                skills_mode: None,
+                pid: Some(1001),
+            },
+        ),
+        ev(
+            2,
+            EventPayload::AttemptFinished {
+                node: "ping".into(),
+                attempt: 1,
+                status: "failed".into(),
+                duration_ms: Some(1200),
+            },
+        ),
+        ev(
+            3,
+            EventPayload::RetryStarted {
+                node: "ping".into(),
+                attempt: 2,
+            },
+        ),
+        ev(
+            4,
+            EventPayload::AttemptStarted {
+                node: "ping".into(),
+                attempt: 2,
+                agent: "claude-code".into(),
+                soul_delivery: None,
+                skills_mode: None,
+                pid: Some(1002),
+            },
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(s.nodes.get("ping"), Some(&NodeStatus::Interrupted));
+    assert_eq!(s.run_status, RunStatus::Interrupted);
+    // The open attempt is attempt 2 (the crash window), recorded as the latest.
+    assert_eq!(s.attempts.get("ping"), Some(&2));
+}

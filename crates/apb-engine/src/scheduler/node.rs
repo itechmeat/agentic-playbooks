@@ -427,7 +427,11 @@ pub(crate) fn execute_node(
 /// resolution/trust to an agent_task), the prompt renders with the full
 /// standard context, but no skills are delivered and there is no success_check
 /// and no isolation. Timeout/retries fall back to `defaults`. Returns
-/// (status, answer, events); drive writes the events (single writer).
+/// (status, answer, events). Like `execute_node`, the two attempt-lifecycle
+/// events are journaled directly (`attempt_started` with pid at spawn,
+/// `attempt_finished` with `duration_ms` at return) so a crash during the
+/// terminal answer composition leaves an open attempt on disk; every other
+/// event is returned for drive to write in its return batch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_finish_answer(
     playbook: &Playbook,
@@ -439,6 +443,7 @@ pub(crate) fn execute_finish_answer(
     cfg: &RunConfig,
     prompt: &str,
     env_scrub: &[String],
+    journal: &Journal,
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
     let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
@@ -511,17 +516,6 @@ pub(crate) fn execute_finish_answer(
                     attempt,
                 });
             }
-            // The finish-answer path keeps its return-batch event writes (it is
-            // the terminal answer composition, not a supervised retry-heavy node),
-            // so it does not journal the spawn: pid/duration_ms stay None here.
-            events.push(EventPayload::AttemptStarted {
-                node: node_id.into(),
-                attempt,
-                agent: ri.agent_id.clone(),
-                soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
-                skills_mode: None,
-                pid: None,
-            });
             let stream_log = run_dir
                 .join("agent-stream")
                 .join(format!("{node_id}-{attempt}.jsonl"));
@@ -535,14 +529,55 @@ pub(crate) fn execute_finish_answer(
                 grant_autonomy,
                 connector_policy: &connector_policy,
             };
-            match adapter.run_cancellable(&task, &cancel, None) {
+            // Spawn-time attempt journaling (identical shape to execute_node):
+            // `on_spawn` journals attempt_started with the child pid before the
+            // agent runs, and records the spawn instant for duration_ms, so a
+            // crash during the terminal answer composition leaves an open attempt
+            // the fold maps to interrupted.
+            let cur_attempt = attempt;
+            let agent_name = ri.agent_id.clone();
+            let soul_del = Some(soul_delivery_str(ri.soul_delivery));
+            let spawn_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
+            let spawn_err: std::cell::RefCell<Option<EngineError>> = std::cell::RefCell::new(None);
+            let on_spawn = |pid: u32| {
+                spawn_at.set(Some(std::time::Instant::now()));
+                if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                    node: node_id.to_string(),
+                    attempt: cur_attempt,
+                    agent: agent_name.clone(),
+                    soul_delivery: soul_del.clone(),
+                    skills_mode: None,
+                    pid: Some(pid),
+                }) {
+                    *spawn_err.borrow_mut() = Some(e);
+                }
+            };
+            let outcome = adapter.run_cancellable(&task, &cancel, Some(&on_spawn));
+            if let Some(e) = spawn_err.borrow_mut().take() {
+                return Err(e);
+            }
+            let spawn_instant = spawn_at.get();
+            // Spawn failed before the callback ran: still journal a started
+            // (pid unknown) so every attempt_finished is preceded by a started.
+            if spawn_instant.is_none() {
+                journal.append(EventPayload::AttemptStarted {
+                    node: node_id.into(),
+                    attempt,
+                    agent: ri.agent_id.clone(),
+                    soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
+                    skills_mode: None,
+                    pid: None,
+                })?;
+            }
+            let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
+            match outcome {
                 Ok(report) => {
-                    events.push(EventPayload::AttemptFinished {
+                    journal.append(EventPayload::AttemptFinished {
                         node: node_id.into(),
                         attempt,
                         status: report.status.as_str().into(),
-                        duration_ms: None,
-                    });
+                        duration_ms,
+                    })?;
                     if report.status == NodeStatus::Succeeded {
                         return Ok((NodeStatus::Succeeded, report.summary, events));
                     }
@@ -551,7 +586,7 @@ pub(crate) fn execute_finish_answer(
                 }
                 Err((class, msg)) => {
                     last_timed_out = class == ErrorClass::Timeout;
-                    events.push(EventPayload::AttemptFinished {
+                    journal.append(EventPayload::AttemptFinished {
                         node: node_id.into(),
                         attempt,
                         status: if last_timed_out {
@@ -560,8 +595,8 @@ pub(crate) fn execute_finish_answer(
                             "failed"
                         }
                         .into(),
-                        duration_ms: None,
-                    });
+                        duration_ms,
+                    })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {
                         break;
