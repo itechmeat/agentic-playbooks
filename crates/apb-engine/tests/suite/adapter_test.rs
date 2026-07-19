@@ -68,3 +68,45 @@ fn adapter_for_maps_known_and_rejects_unknown() {
     assert!(adapter_for("claude-code").is_ok());
     assert!(adapter_for("borg").is_err());
 }
+
+// Each captured argv element is wrapped in delimiters and separated by an
+// otherwise-unused control byte, so the effective prompt (which itself
+// contains embedded newlines once the SOUL prefix and report instruction are
+// added) cannot be confused for an argv boundary.
+#[test]
+fn hermes_adapter_sends_z_flag_prefixed_soul_and_model_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    let ad = ClaudeAdapter {
+        program: stub_agent(dir.path(), "printf '<<<%s>>>\\001' \"$@\""),
+        spec: builtin("hermes").unwrap(),
+    };
+    let report = ad
+        .run(&AgentTask {
+            prompt: "ping",
+            model: "hermes-large",
+            workdir: dir.path(),
+            timeout: None,
+            stream_log: None,
+            soul: Some("You are Hermes."),
+            grant_autonomy: false,
+            connector_policy: &Default::default(),
+        })
+        .unwrap();
+    let argv: Vec<&str> = report
+        .raw
+        .split('\u{1}')
+        .filter(|s| !s.is_empty())
+        .map(|s| s.trim_start_matches("<<<").trim_end_matches(">>>"))
+        .collect();
+    assert_eq!(argv[0], "-z");
+    assert!(
+        argv[1].starts_with("You are Hermes.\n\n---\n\nping"),
+        "expected the prompt prefixed with the SOUL text, got {:?}",
+        argv[1]
+    );
+    assert_eq!(argv[2], "-m");
+    assert_eq!(argv[3], "hermes-large");
+    // No structured report block in the stub's echoed argv - the node output
+    // falls back to the full captured stdout.
+    assert_eq!(report.summary, report.raw);
+}

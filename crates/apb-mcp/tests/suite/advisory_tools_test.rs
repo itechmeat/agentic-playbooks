@@ -137,7 +137,7 @@ fn subscriptions_set_writes_overlay_and_configures() {
 fn adopt_report_emits_expected_codes() {
     let _l = lock();
     let c = setup();
-    // goodp: a valid profile (the skill exists), NOT trusted, agent outside the top five.
+    // goodp: a valid profile (the skill exists), NOT trusted, agent outside the top six.
     seed_skill(&c.root, "s1");
     seed_profile(&c.root, "goodp", "customx", "skills:\n  - s1\n");
     // The pipeline references goodp and a nonexistent ghost.

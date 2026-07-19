@@ -1,6 +1,6 @@
 //! Resolving the agent invocation form (spec 2026-07-12, sections 6.2-6.3).
 //!
-//! The invocation form is data (`InvocationDef`), not code: the built-in five
+//! The invocation form is data (`InvocationDef`), not code: the built-in six
 //! are provided by `builtin`, custom agents come from the global config's
 //! `agents:`. `resolve_invocation` fixes the agent, model, invocation form,
 //! SOUL delivery method, canonical binary path, and its fingerprint - all of
@@ -25,7 +25,7 @@ pub struct ResolvedInvocation {
     pub executable_fingerprint: String,
 }
 
-/// Built-in invocation form for the known five. `None` for unknown agents and
+/// Built-in invocation form for the known six. `None` for unknown agents and
 /// for pi (details will follow once the binary exists).
 pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
     let mk = |argv: &[&str],
@@ -68,6 +68,15 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
             None,
             &[],
         )),
+        // hermes one-shot mode prints only the final response text to
+        // stdout and auto-bypasses approvals by design (script mode);
+        // the SOUL travels as a prompt prefix like the other aggregators.
+        "hermes" => Some(mk(
+            &["-z", "{prompt}", "-m", "{model}"],
+            SoulDelivery::Prefix,
+            None,
+            &[],
+        )),
         _ => None,
     }
 }
@@ -82,7 +91,7 @@ pub fn spec_for(agent_id: &str, global: &GlobalConfig) -> Result<InvocationDef, 
         .and_then(|a| a.invocation.clone())
         .or_else(|| builtin(agent_id))
         // Agent is defined in config but without an explicit form and is not
-        // one of the built-in five: historical compatibility falls back to
+        // one of the built-in six: historical compatibility falls back to
         // the claude form (`-p {prompt} --model {model}`).
         .or_else(|| global.agents.get(agent_id).and(builtin("claude")))
         .ok_or_else(|| {
@@ -295,12 +304,22 @@ mod tests {
     }
 
     #[test]
-    fn builtin_five_agents_present_and_valid() {
-        for id in ["claude", "agy", "codex", "opencode"] {
+    fn builtin_six_agents_present_and_valid() {
+        for id in ["claude", "agy", "codex", "opencode", "hermes"] {
             builtin(id).unwrap().validate().unwrap();
         }
         assert!(builtin("pi").is_none());
         assert!(builtin("unknown").is_none());
+    }
+
+    #[test]
+    fn builtin_hermes_form() {
+        let spec = builtin("hermes").expect("hermes builtin spec");
+        assert_eq!(spec.argv, vec!["-z", "{prompt}", "-m", "{model}"]);
+        assert_eq!(spec.soul, SoulDelivery::Prefix);
+        assert_eq!(spec.soul_flag, None);
+        assert_eq!(spec.transport, Transport::Headless);
+        assert!(spec.autonomous_args.is_empty());
     }
 
     #[test]

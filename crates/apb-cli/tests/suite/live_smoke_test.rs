@@ -470,3 +470,51 @@ fn live_imap_verify_and_list_folders() {
         "{}",
     );
 }
+
+/// Live smoke for the `hermes` agent (not a connector probe): invokes the
+/// real `hermes` binary directly with the exact flag order `builtin("hermes")`
+/// uses (crates/apb-engine/src/invocation.rs, `-z {prompt} -m {model}`), so
+/// this exercises the shipped one-shot invocation form rather than a
+/// hand-rolled one. Gated behind `APB_LIVE_TEST_HERMES=1`; skipped (not
+/// failed) when the flag or the model env var is absent.
+#[test]
+#[ignore]
+fn live_hermes_oneshot() {
+    if std::env::var("APB_LIVE_TEST_HERMES")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_HERMES not set");
+        return;
+    }
+    // APB_LIVE_HERMES_MODEL: the user's configured hermes default model id
+    // (for example `glm-5.2`). Hermes has no entry in the curated models
+    // table (docs/PROFILES.md's "Choosing agent and model"), so there is no
+    // built-in default to fall back to - the model must come from the
+    // environment.
+    let Some(vals) = require_env(&["APB_LIVE_HERMES_MODEL"]) else {
+        return;
+    };
+    let model = &vals[0];
+
+    let out = Command::new("hermes")
+        .args([
+            "-z",
+            "Reply with exactly the text APB_OK and nothing else",
+            "-m",
+            model,
+        ])
+        .output()
+        .expect("failed to spawn hermes");
+
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success(),
+        "hermes -z ... -m {model} exited non-zero: stdout={stdout} stderr={stderr}"
+    );
+    assert!(
+        stdout.contains("APB_OK"),
+        "hermes stdout did not contain APB_OK: stdout={stdout} stderr={stderr}"
+    );
+}

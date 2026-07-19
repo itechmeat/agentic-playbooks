@@ -7,7 +7,7 @@
 
 use std::path::Path;
 
-use apb_core::detect::{self, AgentCategory, Authority};
+use apb_core::detect::{self, AgentCategory, AuthKind, Authority};
 
 use crate::common::env_lock as lock;
 
@@ -402,4 +402,80 @@ fn project_local_path_entry_is_ignored() {
     let agents = detect::detect(true);
     let oc = agents.iter().find(|a| a.agent == "opencode").unwrap();
     assert!(!oc.installed, "project-local agent must be ignored");
+}
+
+#[test]
+fn hermes_probe_detects_stub_binary() {
+    let _l = lock();
+    let e = setup();
+    write_agent(
+        &e.bin,
+        "hermes",
+        &e.counter,
+        "echo 'Hermes Agent v0.18.2 (2026.7.7.2) · upstream e361c5e2'",
+    );
+
+    let agents = detect::detect(true);
+    let h = agents.iter().find(|a| a.agent == "hermes").unwrap();
+    assert!(h.installed);
+    assert_eq!(h.category, AgentCategory::Aggregator);
+    assert_eq!(
+        serde_json::to_string(&h.category).unwrap(),
+        "\"aggregator\""
+    );
+    let version = h.version.as_deref().unwrap_or_default();
+    assert!(
+        version.contains("0.18.2"),
+        "version must contain 0.18.2: {version:?}"
+    );
+    assert!(h.models.is_none());
+}
+
+#[test]
+fn hermes_auth_hint_from_env_file() {
+    let _l = lock();
+
+    // With `~/.hermes/.env` present - api-key hint.
+    let e = setup();
+    write_agent(
+        &e.bin,
+        "hermes",
+        &e.counter,
+        "echo 'Hermes Agent v0.18.2 (2026.7.7.2) · upstream e361c5e2'",
+    );
+    let hermes_dir = e.home.join(".hermes");
+    std::fs::create_dir_all(&hermes_dir).unwrap();
+    std::fs::write(hermes_dir.join(".env"), "SOME_KEY=secret\n").unwrap();
+
+    let agents = detect::detect(true);
+    let h = agents.iter().find(|a| a.agent == "hermes").unwrap();
+    let kind = h.auth.as_ref().map(|a| a.kind);
+    assert_eq!(kind, Some(AuthKind::ApiKey));
+
+    // The secret value must never leak into the detect output.
+    let serialized = serde_json::to_string(&agents).unwrap();
+    assert!(!serialized.contains("secret"));
+
+    // Without the file - no auth hint.
+    let e2 = setup();
+    write_agent(
+        &e2.bin,
+        "hermes",
+        &e2.counter,
+        "echo 'Hermes Agent v0.18.2 (2026.7.7.2) · upstream e361c5e2'",
+    );
+    let agents2 = detect::detect(true);
+    let h2 = agents2.iter().find(|a| a.agent == "hermes").unwrap();
+    assert!(h2.auth.is_none());
+}
+
+#[test]
+fn hermes_missing_binary_reports_not_installed() {
+    let _l = lock();
+    let _e = setup();
+
+    let agents = detect::detect(true);
+    let h = agents.iter().find(|a| a.agent == "hermes").unwrap();
+    assert!(!h.installed);
+    assert!(h.version.is_none());
 }

@@ -107,6 +107,9 @@ enum AuthSource {
     Codex,
     /// opencode auth.json - provider names only.
     Opencode,
+    /// hermes: presence of `<home>/.hermes/.env` -> api-key hint (values
+    /// never read).
+    Hermes,
     None,
 }
 
@@ -122,7 +125,8 @@ pub struct Probe {
     auth_source: AuthSource,
 }
 
-/// Built-in probes for the five agents (claude, codex, agy, opencode, pi).
+/// Built-in probes for the six agents (claude, codex, agy, opencode, pi,
+/// hermes).
 pub fn builtin_probes() -> Vec<Probe> {
     let v = |s: &str| vec![s.to_string()];
     vec![
@@ -171,6 +175,14 @@ pub fn builtin_probes() -> Vec<Probe> {
             version_args: v("--version"),
             models_source: ModelsSource::None,
             auth_source: AuthSource::None,
+        },
+        Probe {
+            id: "hermes".into(),
+            bins: v("hermes"),
+            category: AgentCategory::Aggregator,
+            version_args: v("--version"),
+            models_source: ModelsSource::None,
+            auth_source: AuthSource::Hermes,
         },
     ]
 }
@@ -514,6 +526,19 @@ fn auth_hint(src: &AuthSource, home: &Path) -> (Option<AuthHint>, Option<Vec<Str
                 .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()));
             (None, providers)
         }
+        AuthSource::Hermes => {
+            // Presence of the .env file only - values are never read.
+            if home.join(".hermes/.env").is_file() {
+                (
+                    Some(AuthHint {
+                        kind: AuthKind::ApiKey,
+                    }),
+                    None,
+                )
+            } else {
+                (None, None)
+            }
+        }
         AuthSource::None => (None, None),
     }
 }
@@ -603,16 +628,17 @@ fn probe_one(p: &Probe) -> AgentInfo {
 }
 
 /// Custom probes from the global config: agents with `probe: true` (the
-/// built-in five are not duplicated). Only checks for the binary's presence -
+/// built-in six are not duplicated). Only checks for the binary's presence -
 /// no model/auth sources. Best-effort: a malformed config yields an empty
 /// list.
 fn custom_probes() -> Vec<Probe> {
     let Ok(cfg) = crate::config::GlobalConfig::load() else {
         return Vec::new();
     };
-    let builtin: std::collections::BTreeSet<&str> = ["claude", "codex", "agy", "opencode", "pi"]
-        .into_iter()
-        .collect();
+    let builtin: std::collections::BTreeSet<&str> =
+        ["claude", "codex", "agy", "opencode", "pi", "hermes"]
+            .into_iter()
+            .collect();
     let mut out = Vec::new();
     for (id, def) in &cfg.agents {
         if def.probe != Some(true) || builtin.contains(id.as_str()) {
@@ -648,6 +674,7 @@ fn probe_source_files(p: &Probe, home: Option<&Path>) -> Vec<PathBuf> {
         AuthSource::Claude => out.push(home.join(".claude.json")),
         AuthSource::Codex => out.push(home.join(".codex/auth.json")),
         AuthSource::Opencode => out.push(home.join(".config/opencode/auth.json")),
+        AuthSource::Hermes => out.push(home.join(".hermes/.env")),
         AuthSource::None => {}
     }
     if matches!(p.models_source, ModelsSource::CodexConfig) {

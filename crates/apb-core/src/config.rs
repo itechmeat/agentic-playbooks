@@ -159,7 +159,7 @@ impl InvocationDef {
 
 /// Description of a coding agent. Binary program, transport, and
 /// (optionally) invocation form; when `invocation` is absent for the
-/// built-in five, a default is used (see `apb_engine::invocation::builtin`).
+/// built-in six, a default is used (see `apb_engine::invocation::builtin`).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentDef {
@@ -173,7 +173,7 @@ pub struct AgentDef {
     #[serde(default)]
     pub invocation: Option<InvocationDef>,
     /// Enable presence detection for this custom agent (spec 7). The
-    /// built-in five are always probed; a custom agent only with
+    /// built-in six are always probed; a custom agent only with
     /// `probe: true`.
     #[serde(default)]
     pub probe: Option<bool>,
