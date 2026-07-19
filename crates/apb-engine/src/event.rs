@@ -107,6 +107,14 @@ pub enum EventPayload {
     RunPaused {
         reason: String,
     },
+    /// A resume restarted the run from `from_node` (Task 3: resume rework).
+    /// Folds to `Running`, replacing the old `RunPaused { reason: "resume
+    /// from X" }` marker that used to leave the folded status stuck on paused
+    /// for the rest of the run. Old journals that still carry that legacy
+    /// `RunPaused` marker fold unchanged.
+    RunResumed {
+        from_node: String,
+    },
     RunFinished {
         outcome: String,
     },

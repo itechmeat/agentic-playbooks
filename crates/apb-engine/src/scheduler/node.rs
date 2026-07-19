@@ -898,6 +898,7 @@ pub(crate) fn run_playbook_node(
         &mut cp.log,
         &cp.cfg,
         cp.start_node.clone(),
+        StartMode::Rerun,
         cp.run_id.clone(),
         RunMode::Autonomous,
         cp.supervisor_expected,

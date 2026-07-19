@@ -39,11 +39,13 @@ mod cache;
 mod node;
 mod patch;
 mod prepare;
+mod resume;
 mod supervisor;
 
 use node::*;
 use patch::*;
 use prepare::*;
+pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
 
@@ -283,6 +285,7 @@ pub fn run(
         &mut p.log,
         &p.cfg,
         p.start_node.clone(),
+        StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
         p.supervisor_expected,
@@ -312,6 +315,7 @@ pub fn run_resolved(
         &mut p.log,
         &p.cfg,
         p.start_node.clone(),
+        StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
         p.supervisor_expected,
@@ -391,6 +395,7 @@ pub fn drive_prepared(root: &Path, prepared: PreparedRun) -> Result<RunResult, E
         &mut p.log,
         &p.cfg,
         p.start_node.clone(),
+        StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
         p.supervisor_expected,
@@ -552,6 +557,7 @@ fn drive(
     log: &mut EventLog,
     cfg: &RunConfig,
     start_node: String,
+    start_mode: StartMode,
     run_id: String,
     mode: RunMode,
     supervisor_expected: bool,
@@ -564,12 +570,32 @@ fn drive(
     // unrelated run's agent. `apb connector call`, spawned as a child of the
     // agent, resolves secrets from the dotenv files itself.
     let env_scrub = apb_core::connector::resolve::all_referenced_env_names(root);
-    let mut current = start_node;
     // The other active branch heads (besides `current`). A linear run keeps the
     // frontier empty - behavior identical to the old single `current`. A fork
     // (several unconditional outgoing edges) puts the extra targets here; when the
     // `current` branch runs into a not-yet-ready join or a dead end, we take the next one.
     let mut frontier: Vec<String> = Vec::new();
+    let mut current = match start_mode {
+        // Restart interrupted work, or an explicit `--from-node` re-run: the
+        // start node is executed by the loop below.
+        StartMode::Rerun => start_node,
+        // Advance past an already-finished node without re-executing it: seed
+        // the frontier by evaluating its outgoing edges against the folded
+        // status and outputs (exactly the normal post-node advancement), then
+        // start from the first ready successor.
+        StartMode::After => {
+            let state = RunState::fold(&read_all(run_dir)?);
+            advance_frontier(&playbook, &start_node, &state, &mut frontier, log)?;
+            if frontier.is_empty() {
+                // A pointless resume: the start node already finished and has no
+                // pending successor to advance into.
+                return Err(EngineError::Invalid(format!(
+                    "node `{start_node}` already finished with no pending successor to resume into"
+                )));
+            }
+            frontier.remove(0)
+        }
+    };
     let max_steps = 10_000usize;
     // A counter of condition-node executions for the runtime max_loops check:
     // the validator (V11) only requires that a loop pass through such a node,
@@ -1587,16 +1613,16 @@ fn resume_inner(
         log.append(ev)?;
     }
 
-    let state = RunState::fold(&read_all(&run_dir)?);
-    let start_node = match from_node {
-        Some(n) => n.to_string(),
-        None => state
-            .last_node
-            .clone()
-            .ok_or_else(|| EngineError::Invalid("nothing to resume from".into()))?,
-    };
-    log.append(EventPayload::RunPaused {
-        reason: format!("resume from `{start_node}`"),
+    // Decide where and how to resume (Task 3): restart interrupted work, advance
+    // past a finished node without re-executing it, fall back for a cut-short
+    // parallel fork, or honor an explicit `--from-node`. A pointless resume (an
+    // argument-free resume of a succeeded run) is refused here.
+    let decision = plan_resume(root, run_id, from_node)?;
+    // Journal a proper `run_resumed` marker (folds to running), replacing the
+    // old `RunPaused { reason: "resume from X" }` write that used to leave the
+    // folded status stuck on paused for the rest of the run.
+    log.append(EventPayload::RunResumed {
+        from_node: decision.start_node.clone(),
     })?;
     // Mirrors prepare's predicate (`NodeKind::takes_workdir_lock`): a resumed
     // parent with a sub-playbook node (or a finish-with-prompt agent node)
@@ -1618,7 +1644,8 @@ fn resume_inner(
         root,
         &mut log,
         &cfg,
-        start_node,
+        decision.start_node,
+        decision.mode,
         run_id.to_string(),
         RunMode::Autonomous,
         supervisor_expected,

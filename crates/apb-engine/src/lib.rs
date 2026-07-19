@@ -36,8 +36,9 @@ pub use inspect::{
 pub use progress::{ProgressSummary, compute as run_progress, node_durations_seconds};
 pub use review::{ReviewCommand, ReviewEntry, post_review, read_reviews_after};
 pub use scheduler::{
-    PreparedRun, RunMode, RunOptions, RunResult, RunSummary, drive_prepared, list_runs,
-    post_supervisor_command, prepare_supervised_background, resume, resume_with, run,
-    run_background, run_background_resolved, run_cancel, run_resolved, spawn_supervisor_agent,
+    PreparedRun, ResumeDecision, ResumeReason, RunMode, RunOptions, RunResult, RunSummary,
+    StartMode, drive_prepared, list_runs, plan_resume, post_supervisor_command,
+    prepare_supervised_background, resume, resume_with, run, run_background,
+    run_background_resolved, run_cancel, run_resolved, spawn_supervisor_agent,
 };
 pub use signals::{SignalCommand, SignalEntry, post_signal, read_signals_after};

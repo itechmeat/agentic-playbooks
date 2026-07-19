@@ -12,7 +12,7 @@ use apb_engine::event::read_all;
 use apb_engine::run_config::ChildExpectation;
 use apb_engine::state::RunState;
 use apb_engine::{
-    EngineError, RunMode, RunOptions, list_runs, post_supervisor_command, resume, run,
+    EngineError, RunMode, RunOptions, list_runs, plan_resume, post_supervisor_command, resume, run,
     run_background, run_cancel, run_inspect as engine_run_inspect, touch_heartbeat, wait_wake,
     write_supervisor_report,
 };
@@ -895,8 +895,21 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
 }
 
 pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<Value, ToolError> {
+    // Compute the resume decision up front so the ack reports where and why the
+    // run resumes. This must run BEFORE the drive: once the run reaches a
+    // terminal state, an argument-free `plan_resume` would refuse it.
+    let decision = plan_resume(root, run_id, from_node)?;
+    // TODO(task-7 detach): the detached driver replaces this synchronous
+    // `resume`. Until then we compute the ack, then keep the current blocking
+    // drive; `detached: true` is already the detached-shape contract that Task
+    // 7 will make literally true by spawning the background driver instead.
     let res = resume(root, run_id, from_node)?;
-    Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
+    Ok(json!({
+        "run_id": res.run_id,
+        "resumed_from": decision.start_node,
+        "reason": decision.reason.as_str(),
+        "detached": true,
+    }))
 }
 
 /// Starts a playbook in supervised mode without waiting for it to finish.

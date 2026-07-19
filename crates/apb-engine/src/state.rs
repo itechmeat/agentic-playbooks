@@ -126,6 +126,7 @@ impl RunState {
                     s.last_node = Some(node.clone());
                 }
                 EventPayload::RunPaused { .. } => s.run_status = RunStatus::Paused,
+                EventPayload::RunResumed { .. } => s.run_status = RunStatus::Running,
                 EventPayload::RunFinished { outcome } => {
                     s.run_status = match outcome.as_str() {
                         "succeeded" => RunStatus::Succeeded,

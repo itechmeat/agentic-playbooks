@@ -9,6 +9,13 @@ fn ev(seq: u64, payload: EventPayload) -> Event {
     }
 }
 
+fn run_started(playbook: &str) -> EventPayload {
+    EventPayload::RunStarted {
+        playbook: playbook.into(),
+        version: "1.0.0".into(),
+    }
+}
+
 #[test]
 fn folds_finished_run() {
     let events = vec![
@@ -86,6 +93,49 @@ fn open_attempt_marks_interrupted() {
     let s = RunState::fold(&events);
     assert_eq!(s.nodes.get("ping"), Some(&NodeStatus::Interrupted));
     assert_eq!(s.run_status, RunStatus::Interrupted);
+}
+
+#[test]
+fn run_resumed_folds_to_running() {
+    // Task 3: a resume journals `run_resumed` (not the old `RunPaused` marker),
+    // which folds the run back to running - so a resumed run is never stuck on
+    // paused for the rest of its life. An interrupted node ahead of the marker
+    // is still Running, and the marker sets the run status to Running.
+    let events = vec![
+        ev(0, run_started("w")),
+        ev(
+            1,
+            EventPayload::NodeStarted {
+                node: "a".into(),
+                attempt: 1,
+            },
+        ),
+        ev(
+            2,
+            EventPayload::RunResumed {
+                from_node: "a".into(),
+            },
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(s.run_status, RunStatus::Running);
+}
+
+#[test]
+fn legacy_run_paused_marker_still_folds_to_paused() {
+    // Old journals that carry the legacy `RunPaused { reason: "resume from X" }`
+    // marker must keep folding to paused, unchanged by the Task 3 rework.
+    let events = vec![
+        ev(0, run_started("w")),
+        ev(
+            1,
+            EventPayload::RunPaused {
+                reason: "resume from `a`".into(),
+            },
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(s.run_status, RunStatus::Paused);
 }
 
 #[test]
