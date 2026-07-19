@@ -154,6 +154,9 @@ impl RunState {
                 // A child-run marker is an audit record; the node's own status
                 // events carry the run-state effect.
                 EventPayload::ChildRunStarted { .. } => {}
+                // A connector call is an audit record (spec 6.2); it does not
+                // change run state.
+                EventPayload::ConnectorCall { .. } => {}
                 EventPayload::ReviewRequested { .. } => {}
                 EventPayload::ReviewDecided {
                     node,

@@ -36,6 +36,8 @@ mod background_run_test;
 mod background_supervisor_test;
 #[path = "suite/child_run_event_test.rs"]
 mod child_run_event_test;
+#[path = "suite/connector_call.rs"]
+mod connector_call;
 #[path = "suite/connector_manifest.rs"]
 mod connector_manifest;
 #[path = "suite/connector_run.rs"]

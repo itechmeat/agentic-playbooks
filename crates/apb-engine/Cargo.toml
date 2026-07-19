@@ -13,6 +13,11 @@ serde_yaml_ng.workspace = true
 thiserror.workspace = true
 # uuid v4 - unpredictable hook_secret for webhook nodes wait (spec 6.7)
 uuid = { version = "1.23.4", features = ["v4"] }
+# Connector call executor (spec 2026-07-18-connectors, section 6): blocking
+# HTTP client (redirects disabled, per-call timeout) and args-schema validation.
+ureq.workspace = true
+jsonschema.workspace = true
+percent-encoding.workspace = true
 
 # Group termination of agent process tree on cancellation/timeout (Unix):
 # kill(-pgid, SIGKILL). libc already in tree transitively, direct dependency

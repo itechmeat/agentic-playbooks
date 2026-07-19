@@ -1,4 +1,5 @@
 pub mod adapter;
+pub mod connector_call;
 pub mod connector_prompt;
 pub mod connector_run;
 pub mod context;
