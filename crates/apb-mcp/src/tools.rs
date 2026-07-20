@@ -365,6 +365,7 @@ pub fn playbook_trial(
     id: &str,
     version: Option<&str>,
     params: BTreeMap<String, String>,
+    instruction: Option<String>,
     scope: &str,
 ) -> Result<Value, ToolError> {
     use apb_core::schema::Effect;
@@ -390,6 +391,7 @@ pub fn playbook_trial(
     }
 
     let opts = RunOptions {
+        instruction,
         params,
         ..Default::default()
     };

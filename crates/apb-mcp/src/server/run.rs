@@ -15,7 +15,7 @@ use crate::tools::{self, ToolError};
 #[tool_router(router = run_router, vis = "pub(crate)")]
 impl WfMcp {
     #[tool(
-        description = "Trial-run a draft playbook by its effects matrix: filesystem-writing ones run in a throwaway git worktree and return a diff; irreversible ones are refused. Does not activate the playbook.",
+        description = "Trial-run a draft playbook by its effects matrix: filesystem-writing ones run in a throwaway git worktree and return a diff; irreversible ones are refused. Accepts an optional instruction, exactly like playbook_run, rendered as {{run.instruction}}. Does not activate the playbook.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_trial(
@@ -24,6 +24,7 @@ impl WfMcp {
             id,
             version,
             params,
+            instruction,
             scope,
         }): Parameters<PlaybookTrialArgs>,
     ) -> CallToolResult {
@@ -33,6 +34,7 @@ impl WfMcp {
             &id,
             version.as_deref(),
             params,
+            instruction,
             scope,
         ))
     }

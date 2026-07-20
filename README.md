@@ -137,6 +137,8 @@ apb validate        validate playbook schema
 apb run <id>        run a playbook (--overrides, --supervise, params)
 apb runs            list runs
 apb resume <run>    resume a paused or interrupted run
+apb stop <run>      stop a run: interrupt the running node, finalize if the driver is gone
+apb note <run> <t>  post a note (context append) to a run's control channel
 apb review          decide a pending human_review node
 apb serve           web UI (port 7321)
 apb mcp             stdio MCP server for coding agents
@@ -150,7 +152,7 @@ apb profile         list / show / write / edit agent profiles
 apb connector       list / show / call / approve / doctor / env / init - connectors to external services
 apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
 apb adopt           adoption readiness report for a playbook
-apb doctor          diagnose agents, profiles, runners, playbooks
+apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> for one run's health)
 apb export/import   move a playbook as a single bundle file
 ```
 

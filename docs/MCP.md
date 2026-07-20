@@ -59,14 +59,15 @@ Mutations (destructive):
 | --- | --- |
 | `playbook_run` | Run a playbook (spawns agents, changes project files). Server-side policy gate: draft/untrusted/cross-workspace are rejected |
 | `playbook_capture` | Distill an action into a draft playbook in the chosen scope (not executed until trial) |
-| `playbook_trial` | Trial run of a draft against the effects matrix: filesystem writes go into a git worktree with a diff; irreversible effects are forbidden |
+| `playbook_trial` | Trial run of a draft against the effects matrix: filesystem writes go into a git worktree with a diff; irreversible effects are forbidden. Accepts an `instruction`, exactly like `playbook_run` |
 | `playbook_approve` | Activation after trial/confirmation: lifecycle active, digest trusted |
 | `playbook_execute_plan` | Phase 2: execute a confirmed cross-workspace plan by `plan_token` |
 | `suggestion_dismiss` | Record the user's decline of a suggestion (do not suggest again) |
 | `playbook_create` | New playbook or a new minor version (creating via the tool approves the digest) |
 | `playbook_update` | New minor version of an existing playbook |
 | `playbook_delete` | Soft delete to trash |
-| `run_resume` | Resume a run, optionally from a node |
+| `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below) |
+| `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
 | `review_decide` | Decide a run's human_review node |
 | `profile_write` | Create/update a profile (CAS via expected_digest, auto-approves the bundle); current workspace only |
 | `profile_move` | Copy a profile between scopes (the source remains) |
@@ -87,7 +88,15 @@ the server.
 
 Supervisor tools (`supervisor_*`) are only available inside a supervisor
 session (behind a session gate) and are not listed here as part of the normal
-surface.
+surface. One is worth naming regardless, because its polling contract is easy
+to get wrong: `supervisor_wait_event { token, after_seq, timeout_ms }` blocks
+until the run's next wake, or a timeout, whichever comes first. Pass
+`after_seq` as the `seq` of the last wake you already saw (omit it on the
+first call); the response's `wake.seq` becomes your next `after_seq`, so you
+walk the wake stream forward instead of re-scanning wakes you already
+handled. `timeout_ms` bounds the block (default 25000). `wake: null` means
+the run already reached a terminal state, or the call simply timed out with
+nothing new - the caller decides whether to wait again.
 
 ## Asynchronous run model
 
@@ -105,6 +114,45 @@ tool call (for example, ChatGPT Apps at around 60 seconds). That's why
 Without `background: true`, behavior is unchanged: `playbook_run` blocks
 until completion and returns the result. This remains the default for
 backward compatibility.
+
+## Detached runs, resume, and stop
+
+A run started via `playbook_run` with `background: true`, via
+`supervise: "self"`, or via `run_resume`, is handed to a separate DETACHED
+driver process (spawned from the current `apb` executable, stdio nulled) that
+survives the calling MCP session: the run keeps going even if the chat
+session, or the `apb mcp` process that started it, exits. That process writes
+`runs/<id>/driver.pid` while it drives the run and removes it on a clean
+exit; `run_status`'s `driver_alive` field reports whether that pid is
+currently alive (`null` when no driver ever claimed the run, for example a
+run driven synchronously in-process).
+
+`run_resume` does not wait for the resumed run to finish. It computes the
+resume decision, hands the run to a detached driver, and returns an ack right
+away:
+
+```json
+{ "run_id": "...", "resumed_from": "some_node", "reason": "interrupted_restart", "detached": true }
+```
+
+`resumed_from` is the node id the run resumes at; `reason` is one of
+`interrupted_restart` (exactly one node was cut off mid-execution and
+restarts), `advance_past_finished` (nothing was interrupted; the run
+continues past the last finished node without re-running it),
+`parallel_fallback` (two or more branches were cut, so the run restarts from
+the last finished node), or `explicit_from_node` (the caller named
+`from_node`). Poll `run_status` / `run_events` afterward the same way you
+would for a `background: true` run.
+
+`run_stop { run_id }` posts an abort. If a live driver owns the run, that
+driver's watcher interrupts the in-flight node and its own drive loop writes
+the terminal event (`outcome: "signaled_live_driver"`). If nothing is driving
+the run any more, `run_stop` finalizes it itself
+(`outcome: "finalized_dead_run"`). If the run was already terminal, nothing
+is written (`outcome: "already_terminal"`). `apb stop <run_id>` is the CLI
+equivalent; `apb doctor --run <id>` diagnoses a run's process state read-only
+(open attempts and their pid liveness, the driver and workdir-lock holders,
+unapplied control entries).
 
 ## Connecting (local agents, no relay)
 

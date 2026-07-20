@@ -221,6 +221,10 @@ pub struct PlaybookTrialArgs {
     pub version: Option<String>,
     #[serde(default)]
     pub params: BTreeMap<String, String>,
+    /// Free-form instruction for nodes that expect one, exactly like
+    /// `playbook_run`'s `instruction` (rendered as `{{run.instruction}}`).
+    #[serde(default)]
+    pub instruction: Option<String>,
     /// Definition scope: "project" (default) or "global".
     #[serde(default)]
     pub scope: Option<String>,

@@ -68,6 +68,92 @@ Installing connectors, configuring accounts, secrets, trust, and the
 `finish`. Edges connect node ids; conditional edges gate on node status,
 review status, or output match.
 
+## Template variables
+
+A node prompt (`agent_task`, `prompt`), a `playbook` node's `instruction`, and
+a finish node's `prompt` are rendered as templates before use. This is the
+exact accepted set; any other `{{...}}` reference is rejected at save time as
+a V13 validation error:
+
+- `params.<name>` - a declared playbook param's value, by name.
+- `nodes.<id>.output` - the node's output text.
+- `nodes.<id>.report` - the same value as `.output` (an alias; both names
+  resolve identically).
+- `nodes.<id>.review_note` - the reviewer's note from a `human_review` node's
+  decision.
+- `run.instruction` - the run's input prompt (see below).
+- `run.context` - the accumulated run context (params, instruction, node
+  outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
+- `run.hooks.<key>` - the payload last posted to a `wait` node's webhook `key`.
+
+An unresolvable reference (an unknown param, a node id that is not in the
+playbook, a namespace outside this list) fails validation before the
+playbook can be saved or run, rather than silently rendering empty at run
+time.
+
+## Human review and conditional edges
+
+A `human_review` node pauses the run for a human decision:
+
+```yaml
+- { id: review, type: human_review, options: [approve, reject] }
+```
+
+`options` is a required list of strings: the choices a reviewer can pick.
+`review_decide` records one of them as the node's decision, plus a free-form
+note (available downstream as `{{nodes.review.review_note}}`).
+
+An edge's `condition` gates traversal on one of three types:
+
+- `node_status { node, equals: success|failure }` - matches when the named
+  node's status is `success` or `failure` (which also covers a timeout).
+- `review_status { equals: <option string> }` - matches when the
+  `human_review` node this edge starts from was decided with exactly that
+  option string.
+- `output_match { node, pattern }` - matches when the named node's output
+  contains `pattern` as a substring (not a regex).
+
+An edge with no `condition` always matches. A worked example wiring a review
+gate:
+
+```yaml
+nodes:
+  - { id: draft,   type: agent_task, prompt: "draft the release notes", profile: writer }
+  - { id: review,  type: human_review, options: [approve, reject] }
+  - { id: publish, type: agent_task, prompt: "publish {{nodes.draft.output}}", profile: writer }
+  - { id: notify,  type: agent_task, prompt: "tell the author: {{nodes.review.review_note}}", profile: writer }
+edges:
+  - { from: draft,   to: review }
+  - { from: review,  to: publish, condition: { type: review_status, equals: approve } }
+  - { from: review,  to: notify,  condition: { type: review_status, equals: reject } }
+```
+
+## Bounded loops
+
+An edge may carry `max_traversals` (an integer >= 1): the number of times
+that edge may be traversed in one run. A cycle in the graph is only legal
+when at least one of its edges is bounded this way (validator V11); an
+unbounded cycle is refused, and `max_traversals: 0` is refused separately
+(validator V30). Once a bounded edge reaches its cap, edge selection treats
+it as non-matching, so the run takes whatever alternative edge is wired (or
+hits the ordinary no-matching-edge behavior if none is). The canonical
+fix-loop:
+
+```yaml
+edges:
+  - { from: review, to: fix,    condition: { type: node_status, node: review, equals: failure }, max_traversals: 3 }
+  - { from: fix,    to: review }
+  - { from: review, to: qa,     condition: { type: node_status, node: review, equals: success } }
+```
+
+After three review failures the bounded `review -> fix` edge stops matching
+and the run takes whatever else is wired from `review` (here, `review -> qa`
+if `review` last succeeded). If nothing matches at all, the run fails with an
+explicit "node has no outgoing edge and is not finish" error rather than
+looping forever - wire an edge for the fully-exhausted case (an escalation to
+`human_review`, or a plain failure edge) if that outcome must be handled
+gracefully.
+
 ## expected_duration (progress estimates)
 
 Every node may carry an optional `expected_duration`: the estimated wall time
@@ -94,6 +180,10 @@ accepts draft edits. At run start the value is resolved once: an explicitly
 passed instruction wins, otherwise the current draft, otherwise none. The chosen
 value is snapshotted immutably into the run.
 
+`playbook_trial` accepts the same `instruction` argument as `playbook_run`, so
+an instruction-driven draft can be trialed with a real instruction before it
+is ever approved.
+
 ## Finish answer
 
 A finish node may carry a `prompt` and an optional `profile`. With a prompt, an
@@ -111,7 +201,7 @@ A `playbook` node runs another playbook as a full child run:
     - id: translate_book
       type: playbook
       playbook: book-translation      # or { id: book-translation, scope: global }
-      instruction: "Translate the plan from {{outputs.plan}} chapter by chapter."
+      instruction: "Translate the plan from {{nodes.plan.output}} chapter by chapter."
       expected_duration: 2h
 
 The node's rendered instruction becomes the child's run input; the child's
