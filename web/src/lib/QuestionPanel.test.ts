@@ -54,6 +54,19 @@ describe('QuestionPanel', () => {
     expect(body).toContain('&lt;b>bold&lt;/b>')
   })
 
+  it('preserves literal newlines in the question text inside the pre-wrap element', () => {
+    const multiline = 'first line\nsecond line\nthird line'
+    const { body } = render(QuestionPanel, {
+      props: {
+        question: { node: 'ask', question: multiline, options: [] },
+        onAnswer: () => {},
+      },
+    })
+    const match = body.match(/<pre[^>]*whitespace-pre-wrap[^>]*>([\s\S]*?)<\/pre>/)
+    expect(match).not.toBeNull()
+    expect(match?.[1]).toContain(multiline)
+  })
+
   it('disables the option buttons and submit while posting', () => {
     const { body } = render(QuestionPanel, {
       props: {

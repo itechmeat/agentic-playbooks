@@ -8,7 +8,11 @@
   // buttons for a suggested answer plus a free-text field, both disabled
   // while an answer is in flight. The question text is rendered as plain text
   // ({expression}, never {@html}) since it comes verbatim from the agent and
-  // must never be interpreted as markdown or HTML.
+  // must never be interpreted as markdown or HTML; it uses the same
+  // `<pre class="whitespace-pre-wrap break-words ...">` convention every
+  // other agent-authored free-form text block in RunView.svelte uses
+  // (`detail.answer`, `detail.instruction`, `report`), so a multiline
+  // question's literal newlines survive instead of collapsing into one line.
   let {
     question,
     posting = false,
@@ -42,7 +46,7 @@
   <Card.Content class="flex flex-col gap-3">
     <div class="flex flex-col gap-1">
       <span class="font-mono text-xs">{question.node}</span>
-      <p class="text-sm">{question.question}</p>
+      <pre class="whitespace-pre-wrap break-words text-sm">{question.question}</pre>
     </div>
 
     {#if question.options.length}
