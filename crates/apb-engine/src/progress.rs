@@ -20,6 +20,33 @@ use crate::state::{NodeStatus, RunState, RunStatus};
 pub enum WaitingKind {
     HumanReview,
     Wait,
+    /// An interactive `agent_task` is parked on a question it asked that has
+    /// not yet been answered (spec 2026-07-20-interactive-nodes). Serializes
+    /// to `"question"`.
+    Question,
+}
+
+/// The pending question for a run whose `waiting_kind` is
+/// `Some(WaitingKind::Question)` (spec 2026-07-20-interactive-nodes). Built
+/// from the `questions.jsonl` / `answers.jsonl` channel files directly
+/// (`pending_question_for_run`), not from the event log, so it is visible
+/// even before drive journals `QuestionAsked` for it.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingQuestion {
+    pub node: String,
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+    /// `"human"` or `"supervisor"`, from the node's `answer_by` in the run's
+    /// playbook snapshot. Defaults to `"human"` when the snapshot or node is
+    /// missing (fail safe, same default as `question::answer_by_for`).
+    pub answer_by: String,
+    /// Milliseconds since epoch when the question was asked, taken from the
+    /// matching `QuestionAsked` event's `ts` when drive has journaled it.
+    /// `0` before that (the channel entry exists but drive has not yet
+    /// observed it); the web treats `0` as "just now" rather than
+    /// synthesizing a non-deterministic `now_millis` here.
+    pub asked_at: u128,
 }
 
 /// The run-progress summary surfaced by the server and MCP `run_status`.
@@ -32,6 +59,11 @@ pub struct ProgressSummary {
     /// `None` whenever `waiting_on` is `None`. Feeds the web badge copy
     /// (spec section 6 wants distinct texts).
     pub waiting_kind: Option<WaitingKind>,
+    /// The pending question when `waiting_kind == Some(WaitingKind::Question)`.
+    /// `None` otherwise, and `None` for the plain `compute`/`compute_with`
+    /// path (no run dir to read the channel files from) - only the
+    /// `from_run_dir` family populates it.
+    pub pending_question: Option<PendingQuestion>,
     /// Deterministic identity of the work plan behind this percent (spec
     /// section 3): the playbook version bound to the run plus the latest
     /// reported `total` of each cyclic group. It changes exactly when a report
@@ -131,6 +163,89 @@ pub fn load_run_playbook(run_dir: &Path) -> Option<Playbook> {
     }
 }
 
+/// The first interactive `agent_task` node with a pending question, read
+/// directly from the `questions.jsonl` / `answers.jsonl` channel files
+/// (spec 2026-07-20-interactive-nodes) rather than the event log, so it is
+/// visible even before drive journals `QuestionAsked` for it (the live
+/// transport in a later task depends on this exact property). Node order
+/// follows `playbook.nodes`, giving a deterministic pick when more than one
+/// interactive node happens to be pending at once.
+fn pending_question_for_run(
+    run_dir: &Path,
+    playbook: &Playbook,
+    events: &[Event],
+) -> Option<PendingQuestion> {
+    playbook.nodes.iter().find_map(|n| {
+        if matches!(
+            n.kind,
+            NodeKind::AgentTask {
+                interactive: true,
+                ..
+            }
+        ) {
+            pending_question_for_node(run_dir, playbook, events, &n.id)
+        } else {
+            None
+        }
+    })
+}
+
+/// A single node's pending question, or `None` when every asked question has
+/// a matching answer. Mirrors `compute_with`'s `review_pending` count-based
+/// detection: the node has a pending question when its asked-question count
+/// exceeds its answered count, and the pending question is the first
+/// unanswered entry (index == the answered count, since answers consume
+/// questions in posting order).
+fn pending_question_for_node(
+    run_dir: &Path,
+    playbook: &Playbook,
+    events: &[Event],
+    node_id: &str,
+) -> Option<PendingQuestion> {
+    let questions: Vec<_> = crate::question::read_questions_after(run_dir, None)
+        .ok()?
+        .into_iter()
+        .filter(|q| q.node == node_id)
+        .collect();
+    let answered = crate::question::read_answers_after(run_dir, None)
+        .ok()?
+        .into_iter()
+        .filter(|a| a.node == node_id)
+        .count();
+    if questions.len() <= answered {
+        return None;
+    }
+    let q = &questions[answered];
+    let answer_by = playbook
+        .node(node_id)
+        .and_then(|n| match &n.kind {
+            NodeKind::AgentTask { answer_by, .. } => Some(answer_by.as_str().to_string()),
+            _ => None,
+        })
+        .unwrap_or_else(|| "human".to_string());
+    // asked_at: the ts of the (answered-count)-th `QuestionAsked` event
+    // journaled for this node, positionally matching the channel order,
+    // since drive journals them in the order it observes new channel
+    // entries. `0` when drive has not journaled it yet (the web treats `0`
+    // as "just now" rather than a synthesized now_millis, which would be
+    // non-deterministic at fold time).
+    let asked_at = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::QuestionAsked { node, .. } if node == node_id => Some(e.ts),
+            _ => None,
+        })
+        .nth(answered)
+        .unwrap_or(0);
+    Some(PendingQuestion {
+        node: node_id.to_string(),
+        question: q.question.clone(),
+        options: q.options.clone(),
+        answer_by,
+        asked_at,
+    })
+}
+
 /// Computes the progress summary for a run directory, or `None` when the
 /// playbook snapshot is missing or unparseable. The rule "missing or
 /// unparseable snapshot means no progress" lives here and only here.
@@ -161,6 +276,17 @@ pub fn from_run_dir_with_root(
     // instead of `compute` and `weighted` each rebuilding it independently.
     let gc = GroupContext::build(&pb, events);
     let mut summary = compute_with(&pb, events, &gc);
+    // A pending question takes precedence over whatever `compute_with` set
+    // (a pending human_review, or nothing): it is read from the
+    // questions.jsonl/answers.jsonl channel files, which only a run dir can
+    // provide, so this override lives here rather than in the pure
+    // `compute_with` fold. A parked question is the tighter interactive
+    // wait, so it wins whenever both are pending.
+    if let Some(pq) = pending_question_for_run(run_dir, &pb, events) {
+        summary.waiting_on = Some(pq.node.clone());
+        summary.waiting_kind = Some(WaitingKind::Question);
+        summary.pending_question = Some(pq);
+    }
     let (done, total) = weighted_with(&pb, events, &gc);
     if total == 0 {
         return Some(summary);
@@ -426,6 +552,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         label,
         waiting_on,
         waiting_kind,
+        pending_question: None,
         plan_key,
     }
 }
@@ -777,6 +904,124 @@ edges:
         let p = compute(&pb, &events);
         assert_eq!(p.waiting_on, None);
         assert_eq!(p.waiting_kind, None);
+    }
+
+    fn interactive_pb_yaml() -> &'static str {
+        "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: ask, type: agent_task, prompt: hi, interactive: true, answer_by: supervisor }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: ask }\n  - { from: ask, to: f }\n"
+    }
+
+    #[test]
+    fn pending_question_waits_with_kind_and_clears_on_answer() {
+        // The pending question is read from the CHANNEL files
+        // (questions.jsonl vs answers.jsonl count difference), not from
+        // events, so it is visible before drive ever journals
+        // `QuestionAsked`.
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"), interactive_pb_yaml()).unwrap();
+        crate::question::post_question(
+            &run_dir,
+            "ask",
+            1,
+            "which way",
+            vec!["left".into(), "right".into()],
+        )
+        .unwrap();
+
+        let events = vec![ev(
+            0,
+            EventPayload::RunStarted {
+                playbook: "p".into(),
+                version: "1.0.0".into(),
+            },
+        )];
+        let p = from_run_dir(&run_dir, &events).expect("run dir must yield progress");
+        assert_eq!(p.waiting_on.as_deref(), Some("ask"));
+        assert_eq!(p.waiting_kind, Some(WaitingKind::Question));
+        let pq = p
+            .pending_question
+            .expect("pending_question must be Some before an answer lands");
+        assert_eq!(pq.node, "ask");
+        assert_eq!(pq.question, "which way");
+        assert_eq!(pq.options, vec!["left".to_string(), "right".to_string()]);
+        assert_eq!(pq.answer_by, "supervisor");
+        // No QuestionAsked journaled yet: asked_at falls back to 0 (the web
+        // treats 0 as "just now"), never a non-deterministic now_millis.
+        assert_eq!(pq.asked_at, 0);
+
+        crate::question::post_answer(&run_dir, Some("ask"), "left", "supervisor").unwrap();
+        let p2 = from_run_dir(&run_dir, &events).expect("run dir must yield progress");
+        assert_eq!(p2.waiting_on, None);
+        assert_eq!(p2.waiting_kind, None);
+        assert!(p2.pending_question.is_none());
+    }
+
+    #[test]
+    fn pending_question_asked_at_comes_from_the_journaled_event() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"), interactive_pb_yaml()).unwrap();
+        crate::question::post_question(&run_dir, "ask", 1, "which way", Vec::new()).unwrap();
+
+        let events = vec![
+            ev(
+                0,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            Event {
+                seq: 1,
+                ts: 12_345,
+                payload: EventPayload::QuestionAsked {
+                    node: "ask".into(),
+                    question: "which way".into(),
+                    options: Vec::new(),
+                },
+            },
+        ];
+        let p = from_run_dir(&run_dir, &events).expect("run dir must yield progress");
+        let pq = p.pending_question.expect("pending_question must be Some");
+        assert_eq!(pq.asked_at, 12_345);
+    }
+
+    #[test]
+    fn pending_question_takes_precedence_over_pending_review() {
+        // spec: a parked question is the tighter interactive wait, so when
+        // both a question and a review are pending in the same run, the
+        // question wins deterministically.
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: ask, type: agent_task, prompt: hi, interactive: true, answer_by: supervisor }\n  - { id: r, type: human_review, options: [approve, reject] }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: ask }\n  - { from: ask, to: r }\n  - { from: r, to: f }\n",
+        )
+        .unwrap();
+        crate::question::post_question(&run_dir, "ask", 1, "which way", Vec::new()).unwrap();
+
+        let events = vec![
+            ev(
+                0,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                EventPayload::ReviewRequested {
+                    node: "r".into(),
+                    options: vec!["approve".into(), "reject".into()],
+                },
+            ),
+        ];
+        let p = from_run_dir(&run_dir, &events).expect("run dir must yield progress");
+        assert_eq!(p.waiting_on.as_deref(), Some("ask"));
+        assert_eq!(p.waiting_kind, Some(WaitingKind::Question));
     }
 
     fn wait_pb() -> Playbook {

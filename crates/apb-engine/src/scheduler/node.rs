@@ -343,6 +343,7 @@ pub(crate) fn execute_node(
                                 attempt,
                                 status: report.status.as_str().into(),
                                 duration_ms,
+                                session: None,
                             })?;
                             if report.status == NodeStatus::Succeeded {
                                 // A deterministic check on top of the self-report (spec 6.2):
@@ -397,6 +398,7 @@ pub(crate) fn execute_node(
                                 attempt,
                                 status: attempt_status.into(),
                                 duration_ms,
+                                session: None,
                             })?;
                             last_msg = msg;
                             // A transport error and a timeout break the retry loop for this
@@ -611,6 +613,7 @@ pub(crate) fn execute_finish_answer(
                         attempt,
                         status: report.status.as_str().into(),
                         duration_ms,
+                        session: None,
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         return Ok((NodeStatus::Succeeded, report.summary, events));
@@ -630,6 +633,7 @@ pub(crate) fn execute_finish_answer(
                         }
                         .into(),
                         duration_ms,
+                        session: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {
