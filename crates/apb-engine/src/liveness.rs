@@ -33,19 +33,68 @@ use crate::state::{NodeStatus, RunState};
 // Process liveness
 // ---------------------------------------------------------------------------
 
-/// The raw primitive: `kill -0 <pid>` exits successfully if the process
-/// exists. Cheaper than `process_probe` and enough where a pid cannot have
-/// been reused (the workdir lock, held for the lifetime of one process).
-/// Anything that must survive pid reuse wants `driver_is_live` instead.
+/// A pid that could actually name a process, as the `i32` `kill(2)` wants.
+///
+/// `None` for values that cannot name one, and the distinction matters far
+/// more than it looks: to `kill(2)`, the out-of-range values are not invalid,
+/// they are WILDCARDS. `pid 0` means "every process in my group" and `-1`
+/// means "every process I may signal". A `u32` pid above `i32::MAX` becomes
+/// negative when narrowed - `u32::MAX` becomes exactly `-1` - so probing a
+/// garbage pid asked "may I signal EVERYTHING?", got yes, and reported the
+/// garbage pid as a running process.
+///
+/// A pid file holding an out-of-range or corrupt value therefore read as
+/// permanently held, wedging the workdir with no way to reclaim it, which is
+/// the bug this rejects. It is also why the narrowing must never be done
+/// silently anywhere near a signal: with a real signal instead of the 0 used
+/// here, the same truncation would have killed every process the user owns.
+fn probeable_pid(pid: u32) -> Option<i32> {
+    match i32::try_from(pid) {
+        Ok(p) if p > 0 => Some(p),
+        _ => None,
+    }
+}
+
+/// The raw primitive: does process `pid` exist? Cheaper than `process_probe`
+/// and enough where a pid cannot have been reused (the workdir lock, held for
+/// the lifetime of one process). Anything that must survive pid reuse wants
+/// `driver_is_live` instead.
+///
+/// This is the `kill(pid, 0)` syscall, not a `kill -0` subprocess. The
+/// subprocess form was both a portability hazard (BSD and procps-ng `kill`
+/// disagree about argument parsing, as `proc.rs` and `detect.rs` record) and
+/// unable to tell the module's three cases apart, because an exit code cannot
+/// distinguish "no such process" from "could not ask".
+///
+/// The bias is the module's: only `ESRCH`, a positive "there is no such
+/// process", counts as dead. `EPERM` means the process is there but not ours
+/// to signal, which is alive; anything else is unknown, which is also alive.
+/// Note this direction is a CHANGE - the old code's `.unwrap_or(false)` on a
+/// failed spawn meant a host without a usable `kill` binary reported every pid
+/// as dead, which is precisely the wrong-"dead" this module exists to prevent.
 pub fn pid_alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+    // Ahead of the platform split on purpose: a pid that cannot name a process
+    // is dead everywhere, and the non-unix arm's "unknown means alive" must
+    // not swallow that and hand back a permanently-held lock.
+    let Some(pid) = probeable_pid(pid) else {
+        return false;
+    };
+    #[cfg(unix)]
+    {
+        // SAFETY: `kill` takes no pointers and is async-signal-safe; signal 0
+        // performs the existence and permission checks without delivering
+        // anything. `pid` is known positive, so no wildcard can be reached.
+        if unsafe { libc::kill(pid, 0) } == 0 {
+            return true;
+        }
+        std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
+    }
+    #[cfg(not(unix))]
+    {
+        // No probe available: unknown, and unknown means alive.
+        let _ = pid;
+        true
+    }
 }
 
 /// The answer to "what is process `pid`?". Deliberately three-valued: "the
@@ -142,6 +191,14 @@ fn classify(out: Option<PsOutput>) -> Probe {
 /// worth paying a second `ps` to double-check, and on a healthy host that
 /// second call happens only for pids that really are gone.
 fn guarded_probe(pid: u32, run: PsRun<'_>) -> Probe {
+    // An impossible pid is `NotFound` without asking anyone. This is the same
+    // rejection `pid_alive` makes, kept here so both probes classify a corrupt
+    // pid file identically rather than inheriting whatever a given `ps` does
+    // with an out-of-range argument. It cannot mask a live process: no such
+    // value can name one.
+    if probeable_pid(pid).is_none() {
+        return Probe::NotFound;
+    }
     match classify(run(pid)) {
         Probe::NotFound if !matches!(classify(run(std::process::id())), Probe::Running(_)) => {
             Probe::Unknown
@@ -612,6 +669,66 @@ mod tests {
         assert!(pid_is_live(std::process::id()));
         assert!(!pid_is_live(u32::MAX));
         assert!(pid_alive(std::process::id()));
+    }
+
+    /// A pid that cannot name a process must read as DEAD, through both
+    /// probes, for every impossible value.
+    ///
+    /// This is the regression test for a bug that wedged the workdir. A pid
+    /// file holding a corrupt or out-of-range value read as "held by a running
+    /// process" forever, and there was no way to reclaim it. The cause is that
+    /// the out-of-range values are not rejected by `kill(2)` - they are
+    /// WILDCARDS. `u32::MAX` narrows to `-1`, "every process I may signal",
+    /// which succeeds; `0` means "my own process group", which also succeeds.
+    /// So the probe asked "may I signal everything?", got yes, and called the
+    /// garbage pid alive.
+    ///
+    /// It was invisible on macOS, where BSD `kill(1)` rejected the argument
+    /// before it ever reached the syscall, and only surfaced on Linux, where
+    /// procps-ng `kill(1)` passed it through to be narrowed. Probing by
+    /// syscall makes the behaviour identical on both, which is exactly why the
+    /// range check has to be explicit rather than delegated to a `kill` binary.
+    #[test]
+    fn a_pid_that_cannot_name_a_process_is_dead_not_alive() {
+        for pid in [0, u32::MAX, u32::MAX - 1, (i32::MAX as u32) + 1] {
+            assert!(
+                !pid_alive(pid),
+                "pid {pid} cannot name a process, so pid_alive must not report it running"
+            );
+            assert!(
+                !pid_is_live(pid),
+                "pid {pid} cannot name a process, so pid_is_live must not report it running"
+            );
+            assert!(
+                matches!(process_probe(pid), Probe::NotFound),
+                "pid {pid} cannot name a process, so the probe must answer NotFound"
+            );
+        }
+        // The largest pid that IS representable stays probeable: the rejection
+        // must be of impossible values, not of large ones.
+        assert!(probeable_pid(i32::MAX as u32).is_some());
+        assert!(probeable_pid(1).is_some());
+    }
+
+    /// The rejection must not have broadened into "unknown means dead", which
+    /// is the failure mode this whole module is biased against: a pid that is
+    /// merely unreadable, or a probe that cannot answer, still resolves to
+    /// alive.
+    #[test]
+    fn an_unanswerable_probe_still_resolves_to_alive() {
+        // `Unknown` is never a "dead" verdict for the driver rule ...
+        assert!(driver_verdict("any-run", Probe::Unknown));
+        // ... and a real, live, foreign pid is reported alive by the raw
+        // primitive even though it is not ours and carries no identity.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("sleep 30")
+            .spawn()
+            .expect("spawn a live child");
+        let pid = child.id();
+        assert!(pid_alive(pid), "a live foreign pid must read as alive");
+        let _ = child.kill();
+        let _ = child.wait();
     }
 
     #[test]

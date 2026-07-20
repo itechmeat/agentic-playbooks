@@ -11,6 +11,11 @@ use std::os::unix::process::CommandExt as _;
 use apb_core::config::{InvocationDef, PromptVia, SoulDelivery, Transport};
 
 use crate::error::EngineError;
+// Shared with `run_capture` rather than duplicated: the signal-target
+// validation it performs is the difference between killing one process group
+// and killing every process the user owns, so it must live in exactly one
+// place.
+use crate::proc::kill_process_group;
 use crate::state::NodeStatus;
 
 /// Spawns the agent in its own process group so that cancellation/timeout can
@@ -67,28 +72,6 @@ fn env_duration_ms(key: &str) -> Option<Duration> {
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .map(Duration::from_millis)
-}
-
-/// SIGKILLs every process still in the agent's process group. `spawn_in_group`
-/// gives the agent `process_group(0)`, so its pgid equals its pid and one
-/// signal reaches the MCP servers and tool subprocesses it spawned.
-///
-/// Safe to call after the leader has been reaped: a pgid is not recycled while
-/// any process remains in the group, so this can never reach an unrelated
-/// process, and an empty group is a harmless ESRCH.
-fn kill_process_group(pid: u32) {
-    #[cfg(unix)]
-    {
-        // SAFETY: `kill` takes no pointers and is async-signal-safe; a
-        // negative pid addresses the process group.
-        unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        let _ = pid;
-    }
 }
 
 /// Terminates the agent's whole process tree and reaps the leader. On Unix
@@ -622,7 +605,15 @@ impl ClaudeAdapter {
         // draining whatever is still buffered in the pipe afterwards.
         let mut drain_deadline: Option<Instant> = None;
         loop {
-            if let Some(err) = Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)
+            // Only while the agent is still running. Once `drain_deadline` is
+            // set the agent has ALREADY exited, and what remains is reading
+            // bytes it left in the pipe; charging that against the node's
+            // timeout would report `TimedOut` for an agent that finished
+            // inside its budget, purely because a leftover descendant made the
+            // final read slow.
+            if drain_deadline.is_none()
+                && let Some(err) =
+                    Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)
             {
                 return Err(err);
             }
@@ -682,14 +673,29 @@ impl ClaudeAdapter {
                 ));
             }
             None => {
+                // The agent will not exit. Tear the tree down either way, but
+                // do not throw away a run that actually finished: if the
+                // stream already carried its terminal `result` event, the
+                // agent said everything it had to say and only failed to exit
+                // afterwards. Reporting that as a timeout would discard
+                // completed work over a process-lifecycle detail, which is the
+                // same call this wave made for an agent that exits leaving a
+                // grandchild on its pipes - the work counts, the leftover
+                // process is noise. `Timeout` is reserved for the case where
+                // no result was ever seen, which is a genuinely unfinished
+                // node.
                 kill_process_tree(&mut child);
-                return Err((
-                    ErrorClass::Timeout,
-                    format!(
-                        "`{}` closed its stdout but was still running {grace:?} later; killed its process group",
-                        self.program
-                    ),
-                ));
+                return match parse_stream_result(&raw_lines) {
+                    Ok(report) => Ok(report),
+                    Err(_) => Err((
+                        ErrorClass::Timeout,
+                        format!(
+                            "`{}` closed its stdout without a terminal result event and was still \
+                             running {grace:?} later; killed its process group",
+                            self.program
+                        ),
+                    )),
+                };
             }
         };
         // The leader is reaped; anything left in its group would still be

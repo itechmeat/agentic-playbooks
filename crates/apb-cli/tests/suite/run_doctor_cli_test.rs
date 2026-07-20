@@ -18,8 +18,25 @@ fn apb() -> Command {
     Command::cargo_bin("apb").unwrap()
 }
 
-/// A pid no process can hold, so the liveness probe answers "no such process".
-const DEAD_PID: u32 = u32::MAX;
+/// A real pid that is reliably absent: a child spawned, waited for and reaped,
+/// so the number was genuinely valid and is now free.
+///
+/// Deliberately not `u32::MAX`. An impossible pid exercises the invalid-pid
+/// rejection (tested directly in `apb_engine::liveness`) rather than the
+/// stale-holder property these fixtures are about, and using one here hid a
+/// real bug: `u32::MAX` narrows to `-1`, the `kill(2)` "every process"
+/// wildcard, so the probe reported it as running.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .expect("spawn a throwaway child to borrow a pid from");
+    let pid = child.id();
+    // Bounded by construction: `exit 0` cannot fail to exit.
+    child.wait().expect("reap the throwaway child");
+    pid
+}
 
 fn init(dir: &Path) {
     apb().arg("init").current_dir(dir).assert().success();
@@ -39,20 +56,21 @@ fn doctor_run_flags_a_wedged_run() {
     let dir = tempfile::tempdir().unwrap();
     init(dir.path());
     let rd = run_dir(dir.path(), "wedged-1");
+    let dead = dead_pid();
 
     fs::write(
         rd.join("events.jsonl"),
         format!(
             "{{\"seq\":0,\"ts\":1000,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}}\n\
              {{\"seq\":1,\"ts\":2000,\"type\":\"node_started\",\"node\":\"a\",\"attempt\":1}}\n\
-             {{\"seq\":2,\"ts\":3000,\"type\":\"attempt_started\",\"node\":\"a\",\"attempt\":1,\"agent\":\"stub\",\"pid\":{DEAD_PID}}}\n\
+             {{\"seq\":2,\"ts\":3000,\"type\":\"attempt_started\",\"node\":\"a\",\"attempt\":1,\"agent\":\"stub\",\"pid\":{dead}}}\n\
              {{\"seq\":3,\"ts\":4000,\"type\":\"supervisor_action\",\"action\":\"retry\",\"node\":\"a\",\"detail\":\"\"}}\n\
              {{\"seq\":4,\"ts\":5000,\"type\":\"supervisor_action\",\"action\":\"retry\",\"node\":\"a\",\"detail\":\"\"}}\n"
         ),
     )
     .unwrap();
     // A stale driver.pid: the sole reason `stop_run` would refuse to finalize.
-    fs::write(rd.join("driver.pid"), DEAD_PID.to_string()).unwrap();
+    fs::write(rd.join("driver.pid"), dead.to_string()).unwrap();
     // One control entry posted and never consumed (no control.cursor at all).
     fs::write(
         rd.join("control.jsonl"),
@@ -86,7 +104,7 @@ fn doctor_run_flags_a_wedged_run() {
         );
     }
     assert!(
-        stdout.contains(&DEAD_PID.to_string()),
+        stdout.contains(&dead.to_string()),
         "the dead pid must be named so an operator can correlate it: {stdout}"
     );
 }

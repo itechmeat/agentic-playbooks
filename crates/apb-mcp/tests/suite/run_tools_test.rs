@@ -315,9 +315,25 @@ fn now_ms() -> u128 {
         .as_millis()
 }
 
-/// A pid no process can hold: the probe answers "no such process", which is
-/// the one branch allowed to conclude "dead".
-const DEAD_PID: u32 = u32::MAX;
+/// A real pid that is reliably absent: a child spawned, waited for and reaped,
+/// so the number was genuinely valid and is now free.
+///
+/// Deliberately not `u32::MAX`. An impossible pid exercises the invalid-pid
+/// rejection (tested directly in `apb_engine::liveness`) rather than the
+/// stale-holder property these fixtures are about, and using one here hid a
+/// real bug: `u32::MAX` narrows to `-1`, the `kill(2)` "every process"
+/// wildcard, so the probe reported it as running.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .expect("spawn a throwaway child to borrow a pid from");
+    let pid = child.id();
+    // Bounded by construction: `exit 0` cannot fail to exit.
+    child.wait().expect("reap the throwaway child");
+    pid
+}
 
 /// A short-lived child that exists only to lend the test a real, live,
 /// foreign pid. Killed and waited for on drop, so no path out of the test
@@ -354,6 +370,7 @@ impl Drop for Sleeper {
 fn run_status_reports_a_dead_attempt_as_lost_with_node_times() {
     let dir = tempfile::tempdir().unwrap();
     let run_dir = bare_run_dir(dir.path(), "r-lost");
+    let dead = dead_pid();
     // `a` opened an attempt under a pid that is not running and never wrote
     // `attempt_finished`: the crashed-attempt shape. `b` ran and finished
     // normally, so it must carry timings without any attempt fields.
@@ -364,7 +381,7 @@ fn run_status_reports_a_dead_attempt_as_lost_with_node_times() {
              {{\"seq\":1,\"ts\":3000,\"type\":\"node_started\",\"node\":\"b\",\"attempt\":1}}\n\
              {{\"seq\":2,\"ts\":4000,\"type\":\"node_finished\",\"node\":\"b\",\"status\":\"succeeded\",\"attempt\":1,\"output\":\"\"}}\n\
              {{\"seq\":3,\"ts\":5000,\"type\":\"node_started\",\"node\":\"a\",\"attempt\":1}}\n\
-             {{\"seq\":4,\"ts\":6000,\"type\":\"attempt_started\",\"node\":\"a\",\"attempt\":1,\"agent\":\"stub\",\"pid\":{DEAD_PID}}}\n"
+             {{\"seq\":4,\"ts\":6000,\"type\":\"attempt_started\",\"node\":\"a\",\"attempt\":1,\"agent\":\"stub\",\"pid\":{dead}}}\n"
         ),
     )
     .unwrap();
@@ -391,7 +408,7 @@ fn run_status_reports_a_dead_attempt_as_lost_with_node_times() {
 
     let times = &status["node_times"];
     assert_eq!(times["a"]["started_ms"], 5000);
-    assert_eq!(times["a"]["attempt_pid"], DEAD_PID);
+    assert_eq!(times["a"]["attempt_pid"], dead);
     assert!(
         times["a"]["attempt_age_ms"].as_u64().is_some(),
         "an open attempt must carry an age, got {times}"

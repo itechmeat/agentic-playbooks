@@ -299,17 +299,38 @@ const MAX_STDERR_BYTES: usize = 4 * 1024;
 /// group is empty.
 fn kill_process_group(pid: u32) {
     #[cfg(unix)]
-    {
-        // SAFETY: `kill` is async-signal-safe and takes no pointers; a
-        // negative pid addresses the process group, and an unknown group is
-        // reported as ESRCH rather than being undefined.
+    if let Some(target) = group_target(pid) {
+        // SAFETY: `kill` is async-signal-safe and takes no pointers; `target`
+        // is a validated negative group id, and an unknown group is reported
+        // as ESRCH rather than being undefined.
         unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(target, libc::SIGKILL);
         }
     }
     #[cfg(not(unix))]
     {
         let _ = pid;
+    }
+}
+
+/// The `kill(2)` argument addressing the group led by `pid`, or `None` when
+/// `pid` cannot lead an addressable one.
+///
+/// Refuses the three inputs that are wildcards rather than errors, because the
+/// group form negates its argument: `0` negates to 0 ("my own group"), `1`
+/// negates to -1 ("every process I may signal", the catastrophic one), and
+/// anything above `i32::MAX` narrows negative first so negating it lands on a
+/// small unrelated pid. The probe child here is always a `Child` we spawned,
+/// so none of these is reachable today; the check is what keeps it that way if
+/// a caller ever passes a pid read from a file.
+///
+/// `apb_engine::proc::group_target` is the same rule for the engine's spawns.
+/// The duplication is deliberate: apb-core must not depend on apb-engine, and
+/// a shared crate for six lines would be worse than two audited copies.
+fn group_target(pid: u32) -> Option<i32> {
+    match i32::try_from(pid) {
+        Ok(p) if p > 1 => Some(-p),
+        _ => None,
     }
 }
 

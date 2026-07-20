@@ -303,6 +303,33 @@ mod tests {
     use super::*;
     use crate::control::{Control, post_control, write_control_cursor};
 
+    /// A real pid that is reliably absent: a child we spawned, waited for and
+    /// reaped, so the number was genuinely valid and is now free.
+    ///
+    /// Deliberately NOT `u32::MAX`, which these fixtures used to use. An
+    /// impossible pid does not exercise the stale-holder property these tests
+    /// are about; it exercises the invalid-pid rejection, which is now tested
+    /// directly in `liveness`. Worse, it hid a real bug for as long as it was
+    /// used here: `u32::MAX` narrows to `-1`, which `kill(2)` reads as the
+    /// "every process I may signal" wildcard, so the probe answered "alive"
+    /// and this fixture passed on macOS while failing on Linux.
+    ///
+    /// The pid could in principle be recycled between the reap and the
+    /// assertion. On an idle host within a few milliseconds that is
+    /// vanishingly unlikely, and unlike an impossible pid it exercises the
+    /// probe path an operator's stale lock file actually takes.
+    fn dead_pid() -> u32 {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn a throwaway child to borrow a pid from");
+        let pid = child.id();
+        // Bounded by construction: `exit 0` cannot fail to exit.
+        child.wait().expect("reap the throwaway child");
+        pid
+    }
+
     /// A run directory under a project root, with a hand-built journal. The
     /// interesting states (a dead pid, a stale lock) cannot be produced by a
     /// real run on demand, so every fixture here is written by hand.
@@ -359,6 +386,7 @@ mod tests {
 
     #[test]
     fn a_dead_attempt_pid_fails_the_attempt_check() {
+        let dead = dead_pid();
         let journal = format!(
             concat!(
                 r#"{{"seq":0,"ts":1000,"type":"run_started","playbook":"p","version":"1.0.0"}}"#,
@@ -368,20 +396,20 @@ mod tests {
                 r#"{{"seq":2,"ts":3000,"type":"attempt_started","node":"a","attempt":1,"agent":"stub","pid":{pid}}}"#,
                 "\n",
             ),
-            pid = u32::MAX
+            pid = dead
         );
         let (tmp, _) = run_root(&journal);
         let checks = diagnose_run(tmp.path(), "r1").unwrap();
         let c = find(&checks, "attempt a#1");
         assert_eq!(c.status, FAIL, "{c:?}");
-        assert!(c.detail.contains(&u32::MAX.to_string()));
+        assert!(c.detail.contains(&dead.to_string()));
         assert!(has_failure(&checks));
     }
 
     #[test]
     fn a_stale_driver_pid_fails_and_a_live_one_does_not() {
         let (tmp, run_dir) = run_root(HEALTHY);
-        std::fs::write(run_dir.join("driver.pid"), u32::MAX.to_string()).unwrap();
+        std::fs::write(run_dir.join("driver.pid"), dead_pid().to_string()).unwrap();
         let checks = diagnose_run(tmp.path(), "r1").unwrap();
         assert_eq!(find(&checks, "driver").status, FAIL);
 
@@ -395,7 +423,7 @@ mod tests {
     fn a_stale_workdir_lock_warns() {
         let (tmp, _) = run_root(HEALTHY);
         std::fs::create_dir_all(tmp.path().join(".apb")).unwrap();
-        std::fs::write(tmp.path().join(".apb/workdir.lock"), u32::MAX.to_string()).unwrap();
+        std::fs::write(tmp.path().join(".apb/workdir.lock"), dead_pid().to_string()).unwrap();
         let checks = diagnose_run(tmp.path(), "r1").unwrap();
         let c = find(&checks, "workdir lock");
         assert_eq!(c.status, WARN, "{c:?}");
