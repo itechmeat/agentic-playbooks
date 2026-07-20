@@ -99,8 +99,22 @@ fn seed_profile(root: &Path, name: &str) {
 }
 
 fn seed_playbook(root: &Path) {
+    seed_playbook_with(root, true);
+}
+
+/// Seeds the one-node `iq` playbook; `interactive` toggles the `ask` node's
+/// `interactive: true` flag so a test can exercise the non-interactive path
+/// (where the marker line is ordinary output) against the same shape.
+fn seed_playbook_with(root: &Path, interactive: bool) {
     init_project(root).unwrap();
-    let src = "schema: 1\nid: iq\nname: IQ\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: ask, type: agent_task, prompt: \"ask something\", profile: arch, interactive: true }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: ask }\n  - { from: ask, to: done }\n";
+    let inter = if interactive {
+        ", interactive: true"
+    } else {
+        ""
+    };
+    let src = format!(
+        "schema: 1\nid: iq\nname: IQ\nversion: 1.0.0\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: ask, type: agent_task, prompt: \"ask something\", profile: arch{inter} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: ask }}\n  - {{ from: ask, to: done }}\n"
+    );
     let dir = root.join(".apb/playbooks/iq/1.0.0");
     fs::create_dir_all(&dir).unwrap();
     fs::write(dir.join("playbook.yaml"), src).unwrap();
@@ -492,5 +506,182 @@ fn context_append_while_parked_is_applied_then_node_completes() {
             EventPayload::NodeFinished { node, status, .. } if node == "ask" && status == "succeeded"
         )),
         "the interactive node must finish after the answer, even after a mid-park ContextAppend"
+    );
+}
+
+/// Task 6 (b): malformed JSON after the marker on an interactive node fails the
+/// attempt with an error naming the node and the marker. The node never parks:
+/// no `QuestionAsked` is journaled and the `ask` attempt/node finalize failed.
+/// (The run itself still flows to its unconditional finish node; the contract
+/// under test is the node-level failure, not the run outcome.)
+#[test]
+fn malformed_marker_json_fails_without_parking() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path());
+    seed_profile(proj.path(), "arch");
+    // Print the marker followed by a truncated JSON object and exit. On an
+    // interactive node the scan must hard-fail rather than treat this as output.
+    let body = "printf '%s\\n' '<<<apb:question>>>'\nprintf '%s\\n' '{\"question\":'\nexit 0";
+    set_env(&make_stub(bin.path(), body), home.path(), cfg.path());
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id_of(&run_dir),
+        handle: Some(handle),
+    };
+
+    // Wait for the run to reach a terminal state (any), then inspect the node.
+    let _ = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::QuestionAsked { node, .. } if node == "ask"
+        )),
+        0,
+        "a malformed marker must never park the run on a question"
+    );
+    let finished = events.iter().find_map(|e| match &e.payload {
+        EventPayload::NodeFinished {
+            node,
+            status,
+            output,
+            ..
+        } if node == "ask" => Some((status.clone(), output.clone())),
+        _ => None,
+    });
+    let (status, output) = finished.expect("the node must finish");
+    assert_eq!(status, "failed", "the malformed-marker attempt must fail");
+    assert!(
+        output.contains("ask") && output.contains("marker"),
+        "the failure must name the node and the marker: {output}"
+    );
+}
+
+/// Task 6 (c): a NON-interactive node that prints the literal marker line is not
+/// special-cased. The scan does not run, so the node finishes normally and the
+/// run succeeds; no `QuestionAsked` is ever journaled.
+#[test]
+fn non_interactive_marker_finishes_normally() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook_with(proj.path(), false);
+    seed_profile(proj.path(), "arch");
+    // The literal marker plus a JSON line, then a normal finish. On a
+    // non-interactive node this is ordinary output.
+    let body = "printf '%s\\n' '<<<apb:question>>>'\nprintf '%s\\n' '{\"question\":\"ignored\"}'\necho done\nexit 0";
+    set_env(&make_stub(bin.path(), body), home.path(), cfg.path());
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id_of(&run_dir),
+        handle: Some(handle),
+    };
+
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::QuestionAsked { node, .. } if node == "ask"
+        )),
+        0,
+        "a non-interactive node's literal marker must not raise a question"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "ask" && status == "succeeded"
+        )),
+        "the non-interactive node must finish normally"
+    );
+}
+
+/// Task 6 (d): after an answer, the re-invocation prompt carries the original
+/// rendered prompt AND the full Q&A transcript of this node visit, rendered as a
+/// plain quoted `Q:`/`A:` block. The stub appends every invocation's prompt
+/// argument to a file the test reads.
+#[test]
+fn reinvocation_prompt_carries_original_and_transcript() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let counter = bin.path().join("count");
+    let promptfile = bin.path().join("prompts");
+    seed_playbook(proj.path());
+    seed_profile(proj.path(), "arch");
+    // Every invocation appends its prompt argument ($2 = the `-p` prompt) to
+    // `promptfile`. Invocation 1 asks; invocation 2 (reachable only after the
+    // answer) finishes.
+    let body = format!(
+        "c=\"{}\"\np=\"{}\"\nn=$(cat \"$c\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$c\"\nprintf '%s\\n' \"$2\" >> \"$p\"\nif [ \"$n\" = \"1\" ]; then\n  printf '%s\\n' '<<<apb:question>>>'\n  printf '%s\\n' '{{\"question\":\"Which DB?\",\"options\":[\"pg\"]}}'\n  exit 0\nfi\necho done\nexit 0",
+        counter.display(),
+        promptfile.display()
+    );
+    set_env(&make_stub(bin.path(), &body), home.path(), cfg.path());
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id_of(&run_dir),
+        handle: Some(handle),
+    };
+
+    poll_until("QuestionAsked for node ask", || {
+        let events = read_all(&run_dir).ok()?;
+        (!questions_asked(&events).is_empty()).then_some(())
+    });
+    post_answer(&run_dir, Some("ask"), "pg", "human").unwrap();
+
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let prompts = fs::read_to_string(&promptfile).expect("prompt file written by the stub");
+    // The re-invocation prompt keeps the original rendered prompt.
+    assert!(
+        prompts.contains("ask something"),
+        "re-invocation must include the original prompt: {prompts}"
+    );
+    // ...and appends the full Q&A transcript for this node visit.
+    assert!(
+        prompts.contains("## prior questions and answers"),
+        "re-invocation must carry the transcript header: {prompts}"
+    );
+    assert!(
+        prompts.contains("Q: Which DB?"),
+        "transcript must quote the question: {prompts}"
+    );
+    assert!(
+        prompts.contains("A: pg"),
+        "transcript must quote the answer: {prompts}"
     );
 }

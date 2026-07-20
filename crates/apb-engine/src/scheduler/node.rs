@@ -48,6 +48,20 @@ pub(crate) fn render_node_prompt(
 /// return batch - drive remains the sole writer of those. `journal` wraps the
 /// same single log in a Mutex, so this stays safe on the parallel batch's
 /// worker threads (each append is one atomic line write).
+/// The marker contract paragraph appended to an interactive node's prompt for
+/// resume/reprompt agents (spec 2026-07-20, Transport: resume/reprompt block),
+/// quoted verbatim. Interpolates [`crate::adapter::QUESTION_MARKER`] so the
+/// wording and the constant can never drift.
+fn marker_contract() -> String {
+    format!(
+        "If you need input from the user before you can proceed, print a line \
+         containing exactly `{marker}` followed by a JSON object \
+         `{{\"question\": \"...\", \"options\": [\"...\", ...]}}` on the next line, \
+         then stop without doing further work.",
+        marker = crate::adapter::QUESTION_MARKER,
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -203,6 +217,16 @@ pub(crate) fn execute_node(
                 }
             }
 
+            // Marker contract (spec 2026-07-20, Transport: resume/reprompt): an
+            // interactive node's agent is told how to ask the user a question
+            // mid-run - print the marker plus a JSON question and stop. Appended
+            // once here, so it rides both the first invocation and each
+            // re-invocation (whose override prompt carries only the transcript,
+            // not the contract). Non-interactive nodes never receive it.
+            if *interactive {
+                text = format!("{text}\n\n{}", marker_contract());
+            }
+
             // Connector env isolation (spec 4.3) for every attempt's agent spawn:
             // scrub inherited connector tokens and hand the agent the run-context
             // env that `apb connector call` reads.
@@ -308,6 +332,8 @@ pub(crate) fn execute_node(
                         soul: soul_text.as_deref(),
                         grant_autonomy,
                         connector_policy: &connector_policy,
+                        interactive: *interactive,
+                        node: node_id,
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -613,6 +639,10 @@ pub(crate) fn execute_finish_answer(
                 soul: Some(entry.soul.as_str()),
                 grant_autonomy,
                 connector_policy: &connector_policy,
+                // A finish-answer node is never interactive: it composes the
+                // run's terminal answer, it does not ask the user questions.
+                interactive: false,
+                node: node_id,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -1124,6 +1154,9 @@ pub(crate) fn maybe_compact_context(
         // access, so it stays in the default permission posture.
         grant_autonomy: false,
         connector_policy: &connector_policy,
+        // Internal summarizer: not a playbook node, never interactive.
+        interactive: false,
+        node: "__context_compact",
     };
     let summary = match adapter.run(&task) {
         Ok(report) => report.summary,

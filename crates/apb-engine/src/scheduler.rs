@@ -1581,10 +1581,35 @@ fn drive(
                             NodeKind::AgentTask { prompt, .. } => prompt.clone(),
                             _ => String::new(),
                         };
+                        // Re-invocation prompt (spec 2026-07-20, Transport:
+                        // resume/reprompt step 3): the original rendered prompt
+                        // followed by the full Q&A transcript of THIS node
+                        // visit. Questions and answers are paired count-based
+                        // (the i-th answer answers the i-th question), read from
+                        // the channels filtered to this node. The transcript is
+                        // appended AFTER rendering, as plain quoted text, so no
+                        // template expansion runs over agent-generated question
+                        // text or user-supplied answer text (V13 namespaces do
+                        // not apply inside a transcript).
                         let base = render_node_prompt(run_dir, &run_id, &state, cfg, &node_prompt)?;
+                        let questions: Vec<_> = read_questions_after(run_dir, None)?
+                            .into_iter()
+                            .filter(|q| q.node == current)
+                            .collect();
+                        let answers: Vec<_> = read_answers_after(run_dir, None)?
+                            .into_iter()
+                            .filter(|a| a.node == current)
+                            .collect();
+                        let mut transcript = String::new();
+                        for (q, a) in questions.iter().zip(answers.iter()) {
+                            transcript.push_str(&format!("Q: {}\nA: {}\n\n", q.question, a.answer));
+                        }
                         prompt_overrides.insert(
                             current.clone(),
-                            format!("{base}\n\n## prior answer\n{}", entry.answer),
+                            format!(
+                                "{base}\n\n## prior questions and answers\n{}",
+                                transcript.trim_end()
+                            ),
                         );
                         // Fall through to run the next attempt below.
                     }

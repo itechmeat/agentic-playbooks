@@ -35,6 +35,8 @@ fn claude_adapter_success_via_stub() {
             soul: None,
             grant_autonomy: false,
             connector_policy: &Default::default(),
+            interactive: false,
+            node: "test",
         })
         .unwrap();
     assert_eq!(report.status, NodeStatus::Succeeded);
@@ -58,6 +60,8 @@ fn claude_adapter_nonzero_exit_is_process_exit() {
             soul: None,
             grant_autonomy: false,
             connector_policy: &Default::default(),
+            interactive: false,
+            node: "test",
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::ProcessExit));
@@ -90,6 +94,8 @@ fn hermes_adapter_sends_z_flag_prefixed_soul_and_model_flag() {
             soul: Some("You are Hermes."),
             grant_autonomy: false,
             connector_policy: &Default::default(),
+            interactive: false,
+            node: "test",
         })
         .unwrap();
     let argv: Vec<&str> = report

@@ -89,6 +89,8 @@ fn task<'a>(
         soul: None,
         grant_autonomy: false,
         connector_policy: policy,
+        interactive: false,
+        node: "test",
     }
 }
 

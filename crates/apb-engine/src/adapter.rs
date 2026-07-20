@@ -206,6 +206,14 @@ pub struct AgentTask<'a> {
     /// context env, applied at spawn. Defaults to empty for spawn paths that
     /// carry no connector exposure.
     pub connector_policy: &'a ConnectorEnvPolicy,
+    /// Whether this attempt runs an interactive node (spec 2026-07-20). Only
+    /// then does the adapter scan stdout for the question marker; on a
+    /// non-interactive node the marker line is ordinary output. Internal,
+    /// side-effect-free calls (context compaction, finish answers) set `false`.
+    pub interactive: bool,
+    /// The node id this attempt executes, used to name the node in a
+    /// malformed-marker error. Internal calls pass an internal placeholder.
+    pub node: &'a str,
 }
 
 /// The marker a `resume`/`reprompt` agent prints on its own stdout line to ask
@@ -225,24 +233,44 @@ pub struct AskedQuestion {
     pub options: Vec<String>,
 }
 
-/// Scans collected stdout for a line equal to [`QUESTION_MARKER`] and parses the
-/// next non-empty line as an [`AskedQuestion`]. Task 4 is lenient: a malformed
-/// JSON line yields `None` (no question), and the attempt is interpreted as a
-/// normal finish. Task 6 tightens this into a hard, node-named failure and adds
-/// the stream-path scan.
-fn scan_question(stdout: &str) -> Option<AskedQuestion> {
-    let mut lines = stdout.lines();
+/// Scans agent output for a line equal to [`QUESTION_MARKER`] and parses the
+/// next non-empty line as an [`AskedQuestion`] (spec 2026-07-20, Transport:
+/// resume/reprompt). The scan runs ONLY for an interactive task: on a
+/// non-interactive node the marker text is ordinary output and this returns
+/// `Ok(None)`. On an interactive node a marker whose following line is not a
+/// valid question object fails the attempt with a Transport error naming the
+/// node and the marker, never a silent skip - a half-parsed question would park
+/// the run on something nobody can read. A marker with no following payload
+/// line is treated as no question (`Ok(None)`).
+fn scan_question(
+    output: &str,
+    task: &AgentTask,
+) -> Result<Option<AskedQuestion>, (ErrorClass, String)> {
+    if !task.interactive {
+        return Ok(None);
+    }
+    let mut lines = output.lines();
     while let Some(line) = lines.next() {
         if line.trim() == QUESTION_MARKER {
             for next in lines.by_ref() {
                 if next.trim().is_empty() {
                     continue;
                 }
-                return serde_json::from_str::<AskedQuestion>(next.trim()).ok();
+                return serde_json::from_str::<AskedQuestion>(next.trim())
+                    .map(Some)
+                    .map_err(|e| {
+                        (
+                            ErrorClass::Transport,
+                            format!(
+                                "interactive node `{}` printed a malformed question after the {QUESTION_MARKER} marker: {e}",
+                                task.node
+                            ),
+                        )
+                    });
             }
         }
     }
-    None
+    Ok(None)
 }
 
 #[derive(Debug)]
@@ -575,11 +603,11 @@ impl ClaudeAdapter {
         }
         // Status comes from the structured report block (spec 6.2); raw is the full stdout.
         let (status, summary) = interpret_report(&stdout);
-        // Marker scan (spec 2026-07-20, Task 4 minimal headless-path scan): an
-        // interactive node's agent may ask a question instead of finishing. The
-        // interactive gate lives in `node.rs`, so a non-interactive node's
-        // literal marker text is simply ignored there.
-        let question = scan_question(&stdout);
+        // Marker scan (spec 2026-07-20): an interactive node's agent may ask a
+        // question instead of finishing. The scan is gated on `task.interactive`
+        // and hard-fails on malformed JSON naming the node; a non-interactive
+        // node's literal marker text is simply ignored.
+        let question = scan_question(&stdout, task)?;
         Ok(AgentReport {
             status,
             summary,
@@ -798,7 +826,7 @@ impl ClaudeAdapter {
                 // no result was ever seen, which is a genuinely unfinished
                 // node.
                 kill_process_tree(&mut child);
-                return match parse_stream_result(&raw_lines) {
+                return match parse_stream_result(&raw_lines, task) {
                     Ok(report) => Ok(report),
                     Err(_) => Err((
                         ErrorClass::Timeout,
@@ -822,14 +850,17 @@ impl ClaudeAdapter {
             ));
         }
 
-        parse_stream_result(&raw_lines)
+        parse_stream_result(&raw_lines, task)
     }
 }
 
 /// Extracts the result from the stream-json stream: looks for the terminal
 /// `type: "result"` event and takes its text (`result`) and `is_error` flag.
 /// The absence of such an event on a normal exit is StructuredOutputMissing.
-fn parse_stream_result(lines: &[String]) -> Result<AgentReport, (ErrorClass, String)> {
+fn parse_stream_result(
+    lines: &[String],
+    task: &AgentTask,
+) -> Result<AgentReport, (ErrorClass, String)> {
     let raw = lines.join("\n");
     for line in lines.iter().rev() {
         let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
@@ -856,13 +887,16 @@ fn parse_stream_result(lines: &[String]) -> Result<AgentReport, (ErrorClass, Str
         } else {
             block_status
         };
+        // Marker scan over the agent's message text (spec 2026-07-20): in the
+        // stream transport the agent's prose is the `result` event's text, so
+        // that is where the marker appears (not the surrounding NDJSON). Gated
+        // on `task.interactive`; malformed JSON fails naming the node.
+        let question = scan_question(&text, task)?;
         return Ok(AgentReport {
             status,
             summary,
             raw,
-            // The stream-path marker scan lands in Task 6; the reprompt path
-            // (Task 4) uses the headless transport.
-            question: None,
+            question,
         });
     }
     Err((

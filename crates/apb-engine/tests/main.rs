@@ -92,6 +92,8 @@ mod interactive_timeout_test;
 mod list_runs_resilient_test;
 #[path = "suite/loop_edges_test.rs"]
 mod loop_edges_test;
+#[path = "suite/marker_test.rs"]
+mod marker_test;
 #[path = "suite/max_loops_test.rs"]
 mod max_loops_test;
 #[path = "suite/migrate_test.rs"]
