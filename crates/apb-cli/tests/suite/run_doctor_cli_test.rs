@@ -66,20 +66,59 @@ fn doctor_run_flags_a_wedged_run() {
         .arg("wedged-1")
         .current_dir(dir.path())
         .assert()
-        .failure()
-        .stdout(predicate::str::contains("[fail]"))
-        .stdout(predicate::str::contains("driver"))
-        .stdout(predicate::str::contains("attempt"))
-        .stdout(predicate::str::contains("control"))
-        .stdout(predicate::str::contains("[warn]"));
+        .failure();
     let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+
+    // Asserted as whole `[level] subject:` prefixes, not as bare words. Every
+    // subject name appears in the report whatever its status, so a test that
+    // only looked for "driver" would pass even if the driver check said ok -
+    // which is the one thing these lines exist to rule out.
+    for line in [
+        "[fail] attempt a#1:",
+        "[fail] driver:",
+        "[warn] control:",
+        "[warn] supervisor actions:",
+        "[warn] run:",
+    ] {
+        assert!(
+            stdout.contains(line),
+            "expected a line starting `{line}` in:\n{stdout}"
+        );
+    }
     assert!(
         stdout.contains(&DEAD_PID.to_string()),
         "the dead pid must be named so an operator can correlate it: {stdout}"
     );
+}
+
+/// A run whose driver finished cleanly is never reported as wedged, even
+/// though its journal still names the pid that drove it. The blocking `[fail]`
+/// verdict is reserved for a `driver.pid` that is actually still on disk.
+#[test]
+fn doctor_run_does_not_fail_a_cleanly_finished_run() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path());
+    let rd = run_dir(dir.path(), "finished-1");
+    fs::write(
+        rd.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":1000,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n\
+         {\"seq\":1,\"ts\":2000,\"type\":\"run_finished\",\"outcome\":\"succeeded\"}\n",
+    )
+    .unwrap();
+    // The drive removed its pid file on exit, exactly as `DriverPidGuard` does.
+    assert!(!rd.join("driver.pid").exists());
+
+    let out = apb()
+        .arg("doctor")
+        .arg("--run")
+        .arg("finished-1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
     assert!(
-        stdout.to_lowercase().contains("supervisor"),
-        "the duplicate supervisor_action must be reported: {stdout}"
+        stdout.contains("[ok]   driver: no driver.pid"),
+        "a finished run must report no drive in progress: {stdout}"
     );
 }
 

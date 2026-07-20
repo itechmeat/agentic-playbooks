@@ -58,34 +58,61 @@ pub(crate) enum Probe {
     Unknown,
 }
 
-/// One `ps` invocation, interpreted. Never call this directly: `process_probe`
-/// wraps it with the self-probe guard that decides whether `ps` can be
-/// believed at all.
-fn raw_probe(pid: u32) -> Probe {
-    let out = match Command::new("ps")
+/// What one `ps` invocation returned, reduced to what the shape judgment
+/// needs. `None` from a `PsRun` means `ps` could not be spawned at all.
+struct PsOutput {
+    success: bool,
+    stdout: String,
+}
+
+/// How a probe actually asks the OS. A parameter rather than a hard-coded
+/// call so `classify`'s shape judgment and the self-probe guard can be tested
+/// against a deliberately broken `ps` without mutating this process's `PATH`
+/// (these tests run as threads of one binary, so an env change would leak
+/// into every other test that spawns a process).
+type PsRun<'a> = &'a dyn Fn(u32) -> Option<PsOutput>;
+
+/// Runs the real `ps` named by `program`. Split from `run_ps` so a test can
+/// point it at a stub binary that reproduces a reduced `ps`.
+fn run_ps_program(program: &str, pid: u32) -> Option<PsOutput> {
+    let out = Command::new(program)
         .args(["-o", "stat=", "-o", "args=", "-p", &pid.to_string()])
         .output()
-    {
-        Ok(out) => out,
-        // `ps` is missing or could not be spawned at all.
-        Err(_) => return Probe::Unknown,
+        .ok()?;
+    Some(PsOutput {
+        success: out.status.success(),
+        stdout: String::from_utf8_lossy(&out.stdout).trim().to_string(),
+    })
+}
+
+fn run_ps(pid: u32) -> Option<PsOutput> {
+    run_ps_program("ps", pid)
+}
+
+/// The shape judgment: what one `ps` answer means. Pure, and the fragile part
+/// of this module - the "no such process" and "this ps rejected my arguments"
+/// answers are genuinely indistinguishable here, which is what the self-probe
+/// guard in `guarded_probe` exists to compensate for.
+fn classify(out: Option<PsOutput>) -> Probe {
+    // `ps` is missing or could not be spawned at all.
+    let Some(out) = out else {
+        return Probe::Unknown;
     };
-    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() {
+    if !out.success {
         // The ordinary "no such process" answer: a non-zero exit with nothing
         // on stdout (the diagnostic goes to stderr). A non-zero exit that DID
         // print something is some other failure, and we do not guess.
-        return if line.is_empty() {
+        return if out.stdout.is_empty() {
             Probe::NotFound
         } else {
             Probe::Unknown
         };
     }
     // A successful probe that printed nothing also means no such process.
-    if line.is_empty() {
+    if out.stdout.is_empty() {
         return Probe::NotFound;
     }
-    let Some((stat, argv)) = line.split_once(char::is_whitespace) else {
+    let Some((stat, argv)) = out.stdout.split_once(char::is_whitespace) else {
         // Output we cannot parse: unknown, not dead.
         return Probe::Unknown;
     };
@@ -95,21 +122,18 @@ fn raw_probe(pid: u32) -> Probe {
     Probe::Running(argv.trim().to_string())
 }
 
-/// Is the `ps` on this host one we can believe? Answered by probing a pid
-/// whose liveness we are certain of: our own. A `ps` that cannot see the
+/// The shape judgment plus the self-probe guard.
+///
+/// The guard answers "is the `ps` on this host one we can believe?" by probing
+/// a pid whose liveness we are certain of: our own. A `ps` that cannot see the
 /// process asking the question cannot see anything.
 ///
-/// This exists because of a specific failure mode. A busybox (or otherwise
+/// It exists because of a specific failure mode. A busybox (or otherwise
 /// reduced) `ps` rejects the `-o stat= -o args= -p <pid>` invocation outright:
 /// it prints its usage to stderr and exits non-zero with an EMPTY stdout,
 /// which is bit-for-bit the shape of the ordinary "no such process" answer.
 /// Without this guard such a host classifies EVERY pid as dead, and a false
 /// dead is the error that writes a terminal event over live work.
-fn ps_tool_is_usable() -> bool {
-    matches!(raw_probe(std::process::id()), Probe::Running(_))
-}
-
-/// `raw_probe` with the self-probe guard applied.
 ///
 /// The guard is only consulted on the `NotFound` branch, which is an
 /// optimization and not a change in meaning: `Running` and `Unknown` are
@@ -117,11 +141,17 @@ fn ps_tool_is_usable() -> bool {
 /// turn either of them into a harmful answer. `NotFound` is the only verdict
 /// worth paying a second `ps` to double-check, and on a healthy host that
 /// second call happens only for pids that really are gone.
-pub(crate) fn process_probe(pid: u32) -> Probe {
-    match raw_probe(pid) {
-        Probe::NotFound if !ps_tool_is_usable() => Probe::Unknown,
+fn guarded_probe(pid: u32, run: PsRun<'_>) -> Probe {
+    match classify(run(pid)) {
+        Probe::NotFound if !matches!(classify(run(std::process::id())), Probe::Running(_)) => {
+            Probe::Unknown
+        }
         other => other,
     }
+}
+
+pub(crate) fn process_probe(pid: u32) -> Probe {
+    guarded_probe(pid, &run_ps)
 }
 
 /// Single-pid liveness with the module's bias: only a probe that positively
@@ -155,16 +185,34 @@ pub fn pid_is_live(pid: u32) -> bool {
 /// `--run-id <id>`. Around that definitive signal the rule keeps the module's
 /// bias toward "live".
 pub fn driver_is_live(run_dir: &Path, run_id: &str) -> bool {
-    let Some(pid) = crate::driver::read_driver_pid(run_dir) else {
-        return false;
-    };
+    match crate::driver::read_driver_pid(run_dir) {
+        Some(pid) => driver_pid_is_live(pid, run_id),
+        None => false,
+    }
+}
+
+/// The same rule against a pid the caller has ALREADY read from `driver.pid`.
+///
+/// Callers that need both the pid and the verdict must go through this rather
+/// than reading the file and then calling `driver_is_live`, which would read it
+/// a second time. A drive that finishes cleanly between the two reads removes
+/// the file, so the second read finds nothing and the pair reports "there is a
+/// driver, and it is dead" for a run that in fact just completed normally.
+pub fn driver_pid_is_live(pid: u32, run_id: &str) -> bool {
     // A drive running on a thread of THIS process (the CLI's synchronous run,
     // the in-process background drive) needs no probing and cannot be a
     // reused pid.
     if pid == std::process::id() {
         return true;
     }
-    let argv = match process_probe(pid) {
+    driver_verdict(run_id, process_probe(pid))
+}
+
+/// The driver rule applied to an already-obtained probe result. Separated from
+/// the probing so the argv reasoning - and in particular the bias that an
+/// unusable probe means "live" - is testable without a real process.
+fn driver_verdict(run_id: &str, probe: Probe) -> bool {
+    let argv = match probe {
         // The probe worked and the process is gone (or is a zombie, which
         // holds a pid but drives nothing). The only branch that may conclude
         // "dead" without knowing what the process is.
@@ -197,8 +245,11 @@ pub fn driver_is_live(run_dir: &Path, run_id: &str) -> bool {
 /// that claimed this run is gone" look identical under a plain bool, and only
 /// the second one is a problem.
 pub fn driver_alive(run_dir: &Path, run_id: &str) -> Option<bool> {
-    crate::driver::read_driver_pid(run_dir)?;
-    Some(driver_is_live(run_dir, run_id))
+    // One read, then the verdict against that pid: see `driver_pid_is_live`
+    // for why reading `driver.pid` twice reports a cleanly finished drive as a
+    // dead one.
+    let pid = crate::driver::read_driver_pid(run_dir)?;
+    Some(driver_pid_is_live(pid, run_id))
 }
 
 /// Does this command line belong to the detached driver of `run_id`?
@@ -452,7 +503,100 @@ mod tests {
         // the process asking. If this ever fails, every `NotFound` on this host
         // degrades to `Unknown` and nothing is ever declared dead - which is
         // the safe direction, and exactly what the guard is for.
-        assert!(ps_tool_is_usable());
+        assert!(matches!(
+            classify(run_ps(std::process::id())),
+            Probe::Running(_)
+        ));
+    }
+
+    /// Writes an executable stub that reproduces a reduced (busybox-style)
+    /// `ps`: it rejects the invocation, prints its usage to stderr, and exits
+    /// non-zero with an EMPTY stdout.
+    ///
+    /// A stub binary rather than a `PATH` shadow on purpose. These tests run
+    /// as threads of a single binary, so mutating `PATH` would leak into every
+    /// other test that spawns a process and make the suite flaky; passing the
+    /// program path explicitly exercises the same real spawn with no global
+    /// state.
+    #[cfg(unix)]
+    fn broken_ps_stub(dir: &Path) -> String {
+        use std::os::unix::fs::PermissionsExt;
+        let path = dir.join("ps");
+        std::fs::write(
+            &path,
+            "#!/bin/sh\necho \"usage: ps [-aAdefjlmrSTvwXx]\" >&2\nexit 1\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_reduced_ps_is_indistinguishable_from_no_such_process() {
+        // The fragile judgment, stated as a test: on its own, one answer from a
+        // broken `ps` reads exactly like "this pid is dead". Everything the
+        // guard does is justified by this assertion holding.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = broken_ps_stub(dir.path());
+        assert!(matches!(
+            classify(run_ps_program(&stub, std::process::id())),
+            Probe::NotFound
+        ));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_self_probe_guard_downgrades_a_broken_ps_to_unknown() {
+        // The guard's engaged branch. With a `ps` that answers "not found" for
+        // every pid - including the live one asking - the guard must refuse to
+        // believe the verdict and degrade to Unknown.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = broken_ps_stub(dir.path());
+        let run = |pid: u32| run_ps_program(&stub, pid);
+
+        // Our own pid: certainly alive, and a broken `ps` must not call it dead.
+        assert!(matches!(
+            guarded_probe(std::process::id(), &run),
+            Probe::Unknown
+        ));
+        // An arbitrary other pid gets the same protection.
+        assert!(matches!(guarded_probe(4242, &run), Probe::Unknown));
+    }
+
+    #[test]
+    fn an_unusable_probe_leaves_the_driver_live() {
+        // The consequence that matters: Unknown must resolve to "live", so a
+        // host with a reduced `ps` never finalizes a run that is still working.
+        assert!(driver_verdict("any-run", Probe::Unknown));
+        // A working probe still concludes dead when the process is really gone.
+        assert!(!driver_verdict("any-run", Probe::NotFound));
+        // And a working probe that finds another run's driver rejects it.
+        assert!(!driver_verdict(
+            "mine",
+            Probe::Running("/usr/bin/apb __drive-run --run-id other".into())
+        ));
+    }
+
+    #[test]
+    fn a_healthy_probe_still_reports_a_dead_pid_dead() {
+        // The guard must not blunt the real verdict on a working host: an
+        // impossible pid is still NotFound through the full guarded path.
+        assert!(matches!(guarded_probe(u32::MAX, &run_ps), Probe::NotFound));
+    }
+
+    #[test]
+    fn the_pid_taking_rule_never_consults_the_pid_file() {
+        // The fix behind `driver_pid_is_live`: a caller that has already read
+        // `driver.pid` gets its verdict from the pid it holds, so a drive that
+        // finishes and removes the file mid-check cannot flip a live verdict
+        // into "stale pid file". Here the file does not exist at all and the
+        // verdict is still driven purely by the pid.
+        let dir = tempfile::tempdir().unwrap();
+        assert!(driver_pid_is_live(std::process::id(), "any-run"));
+        // The file-reading entry point, on the same directory, correctly says
+        // there is no driver - which is what a second read would have returned.
+        assert!(!driver_is_live(dir.path(), "any-run"));
     }
 
     #[test]

@@ -149,21 +149,42 @@ fn attempt_checks(events: &[Event]) -> Vec<RunCheck> {
 /// single reason `stop_run` refuses to finalize a run whose driver is gone,
 /// so it is worth a blocking verdict rather than a warning.
 fn driver_check(run_dir: &Path, run_id: &str) -> RunCheck {
+    const NO_DRIVE: &str = "no driver.pid, so no drive is in progress";
     let Some(pid) = crate::driver::read_driver_pid(run_dir) else {
-        return RunCheck::new(OK, "driver", "no driver.pid, so no drive is in progress");
+        return RunCheck::new(OK, "driver", NO_DRIVE);
     };
-    if liveness::driver_is_live(run_dir, run_id) {
-        RunCheck::new(
+    // The verdict is taken against the pid we just read, never by re-reading
+    // the file: `driver_pid_is_live` documents why a second read turns a
+    // cleanly finished drive into a reported dead one.
+    if liveness::driver_pid_is_live(pid, run_id) {
+        return RunCheck::new(
             OK,
             "driver",
             format!("driver.pid names pid {pid}, which is driving this run"),
-        )
-    } else {
-        RunCheck::new(
+        );
+    }
+    // The pid is not driving this run. Before calling that a stale file - the
+    // only verdict in this whole report that exits non-zero - confirm the file
+    // still says what it said when we read it. A drive that finished cleanly
+    // while we probed has already removed it, and reporting a run that just
+    // completed normally as wedged is precisely the false alarm this doctor
+    // exists to prevent.
+    match crate::driver::read_driver_pid(run_dir) {
+        None => RunCheck::new(
+            OK,
+            "driver",
+            format!("{NO_DRIVE} (pid {pid} released it while this check ran)"),
+        ),
+        Some(now) if now != pid => RunCheck::new(
+            OK,
+            "driver",
+            format!("driver.pid moved from pid {pid} to pid {now} while this check ran"),
+        ),
+        Some(_) => RunCheck::new(
             FAIL,
             "driver",
             format!("driver.pid names pid {pid}, which is not driving this run: stale pid file"),
-        )
+        ),
     }
 }
 
@@ -176,7 +197,14 @@ fn workdir_lock_check(root: &Path) -> RunCheck {
     let Some(pid) = crate::workdir::lock_holder(&path) else {
         return RunCheck::new(OK, "workdir lock", "not held");
     };
-    if liveness::pid_is_live(pid) {
+    // `pid_alive` (kill -0), NOT the ps-based `pid_is_live`, because
+    // `workdir::acquire` decides with `pid_alive` and this check must report
+    // what the code that ACTS on the lock will conclude. The two disagree for
+    // a pid owned by another user: `kill -0` fails with EPERM and reads as
+    // dead, so `acquire` steals the lock while `ps` can still see the holder.
+    // A doctor that said "held by a running process" where the next write-run
+    // will say "stale, taking it" would be describing a different system.
+    if liveness::pid_alive(pid) {
         RunCheck::new(
             OK,
             "workdir lock",
