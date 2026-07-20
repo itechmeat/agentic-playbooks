@@ -120,6 +120,46 @@ fn seed_single(root: &Path, timeout: u64) {
     fs::write(root.join(".apb/playbooks/iq/current"), "1.0.0").unwrap();
 }
 
+/// One-node interactive playbook `iq` with `question_timeout_seconds` and an
+/// optional `default_answer` on the `ask` node.
+fn seed_single_q(root: &Path, q_timeout: u64, default_answer: Option<&str>) {
+    init_project(root).unwrap();
+    let da = match default_answer {
+        Some(a) => format!(", default_answer: \"{a}\""),
+        None => String::new(),
+    };
+    // Route a node SUCCESS to the success finish and a node FAILURE (a
+    // no-default question timeout) to the failure finish, so the run outcome
+    // reflects the node's fate.
+    let src = format!(
+        "schema: 1\nid: iq\nname: IQ\nversion: 1.0.0\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: ask, type: agent_task, prompt: \"ask something\", profile: arch, interactive: true, question_timeout_seconds: {q_timeout}{da} }}\n  - {{ id: done, type: finish, outcome: success }}\n  - {{ id: no, type: finish, outcome: failure }}\nedges:\n  - {{ from: start, to: ask }}\n  - {{ from: ask, to: done, condition: {{ type: node_status, node: ask, equals: success }} }}\n  - {{ from: ask, to: no, fallback: true }}\n"
+    );
+    let dir = root.join(".apb/playbooks/iq/1.0.0");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("playbook.yaml"), src).unwrap();
+    fs::write(root.join(".apb/playbooks/iq/current"), "1.0.0").unwrap();
+}
+
+/// A stub claude that posts the question and blocks on the answer file; when an
+/// answer for `ask` lands it extracts the answer text into `received` (the tool
+/// result the agent "got") and exits. Self-capped so a missing answer cannot
+/// hang.
+fn answer_recording_stub_body(received: &Path) -> String {
+    format!(
+        "rd=\"$APB_RUN_DIR\"\n\
+         printf '%s\\n' '{{\"seq\":0,\"node\":\"ask\",\"attempt\":1,\"question\":\"Which DB?\",\"options\":[]}}' >> \"$rd/questions.jsonl\"\n\
+         i=0\n\
+         while ! grep -q '\"node\":\"ask\"' \"$rd/answers.jsonl\" 2>/dev/null; do\n\
+         i=$((i+1)); [ \"$i\" -gt 400 ] && break\n\
+         sleep 0.05\n\
+         done\n\
+         grep '\"node\":\"ask\"' \"$rd/answers.jsonl\" | tail -1 | sed 's/.*\"answer\":\"\\([^\"]*\\)\".*/\\1/' > \"{}\"\n\
+         echo 'proceeded on the default'\n\
+         exit 0",
+        received.display()
+    )
+}
+
 fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let started = Instant::now();
     loop {
@@ -436,5 +476,148 @@ fn live_configured_non_claude_agent_downgrades() {
     assert!(
         detail.contains("claude") && detail.contains("livex"),
         "the downgrade reason must name the claude requirement and the agent: {detail}"
+    );
+}
+
+// --- (d) question timeout WITH default_answer: engine posts it ---
+
+#[test]
+fn live_question_timeout_posts_default_answer() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let received = bin.path().join("received");
+    // question_timeout_seconds: 1 with a default; drive must post it as a
+    // "timeout" answer (timing IS the subject; the honest budget is 1s).
+    seed_single_q(proj.path(), 1, Some("proceed"));
+    seed_profile(proj.path(), "claude");
+    set_env(
+        &make_stub(bin.path(), &answer_recording_stub_body(&received)),
+        home.path(),
+        cfg.path(),
+    );
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id_of(&run_dir),
+        handle: Some(handle),
+    };
+
+    // Never answer from the test: the engine's question timeout must post the
+    // default_answer on its own.
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    let answered: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::QuestionAnswered {
+                node,
+                answer,
+                answered_by,
+            } if node == "ask" => Some((answer.clone(), answered_by.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        answered,
+        vec![("proceed".to_string(), "timeout".to_string())],
+        "the default answer must be journaled as a timeout answer"
+    );
+    // The agent (via the channel) received the default answer text.
+    let got = fs::read_to_string(&received).expect("stub recorded the answer it got");
+    assert_eq!(
+        got.trim(),
+        "proceed",
+        "the blocked agent must receive the default answer text: {got}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "ask" && status == "succeeded"
+        )),
+        "the node must succeed after the default answer"
+    );
+}
+
+// --- (e) question timeout WITHOUT default_answer: attempt fails ---
+
+#[test]
+fn live_question_timeout_without_default_fails_the_attempt() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    // question_timeout_seconds: 1, no default: the open question times out, the
+    // agent is torn down, and the attempt fails with the Task 5 wording.
+    seed_single_q(proj.path(), 1, None);
+    seed_profile(proj.path(), "claude");
+    set_env(
+        &make_stub(bin.path(), &blocking_stub_body(None)),
+        home.path(),
+        cfg.path(),
+    );
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id_of(&run_dir),
+        handle: Some(handle),
+    };
+
+    // Never answer: the timeout with no default must fail the node, and the
+    // playbook routes that failure to the failure finish.
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Failed);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    let finished = events.iter().find_map(|e| match &e.payload {
+        EventPayload::NodeFinished {
+            node,
+            status,
+            output,
+            ..
+        } if node == "ask" => Some((status.clone(), output.clone())),
+        _ => None,
+    });
+    let (status, output) = finished.expect("the node must finish");
+    assert_eq!(status, "failed", "the timed-out node must fail");
+    assert!(
+        output.contains("ask")
+            && output.contains("timed out")
+            && output.contains("no default_answer"),
+        "the failure must name the node and the question timeout: {output}"
+    );
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::QuestionAnswered { node, .. } if node == "ask"
+        )),
+        0,
+        "no answer was posted, so no QuestionAnswered may appear"
+    );
+    // Exactly one attempt: a question timeout does not re-invoke the agent.
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::AttemptStarted { node, .. } if node == "ask"
+        )),
+        1,
+        "the timed-out live attempt must not be re-invoked"
     );
 }

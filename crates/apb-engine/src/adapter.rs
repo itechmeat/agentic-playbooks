@@ -243,10 +243,32 @@ pub struct AskedQuestion {
 /// live interactive node when the node sets no `question_timeout_seconds` (spec
 /// 2026-07-20, Transport: live): about 28 h in ms, so claude's ~30-minute stdio
 /// idle timer never cuts off a blocking `ask_user` call while a human takes
-/// their time. A node WITH a `question_timeout_seconds` uses that instead (its
-/// value in ms), which also bounds the blocking call at the same budget the
-/// engine uses to post the `default_answer`.
+/// their time.
 pub const LIVE_TOOL_TIMEOUT_MS_DEFAULT: u64 = 28 * 60 * 60 * 1000;
+
+/// Slack added to the injected per-server timeout ON TOP of a node's
+/// `question_timeout_seconds` (spec 2026-07-20, Task 11 fix). The sidecar
+/// timeout is a BACKSTOP only, never the enforcement mechanism: the engine
+/// enforces `question_timeout_seconds` on the drive thread (posting the
+/// `default_answer` or failing the attempt), and this slack keeps the sidecar's
+/// own timeout strictly larger so drive always wins the race and the timeout
+/// semantics stay engine-owned.
+pub const LIVE_TOOL_TIMEOUT_BACKSTOP_MS: u64 = 60 * 1000;
+
+/// The per-server `timeout` (ms) injected into claude's `--mcp-config` for a
+/// live interactive node. With a `question_timeout_seconds` it is that budget
+/// plus [`LIVE_TOOL_TIMEOUT_BACKSTOP_MS`] (strictly larger, so the engine-side
+/// enforcement fires first); without one, the large default. Never the
+/// enforcement mechanism - a backstop that keeps claude's stdio connection
+/// alive if the engine ever missed a tick.
+pub fn live_tool_timeout_ms(question_timeout_seconds: Option<u64>) -> u64 {
+    match question_timeout_seconds {
+        Some(s) => s
+            .saturating_mul(1000)
+            .saturating_add(LIVE_TOOL_TIMEOUT_BACKSTOP_MS),
+        None => LIVE_TOOL_TIMEOUT_MS_DEFAULT,
+    }
+}
 
 /// The paragraph appended to a live interactive node's prompt (spec 2026-07-20,
 /// Transport: live): the `ask_user` tool exists, when to use it, and that
@@ -281,6 +303,14 @@ pub struct LiveInject {
 pub struct LiveHooks<'a> {
     pub inject: LiveInject,
     pub on_tick: &'a dyn Fn(),
+    /// Set by `on_tick` when the open question hit its
+    /// `question_timeout_seconds` with no `default_answer` (spec 2026-07-20,
+    /// Task 11 fix). The adapter's poll loop then tears down the agent's process
+    /// group and returns, so the drive layer can fail the attempt with the
+    /// node-named timeout message. Attempt-local (NOT the run-level cancel), so
+    /// only THIS node fails; the blocked agent would otherwise wait forever for
+    /// an answer that will never come.
+    pub abort: &'a AtomicBool,
 }
 
 /// Builds the `--mcp-config` JSON injected into claude for a live interactive
@@ -777,6 +807,17 @@ impl ClaudeAdapter {
         loop {
             if let Some(lh) = live {
                 (lh.on_tick)();
+                // Question timed out with no default answer (spec 2026-07-20,
+                // Task 11 fix): drive-thread `on_tick` set the abort flag. Tear
+                // down the blocked agent's process group so drive can fail the
+                // attempt with the node-named timeout message.
+                if lh.abort.load(Ordering::Relaxed) {
+                    kill_process_tree(&mut child);
+                    return Err((
+                        ErrorClass::Timeout,
+                        "live interactive question timed out with no default answer".to_string(),
+                    ));
+                }
                 pending_ms = Self::pending_question_ms(task, since, true);
             }
             if let Some(err) =
@@ -976,6 +1017,16 @@ impl ClaudeAdapter {
                 && let Some(lh) = live
             {
                 (lh.on_tick)();
+                // Question timed out with no default answer (spec 2026-07-20,
+                // Task 11 fix): tear down the blocked agent so drive can fail the
+                // attempt with the node-named timeout message.
+                if lh.abort.load(Ordering::Relaxed) {
+                    kill_process_tree(&mut child);
+                    return Err((
+                        ErrorClass::Timeout,
+                        "live interactive question timed out with no default answer".to_string(),
+                    ));
+                }
                 pending_ms = Self::pending_question_ms(task, since, true);
             }
             if drain_deadline.is_none()
@@ -1339,6 +1390,23 @@ mod tests {
             LIVE_TOOL_TIMEOUT_MS_DEFAULT
         );
         assert_eq!(val["mcpServers"]["apb"]["timeout"], 100_800_000);
+    }
+
+    #[test]
+    fn live_tool_timeout_is_a_backstop_strictly_larger_than_the_question_timeout() {
+        // With a question timeout the injected sidecar timeout is that budget
+        // plus the backstop slack, so drive's own enforcement always fires
+        // first and the timeout semantics stay engine-owned.
+        assert_eq!(
+            live_tool_timeout_ms(Some(120)),
+            120_000 + LIVE_TOOL_TIMEOUT_BACKSTOP_MS
+        );
+        assert!(
+            live_tool_timeout_ms(Some(120)) > 120_000,
+            "the sidecar timeout must be strictly larger than the question timeout"
+        );
+        // Without one, the large default.
+        assert_eq!(live_tool_timeout_ms(None), LIVE_TOOL_TIMEOUT_MS_DEFAULT);
     }
 
     #[test]

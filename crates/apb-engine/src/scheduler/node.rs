@@ -139,8 +139,18 @@ pub(crate) fn execute_node(
             success_check,
             isolation,
             interactive,
+            question_timeout_seconds,
+            default_answer,
             ..
         } => {
+            // Live question-timeout enforcement inputs (spec 2026-07-20, Task 11
+            // fix): a live attempt enforces `question_timeout_seconds` on the
+            // drive thread from `on_tick`, posting `default_answer` (as
+            // `"timeout"`) or failing the attempt when none is set. Owned so the
+            // per-attempt `on_tick` closure can capture them freely; only ever
+            // consulted on the live path.
+            let live_q_timeout: Option<u64> = *question_timeout_seconds;
+            let live_default: Option<String> = default_answer.clone();
             // On a `resume` re-invocation the follow-up prompt IS the user's
             // answer (the prior context lives in the agent's own session); an
             // ordinary attempt renders the node prompt (or takes the reprompt
@@ -460,14 +470,32 @@ pub(crate) fn execute_node(
                     // failure is carried out of the closure like `spawn_err`.
                     let tick_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
+                    // Set by `on_tick` when the open question timed out with no
+                    // default answer: the message fails the attempt (Task 5
+                    // wording) and `abort` tells the adapter to tear the agent
+                    // down. Attempt-local, so only this node fails.
+                    let timeout_msg: std::cell::RefCell<Option<String>> =
+                        std::cell::RefCell::new(None);
+                    let abort = AtomicBool::new(false);
                     let on_tick = || {
-                        if tick_err.borrow().is_some() {
+                        if tick_err.borrow().is_some() || abort.load(Ordering::Relaxed) {
                             return;
                         }
                         // Unqualified via `use super::*`: node.rs already reaches
                         // scheduler that way, so no new module edge is added.
-                        if let Err(e) = observe_live_channels(run_dir, node_id, journal) {
-                            *tick_err.borrow_mut() = Some(e);
+                        match tick_live_observation(
+                            run_dir,
+                            node_id,
+                            journal,
+                            live_q_timeout,
+                            live_default.as_deref(),
+                        ) {
+                            Ok(Some(msg)) => {
+                                *timeout_msg.borrow_mut() = Some(msg);
+                                abort.store(true, Ordering::Relaxed);
+                            }
+                            Ok(None) => {}
+                            Err(e) => *tick_err.borrow_mut() = Some(e),
                         }
                     };
                     let live_hooks = live.as_ref().map(|lc| crate::adapter::LiveHooks {
@@ -478,6 +506,7 @@ pub(crate) fn execute_node(
                             timeout_ms: lc.timeout_ms,
                         },
                         on_tick: &on_tick,
+                        abort: &abort,
                     });
                     let outcome = adapter.run_cancellable(
                         &task,
@@ -490,6 +519,26 @@ pub(crate) fn execute_node(
                     }
                     if let Some(e) = tick_err.borrow_mut().take() {
                         return Err(e);
+                    }
+                    // Question-timeout-without-default (spec 2026-07-20, Task 11
+                    // fix): the adapter tore the agent down on the abort flag.
+                    // Fail this attempt with the node-named message, journaling
+                    // the paired `attempt_finished`; no retry/fallback, since a
+                    // question timeout does not resolve by re-running the agent.
+                    if let Some(msg) = timeout_msg.borrow_mut().take() {
+                        let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
+                        journal.append(EventPayload::AttemptFinished {
+                            node: node_id.into(),
+                            attempt,
+                            status: "failed".into(),
+                            duration_ms,
+                            session: None,
+                        })?;
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Failed,
+                            output: msg,
+                            events,
+                        });
                     }
                     let spawn_instant = spawn_at.get();
                     // The spawn itself failed before the callback ran: still journal

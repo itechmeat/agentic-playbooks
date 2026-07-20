@@ -299,6 +299,67 @@ pub(crate) fn observe_live_channels(
     Ok(())
 }
 
+/// One drive-thread tick of a live attempt (spec 2026-07-20, Task 11 fix):
+/// observe the channels (journal the round) AND enforce the node's
+/// `question_timeout_seconds` for the currently OPEN question, all on the drive
+/// thread from the adapter's `on_tick`.
+///
+/// When the open question has been unanswered for `>= timeout_secs`:
+/// - WITH `default_answer`, post it via `post_answer_if_unanswered`
+///   (`answered_by: "timeout"`, idempotent under the answers lock so it races a
+///   real answer cleanly); the blocked sidecar returns it to the agent and the
+///   next observation journals the `QuestionAnswered`.
+/// - WITHOUT `default_answer`, return `Ok(Some(msg))` with the Task 5 wording;
+///   the caller sets the abort flag so the adapter tears the agent down and the
+///   attempt fails naming the node and the timeout.
+///
+/// Returns `Ok(None)` when nothing was enforced (no open question, not yet
+/// expired, or a default was posted). Engine-owned: the injected sidecar
+/// timeout is only a larger backstop, never the enforcement mechanism.
+pub(crate) fn tick_live_observation(
+    run_dir: &Path,
+    node: &str,
+    journal: &Journal,
+    timeout_secs: Option<u64>,
+    default_answer: Option<&str>,
+) -> Result<Option<String>, EngineError> {
+    observe_live_channels(run_dir, node, journal)?;
+    let Some(secs) = timeout_secs else {
+        return Ok(None);
+    };
+    let questions = read_questions_after(run_dir, None)?
+        .into_iter()
+        .filter(|q| q.node == node)
+        .count();
+    let answers = read_answers_after(run_dir, None)?
+        .into_iter()
+        .filter(|a| a.node == node)
+        .count();
+    // No open (asked-but-unanswered) question for the node: nothing to enforce.
+    if questions <= answers {
+        return Ok(None);
+    }
+    let events = read_all(run_dir)?;
+    let Some(asked_ts) = last_question_asked_ts(&events, node) else {
+        return Ok(None);
+    };
+    if now_millis().saturating_sub(asked_ts) < u128::from(secs) * 1000 {
+        return Ok(None);
+    }
+    match default_answer {
+        Some(ans) => {
+            // `answers` is the channel answer count observed above;
+            // `post_answer_if_unanswered` re-checks it under the answers lock,
+            // so a real answer landing in the gap makes this a no-op.
+            post_answer_if_unanswered(run_dir, node, ans, "timeout", answers)?;
+            Ok(None)
+        }
+        None => Ok(Some(format!(
+            "interactive node `{node}` timed out after {secs}s waiting for an answer and has no default_answer"
+        ))),
+    }
+}
+
 /// How many `AttemptStarted` events a node already carries - the number of the
 /// current attempt while one is open, used to tag a posted question.
 fn attempt_started_count(events: &[Event], node: &str) -> usize {
@@ -1831,16 +1892,15 @@ fn drive(
             } else {
                 prim_interaction
             };
-            // Per-server tool timeout for the sidecar injection:
-            // `question_timeout_seconds*1000` when set, else the large default.
+            // Per-server tool timeout for the sidecar injection: a BACKSTOP
+            // strictly larger than `question_timeout_seconds` (the engine
+            // enforces that budget on the drive thread), else the large default.
             let live_timeout_ms = match &node_kind {
                 NodeKind::AgentTask {
                     question_timeout_seconds,
                     ..
-                } => question_timeout_seconds
-                    .map(|s| s.saturating_mul(1000))
-                    .unwrap_or(crate::adapter::LIVE_TOOL_TIMEOUT_MS_DEFAULT),
-                _ => crate::adapter::LIVE_TOOL_TIMEOUT_MS_DEFAULT,
+                } => crate::adapter::live_tool_timeout_ms(*question_timeout_seconds),
+                _ => crate::adapter::live_tool_timeout_ms(None),
             };
             // A pending (asked-but-unanswered) question means we are parked.
             if question_asked_count(&events, &current) > answered {
@@ -2069,6 +2129,29 @@ fn drive(
                         if live_injectable {
                             let journal = Journal::new(&mut *log);
                             observe_live_channels(run_dir, &current, &journal)?;
+                        }
+                        // Abandoned-question edge (spec 2026-07-20, Task 11 fix):
+                        // a live agent that finished cleanly while a question was
+                        // still open (it answered its own way and moved on, or
+                        // never waited for the answer) would otherwise leave
+                        // silence. Record it so the run report shows what
+                        // happened. Gated on a SUCCEEDED finish: a FAILED finish
+                        // with an open question is already told by the failure
+                        // itself - most notably the question-timeout-without-
+                        // default path, whose node-named failure covers it.
+                        if live_injectable && status == NodeStatus::Succeeded {
+                            let ev = read_all(run_dir)?;
+                            if question_asked_count(&ev, &current)
+                                > question_answered_count(&ev, &current)
+                            {
+                                log.append(EventPayload::SupervisorAction {
+                                    action: "question_abandoned".into(),
+                                    node: Some(current.clone()),
+                                    detail: format!(
+                                        "live node `{current}` finished with an unanswered question still open"
+                                    ),
+                                })?;
+                            }
                         }
                         // Runtime resume failure (spec 2026-07-20, Task 7): the
                         // resume invocation ran but failed (spawn/transport-init
