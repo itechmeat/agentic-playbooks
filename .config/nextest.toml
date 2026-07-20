@@ -12,16 +12,24 @@
 #
 # Retries are deliberately left off everywhere (nextest's default): a hang that
 # a retry papers over is a defect that should be visible on the first run.
+#
+# Reading the settings below: `period` is how long a test runs before nextest
+# reports it as SLOW, which on its own changes nothing - the test keeps going.
+# `terminate-after` is how many of those periods it gets before nextest ends
+# it, sending SIGTERM first and escalating to SIGKILL if it does not go, and
+# failing it by name. So the real ceiling is period x terminate-after.
 
-# Local runs. Deliberately loose, because the ceiling here has to clear the
-# slowest HONEST test on any developer machine, and on macOS that is not the
-# test logic: `apb_server::watch::spawn_watcher` takes ~34s to register an
-# FSEvents watch on a tempdir under /var/folders (measured; the watcher's own
-# drop is ~350us and the two watcher tests' assertion loops are bounded at 5s).
-# The Linux inotify path CI uses does not pay that cost. A tighter default
-# would fail those two tests on every macOS run for no defect.
+# Local runs. Looser than CI, because the ceiling here has to clear the slowest
+# HONEST test on any developer machine, and on macOS that is not the test
+# logic: `apb_server::watch::spawn_watcher` takes ~34s to register an FSEvents
+# watch on a tempdir under /var/folders (measured; the watcher's own drop is
+# ~350us and the two watcher tests' assertion loops are bounded at 5s). The
+# Linux inotify path CI uses does not pay that cost.
+#
+# Two periods, so 120s: comfortably clear of that ~34s case while still
+# catching a genuine local hang in two minutes rather than ten.
 [profile.default]
-slow-timeout = { period = "60s", terminate-after = 10 }
+slow-timeout = { period = "60s", terminate-after = 2 }
 
 # CI (Linux). This is the profile that actually enforces the anti-hang
 # property. The honest worst case in this workspace is the detached-driver

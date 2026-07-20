@@ -80,8 +80,12 @@ fn sh_script_timeout_is_timed_out() {
 // pattern that works today precisely because nothing kills the group, and a
 // group kill would break it. So the bound is the whole fix here, and the
 // documented cost is that a script backgrounding a process WITHOUT redirecting
-// its output loses the captured stdout instead of hanging. Both halves are
-// asserted below.
+// its output loses the captured stdout instead of hanging.
+//
+// This test asserts the bound, the surviving daemon, and the empty stdout that
+// is the cost. The marker that makes that cost visible to an operator is
+// asserted in the test below, at the `run_capture` layer, because
+// `ScriptResult` has no stderr field to carry it up to here.
 #[test]
 fn script_backgrounding_a_process_on_its_stdout_is_bounded_and_spares_the_daemon() {
     let ver = tempfile::tempdir().unwrap();
@@ -128,5 +132,56 @@ fn script_backgrounding_a_process_on_its_stdout_is_bounded_and_spares_the_daemon
         daemon_survived,
         "run_capture must not kill the script's process group: backgrounding a \
          long-lived helper is a supported pattern"
+    );
+
+    // The cost of sparing the daemon, pinned rather than described. The drain
+    // expires with the pipe still open, so stdout comes back EMPTY - not
+    // truncated, and `echo started` is nowhere in it - while the node is still
+    // Succeeded. Pinning it here is what makes the loss a decision rather than
+    // an accident; the marker that reports it is asserted one layer down, in
+    // `an_expired_drain_says_so_instead_of_losing_stdout_silently`, because
+    // `ScriptResult` has no stderr field to carry it.
+    assert_eq!(
+        r.stdout, "",
+        "an expired drain yields no stdout at all, not partial output"
+    );
+}
+
+// The same situation one layer down, where the evidence lives. `run_capture`
+// is where the drain budget is, so it is where the loss can be named: a
+// Succeeded node whose entire stdout silently became "" is indistinguishable
+// from a script that printed nothing, and a downstream condition reading that
+// output would quietly see the wrong thing.
+#[test]
+fn an_expired_drain_says_so_instead_of_losing_stdout_silently() {
+    let work = tempfile::tempdir().unwrap();
+    let mut cmd = std::process::Command::new("sh");
+    cmd.arg("-c")
+        .arg("sleep 300 &\necho $! > daemon.pid\necho started")
+        .current_dir(work.path());
+
+    let captured = apb_engine::proc::run_capture(cmd, None, None).unwrap();
+
+    let pid: i32 = fs::read_to_string(work.path().join("daemon.pid"))
+        .expect("script should have recorded the background pid")
+        .trim()
+        .parse()
+        .expect("background pid");
+    // SAFETY: `kill` takes no pointers; reap it so the test leaks nothing.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+
+    assert_eq!(captured.stdout, "", "the drain expired, so stdout is empty");
+    assert!(
+        captured
+            .stderr
+            .contains(apb_engine::proc::DRAIN_LOST_MARKER),
+        "the lost stdout must be explained on stderr, got: {:?}",
+        captured.stderr
+    );
+    assert!(
+        captured.status.is_some_and(|s| s.success()),
+        "the script itself succeeded; only its output was lost"
     );
 }
