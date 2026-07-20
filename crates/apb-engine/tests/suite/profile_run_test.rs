@@ -830,3 +830,64 @@ fn live_profile_edit_after_start_does_not_affect_resume() {
         "resume picked up live-edited SOUL: {got}"
     );
 }
+
+/// The finish-answer path carries its OWN copy of the fallback sameness guard
+/// (`execute_finish_answer`), and only `execute_node`'s copy was covered. Same
+/// property, asserted where the second copy lives: a chain claude(haiku) ->
+/// claude(haiku) behind a finish-with-prompt must attempt the first step only
+/// and emit no fallback_triggered, because a fallback to the identical
+/// (agent, model) pair is not a different attempt.
+#[test]
+fn finish_answer_fallback_skips_identical_agent_and_model_binding() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    init_project(proj.path()).unwrap();
+    let src = "schema: 1\nid: pf\nname: PF\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success, prompt: \"sum up\", profile: arch }\nedges:\n  - { from: start, to: done }\n";
+    let dir = proj.path().join(".apb/playbooks/pf/1.0.0");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("playbook.yaml"), src).unwrap();
+    fs::write(proj.path().join(".apb/playbooks/pf/current"), "1.0.0").unwrap();
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: claude, model: haiku }\n",
+        "",
+        "role",
+    );
+    set_env(
+        &make_stub(bin.path(), "echo boom 1>&2\nexit 1"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "pf", None, RunOptions::default()).expect("run returns");
+    assert_eq!(
+        res.outcome,
+        RunStatus::Failed,
+        "the answer composition fails once its one real step is exhausted"
+    );
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::FallbackTriggered { .. })),
+        "an identical finish-answer fallback binding must not emit fallback_triggered"
+    );
+    let attempts = events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "done"),
+        )
+        .count();
+    assert_eq!(
+        attempts, 1,
+        "only the first (real) step of the finish-answer chain should be attempted"
+    );
+}

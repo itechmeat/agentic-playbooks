@@ -66,8 +66,9 @@ pub enum EventPayload {
         skills_mode: Option<String>,
         /// OS process id of the spawned agent, captured at spawn time (from
         /// `child.id()`). Written when the attempt is journaled at spawn so a
-        /// mid-attempt crash leaves an identifiable open attempt. `None` for
-        /// old logs and for paths that do not journal the spawn (finish-answer).
+        /// mid-attempt crash leaves an identifiable open attempt. `None` only
+        /// for old logs: every path that spawns an agent - including the
+        /// finish-answer composition - journals the attempt at spawn.
         #[serde(default)]
         pid: Option<u32>,
     },
@@ -76,8 +77,9 @@ pub enum EventPayload {
         attempt: u32,
         status: String,
         /// Wall-clock milliseconds from the agent spawn to this attempt's
-        /// return, measured from the spawn instant. `None` for old logs and
-        /// for paths that do not journal the spawn (finish-answer).
+        /// return, measured from the spawn instant. `None` only for old logs:
+        /// every path that spawns an agent - including the finish-answer
+        /// composition - measures the attempt from its own spawn instant.
         #[serde(default)]
         duration_ms: Option<u64>,
     },

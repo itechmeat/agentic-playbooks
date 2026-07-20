@@ -18,6 +18,9 @@ mod cli_test;
 mod connector_cli;
 #[path = "suite/demo_playbooks_test.rs"]
 mod demo_playbooks_test;
+// Unix-only: the module drives process groups through
+// `std::os::unix::process::CommandExt` and inspects them with `ps`/`kill`.
+#[cfg(unix)]
 #[path = "suite/detached_driver_test.rs"]
 mod detached_driver_test;
 #[path = "suite/live_smoke_test.rs"]
