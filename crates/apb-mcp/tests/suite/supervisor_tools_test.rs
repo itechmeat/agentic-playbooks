@@ -203,9 +203,15 @@ fn playbook_run_supervised_prepares_the_run_and_hands_off_the_drive() {
         run_dir.is_dir(),
         "run dir must exist after the tool returns"
     );
+    // The run config must carry the MODE across, not just exist: the detached
+    // driver re-opens the run from disk and has no other way to learn it is
+    // supervised. A regression that dropped `mode` on the handoff path would
+    // otherwise ship green, and the run would silently drive autonomously -
+    // taking its own fallbacks instead of waking the supervisor.
+    let cfg = fs::read_to_string(run_dir.join("run.yaml")).expect("run.yaml");
     assert!(
-        run_dir.join("run.yaml").is_file(),
-        "the run config must be snapshotted before the drive is handed off"
+        cfg.contains("mode: supervised"),
+        "the run config must record the supervised mode for the detached driver, got:\n{cfg}"
     );
     assert!(
         run_dir.join("playbook.yaml").is_file(),

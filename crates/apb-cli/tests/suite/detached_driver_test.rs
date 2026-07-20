@@ -13,7 +13,9 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -34,6 +36,46 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
             panic!("timed out after {POLL_DEADLINE:?} waiting for: {what}");
         }
         std::thread::sleep(POLL_STEP);
+    }
+}
+
+/// The process-group id of `pid`, via `ps`. `None` once the process is gone.
+fn pgid_of(pid: u32) -> Option<u32> {
+    let out = Command::new("ps")
+        .arg("-o")
+        .arg("pgid=")
+        .arg("-p")
+        .arg(pid.to_string())
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+}
+
+fn alive(pid: u32) -> bool {
+    Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+/// Kills the detached driver if a test bails out before the run finished.
+/// Nothing else would: the driver deliberately outlives every process these
+/// tests control, so a panicking `poll_until` would otherwise leave a live
+/// `sleep` running against a tempdir that is about to be deleted. On the happy
+/// path `driver.pid` is already gone and this is a no-op.
+struct DriverReaper {
+    run_dir: PathBuf,
+}
+
+impl Drop for DriverReaper {
+    fn drop(&mut self) {
+        if let Some(pid) = apb_engine::driver::read_driver_pid(&self.run_dir) {
+            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+        }
     }
 }
 
@@ -140,20 +182,29 @@ fn drive_run_subcommand_completes_a_run_prepared_by_another_process() {
     );
 
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let _reaper = DriverReaper {
+        run_dir: run_dir.clone(),
+    };
     let status = wait_for_outcome(&run_dir, 0, "the driven run to reach a terminal event");
     assert_eq!(status, RunStatus::Succeeded);
 }
 
-// Scenario 2: a background `playbook_run` started over MCP survives the death
-// of the `apb mcp` process. This is the production incident the task exists
-// for: the host chat session died under memory pressure and took the in-flight
-// run with it.
+// Scenario 2: a background `playbook_run` started over MCP survives its
+// launcher's whole PROCESS GROUP being killed. This is the production incident
+// the task exists for, and the group is the part that matters: a host that
+// tears down its subtree with `kill(-pgid)`, or a closed terminal SIGHUPing
+// its foreground group, reaches every process that shares the launcher's
+// group. A driver that merely has its own pid but inherits that group dies
+// right along with the launcher, leaving the run no safer than the in-process
+// thread it replaced - so this test signals the group, not the pid.
 #[test]
-fn mcp_background_run_survives_the_death_of_the_mcp_process() {
+fn mcp_background_run_survives_a_group_kill_of_the_mcp_process() {
     let dir = tempfile::tempdir().unwrap();
     let (yaml, script) = slowscript_yaml("bgsurvive", 3);
     seed(dir.path(), "bgsurvive", &yaml, &script);
 
+    // `apb mcp` leads its own group, so the group kill below cannot reach the
+    // test runner itself.
     let mut mcp = McpSession::start(dir.path());
     let body = mcp.call(
         2,
@@ -165,6 +216,10 @@ fn mcp_background_run_survives_the_death_of_the_mcp_process() {
         .to_string();
 
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let _reaper = DriverReaper {
+        run_dir: run_dir.clone(),
+    };
+
     // The run is still in flight (the script sleeps 3s): the driver must be a
     // process of its own, not a thread of the MCP server.
     let driver_pid = poll_until("driver.pid to name the detached driver process", || {
@@ -181,18 +236,160 @@ fn mcp_background_run_survives_the_death_of_the_mcp_process() {
         "the driver must be a separate process from `apb mcp`, not a thread inside it"
     );
 
-    // Kill the launching process outright, mid-run.
-    mcp.kill();
+    // ... and in its own process group, which is what makes the group kill
+    // below survivable.
+    let mcp_pgid = pgid_of(mcp.pid()).expect("mcp process group");
+    let driver_pgid = pgid_of(driver_pid).expect("driver process group");
+    assert_eq!(
+        driver_pgid, driver_pid,
+        "the driver must lead its own process group"
+    );
+    assert_ne!(
+        driver_pgid, mcp_pgid,
+        "the driver must not share its launcher's process group"
+    );
+
+    // Kill the launcher's entire group, mid-run.
+    mcp.kill_group();
+    poll_until(
+        "the MCP process to actually die from the group kill",
+        || {
+            if alive(mcp.pid()) { None } else { Some(()) }
+        },
+    );
 
     let status = wait_for_outcome(
         &run_dir,
         0,
-        "the detached run to finish after the MCP process was killed",
+        "the detached run to finish after its launcher's process group was killed",
     );
     assert_eq!(
         status,
         RunStatus::Succeeded,
-        "the run must complete on its own after its launcher died"
+        "the run must complete on its own after its launcher's group was killed"
+    );
+}
+
+// Scenario 2b: the contract of `spawn_driver_at` (and so of
+// `spawn_detached_driver`, which is the same function with `current_exe()`)
+// asserted directly, since every other scenario reaches it indirectly through
+// the MCP server. Three promises: the returned pid is the driver's own pid -
+// the SAME one that lands in `driver.pid` and that liveness checks read - the
+// driver leads its own process group, and it completes the run with the caller
+// doing nothing but wait.
+#[test]
+fn spawn_driver_at_returns_the_driver_pid_and_drives_the_run_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("spawnme", 2);
+    seed(dir.path(), "spawnme", &yaml, &script);
+
+    let prepared = apb_engine::prepare_supervised_background(
+        dir.path(),
+        "spawnme",
+        None,
+        apb_engine::RunOptions::default(),
+    )
+    .unwrap();
+    let run_id = prepared.run_id().to_string();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+
+    let pid = apb_engine::driver::spawn_driver_at(
+        Path::new(env!("CARGO_BIN_EXE_apb")),
+        dir.path(),
+        &run_id,
+        None,
+        false,
+    )
+    .unwrap();
+    // Hand the lock across exactly as `start_detached` does, so the driver
+    // adopts it rather than waiting the handover window out.
+    prepared.hand_over_workdir_lock(pid).unwrap();
+
+    let _reaper = DriverReaper {
+        run_dir: run_dir.clone(),
+    };
+
+    // The returned pid is the driver itself: whatever it publishes as
+    // `driver.pid` must be the very pid we were handed, or the workdir
+    // handover and every downstream liveness check are aimed at the wrong
+    // process.
+    let published = poll_until("the driver to publish driver.pid", || {
+        apb_engine::driver::read_driver_pid(&run_dir)
+    });
+    assert_eq!(
+        published, pid,
+        "spawn_driver_at must return the pid that ends up in driver.pid"
+    );
+    assert_eq!(
+        pgid_of(pid),
+        Some(pid),
+        "the driver must lead its own process group"
+    );
+
+    // The caller drives nothing - it only waits.
+    let status = wait_for_outcome(&run_dir, 0, "the spawned driver to finish the run alone");
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
+// Scenario 2c: a driver killed mid-run must read as DEAD. The launcher reaps
+// its driver handles, so a killed driver's pid is released instead of lingering
+// as a zombie - and `kill -0`, which is how liveness is checked here and in
+// `workdir`, succeeds for a zombie. Without reaping, a driver that was
+// SIGKILLed mid-run would read as alive for the rest of the launcher's
+// session, and the stuck run it left behind could never be recognised as
+// recoverable - which is exactly the signal Tasks 8 and 9 build on.
+#[test]
+fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    // Long enough that the driver is certainly still running when killed.
+    let (yaml, script) = slowscript_yaml("reapme", 30);
+    seed(dir.path(), "reapme", &yaml, &script);
+
+    let prepared = apb_engine::prepare_supervised_background(
+        dir.path(),
+        "reapme",
+        None,
+        apb_engine::RunOptions::default(),
+    )
+    .unwrap();
+    let run_id = prepared.run_id().to_string();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+
+    // This test process is the launcher, so it owns the reaper.
+    let pid = apb_engine::driver::spawn_driver_at(
+        Path::new(env!("CARGO_BIN_EXE_apb")),
+        dir.path(),
+        &run_id,
+        None,
+        false,
+    )
+    .unwrap();
+    prepared.hand_over_workdir_lock(pid).unwrap();
+
+    poll_until("the driver to start driving", || {
+        apb_engine::driver::read_driver_pid(&run_dir)
+    });
+    assert!(alive(pid), "the driver should be alive before we kill it");
+
+    let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+
+    // Unreaped, the pid stays a zombie and `kill -0` keeps succeeding forever.
+    poll_until(
+        "the killed driver's pid to be reaped and stop reading as alive",
+        || if alive(pid) { None } else { Some(()) },
+    );
+
+    // And it left the evidence Tasks 8/9 need: a driver.pid naming a pid that
+    // is provably gone, on a run that never finished.
+    assert_eq!(
+        apb_engine::driver::read_driver_pid(&run_dir),
+        Some(pid),
+        "a killed driver leaves its driver.pid behind - that is the stale marker"
+    );
+    assert_eq!(
+        finishes(&run_dir),
+        0,
+        "the killed run must not have finished"
     );
 }
 
@@ -231,6 +428,9 @@ fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
     // own snapshot, so rewriting it here is what the resumed node will run.
     fs::write(run_dir.join("scripts/work.sh"), "#!/bin/sh\nsleep 10\n").unwrap();
     let before = finishes(&run_dir);
+    let _reaper = DriverReaper {
+        run_dir: run_dir.clone(),
+    };
 
     let mut mcp = McpSession::start(dir.path());
     let started = Instant::now();
@@ -280,6 +480,9 @@ impl McpSession {
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
+            // Its own process group, so a test can kill the launcher's whole
+            // group without also signalling the cargo test runner.
+            .process_group(0)
             .spawn()
             .unwrap();
         let mut stdin = child.stdin.take().unwrap();
@@ -348,6 +551,16 @@ impl McpSession {
 
     fn kill(&mut self) {
         let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+
+    /// Kills the launcher's entire process group, the way a host tears down a
+    /// subtree. Anything that inherited this group dies with it.
+    fn kill_group(&mut self) {
+        let _ = Command::new("kill")
+            .arg("-9")
+            .arg(format!("-{}", self.child.id()))
+            .status();
         let _ = self.child.wait();
     }
 }

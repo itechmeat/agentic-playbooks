@@ -19,6 +19,8 @@
 //! re-resolves live profile or skill files, so the posture is unchanged.
 
 use std::io;
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -71,8 +73,7 @@ impl Drop for DriverPidGuard {
 
 /// Re-execs this binary as `apb __drive-run ...` in a separate, detached OS
 /// process and returns its pid. The child drives the run at `runs/<run_id>` to
-/// completion on its own; we do not wait for it, so it is reparented to init
-/// when we exit - which is the entire point.
+/// completion on its own and outlives us.
 ///
 /// `resume` selects the resume path (`--resume`, honouring `from_node` through
 /// the normal resume planner) over re-opening a freshly prepared run.
@@ -83,12 +84,27 @@ pub fn spawn_detached_driver(
     resume: bool,
 ) -> io::Result<u32> {
     let exe = std::env::current_exe()?;
+    spawn_driver_at(&exe, root, run_id, from_node, resume)
+}
+
+/// `spawn_detached_driver` against an explicitly named driver binary, for
+/// callers that know where `apb` lives rather than being it. Production code
+/// wants `spawn_detached_driver`; this exists because `current_exe()` inside a
+/// test binary is the test harness, so the detached path can only be exercised
+/// end-to-end by naming the real binary.
+pub fn spawn_driver_at(
+    exe: &Path,
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    resume: bool,
+) -> io::Result<u32> {
     // The child gets an absolute root: it starts from a different working
     // directory context and must not have to guess what a relative path meant
     // to the parent.
     let root = std::fs::canonicalize(root)?;
 
-    let mut cmd = Command::new(&exe);
+    let mut cmd = Command::new(exe);
     cmd.arg("__drive-run")
         .arg("--root")
         .arg(&root)
@@ -107,12 +123,38 @@ pub fn spawn_detached_driver(
     cmd.stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
+    // The driver leads its OWN process group (pgid == its pid), the same idiom
+    // as `proc::run_capture` and `adapter::spawn_in_group`. Without this it
+    // inherits the launcher's group, and every way a host tears down a subtree
+    // at once - `kill(-pgid)`, a closed terminal SIGHUPing its foreground
+    // group - takes the driver down with the launcher. That is precisely the
+    // incident this whole mechanism exists to prevent, so inheriting the
+    // group would leave the run no safer than the in-process thread it
+    // replaced.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let child = cmd.spawn()?;
     let pid = child.id();
-    // Deliberately not waited on: dropping the handle orphans the process,
-    // which is what lets it outlive us (the same trick as
-    // `spawn_detached_supervised` and `ClaudeAdapter::spawn_supervisor`).
-    drop(child);
+    reap_in_background(child);
     Ok(pid)
+}
+
+/// Waits on a driver handle from a throwaway thread, purely to reap it.
+///
+/// The driver stays our child until it exits, and an unwaited-for dead child
+/// is a zombie: its pid is never released, so `kill -0` keeps succeeding for
+/// it. `apb mcp` is long-lived and starts one driver per background run, so
+/// those zombies would accumulate - and, far worse, a driver killed mid-run
+/// would read as ALIVE for the rest of the session, which is exactly the
+/// liveness signal `driver.pid` is supposed to provide (Tasks 8 and 9 decide
+/// "is this run recoverable" from it). Reaping keeps that signal honest.
+///
+/// The thread costs a blocked `waitpid` and nothing else, and it is not what
+/// keeps the run alive: if this process dies, the thread dies with it and the
+/// driver is simply reparented to init, which reaps it instead.
+fn reap_in_background(mut child: std::process::Child) {
+    std::thread::spawn(move || {
+        let _ = child.wait();
+    });
 }
