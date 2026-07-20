@@ -31,6 +31,15 @@
 [profile.default]
 slow-timeout = { period = "60s", terminate-after = 2 }
 
+# The two FSEvents watcher tests are honestly slow on macOS, not hung: measured
+# 72-96s solo (FSEvents registration under /var/folders), and past 120s when a
+# full parallel run saturates the machine. They get their own wider ceiling so
+# the global one stays tight for everything else. CI (Linux inotify) does not
+# pay this cost and keeps the ci profile's ceiling.
+[[profile.default.overrides]]
+filter = "test(runs_watch_test::watcher_emits_runs_changed_on_run_file) | test(ws_test::watcher_publishes_on_file_change)"
+slow-timeout = { period = "120s", terminate-after = 3 }
+
 # CI (Linux). This is the profile that actually enforces the anti-hang
 # property. The honest worst case in this workspace is the detached-driver
 # suite at roughly 11s per test, and the whole job ran under 3 minutes before
