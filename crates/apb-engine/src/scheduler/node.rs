@@ -201,15 +201,34 @@ pub(crate) fn execute_node(
             // The node's final status once all attempts are exhausted: TimedOut if
             // the last attempt was interrupted by a timeout, otherwise Failed.
             let mut last_timed_out = false;
+            // Fallback sameness guard: the (agent, model) pair of the step that
+            // was just actually attempted (not the positionally-previous step,
+            // which may itself have been skipped). Compared against each
+            // candidate step in turn, so a chain X -> Y -> X still attempts the
+            // third step (it differs from Y, the step that just failed), while
+            // X -> X collapses (identical to the step that just failed, most
+            // likely doomed by the same external cause - e.g. a token lacking
+            // permission - not by the agent or model).
+            let mut last_tried: Option<(String, String)> = None;
             for (idx, step) in steps.iter().enumerate() {
                 if idx > 0 {
+                    let same_binding = last_tried
+                        .as_ref()
+                        .is_some_and(|(agent, model)| *agent == step.agent && *model == step.model);
+                    if same_binding {
+                        continue;
+                    }
                     events.push(EventPayload::FallbackTriggered {
                         node: node_id.into(),
-                        from: steps[idx - 1].agent.clone(),
+                        from: last_tried
+                            .as_ref()
+                            .map(|(agent, _)| agent.clone())
+                            .unwrap_or_else(|| steps[idx - 1].agent.clone()),
                         to: step.agent.clone(),
                         profile: profile_key.clone(),
                     });
                 }
+                last_tried = Some((step.agent.clone(), step.model.clone()));
                 // The profile path builds the adapter from the fixed invocation
                 // (call form + canonical binary from the manifest), so that editing
                 // agents.<id>.invocation in the config between start and resume does
@@ -497,15 +516,29 @@ pub(crate) fn execute_finish_answer(
     let mut attempt: u32 = 0;
     let mut last_msg = String::new();
     let mut last_timed_out = false;
+    // Fallback sameness guard (same semantics as `execute_node` above): compare
+    // each candidate step against the (agent, model) pair actually attempted
+    // last, not against the positionally-previous step.
+    let mut last_tried: Option<(String, String)> = None;
     for (idx, ri) in entry.chain.iter().enumerate() {
         if idx > 0 {
+            let same_binding = last_tried
+                .as_ref()
+                .is_some_and(|(agent, model)| *agent == ri.agent_id && *model == ri.model);
+            if same_binding {
+                continue;
+            }
             events.push(EventPayload::FallbackTriggered {
                 node: node_id.into(),
-                from: entry.chain[idx - 1].agent_id.clone(),
+                from: last_tried
+                    .as_ref()
+                    .map(|(agent, _)| agent.clone())
+                    .unwrap_or_else(|| entry.chain[idx - 1].agent_id.clone()),
                 to: ri.agent_id.clone(),
                 profile: Some(entry.key()),
             });
         }
+        last_tried = Some((ri.agent_id.clone(), ri.model.clone()));
         let adapter = crate::adapter::ClaudeAdapter {
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),

@@ -537,6 +537,168 @@ fn fallback_event_carries_profile_ref() {
 }
 
 #[test]
+fn fallback_skips_identical_agent_and_model_binding() {
+    // Task 6: a chain claude(haiku) -> claude(haiku) - the fallback resolves
+    // to the exact same (agent, model) pair as the primary that just failed
+    // (e.g. a token-permission failure a model swap cannot help). The guard
+    // must skip the fallback step entirely: no attempt, no
+    // fallback_triggered, and the node fails once the one real step is
+    // exhausted.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: claude, model: haiku }\n",
+        "",
+        "role",
+    );
+    set_env(
+        &make_stub(bin.path(), "echo boom 1>&2\nexit 1"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run returns");
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::FallbackTriggered { .. })),
+        "identical fallback binding must not emit fallback_triggered"
+    );
+    let attempt_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "t"))
+        .count();
+    assert_eq!(
+        attempt_count, 1,
+        "only the first (real) step should be attempted; the identical fallback must be skipped silently"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "t" && status == "failed"
+        )),
+        "node must fail once its only real step is exhausted"
+    );
+}
+
+#[test]
+fn fallback_triggers_when_model_differs() {
+    // Companion to the identical-binding test above: a chain claude(haiku) ->
+    // claude(sonnet) differs on model, so the fallback is a genuinely
+    // different attempt and must still run normally (one fallback_triggered,
+    // an attempt for each step).
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: claude, model: sonnet }\n",
+        "",
+        "role",
+    );
+    set_env(
+        &make_stub(bin.path(), "echo boom 1>&2\nexit 1"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run returns");
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+
+    let fallback_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::FallbackTriggered { .. }))
+        .count();
+    assert_eq!(
+        fallback_count, 1,
+        "a genuinely different (agent, model) fallback must still trigger"
+    );
+    let attempt_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "t"))
+        .count();
+    assert_eq!(
+        attempt_count, 2,
+        "both steps of a non-identical chain must be attempted"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "t" && status == "failed"
+        )),
+        "node must fail once the whole chain is exhausted"
+    );
+}
+
+#[test]
+fn fallback_guard_compares_consecutive_steps_only() {
+    // The guard compares a step against the step that JUST failed, not
+    // against every previously tried step: a chain X -> Y -> X (haiku ->
+    // sonnet -> haiku) must still attempt the third step, because the step
+    // immediately before it (sonnet) differs, even though the first step
+    // shares its binding.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: claude, model: sonnet }\n    - { agent: claude, model: haiku }\n",
+        "",
+        "role",
+    );
+    set_env(
+        &make_stub(bin.path(), "echo boom 1>&2\nexit 1"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run returns");
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+
+    let fallback_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::FallbackTriggered { .. }))
+        .count();
+    assert_eq!(
+        fallback_count, 2,
+        "X -> Y -> X must trigger both fallbacks: the guard only skips a step identical to the one that just failed"
+    );
+    let attempt_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "t"))
+        .count();
+    assert_eq!(
+        attempt_count, 3,
+        "all three steps of X -> Y -> X must be attempted"
+    );
+}
+
+#[test]
 fn env_drift_stops_resume_unless_allowed() {
     let _l = lock();
     let _g = EnvGuard;
