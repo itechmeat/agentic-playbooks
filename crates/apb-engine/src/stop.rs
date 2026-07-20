@@ -132,20 +132,36 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
     // stamp a redundant `RunAborted` onto a run that had in fact just
     // finished cleanly.
     if is_terminal(RunState::fold(&read_all(&run_dir)?).run_status) {
-        // The abort we just posted has nothing left to do. Mark it consumed so
-        // a later resume of this run does not trip over a stale stop command.
+        // The abort we just posted has nothing left to do, and the driver that
+        // just finalized this run owns the cursor for everything it applied.
+        // Mark our own entry consumed so a later resume of a run that finished
+        // on its own does not trip over a stale stop command.
         write_control_cursor(&run_dir, seq)?;
         return Ok(StopOutcome::AlreadyTerminal);
     }
 
-    // Apply the abort ourselves: effect first (the terminal event), then the
-    // cursor, so a failed append leaves the command unconsumed rather than
-    // silently dropped - the same ordering the drive loop uses.
+    // Apply the abort ourselves: the terminal event, and NOTHING else.
+    //
+    // The cursor is deliberately not advanced here. It is a single scalar, so
+    // moving it to our Abort's seq marks every lower-numbered entry applied as
+    // well - and on this path the driver died without applying its queue, so
+    // those entries are precisely the ones nobody has acted on yet. A crashed
+    // driver plus `apb note` plus `apb stop` plus `apb resume` silently lost
+    // the note, the exact loss class the cursor exists to prevent.
+    //
+    // The terminal `RunAborted` is the guard against a replay instead: a
+    // resumed run re-reads the Abort at its first top-of-loop scan, but only
+    // after replaying the pending entries ahead of it, and it then simply
+    // re-finalizes an already terminal run and returns. That is a single extra
+    // terminal event on an explicitly stopped run, not a loop: the drive loop
+    // returns as soon as it applies an Abort, so nothing re-enters. Advancing
+    // past the Abort while leaving lower entries visible is not expressible
+    // with a scalar cursor, so the choice is between replaying the stop and
+    // dropping the operator's other commands, and dropping them is worse.
     let mut log = EventLog::open(&run_dir)?;
     log.append(EventPayload::RunAborted {
         reason: STOP_REASON.into(),
     })?;
-    write_control_cursor(&run_dir, seq)?;
     Ok(StopOutcome::FinalizedDeadRun)
 }
 

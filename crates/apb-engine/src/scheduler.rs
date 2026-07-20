@@ -609,6 +609,11 @@ fn hand_to_detached_driver(root: &Path, prepared: PreparedRun) -> Result<String,
             )));
         }
     };
+    // Publish the driver BEFORE returning, for the same reason the lock is
+    // handed over by pid here: until `driver.pid` names the child, this run
+    // reads as having no driver at all, and a stop landing in that window
+    // finalizes a run that is about to execute (see `publish_driver_pid`).
+    crate::driver::publish_driver_pid(&root.join(".apb/runs").join(&run_id), pid);
     // Best effort, and deliberately not fatal: the child is already running, so
     // failing the call here would hide a run that is genuinely under way. If
     // the rewrite fails, our guard releases the lock as it drops instead, and
@@ -633,8 +638,13 @@ pub fn resume_detached(
     if !root.join(".apb/runs").join(run_id).is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    crate::driver::spawn_detached_driver(root, run_id, from_node, true)
-        .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))
+    let pid = crate::driver::spawn_detached_driver(root, run_id, from_node, true)
+        .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
+    // As in `hand_to_detached_driver`: name the driver before returning, so a
+    // stop issued the moment this call comes back sees a live driver instead of
+    // finalizing a run the child is about to drive.
+    crate::driver::publish_driver_pid(&root.join(".apb/runs").join(run_id), pid);
+    Ok(pid)
 }
 
 /// Posts a cancel command to control.jsonl of an already-running (or already
@@ -821,7 +831,12 @@ fn drive(
         // was exactly the Phase 4a bug: the cursor advanced past ANY entry, including
         // Retry/ContinueFrom, silently losing them.
         let mut patch_applied = false;
-        for entry in read_control_after(run_dir, control_cursor)? {
+        // Set when the scan stops at a Retry/ContinueFrom without consuming it:
+        // everything queued BEHIND that entry - including a pending Abort - is
+        // unreachable for this scan. See the cancel check below the loop.
+        let mut blocked_before_end = false;
+        let pending_control = read_control_after(run_dir, control_cursor)?;
+        for entry in pending_control.iter().cloned() {
             match entry.cmd {
                 Control::Abort { reason } => {
                     // Effect first, cursor persisted last: if `log.append` errs
@@ -914,9 +929,41 @@ fn drive(
                 Control::Retry { .. } | Control::ContinueFrom { .. } => {
                     // Valid only inside await_control, in response to a wake -
                     // we do not advance the cursor, the command remains unconsumed.
+                    blocked_before_end = true;
                     break;
                 }
             }
+        }
+
+        // A stop that the scan above cannot reach. The watcher reads the raw
+        // control file and so DOES see an Abort queued behind an unconsumable
+        // Retry/ContinueFrom; the scan stops short of it and never applies it.
+        // The flag then stayed latched for the rest of the drive: every later
+        // node returned `Cancelled` instantly, `Cancelled` is neither Unknown
+        // nor Interrupted, so it fell through to edge selection, matched
+        // nothing, and the drive failed with "has no outgoing edge" - which
+        // `drive_prepared` stamped as run_finished(failed). An operator who
+        // asked for a stop got a FAILED run.
+        //
+        // The flag being set is itself proof that an Abort is pending, so
+        // finalize as aborted right here. The cursor is deliberately not
+        // advanced: it is a scalar, and moving it past the Abort would also
+        // mark the Retry ahead of it applied, silently dropping a command
+        // nobody has acted on. The terminal event is the guard against a
+        // replay, exactly as on `stop_run`'s dead-run path.
+        if blocked_before_end && run_cancel.load(Ordering::SeqCst) {
+            let reason = pending_control
+                .iter()
+                .find_map(|e| match &e.cmd {
+                    Control::Abort { reason } => Some(reason.clone()),
+                    _ => None,
+                })
+                .unwrap_or_else(|| "stop requested".to_string());
+            log.append(EventPayload::RunAborted { reason })?;
+            return Ok(RunResult {
+                run_id,
+                outcome: RunStatus::Aborted,
+            });
         }
 
         if patch_applied {

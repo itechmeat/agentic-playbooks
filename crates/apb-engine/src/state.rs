@@ -212,7 +212,19 @@ impl RunState {
             for node in &open {
                 s.nodes.insert(node.clone(), NodeStatus::Interrupted);
             }
-            if !matches!(s.run_status, RunStatus::Succeeded | RunStatus::Failed) {
+            // `Aborted` belongs in this exempt list next to the other explicit
+            // terminal verdicts: the shape a crashed driver leaves behind is an
+            // open `attempt_started`, and that is exactly the run `stop_run`
+            // finalizes with `RunAborted`. Without the exemption the fold
+            // immediately downgraded that run back to `Interrupted`, so the
+            // stop never became visible (run_status, `apb runs`, the dashboard,
+            // `doctor --run` all still read interrupted) and a second stop
+            // passed the terminal check again and appended a second
+            // `RunAborted`.
+            if !matches!(
+                s.run_status,
+                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
+            ) {
                 s.run_status = RunStatus::Interrupted;
             }
         }

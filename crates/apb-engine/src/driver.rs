@@ -45,6 +45,33 @@ pub fn read_driver_pid(run_dir: &Path) -> Option<u32> {
         .ok()
 }
 
+/// Publishes `pid` as the process driving this run, from the process that just
+/// SPAWNED that driver rather than from the driver itself.
+///
+/// `DriverPidGuard::claim` runs inside the child, and a full exec easily takes
+/// a hundred milliseconds to get there. For that whole window `driver.pid` did
+/// not exist, so `liveness::driver_is_live` reported no driver and a `stop_run`
+/// landing in it took the dead-run branch: it finalized a run whose driver was
+/// only just starting, and the child then executed the whole run past its own
+/// terminal `RunAborted`. A caller that gets a run_id back and stops the run
+/// immediately (an agent doing `playbook_run` then `run_stop`) hits exactly
+/// that window. The parent already knows the child's pid - it hands the workdir
+/// lock over by it - so it publishes the pid at the same point, and the child's
+/// own guard simply adopts the file (it writes the identical value and still
+/// removes it on a clean exit).
+///
+/// Best effort, like `claim`: a run that is genuinely under way must not fail
+/// because its pid could not be published.
+pub fn publish_driver_pid(run_dir: &Path, pid: u32) {
+    let path = driver_pid_path(run_dir);
+    if let Err(e) = atomic_write(&path, pid.to_string().as_bytes()) {
+        eprintln!(
+            "apb: warning: could not write {}: a stop issued before the driver starts may finalize this run as dead: {e}",
+            path.display()
+        );
+    }
+}
+
 /// Owns `runs/<id>/driver.pid` for the lifetime of one drive call: written
 /// (atomically, 0600) when the drive starts, removed when it returns, whatever
 /// the outcome. Every drive invocation takes one - the CLI's synchronous run,
@@ -59,6 +86,11 @@ pub(crate) struct DriverPidGuard {
 }
 
 impl DriverPidGuard {
+    /// Adopts the file when one is already there rather than requiring to
+    /// create it: a detached driver's parent publishes the child's pid before
+    /// the child gets here (`publish_driver_pid`), and that value is the pid
+    /// this write puts back. Ownership - and so the removal on exit - moves to
+    /// the drive either way.
     pub(crate) fn claim(run_dir: &Path) -> Self {
         let path = driver_pid_path(run_dir);
         if let Err(e) = atomic_write(&path, std::process::id().to_string().as_bytes()) {

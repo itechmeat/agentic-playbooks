@@ -286,6 +286,12 @@ fn stop_aborts_even_when_the_killed_node_has_no_way_forward() {
 
 /// Builds a run directory by hand whose journal stops mid-run, with no
 /// `driver.pid`: exactly what a crashed driver leaves behind.
+///
+/// The journal ends with an OPEN attempt (`attempt_started` and no
+/// `attempt_finished`, no `node_finished`), which is the crash shape this
+/// branch actually produces now that attempts are journaled at SPAWN time. That
+/// shape is the one the fold used to downgrade back to `Interrupted` after the
+/// stop had already written `RunAborted`.
 fn seed_abandoned_run(root: &Path, run_id: &str) -> PathBuf {
     let run_dir = root.join(".apb/runs").join(run_id);
     fs::create_dir_all(&run_dir).unwrap();
@@ -298,6 +304,15 @@ fn seed_abandoned_run(root: &Path, run_id: &str) -> PathBuf {
     log.append(EventPayload::NodeStarted {
         node: "work".into(),
         attempt: 1,
+    })
+    .unwrap();
+    log.append(EventPayload::AttemptStarted {
+        node: "work".into(),
+        attempt: 1,
+        agent: "claude".into(),
+        soul_delivery: None,
+        skills_mode: None,
+        pid: Some(999_999),
     })
     .unwrap();
     run_dir
@@ -326,6 +341,52 @@ fn stop_finalizes_a_run_whose_driver_is_gone() {
         RunState::fold(&events).run_status,
         RunStatus::Aborted,
         "the folded status must be aborted"
+    );
+}
+
+/// A stop has to STICK. Twice over: the folded status of the run must actually
+/// be `aborted` afterwards (before the fold's open-attempt override exempted
+/// `Aborted`, the crash shape this branch produces - a journal ending in an
+/// open `attempt_started` - was downgraded straight back to `interrupted`,
+/// so the stop was invisible to `run_status`, `apb runs`, the dashboard and
+/// `doctor --run`), and a second stop must therefore find a terminal run and do
+/// nothing, instead of passing the terminal check again and appending a SECOND
+/// `RunAborted`.
+#[test]
+fn a_second_stop_of_a_finalized_dead_run_is_a_no_op() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let run_dir = seed_abandoned_run(dir.path(), "stopflow-twice");
+
+    assert_eq!(
+        stop_run(dir.path(), "stopflow-twice").unwrap(),
+        StopOutcome::FinalizedDeadRun
+    );
+    assert_eq!(
+        RunState::fold(&read_all(&run_dir).unwrap()).run_status,
+        RunStatus::Aborted,
+        "an explicitly aborted run must not be downgraded by its leftover open attempt"
+    );
+
+    assert_eq!(
+        stop_run(dir.path(), "stopflow-twice").unwrap(),
+        StopOutcome::AlreadyTerminal,
+        "the run is terminal now, so the second stop has nothing to finalize"
+    );
+
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::RunAborted { .. }))
+            .count(),
+        1,
+        "two stops must leave exactly one RunAborted"
+    );
+    assert_eq!(
+        RunState::fold(&events).run_status,
+        RunStatus::Aborted,
+        "and the run must still read aborted"
     );
 }
 
@@ -366,4 +427,178 @@ fn stop_of_an_unknown_run_is_not_found() {
         stop_run(dir.path(), "../escape"),
         Err(EngineError::NotFound(_))
     ));
+}
+
+/// A stop must not eat the operator's OTHER pending commands.
+///
+/// The control cursor is a single scalar, so setting it to the Abort's seq
+/// marks every lower-numbered entry applied as well. On the dead-run path those
+/// lower entries are exactly the ones the crashed driver never got to - so a
+/// crashed driver plus `apb note` plus `apb stop` plus `apb resume` silently
+/// lost the note. The stop therefore leaves the cursor alone and lets the
+/// terminal `RunAborted` guard the replay: the resumed drive applies the note
+/// first and only then re-reads the abort.
+#[cfg(unix)]
+#[test]
+fn a_note_the_crashed_driver_never_applied_survives_a_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "stopflow");
+    let stub = dir.path().join("quick.sh");
+    fs::write(&stub, "#!/bin/sh\necho done\n").unwrap();
+    set_executable(&stub);
+    let _env = AgentEnv::set(&stub.to_string_lossy());
+
+    // A real prepared run (snapshot, manifest, run config - everything a resume
+    // needs), then the crash shape by hand: a node started, an attempt opened,
+    // nothing closed, no driver.pid.
+    let prepared = apb_engine::prepare_supervised_background(
+        dir.path(),
+        "stopflow",
+        None,
+        RunOptions::default(),
+    )
+    .unwrap();
+    let run_id = prepared.run_id().to_string();
+    drop(prepared);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    {
+        let mut log = EventLog::open(&run_dir).unwrap();
+        log.append(EventPayload::NodeStarted {
+            node: "work".into(),
+            attempt: 1,
+        })
+        .unwrap();
+        log.append(EventPayload::AttemptStarted {
+            node: "work".into(),
+            attempt: 1,
+            agent: "claude".into(),
+            soul_delivery: None,
+            skills_mode: None,
+            pid: Some(999_999),
+        })
+        .unwrap();
+    }
+
+    // The operator posts a note, then stops the run. The note is queued ahead
+    // of the stop's own Abort and nothing has applied it.
+    let note = "remember the failing fixture";
+    apb_engine::scheduler::post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::ContextAppend { note: note.into() },
+    )
+    .unwrap();
+    assert_eq!(
+        stop_run(dir.path(), &run_id).unwrap(),
+        StopOutcome::FinalizedDeadRun
+    );
+    assert_eq!(
+        read_control_cursor(&run_dir).unwrap(),
+        None,
+        "the stop must not mark the unapplied note consumed"
+    );
+
+    // The later drive applies it - exactly once - and then honours the stop.
+    let res = apb_engine::scheduler::resume(dir.path(), &run_id, None).expect("resume returns");
+    assert_eq!(
+        res.outcome,
+        RunStatus::Aborted,
+        "the resumed drive must re-read the stop and stay stopped"
+    );
+    let applied = read_all(&run_dir)
+        .unwrap()
+        .iter()
+        .filter(|e| {
+            matches!(&e.payload, EventPayload::SupervisorAction { action, detail, .. }
+                if action == "context_append" && detail == note)
+        })
+        .count();
+    assert_eq!(applied, 1, "the note must be applied exactly once");
+    assert!(
+        fs::read_to_string(run_dir.join("context.md"))
+            .unwrap_or_default()
+            .contains(note),
+        "the note must reach the run context"
+    );
+}
+
+/// A stop must produce an ABORTED run even when the operator left an
+/// unconsumable command queued ahead of it.
+///
+/// `supervisor_node_retry` posted outside a wake is such a command: the
+/// top-of-loop scan stops at it without advancing the cursor, so it can never
+/// reach an Abort queued behind it. The abort watcher reads the raw file and
+/// does see the abort, so the run-level cancel flag latches and every later
+/// node returns `Cancelled` instantly - which used to fall through edge
+/// selection, match nothing, and fail the drive with "has no outgoing edge",
+/// stamping the run FAILED. An operator who asked for a stop must get a stop.
+#[cfg(unix)]
+#[test]
+fn a_stop_queued_behind_a_retry_still_aborts_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    // The success-only playbook: a node killed by the stop has nowhere to go,
+    // which is what turned the latched cancel into a hard drive error and so
+    // into a run_finished(failed).
+    init_project(dir.path()).unwrap();
+    let vdir = dir.path().join(".apb/playbooks/stopretry/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        WF_SUCCESS_ONLY.replace("stopdead", "stopretry"),
+    )
+    .unwrap();
+    fs::write(dir.path().join(".apb/playbooks/stopretry/current"), "1.0.0").unwrap();
+    common::seed_main(dir.path());
+    let (prog, marker) = sleepy_agent(dir.path());
+    let _env = AgentEnv::set(&prog);
+
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stopretry", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "stopretry-");
+    poll_until("the stub agent to start", || marker.is_file().then_some(()));
+
+    // Ordering is the whole point: the Retry lands FIRST, so the scan breaks on
+    // it and never reaches the Abort behind it.
+    apb_engine::scheduler::post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Retry {
+            node: "work".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        stop_run(dir.path(), &run_id).unwrap(),
+        StopOutcome::SignaledLiveDriver
+    );
+
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
+    let res = res.expect("a stop must abort cleanly, not fail the drive with an error");
+    assert_eq!(
+        res.outcome,
+        RunStatus::Aborted,
+        "a stop queued behind a retry must still abort, not fail"
+    );
+
+    let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    assert!(
+        matches!(
+            events.last().map(|e| &e.payload),
+            Some(EventPayload::RunAborted { .. })
+        ),
+        "the journal must end with RunAborted, got {:?}",
+        events.last().map(|e| &e.payload)
+    );
+    assert_eq!(
+        RunState::fold(&events).run_status,
+        RunStatus::Aborted,
+        "and the folded run must read aborted"
+    );
 }

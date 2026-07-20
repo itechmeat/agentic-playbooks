@@ -393,6 +393,109 @@ fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
     );
 }
 
+// Scenario 2d: a stop issued in the SPAWN WINDOW must not be discarded.
+//
+// `driver.pid` used to be written by the child, inside `drive`, so between the
+// spawn returning and the child getting through a full exec (easily 100ms)
+// nothing named the driver. A `run_stop` landing there saw no driver, took the
+// dead-run branch, finalized the run with `RunAborted` and advanced the control
+// cursor past its own Abort - and the child then started, saw neither the Abort
+// (both its watcher and its top-of-loop scan begin at that advanced cursor) nor
+// any reason to stop, and executed the whole run past its terminal event. An
+// agent that gets a run_id from `playbook_run` and immediately calls `run_stop`
+// hits exactly this window. The parent now publishes the pid before it returns,
+// so the stop sees a live driver and the driver applies the abort itself.
+#[test]
+fn a_stop_in_the_driver_spawn_window_is_not_lost() {
+    let dir = tempfile::tempdir().unwrap();
+    // Long enough that a run which ignored the stop would still be sleeping
+    // well past the assertions below.
+    let (yaml, script) = slowscript_yaml("stopwindow", 30);
+    seed(dir.path(), "stopwindow", &yaml, &script);
+
+    // The real production path: `playbook_run` with background:true goes
+    // through `hand_to_detached_driver`, and the tool call returns the instant
+    // that function does - which is precisely the window under test.
+    let mut mcp = McpSession::start(dir.path());
+    let body = mcp.call(
+        2,
+        r#"{"name":"playbook_run","arguments":{"id":"stopwindow","background":true,"acknowledge_untrusted":true}}"#,
+    );
+    let run_id = body["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no run_id in playbook_run response: {body}"))
+        .to_string();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let _reaper = DriverReaper {
+        run_dir: run_dir.clone(),
+    };
+
+    // No polling: whoever holds the run_id holds it the moment the call
+    // returned, and by then the run must already name its driver.
+    let pid = apb_engine::driver::read_driver_pid(&run_dir).expect(
+        "the spawning parent must publish driver.pid before it returns the run_id, or a stop \
+         issued right here sees no driver and finalizes a run that is about to execute",
+    );
+
+    // No polling, no waiting for the child to come up: the stop lands in the
+    // window on purpose.
+    let outcome = apb_engine::stop_run(dir.path(), &run_id).unwrap();
+    assert_eq!(
+        outcome,
+        apb_engine::StopOutcome::SignaledLiveDriver,
+        "the driver was spawned before the stop, so the stop must signal it rather than declare the run dead"
+    );
+
+    // Not `wait_for_outcome`: an aborted run journals `RunAborted`, not
+    // `RunFinished`, so the terminal event to wait for is the abort itself.
+    let status = poll_until("the stopped run to reach a terminal event", || {
+        let events = read_all(&run_dir).ok()?;
+        let folded = RunState::fold(&events).run_status;
+        matches!(
+            folded,
+            RunStatus::Aborted | RunStatus::Succeeded | RunStatus::Failed
+        )
+        .then_some(folded)
+    });
+    assert_eq!(
+        status,
+        RunStatus::Aborted,
+        "a run stopped in the spawn window must end aborted"
+    );
+
+    // And it must really have STOPPED: nothing may be journalled after the
+    // terminal event, and the sleeping script must never have completed.
+    poll_until("the driver process to exit", || {
+        if alive(pid) { None } else { Some(()) }
+    });
+    let events = read_all(&run_dir).unwrap();
+    let aborts = events
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::RunAborted { .. }))
+        .count();
+    assert_eq!(aborts, 1, "the abort must be applied exactly once");
+    let terminal_at = events
+        .iter()
+        .position(|e| matches!(e.payload, EventPayload::RunAborted { .. }))
+        .expect("a RunAborted");
+    assert_eq!(
+        terminal_at,
+        events.len() - 1,
+        "nothing may be written after the run was finalized, got {:?}",
+        &events[terminal_at + 1..]
+            .iter()
+            .map(|e| &e.payload)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "work" && status == "succeeded"
+        )),
+        "the stopped run must not have completed its sleeping node"
+    );
+}
+
 // Scenario 3: `run_resume` acknowledges immediately and the resumed run then
 // completes without the caller. The resumed node sleeps 10s, so an ack that
 // arrives in well under 5s can only mean the drive was handed to another
