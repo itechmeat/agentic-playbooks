@@ -67,10 +67,24 @@ mod sig {
     }
 
     /// SIGKILLs every process in the group led by `pid`.
+    ///
+    /// Refuses anything that cannot lead an addressable group. The group form
+    /// negates its argument, so pid 1 becomes `kill(-1, SIGKILL)` - "every
+    /// process I may signal" - pid 0 targets our own group, and a pid above
+    /// `i32::MAX` narrows negative and then lands on a small unrelated pid.
+    /// `DriverReaper` feeds this a pid parsed out of `driver.pid`, and a
+    /// signal target that came from a file gets validated. Mirrors
+    /// `apb_engine::proc::group_target`.
     pub fn kill_group(pid: u32) {
-        // SAFETY: as above; a negative pid addresses the process group.
+        let Ok(pid) = i32::try_from(pid) else {
+            return;
+        };
+        if pid <= 1 {
+            return;
+        }
+        // SAFETY: as above; a validated negative pid addresses the group.
         unsafe {
-            libc::kill(-(pid as i32), libc::SIGKILL);
+            libc::kill(-pid, libc::SIGKILL);
         }
     }
 
@@ -496,13 +510,49 @@ fn a_stop_in_the_driver_spawn_window_is_not_lost() {
          issued right here sees no driver and finalizes a run that is about to execute",
     );
 
+    // The premise, asserted rather than assumed: the run must still be in
+    // flight at the instant the stop is issued. The node sleeps 30s, so this
+    // holds by construction, and pinning it here is what makes the outcome
+    // check below unambiguous - see the note on `AlreadyTerminal`.
+    let before = RunState::fold(&read_all(&run_dir).unwrap()).run_status;
+    assert_eq!(
+        before,
+        RunStatus::Running,
+        "the premise of this test is a run still in flight when the stop lands; \
+         it was already {before:?}, so the spawn window was never exercised"
+    );
+
     // No polling, no waiting for the child to come up: the stop lands in the
     // window on purpose.
     let outcome = apb_engine::stop_run(dir.path(), &run_id).unwrap();
-    assert_eq!(
-        outcome,
-        apb_engine::StopOutcome::SignaledLiveDriver,
-        "the driver was spawned before the stop, so the stop must signal it rather than declare the run dead"
+    // What must NEVER happen is `FinalizedDeadRun`: that is the defect this
+    // test exists for, the stop looking at a run whose driver was just spawned,
+    // concluding nothing is driving it, and writing the terminal event itself.
+    //
+    // Both other outcomes mean the driver owned the abort, which is the
+    // property:
+    //   * `SignaledLiveDriver` - the stop saw the driver and left the terminal
+    //     event to it. This is what macOS reports.
+    //   * `AlreadyTerminal` - the driver was quicker than the stop. `stop_run`
+    //     posts the Abort BEFORE it probes for a driver, so on a fast host the
+    //     driver can exec, read the Abort at the top of its drive loop, write
+    //     `RunAborted`, drop `driver.pid` and exit inside that gap; the probe
+    //     then finds no pid and the re-read finds the run terminal. Linux CI
+    //     reports this. It is the driver applying the stop itself, which is
+    //     precisely what the fix was for.
+    //
+    // The assertion above is what keeps this honest: `AlreadyTerminal` would
+    // ALSO be returned by `stop_run`'s entry check for a run that was terminal
+    // before the stop ran at all, and that would mean the premise had
+    // collapsed. Having just proved the run was `Running` one statement
+    // earlier, only the driver-won-the-race reading remains.
+    assert!(
+        matches!(
+            outcome,
+            apb_engine::StopOutcome::SignaledLiveDriver | apb_engine::StopOutcome::AlreadyTerminal
+        ),
+        "the driver was spawned before the stop, so the stop must leave the terminal event to \
+         it, not declare the run dead and finalize it: got {outcome:?}"
     );
 
     // Not `wait_for_outcome`: an aborted run journals `RunAborted`, not
