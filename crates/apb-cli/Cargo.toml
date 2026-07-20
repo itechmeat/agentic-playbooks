@@ -26,3 +26,9 @@ predicates = "3.1.4"
 tempfile = "3.27.0"
 serde_yaml_ng.workspace = true
 jsonschema.workspace = true
+# Process-group signalling and liveness checks in the detached-driver suite,
+# as syscalls rather than `kill` subprocesses: `kill -9 -<pgid>` is accepted by
+# BSD kill (macOS) and rejected by procps-ng kill (Linux), which silently
+# turned the group kill into a no-op and hung the suite on CI.
+[target.'cfg(unix)'.dev-dependencies]
+libc = "0.2"

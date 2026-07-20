@@ -25,6 +25,11 @@ use apb_engine::state::{RunState, RunStatus};
 
 const POLL_DEADLINE: Duration = Duration::from_secs(60);
 const POLL_STEP: Duration = Duration::from_millis(50);
+/// How long a process gets to die after being SIGKILLed. SIGKILL cannot be
+/// caught or ignored, so this is only ever reached when the signal did not
+/// reach the process at all - which is exactly the failure that has to be
+/// reported rather than waited out.
+const REAP_DEADLINE: Duration = Duration::from_secs(10);
 
 fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     let start = Instant::now();
@@ -39,27 +44,76 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-/// The process-group id of `pid`, via `ps`. `None` once the process is gone.
-fn pgid_of(pid: u32) -> Option<u32> {
-    let out = Command::new("ps")
-        .arg("-o")
-        .arg("pgid=")
-        .arg("-p")
-        .arg(pid.to_string())
-        .output()
-        .ok()?;
-    String::from_utf8_lossy(&out.stdout).trim().parse().ok()
+/// Every process signal and liveness check in this module is a syscall, not a
+/// `kill`/`ps` subprocess.
+///
+/// That is not tidiness. `Command::new("kill").arg("-9").arg("-<pgid>")` is
+/// accepted by BSD kill (macOS, where this suite passed) but rejected by
+/// procps-ng kill (Linux, and so CI), which hands the leading `-` of the
+/// operand to getopt and errors out as if it were an unknown option. The
+/// signal was then never delivered, the status of the spawned `kill` was
+/// discarded, and the unbounded `child.wait()` that followed blocked forever:
+/// the CI job burned 30 minutes on a test whose own 60s poll ceiling was never
+/// reached, because control never got that far. `apb_engine::proc::run_capture`
+/// and `apb_core::detect` moved off the same subprocess form for the same
+/// reason. A syscall has no argument-parsing layer to disagree about.
+mod sig {
+    /// SIGKILLs a single process.
+    pub fn kill_pid(pid: u32) {
+        // SAFETY: `kill` takes no pointers; an unknown pid is ESRCH.
+        unsafe {
+            libc::kill(pid as i32, libc::SIGKILL);
+        }
+    }
+
+    /// SIGKILLs every process in the group led by `pid`.
+    pub fn kill_group(pid: u32) {
+        // SAFETY: as above; a negative pid addresses the process group.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+
+    /// The process-group id of `pid`, or `None` once the process is gone.
+    pub fn pgid_of(pid: u32) -> Option<u32> {
+        // SAFETY: `getpgid` takes no pointers and reports ESRCH as -1.
+        let pgid = unsafe { libc::getpgid(pid as i32) };
+        (pgid >= 0).then_some(pgid as u32)
+    }
+
+    /// Whether `pid` still exists (a zombie counts as existing, which is the
+    /// point of the reaping assertions in this module).
+    pub fn alive(pid: u32) -> bool {
+        // SAFETY: signal 0 performs the permission and existence checks
+        // without delivering anything.
+        unsafe { libc::kill(pid as i32, 0) == 0 }
+    }
 }
 
-fn alive(pid: u32) -> bool {
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
+use sig::{alive, pgid_of};
+
+/// `child.wait()` with a deadline, and a message naming what the wait was for.
+///
+/// The suite has no unbounded process wait left: every child it waits on dies
+/// only because the test signalled it, so a signal that fails to land must
+/// surface as a named failure rather than as a hang. `Child::wait` has no
+/// timed form, hence the `try_wait` loop.
+fn wait_with_deadline(child: &mut Child, budget: Duration, what: &str) {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Ok(None) => {
+                assert!(
+                    Instant::now() < deadline,
+                    "timed out after {budget:?} waiting for: {what} (pid {} is still running)",
+                    child.id()
+                );
+                std::thread::sleep(POLL_STEP);
+            }
+            Err(e) => panic!("wait failed while waiting for {what}: {e}"),
+        }
+    }
 }
 
 /// Kills the detached driver if a test bails out before the run finished.
@@ -74,7 +128,12 @@ struct DriverReaper {
 impl Drop for DriverReaper {
     fn drop(&mut self) {
         if let Some(pid) = apb_engine::driver::read_driver_pid(&self.run_dir) {
-            let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+            // The driver leads its own group, so this also takes down the
+            // script it is running. Not waited on: the driver is not our
+            // child (it was re-exec'd by another process), so there is no
+            // handle to reap and nothing that could block here.
+            sig::kill_group(pid);
+            sig::kill_pid(pid);
         }
     }
 }
@@ -371,9 +430,9 @@ fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
     });
     assert!(alive(pid), "the driver should be alive before we kill it");
 
-    let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    sig::kill_pid(pid);
 
-    // Unreaped, the pid stays a zombie and `kill -0` keeps succeeding forever.
+    // Unreaped, the pid stays a zombie and signal 0 keeps succeeding forever.
     poll_until(
         "the killed driver's pid to be reaped and stop reading as alive",
         || if alive(pid) { None } else { Some(()) },
@@ -653,25 +712,48 @@ impl McpSession {
     }
 
     fn kill(&mut self) {
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        sig::kill_pid(self.child.id());
+        wait_with_deadline(
+            &mut self.child,
+            REAP_DEADLINE,
+            "the `apb mcp` process to die",
+        );
     }
 
     /// Kills the launcher's entire process group, the way a host tears down a
     /// subtree. Anything that inherited this group dies with it.
+    ///
+    /// `apb mcp` never exits on its own - it is a stdio server, and this
+    /// struct still holds its stdin open - so the group signal is the only
+    /// thing that can end it. A signal that fails to land therefore has to
+    /// fail loudly here, which is what the deadline is for.
     fn kill_group(&mut self) {
-        let _ = Command::new("kill")
-            .arg("-9")
-            .arg(format!("-{}", self.child.id()))
-            .status();
-        let _ = self.child.wait();
+        sig::kill_group(self.child.id());
+        wait_with_deadline(
+            &mut self.child,
+            REAP_DEADLINE,
+            "the `apb mcp` process to die from the kill of its process group",
+        );
     }
 }
 
 impl Drop for McpSession {
     fn drop(&mut self) {
-        // Never leave an `apb mcp` child behind when a test fails early.
-        let _ = self.child.kill();
-        let _ = self.child.wait();
+        // Never leave an `apb mcp` child behind when a test fails early. Drop
+        // runs during unwinding too, so this must not be able to hang: a
+        // second panic while panicking aborts the process, and an unbounded
+        // wait here would bury the original failure under a hang instead.
+        sig::kill_pid(self.child.id());
+        let deadline = Instant::now() + REAP_DEADLINE;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => std::thread::sleep(POLL_STEP),
+            }
+        }
+        eprintln!(
+            "warning: `apb mcp` (pid {}) did not die within {REAP_DEADLINE:?} of SIGKILL",
+            self.child.id()
+        );
     }
 }

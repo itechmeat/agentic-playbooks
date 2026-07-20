@@ -115,7 +115,11 @@ fn seed_webhook_run() -> (tempfile::TempDir, String, String) {
     std::thread::spawn(move || {
         let _ = apb_engine::run(&root, "hooky", None, apb_engine::RunOptions::default());
     });
-    // Wait for the run and its hooks.json to appear.
+    // Wait for the run and its hooks.json to appear. Bounded: the run is
+    // driven on a detached thread whose result is discarded, so a run that
+    // fails to start reports nothing at all - without a ceiling this loop
+    // would poll a directory that is never going to be written, forever.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
     let run_id = loop {
         let found = fs::read_dir(dir.path().join(".apb/runs"))
             .ok()
@@ -127,6 +131,11 @@ fn seed_webhook_run() -> (tempfile::TempDir, String, String) {
         if let Some(id) = found {
             break id;
         }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out waiting for the webhook run to write its hooks.json under {}",
+            dir.path().join(".apb/runs").display()
+        );
         std::thread::sleep(std::time::Duration::from_millis(10));
     };
     let hooks: std::collections::BTreeMap<String, String> = serde_json::from_str(

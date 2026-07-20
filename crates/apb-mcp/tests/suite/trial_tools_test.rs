@@ -36,9 +36,15 @@ impl Drop for AgentEnvGuard {
 }
 
 fn git(root: &Path, args: &[&str]) {
+    // `-c commit.gpgsign=false`: a developer with `commit.gpgsign = true` set
+    // globally would otherwise have `git commit` block on a GPG pinentry
+    // prompt that never comes in a test process, and `.status()` would wait
+    // on it forever. The engine's git helpers are hardened the same way.
     let ok = Command::new("git")
         .arg("-C")
         .arg(root)
+        .arg("-c")
+        .arg("commit.gpgsign=false")
         .args(args)
         .status()
         .map(|s| s.success())
