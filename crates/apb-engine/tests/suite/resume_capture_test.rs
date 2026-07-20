@@ -289,6 +289,96 @@ fn resume_reinvokes_with_resume_flag_and_no_transcript() {
     );
 }
 
+// --- (a) resume invocation fails at runtime -> downgrade to reprompt ---
+
+#[test]
+fn resume_runtime_failure_downgrades_and_completes_via_reprompt() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let counter = bin.path().join("count");
+    let argvfile = bin.path().join("argv");
+    seed_single(proj.path());
+    seed_profile(proj.path(), "arch");
+    write_config(cfg.path(), "resume");
+    // Any invocation whose argv carries `--resume` fails (the resume form is the
+    // suspect); a fresh (non-resume) invocation succeeds. So: inv1 (non-resume,
+    // n=1) captures a session and asks; the resume attempt (argv has --resume)
+    // exits nonzero -> runtime downgrade; the reprompt re-run (non-resume, n=2)
+    // finishes. Every invocation records its full argv line.
+    let body = format!(
+        "a=\"{}\"\nc=\"{}\"\nprintf '%s\\n' \"$*\" >> \"$a\"\ncase \"$*\" in\n  *--resume*) echo boom 1>&2; exit 1 ;;\nesac\nn=$(cat \"$c\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$c\"\nif [ \"$n\" = \"1\" ]; then\n  printf '%s\\n' '{{\"session_id\":\"sess-99\"}}'\n  printf '%s\\n' '<<<apb:question>>>'\n  printf '%s\\n' '{{\"question\":\"Which DB?\"}}'\n  exit 0\nfi\necho done\nexit 0",
+        argvfile.display(),
+        counter.display()
+    );
+    set_env(&make_stub(bin.path(), &body), home.path(), cfg.path());
+
+    let (rx, handle) = spawn_run(proj.path(), "iq");
+    let run_dir = latest_run_dir(proj.path());
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id_of(&run_dir),
+        handle: Some(handle),
+    };
+
+    poll_until("QuestionAsked for node ask", || {
+        let events = read_all(&run_dir).ok()?;
+        (questions_asked_count(&events, "ask") >= 1).then_some(())
+    });
+    post_answer(&run_dir, Some("ask"), "pg", "human").unwrap();
+
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    // Exactly one downgrade was journaled (no ping-pong), naming the resume
+    // failure.
+    let downgrades: Vec<String> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::SupervisorAction { action, detail, .. }
+                if action == "interaction_downgraded" =>
+            {
+                Some(detail.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        downgrades.len(),
+        1,
+        "exactly one downgrade per failed round (no transport ping-pong): {downgrades:?}"
+    );
+    assert!(
+        downgrades[0].contains("resume"),
+        "the downgrade reason must name the resume failure: {}",
+        downgrades[0]
+    );
+    // The reprompt re-run carried the transcript, and the node succeeded.
+    let argv = fs::read_to_string(&argvfile).expect("argv recorded by the stub");
+    assert!(
+        argv.contains("--resume"),
+        "the failed resume attempt must have run: {argv}"
+    );
+    assert!(
+        argv.contains("## prior questions and answers") && argv.contains("A: pg"),
+        "the downgrade must complete via a reprompt transcript: {argv}"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "ask" && status == "succeeded"
+        )),
+        "the node must succeed via the reprompt after the resume failure"
+    );
+}
+
 // --- (d) no session captured -> downgrade to reprompt ---
 
 #[test]

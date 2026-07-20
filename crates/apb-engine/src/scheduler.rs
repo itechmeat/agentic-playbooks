@@ -429,6 +429,93 @@ fn questions_answered_before_seq(events: &[Event], node: &str, seq: u64) -> usiz
         .count()
 }
 
+/// The re-invocation transport chosen for an interactive node's answer round
+/// (spec 2026-07-20, Task 7), from its resolved `interaction` ceiling, the
+/// session captured from the asking attempt, and the agent's resume form.
+#[cfg_attr(test, derive(Debug))]
+enum ResumeChoice {
+    /// Re-enter the agent's own session (the `resume` transport).
+    Resume,
+    /// Re-invoke from scratch with the Q&A transcript. `reason` is `Some` when
+    /// this is a pre-flight DOWNGRADE from `resume` (the caller journals it);
+    /// `None` when the ceiling was already `reprompt` (nothing to journal).
+    Reprompt { reason: Option<String> },
+}
+
+/// The pre-flight resume-vs-reprompt decision (spec 2026-07-20, Task 7),
+/// factored out as a pure function so every branch - including the defensive
+/// "captured a session but the agent has no resume form" branch, which no
+/// built-in agent can reach today (the agents that capture a session all have a
+/// resume form) - is unit-testable. `Live` is downgraded to `Resume` by the
+/// caller before this runs; a residual `Live` is treated as `Reprompt`
+/// defensively. A missing session or missing resume form downgrades with a
+/// reason naming the failure (transport is a ceiling, not a promise).
+fn resume_decision(
+    interaction: Interaction,
+    agent_id: &str,
+    node: &str,
+    session: Option<&String>,
+    resume_form: Option<&Vec<String>>,
+) -> ResumeChoice {
+    match interaction {
+        Interaction::Reprompt | Interaction::Live => ResumeChoice::Reprompt { reason: None },
+        Interaction::Resume => match (session, resume_form) {
+            (Some(_), Some(_)) => ResumeChoice::Resume,
+            (None, _) => ResumeChoice::Reprompt {
+                reason: Some(format!(
+                    "resume unavailable: no agent session id was captured for node `{node}`; using reprompt"
+                )),
+            },
+            (Some(_), None) => ResumeChoice::Reprompt {
+                reason: Some(format!(
+                    "resume unavailable: agent `{agent_id}` has no resume form; using reprompt"
+                )),
+            },
+        },
+    }
+}
+
+/// Builds the reprompt re-invocation prompt for an interactive node's answer
+/// round (spec 2026-07-20, Task 6/7): the original rendered prompt followed by
+/// THIS visit's Q&A transcript. The window is scoped to the current visit by
+/// skipping the prior visits' channel entries (counted from `events` up to this
+/// visit's `NodeStarted`), so a looped re-entry does not replay earlier rounds.
+/// The transcript is plain quoted text appended AFTER rendering, so no template
+/// expansion runs over agent/user text (V13 namespaces do not apply). Shared by
+/// the pre-flight reprompt path and the runtime downgrade after a failed resume.
+fn build_reprompt_override(
+    run_dir: &Path,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    node_prompt: &str,
+    events: &[Event],
+    node: &str,
+) -> Result<String, EngineError> {
+    let base = render_node_prompt(run_dir, run_id, state, cfg, node_prompt)?;
+    let visit_start = current_visit_start_seq(events, node);
+    let prior_q = questions_asked_before_seq(events, node, visit_start);
+    let prior_a = questions_answered_before_seq(events, node, visit_start);
+    let questions: Vec<_> = read_questions_after(run_dir, None)?
+        .into_iter()
+        .filter(|q| q.node == node)
+        .skip(prior_q)
+        .collect();
+    let answers: Vec<_> = read_answers_after(run_dir, None)?
+        .into_iter()
+        .filter(|a| a.node == node)
+        .skip(prior_a)
+        .collect();
+    let mut transcript = String::new();
+    for (q, a) in questions.iter().zip(answers.iter()) {
+        transcript.push_str(&format!("Q: {}\nA: {}\n\n", q.question, a.answer));
+    }
+    Ok(format!(
+        "{base}\n\n## prior questions and answers\n{}",
+        transcript.trim_end()
+    ))
+}
+
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry
 /// opened, the playbook loaded and validated, run_dir created, the snapshot and
 /// scripts in place, RunStarted recorded. Used by both `run` (synchronously) and
@@ -1694,85 +1781,49 @@ fn drive(
                         // A resume needs both a captured agent session and a
                         // declarative resume form; either missing downgrades to
                         // reprompt, journaled with the reason (transport is a
-                        // ceiling, not a promise).
+                        // ceiling, not a promise). Pre-flight decision.
                         let session = last_attempt_session(&events, &current);
                         let resume_form = crate::invocation::resume_argv(&agent_id);
-                        let use_resume = match interaction {
-                            Interaction::Reprompt | Interaction::Live => false,
-                            Interaction::Resume => match (&session, &resume_form) {
-                                (Some(_), Some(_)) => true,
-                                (None, _) => {
-                                    log.append(EventPayload::SupervisorAction {
-                                        action: "interaction_downgraded".into(),
-                                        node: Some(current.clone()),
-                                        detail: format!(
-                                            "resume unavailable: no agent session id was captured for node `{current}`; using reprompt"
-                                        ),
-                                    })?;
-                                    false
-                                }
-                                (Some(_), None) => {
-                                    log.append(EventPayload::SupervisorAction {
-                                        action: "interaction_downgraded".into(),
-                                        node: Some(current.clone()),
-                                        detail: format!(
-                                            "resume unavailable: agent `{agent_id}` has no resume form; using reprompt"
-                                        ),
-                                    })?;
-                                    false
-                                }
-                            },
-                        };
-
-                        if use_resume {
-                            // Resume: hand execute_node the captured session and
-                            // the answer as the follow-up prompt; no transcript,
-                            // since the agent re-enters its own session.
-                            resume_ctx = Some(ResumeContext {
-                                session: session.expect("resume implies a captured session"),
-                                answer: entry.answer.clone(),
-                            });
-                        } else {
-                            // Reprompt: the original rendered prompt followed by
-                            // this visit's Q&A transcript, scoped to the CURRENT
-                            // visit window (Task 6 carry-over fix) so a looped
-                            // re-entry does not replay prior visits' rounds. The
-                            // transcript is plain quoted text appended AFTER
-                            // rendering, so no template expansion runs over
-                            // agent/user text (V13 namespaces do not apply).
-                            let node_prompt = match &node_kind {
-                                NodeKind::AgentTask { prompt, .. } => prompt.clone(),
-                                _ => String::new(),
-                            };
-                            let base =
-                                render_node_prompt(run_dir, &run_id, &state, cfg, &node_prompt)?;
-                            let visit_start = current_visit_start_seq(&events, &current);
-                            let prior_q =
-                                questions_asked_before_seq(&events, &current, visit_start);
-                            let prior_a =
-                                questions_answered_before_seq(&events, &current, visit_start);
-                            let questions: Vec<_> = read_questions_after(run_dir, None)?
-                                .into_iter()
-                                .filter(|q| q.node == current)
-                                .skip(prior_q)
-                                .collect();
-                            let answers: Vec<_> = read_answers_after(run_dir, None)?
-                                .into_iter()
-                                .filter(|a| a.node == current)
-                                .skip(prior_a)
-                                .collect();
-                            let mut transcript = String::new();
-                            for (q, a) in questions.iter().zip(answers.iter()) {
-                                transcript
-                                    .push_str(&format!("Q: {}\nA: {}\n\n", q.question, a.answer));
+                        match resume_decision(
+                            interaction,
+                            &agent_id,
+                            &current,
+                            session.as_ref(),
+                            resume_form.as_ref(),
+                        ) {
+                            ResumeChoice::Resume => {
+                                // Resume: hand execute_node the captured session
+                                // and the answer as the follow-up prompt; no
+                                // transcript, since the agent re-enters its own
+                                // session.
+                                resume_ctx = Some(ResumeContext {
+                                    session: session.expect("resume implies a captured session"),
+                                    answer: entry.answer.clone(),
+                                });
                             }
-                            prompt_overrides.insert(
-                                current.clone(),
-                                format!(
-                                    "{base}\n\n## prior questions and answers\n{}",
-                                    transcript.trim_end()
-                                ),
-                            );
+                            ResumeChoice::Reprompt { reason } => {
+                                if let Some(detail) = reason {
+                                    log.append(EventPayload::SupervisorAction {
+                                        action: "interaction_downgraded".into(),
+                                        node: Some(current.clone()),
+                                        detail,
+                                    })?;
+                                }
+                                let node_prompt = match &node_kind {
+                                    NodeKind::AgentTask { prompt, .. } => prompt.clone(),
+                                    _ => String::new(),
+                                };
+                                let ov = build_reprompt_override(
+                                    run_dir,
+                                    &run_id,
+                                    &state,
+                                    cfg,
+                                    &node_prompt,
+                                    &events,
+                                    &current,
+                                )?;
+                                prompt_overrides.insert(current.clone(), ov);
+                            }
                         }
                         // Fall through to run the next attempt below.
                     }
@@ -1855,6 +1906,12 @@ fn drive(
                     })?;
                 }
                 let override_prompt = prompt_overrides.remove(&current);
+                // Whether THIS attempt is a resume re-invocation: a runtime
+                // failure of a resume attempt downgrades to reprompt for the
+                // SAME answer round (below), at most once (the reprompt attempt
+                // that follows is not a resume attempt, so it never re-downgrades
+                // - no transport ping-pong).
+                let resume_attempt = resume_ctx.is_some();
                 let outcome = {
                     let journal = Journal::new(&mut *log);
                     execute_node(
@@ -1883,6 +1940,45 @@ fn drive(
                     } => {
                         for ev in evs {
                             log.append(ev)?;
+                        }
+                        // Runtime resume failure (spec 2026-07-20, Task 7): the
+                        // resume invocation ran but failed (spawn/transport-init
+                        // error, an invalid/expired session, or an agent error on
+                        // the resume form - drive cannot cheaply tell an agent-
+                        // logic failure from a resume-form failure, so it
+                        // downgrades on ANY failure class here, which is safe: a
+                        // reprompt retry is merely more expensive). The answer is
+                        // already consumed, so downgrade to reprompt and re-run
+                        // the SAME answer round via the transcript instead of
+                        // failing the node. The follow-up reprompt attempt is not
+                        // a resume attempt, so its own failure follows normal
+                        // retry/failure handling.
+                        if resume_attempt
+                            && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut)
+                        {
+                            log.append(EventPayload::SupervisorAction {
+                                action: "interaction_downgraded".into(),
+                                node: Some(current.clone()),
+                                detail: format!(
+                                    "resume re-invocation failed for node `{current}` ({}); retrying the same answer round via reprompt",
+                                    output.trim()
+                                ),
+                            })?;
+                            let node_prompt = match &node_kind {
+                                NodeKind::AgentTask { prompt, .. } => prompt.clone(),
+                                _ => String::new(),
+                            };
+                            let ov = build_reprompt_override(
+                                run_dir,
+                                &run_id,
+                                &state,
+                                cfg,
+                                &node_prompt,
+                                &events,
+                                &current,
+                            )?;
+                            prompt_overrides.insert(current.clone(), ov);
+                            continue;
                         }
                         // Fall to the shared tail (NodeFinished + frontier advance).
                         (status, output)
@@ -2506,4 +2602,66 @@ fn resume_inner(
         RunMode::Autonomous,
         supervisor_expected,
     )
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+
+    fn form() -> Vec<String> {
+        vec!["--resume".to_string(), "{session}".to_string()]
+    }
+
+    #[test]
+    fn resume_when_session_and_form_present() {
+        let s = "sess-1".to_string();
+        let f = form();
+        assert!(matches!(
+            resume_decision(Interaction::Resume, "claude", "ask", Some(&s), Some(&f)),
+            ResumeChoice::Resume
+        ));
+    }
+
+    #[test]
+    fn downgrade_when_no_session() {
+        let f = form();
+        match resume_decision(Interaction::Resume, "claude", "ask", None, Some(&f)) {
+            ResumeChoice::Reprompt { reason: Some(r) } => {
+                assert!(
+                    r.contains("session"),
+                    "reason names the missing session: {r}"
+                );
+            }
+            other => panic!("expected a downgrade reason, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn downgrade_when_session_but_no_resume_form() {
+        // The defensive branch the reviewer flagged: a captured session but no
+        // resume form. No built-in agent reaches it (every agent that captures a
+        // session also has a resume form), so it is covered here at unit level.
+        let s = "sess-1".to_string();
+        match resume_decision(Interaction::Resume, "customx", "ask", Some(&s), None) {
+            ResumeChoice::Reprompt { reason: Some(r) } => {
+                assert!(
+                    r.contains("resume form") && r.contains("customx"),
+                    "reason names the missing resume form and the agent: {r}"
+                );
+            }
+            other => panic!("expected a no-resume-form downgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reprompt_ceiling_never_downgrades() {
+        // A `reprompt` ceiling reprompts with no journaled reason even when a
+        // session and form are present.
+        let s = "sess-1".to_string();
+        let f = form();
+        assert!(matches!(
+            resume_decision(Interaction::Reprompt, "agy", "ask", Some(&s), Some(&f)),
+            ResumeChoice::Reprompt { reason: None }
+        ));
+    }
 }
