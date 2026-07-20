@@ -168,6 +168,16 @@ fn answer_by_for(run_dir: &Path, node: &str) -> AnswerBy {
 /// through the supervisor-token path (`answered_by == "supervisor"`). Every
 /// facade (MCP `run_answer`, `apb answer`, the web API) calls this function,
 /// so the policy applies uniformly regardless of caller.
+///
+/// Takes `ANSWERS_LOCK` around the append (spec 2026-07-20, Task 5
+/// fix-round-2): an advisory lock only serializes writers that actually take
+/// it, so `post_answer_if_unanswered`'s recheck-then-append is only race-free
+/// against a concurrent real answer if THIS function takes the very same lock
+/// too - otherwise a facade answer could still land between that recheck and
+/// its append, which is exactly the timeout-vs-real-answer race the lock
+/// exists to close, not the (accepted, out-of-scope) facade-vs-facade race.
+/// No behavior change for callers: a facade answer still always appends:
+/// this only orders it relative to a concurrent timeout recheck.
 pub fn post_answer(
     run_dir: &Path,
     node: Option<&str>,
@@ -180,16 +190,19 @@ pub fn post_answer(
             "node `{target}` is answer_by: human; relay this question to the user and post their answer verbatim rather than answering as the supervisor"
         )));
     }
+    let _lock = apb_core::fsutil::lock_dir(run_dir, ANSWERS_LOCK)?;
     append_answer(run_dir, &target, answer, answered_by)
 }
 
-/// Lock file serializing `post_answer_if_unanswered`'s recount-then-append
-/// critical section (spec 2026-07-20, Task 5 fix-round-1). Deliberately NOT
-/// taken by plain `post_answer`: a facade race (two humans, or a human and
-/// the supervisor, both answering) is the same last-write-positional
-/// semantics `review.rs` already accepts for review decisions, and is out of
-/// scope here. This lock exists only to protect drive's own timeout path
-/// against posting a stray duplicate over an answer that already arrived.
+/// Lock file serializing every `answers.jsonl` writer (spec 2026-07-20, Task
+/// 5 fix-round-2): both `post_answer` (the facade path - MCP `run_answer`,
+/// `apb answer`, the web API) and `post_answer_if_unanswered` (drive's own
+/// conditional timeout path) take it around their read-then-append. All
+/// writers are local processes (CLI, MCP, server, drive), so this advisory
+/// file lock (`apb_core::fsutil::lock_dir`) composes across every one of
+/// them. Without ALL writers taking it, the lock would serialize nothing: a
+/// non-taking writer can still append between a taking writer's own
+/// recount and append.
 const ANSWERS_LOCK: &str = "answers.jsonl.lock";
 
 /// Appends one answer entry to `answers.jsonl`, unconditionally. Shared by
@@ -226,7 +239,7 @@ fn append_answer(
 
 /// Conditionally appends a (typically `"timeout"`) answer for `node`, but
 /// only if `node`'s channel answer count is still exactly `expected_answers`
-/// at the moment of the append (spec 2026-07-20, Task 5 fix-round-1).
+/// at the moment of the append (spec 2026-07-20, Task 5 fix-round-1/2).
 ///
 /// Closes a TOCTOU in the drive park loop: the loop reads "no answer yet for
 /// this node" (count == `expected_answers`), decides `question_timeout_seconds`
@@ -239,12 +252,16 @@ fn append_answer(
 /// the stray second entry to the NEXT question round instead of recognizing
 /// it as a duplicate that must not have been written at all.
 ///
-/// Takes the run dir's advisory lock (`apb_core::fsutil::lock_dir` - the same
-/// primitive `stop_run` uses to serialize its own read-check-append) around
-/// a fresh recount of `node`'s channel answers. If that recount no longer
-/// matches `expected_answers` - a genuine answer already landed - this
-/// returns `Ok(None)` and appends nothing; the caller (drive's timeout path)
-/// simply continues polling, and the real answer is picked up by the normal
+/// Takes `ANSWERS_LOCK` (`apb_core::fsutil::lock_dir` - the same primitive
+/// `stop_run` uses to serialize its own read-check-append) around a fresh
+/// recount of `node`'s channel answers. This is airtight, not merely
+/// narrowed: `post_answer` takes the exact same lock around its own
+/// read-then-append (fix-round-2), so there is no writer that can slip
+/// between this function's recount and its append - every `answers.jsonl`
+/// writer serializes through the one lock. If the recount no longer matches
+/// `expected_answers` - a genuine answer already landed - this returns
+/// `Ok(None)` and appends nothing; the caller (drive's timeout path) simply
+/// continues polling, and the real answer is picked up by the normal
 /// count-based consumption on the next iteration. `expected_answers` is the
 /// count the caller already observed (drive already has it: it is the same
 /// count for which `for_node.into_iter().nth(answered)` returned `None`).
