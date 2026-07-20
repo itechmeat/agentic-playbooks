@@ -1100,8 +1100,28 @@ pub(crate) fn advance_frontier(
         }
         runnable.retain(|s| s == &join);
     }
+    // The edges actually selected out of `node` for this advance. Used only to
+    // decide which pushes cross a bounded edge and must be journaled. Computed
+    // from the same `state`, so it agrees with the `runnable` set above.
+    let selected = parallel::selected_edges(playbook, node, state);
     for s in runnable {
         if !frontier.contains(&s) {
+            // Journal a traversal ONLY when the edge taken carries
+            // max_traversals (keeps the journal lean). The cap check itself
+            // already happened in the pure `selected_edges`/`seed_successors`
+            // evaluation; this is where the edge is actually taken, so this is
+            // the single counting site (never in the pure seed evaluation), and
+            // the resume StartMode::After path counts through here exactly once
+            // because it advances via this same function.
+            if selected
+                .iter()
+                .any(|e| e.to == s && e.max_traversals.is_some())
+            {
+                log.append(EventPayload::EdgeTraversed {
+                    from: node.to_string(),
+                    to: s.clone(),
+                })?;
+            }
             frontier.push(s);
         }
     }

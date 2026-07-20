@@ -80,32 +80,69 @@ pub fn edge_matches(edge: &Edge, from: &str, state: &RunState) -> bool {
     }
 }
 
+/// Whether a bounded loop edge is still available for traversal: its folded
+/// traversal count has not yet reached its `max_traversals` cap. A plain edge
+/// (no cap) is always available. A bounded edge at its cap is treated as
+/// NON-MATCHING during edge selection (spec 2026-07-20-run-reliability), so an
+/// alternative edge (or the existing no-edge behavior) applies.
+fn edge_available(edge: &Edge, state: &RunState) -> bool {
+    match edge.max_traversals {
+        Some(cap) => {
+            let count = state
+                .edge_counts
+                .get(&(edge.from.clone(), edge.to.clone()))
+                .copied()
+                .unwrap_or(0);
+            count < cap
+        }
+        None => true,
+    }
+}
+
+/// The outgoing edges of `from` actually SELECTED for traversal, mirroring
+/// [`successors`] but returning the edges rather than the target node names so
+/// a caller that takes these edges can see which carry `max_traversals` and
+/// journal a traversal. A bounded edge that has reached its cap is excluded
+/// (treated as non-matching), exactly as it is dropped from `successors`.
+pub fn selected_edges<'a>(playbook: &'a Playbook, from: &str, state: &RunState) -> Vec<&'a Edge> {
+    let out: Vec<&Edge> = playbook.edges.iter().filter(|e| e.from == from).collect();
+    let unconditional: Vec<&Edge> = out
+        .iter()
+        .copied()
+        .filter(|e| e.condition.is_none() && !e.fallback && edge_available(e, state))
+        .collect();
+    if !unconditional.is_empty() {
+        return unconditional;
+    }
+    if let Some(e) = out
+        .iter()
+        .copied()
+        .find(|e| !e.fallback && edge_available(e, state) && edge_matches(e, from, state))
+    {
+        return vec![e];
+    }
+    if let Some(e) = out
+        .iter()
+        .copied()
+        .find(|e| e.fallback && edge_available(e, state))
+    {
+        return vec![e];
+    }
+    Vec::new()
+}
+
 /// Successors of node `from`. Several UNCONDITIONAL outgoing edges = parallel
 /// branches (all are returned). If there are no unconditional edges -
 /// conditional routing: the first matching non-fallback edge, otherwise the
 /// fallback edge (a single target is returned). An empty vector is a dead
 /// end (no outgoing edges, or nothing matched and there is no fallback); the
-/// caller decides what to do about that.
+/// caller decides what to do about that. A bounded loop edge whose traversal
+/// count has reached its `max_traversals` cap is treated as non-matching.
 pub fn successors(playbook: &Playbook, from: &str, state: &RunState) -> Vec<String> {
-    let out: Vec<&Edge> = playbook.edges.iter().filter(|e| e.from == from).collect();
-    let unconditional: Vec<&Edge> = out
+    selected_edges(playbook, from, state)
         .iter()
-        .copied()
-        .filter(|e| e.condition.is_none() && !e.fallback)
-        .collect();
-    if !unconditional.is_empty() {
-        return unconditional.iter().map(|e| e.to.clone()).collect();
-    }
-    if let Some(e) = out
-        .iter()
-        .find(|e| !e.fallback && edge_matches(e, from, state))
-    {
-        return vec![e.to.clone()];
-    }
-    if let Some(e) = out.iter().find(|e| e.fallback) {
-        return vec![e.to.clone()];
-    }
-    Vec::new()
+        .map(|e| e.to.clone())
+        .collect()
 }
 
 fn incoming<'a>(playbook: &'a Playbook, node: &str) -> Vec<&'a Edge> {

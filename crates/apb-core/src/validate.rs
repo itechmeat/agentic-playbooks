@@ -95,6 +95,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_playbook_ref(playbook, &mut r); // V22
     check_connectors(playbook, &mut r); // V23, V24, V25, V26
     check_cache(playbook, &mut r); // V27, V28, V29
+    check_edges(playbook, &mut r); // V30
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     if r.is_valid() {
@@ -684,22 +685,42 @@ fn check_cycles(playbook: &Playbook, r: &mut ValidationReport) {
         if !cyclic {
             continue;
         }
-        let has_guard = comp.iter().any(|&i| {
+        let members: HashSet<&str> = comp.iter().map(|&i| ids[i]).collect();
+        // A cycle is bounded when it passes through a condition node with
+        // max_loops OR contains at least one edge (both endpoints inside the
+        // component) carrying max_traversals. Either guard makes the loop
+        // terminate, so V11 only fires when neither is present.
+        let has_max_loops = comp.iter().any(|&i| {
             matches!(
                 playbook.node(ids[i]).map(|n| &n.kind),
                 Some(NodeKind::Condition { max_loops: Some(_) })
             )
         });
-        if !has_guard {
-            let members: Vec<&str> = comp.iter().map(|&i| ids[i]).collect();
+        let has_bounded_edge = playbook.edges.iter().any(|e| {
+            e.max_traversals.is_some()
+                && members.contains(e.from.as_str())
+                && members.contains(e.to.as_str())
+        });
+        if !has_max_loops && !has_bounded_edge {
+            let member_list: Vec<&str> = comp.iter().map(|&i| ids[i]).collect();
             r.error(
                 "V11",
-                Some(members[0]),
+                Some(member_list[0]),
                 format!(
-                    "cycle [{}] must pass through a condition node with max_loops",
-                    members.join(", ")
+                    "cycle [{}] must contain an edge with max_traversals or pass through a condition node with max_loops",
+                    member_list.join(", ")
                 ),
             );
+        }
+    }
+}
+
+/// V30 (error): a `max_traversals` of 0 on an edge. A bounded edge that can
+/// never be traversed is an authoring mistake; the minimum useful cap is 1.
+fn check_edges(playbook: &Playbook, r: &mut ValidationReport) {
+    for e in &playbook.edges {
+        if e.max_traversals == Some(0) {
+            r.error("V30", None, "max_traversals must be at least 1".to_string());
         }
     }
 }

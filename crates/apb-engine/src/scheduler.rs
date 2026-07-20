@@ -1226,7 +1226,19 @@ fn drive(
             // object), we drop the hit entirely and fall through to the miss
             // path, so a failed hit never leaves a `NodeCacheHit` without the
             // files it promised (no partial event pair).
-            let hit = match cache_ctx.as_ref().and_then(|c| c.lookup(cfg)) {
+            // A node that already finished once in this run (a loop
+            // re-execution) must NOT replay a cached verdict: skip the lookup so
+            // each iteration runs the node again. The store side is unchanged -
+            // a fresh execution still admits/stores below. Detected from the
+            // folded state (`state` predates this iteration's NodeStarted, so a
+            // terminal status means a prior NodeFinished for this node).
+            let already_finished = state.nodes.get(&current).is_some_and(|st| st.is_finished());
+            let lookup = if already_finished {
+                None
+            } else {
+                cache_ctx.as_ref().and_then(|c| c.lookup(cfg))
+            };
+            let hit = match lookup {
                 Some(entry) => {
                     let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
                     match cache::restore_artifacts(&entry, ctx.store(), run_dir, &workdir) {

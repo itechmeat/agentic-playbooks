@@ -270,6 +270,17 @@ pub enum EventPayload {
         node: String,
         reason: String,
     },
+    /// A bounded loop edge (one carrying `max_traversals`) was traversed (spec
+    /// 2026-07-20-run-reliability). Journaled ONLY for edges that carry
+    /// `max_traversals`, so the journal stays lean: `RunState::fold` counts
+    /// these per `(from, to)` into `edge_counts`, and edge selection blocks the
+    /// edge once the count reaches its cap. A resume restores loop progress
+    /// exactly because the counts come from the journal. Additive variant: old
+    /// logs never carry it.
+    EdgeTraversed {
+        from: String,
+        to: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

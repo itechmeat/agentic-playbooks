@@ -662,6 +662,15 @@ pub struct Edge {
     pub fallback: bool,
     #[serde(default)]
     pub join: Option<String>, // all | any; executed in phase 2, but parsed already now
+    /// Bounded-loop cap (spec 2026-07-20-run-reliability): the maximum number
+    /// of times this edge may be traversed in a run. A cycle is legal only when
+    /// it contains at least one edge carrying this field (validator V11). Once
+    /// the run has traversed this edge `max_traversals` times, edge selection
+    /// treats it as non-matching, so the run takes an alternative edge or hits
+    /// the existing no-edge behavior. `None` - unbounded (a plain edge). A value
+    /// of 0 is rejected (validator V30).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_traversals: Option<u32>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
