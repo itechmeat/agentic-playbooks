@@ -34,6 +34,31 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
+/// Starts the same supervised run `playbook_run_supervised` starts, but on a
+/// thread of THIS process.
+///
+/// Since Task 7 the tool hands the drive to a detached `apb __drive-run`
+/// process re-exec'd from `current_exe()`, which in a test binary is the test
+/// harness rather than the `apb` binary - so no real driver comes up here. The
+/// scenarios below are about the supervisor TOOLS (wake, retry, report,
+/// continue-from) and need a run that actually moves, so they start one
+/// through the engine with the options the tool would have used. The tool's
+/// own launch path is covered end-to-end against the real binary in
+/// `apb-cli/tests/suite/detached_driver_test.rs`.
+fn start_supervised_in_process(root: &Path, id: &str, params: BTreeMap<String, String>) -> String {
+    apb_engine::run_background(
+        root,
+        id,
+        None,
+        apb_engine::RunOptions {
+            params,
+            mode: apb_engine::RunMode::Supervised,
+            ..Default::default()
+        },
+    )
+    .unwrap()
+}
+
 fn set_executable(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let mut p = fs::metadata(path).unwrap().permissions();
@@ -123,17 +148,34 @@ fn wait_for_status(root: &Path, run_id: &str, expected: &str) {
 // Scenario 1: a playbook without agent_task in supervised mode - the mode only
 // affects the failure path, so the run should still reach succeeded as usual.
 #[test]
-fn playbook_run_supervised_no_agent_reaches_succeeded() {
+fn supervised_no_agent_run_reaches_succeeded() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path(), "noagent_sv", NOAGENT);
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
+    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+
+    wait_for_status(dir.path(), &run_id, "succeeded");
+}
+
+// Scenario 1b: what `playbook_run_supervised` itself owns since Task 7. It
+// prepares the run fully in-process - registry, validation, run dir, manifest
+// snapshot - and only then hands the drive to a detached driver, returning the
+// run_id at once. The drive is NOT expected to happen here (the driver child
+// is re-exec'd from `current_exe()`, which in this test binary is the harness),
+// so the assertions stop at the handoff boundary.
+#[test]
+fn playbook_run_supervised_prepares_the_run_and_hands_off_the_drive() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "noagent_sv", NOAGENT);
+
+    let started = Instant::now();
     let res = playbook_run_supervised(
         dir.path(),
         "noagent_sv",
         None,
-        params,
+        BTreeMap::new(),
         None,
         None,
         None,
@@ -142,9 +184,33 @@ fn playbook_run_supervised_no_agent_reaches_succeeded() {
         Default::default(),
     )
     .unwrap();
-    let run_id = res["run_id"].as_str().unwrap().to_string();
+    let elapsed = started.elapsed();
 
-    wait_for_status(dir.path(), &run_id, "succeeded");
+    let run_id = res["run_id"].as_str().expect("run_id in response");
+    assert!(
+        run_id.starts_with("noagent_sv-"),
+        "unexpected run_id: {run_id}"
+    );
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "a supervised start must not block on the run, took {elapsed:?}"
+    );
+
+    // The run is prepared on disk before the handoff: run dir, run config, and
+    // the journal's start-up events are all the detached driver ever gets.
+    let run_dir = dir.path().join(".apb/runs").join(run_id);
+    assert!(
+        run_dir.is_dir(),
+        "run dir must exist after the tool returns"
+    );
+    assert!(
+        run_dir.join("run.yaml").is_file(),
+        "the run config must be snapshotted before the drive is handed off"
+    );
+    assert!(
+        run_dir.join("playbook.yaml").is_file(),
+        "the playbook snapshot must be written before the drive is handed off"
+    );
 }
 
 // Scenario 2: agent_task fails on the first call, succeeds on the second. We wait for a wake via
@@ -161,20 +227,7 @@ fn supervised_wake_context_append_and_retry_recovers() {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }
 
-    let res = playbook_run_supervised(
-        dir.path(),
-        "supflow_mcp",
-        None,
-        BTreeMap::new(),
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-    )
-    .unwrap();
-    let run_id = res["run_id"].as_str().unwrap().to_string();
+    let run_id = start_supervised_in_process(dir.path(), "supflow_mcp", BTreeMap::new());
 
     let wake = poll_until("a non-null wake from supervisor_wait_event", || {
         let out = supervisor_wait_event(dir.path(), &run_id, None, Some(2_000)).unwrap();
@@ -276,20 +329,7 @@ fn supervisor_report_write_then_read() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let res = playbook_run_supervised(
-        dir.path(),
-        "noagent_sv",
-        None,
-        params,
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-    )
-    .unwrap();
-    let run_id = res["run_id"].as_str().unwrap().to_string();
+    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
     wait_for_status(dir.path(), &run_id, "succeeded");
 
     supervisor_report(dir.path(), &run_id, "final summary").unwrap();
@@ -306,20 +346,7 @@ fn run_continue_from_posts_command() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let res = playbook_run_supervised(
-        dir.path(),
-        "noagent_sv",
-        None,
-        params,
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-    )
-    .unwrap();
-    let run_id = res["run_id"].as_str().unwrap().to_string();
+    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     let v = run_continue_from(dir.path(), &run_id, "note").unwrap();
     assert!(
@@ -459,20 +486,7 @@ fn write_supervisor_session_is_findable_without_in_memory_table() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let res = playbook_run_supervised(
-        dir.path(),
-        "noagent_sv",
-        None,
-        params,
-        None,
-        None,
-        None,
-        None,
-        Default::default(),
-        Default::default(),
-    )
-    .unwrap();
-    let run_id = res["run_id"].as_str().unwrap().to_string();
+    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     apb_engine::write_supervisor_session(
         dir.path(),

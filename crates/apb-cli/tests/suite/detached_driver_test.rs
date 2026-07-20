@@ -1,0 +1,361 @@
+//! Task 7: detached run drivers, end to end through the real `apb` binary.
+//!
+//! This is the only crate that can reach the shipped binary
+//! (`CARGO_BIN_EXE_apb`), and the binary is exactly what
+//! `apb_engine::driver::spawn_detached_driver` re-execs, so the "the run
+//! outlives the process that started it" property is proven here and nowhere
+//! else. Each scenario deliberately kills the launching process and then keeps
+//! polling the run directory: a run that only completes because the parent
+//! stayed alive would fail these tests.
+//!
+//! The stdio JSON-RPC plumbing (handshake, background reader thread, bounded
+//! `recv_timeout` instead of a blocking read) follows `mcp_supervise_test.rs`.
+
+use std::fs;
+use std::io::{BufRead, BufReader, Write};
+use std::path::Path;
+use std::process::{Child, ChildStdin, Command, Stdio};
+use std::sync::mpsc::Receiver;
+use std::time::{Duration, Instant};
+
+use apb_engine::event::{EventPayload, read_all};
+use apb_engine::state::{RunState, RunStatus};
+
+const POLL_DEADLINE: Duration = Duration::from_secs(60);
+const POLL_STEP: Duration = Duration::from_millis(50);
+
+fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let start = Instant::now();
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        if start.elapsed() > POLL_DEADLINE {
+            panic!("timed out after {POLL_DEADLINE:?} waiting for: {what}");
+        }
+        std::thread::sleep(POLL_STEP);
+    }
+}
+
+fn finishes(run_dir: &Path) -> usize {
+    read_all(run_dir)
+        .unwrap_or_default()
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+        .count()
+}
+
+/// Waits until the run has journalled MORE than `already` terminal events and
+/// returns the folded status. A resume adds a second `run_finished`, so the
+/// baseline count is what tells a fresh finish from the one already on disk.
+fn wait_for_outcome(run_dir: &Path, already: usize, what: &str) -> RunStatus {
+    poll_until(what, || {
+        let events = read_all(run_dir).ok()?;
+        let n = events
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+            .count();
+        if n <= already {
+            return None;
+        }
+        Some(RunState::fold(&events).run_status)
+    })
+}
+
+/// A run whose single script node sleeps, so the run is provably still in
+/// flight when the launching process is killed. `SLEEP` seconds is long enough
+/// to make the kill land mid-run and short enough to keep the suite quick.
+fn slowscript_yaml(id: &str, sleep_seconds: u32) -> (String, String) {
+    (
+        format!(
+            r#"
+schema: 1
+id: {id}
+name: Slow Script
+version: 1.0.0
+nodes:
+  - {{ id: start, type: start }}
+  - {{ id: work, type: script, script: "scripts/work.sh", runner: sh }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: start, to: work }}
+  - {{ from: work, to: done }}
+"#
+        ),
+        format!("#!/bin/sh\nsleep {sleep_seconds}\n"),
+    )
+}
+
+fn seed(root: &Path, id: &str, playbook: &str, script: &str) {
+    Command::new(env!("CARGO_BIN_EXE_apb"))
+        .arg("init")
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let vdir = root.join(".apb/playbooks").join(id).join("1.0.0");
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("playbook.yaml"), playbook).unwrap();
+    fs::write(vdir.join("scripts/work.sh"), script).unwrap();
+    fs::write(
+        root.join(".apb/playbooks").join(id).join("current"),
+        "1.0.0",
+    )
+    .unwrap();
+}
+
+// Scenario 1: the hidden `__drive-run` subcommand re-opens a run that another
+// process prepared and drives it to completion. The parent here does nothing
+// but prepare; every byte the child needs comes out of `runs/<id>`.
+#[test]
+fn drive_run_subcommand_completes_a_run_prepared_by_another_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("driveme", 1);
+    seed(dir.path(), "driveme", &yaml, &script);
+
+    let prepared = apb_engine::prepare_supervised_background(
+        dir.path(),
+        "driveme",
+        None,
+        apb_engine::RunOptions::default(),
+    )
+    .unwrap();
+    let run_id = prepared.run_id().to_string();
+    // Release the workdir lock the way a parent that failed to spawn would;
+    // the child then takes it itself.
+    drop(prepared);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+        .arg("__drive-run")
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--run-id")
+        .arg(&run_id)
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "__drive-run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let status = wait_for_outcome(&run_dir, 0, "the driven run to reach a terminal event");
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
+// Scenario 2: a background `playbook_run` started over MCP survives the death
+// of the `apb mcp` process. This is the production incident the task exists
+// for: the host chat session died under memory pressure and took the in-flight
+// run with it.
+#[test]
+fn mcp_background_run_survives_the_death_of_the_mcp_process() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("bgsurvive", 3);
+    seed(dir.path(), "bgsurvive", &yaml, &script);
+
+    let mut mcp = McpSession::start(dir.path());
+    let body = mcp.call(
+        2,
+        r#"{"name":"playbook_run","arguments":{"id":"bgsurvive","background":true,"acknowledge_untrusted":true}}"#,
+    );
+    let run_id = body["run_id"]
+        .as_str()
+        .unwrap_or_else(|| panic!("no run_id in playbook_run response: {body}"))
+        .to_string();
+
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    // The run is still in flight (the script sleeps 3s): the driver must be a
+    // process of its own, not a thread of the MCP server.
+    let driver_pid = poll_until("driver.pid to name the detached driver process", || {
+        apb_engine::driver::read_driver_pid(&run_dir)
+    });
+    assert_ne!(
+        driver_pid,
+        std::process::id(),
+        "the driver must not be this test process"
+    );
+    assert_ne!(
+        driver_pid,
+        mcp.pid(),
+        "the driver must be a separate process from `apb mcp`, not a thread inside it"
+    );
+
+    // Kill the launching process outright, mid-run.
+    mcp.kill();
+
+    let status = wait_for_outcome(
+        &run_dir,
+        0,
+        "the detached run to finish after the MCP process was killed",
+    );
+    assert_eq!(
+        status,
+        RunStatus::Succeeded,
+        "the run must complete on its own after its launcher died"
+    );
+}
+
+// Scenario 3: `run_resume` acknowledges immediately and the resumed run then
+// completes without the caller. The resumed node sleeps 10s, so an ack that
+// arrives in well under 5s can only mean the drive was handed to another
+// process; killing the MCP server right after the ack then proves the run does
+// not depend on it.
+#[test]
+fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
+    let dir = tempfile::tempdir().unwrap();
+    // A quick first run, so there is a finished run on disk to resume into.
+    let (yaml, script) = slowscript_yaml("resumeme", 0);
+    seed(dir.path(), "resumeme", &yaml, &script);
+
+    let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+        .arg("run")
+        .arg("resumeme")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "the seeded first run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let run_id = stdout
+        .split_whitespace()
+        .find(|w| w.starts_with("resumeme-"))
+        .unwrap_or_else(|| panic!("no run id in `apb run` output: {stdout}"))
+        .to_string();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+
+    // The resumed attempt takes a long time. Scripts execute from the run's
+    // own snapshot, so rewriting it here is what the resumed node will run.
+    fs::write(run_dir.join("scripts/work.sh"), "#!/bin/sh\nsleep 10\n").unwrap();
+    let before = finishes(&run_dir);
+
+    let mut mcp = McpSession::start(dir.path());
+    let started = Instant::now();
+    let body = mcp.call(
+        2,
+        &format!(
+            r#"{{"name":"run_resume","arguments":{{"run_id":"{run_id}","from_node":"work"}}}}"#
+        ),
+    );
+    let elapsed = started.elapsed();
+
+    assert!(
+        elapsed < Duration::from_secs(5),
+        "run_resume must ack immediately, but blocked for {elapsed:?} (the resumed node sleeps 10s)"
+    );
+    assert_eq!(body["run_id"].as_str(), Some(run_id.as_str()));
+    assert_eq!(body["resumed_from"].as_str(), Some("work"));
+    assert_eq!(body["reason"].as_str(), Some("explicit_from_node"));
+    assert_eq!(body["detached"].as_bool(), Some(true));
+
+    // And the run really does proceed without the caller.
+    mcp.kill();
+    let status = wait_for_outcome(
+        &run_dir,
+        before,
+        "the resumed run to finish after the MCP process was killed",
+    );
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
+// --- minimal stdio MCP client -------------------------------------------------
+
+/// A live `apb mcp` child spoken to over stdio, with the initialize handshake
+/// already done. `call` issues one `tools/call` and returns the tool's own
+/// (double-encoded) JSON body.
+struct McpSession {
+    child: Child,
+    stdin: ChildStdin,
+    rx: Receiver<String>,
+}
+
+impl McpSession {
+    fn start(root: &Path) -> Self {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+            .arg("mcp")
+            .current_dir(root)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut stdin = child.stdin.take().unwrap();
+        let stdout = child.stdout.take().unwrap();
+
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            let mut reader = BufReader::new(stdout);
+            let mut line = String::new();
+            loop {
+                line.clear();
+                match reader.read_line(&mut line) {
+                    Ok(0) | Err(_) => break,
+                    Ok(_) => {
+                        if tx.send(line.clone()).is_err() {
+                            break;
+                        }
+                    }
+                }
+            }
+        });
+
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","id":1,"method":"initialize","params":{{"protocolVersion":"2024-11-05","capabilities":{{}},"clientInfo":{{"name":"test","version":"0"}}}}}}"#
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+        rx.recv_timeout(Duration::from_secs(20))
+            .expect("no response to initialize");
+        writeln!(
+            stdin,
+            r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+        )
+        .unwrap();
+        stdin.flush().unwrap();
+
+        Self { child, stdin, rx }
+    }
+
+    fn pid(&self) -> u32 {
+        self.child.id()
+    }
+
+    fn call(&mut self, id: u32, params: &str) -> serde_json::Value {
+        writeln!(
+            self.stdin,
+            r#"{{"jsonrpc":"2.0","id":{id},"method":"tools/call","params":{params}}}"#
+        )
+        .unwrap();
+        self.stdin.flush().unwrap();
+        let line = self
+            .rx
+            .recv_timeout(Duration::from_secs(20))
+            .expect("no response to tools/call");
+        assert!(
+            !line.contains("\"isError\":true"),
+            "tools/call returned an error: {line}"
+        );
+        let outer: serde_json::Value = serde_json::from_str(&line).expect("json-rpc response");
+        let text = outer["result"]["content"][0]["text"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no tool body in: {line}"));
+        serde_json::from_str(text).expect("tool body json")
+    }
+
+    fn kill(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl Drop for McpSession {
+    fn drop(&mut self) {
+        // Never leave an `apb mcp` child behind when a test fails early.
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}

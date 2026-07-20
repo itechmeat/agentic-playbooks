@@ -12,8 +12,8 @@ use apb_engine::event::read_all;
 use apb_engine::run_config::ChildExpectation;
 use apb_engine::state::RunState;
 use apb_engine::{
-    EngineError, RunMode, RunOptions, list_runs, plan_resume, post_supervisor_command, resume, run,
-    run_background, run_cancel, run_inspect as engine_run_inspect, touch_heartbeat, wait_wake,
+    EngineError, RunMode, RunOptions, list_runs, plan_resume, post_supervisor_command, run,
+    run_cancel, run_inspect as engine_run_inspect, touch_heartbeat, wait_wake,
     write_supervisor_report,
 };
 use serde_json::{Value, json};
@@ -722,10 +722,15 @@ pub fn playbook_run(
 }
 
 /// A non-blocking run start for a regular (non-supervised) MCP client:
-/// starts the playbook in the background (autonomous) and returns run_id immediately. The client
+/// starts the playbook (autonomous) and returns run_id immediately. The client
 /// then polls `run_status`/`run_events` and resolves reviews via `review_decide`.
 /// Needed because some hosts (e.g. ChatGPT Apps) have a tool-call timeout of
 /// ~60s, while a run can take minutes (design doc, section 13.5).
+///
+/// The run is driven by a DETACHED process, not a thread of this one: the
+/// policy gate, permit verification and manifest snapshot all complete here,
+/// in-process, and only the drive loop is handed across - so an `apb mcp`
+/// bound to a chat session that dies no longer takes the run with it.
 #[allow(clippy::too_many_arguments)]
 pub fn playbook_run_background(
     root: &Path,
@@ -758,7 +763,7 @@ pub fn playbook_run_background(
         expected_connector_accounts,
         cache: Default::default(),
     };
-    let run_id = run_background(root, id, version, opts)?;
+    let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
 }
 
@@ -899,21 +904,23 @@ pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<
     // run resumes. This must run BEFORE the drive: once the run reaches a
     // terminal state, an argument-free `plan_resume` would refuse it.
     let decision = plan_resume(root, run_id, from_node)?;
-    // TODO(task-7 detach): the detached driver replaces this synchronous
-    // `resume`. Until then we compute the ack, then keep the current blocking
-    // drive; `detached: true` is already the detached-shape contract that Task
-    // 7 will make literally true by spawning the background driver instead.
-    let res = resume(root, run_id, from_node)?;
+    // The drive itself happens in a separate OS process: this session may be a
+    // chat host that dies at any moment, and a resumed run must not die with
+    // it. The ack is what the caller gets back, immediately - the run's
+    // progress is read afterwards through `run_status` / `run_events`.
+    apb_engine::resume_detached(root, run_id, from_node)?;
     Ok(json!({
-        "run_id": res.run_id,
+        "run_id": run_id,
         "resumed_from": decision.start_node,
         "reason": decision.reason.as_str(),
         "detached": true,
     }))
 }
 
-/// Starts a playbook in supervised mode without waiting for it to finish.
-/// The supervisor access token is minted by the server layer (Phase 4b, Task 3), not this function.
+/// Starts a playbook in supervised mode without waiting for it to finish, on a
+/// detached driver process (see `playbook_run_background`). The supervisor
+/// access token is minted by the server layer (Phase 4b, Task 3), not this
+/// function.
 #[allow(clippy::too_many_arguments)]
 pub fn playbook_run_supervised(
     root: &Path,
@@ -949,7 +956,7 @@ pub fn playbook_run_supervised(
         expected_connector_accounts,
         cache: Default::default(),
     };
-    let run_id = run_background(root, id, version, opts)?;
+    let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
 }
 

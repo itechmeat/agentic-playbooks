@@ -8,6 +8,7 @@ pub mod connector_smtp;
 pub mod connector_test;
 pub mod context;
 pub mod control;
+pub mod driver;
 pub mod error;
 pub mod event;
 pub mod hooks;
@@ -37,8 +38,9 @@ pub use progress::{ProgressSummary, compute as run_progress, node_durations_seco
 pub use review::{ReviewCommand, ReviewEntry, post_review, read_reviews_after};
 pub use scheduler::{
     PreparedRun, ResumeDecision, ResumeReason, RunMode, RunOptions, RunResult, RunSummary,
-    StartMode, drive_prepared, list_runs, plan_resume, post_supervisor_command,
-    prepare_supervised_background, resume, resume_with, run, run_background,
-    run_background_resolved, run_cancel, run_resolved, spawn_supervisor_agent,
+    StartMode, drive_prepared, drive_run_from_dir, list_runs, plan_resume, post_supervisor_command,
+    prepare_supervised_background, resume, resume_detached, resume_with, run, run_background,
+    run_background_resolved, run_cancel, run_resolved, spawn_supervisor_agent, start_detached,
+    start_detached_resolved,
 };
 pub use signals::{SignalCommand, SignalEntry, post_signal, read_signals_after};

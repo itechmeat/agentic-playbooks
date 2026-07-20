@@ -319,7 +319,7 @@ impl WfMcp {
                 ..Default::default()
             };
             if background == Some(true) {
-                return match apb_engine::run_background_resolved(&resolved, opts) {
+                return match apb_engine::start_detached_resolved(&resolved, opts) {
                     Ok(run_id) => {
                         to_call_tool_result(Ok(json!({ "run_id": run_id, "scope": "global" })))
                     }

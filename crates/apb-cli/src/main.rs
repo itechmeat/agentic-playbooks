@@ -19,8 +19,8 @@ use crate::manage::{
 };
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
-    drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd, run_doctor, run_list,
-    run_validate, runs_cmd,
+    drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd, run_doctor,
+    run_list, run_validate, runs_cmd,
 };
 use crate::serve::{dev_cmd, mcp_cmd, serve};
 use crate::util::resolve_port;
@@ -190,6 +190,25 @@ enum Command {
         #[arg(long)]
         handshake: PathBuf,
     },
+    /// Drives an already-prepared run at `<root>/.apb/runs/<run-id>` to
+    /// completion in THIS process. Spawned detached by
+    /// `apb_engine::driver::spawn_detached_driver`, so that a run started from
+    /// a chat session (MCP) survives that session dying. Hidden: an internal
+    /// re-exec target, not a user-facing command.
+    #[command(hide = true, name = "__drive-run")]
+    DriveRun {
+        /// Project root holding `.apb/runs` (absolute: the parent resolves it).
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long = "run-id")]
+        run_id: String,
+        /// Passed through to the resume planner; only meaningful with `--resume`.
+        #[arg(long = "from-node")]
+        from_node: Option<String>,
+        /// Resume an existing run instead of driving a freshly prepared one.
+        #[arg(long)]
+        resume: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -273,6 +292,14 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             &handshake,
         ),
+        // Deliberately uses the `--root` it was given, not the process cwd:
+        // the spawning parent knows which project the run belongs to.
+        Some(Command::DriveRun {
+            root: run_root,
+            run_id,
+            from_node,
+            resume,
+        }) => drive_run_child(&run_root, &run_id, from_node.as_deref(), resume),
         None => serve(resolve_port(None), false),
     }
 }

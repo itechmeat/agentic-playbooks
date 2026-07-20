@@ -47,6 +47,19 @@ pub enum CacheRunMode {
     Refresh,
 }
 
+/// How `drive` reacts to a node failure: an autonomous run takes its own
+/// fallbacks, a supervised one raises a wake and waits for a supervisor
+/// command. Persisted in the run config (not just held in memory) because a
+/// detached driver process re-opens the run from disk and must drive it in the
+/// mode it was started in.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunMode {
+    #[default]
+    Autonomous,
+    Supervised,
+}
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
     #[serde(default)]
@@ -97,6 +110,10 @@ pub struct RunConfig {
     /// existing on-disk configs without the field read unchanged.
     #[serde(default)]
     pub cache: CacheRunMode,
+    /// Autonomous or supervised (Task 7). Defaults to `Autonomous`, so
+    /// existing on-disk configs without the field read unchanged.
+    #[serde(default)]
+    pub mode: RunMode,
 }
 
 pub fn write_run_config(run_dir: &Path, cfg: &RunConfig) -> Result<(), EngineError> {

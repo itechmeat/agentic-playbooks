@@ -62,6 +62,8 @@ mod context_compaction_test;
 mod context_test;
 #[path = "suite/control_test.rs"]
 mod control_test;
+#[path = "suite/detached_driver_test.rs"]
+mod detached_driver_test;
 #[path = "suite/digest_binding_test.rs"]
 mod digest_binding_test;
 #[path = "suite/event_test.rs"]

@@ -18,6 +18,8 @@ mod cli_test;
 mod connector_cli;
 #[path = "suite/demo_playbooks_test.rs"]
 mod demo_playbooks_test;
+#[path = "suite/detached_driver_test.rs"]
+mod detached_driver_test;
 #[path = "suite/live_smoke_test.rs"]
 mod live_smoke_test;
 #[path = "suite/mcp_cli_test.rs"]

@@ -26,15 +26,19 @@ use crate::manifest::{ManifestProfile, ManifestSkill, RunExecutionManifest};
 use crate::parallel::{self, JoinReadiness};
 use crate::review::read_reviews_after;
 use crate::run_config::{
-    CacheRunMode, RunConfig, copy_scripts, snapshot_playbook, write_run_config,
+    CacheRunMode, RunConfig, copy_scripts, read_run_config, snapshot_playbook, write_run_config,
 };
 use crate::script::run_script;
 use crate::signals::read_signals_after;
 use crate::state::{NodeStatus, RunState, RunStatus};
-use crate::workdir::acquire;
+use crate::workdir::{acquire, acquire_handover};
 
-/// Run mode: autonomous (as in phases 1-3, behavior unchanged) or
-/// supervised (the engine stops on a wake event and waits for a command).
+/// Run mode: autonomous (as in phases 1-3, behavior unchanged) or supervised
+/// (the engine stops on a wake event and waits for a command). Defined in
+/// `run_config` because it is persisted with the run, re-exported here where
+/// every caller expects to find it.
+pub use crate::run_config::RunMode;
+
 mod cache;
 mod node;
 mod patch;
@@ -81,13 +85,6 @@ impl<'a> Journal<'a> {
             .append(payload)?;
         Ok(())
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RunMode {
-    #[default]
-    Autonomous,
-    Supervised,
 }
 
 #[derive(Debug, Default)]
@@ -254,14 +251,11 @@ struct Prepared {
     run_dir: std::path::PathBuf,
     log: EventLog,
     cfg: RunConfig,
-    // The field is not read directly - it keeps the workdir lock alive until `Prepared`
-    // is dropped (at the end of `run` or at the end of the `run_background` background
-    // thread). dead_code here is not about a partial-move bug: even after the
-    // closure capture is fixed (see `let mut p = p;` in run_background), rustc still
-    // does not consider the field "read" - it is used only through the Drop side
-    // effect, not through an explicit read of the value, so the attribute remains
-    // necessary for a clean build.
-    #[allow(dead_code)]
+    // Kept alive to hold the workdir lock until `Prepared` is dropped (at the
+    // end of `run`, or at the end of the `run_background` background thread).
+    // `PreparedRun::hand_over_workdir_lock` is the one place that reads it: a
+    // run handed to a detached driver passes the lock across by pid instead of
+    // releasing it.
     guard: Option<crate::workdir::WorkdirGuard>,
     start_node: String,
     mode: RunMode,
@@ -333,6 +327,31 @@ pub struct PreparedRun(Prepared);
 impl PreparedRun {
     pub fn run_id(&self) -> &str {
         &self.0.run_id
+    }
+
+    /// Passes the workdir lock this preparation holds (if it took one) to
+    /// process `pid`, then lets the preparation go. Used when the run is handed
+    /// to a detached driver: the lock moves straight from the preparing process
+    /// to the driver process with no window in between, and the driver adopts
+    /// it via `workdir::acquire_handover`.
+    pub fn hand_over_workdir_lock(self, pid: u32) -> Result<(), EngineError> {
+        let mut p = self.0;
+        if let Some(guard) = p.guard.take() {
+            guard.hand_over(pid)?;
+        }
+        Ok(())
+    }
+
+    /// Marks a prepared run as failed without ever driving it. The run dir and
+    /// its `run_started` event already exist at this point, so a preparation
+    /// that cannot be handed to a driver must be closed out - otherwise the run
+    /// would read as forever `running` to `apb runs`, the dashboard and the
+    /// supervisor tools.
+    fn abandon(self) {
+        let mut p = self.0;
+        let _ = p.log.append(EventPayload::RunFinished {
+            outcome: "failed".into(),
+        });
     }
 }
 
@@ -461,6 +480,163 @@ pub fn run_background_resolved(
     Ok(run_id)
 }
 
+/// Re-opens a run that another process prepared but never drove, and drives it
+/// to a terminal state. This is the body of the detached driver child
+/// (`apb __drive-run`): preparation - the policy gate, the permit, the
+/// immutable manifest snapshot - all happened in the parent, and everything
+/// this side needs is already in `runs/<id>` (the playbook snapshot, the run
+/// config, the manifest, the journal). Nothing is re-resolved from live
+/// profile or skill files, so the anti-TOCTOU posture is exactly the one the
+/// parent's permit established.
+///
+/// Refuses a run that has already been driven: replaying nodes against a
+/// journal that has moved on is not a resume, and `resume` is the supported
+/// way back into a run that already ran.
+pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, EngineError> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+
+    let events = read_all(&run_dir)?;
+    let state = RunState::fold(&events);
+    if !state.nodes.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "run `{run_id}` has already been driven - use resume to continue it"
+        )));
+    }
+
+    // The snapshot parser rather than `Playbook::from_yaml`: a run dir is a
+    // read-only historical record, and the shared parser is the one that
+    // tolerates every snapshot shape the engine has written (see `resume`).
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))?;
+    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
+    let cfg = read_run_config(&run_dir)?;
+    let mut log = EventLog::open(&run_dir)?;
+
+    let start_node = playbook
+        .nodes
+        .iter()
+        .find(|n| matches!(n.kind, NodeKind::Start))
+        .ok_or_else(|| EngineError::Invalid("no start node".into()))?
+        .id
+        .clone();
+
+    // Mirrors prepare's predicate. The parent held this lock through
+    // preparation and handed it to us by pid, so we adopt rather than acquire
+    // (a plain acquire would see our own live pid and call the workdir busy).
+    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
+    let _guard = if is_write {
+        acquire_handover(root)?
+    } else {
+        None
+    };
+
+    let res = drive(
+        playbook,
+        &run_dir,
+        root,
+        &mut log,
+        &cfg,
+        start_node,
+        StartMode::Rerun,
+        run_id.to_string(),
+        cfg.mode,
+        cfg.supervisor_expected,
+    );
+    // Same fallback as `drive_prepared`: an internal error with no terminal
+    // record would leave the run `running` forever for any external observer.
+    if res.is_err() {
+        let _ = log.append(EventPayload::RunFinished {
+            outcome: "failed".into(),
+        });
+    }
+    res
+}
+
+/// Prepares a run and hands it to a DETACHED driver process, returning the
+/// run_id as soon as the child is spawned. Unlike `run_background`, whose
+/// drive thread dies with the calling process, the run started here survives
+/// its launcher - which is what `apb mcp` needs, since its process is bound to
+/// a chat session that can be killed at any moment.
+pub fn start_detached(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    opts: RunOptions,
+) -> Result<String, EngineError> {
+    let prepared = prepare_supervised_background(root, id, version, opts)?;
+    hand_to_detached_driver(root, prepared)
+}
+
+/// `start_detached` for an already-resolved playbook (spec 3): the definition
+/// may live in the global store while execution happens in the project root.
+pub fn start_detached_resolved(
+    resolved: &ResolvedPlaybook,
+    mut opts: RunOptions,
+) -> Result<String, EngineError> {
+    // Tie the expected digest to what the resolver read (anti-TOCTOU).
+    opts.expected_digest
+        .get_or_insert_with(|| resolved.digest.clone());
+    let t = PrepareTarget {
+        definition_parent: resolved.definition_parent.clone(),
+        execution_root: resolved.execution_root.clone(),
+        origin_label: resolved.origin_label,
+    };
+    let prepared =
+        prepare_supervised_background_target(&t, &resolved.id, Some(&resolved.version), opts)?;
+    hand_to_detached_driver(&resolved.execution_root, prepared)
+}
+
+/// Spawns the driver child for an already prepared run and moves the workdir
+/// lock across to it. The order matters: the child is spawned first (so we
+/// know its pid), and the lock is rewritten immediately afterwards while we
+/// still own it - `acquire_handover` on the child side covers the case where
+/// the child looks at the lock before that write lands.
+fn hand_to_detached_driver(root: &Path, prepared: PreparedRun) -> Result<String, EngineError> {
+    let run_id = prepared.run_id().to_string();
+    let pid = match crate::driver::spawn_detached_driver(root, &run_id, None, false) {
+        Ok(pid) => pid,
+        Err(e) => {
+            // No driver was started, so nothing will ever move this run. Close
+            // it out rather than leaving it stuck in `running`.
+            prepared.abandon();
+            return Err(EngineError::Invalid(format!(
+                "cannot start the detached run driver: {e}"
+            )));
+        }
+    };
+    // Best effort, and deliberately not fatal: the child is already running, so
+    // failing the call here would hide a run that is genuinely under way. If
+    // the rewrite fails, our guard releases the lock as it drops instead, and
+    // the child's `acquire_handover` simply takes a free lock - a hair's
+    // breadth of a window rather than a lost run.
+    let _ = prepared.hand_over_workdir_lock(pid);
+    Ok(run_id)
+}
+
+/// Resumes a run in a DETACHED driver process and returns that process's pid
+/// immediately. The caller is expected to have already computed the resume
+/// decision (`plan_resume`) for its acknowledgement: the child re-derives the
+/// same decision from the same journal.
+pub fn resume_detached(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+) -> Result<u32, EngineError> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    if !root.join(".apb/runs").join(run_id).is_dir() {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    crate::driver::spawn_detached_driver(root, run_id, from_node, true)
+        .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))
+}
+
 /// Posts a cancel command to control.jsonl of an already-running (or already
 /// finished) run. Does not wait for an actual stop - `drive` will see the Abort at
 /// the nearest iteration boundary. Idempotent: a repeated call just appends
@@ -562,6 +738,12 @@ fn drive(
     mode: RunMode,
     supervisor_expected: bool,
 ) -> Result<RunResult, EngineError> {
+    // Publish which OS process is driving this run, for as long as the drive
+    // lasts (Task 7). Every drive invocation takes one - the CLI's synchronous
+    // run, the in-process background thread, and the detached driver child
+    // alike - and the guard removes the file on every exit path, so
+    // `driver.pid` present means "a process claims to be driving this run".
+    let _driver_pid = crate::driver::DriverPidGuard::claim(run_dir);
     let workdir = root.to_path_buf();
     // Adapter env scrubbing (spec 4.3): the union of every env var name
     // referenced by ANY installed connector config (both scopes), computed once

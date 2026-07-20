@@ -509,6 +509,39 @@ pub(crate) fn drive_supervised_child(
     }
 }
 
+/// Body of the hidden `__drive-run` subcommand: the detached driver process.
+/// The run was already prepared (or already ran, for `--resume`) by whoever
+/// spawned us - CLI, MCP server, anything that calls
+/// `apb_engine::driver::spawn_detached_driver` - and everything this process
+/// needs is on disk under `runs/<run_id>`. The whole drive loop is synchronous
+/// HERE, which is what lets the run outlive the process that launched it.
+///
+/// Stdio is normally nulled by the spawner, so the exit code carries the
+/// outcome; diagnostics still go to stderr for the case where the command is
+/// invoked directly.
+pub(crate) fn drive_run_child(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    resume: bool,
+) -> ExitCode {
+    let res = if resume {
+        apb_engine::resume(root, run_id, from_node)
+    } else {
+        apb_engine::drive_run_from_dir(root, run_id)
+    };
+    match res {
+        Ok(r) => match r.outcome {
+            RunStatus::Succeeded => ExitCode::SUCCESS,
+            _ => ExitCode::from(1),
+        },
+        Err(e) => {
+            eprintln!("drive of run `{run_id}` failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
     match list_runs(root) {
         Ok(runs) if runs.is_empty() => {

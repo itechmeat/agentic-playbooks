@@ -1,5 +1,5 @@
 use apb_engine::error::EngineError;
-use apb_engine::run_config::{RunConfig, read_run_config, write_run_config};
+use apb_engine::run_config::{RunConfig, RunMode, read_run_config, write_run_config};
 use apb_engine::workdir::acquire;
 use std::collections::BTreeMap;
 
@@ -22,11 +22,15 @@ fn run_config_round_trips() {
         expected_connectors: Default::default(),
         expected_connector_accounts: Default::default(),
         cache: Default::default(),
+        mode: RunMode::Supervised,
     };
     write_run_config(dir.path(), &cfg).unwrap();
     let back = read_run_config(dir.path()).unwrap();
     assert_eq!(back.params.get("task").map(String::as_str), Some("do it"));
     assert_eq!(back.instruction.as_deref(), Some("careful"));
+    // The run mode is persisted: a detached driver re-opens the run from disk
+    // and has no other way to learn it (Task 7).
+    assert_eq!(back.mode, RunMode::Supervised);
 }
 
 #[test]
