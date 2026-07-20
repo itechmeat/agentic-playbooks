@@ -930,13 +930,30 @@ pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<
     // chat host that dies at any moment, and a resumed run must not die with
     // it. The ack is what the caller gets back, immediately - the run's
     // progress is read afterwards through `run_status` / `run_events`.
+    // A stop still sitting unapplied in the control queue is consumed by the
+    // resumed drive BEFORE it executes anything, so the run stops again
+    // immediately. Read it before spawning the driver (afterwards the driver
+    // races us to consume it) and say so in the ack, or the caller sees a
+    // successful resume followed by a run that never moved.
+    let pending_stop =
+        apb_engine::control::pending_stop_seq(&root.join(".apb/runs").join(run_id))?.is_some();
     apb_engine::resume_detached(root, run_id, from_node)?;
-    Ok(json!({
+    let mut ack = json!({
         "run_id": run_id,
         "resumed_from": decision.start_node,
         "reason": decision.reason.as_str(),
         "detached": true,
-    }))
+    });
+    if pending_stop && let Some(obj) = ack.as_object_mut() {
+        obj.insert("stops_on_pending_abort".into(), json!(true));
+        obj.insert(
+            "note".into(),
+            json!(
+                "a stop was still pending on this run, so this resume applies it and the run stops again without executing anything; call run_resume once more to continue past it"
+            ),
+        );
+    }
+    Ok(ack)
 }
 
 /// Starts a playbook in supervised mode without waiting for it to finish, on a

@@ -602,3 +602,216 @@ fn a_stop_queued_behind_a_retry_still_aborts_the_run() {
         "and the folded run must read aborted"
     );
 }
+
+/// The stop that supersedes a queued Retry must be CONSUMED, not merely
+/// applied. The arm that finalizes a run whose pending Abort the scan cannot
+/// reach writes the control cursor like every other applied command, so the
+/// stopped run can be resumed normally afterwards. Without that write the
+/// stale Retry stayed pending with the cursor below it forever: every later
+/// resume re-entered the same arm and appended another RunAborted, with no way
+/// out short of hand-editing control.jsonl - exactly the class of workaround
+/// this release exists to remove. The discarded Retry is journaled as a
+/// `retry_superseded_by_stop` supervisor action so the loss is visible.
+#[cfg(unix)]
+#[test]
+fn a_stop_that_supersedes_a_retry_leaves_the_run_resumable() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let vdir = dir.path().join(".apb/playbooks/stopresume/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        WF_SUCCESS_ONLY.replace("stopdead", "stopresume"),
+    )
+    .unwrap();
+    fs::write(
+        dir.path().join(".apb/playbooks/stopresume/current"),
+        "1.0.0",
+    )
+    .unwrap();
+    common::seed_main(dir.path());
+    let (prog, marker) = sleepy_agent(dir.path());
+    let _env = AgentEnv::set(&prog);
+
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stopresume", None, RunOptions::default()));
+    });
+    let run_id = find_run_id(dir.path(), "stopresume-");
+    poll_until("the stub agent to start", || marker.is_file().then_some(()));
+
+    apb_engine::scheduler::post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Retry {
+            node: "work".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    stop_run(dir.path(), &run_id).unwrap();
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
+    assert_eq!(res.unwrap().outcome, RunStatus::Aborted);
+
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |e| matches!(&e.payload, EventPayload::SupervisorAction { action, node, .. }
+                if action == "retry_superseded_by_stop" && node.as_deref() == Some("work"))
+            )
+            .count(),
+        1,
+        "the discarded retry must be journaled, not dropped silently"
+    );
+    // The stop consumed everything up to and including its own Abort, so
+    // nothing is left pending for the next drive to trip over.
+    assert_eq!(
+        apb_engine::control::pending_stop_seq(&run_dir).unwrap(),
+        None,
+        "the applied stop must not still read as pending"
+    );
+
+    // The run is resumable: swap the agent for one that returns at once (the
+    // binary changed, hence the drift allowance) and let it finish. The killed
+    // node is journaled `cancelled` rather than interrupted and its only edge
+    // needs success, so this is the `--from-node` recovery the docs prescribe -
+    // what matters here is that the resumed drive PROGRESSES instead of
+    // re-entering the abort arm.
+    fs::write(&prog, "#!/bin/sh\necho done\n").unwrap();
+    set_executable(Path::new(&prog));
+    let resumed = apb_engine::scheduler::resume_with(dir.path(), &run_id, Some("work"), true)
+        .expect("a stopped run must stay resumable");
+    assert_eq!(
+        resumed.outcome,
+        RunStatus::Succeeded,
+        "the resumed run must actually progress instead of re-aborting"
+    );
+    assert_eq!(
+        read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::RunAborted { .. }))
+            .count(),
+        1,
+        "resuming a stopped run must not append another RunAborted"
+    );
+}
+
+/// The stop, note, resume pattern the release notes teach, in the order they
+/// teach it: the note is posted AFTER the stop and so carries a HIGHER seq than
+/// the Abort. The first resume therefore hits the Abort first, applies it and
+/// returns without ever reaching the note - so the operator has to resume a
+/// second time. The note must survive that first resume intact and be applied
+/// exactly once by the second, and `pending_stop_seq` (what `apb resume` and
+/// the `run_resume` ack report) must be what tells the operator which of the
+/// two resumes they are looking at.
+#[cfg(unix)]
+#[test]
+fn a_note_posted_after_a_stop_survives_the_resume_that_applies_the_stop() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "stopflow");
+    let stub = dir.path().join("quick.sh");
+    fs::write(&stub, "#!/bin/sh\necho done\n").unwrap();
+    set_executable(&stub);
+    let _env = AgentEnv::set(&stub.to_string_lossy());
+
+    let prepared = apb_engine::prepare_supervised_background(
+        dir.path(),
+        "stopflow",
+        None,
+        RunOptions::default(),
+    )
+    .unwrap();
+    let run_id = prepared.run_id().to_string();
+    drop(prepared);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    {
+        let mut log = EventLog::open(&run_dir).unwrap();
+        log.append(EventPayload::NodeStarted {
+            node: "work".into(),
+            attempt: 1,
+        })
+        .unwrap();
+        log.append(EventPayload::AttemptStarted {
+            node: "work".into(),
+            attempt: 1,
+            agent: "claude".into(),
+            soul_delivery: None,
+            skills_mode: None,
+            pid: Some(999_999),
+        })
+        .unwrap();
+    }
+
+    // The documented ordering: stop first, then leave the note.
+    assert_eq!(
+        stop_run(dir.path(), &run_id).unwrap(),
+        StopOutcome::FinalizedDeadRun
+    );
+    let note = "the fixture path moved";
+    apb_engine::scheduler::post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::ContextAppend { note: note.into() },
+    )
+    .unwrap();
+
+    // Resume 1 consumes the pending stop and nothing else. This is what the
+    // CLI and the run_resume ack now announce, so the operator knows to go
+    // again rather than concluding the resume did nothing.
+    assert!(
+        apb_engine::control::pending_stop_seq(&run_dir)
+            .unwrap()
+            .is_some(),
+        "the stop is still pending before the first resume"
+    );
+    let first = apb_engine::scheduler::resume(dir.path(), &run_id, None).expect("resume returns");
+    assert_eq!(
+        first.outcome,
+        RunStatus::Aborted,
+        "the first resume applies the pending stop and stops again"
+    );
+    let after_first = read_all(&run_dir).unwrap();
+    assert_eq!(
+        after_first
+            .iter()
+            .filter(|e| matches!(&e.payload, EventPayload::SupervisorAction { detail, .. } if detail == note))
+            .count(),
+        0,
+        "the note sits behind the abort, so the first resume must not have reached it"
+    );
+
+    // Resume 2 gets past it: the stop is consumed, the note is applied once.
+    assert_eq!(
+        apb_engine::control::pending_stop_seq(&run_dir).unwrap(),
+        None,
+        "the stop is consumed now, so the second resume proceeds"
+    );
+    let second = apb_engine::scheduler::resume(dir.path(), &run_id, None).expect("resume returns");
+    assert_eq!(
+        second.outcome,
+        RunStatus::Succeeded,
+        "the second resume runs the playbook out"
+    );
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.payload, EventPayload::SupervisorAction { detail, .. } if detail == note))
+            .count(),
+        1,
+        "the note must survive the stop-applying resume and be applied exactly once"
+    );
+    assert!(
+        fs::read_to_string(run_dir.join("context.md"))
+            .unwrap_or_default()
+            .contains(note),
+        "the note must reach the run context"
+    );
+}

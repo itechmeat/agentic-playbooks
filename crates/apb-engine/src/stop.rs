@@ -142,22 +142,13 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
 
     // Apply the abort ourselves: the terminal event, and NOTHING else.
     //
-    // The cursor is deliberately not advanced here. It is a single scalar, so
-    // moving it to our Abort's seq marks every lower-numbered entry applied as
-    // well - and on this path the driver died without applying its queue, so
-    // those entries are precisely the ones nobody has acted on yet. A crashed
-    // driver plus `apb note` plus `apb stop` plus `apb resume` silently lost
-    // the note, the exact loss class the cursor exists to prevent.
-    //
-    // The terminal `RunAborted` is the guard against a replay instead: a
-    // resumed run re-reads the Abort at its first top-of-loop scan, but only
-    // after replaying the pending entries ahead of it, and it then simply
-    // re-finalizes an already terminal run and returns. That is a single extra
-    // terminal event on an explicitly stopped run, not a loop: the drive loop
-    // returns as soon as it applies an Abort, so nothing re-enters. Advancing
-    // past the Abort while leaving lower entries visible is not expressible
-    // with a scalar cursor, so the choice is between replaying the stop and
-    // dropping the operator's other commands, and dropping them is worse.
+    // This is the replay option of the scalar-cursor trade-off documented on
+    // `write_control_cursor`. Advancing the cursor here would mark every entry
+    // queued ahead of our Abort applied, and on this path the driver died
+    // without applying any of them - so a crashed driver plus `apb note` plus
+    // `apb stop` plus `apb resume` silently lost the note. The replay is
+    // self-limiting: the next drive re-reads the abort through the drive
+    // loop's own Abort arm, which advances the cursor, so it happens once.
     let mut log = EventLog::open(&run_dir)?;
     log.append(EventPayload::RunAborted {
         reason: STOP_REASON.into(),

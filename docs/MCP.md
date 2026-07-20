@@ -144,6 +144,13 @@ the last finished node), or `explicit_from_node` (the caller named
 `from_node`). Poll `run_status` / `run_events` afterward the same way you
 would for a `background: true` run.
 
+When the run still has an unapplied stop in its control queue, the ack also
+carries `"stops_on_pending_abort": true` and a `note` saying so. Control
+commands are consumed in order, so that resume applies the stop and the run
+stops again without executing anything; call `run_resume` once more to
+continue past it. This is what the stop, note, resume recovery pattern looks
+like from the tool side.
+
 `run_stop { run_id }` posts an abort. If a live driver owns the run, that
 driver's watcher interrupts the in-flight node and its own drive loop writes
 the terminal event (`outcome: "signaled_live_driver"`). If nothing is driving

@@ -603,9 +603,22 @@ pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
 }
 
 pub(crate) fn resume_cmd(root: &Path, run_id: &str, from_node: Option<&str>) -> ExitCode {
+    // Read BEFORE the drive: a resume of a run with a pending stop applies that
+    // stop before it executes anything and returns immediately, which otherwise
+    // looks like a resume that silently did nothing. Best effort - an
+    // unreadable control queue must not fail the resume itself.
+    let pending_stop = apb_engine::control::pending_stop_seq(&root.join(".apb/runs").join(run_id))
+        .ok()
+        .flatten()
+        .is_some();
     match resume(root, run_id, from_node) {
         Ok(res) => {
             println!("resume {} finished: {}", res.run_id, res.outcome.as_str());
+            if pending_stop && res.outcome == RunStatus::Aborted {
+                println!(
+                    "this resume only applied a stop that was still pending, so nothing else ran; resume again to continue past it"
+                );
+            }
             match res.outcome {
                 RunStatus::Succeeded => ExitCode::SUCCESS,
                 _ => ExitCode::from(1),

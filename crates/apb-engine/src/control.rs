@@ -82,6 +82,27 @@ pub fn read_control_cursor(run_dir: &Path) -> Result<Option<u64>, EngineError> {
     Ok(Some(seq))
 }
 
+/// The cursor is a SINGLE SCALAR, and that shapes every site that writes it.
+///
+/// Setting it to seq N declares every entry up to and including N applied.
+/// There is no way to record "N is applied but N-1 is not", so a site that has
+/// to skip ahead to a specific entry - a stop that must take effect while an
+/// unconsumable `Retry` sits ahead of it in the queue - necessarily discards
+/// what it skips over. The two options are therefore:
+///
+///   * advance, and DISCARD the entries in between. Correct when the entry we
+///     skip to is terminal (the run stops, so a queued Retry has nothing left
+///     to retry), but the discard must be made visible in the journal rather
+///     than happening silently - see the `retry_superseded_by_stop`
+///     `SupervisorAction` written by the drive loop.
+///   * do not advance, and REPLAY the entry on the next drive. Correct only
+///     when the replay is idempotent and self-limiting. `stop_run`'s dead-run
+///     path takes this option: it writes the terminal `RunAborted` without a
+///     cursor, and the next drive re-reads the abort, applies it through the
+///     drive loop's own Abort arm (which DOES advance the cursor) and returns.
+///     That replay clears itself after one pass; a path whose replay does not
+///     advance the cursor would loop forever instead.
+///
 /// Persists the control cursor right after a control.jsonl entry is applied,
 /// atomically (temp + rename, per `apb_core::fsutil::atomic_write`) so a crash
 /// mid-write never leaves a torn cursor file for a later drive to misread.
@@ -94,6 +115,23 @@ pub fn write_control_cursor(run_dir: &Path, seq: u64) -> Result<(), EngineError>
         &run_dir.join("control.cursor"),
         seq.to_string().as_bytes(),
     )?)
+}
+
+/// The seq of the first UNAPPLIED `Abort` in this run's control queue, if any.
+///
+/// A resume of a run with a pending stop terminates immediately: the drive
+/// loop's top-of-loop scan applies the abort before it executes anything, so
+/// the resume looks like it did nothing at all. Callers that acknowledge a
+/// resume to a human (`apb resume`, the `run_resume` MCP tool) check this
+/// first so they can say the resume stopped on a pending stop, and that a
+/// second resume is what continues past it - see the release notes' stop, note,
+/// resume pattern.
+pub fn pending_stop_seq(run_dir: &Path) -> Result<Option<u64>, EngineError> {
+    let cursor = read_control_cursor(run_dir)?;
+    Ok(read_control_after(run_dir, cursor)?
+        .iter()
+        .find(|e| matches!(e.cmd, Control::Abort { .. }))
+        .map(|e| e.seq))
 }
 
 pub fn read_control_after(

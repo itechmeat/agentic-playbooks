@@ -831,10 +831,11 @@ fn drive(
         // was exactly the Phase 4a bug: the cursor advanced past ANY entry, including
         // Retry/ContinueFrom, silently losing them.
         let mut patch_applied = false;
-        // Set when the scan stops at a Retry/ContinueFrom without consuming it:
-        // everything queued BEHIND that entry - including a pending Abort - is
-        // unreachable for this scan. See the cancel check below the loop.
-        let mut blocked_before_end = false;
+        // Set to the node named by a Retry/ContinueFrom the scan stopped at
+        // without consuming it: everything queued BEHIND that entry - including
+        // a pending Abort - is unreachable for this scan. See the cancel check
+        // below the loop.
+        let mut blocked_by: Option<String> = None;
         let pending_control = read_control_after(run_dir, control_cursor)?;
         for entry in pending_control.iter().cloned() {
             match entry.cmd {
@@ -926,10 +927,10 @@ fn drive(
                     control_cursor = Some(entry.seq);
                     write_control_cursor(run_dir, entry.seq)?;
                 }
-                Control::Retry { .. } | Control::ContinueFrom { .. } => {
+                Control::Retry { ref node, .. } | Control::ContinueFrom { ref node } => {
                     // Valid only inside await_control, in response to a wake -
                     // we do not advance the cursor, the command remains unconsumed.
-                    blocked_before_end = true;
+                    blocked_by = Some(node.clone());
                     break;
                 }
             }
@@ -945,21 +946,37 @@ fn drive(
         // `drive_prepared` stamped as run_finished(failed). An operator who
         // asked for a stop got a FAILED run.
         //
-        // The flag being set is itself proof that an Abort is pending, so
-        // finalize as aborted right here. The cursor is deliberately not
-        // advanced: it is a scalar, and moving it past the Abort would also
-        // mark the Retry ahead of it applied, silently dropping a command
-        // nobody has acted on. The terminal event is the guard against a
-        // replay, exactly as on `stop_run`'s dead-run path.
-        if blocked_before_end && run_cancel.load(Ordering::SeqCst) {
-            let reason = pending_control
-                .iter()
-                .find_map(|e| match &e.cmd {
-                    Control::Abort { reason } => Some(reason.clone()),
-                    _ => None,
-                })
-                .unwrap_or_else(|| "stop requested".to_string());
+        // The flag being set is proof that an Abort is pending, so finalize as
+        // aborted here instead - and consume the abort properly, cursor and
+        // all. Skipping the cursor forward past the Retry is what the scalar
+        // cursor forces (see `write_control_cursor`), and it is the right
+        // trade here: the run is stopping, so a queued Retry has nothing left
+        // to retry. What it must not be is silent, hence the
+        // `retry_superseded_by_stop` record ahead of the terminal event. NOT
+        // advancing would be far worse than losing the Retry: this arm does
+        // not consume anything, so every later resume would re-enter it and
+        // append another RunAborted, forever.
+        //
+        // If the Abort is not in `pending_control` (the watcher saw an append
+        // that landed after our read), fall through rather than invent a seq:
+        // the next iteration re-reads control and this arm fires with the real
+        // entry in hand.
+        if let Some(blocked_node) = blocked_by.as_ref()
+            && run_cancel.load(Ordering::SeqCst)
+            && let Some((abort_seq, reason)) = pending_control.iter().find_map(|e| match &e.cmd {
+                Control::Abort { reason } => Some((e.seq, reason.clone())),
+                _ => None,
+            })
+        {
+            log.append(EventPayload::SupervisorAction {
+                action: "retry_superseded_by_stop".into(),
+                node: Some(blocked_node.clone()),
+                detail: format!(
+                    "a pending stop was applied before this command could be consumed, so it was discarded: {reason}"
+                ),
+            })?;
             log.append(EventPayload::RunAborted { reason })?;
+            write_control_cursor(run_dir, abort_seq)?;
             return Ok(RunResult {
                 run_id,
                 outcome: RunStatus::Aborted,
