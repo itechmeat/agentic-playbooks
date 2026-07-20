@@ -129,6 +129,77 @@ edges:
   - { from: review,  to: notify,  condition: { type: review_status, equals: reject } }
 ```
 
+## Interactive nodes
+
+An `agent_task` node may be marked `interactive: true`, letting the agent ask
+the user a question mid-attempt instead of only reporting a finished result.
+Four fields carry this:
+
+- `interactive` (bool, default false): only meaningful on `agent_task`.
+- `answer_by` (`human` | `supervisor`, default `human`): who may answer.
+  `human` requires a supervising agent to relay the question to the user
+  verbatim and relay the answer back verbatim; a supervisor cannot answer
+  such a node on its own judgment (see `docs/MCP.md`'s supervisor relay
+  contract for the exact refusal and wording). `supervisor` lets the
+  supervisor answer directly from its own judgment.
+- `question_timeout_seconds` (optional): how long the node waits for an
+  answer before falling back to `default_answer`. Omitted, the node waits
+  forever, like `human_review`.
+- `default_answer` (optional): the answer used when the timeout elapses
+  (`answered_by: "timeout"`). Requires `question_timeout_seconds` (validator
+  V32); the reverse - `interactive` companion fields set without
+  `interactive: true` - is validator V31.
+
+```yaml
+schema: 2
+id: deploy-with-confirmation
+name: Deploy with Confirmation
+version: 1.0.0
+
+defaults:
+  profile: architect
+
+nodes:
+  - { id: start, type: start }
+  - id: confirm
+    type: agent_task
+    title: Confirm before deploy
+    prompt: |
+      Check the target environment, then ask the user to confirm before
+      deploying.
+    interactive: true
+    answer_by: supervisor
+    question_timeout_seconds: 900
+    default_answer: "abort"
+    expected_duration: 5m
+  - id: deploy
+    type: agent_task
+    title: Deploy
+    prompt: "Deploy using the confirmed target: {{nodes.confirm.output}}"
+    expected_duration: 10m
+  - { id: done, type: finish, outcome: success }
+
+edges:
+  - { from: start, to: confirm }
+  - { from: confirm, to: deploy }
+  - { from: deploy, to: done }
+```
+
+How the answer reaches the node depends on the transport the invocation
+resolves to, best available first: **live** (today: claude only) injects a
+one-tool MCP sidecar (`ask_user`) into the agent, so the tool call itself
+blocks until an answer arrives; **resume** re-invokes the agent with the
+answer once a session id is available; **reprompt** - the floor every agent
+falls back to - re-invokes the agent from scratch carrying the full Q&A
+transcript in the prompt. Whichever transport is live, a running agent can
+also just print the marker `<<<apb:question>>>` followed by a line of JSON
+(`{"question": "...", "options": [...]}`); this is how resume and reprompt
+recognize a question, and it also works as a manual fallback for a live agent
+that prints it instead of calling the tool. Answers land through
+`run_answer` (MCP), `apb answer <run> [--node <id>] <text>` (CLI), or the web
+UI's question panel; a pending question shows up in `apb runs`, `apb doctor
+--run`, and `run_status.pending_question`.
+
 ## Bounded loops
 
 A cycle in the graph is legal only when it carries one of two guards

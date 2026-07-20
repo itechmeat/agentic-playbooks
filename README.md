@@ -14,7 +14,9 @@ log behind.
 
 - **Playbooks as YAML.** Node types: `agent_task`, `script`, `condition`,
   `human_review`, `wait` (timer/webhook), parallel branches with `join`.
-  Templating over params and node outputs, retries, fallbacks, timeouts.
+  Templating over params and node outputs, retries, fallbacks, timeouts. An
+  `agent_task` can be marked `interactive: true` to ask the user a question
+  mid-run and wait for an answer.
 - **Any coding agent, via profiles.** A profile binds agent + model + ordered
   fallbacks + role prompt + skills. Nodes reference profiles by name; swapping
   models never means editing the playbook.
@@ -140,6 +142,7 @@ apb resume <run>    resume a paused or interrupted run
 apb stop <run>      stop a run: interrupt the running node, finalize if the driver is gone
 apb note <run> <t>  post a note (context append) to a run's control channel
 apb review          decide a pending human_review node
+apb answer <run> <t> answer an interactive node's pending question (--node)
 apb serve           web UI (port 7321)
 apb mcp             stdio MCP server for coding agents
 ```

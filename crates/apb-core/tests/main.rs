@@ -39,6 +39,8 @@ mod doctor_test;
 mod fsutil_test;
 #[path = "suite/instruction_draft_test.rs"]
 mod instruction_draft_test;
+#[path = "suite/interactive_howto_example_test.rs"]
+mod interactive_howto_example_test;
 #[path = "suite/migration_test.rs"]
 mod migration_test;
 #[path = "suite/models_table_test.rs"]

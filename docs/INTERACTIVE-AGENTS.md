@@ -6,11 +6,19 @@ that ask the user questions mid-run, spec:
 agent stands today, and which upstream contributions we plan so more agents
 can reach the best tier.
 
-Status: research snapshot 2026-07-20, pre-implementation. UPDATE THIS
-DOCUMENT after the interactive-nodes feature ships: re-verify the "needs
-verification" rows against the real binaries, flip `interaction` defaults
-that verification confirms, and turn the "planned" contribution rows into
-links to filed issues and PRs.
+Status: shipped in apb 0.8.0. `interaction` defaults are live in code
+(`invocation::builtin`): claude = `live`, codex/opencode/hermes = `resume`
+(declared), agy = `reprompt`. In practice codex, opencode, and hermes run
+`reprompt` today: none of the three surveyed one-shot invocations surfaces a
+session id in its output, so the engine downgrades `resume` -> `reprompt` at
+runtime for all three (journaled as `SupervisorAction { action:
+"interaction_downgraded" }`); `live` is real only for claude, whose
+stream-json output is the only one that yields a capturable session so far.
+The "needs verification" rows below and the verification checklist at the
+end are still open - re-verify them against the real binaries, flip a
+row's `interaction` default only once verification confirms the resume
+actually holds, and turn the "planned" contribution rows into links once
+one is actually filed.
 
 ## What an agent needs
 
@@ -33,17 +41,23 @@ user a question, apb uses one of three transports, best available first:
 MCP elicitation (spec 2025-06) would be the protocol-native fourth option,
 but as of 2026-07 no surveyed agent ships it verified in headless mode.
 
-## Capability matrix (2026-07 research, doc-based)
+## Capability matrix (2026-07 research plus 0.8.0 implementation)
 
-Agents apb supports today:
+Agents apb supports today. "Transport today" is the built-in `interaction`
+default now in `invocation::builtin`, and, where it differs, what actually
+runs after the engine's runtime downgrade:
 
 | agent | per-run MCP injection | tool-call timeout | headless resume | transport today |
 |---|---|---|---|---|
-| Claude Code | yes, `--mcp-config` (file or inline JSON) | default about 28 h (`MCP_TOOL_TIMEOUT`, per-server `timeout`); 30 min stdio idle timer, reset by progress notifications | yes, `--resume <session-id>` with `-p` | **live** |
-| Codex CLI | config file only (`.codex/config.toml`); inline `-c` override for `mcp_servers.*` unconfirmed | `tool_timeout_sec`, default 60 s, config file only | yes, `codex exec resume <id>` | **resume** |
-| OpenCode | no flag; `opencode.json` only, with an open project-scope detection bug | effectively hard-capped around 30-120 s regardless of config (open issues) | `--session <id>` / `--continue`, open "Session not found" headless bug | **resume** (needs verification) |
-| Hermes Agent | not documented; `config.yaml` / `hermes mcp add` only | not documented | `--resume` / `--continue` documented; combination with `-z` one-shot unverified | **resume** (needs verification, until then reprompt) |
-| Antigravity CLI | no; persistent config files only | not documented | no: `-p` never surfaces a conversation id (open upstream issue #7) | **reprompt** |
+| Claude Code | yes, `--mcp-config` (file or inline JSON) | default about 28 h (`MCP_TOOL_TIMEOUT`, per-server `timeout`); 30 min stdio idle timer, reset by progress notifications | yes, `--resume <session-id>` with `-p` | **live** (shipped: the `apb __ask-server` sidecar plus `ask_user`) |
+| Codex CLI | config file only (`.codex/config.toml`); inline `-c` override for `mcp_servers.*` unconfirmed | `tool_timeout_sec`, default 60 s, config file only | yes, `codex exec resume <id>` | declared `resume`, runs as **reprompt**: a one-shot `codex exec` surfaces no session id to capture, so the engine downgrades every attempt |
+| OpenCode | no flag; `opencode.json` only, with an open project-scope detection bug | effectively hard-capped around 30-120 s regardless of config (open issues) | `--session <id>` / `--continue`, open "Session not found" headless bug | declared `resume`, runs as **reprompt** (needs verification): same no-session-id downgrade as codex |
+| Hermes Agent | not documented; `config.yaml` / `hermes mcp add` only | not documented | `--resume` / `--continue` documented; combination with `-z` one-shot unverified | declared `resume`, runs as **reprompt** (needs verification): same no-session-id downgrade as codex |
+| Antigravity CLI | no; persistent config files only | not documented | no: `-p` never surfaces a conversation id (open upstream issue #7) | **reprompt** (shipped, unchanged) |
+
+Every downgrade (`live` -> `resume`, `resume` -> `reprompt`) is journaled as
+`SupervisorAction { action: "interaction_downgraded", node, detail }`, so a
+supervisor or `apb doctor --run` can see when and why a node fell back.
 
 Popular agents apb does not support yet (candidates):
 
