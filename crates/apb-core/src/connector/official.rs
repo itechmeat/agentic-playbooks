@@ -43,6 +43,22 @@ impl OfficialConnector {
         }
         Ok(())
     }
+
+    /// The storefront metadata from this connector's embedded `PUBLIC.md`, so
+    /// an "available to install" listing can show the same `display_name`,
+    /// `summary` and `tags` the installed listing shows. Falls back to a
+    /// `PublicMeta` carrying just the connector name when `PUBLIC.md` is
+    /// absent, is not UTF-8, or has no usable frontmatter block.
+    pub fn meta(&self) -> super::store::PublicMeta {
+        self.files
+            .get("PUBLIC.md")
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(|content| super::store::public_meta_from_str(content, &self.name))
+            .unwrap_or_else(|| super::store::PublicMeta {
+                display_name: self.name.clone(),
+                ..Default::default()
+            })
+    }
 }
 
 /// Every embedded official connector, sorted by name. A folder whose name is

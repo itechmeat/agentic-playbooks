@@ -176,11 +176,37 @@ fn doctor_run(root: &Path, run_id: &str) -> ExitCode {
         };
         println!("{marker} {}: {}", c.subject, c.detail);
     }
+    print_pending_question_check(root, run_id);
     if has_failure(&checks) {
         eprintln!("doctor: found blocking problems");
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Flags a pending interactive question on the run, if any
+/// (spec 2026-07-20-interactive-nodes, Task 9): read directly from the
+/// `questions.jsonl`/`answers.jsonl` channel files via
+/// `apb_engine::progress::from_run_dir` (Task 3), the same source
+/// `run_status` and `apb runs` use, so it is visible even before drive has
+/// journaled a `QuestionAsked` event for it. Not part of `diagnose_run`'s own
+/// fixed check order (that stays an engine-crate concern); a pending
+/// question is a normal wait state, not a blocking problem, so it never
+/// affects this command's exit code. A best-effort read: an unreadable
+/// events.jsonl simply omits the line rather than failing the whole report.
+fn print_pending_question_check(root: &Path, run_id: &str) {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    let Ok(events) = apb_engine::event::read_all(&run_dir) else {
+        return;
+    };
+    if let Some(pq) =
+        apb_engine::progress::from_run_dir(&run_dir, &events).and_then(|p| p.pending_question)
+    {
+        println!(
+            "[warn] pending question: node `{}`: {}",
+            pq.node, pq.question
+        );
     }
 }
 
@@ -592,6 +618,7 @@ pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
         Ok(runs) => {
             for r in runs {
                 println!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+                print_waiting_on_question(r.progress.as_ref());
             }
             ExitCode::SUCCESS
         }
@@ -599,6 +626,19 @@ pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
             eprintln!("runs failed: {e}");
             ExitCode::from(2)
         }
+    }
+}
+
+/// Prints a waiting-on-question marker line (node id and question text,
+/// plain text - no shell interpolation, just `println!`) when `progress`
+/// carries a pending question (spec 2026-07-20-interactive-nodes, Task 9).
+/// A no-op otherwise, so a run not parked on a question prints nothing extra.
+fn print_waiting_on_question(progress: Option<&apb_engine::ProgressSummary>) {
+    if let Some(pq) = progress.and_then(|p| p.pending_question.as_ref()) {
+        println!(
+            "  waiting on question (node `{}`): {}",
+            pq.node, pq.question
+        );
     }
 }
 
@@ -717,6 +757,46 @@ pub(crate) fn review_cmd(
         }
         Err(e) => {
             eprintln!("review failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Answers an interactive `agent_task` node's pending question (spec
+/// 2026-07-20-interactive-nodes, Task 9): appends to the run's
+/// `answers.jsonl` channel via `apb_engine::post_answer`, always as
+/// `answered_by: "human"` - this is the plain/operator path, the same one
+/// the MCP `run_answer` tool's `run_id` branch takes (`token` is the
+/// separate supervisor-session path, not exposed here). `node` omitted
+/// resolves to the single pending question; an ambiguous or absent pending
+/// question is `post_answer`'s own error, which already names what is wrong
+/// (which nodes are pending, or that none are) - this only adds the run id,
+/// so the error is actionable without an operator having to guess which run
+/// it came from.
+///
+/// The existence check (mirroring `review_cmd`, not `note_cmd`) is needed
+/// here because `post_answer` itself does not validate `run_id` or the run
+/// directory's existence - unlike `post_supervisor_command`, which `note_cmd`
+/// leans on for that. Without it an unknown or path-traversing run id would
+/// fall through to `post_answer`'s "no pending question" error instead of a
+/// clear "not found".
+pub(crate) fn answer_cmd(root: &Path, run_id: &str, node: Option<&str>, text: &str) -> ExitCode {
+    if !is_safe_segment(run_id) {
+        eprintln!("answer failed: run `{run_id}` not found");
+        return ExitCode::from(2);
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        eprintln!("answer failed: run `{run_id}` not found");
+        return ExitCode::from(2);
+    }
+    match apb_engine::post_answer(&run_dir, node, text, "human") {
+        Ok(seq) => {
+            println!("answer posted for {run_id} (seq {seq})");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("answer failed for {run_id}: {e}");
             ExitCode::from(2)
         }
     }

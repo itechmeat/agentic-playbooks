@@ -188,17 +188,25 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 }
 
 /// Default metadata for a connector with no usable storefront page: an
-/// otherwise-empty `PublicMeta` whose `display_name` is the folder name, so
+/// otherwise-empty `PublicMeta` whose `display_name` is the connector name, so
 /// the dashboard always has something to show.
-fn fallback_meta(dir: &Path) -> PublicMeta {
-    let display_name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
+fn fallback_meta(name: &str) -> PublicMeta {
     PublicMeta {
-        display_name,
+        display_name: name.to_string(),
         ..Default::default()
     }
+}
+
+/// Parses `PUBLIC.md` frontmatter from content already in memory, falling back
+/// to `fallback_meta(name)` when there is no `---`-delimited block or it fails
+/// to parse as YAML. Split out from [`public_meta`] because an embedded
+/// official connector carries its `PUBLIC.md` as bytes in the binary and never
+/// has a directory to read it from.
+pub fn public_meta_from_str(content: &str, name: &str) -> PublicMeta {
+    let Some((frontmatter, _body)) = split_frontmatter(content) else {
+        return fallback_meta(name);
+    };
+    serde_yaml_ng::from_str(frontmatter).unwrap_or_else(|_| fallback_meta(name))
 }
 
 /// Reads and parses `PUBLIC.md`'s frontmatter (spec 3.2). Falls back to a
@@ -206,13 +214,14 @@ fn fallback_meta(dir: &Path) -> PublicMeta {
 /// `---`-delimited frontmatter block, or the frontmatter fails to parse as
 /// YAML - the storefront must never break the machine path.
 pub fn public_meta(dir: &Path) -> PublicMeta {
-    let Ok(content) = std::fs::read_to_string(dir.join("PUBLIC.md")) else {
-        return fallback_meta(dir);
-    };
-    let Some((frontmatter, _body)) = split_frontmatter(&content) else {
-        return fallback_meta(dir);
-    };
-    serde_yaml_ng::from_str(frontmatter).unwrap_or_else(|_| fallback_meta(dir))
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    match std::fs::read_to_string(dir.join("PUBLIC.md")) {
+        Ok(content) => public_meta_from_str(&content, &name),
+        Err(_) => fallback_meta(&name),
+    }
 }
 
 /// The markdown body of `PUBLIC.md`, after its frontmatter block. Empty

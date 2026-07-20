@@ -19,8 +19,8 @@ use crate::manage::{
 };
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
-    drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd, run_doctor,
-    run_list, run_validate, runs_cmd, stop_cmd,
+    answer_cmd, drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd,
+    run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
 };
 use crate::serve::{dev_cmd, mcp_cmd, serve};
 use crate::util::resolve_port;
@@ -153,6 +153,14 @@ enum Command {
         #[arg(long, default_value = "")]
         note: String,
     },
+    /// Answer an interactive node's pending question in a running run
+    Answer {
+        run: String,
+        /// The interactive node; omit when exactly one question is pending
+        #[arg(long)]
+        node: Option<String>,
+        text: String,
+    },
     /// Inspect and manage the project-local node result cache
     Cache {
         #[command(subcommand)]
@@ -277,6 +285,9 @@ fn main() -> ExitCode {
             decision,
             note,
         }) => review_cmd(&root, &run_id, &node_id, &decision, &note),
+        Some(Command::Answer { run, node, text }) => {
+            answer_cmd(&root, &run, node.as_deref(), &text)
+        }
         Some(Command::Serve { port, no_open }) => serve(resolve_port(port), no_open),
         Some(Command::Dev { no_open }) => dev_cmd(root, no_open),
         Some(Command::Mcp) => mcp_cmd(&root),

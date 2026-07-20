@@ -917,84 +917,32 @@ fn install_cmd(name: Option<String>, from_dir: Option<PathBuf>, force: bool) -> 
     }
 }
 
-/// Records connector trust for a freshly installed embedded connector. Origin
-/// is `Bundled`: the bytes came from the trusted binary the user already runs.
-fn record_connector_trust(name: &str, digest: &str) {
-    let mut trust = TrustStore::load();
-    if let Err(e) = trust.approve_kind(digest, name, Kind::Connector, OriginKind::Bundled) {
-        eprintln!("connector warning: installed `{name}` but could not record trust: {e}");
-    }
-}
-
+/// Installs an embedded official connector through the shared core routine
+/// (`apb_core::connector::install::install_official`), which the HTTP API calls
+/// too. This function only renders that structured outcome as the CLI's lines
+/// and exit code; every staging, digest, force and trust decision lives in core.
 fn install_embedded(name: &str, force: bool) -> ExitCode {
-    if let Err(e) = apb_core::profile::validate_profile_name(name) {
-        eprintln!("connector error: invalid connector name `{name}`: {e}");
-        return ExitCode::from(2);
-    }
-    let Some(official) = apb_core::connector::official::get(name) else {
-        eprintln!("connector error: `{name}` is not an embedded official connector");
-        return ExitCode::from(2);
-    };
-    let Some(base) = store::connectors_dir() else {
-        eprintln!("connector error: no config directory available");
-        return ExitCode::from(2);
-    };
-    let target = base.join(name);
-    let staging = base.join(format!(".{name}.install-tmp"));
-    let _ = std::fs::remove_dir_all(&staging);
-    if let Err(e) = official.write_to(&staging) {
-        eprintln!("connector error: cannot stage `{name}`: {e}");
-        let _ = std::fs::remove_dir_all(&staging);
-        return ExitCode::from(2);
-    }
-    let limits = apb_core::content::TreeLimits::default();
-    let new_digest = match apb_core::content::tree_digest(&staging, &limits) {
-        Ok(d) => d,
+    let report = match apb_core::connector::install::install_official(name, force) {
+        Ok(r) => r,
         Err(e) => {
-            let _ = std::fs::remove_dir_all(&staging);
-            eprintln!("connector error: cannot digest `{name}`: {e}");
+            eprintln!("connector error: {e}");
             return ExitCode::from(2);
         }
     };
-
-    if target.exists() {
-        let current = apb_core::content::tree_digest(&target, &limits).ok();
-        if current.as_deref() == Some(new_digest.as_str()) {
-            let _ = std::fs::remove_dir_all(&staging);
-            record_connector_trust(name, &new_digest);
-            println!(
-                "connector `{name}` already installed at version {} (no changes)",
-                official.version
-            );
-            return ExitCode::SUCCESS;
-        }
-        if !force {
-            let _ = std::fs::remove_dir_all(&staging);
-            eprintln!(
-                "connector error: `{}` already exists and differs from the embedded version; pass --force to overwrite",
-                target.display()
-            );
-            return ExitCode::from(2);
-        }
-        if let Err(e) = std::fs::remove_dir_all(&target) {
-            let _ = std::fs::remove_dir_all(&staging);
-            eprintln!("connector error: cannot replace {}: {e}", target.display());
-            return ExitCode::from(2);
-        }
+    if let Some(warning) = &report.trust_warning {
+        eprintln!("connector warning: installed `{name}` but could not record trust: {warning}");
     }
-    if let Err(e) = std::fs::rename(&staging, &target) {
-        let _ = std::fs::remove_dir_all(&staging);
-        eprintln!(
-            "connector error: cannot install into {}: {e}",
-            target.display()
+    if report.no_op {
+        println!(
+            "connector `{name}` already installed at version {} (no changes)",
+            report.version
         );
-        return ExitCode::from(2);
+    } else {
+        println!(
+            "installed connector `{name}` version {} and recorded its trust",
+            report.version
+        );
     }
-    record_connector_trust(name, &new_digest);
-    println!(
-        "installed connector `{name}` version {} and recorded its trust",
-        official.version
-    );
     ExitCode::SUCCESS
 }
 
