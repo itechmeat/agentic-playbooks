@@ -96,6 +96,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_connectors(playbook, &mut r); // V23, V24, V25, V26
     check_cache(playbook, &mut r); // V27, V28, V29
     check_edges(playbook, &mut r); // V30
+    check_interactive(playbook, &mut r); // V31, V32
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     if r.is_valid() {
@@ -725,6 +726,41 @@ fn check_edges(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
+/// V31/V32: interactive-node companion fields (spec 2026-07-20). Only
+/// `agent_task` carries `interactive`/`answer_by`/`question_timeout_seconds`/
+/// `default_answer`, so the node-kind guard is implicit: a non-agent_task node
+/// can never set them.
+fn check_interactive(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        if let NodeKind::AgentTask {
+            interactive,
+            answer_by,
+            question_timeout_seconds,
+            default_answer,
+            ..
+        } = &n.kind
+        {
+            let has_companion = !answer_by.is_default()
+                || question_timeout_seconds.is_some()
+                || default_answer.is_some();
+            if !interactive && has_companion {
+                r.error(
+                    "V31",
+                    Some(&n.id),
+                    "interactive companion fields (`answer_by`, `question_timeout_seconds`, `default_answer`) require `interactive: true`".to_string(),
+                );
+            }
+            if default_answer.is_some() && question_timeout_seconds.is_none() {
+                r.error(
+                    "V32",
+                    Some(&n.id),
+                    "`default_answer` requires `question_timeout_seconds` (it is the answer used when the timeout elapses)".to_string(),
+                );
+            }
+        }
+    }
+}
+
 fn check_scripts(playbook: &Playbook, r: &mut ValidationReport) {
     let escapes =
         |script: &str| script.starts_with('/') || script.split('/').any(|seg| seg == "..");
@@ -1050,5 +1086,94 @@ nodes:
 edges: []"#,
         );
         assert!(codes(&pb).contains(&("V29", Severity::Error)));
+    }
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    /// Wraps a `nodes:`/`edges:` YAML fragment with the schema 2 preamble,
+    /// mirroring `cache_tests::pb_yaml` above.
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    /// All issues as `(code, severity)` pairs, mirroring `cache_tests::codes`.
+    fn codes(pb: &Playbook) -> Vec<(&'static str, Severity)> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .map(|i| (i.code, i.severity))
+            .collect()
+    }
+
+    #[test]
+    fn v31_companion_field_without_interactive_true() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, answer_by: supervisor }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V31", Severity::Error)));
+        let report = validate(&pb, &ctx());
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.code == "V31")
+            .expect("expected a V31 error");
+        assert!(
+            issue.message.contains("interactive: true"),
+            "V31 message must mention `interactive: true`, got: {}",
+            issue.message
+        );
+    }
+
+    #[test]
+    fn v32_default_answer_without_timeout() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, interactive: true, default_answer: "x" }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V32", Severity::Error)));
+        let report = validate(&pb, &ctx());
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.code == "V32")
+            .expect("expected a V32 error");
+        assert!(
+            issue.message.contains("question_timeout_seconds"),
+            "V32 message must mention `question_timeout_seconds`, got: {}",
+            issue.message
+        );
+    }
+
+    #[test]
+    fn well_formed_interactive_node_has_no_v31_or_v32() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, interactive: true, question_timeout_seconds: 60, default_answer: "x" }
+edges: []"#,
+        );
+        let c = codes(&pb);
+        assert!(!c.contains(&("V31", Severity::Error)), "got {c:?}");
+        assert!(!c.contains(&("V32", Severity::Error)), "got {c:?}");
     }
 }
