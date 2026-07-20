@@ -113,10 +113,22 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
         return Ok(StopOutcome::SignaledLiveDriver);
     }
 
-    // Nothing is driving this run. Apply the abort ourselves: effect first
-    // (the terminal event), then the cursor, so a failed append leaves the
-    // command unconsumed rather than silently dropped - the same ordering the
-    // drive loop uses.
+    // Nothing is driving this run. Re-read the journal before writing to it:
+    // the drive loop does not take this lock, and it appends its terminal
+    // event just BEFORE dropping `driver.pid`. A stop that read the journal
+    // ahead of that append and the pid file after the removal would otherwise
+    // stamp a redundant `RunAborted` onto a run that had in fact just
+    // finished cleanly.
+    if is_terminal(RunState::fold(&read_all(&run_dir)?).run_status) {
+        // The abort we just posted has nothing left to do. Mark it consumed so
+        // a later resume of this run does not trip over a stale stop command.
+        write_control_cursor(&run_dir, seq)?;
+        return Ok(StopOutcome::AlreadyTerminal);
+    }
+
+    // Apply the abort ourselves: effect first (the terminal event), then the
+    // cursor, so a failed append leaves the command unconsumed rather than
+    // silently dropped - the same ordering the drive loop uses.
     let mut log = EventLog::open(&run_dir)?;
     log.append(EventPayload::RunAborted {
         reason: STOP_REASON.into(),
