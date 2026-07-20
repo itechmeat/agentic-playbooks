@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::adapter::{AgentAdapter, AgentTask, ErrorClass, adapter_for};
 use crate::context::{build_context, build_context_for_render, render};
-use crate::control::{Control, read_control_after};
+use crate::control::{Control, read_control_after, read_control_cursor, write_control_cursor};
 use crate::error::EngineError;
 use crate::event::{
     Event, EventLog, EventPayload, ProfileProvenance, WakeTrigger, now_millis, read_all,
@@ -26,31 +26,65 @@ use crate::manifest::{ManifestProfile, ManifestSkill, RunExecutionManifest};
 use crate::parallel::{self, JoinReadiness};
 use crate::review::read_reviews_after;
 use crate::run_config::{
-    CacheRunMode, RunConfig, copy_scripts, snapshot_playbook, write_run_config,
+    CacheRunMode, RunConfig, copy_scripts, read_run_config, snapshot_playbook, write_run_config,
 };
 use crate::script::run_script;
 use crate::signals::read_signals_after;
 use crate::state::{NodeStatus, RunState, RunStatus};
-use crate::workdir::acquire;
+use crate::workdir::{acquire, acquire_handover};
 
-/// Run mode: autonomous (as in phases 1-3, behavior unchanged) or
-/// supervised (the engine stops on a wake event and waits for a command).
+/// Run mode: autonomous (as in phases 1-3, behavior unchanged) or supervised
+/// (the engine stops on a wake event and waits for a command). Defined in
+/// `run_config` because it is persisted with the run, re-exported here where
+/// every caller expects to find it.
+pub use crate::run_config::RunMode;
+
 mod cache;
 mod node;
 mod patch;
 mod prepare;
+mod resume;
 mod supervisor;
 
 use node::*;
 use patch::*;
 use prepare::*;
+pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum RunMode {
-    #[default]
-    Autonomous,
-    Supervised,
+
+/// A shared append handle over the run's single event log, used only for the
+/// two attempt-lifecycle events that are journaled off the return batch:
+/// `attempt_started` at spawn time (so a crash mid-attempt leaves an open
+/// attempt on disk) and `attempt_finished` at return time. Every OTHER event
+/// keeps drive's direct, return-batch write path.
+///
+/// The log is wrapped in a `Mutex` so the same handle serves both drive paths:
+/// the sequential path holds the sole reference, while the parallel batch path
+/// shares `&Journal` across scoped worker threads. Each append is a single
+/// atomic line write, so lock contention is irrelevant.
+pub(crate) struct Journal<'a> {
+    log: std::sync::Mutex<&'a mut EventLog>,
+}
+
+impl<'a> Journal<'a> {
+    pub(crate) fn new(log: &'a mut EventLog) -> Self {
+        Self {
+            log: std::sync::Mutex::new(log),
+        }
+    }
+
+    /// Appends one event under the lock. Poison-tolerant: a worker thread that
+    /// panicked mid-append would poison the mutex, but the log file itself is
+    /// append-only and a partial line is impossible (a single `writeln!`), so
+    /// recovering the inner guard and continuing is safe.
+    pub(crate) fn append(&self, payload: EventPayload) -> Result<(), EngineError> {
+        self.log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .append(payload)?;
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -217,14 +251,11 @@ struct Prepared {
     run_dir: std::path::PathBuf,
     log: EventLog,
     cfg: RunConfig,
-    // The field is not read directly - it keeps the workdir lock alive until `Prepared`
-    // is dropped (at the end of `run` or at the end of the `run_background` background
-    // thread). dead_code here is not about a partial-move bug: even after the
-    // closure capture is fixed (see `let mut p = p;` in run_background), rustc still
-    // does not consider the field "read" - it is used only through the Drop side
-    // effect, not through an explicit read of the value, so the attribute remains
-    // necessary for a clean build.
-    #[allow(dead_code)]
+    // Kept alive to hold the workdir lock until `Prepared` is dropped (at the
+    // end of `run`, or at the end of the `run_background` background thread).
+    // `PreparedRun::hand_over_workdir_lock` is the one place that reads it: a
+    // run handed to a detached driver passes the lock across by pid instead of
+    // releasing it.
     guard: Option<crate::workdir::WorkdirGuard>,
     start_node: String,
     mode: RunMode,
@@ -248,6 +279,7 @@ pub fn run(
         &mut p.log,
         &p.cfg,
         p.start_node.clone(),
+        StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
         p.supervisor_expected,
@@ -277,6 +309,7 @@ pub fn run_resolved(
         &mut p.log,
         &p.cfg,
         p.start_node.clone(),
+        StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
         p.supervisor_expected,
@@ -294,6 +327,31 @@ pub struct PreparedRun(Prepared);
 impl PreparedRun {
     pub fn run_id(&self) -> &str {
         &self.0.run_id
+    }
+
+    /// Passes the workdir lock this preparation holds (if it took one) to
+    /// process `pid`, then lets the preparation go. Used when the run is handed
+    /// to a detached driver: the lock moves straight from the preparing process
+    /// to the driver process with no window in between, and the driver adopts
+    /// it via `workdir::acquire_handover`.
+    pub fn hand_over_workdir_lock(self, pid: u32) -> Result<(), EngineError> {
+        let mut p = self.0;
+        if let Some(guard) = p.guard.take() {
+            guard.hand_over(pid)?;
+        }
+        Ok(())
+    }
+
+    /// Marks a prepared run as failed without ever driving it. The run dir and
+    /// its `run_started` event already exist at this point, so a preparation
+    /// that cannot be handed to a driver must be closed out - otherwise the run
+    /// would read as forever `running` to `apb runs`, the dashboard and the
+    /// supervisor tools.
+    fn abandon(self) {
+        let mut p = self.0;
+        let _ = p.log.append(EventPayload::RunFinished {
+            outcome: "failed".into(),
+        });
     }
 }
 
@@ -356,6 +414,7 @@ pub fn drive_prepared(root: &Path, prepared: PreparedRun) -> Result<RunResult, E
         &mut p.log,
         &p.cfg,
         p.start_node.clone(),
+        StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
         p.supervisor_expected,
@@ -421,6 +480,173 @@ pub fn run_background_resolved(
     Ok(run_id)
 }
 
+/// Re-opens a run that another process prepared but never drove, and drives it
+/// to a terminal state. This is the body of the detached driver child
+/// (`apb __drive-run`): preparation - the policy gate, the permit, the
+/// immutable manifest snapshot - all happened in the parent, and everything
+/// this side needs is already in `runs/<id>` (the playbook snapshot, the run
+/// config, the manifest, the journal). Nothing is re-resolved from live
+/// profile or skill files, so the anti-TOCTOU posture is exactly the one the
+/// parent's permit established.
+///
+/// Refuses a run that has already been driven: replaying nodes against a
+/// journal that has moved on is not a resume, and `resume` is the supported
+/// way back into a run that already ran.
+pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, EngineError> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+
+    let events = read_all(&run_dir)?;
+    let state = RunState::fold(&events);
+    if !state.nodes.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "run `{run_id}` has already been driven - use resume to continue it"
+        )));
+    }
+
+    // The snapshot parser rather than `Playbook::from_yaml`: a run dir is a
+    // read-only historical record, and the shared parser is the one that
+    // tolerates every snapshot shape the engine has written (see `resume`).
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))?;
+    let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
+    let cfg = read_run_config(&run_dir)?;
+    let mut log = EventLog::open(&run_dir)?;
+
+    let start_node = playbook
+        .nodes
+        .iter()
+        .find(|n| matches!(n.kind, NodeKind::Start))
+        .ok_or_else(|| EngineError::Invalid("no start node".into()))?
+        .id
+        .clone();
+
+    // Mirrors prepare's predicate. The parent held this lock through
+    // preparation and handed it to us by pid, so we adopt rather than acquire
+    // (a plain acquire would see our own live pid and call the workdir busy).
+    let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
+    let _guard = if is_write {
+        acquire_handover(root)?
+    } else {
+        None
+    };
+
+    let res = drive(
+        playbook,
+        &run_dir,
+        root,
+        &mut log,
+        &cfg,
+        start_node,
+        StartMode::Rerun,
+        run_id.to_string(),
+        cfg.mode,
+        cfg.supervisor_expected,
+    );
+    // Same fallback as `drive_prepared`: an internal error with no terminal
+    // record would leave the run `running` forever for any external observer.
+    if res.is_err() {
+        let _ = log.append(EventPayload::RunFinished {
+            outcome: "failed".into(),
+        });
+    }
+    res
+}
+
+/// Prepares a run and hands it to a DETACHED driver process, returning the
+/// run_id as soon as the child is spawned. Unlike `run_background`, whose
+/// drive thread dies with the calling process, the run started here survives
+/// its launcher - which is what `apb mcp` needs, since its process is bound to
+/// a chat session that can be killed at any moment.
+pub fn start_detached(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    opts: RunOptions,
+) -> Result<String, EngineError> {
+    let prepared = prepare_supervised_background(root, id, version, opts)?;
+    hand_to_detached_driver(root, prepared)
+}
+
+/// `start_detached` for an already-resolved playbook (spec 3): the definition
+/// may live in the global store while execution happens in the project root.
+pub fn start_detached_resolved(
+    resolved: &ResolvedPlaybook,
+    mut opts: RunOptions,
+) -> Result<String, EngineError> {
+    // Tie the expected digest to what the resolver read (anti-TOCTOU).
+    opts.expected_digest
+        .get_or_insert_with(|| resolved.digest.clone());
+    let t = PrepareTarget {
+        definition_parent: resolved.definition_parent.clone(),
+        execution_root: resolved.execution_root.clone(),
+        origin_label: resolved.origin_label,
+    };
+    let prepared =
+        prepare_supervised_background_target(&t, &resolved.id, Some(&resolved.version), opts)?;
+    hand_to_detached_driver(&resolved.execution_root, prepared)
+}
+
+/// Spawns the driver child for an already prepared run and moves the workdir
+/// lock across to it. The order matters: the child is spawned first (so we
+/// know its pid), and the lock is rewritten immediately afterwards while we
+/// still own it - `acquire_handover` on the child side covers the case where
+/// the child looks at the lock before that write lands.
+fn hand_to_detached_driver(root: &Path, prepared: PreparedRun) -> Result<String, EngineError> {
+    let run_id = prepared.run_id().to_string();
+    let pid = match crate::driver::spawn_detached_driver(root, &run_id, None, false) {
+        Ok(pid) => pid,
+        Err(e) => {
+            // No driver was started, so nothing will ever move this run. Close
+            // it out rather than leaving it stuck in `running`.
+            prepared.abandon();
+            return Err(EngineError::Invalid(format!(
+                "cannot start the detached run driver: {e}"
+            )));
+        }
+    };
+    // Publish the driver BEFORE returning, for the same reason the lock is
+    // handed over by pid here: until `driver.pid` names the child, this run
+    // reads as having no driver at all, and a stop landing in that window
+    // finalizes a run that is about to execute (see `publish_driver_pid`).
+    crate::driver::publish_driver_pid(&root.join(".apb/runs").join(&run_id), pid);
+    // Best effort, and deliberately not fatal: the child is already running, so
+    // failing the call here would hide a run that is genuinely under way. If
+    // the rewrite fails, our guard releases the lock as it drops instead, and
+    // the child's `acquire_handover` simply takes a free lock - a hair's
+    // breadth of a window rather than a lost run.
+    let _ = prepared.hand_over_workdir_lock(pid);
+    Ok(run_id)
+}
+
+/// Resumes a run in a DETACHED driver process and returns that process's pid
+/// immediately. The caller is expected to have already computed the resume
+/// decision (`plan_resume`) for its acknowledgement: the child re-derives the
+/// same decision from the same journal.
+pub fn resume_detached(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+) -> Result<u32, EngineError> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    if !root.join(".apb/runs").join(run_id).is_dir() {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    let pid = crate::driver::spawn_detached_driver(root, run_id, from_node, true)
+        .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
+    // As in `hand_to_detached_driver`: name the driver before returning, so a
+    // stop issued the moment this call comes back sees a live driver instead of
+    // finalizing a run the child is about to drive.
+    crate::driver::publish_driver_pid(&root.join(".apb/runs").join(run_id), pid);
+    Ok(pid)
+}
+
 /// Posts a cancel command to control.jsonl of an already-running (or already
 /// finished) run. Does not wait for an actual stop - `drive` will see the Abort at
 /// the nearest iteration boundary. Idempotent: a repeated call just appends
@@ -442,46 +668,7 @@ pub fn run_cancel(root: &Path, run_id: &str) -> Result<(), EngineError> {
     // Propagate the abort into any non-terminal sub-playbook children (spec C):
     // an operator abort of the parent must reach a child that is blocking the
     // parent (e.g. a child paused on human_review).
-    abort_children(root, run_id)?;
-    Ok(())
-}
-
-/// Posts Abort to every non-terminal sub-playbook child of `run_id`, recursively
-/// (spec C). Best-effort per child; a child that no longer exists is skipped.
-/// This is how an operator abort of the parent reaches a child that is blocking
-/// the parent (e.g. a child paused on human_review): the child's own drive loop
-/// scans its control.jsonl at every iteration boundary and returns Aborted, which
-/// the parent maps to a failed node.
-fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineError> {
-    let run_dir = root.join(".apb/runs").join(run_id);
-    let events = read_all(&run_dir)?;
-    for e in &events {
-        if let EventPayload::ChildRunStarted { run_id: child, .. } = &e.payload {
-            let child_dir = root.join(".apb/runs").join(child);
-            if child_dir.is_dir()
-                && !matches!(
-                    RunState::fold(&read_all(&child_dir)?).run_status,
-                    RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
-                )
-            {
-                // Best-effort per child (a child that raced to terminal or lost
-                // its dir must not block the parent abort), but no longer
-                // silent: a failed post is logged with the child run id so an
-                // operator can tell an un-propagated abort from a clean one
-                // (review I7/R1-I9). apb-engine has no tracing facility, so this
-                // is an eprintln, matching the progress/snapshot warnings.
-                if let Err(e) = crate::control::post_control(
-                    &child_dir,
-                    Control::Abort {
-                        reason: "parent aborted".into(),
-                    },
-                ) {
-                    eprintln!("apb: warning: failed to post abort to child run `{child}`: {e}");
-                }
-                abort_children(root, child)?;
-            }
-        }
-    }
+    crate::stop::abort_children(root, run_id)?;
     Ok(())
 }
 
@@ -517,10 +704,17 @@ fn drive(
     log: &mut EventLog,
     cfg: &RunConfig,
     start_node: String,
+    start_mode: StartMode,
     run_id: String,
     mode: RunMode,
     supervisor_expected: bool,
 ) -> Result<RunResult, EngineError> {
+    // Publish which OS process is driving this run, for as long as the drive
+    // lasts (Task 7). Every drive invocation takes one - the CLI's synchronous
+    // run, the in-process background thread, and the detached driver child
+    // alike - and the guard removes the file on every exit path, so
+    // `driver.pid` present means "a process claims to be driving this run".
+    let _driver_pid = crate::driver::DriverPidGuard::claim(run_dir);
     let workdir = root.to_path_buf();
     // Adapter env scrubbing (spec 4.3): the union of every env var name
     // referenced by ANY installed connector config (both scopes), computed once
@@ -529,12 +723,34 @@ fn drive(
     // unrelated run's agent. `apb connector call`, spawned as a child of the
     // agent, resolves secrets from the dotenv files itself.
     let env_scrub = apb_core::connector::resolve::all_referenced_env_names(root);
-    let mut current = start_node;
     // The other active branch heads (besides `current`). A linear run keeps the
     // frontier empty - behavior identical to the old single `current`. A fork
     // (several unconditional outgoing edges) puts the extra targets here; when the
     // `current` branch runs into a not-yet-ready join or a dead end, we take the next one.
     let mut frontier: Vec<String> = Vec::new();
+    let mut current = match start_mode {
+        // Restart interrupted work, or an explicit `--from-node` re-run: the
+        // start node is executed by the loop below.
+        StartMode::Rerun => start_node,
+        // Advance past an already-finished node without re-executing it: seed
+        // the frontier by evaluating its outgoing edges against the folded
+        // status and outputs (exactly the normal post-node advancement), then
+        // start from the first ready successor.
+        StartMode::After => {
+            let state = RunState::fold(&read_all(run_dir)?);
+            advance_frontier(&playbook, &start_node, &state, &mut frontier, log)?;
+            if frontier.is_empty() {
+                // A pointless resume: the start node already finished and has no
+                // pending successor to advance into. `resume_inner` already
+                // refuses this before journaling `RunResumed`; this is the
+                // defensive backstop for any direct `After` drive.
+                return Err(EngineError::Invalid(format!(
+                    "node `{start_node}` already finished with no pending successor to resume into - pass --from-node to re-run from a specific node"
+                )));
+            }
+            frontier.remove(0)
+        }
+    };
     let max_steps = 10_000usize;
     // A counter of condition-node executions for the runtime max_loops check:
     // the validator (V11) only requires that a loop pass through such a node,
@@ -550,7 +766,31 @@ fn drive(
     // twice. Details of the scheme (that top-of-loop advances the cursor only for
     // Pause/Abort/ContextAppend, while Retry/ContinueFrom is advanced only by
     // await_control) are in the comment before the scan below.
-    let mut control_cursor: Option<u64> = None;
+    //
+    // Initialized from the persisted `runs/<id>/control.cursor` (Task 4
+    // completion-plan defect 1), not hardcoded to `None`: without this, EVERY
+    // drive invocation - including a resume, which is simply another `drive`
+    // call - re-read control.jsonl from the very beginning and re-applied every
+    // historical entry (duplicate `supervisor_action` events, a re-growing
+    // context.md, and a stale Pause re-firing on the next drive). Every site
+    // below that advances `control_cursor` also calls `write_control_cursor` in
+    // the same step, so the persisted value never lags the in-memory one.
+    let mut control_cursor: Option<u64> = read_control_cursor(run_dir)?;
+    // The run-level cancel flag (Task 8). It is handed to every node this drive
+    // executes, and a watcher thread sets it as soon as an Abort shows up in
+    // control.jsonl - which is what lets a stop interrupt an agent that is
+    // already running instead of waiting for it to finish. The watcher only
+    // OBSERVES control.jsonl; the drive loop below still applies the Abort and
+    // owns the cursor, so the abort takes effect exactly once. The guard is
+    // dropped when this function returns, which stops and joins the thread.
+    let run_cancel = Arc::new(AtomicBool::new(false));
+    let _abort_watcher =
+        crate::stop::AbortWatcher::spawn(run_dir, control_cursor, Arc::clone(&run_cancel));
+    // True once the loop has already taken the cancel short-circuit below, so
+    // a pathological case (an unconsumable Retry queued ahead of the Abort
+    // stops the top-of-loop scan before it reaches it) degrades to the old
+    // behavior instead of spinning.
+    let mut cancel_short_circuited = false;
     // One-shot prompt overrides set by the Retry{prompt_override} command:
     // node_id -> text that will replace the rendered prompt for EXACTLY the next
     // execution of that node, after which the entry is removed.
@@ -591,19 +831,36 @@ fn drive(
         // was exactly the Phase 4a bug: the cursor advanced past ANY entry, including
         // Retry/ContinueFrom, silently losing them.
         let mut patch_applied = false;
-        for entry in read_control_after(run_dir, control_cursor)? {
+        // Set to the node named by a Retry/ContinueFrom the scan stopped at
+        // without consuming it: everything queued BEHIND that entry - including
+        // a pending Abort - is unreachable for this scan. See the cancel check
+        // below the loop.
+        let mut blocked_by: Option<String> = None;
+        let pending_control = read_control_after(run_dir, control_cursor)?;
+        for entry in pending_control.iter().cloned() {
             match entry.cmd {
                 Control::Abort { reason } => {
+                    // Effect first, cursor persisted last: if `log.append` errs
+                    // (ordinary I/O failure), the entry must NOT be marked
+                    // applied - it has to resurface on the next drive rather
+                    // than being silently dropped. Persisted before the return
+                    // (once the effect has actually happened) so a resumed
+                    // drive never sees this same terminal entry again (Task 4
+                    // completion-plan defect 1 - a stale stop command re-firing
+                    // on resume).
                     log.append(EventPayload::RunAborted { reason })?;
+                    write_control_cursor(run_dir, entry.seq)?;
                     return Ok(RunResult {
                         run_id,
                         outcome: RunStatus::Aborted,
                     });
                 }
                 Control::Pause => {
+                    // Same ordering and reasoning as Abort above.
                     log.append(EventPayload::RunPaused {
                         reason: "supervisor pause".into(),
                     })?;
+                    write_control_cursor(run_dir, entry.seq)?;
                     return Ok(RunResult {
                         run_id,
                         outcome: RunStatus::Paused,
@@ -617,14 +874,20 @@ fn drive(
                     })?;
                     rebuild_context_md(run_dir)?;
                     control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
                 }
                 Control::Patch {
                     version,
                     classification,
                     continue_from,
                 } => {
-                    control_cursor = Some(entry.seq);
-                    match apply_patch(
+                    // Effect first (`apply_patch` can itself err on ordinary
+                    // I/O - unreadable events.jsonl, a bad snapshot read), then
+                    // persist the cursor only once it has actually returned
+                    // Ok: an error here must leave the entry unconsumed so it
+                    // resurfaces on the next drive instead of being silently
+                    // dropped.
+                    let result = apply_patch(
                         root,
                         run_dir,
                         log,
@@ -636,7 +899,10 @@ fn drive(
                             classification,
                             continue_from,
                         },
-                    )? {
+                    )?;
+                    control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
+                    match result {
                         PatchResult::Applied(applied) => {
                             last_applied_patch = Some(*applied);
                             patch_applied = true;
@@ -659,13 +925,62 @@ fn drive(
                         label,
                     })?;
                     control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
                 }
-                Control::Retry { .. } | Control::ContinueFrom { .. } => {
+                Control::Retry { ref node, .. } | Control::ContinueFrom { ref node } => {
                     // Valid only inside await_control, in response to a wake -
                     // we do not advance the cursor, the command remains unconsumed.
+                    blocked_by = Some(node.clone());
                     break;
                 }
             }
+        }
+
+        // A stop that the scan above cannot reach. The watcher reads the raw
+        // control file and so DOES see an Abort queued behind an unconsumable
+        // Retry/ContinueFrom; the scan stops short of it and never applies it.
+        // The flag then stayed latched for the rest of the drive: every later
+        // node returned `Cancelled` instantly, `Cancelled` is neither Unknown
+        // nor Interrupted, so it fell through to edge selection, matched
+        // nothing, and the drive failed with "has no outgoing edge" - which
+        // `drive_prepared` stamped as run_finished(failed). An operator who
+        // asked for a stop got a FAILED run.
+        //
+        // The flag being set is proof that an Abort is pending, so finalize as
+        // aborted here instead - and consume the abort properly, cursor and
+        // all. Skipping the cursor forward past the Retry is what the scalar
+        // cursor forces (see `write_control_cursor`), and it is the right
+        // trade here: the run is stopping, so a queued Retry has nothing left
+        // to retry. What it must not be is silent, hence the
+        // `retry_superseded_by_stop` record ahead of the terminal event. NOT
+        // advancing would be far worse than losing the Retry: this arm does
+        // not consume anything, so every later resume would re-enter it and
+        // append another RunAborted, forever.
+        //
+        // If the Abort is not in `pending_control` (the watcher saw an append
+        // that landed after our read), fall through rather than invent a seq:
+        // the next iteration re-reads control and this arm fires with the real
+        // entry in hand.
+        if let Some(blocked_node) = blocked_by.as_ref()
+            && run_cancel.load(Ordering::SeqCst)
+            && let Some((abort_seq, reason)) = pending_control.iter().find_map(|e| match &e.cmd {
+                Control::Abort { reason } => Some((e.seq, reason.clone())),
+                _ => None,
+            })
+        {
+            log.append(EventPayload::SupervisorAction {
+                action: "retry_superseded_by_stop".into(),
+                node: Some(blocked_node.clone()),
+                detail: format!(
+                    "a pending stop was applied before this command could be consumed, so it was discarded: {reason}"
+                ),
+            })?;
+            log.append(EventPayload::RunAborted { reason })?;
+            write_control_cursor(run_dir, abort_seq)?;
+            return Ok(RunResult {
+                run_id,
+                outcome: RunStatus::Aborted,
+            });
         }
 
         if patch_applied {
@@ -721,9 +1036,25 @@ fn drive(
                     node: current.clone(),
                     attempt: 1,
                 })?;
-                let (st, out, evs) = execute_finish_answer(
-                    &playbook, run_dir, &workdir, &current, &run_id, &state, cfg, p, &env_scrub,
-                )?;
+                // The journal borrows `log` so finish-answer can append its
+                // attempt_started at spawn time; the block scopes that borrow so
+                // `log` is free again for the return-batch and NodeFinished writes.
+                let (st, out, evs) = {
+                    let journal = Journal::new(&mut *log);
+                    execute_finish_answer(
+                        &playbook,
+                        run_dir,
+                        &workdir,
+                        &current,
+                        &run_id,
+                        &state,
+                        cfg,
+                        p,
+                        &run_cancel,
+                        &env_scrub,
+                        &journal,
+                    )?
+                };
                 for ev in evs {
                     log.append(ev)?;
                 }
@@ -817,70 +1148,93 @@ fn drive(
                 // A shared cancel flag: once join:any is ready we set it, and
                 // still-running branches kill their processes (7c-3).
                 let cancel = Arc::new(AtomicBool::new(false));
-                let (tx, rx) = mpsc::channel();
-                for n in &batch {
-                    let playbook_c = playbook.clone();
-                    let rd = run_dir.to_path_buf();
-                    let wd = workdir.clone();
-                    let rid = run_id.clone();
-                    let st = state.clone();
-                    let cfg_c = cfg.clone();
-                    let node = n.clone();
-                    let op = prompt_overrides.remove(n);
-                    let tx = tx.clone();
-                    let cancel_c = Arc::clone(&cancel);
-                    let scrub_c = env_scrub.clone();
-                    std::thread::spawn(move || {
-                        let res = execute_node(
-                            &playbook_c,
-                            &rd,
-                            &wd,
-                            &node,
-                            &rid,
-                            &st,
-                            &cfg_c,
-                            op,
-                            &cancel_c,
-                            &scrub_c,
-                        );
-                        let _ = tx.send((node, res));
-                    });
-                }
-                drop(tx);
-                // Collect completions in readiness order and write their events.
                 let mut batch_statuses: Vec<NodeStatus> = Vec::new();
-                for (node, res) in rx {
-                    let (status, output, evs) = res?;
-                    for ev in evs {
-                        log.append(ev)?;
-                    }
-                    log.append(EventPayload::NodeFinished {
-                        node: node.clone(),
-                        status: status.as_str().into(),
-                        attempt: 1,
-                        output,
-                        // The concurrent batch path does not run through the
-                        // node cache, so it captures no declared artifacts.
-                        artifacts: Vec::new(),
-                    })?;
-                    batch_statuses.push(status);
-                    // If this branch successfully fed a join:any - cancel the others.
-                    if status == NodeStatus::Succeeded {
-                        let state_peek = RunState::fold(&read_all(run_dir)?);
-                        let feeds_ready_any = parallel::successors(&playbook, &node, &state_peek)
-                            .into_iter()
-                            .any(|s| {
-                                parallel::is_join(&playbook, &s)
-                                    && parallel::join_mode(&playbook, &s) == parallel::JoinMode::Any
-                                    && matches!(
-                                        parallel::join_readiness(&playbook, &s, &state_peek),
-                                        JoinReadiness::ReadySuccess
-                                    )
+                // The batch shares ONE journal (the drive's log behind a Mutex)
+                // so each worker thread appends its own attempt_started at spawn
+                // time and attempt_finished at return, while the collector on this
+                // thread appends the returned RetryStarted/FallbackTriggered and
+                // the per-node NodeFinished through the same journal. Scoped
+                // threads let the workers borrow `&Journal` without a 'static
+                // bound; the block scopes the borrow so `log` is free again for
+                // the frontier writes below. Each append is one atomic line
+                // write, so the shared lock is uncontended in practice.
+                {
+                    let journal = Journal::new(&mut *log);
+                    let (tx, rx) = mpsc::channel();
+                    std::thread::scope(|scope| -> Result<(), EngineError> {
+                        for n in &batch {
+                            let playbook_c = playbook.clone();
+                            let rd = run_dir.to_path_buf();
+                            let wd = workdir.clone();
+                            let rid = run_id.clone();
+                            let st = state.clone();
+                            let cfg_c = cfg.clone();
+                            let node = n.clone();
+                            let op = prompt_overrides.remove(n);
+                            let tx = tx.clone();
+                            let cancel_c = Arc::clone(&cancel);
+                            let scrub_c = env_scrub.clone();
+                            let journal_ref = &journal;
+                            scope.spawn(move || {
+                                let res = execute_node(
+                                    &playbook_c,
+                                    &rd,
+                                    &wd,
+                                    &node,
+                                    &rid,
+                                    &st,
+                                    &cfg_c,
+                                    op,
+                                    &cancel_c,
+                                    &scrub_c,
+                                    journal_ref,
+                                );
+                                let _ = tx.send((node, res));
                             });
-                        if feeds_ready_any {
-                            cancel.store(true, Ordering::Relaxed);
                         }
-                    }
+                        drop(tx);
+                        // Collect completions in readiness order and write their events.
+                        for (node, res) in rx {
+                            let (status, output, evs) = res?;
+                            for ev in evs {
+                                journal.append(ev)?;
+                            }
+                            journal.append(EventPayload::NodeFinished {
+                                node: node.clone(),
+                                status: status.as_str().into(),
+                                attempt: 1,
+                                output,
+                                // The concurrent batch path does not run through the
+                                // node cache, so it captures no declared artifacts.
+                                artifacts: Vec::new(),
+                            })?;
+                            batch_statuses.push(status);
+                            // If this branch successfully fed a join:any - cancel the others.
+                            if status == NodeStatus::Succeeded {
+                                let state_peek = RunState::fold(&read_all(run_dir)?);
+                                let feeds_ready_any =
+                                    parallel::successors(&playbook, &node, &state_peek)
+                                        .into_iter()
+                                        .any(|s| {
+                                            parallel::is_join(&playbook, &s)
+                                                && parallel::join_mode(&playbook, &s)
+                                                    == parallel::JoinMode::Any
+                                                && matches!(
+                                                    parallel::join_readiness(
+                                                        &playbook,
+                                                        &s,
+                                                        &state_peek
+                                                    ),
+                                                    JoinReadiness::ReadySuccess
+                                                )
+                                        });
+                                if feeds_ready_any {
+                                    cancel.store(true, Ordering::Relaxed);
+                                }
+                            }
+                        }
+                        Ok(())
+                    })?;
                 }
                 rebuild_context_md(run_dir)?;
                 // unknown/interrupted in any branch - pause the run (as in the
@@ -1103,7 +1457,19 @@ fn drive(
             // object), we drop the hit entirely and fall through to the miss
             // path, so a failed hit never leaves a `NodeCacheHit` without the
             // files it promised (no partial event pair).
-            let hit = match cache_ctx.as_ref().and_then(|c| c.lookup(cfg)) {
+            // A node that already finished once in this run (a loop
+            // re-execution) must NOT replay a cached verdict: skip the lookup so
+            // each iteration runs the node again. The store side is unchanged -
+            // a fresh execution still admits/stores below. Detected from the
+            // folded state (`state` predates this iteration's NodeStarted, so a
+            // terminal status means a prior NodeFinished for this node).
+            let already_finished = state.nodes.get(&current).is_some_and(|st| st.is_finished());
+            let lookup = if already_finished {
+                None
+            } else {
+                cache_ctx.as_ref().and_then(|c| c.lookup(cfg))
+            };
+            let hit = match lookup {
                 Some(entry) => {
                     let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
                     match cache::restore_artifacts(&entry, ctx.store(), run_dir, &workdir) {
@@ -1130,18 +1496,25 @@ fn drive(
                     })?;
                 }
                 let override_prompt = prompt_overrides.remove(&current);
-                let (st, out, evs) = execute_node(
-                    &playbook,
-                    run_dir,
-                    &workdir,
-                    &current,
-                    &run_id,
-                    &state,
-                    cfg,
-                    override_prompt,
-                    &AtomicBool::new(false),
-                    &env_scrub,
-                )?;
+                // The journal borrows `log` for the duration of execute_node so the
+                // node can append attempt_started at spawn time; the block scopes
+                // that borrow so `log` is free again for the return-batch writes.
+                let (st, out, evs) = {
+                    let journal = Journal::new(&mut *log);
+                    execute_node(
+                        &playbook,
+                        run_dir,
+                        &workdir,
+                        &current,
+                        &run_id,
+                        &state,
+                        cfg,
+                        override_prompt,
+                        &run_cancel,
+                        &env_scrub,
+                        &journal,
+                    )?
+                };
                 for ev in evs {
                     log.append(ev)?;
                 }
@@ -1192,6 +1565,19 @@ fn drive(
         // to `current`, before the frontier advances to the successor (B2).
         control_cursor = drain_progress_after_execute(run_dir, log, control_cursor, &current)?;
 
+        // A stop landed while this node was in flight (Task 8): the watcher
+        // set the cancel flag and the agent's process tree was killed, so the
+        // status just journaled is the wreckage of an interrupted node, not a
+        // verdict on the work. Go straight back to the top-of-loop control
+        // scan, which applies the pending Abort exactly as it always has and
+        // returns Aborted. Without this hop that status would first be routed
+        // through the pause/wake/failure handling below and the run would
+        // finalize as Paused or Failed instead of Aborted.
+        if run_cancel.load(Ordering::SeqCst) && !cancel_short_circuited {
+            cancel_short_circuited = true;
+            continue;
+        }
+
         // unknown/interrupted halt progression (Phase 2 without supervisor - run pauses).
         if matches!(status, NodeStatus::Unknown | NodeStatus::Interrupted) {
             log.append(EventPayload::RunPaused {
@@ -1222,7 +1608,15 @@ fn drive(
 
             loop {
                 let (cmd, seq) = await_control(run_dir, log, control_cursor, &current)?;
-                control_cursor = Some(seq);
+                // `await_control` applies ContextAppend/Progress in place (and
+                // persists their own cursor internally) before ever returning;
+                // whatever it DOES return (Retry/ContinueFrom/Pause/Abort/Patch)
+                // is applied right here in each arm below. Cursor persistence
+                // happens AFTER the arm's effect (log.append/apply_patch), not
+                // before: those calls can themselves err on ordinary I/O
+                // conditions, and persisting first would permanently drop the
+                // entry (it would never resurface on the next drive) exactly
+                // when its effect failed to happen.
                 match cmd {
                     // await_control applies ContextAppend and Progress in-place
                     // and never returns them (see its implementation above) - these
@@ -1239,6 +1633,8 @@ fn drive(
                             node: Some(node.clone()),
                             detail: prompt_override.clone().unwrap_or_default(),
                         })?;
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
                         if let Some(p) = prompt_override {
                             prompt_overrides.insert(node.clone(), p);
                         }
@@ -1251,6 +1647,8 @@ fn drive(
                             node: Some(node.clone()),
                             detail: String::new(),
                         })?;
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
                         current = node;
                         break;
                     }
@@ -1259,7 +1657,7 @@ fn drive(
                         classification,
                         continue_from,
                     } => {
-                        match apply_patch(
+                        let result = apply_patch(
                             root,
                             run_dir,
                             log,
@@ -1271,7 +1669,10 @@ fn drive(
                                 classification,
                                 continue_from,
                             },
-                        )? {
+                        )?;
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
+                        match result {
                             PatchResult::Applied(applied) => {
                                 last_applied_patch = Some(*applied);
                                 frontier.clear();
@@ -1290,6 +1691,11 @@ fn drive(
                         log.append(EventPayload::RunPaused {
                             reason: "supervisor pause".into(),
                         })?;
+                        // The function returns right below, so there is no
+                        // further loop iteration to read the in-memory
+                        // `control_cursor` back - only the persisted file
+                        // matters here (read by the next drive's init).
+                        write_control_cursor(run_dir, seq)?;
                         return Ok(RunResult {
                             run_id,
                             outcome: RunStatus::Paused,
@@ -1297,6 +1703,7 @@ fn drive(
                     }
                     Control::Abort { reason } => {
                         log.append(EventPayload::RunAborted { reason })?;
+                        write_control_cursor(run_dir, seq)?;
                         return Ok(RunResult {
                             run_id,
                             outcome: RunStatus::Aborted,
@@ -1515,16 +1922,32 @@ fn resume_inner(
         log.append(ev)?;
     }
 
-    let state = RunState::fold(&read_all(&run_dir)?);
-    let start_node = match from_node {
-        Some(n) => n.to_string(),
-        None => state
-            .last_node
-            .clone()
-            .ok_or_else(|| EngineError::Invalid("nothing to resume from".into()))?,
-    };
-    log.append(EventPayload::RunPaused {
-        reason: format!("resume from `{start_node}`"),
+    // Decide where and how to resume (Task 3): restart interrupted work, advance
+    // past a finished node without re-executing it, fall back for a cut-short
+    // parallel fork, or honor an explicit `--from-node`. A pointless resume (an
+    // argument-free resume of a succeeded run) is refused here.
+    let decision = plan_resume(root, run_id, from_node)?;
+    // Refuse a pointless `After`-mode resume BEFORE journaling anything: if the
+    // already-finished start node has no pending successor to advance into (for
+    // example a no-arg resume of a failed terminal run whose last node has no
+    // matching failure edge), return an error with NO journal side effect.
+    // Writing `RunResumed` first and only discovering the empty frontier inside
+    // `drive` would persist a marker after the terminal `RunFinished`, folding
+    // the run to running forever and appending another marker on every retry.
+    if decision.mode == StartMode::After {
+        let state = RunState::fold(&read_all(&run_dir)?);
+        if seed_successors(&playbook, &decision.start_node, &state).is_empty() {
+            return Err(EngineError::Invalid(format!(
+                "node `{}` already finished with no pending successor to resume into - pass --from-node to re-run from a specific node",
+                decision.start_node
+            )));
+        }
+    }
+    // Journal a proper `run_resumed` marker (folds to running), replacing the
+    // old `RunPaused { reason: "resume from X" }` write that used to leave the
+    // folded status stuck on paused for the rest of the run.
+    log.append(EventPayload::RunResumed {
+        from_node: decision.start_node.clone(),
     })?;
     // Mirrors prepare's predicate (`NodeKind::takes_workdir_lock`): a resumed
     // parent with a sub-playbook node (or a finish-with-prompt agent node)
@@ -1546,7 +1969,8 @@ fn resume_inner(
         root,
         &mut log,
         &cfg,
-        start_node,
+        decision.start_node,
+        decision.mode,
         run_id.to_string(),
         RunMode::Autonomous,
         supervisor_expected,

@@ -10,6 +10,12 @@ permissions:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # The gate that a tagged release actually ships through, so it gets the
+    # same ceiling as CI. Without one the default is 360 minutes, and a hung
+    # test would hold a release for six hours reporting nothing. A stuck TEST
+    # is caught far earlier, and by name, by nextest's per-test terminate-after
+    # (.config/nextest.toml).
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -41,17 +47,35 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Prebuilt binary: seconds to install, nothing compiled into target/, so
+      # the cargo cache above is untouched.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Format check
         run: cargo fmt --all -- --check
 
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Mirrors ci.yml: same selection as `cargo test --workspace`, same
+      # #[ignore] handling, but each test in its own process so the per-test
+      # timeout is enforceable and a hang becomes a named failing test.
       - name: Test
-        run: cargo test --workspace
+        run: cargo nextest run --profile ci --workspace
+
+      # nextest does not run doctests; `cargo test --workspace` did.
+      - name: Doctests
+        run: cargo test --workspace --doc
 
   build:
     needs: [test]
+    # Each matrix leg is one release build of the workspace on a cold cache,
+    # plus the bun build: minutes, not tens of minutes. 45 leaves room for a
+    # slow runner and for the musl leg, which is the heaviest, while still
+    # ending a wedged build in under an hour instead of the default six.
+    # Per-leg, not for the matrix as a whole.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

@@ -43,3 +43,38 @@ fn json_uses_snake_case_type_tag() {
     let json = serde_json::to_value(&playbook).unwrap();
     assert_eq!(json["nodes"][1]["type"], "agent_task");
 }
+
+const EDGE_WF: &str = r#"schema: 2
+id: loop
+name: Loop
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a, max_traversals: 3 }
+  - { from: a, to: done }
+"#;
+
+#[test]
+fn edge_max_traversals_round_trips_and_omits_when_absent() {
+    let playbook = Playbook::from_yaml(EDGE_WF).unwrap();
+    assert_eq!(playbook.edges[0].max_traversals, Some(3));
+    assert_eq!(playbook.edges[1].max_traversals, None);
+
+    // Serialize back to YAML: the field is preserved when set and omitted when
+    // absent (skip_serializing_if).
+    let yaml = serde_yaml_ng::to_string(&playbook).unwrap();
+    assert!(
+        yaml.contains("max_traversals: 3"),
+        "set value must round-trip"
+    );
+    let reparsed = Playbook::from_yaml(&yaml).unwrap();
+    assert_eq!(reparsed.edges[0].max_traversals, Some(3));
+    assert_eq!(reparsed.edges[1].max_traversals, None);
+
+    // The absent edge (index 1) must not emit a max_traversals key.
+    let json = serde_json::to_value(&playbook).unwrap();
+    assert!(json["edges"][1].get("max_traversals").is_none());
+}

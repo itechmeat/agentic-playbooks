@@ -137,6 +137,8 @@ apb validate        validate playbook schema
 apb run <id>        run a playbook (--overrides, --supervise, params)
 apb runs            list runs
 apb resume <run>    resume a paused or interrupted run
+apb stop <run>      stop a run: interrupt the running node, finalize if the driver is gone
+apb note <run> <t>  post a note (context append) to a run's control channel
 apb review          decide a pending human_review node
 apb serve           web UI (port 7321)
 apb mcp             stdio MCP server for coding agents
@@ -150,7 +152,7 @@ apb profile         list / show / write / edit agent profiles
 apb connector       list / show / call / approve / doctor / env / init - connectors to external services
 apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles)
 apb adopt           adoption readiness report for a playbook
-apb doctor          diagnose agents, profiles, runners, playbooks
+apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> for one run's health)
 apb export/import   move a playbook as a single bundle file
 ```
 
@@ -225,6 +227,42 @@ Please report suspected vulnerabilities privately as described in
 
 Contributions are welcome. Please read [CONTRIBUTING.md](CONTRIBUTING.md).
 All commits must be signed off under the [Developer Certificate of Origin](DCO).
+
+### Help apb improve: the feedback loop
+
+apb is under active development, and the most valuable reports come from real
+supervised runs. If you drive playbooks through a coding agent, add the block
+below to your `CLAUDE.md` or `AGENTS.md` so the agent reports what it hits.
+
+```markdown
+## apb feedback loop (standing instruction)
+
+apb (agentic-playbooks) is under active development. On every playbook run you
+supervise from this workspace, collect flaws, bugs, and improvement ideas that
+belong to apb itself: the MCP server, the playbook engine, the validator, the
+supervisor tools, the run lifecycle. Keep those separate from problems that
+belong to our own playbooks, profiles, or prompts, which are ours to fix.
+
+When the run is finished (PRs created, run closed) and the list is not empty,
+first search the open issues at
+https://github.com/itechmeat/agentic-playbooks/issues for each finding. Comment
+on an existing issue when one already covers it. File the remainder as ONE
+consolidated issue per run, in English, with `gh issue create --repo
+itechmeat/agentic-playbooks`.
+
+Each finding in that issue should carry:
+
+- the symptom, stated concretely, with the exact error text or tool output
+- the apb version (`apb --version`) and how the run was driven (MCP or CLI)
+- what you expected instead, and why
+- the reproduction context: the node kind, the playbook shape that triggered it,
+  and whether it survived a resume
+- a suggestion, when you have one
+
+Attach the run id and any relevant lines from `runs/<id>/events.jsonl` when they
+make the report reproducible. Never include secrets, tokens, or private prompt
+content in an issue.
+```
 
 ## License
 

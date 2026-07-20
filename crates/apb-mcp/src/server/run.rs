@@ -15,7 +15,7 @@ use crate::tools::{self, ToolError};
 #[tool_router(router = run_router, vis = "pub(crate)")]
 impl WfMcp {
     #[tool(
-        description = "Trial-run a draft playbook by its effects matrix: filesystem-writing ones run in a throwaway git worktree and return a diff; irreversible ones are refused. Does not activate the playbook.",
+        description = "Trial-run a draft playbook by its effects matrix: filesystem-writing ones run in a throwaway git worktree and return a diff; irreversible ones are refused. Accepts an optional instruction, exactly like playbook_run, rendered as {{run.instruction}}. Does not activate the playbook.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_trial(
@@ -24,6 +24,7 @@ impl WfMcp {
             id,
             version,
             params,
+            instruction,
             scope,
         }): Parameters<PlaybookTrialArgs>,
     ) -> CallToolResult {
@@ -33,6 +34,7 @@ impl WfMcp {
             &id,
             version.as_deref(),
             params,
+            instruction,
             scope,
         ))
     }
@@ -319,7 +321,7 @@ impl WfMcp {
                 ..Default::default()
             };
             if background == Some(true) {
-                return match apb_engine::run_background_resolved(&resolved, opts) {
+                return match apb_engine::start_detached_resolved(&resolved, opts) {
                     Ok(run_id) => {
                         to_call_tool_result(Ok(json!({ "run_id": run_id, "scope": "global" })))
                     }
@@ -377,7 +379,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Get the current status of a run",
+        description = "Get the current status of a run, including liveness: `driver_alive` (null when no process claims the run), `node_times` with each node's start and the age and pid of its open attempt, and the node status `lost` for a node whose attempt process is gone. Use `node_times` to tell a slow node from a stuck one, and `apb doctor --run <id>` for a full per-run diagnosis.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn run_status(
@@ -446,6 +448,21 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         to_call_tool_result(tools::run_report(&root, &run_id))
+    }
+
+    #[tool(
+        description = "Stop a run: interrupts the node it is executing right now, and finalizes it outright if the process that was driving it is gone. Returns which of those happened.",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn run_stop(
+        &self,
+        Parameters(RunRefArgs { run_id, workspace }): Parameters<RunRefArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(tools::run_stop(&root, &run_id))
     }
 
     #[tool(

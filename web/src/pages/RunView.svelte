@@ -3,7 +3,7 @@
   import '@xyflow/svelte/dist/style.css'
   import { fetchRun, fetchRunReport, postReview } from '../lib/api'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
-  import { interventionJournal } from '../lib/journal'
+  import { interventionJournal, runEventJournal } from '../lib/journal'
   import { pendingReviews } from '../lib/reviews'
   import { cachedNodeIds } from '../lib/runcache'
   import { pendingWaits } from '../lib/waits'
@@ -30,6 +30,7 @@
 
   const nodeTypes = { playbookNode: PlaybookNode }
   const journal = $derived(detail ? interventionJournal(detail.events) : [])
+  const eventJournal = $derived(detail ? runEventJournal(detail.events) : [])
   const pending = $derived(detail ? pendingReviews(detail.events) : [])
   const waiting = $derived(detail ? pendingWaits(detail.events) : [])
   const hookEntries = $derived(Object.entries(detail?.hooks ?? {}))
@@ -224,7 +225,7 @@
       <Tabs.Content value="events">
         {#if detail}
           <ol class="flex flex-col gap-1 text-xs">
-            {#each detail.events as e (e.seq)}
+            {#each eventJournal as e (e.seq)}
               <li class="flex items-center gap-1.5">
                 <code class="rounded bg-muted px-1 py-0.5">{e.type}</code>
                 {#if e.node}<span class="text-muted-foreground">{e.node}</span>{/if}

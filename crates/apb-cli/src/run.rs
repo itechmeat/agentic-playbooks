@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 use apb_core::fsutil::atomic_write;
 use apb_core::registry::{Registry, is_safe_segment};
 use apb_core::validate::{Severity, ValidationContext, validate};
+use apb_engine::control::Control;
 use apb_engine::run_config::CacheRunMode;
 use apb_engine::state::RunStatus;
 use apb_engine::{
-    ReviewCommand, RunMode, RunOptions, drive_prepared, list_runs, post_review,
-    prepare_supervised_background, resume, run,
+    ReviewCommand, RunMode, RunOptions, StopOutcome, drive_prepared, list_runs, post_review,
+    post_supervisor_command, prepare_supervised_background, resume, run, stop_run,
 };
 
 use crate::util::open_registry;
@@ -142,7 +143,48 @@ pub(crate) fn run_list(root: &Path) -> ExitCode {
     }
 }
 
-pub(crate) fn run_doctor(root: &Path) -> ExitCode {
+/// `apb doctor`, and with `--run <id>` the per-run doctor.
+///
+/// The two reports print the same way (one `[level] subject: detail` line per
+/// check, non-zero exit on a blocking one) because they answer the same kind
+/// of question at different scopes, and an operator should not have to learn
+/// two output formats while debugging a stuck run.
+pub(crate) fn run_doctor(root: &Path, run: Option<&str>) -> ExitCode {
+    match run {
+        Some(run_id) => doctor_run(root, run_id),
+        None => doctor_env(root),
+    }
+}
+
+/// The per-run doctor. Read-only: it names problems and repairs nothing, so
+/// the repair verbs (`apb stop`, resume) stay explicit operator decisions.
+fn doctor_run(root: &Path, run_id: &str) -> ExitCode {
+    use apb_engine::run_doctor::{FAIL, OK, WARN, diagnose_run, has_failure};
+    let checks = match diagnose_run(root, run_id) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("doctor: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    for c in &checks {
+        let marker = match c.status {
+            OK => "[ok]  ",
+            WARN => "[warn]",
+            FAIL => "[fail]",
+            other => other,
+        };
+        println!("{marker} {}: {}", c.subject, c.detail);
+    }
+    if has_failure(&checks) {
+        eprintln!("doctor: found blocking problems");
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn doctor_env(root: &Path) -> ExitCode {
     use apb_core::doctor::{CheckStatus, diagnose};
     let report = diagnose(root);
     for c in &report.checks {
@@ -508,6 +550,39 @@ pub(crate) fn drive_supervised_child(
     }
 }
 
+/// Body of the hidden `__drive-run` subcommand: the detached driver process.
+/// The run was already prepared (or already ran, for `--resume`) by whoever
+/// spawned us - CLI, MCP server, anything that calls
+/// `apb_engine::driver::spawn_detached_driver` - and everything this process
+/// needs is on disk under `runs/<run_id>`. The whole drive loop is synchronous
+/// HERE, which is what lets the run outlive the process that launched it.
+///
+/// Stdio is normally nulled by the spawner, so the exit code carries the
+/// outcome; diagnostics still go to stderr for the case where the command is
+/// invoked directly.
+pub(crate) fn drive_run_child(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    resume: bool,
+) -> ExitCode {
+    let res = if resume {
+        apb_engine::resume(root, run_id, from_node)
+    } else {
+        apb_engine::drive_run_from_dir(root, run_id)
+    };
+    match res {
+        Ok(r) => match r.outcome {
+            RunStatus::Succeeded => ExitCode::SUCCESS,
+            _ => ExitCode::from(1),
+        },
+        Err(e) => {
+            eprintln!("drive of run `{run_id}` failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
 pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
     match list_runs(root) {
         Ok(runs) if runs.is_empty() => {
@@ -528,9 +603,22 @@ pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
 }
 
 pub(crate) fn resume_cmd(root: &Path, run_id: &str, from_node: Option<&str>) -> ExitCode {
+    // Read BEFORE the drive: a resume of a run with a pending stop applies that
+    // stop before it executes anything and returns immediately, which otherwise
+    // looks like a resume that silently did nothing. Best effort - an
+    // unreadable control queue must not fail the resume itself.
+    let pending_stop = apb_engine::control::pending_stop_seq(&root.join(".apb/runs").join(run_id))
+        .ok()
+        .flatten()
+        .is_some();
     match resume(root, run_id, from_node) {
         Ok(res) => {
             println!("resume {} finished: {}", res.run_id, res.outcome.as_str());
+            if pending_stop && res.outcome == RunStatus::Aborted {
+                println!(
+                    "this resume only applied a stop that was still pending, so nothing else ran; resume again to continue past it"
+                );
+            }
             match res.outcome {
                 RunStatus::Succeeded => ExitCode::SUCCESS,
                 _ => ExitCode::from(1),
@@ -538,6 +626,64 @@ pub(crate) fn resume_cmd(root: &Path, run_id: &str, from_node: Option<&str>) -> 
         }
         Err(e) => {
             eprintln!("resume failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Stops a run: `apb stop <run_id>`.
+///
+/// Posts the abort, which the driving process picks up within a fraction of a
+/// second and uses to kill whatever agent the run has in flight. When no
+/// process is driving the run any more - a driver that crashed, taking the run
+/// down with it and leaving it reading `running` forever - the stop finalizes
+/// the run itself. `stop_run` validates `run_id` and existence.
+pub(crate) fn stop_cmd(root: &Path, run_id: &str) -> ExitCode {
+    match stop_run(root, run_id) {
+        Ok(StopOutcome::SignaledLiveDriver) => {
+            println!("stopping {run_id}: abort sent to the running driver");
+            ExitCode::SUCCESS
+        }
+        Ok(StopOutcome::FinalizedDeadRun) => {
+            println!("stopped {run_id}: no driver was running, the run is now aborted");
+            ExitCode::SUCCESS
+        }
+        Ok(StopOutcome::AlreadyTerminal) => {
+            // Deliberately not "nothing to stop": this outcome also covers a
+            // run that finished while the stop was in flight, in which case an
+            // abort has already been posted. What is true in both cases is
+            // that the run had reached a terminal state on its own.
+            println!("{run_id} had already finished, so no run was stopped");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("stop failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Posts a supervisor note (`Control::ContextAppend`) to a run's control
+/// channel: `runs/<id>/control.jsonl`. Applied at the nearest drive-loop
+/// iteration boundary (top-of-loop scan, or immediately if the run is
+/// currently waiting in `await_control`) - the note lands in context.md and
+/// every subsequent `{{run.context}}` render, same as the MCP
+/// `supervisor_context_append` tool. `post_supervisor_command` validates
+/// `run_id` and existence itself; no separate check needed here.
+pub(crate) fn note_cmd(root: &Path, run_id: &str, text: &str) -> ExitCode {
+    match post_supervisor_command(
+        root,
+        run_id,
+        Control::ContextAppend {
+            note: text.to_string(),
+        },
+    ) {
+        Ok(seq) => {
+            println!("note posted for {run_id} (seq {seq})");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("note failed: {e}");
             ExitCode::from(2)
         }
     }

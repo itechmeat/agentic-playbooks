@@ -65,3 +65,31 @@ describe('toFlow', () => {
     expect(nodes[0].data.cached).toBeUndefined()
   })
 })
+
+// review -> fix -> review is a bounded loop (max_traversals), legal since the
+// run-reliability change. Playbook graphs are no longer guaranteed to be
+// DAGs, so layout must not throw and must not hang.
+const cyclicPlaybook = {
+  id: 'loopy',
+  name: 'Loopy',
+  nodes: [
+    { id: 'review', type: 'agent_task', title: 'Review' },
+    { id: 'fix', type: 'agent_task', title: 'Fix' },
+    { id: 'done', type: 'finish', title: 'Done' },
+  ],
+  edges: [
+    { from: 'review', to: 'fix', condition: { type: 'node_status', node: 'review', equals: 'failed' } },
+    { from: 'fix', to: 'review', max_traversals: 2 },
+    { from: 'review', to: 'done', condition: { type: 'node_status', node: 'review', equals: 'success' } },
+  ],
+}
+
+describe('toFlow with a cyclic (bounded-loop) playbook', () => {
+  it('lays out the cycle without throwing and renders all three nodes', () => {
+    expect(() => toFlow(cyclicPlaybook, null)).not.toThrow()
+    const { nodes, edges } = toFlow(cyclicPlaybook, null)
+    expect(nodes).toHaveLength(3)
+    expect(nodes.map((n) => n.id).sort()).toEqual(['done', 'fix', 'review'])
+    expect(edges).toHaveLength(3)
+  })
+})

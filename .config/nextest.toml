@@ -1,0 +1,44 @@
+# Per-test timeouts, so a hung test is a named failing test instead of a dead
+# CI job.
+#
+# `cargo test` cannot express this: it runs every test of a binary in one
+# process, so one stuck test takes the whole binary with it and the job sits
+# there until the workflow ceiling (formerly the 360-minute default) or a human
+# cancels it. That is exactly what happened to
+# `detached_driver_test::mcp_background_run_survives_a_group_kill_of_the_mcp_process`,
+# which blocked forever in an unbounded `child.wait()` and burned 30 minutes
+# while reporting nothing about which test was stuck or why. nextest runs each
+# test in its own process and can therefore enforce a deadline per test.
+#
+# Retries are deliberately left off everywhere (nextest's default): a hang that
+# a retry papers over is a defect that should be visible on the first run.
+#
+# Reading the settings below: `period` is how long a test runs before nextest
+# reports it as SLOW, which on its own changes nothing - the test keeps going.
+# `terminate-after` is how many of those periods it gets before nextest ends
+# it, sending SIGTERM first and escalating to SIGKILL if it does not go, and
+# failing it by name. So the real ceiling is period x terminate-after.
+
+# Local runs. Looser than CI, because the ceiling here has to clear the slowest
+# HONEST test on any developer machine, and on macOS that is not the test
+# logic: `apb_server::watch::spawn_watcher` takes ~34s to register an FSEvents
+# watch on a tempdir under /var/folders (measured; the watcher's own drop is
+# ~350us and the two watcher tests' assertion loops are bounded at 5s). The
+# Linux inotify path CI uses does not pay that cost.
+#
+# Two periods, so 120s: comfortably clear of that ~34s case while still
+# catching a genuine local hang in two minutes rather than ten.
+[profile.default]
+slow-timeout = { period = "60s", terminate-after = 2 }
+
+# CI (Linux). This is the profile that actually enforces the anti-hang
+# property. The honest worst case in this workspace is the detached-driver
+# suite at roughly 11s per test, and the whole job ran under 3 minutes before
+# the run-reliability branch, so 180s per test is a wide margin over anything
+# healthy while still converting a genuine hang into a named failure in
+# minutes rather than hours.
+[profile.ci]
+slow-timeout = { period = "60s", terminate-after = 3 }
+# Let the whole run finish and report every failure rather than stopping at the
+# first: a hang is worth knowing about even if another test already failed.
+fail-fast = false

@@ -8,6 +8,7 @@ use std::path::Path;
 use std::sync::MutexGuard;
 
 use apb_core::registry::init_project;
+use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, resume_with, run};
 use apb_engine::state::RunStatus;
 
@@ -108,6 +109,74 @@ fn run_with_profile_snapshots_and_writes_manifest() {
     let manifest = fs::read_to_string(run_dir.join("manifest.yaml")).expect("manifest exists");
     assert!(manifest.contains("bundle_digest"));
     assert!(manifest.contains("arch"));
+}
+
+#[test]
+fn attempt_journaled_at_spawn_with_pid_and_duration() {
+    // Task 2 (spawn-time attempt journaling): a real stub-agent node must
+    // journal attempt_started at spawn (carrying the child pid) strictly before
+    // attempt_finished (carrying duration_ms measured from the spawn instant),
+    // with distinct timestamps. This is the write shape that makes a mid-attempt
+    // crash observable: attempt_started is on disk before the agent returns. The
+    // stub sleeps briefly so the spawn write and the return write land in
+    // distinct milliseconds.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(proj.path(), "arch", "", "", "role");
+    set_env(
+        &make_stub(bin.path(), "sleep 0.05\necho done"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run ok");
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).expect("events readable");
+
+    let started = events
+        .iter()
+        .find(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "t"))
+        .expect("attempt_started for node t");
+    let finished = events
+        .iter()
+        .find(|e| matches!(&e.payload, EventPayload::AttemptFinished { node, .. } if node == "t"))
+        .expect("attempt_finished for node t");
+
+    // Ordering: started strictly before finished in the journal.
+    assert!(
+        started.seq < finished.seq,
+        "attempt_started (seq {}) must precede attempt_finished (seq {})",
+        started.seq,
+        finished.seq
+    );
+    // Distinct, ordered timestamps: the spawn-time write predates the
+    // return-time write. With back-to-back writes these could share a ms.
+    assert!(
+        started.ts < finished.ts,
+        "attempt_started ts {} must be strictly before attempt_finished ts {}",
+        started.ts,
+        finished.ts
+    );
+    // pid captured at spawn from child.id().
+    let EventPayload::AttemptStarted { pid, .. } = &started.payload else {
+        unreachable!("matched AttemptStarted above")
+    };
+    assert!(pid.is_some(), "attempt_started.pid must be Some at spawn");
+    // duration_ms measured from the spawn instant.
+    let EventPayload::AttemptFinished { duration_ms, .. } = &finished.payload else {
+        unreachable!("matched AttemptFinished above")
+    };
+    assert!(
+        duration_ms.is_some(),
+        "attempt_finished.duration_ms must be Some"
+    );
 }
 
 #[test]
@@ -468,6 +537,168 @@ fn fallback_event_carries_profile_ref() {
 }
 
 #[test]
+fn fallback_skips_identical_agent_and_model_binding() {
+    // Task 6: a chain claude(haiku) -> claude(haiku) - the fallback resolves
+    // to the exact same (agent, model) pair as the primary that just failed
+    // (e.g. a token-permission failure a model swap cannot help). The guard
+    // must skip the fallback step entirely: no attempt, no
+    // fallback_triggered, and the node fails once the one real step is
+    // exhausted.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: claude, model: haiku }\n",
+        "",
+        "role",
+    );
+    set_env(
+        &make_stub(bin.path(), "echo boom 1>&2\nexit 1"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run returns");
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::FallbackTriggered { .. })),
+        "identical fallback binding must not emit fallback_triggered"
+    );
+    let attempt_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "t"))
+        .count();
+    assert_eq!(
+        attempt_count, 1,
+        "only the first (real) step should be attempted; the identical fallback must be skipped silently"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "t" && status == "failed"
+        )),
+        "node must fail once its only real step is exhausted"
+    );
+}
+
+#[test]
+fn fallback_triggers_when_model_differs() {
+    // Companion to the identical-binding test above: a chain claude(haiku) ->
+    // claude(sonnet) differs on model, so the fallback is a genuinely
+    // different attempt and must still run normally (one fallback_triggered,
+    // an attempt for each step).
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: claude, model: sonnet }\n",
+        "",
+        "role",
+    );
+    set_env(
+        &make_stub(bin.path(), "echo boom 1>&2\nexit 1"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run returns");
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+
+    let fallback_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::FallbackTriggered { .. }))
+        .count();
+    assert_eq!(
+        fallback_count, 1,
+        "a genuinely different (agent, model) fallback must still trigger"
+    );
+    let attempt_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "t"))
+        .count();
+    assert_eq!(
+        attempt_count, 2,
+        "both steps of a non-identical chain must be attempted"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "t" && status == "failed"
+        )),
+        "node must fail once the whole chain is exhausted"
+    );
+}
+
+#[test]
+fn fallback_guard_compares_consecutive_steps_only() {
+    // The guard compares a step against the step that JUST failed, not
+    // against every previously tried step: a chain X -> Y -> X (haiku ->
+    // sonnet -> haiku) must still attempt the third step, because the step
+    // immediately before it (sonnet) differs, even though the first step
+    // shares its binding.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: claude, model: sonnet }\n    - { agent: claude, model: haiku }\n",
+        "",
+        "role",
+    );
+    set_env(
+        &make_stub(bin.path(), "echo boom 1>&2\nexit 1"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run returns");
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+
+    let fallback_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::FallbackTriggered { .. }))
+        .count();
+    assert_eq!(
+        fallback_count, 2,
+        "X -> Y -> X must trigger both fallbacks: the guard only skips a step identical to the one that just failed"
+    );
+    let attempt_count = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "t"))
+        .count();
+    assert_eq!(
+        attempt_count, 3,
+        "all three steps of X -> Y -> X must be attempted"
+    );
+}
+
+#[test]
 fn env_drift_stops_resume_unless_allowed() {
     let _l = lock();
     let _g = EnvGuard;
@@ -597,5 +828,66 @@ fn live_profile_edit_after_start_does_not_affect_resume() {
     assert!(
         !got.contains("NEW-SOUL-MARKER"),
         "resume picked up live-edited SOUL: {got}"
+    );
+}
+
+/// The finish-answer path carries its OWN copy of the fallback sameness guard
+/// (`execute_finish_answer`), and only `execute_node`'s copy was covered. Same
+/// property, asserted where the second copy lives: a chain claude(haiku) ->
+/// claude(haiku) behind a finish-with-prompt must attempt the first step only
+/// and emit no fallback_triggered, because a fallback to the identical
+/// (agent, model) pair is not a different attempt.
+#[test]
+fn finish_answer_fallback_skips_identical_agent_and_model_binding() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    init_project(proj.path()).unwrap();
+    let src = "schema: 1\nid: pf\nname: PF\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success, prompt: \"sum up\", profile: arch }\nedges:\n  - { from: start, to: done }\n";
+    let dir = proj.path().join(".apb/playbooks/pf/1.0.0");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("playbook.yaml"), src).unwrap();
+    fs::write(proj.path().join(".apb/playbooks/pf/current"), "1.0.0").unwrap();
+    seed_profile(
+        proj.path(),
+        "arch",
+        "  fallbacks:\n    - { agent: claude, model: haiku }\n",
+        "",
+        "role",
+    );
+    set_env(
+        &make_stub(bin.path(), "echo boom 1>&2\nexit 1"),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "pf", None, RunOptions::default()).expect("run returns");
+    assert_eq!(
+        res.outcome,
+        RunStatus::Failed,
+        "the answer composition fails once its one real step is exhausted"
+    );
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::FallbackTriggered { .. })),
+        "an identical finish-answer fallback binding must not emit fallback_triggered"
+    );
+    let attempts = events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "done"),
+        )
+        .count();
+    assert_eq!(
+        attempts, 1,
+        "only the first (real) step of the finish-answer chain should be attempted"
     );
 }

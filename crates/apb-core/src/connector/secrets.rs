@@ -13,8 +13,16 @@ use std::io::Read as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// How long the pipe-drain threads get to hand back what they read once the
+/// command itself has exited. Generous, because it is not a work budget: the
+/// pipes are normally already at EOF by then and the value arrives instantly.
+/// It exists only so a descendant that inherited the pipes cannot block the
+/// caller forever.
+const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Parses a `{{env.VAR}}` secret reference: the whole value must be exactly
 /// that placeholder (no surrounding text), with `VAR` matching
@@ -199,17 +207,27 @@ pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<String, CmdSecret
     // Drain both pipes on their own threads so a large output cannot deadlock
     // the child against a full pipe while we wait; keep the child handle so
     // the deadline can kill it.
+    // Results come back over channels rather than through `JoinHandle::join`:
+    // the command may leave a descendant that inherited these pipes, and that
+    // descendant - not the command we waited for - decides when EOF arrives.
+    // A `join` would then block for as long as the descendant lives, turning
+    // this bounded-by-`timeout` helper into an unbounded one. With channels
+    // the collection carries its own deadline; a reader thread still stuck on
+    // the pipe is abandoned (it holds nothing this process needs) instead of
+    // holding the caller.
     let mut out_pipe = child.stdout.take().expect("stdout piped");
     let mut err_pipe = child.stderr.take().expect("stderr piped");
-    let out_join = thread::spawn(move || {
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = out_pipe.read_to_end(&mut buf);
-        buf
+        let _ = out_tx.send(buf);
     });
-    let err_join = thread::spawn(move || {
+    let (err_tx, err_rx) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = err_pipe.read_to_end(&mut buf);
-        buf
+        let _ = err_tx.send(buf);
     });
 
     let deadline = Instant::now() + timeout;
@@ -228,8 +246,21 @@ pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<String, CmdSecret
         }
     };
 
-    let stdout = out_join.join().unwrap_or_default();
-    let stderr = err_join.join().unwrap_or_default();
+    // The command has exited, so its own pipe ends are closed and EOF is
+    // normally already there; the budget only covers a surviving descendant
+    // still holding them open. Unlike the agent adapter, this cannot cut that
+    // descendant loose by killing the process group: the command is spawned
+    // into OUR group (no `process_group(0)` here), so a group kill would take
+    // the caller down with it. The budget is therefore the whole defence.
+    //
+    // Reported as `Timeout` rather than falling through to `Empty`: the
+    // command may well have printed a perfectly good secret that is still
+    // sitting unread in the pipe, and "your secret command produced nothing"
+    // would send whoever hits this looking in the wrong place.
+    let Ok(stdout) = out_rx.recv_timeout(DRAIN_BUDGET) else {
+        return Err(CmdSecretError::Timeout);
+    };
+    let stderr = err_rx.recv_timeout(DRAIN_BUDGET).unwrap_or_default();
     let excerpt = stderr_excerpt(&stderr);
 
     if !status.success() {
@@ -770,6 +801,51 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "timeout did not preempt sleep"
+        );
+    }
+
+    // A secret command that exits but leaves a descendant holding its stdout.
+    // A password-manager CLI that talks to (or starts) a long-lived agent
+    // daemon is the realistic shape of this.
+    //
+    // The drain threads read to EOF, and EOF here belongs to the descendant,
+    // not to the command: before the bound, `out_join.join()` waited on it for
+    // as long as it chose to live, hanging the whole resolve. Now the wait is
+    // capped and the failure is named. This is the ONE path where the fix
+    // cannot also rescue the value: the command is spawned into our own
+    // process group, so the group kill that saves the agent adapter would kill
+    // the caller too, and a bounded loss is the best available outcome.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cmd_descendant_holding_stdout_times_out_instead_of_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_stub(
+            dir.path(),
+            "daemon-secret",
+            "#!/bin/sh\nsleep 300 &\necho $! > \"$(dirname \"$0\")/held.pid\"\necho tok\n",
+        );
+        let started = std::time::Instant::now();
+        let got = resolve_cmd(&stub.to_string_lossy(), std::time::Duration::from_secs(10));
+
+        // Reap the descendant before asserting, so a failure cannot leak a
+        // 300-second sleep.
+        if let Ok(pid) = std::fs::read_to_string(dir.path().join("held.pid"))
+            && let Ok(pid) = pid.trim().parse::<i32>()
+        {
+            // SAFETY: `kill` takes no pointers; an unknown pid is ESRCH.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+
+        assert!(
+            matches!(got, Err(CmdSecretError::Timeout)),
+            "a descendant holding stdout must surface as Timeout, got {got:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "the drain was not bounded: {:?} against a descendant sleeping 300s",
+            started.elapsed()
         );
     }
 

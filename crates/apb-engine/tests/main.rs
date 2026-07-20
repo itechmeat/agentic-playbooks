@@ -24,6 +24,9 @@ mod common;
 mod acp_adapter_test;
 #[path = "suite/acp_config_test.rs"]
 mod acp_config_test;
+#[cfg(unix)]
+#[path = "suite/adapter_bounded_waits_test.rs"]
+mod adapter_bounded_waits_test;
 #[path = "suite/adapter_test.rs"]
 mod adapter_test;
 #[path = "suite/agent_report_test.rs"]
@@ -62,6 +65,8 @@ mod context_compaction_test;
 mod context_test;
 #[path = "suite/control_test.rs"]
 mod control_test;
+#[path = "suite/detached_driver_test.rs"]
+mod detached_driver_test;
 #[path = "suite/digest_binding_test.rs"]
 mod digest_binding_test;
 #[path = "suite/event_test.rs"]
@@ -81,6 +86,8 @@ mod inspect_wait_test;
 mod instruction_precedence_test;
 #[path = "suite/list_runs_resilient_test.rs"]
 mod list_runs_resilient_test;
+#[path = "suite/loop_edges_test.rs"]
+mod loop_edges_test;
 #[path = "suite/max_loops_test.rs"]
 mod max_loops_test;
 #[path = "suite/migrate_test.rs"]
@@ -121,6 +128,8 @@ mod script_node_test;
 mod script_test;
 #[path = "suite/state_test.rs"]
 mod state_test;
+#[path = "suite/stop_run_test.rs"]
+mod stop_run_test;
 #[path = "suite/subplaybook_run_test.rs"]
 mod subplaybook_run_test;
 #[path = "suite/success_check_test.rs"]

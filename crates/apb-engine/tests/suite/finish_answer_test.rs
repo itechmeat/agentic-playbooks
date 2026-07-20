@@ -49,7 +49,12 @@ fn finish_with_prompt_stores_answer_as_output() {
     fs::write(proj.path().join(".apb/playbooks/p/current"), "1.0.0").unwrap();
 
     unsafe {
-        std::env::set_var("APB_AGENT_CMD", make_stub(bin.path(), "echo FINAL_ANSWER"));
+        // Sleep so the spawn-time attempt_started and the return-time
+        // attempt_finished land in distinct milliseconds.
+        std::env::set_var(
+            "APB_AGENT_CMD",
+            make_stub(bin.path(), "sleep 0.05\necho FINAL_ANSWER"),
+        );
         std::env::set_var("HOME", home.path());
         std::env::set_var("APB_CONFIG_DIR", cfg.path());
     }
@@ -63,5 +68,40 @@ fn finish_with_prompt_stores_answer_as_output() {
     assert_eq!(
         state.outputs.get("f").map(|s| s.as_str()),
         Some("FINAL_ANSWER")
+    );
+
+    // The finish-answer path now journals its attempt at spawn time too: the
+    // attempt_started carries the child pid and precedes attempt_finished (which
+    // carries duration_ms) with a distinct, earlier timestamp.
+    use apb_engine::event::EventPayload;
+    let started = events
+        .iter()
+        .find(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "f"))
+        .expect("attempt_started for finish node f");
+    let finished = events
+        .iter()
+        .find(|e| matches!(&e.payload, EventPayload::AttemptFinished { node, .. } if node == "f"))
+        .expect("attempt_finished for finish node f");
+    assert!(
+        started.seq < finished.seq && started.ts < finished.ts,
+        "finish attempt_started must precede attempt_finished (seq {} ts {} vs seq {} ts {})",
+        started.seq,
+        started.ts,
+        finished.seq,
+        finished.ts
+    );
+    let EventPayload::AttemptStarted { pid, .. } = &started.payload else {
+        unreachable!("matched AttemptStarted above")
+    };
+    assert!(
+        pid.is_some(),
+        "finish attempt_started.pid must be Some at spawn"
+    );
+    let EventPayload::AttemptFinished { duration_ms, .. } = &finished.payload else {
+        unreachable!("matched AttemptFinished above")
+    };
+    assert!(
+        duration_ms.is_some(),
+        "finish attempt_finished.duration_ms must be Some"
     );
 }

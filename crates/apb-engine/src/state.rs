@@ -34,6 +34,20 @@ impl NodeStatus {
             NodeStatus::Cancelled => "cancelled",
         }
     }
+    /// Whether this status represents a node that has completed one execution
+    /// (a `node_finished` was folded). Used to bypass the result-cache lookup on
+    /// a loop re-execution: a node that already finished once in this run must
+    /// run again rather than replay its first verdict.
+    pub fn is_finished(&self) -> bool {
+        matches!(
+            self,
+            NodeStatus::Succeeded
+                | NodeStatus::Failed
+                | NodeStatus::TimedOut
+                | NodeStatus::Skipped
+                | NodeStatus::Cancelled
+        )
+    }
     pub fn from_label(s: &str) -> NodeStatus {
         match s {
             "pending" => NodeStatus::Pending,
@@ -92,6 +106,12 @@ pub struct RunState {
     pub outputs: BTreeMap<String, String>,
     pub reviews: BTreeMap<String, ReviewDecision>,
     pub last_node: Option<String>,
+    /// How many times each bounded loop edge `(from, to)` has been traversed,
+    /// folded from `EdgeTraversed` events (spec 2026-07-20-run-reliability).
+    /// Edge selection blocks an edge once its count reaches `max_traversals`;
+    /// resume restores loop progress exactly because the counts come from the
+    /// journal.
+    pub edge_counts: BTreeMap<(String, String), u32>,
 }
 
 impl RunState {
@@ -126,6 +146,7 @@ impl RunState {
                     s.last_node = Some(node.clone());
                 }
                 EventPayload::RunPaused { .. } => s.run_status = RunStatus::Paused,
+                EventPayload::RunResumed { .. } => s.run_status = RunStatus::Running,
                 EventPayload::RunFinished { outcome } => {
                     s.run_status = match outcome.as_str() {
                         "succeeded" => RunStatus::Succeeded,
@@ -165,6 +186,11 @@ impl RunState {
                 | EventPayload::NodeCacheMiss { .. }
                 | EventPayload::NodeCacheStored { .. }
                 | EventPayload::NodeCacheRejected { .. } => {}
+                // A bounded loop edge traversal: count it per (from, to) so
+                // edge selection can cap the loop and a resume restores progress.
+                EventPayload::EdgeTraversed { from, to } => {
+                    *s.edge_counts.entry((from.clone(), to.clone())).or_insert(0) += 1;
+                }
                 EventPayload::ReviewRequested { .. } => {}
                 EventPayload::ReviewDecided {
                     node,
@@ -186,7 +212,19 @@ impl RunState {
             for node in &open {
                 s.nodes.insert(node.clone(), NodeStatus::Interrupted);
             }
-            if !matches!(s.run_status, RunStatus::Succeeded | RunStatus::Failed) {
+            // `Aborted` belongs in this exempt list next to the other explicit
+            // terminal verdicts: the shape a crashed driver leaves behind is an
+            // open `attempt_started`, and that is exactly the run `stop_run`
+            // finalizes with `RunAborted`. Without the exemption the fold
+            // immediately downgraded that run back to `Interrupted`, so the
+            // stop never became visible (run_status, `apb runs`, the dashboard,
+            // `doctor --run` all still read interrupted) and a second stop
+            // passed the terminal check again and appended a second
+            // `RunAborted`.
+            if !matches!(
+                s.run_status,
+                RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
+            ) {
                 s.run_status = RunStatus::Interrupted;
             }
         }

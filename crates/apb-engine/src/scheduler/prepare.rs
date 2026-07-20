@@ -421,6 +421,9 @@ pub(crate) fn prepare_run_target(
         expected_connectors: opts.expected_connectors.clone(),
         expected_connector_accounts: opts.expected_connector_accounts.clone(),
         cache: opts.cache,
+        // Persisted so a detached driver process, which learns everything it
+        // knows from `runs/<id>`, drives the run in the mode it was started in.
+        mode: opts.mode,
     };
     write_run_config(&run_dir, &cfg)?;
 

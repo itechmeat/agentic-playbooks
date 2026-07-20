@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -11,6 +11,11 @@ use std::os::unix::process::CommandExt as _;
 use apb_core::config::{InvocationDef, PromptVia, SoulDelivery, Transport};
 
 use crate::error::EngineError;
+// Shared with `run_capture` rather than duplicated: the signal-target
+// validation it performs is the difference between killing one process group
+// and killing every process the user owns, so it must live in exactly one
+// place.
+use crate::proc::kill_process_group;
 use crate::state::NodeStatus;
 
 /// Spawns the agent in its own process group so that cancellation/timeout can
@@ -34,24 +39,103 @@ fn spawn_in_group(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
+/// How long the pipe collection gets once the agent process itself is gone.
+///
+/// NOT a limit on how long an agent may work. Every use of this budget sits
+/// AFTER the agent has already exited, so the data is buffered and the normal
+/// cost is microseconds. It bounds only the thing the process wait cannot see:
+/// a daemonized grandchild still holding the inherited stdout/stderr write
+/// ends, which is what actually decides EOF. A healthy agent - including one
+/// that worked for hours - cannot reach it, because by then it is gone and its
+/// fds are closed. Tests override it via `APB_AGENT_DRAIN_BUDGET_MS`.
+fn drain_budget() -> Duration {
+    env_duration_ms("APB_AGENT_DRAIN_BUDGET_MS").unwrap_or(Duration::from_secs(10))
+}
+
+/// How long an agent may keep running AFTER it has closed its stdout.
+///
+/// Also not a limit on working time. An agent's actual work is governed by the
+/// node's own `timeout_seconds` through `check_cancel_timeout`, inside the
+/// streaming loop; this clock does not start until that loop has already ended
+/// because stdout reached EOF. An agent that streams for six hours never comes
+/// near it. Reaching it means the agent stopped talking to us and then did not
+/// exit for five minutes, which is indistinguishable from a wedge, so the tree
+/// is killed and the attempt fails as a timeout instead of blocking the drive
+/// forever. Deliberately generous: its job is to make an infinite wait finite,
+/// not to enforce promptness. Tests override it via `APB_AGENT_EXIT_GRACE_MS`.
+fn exit_after_eof_budget() -> Duration {
+    env_duration_ms("APB_AGENT_EXIT_GRACE_MS").unwrap_or(Duration::from_secs(300))
+}
+
+fn env_duration_ms(key: &str) -> Option<Duration> {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+}
+
 /// Terminates the agent's whole process tree and reaps the leader. On Unix
 /// this sends SIGKILL to the group (`kill(-pgid, ...)`, pgid == pid because of
 /// process_group(0) at spawn time) so children are not orphaned; on other
 /// platforms - child.kill().
 fn kill_process_tree(child: &mut Child) {
     #[cfg(unix)]
-    {
-        let pid = child.id() as i32;
-        // A negative pid signals the entire process group.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
+    kill_process_group(child.id());
     #[cfg(not(unix))]
     {
         let _ = child.kill();
     }
+    // Bounded: the leader has just been SIGKILLed, which no process can catch
+    // or ignore, so this reaps a pid that is already dead or dying.
     let _ = child.wait();
+}
+
+/// `child.wait()` with a deadline. `None` means the process was still running
+/// when `budget` ran out; the caller decides what to do about it.
+fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<ExitStatus>> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(Ok(status)),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Some(Err(e)),
+        }
+    }
+}
+
+/// `child.wait_with_output()` with a deadline, so a grandchild holding the
+/// pipes open cannot stall the drive. The collecting thread is abandoned on a
+/// timeout rather than joined: it owns nothing the caller needs, and joining
+/// it is the very wait being bounded.
+fn wait_with_output_bounded(
+    child: Child,
+    budget: Duration,
+    program: &str,
+) -> Result<std::process::Output, (ErrorClass, String)> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(budget) {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err((
+            ErrorClass::ProcessExit,
+            format!("collect `{program}` output failed: {e}"),
+        )),
+        Err(_) => Err((
+            ErrorClass::Timeout,
+            format!(
+                "`{program}` exited but its stdout/stderr were still held open {budget:?} later, \
+                 so its output could not be collected: a descendant that outlived it inherited \
+                 the pipes"
+            ),
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -136,14 +220,22 @@ pub trait AgentAdapter {
     /// running, the implementation periodically checks `cancel` and, if set,
     /// kills the process and returns Err(Transport, "cancelled"). Needed by
     /// parallel branches so join:any can cancel the losing branch (spec 8.4).
-    /// The default ignores `cancel` and just calls `run` (for adapters
-    /// without kill support).
+    ///
+    /// `on_spawn`, when set, is invoked exactly once immediately after the agent
+    /// process is successfully spawned, carrying the child pid (`child.id()`).
+    /// The attempt-journaling path uses it to append `attempt_started` at spawn
+    /// time so a crash mid-attempt leaves an open attempt on disk. It never
+    /// fires if the spawn itself fails.
+    ///
+    /// The default ignores `cancel`/`on_spawn` and just calls `run` (for
+    /// adapters without kill or spawn-hook support).
     fn run_cancellable(
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
+        on_spawn: Option<&dyn Fn(u32)>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
-        let _ = cancel;
+        let _ = (cancel, on_spawn);
         self.run(task)
     }
 
@@ -320,6 +412,7 @@ impl ClaudeAdapter {
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
+        on_spawn: Option<&dyn Fn(u32)>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
         let (argv, stdin_payload) = build_command(
@@ -348,6 +441,11 @@ impl ClaudeAdapter {
                 format!("spawn `{}` failed: {e}", self.program),
             )
         })?;
+        // Attempt journaling (spawn-time): the process exists, so record it now
+        // (pid = child.id()) before any of its work runs.
+        if let Some(cb) = on_spawn {
+            cb(child.id());
+        }
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
         {
@@ -371,12 +469,15 @@ impl ClaudeAdapter {
                 }
             }
         }
-        let output = child.wait_with_output().map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("collect `{}` output failed: {e}", self.program),
-            )
-        })?;
+        // The agent process itself is gone, but `wait_with_output` reads both
+        // pipes to EOF - and EOF is decided by whoever still holds the write
+        // ends, not by the process we just waited for. A real agent spawns MCP
+        // servers and tool subprocesses; any one of them that daemonizes and
+        // outlives its parent keeps those fds open, and this read would then
+        // block for the lifetime of that daemon. Tearing the group down first
+        // is what makes EOF actually arrive.
+        kill_process_group(child.id());
+        let output = wait_with_output_bounded(child, drain_budget(), &self.program)?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if !output.status.success() {
@@ -413,6 +514,7 @@ impl ClaudeAdapter {
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
+        on_spawn: Option<&dyn Fn(u32)>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
         // Base argv comes from the invocation form; claude-specific streaming
@@ -443,6 +545,11 @@ impl ClaudeAdapter {
                 format!("spawn `{}` failed: {e}", self.program),
             )
         })?;
+        // Attempt journaling (spawn-time): record the process (pid = child.id())
+        // now, before its streaming work runs.
+        if let Some(cb) = on_spawn {
+            cb(child.id());
+        }
 
         // Read stdout on a background thread: BufReader::lines() blocks
         // line by line, but we also need to poll cancel/timeout concurrently.
@@ -465,14 +572,19 @@ impl ClaudeAdapter {
         // Drain stderr on a separate thread, otherwise heavy stderr output
         // would fill its pipe and block the agent on write (we only read
         // stdout).
+        // Delivered over a channel rather than through `JoinHandle::join`:
+        // there is no timed join in std, and stderr's EOF is decided by
+        // whatever still holds the write end - possibly a daemonized
+        // grandchild rather than the agent. See the bounded receive below.
         let stderr_pipe = child.stderr.take();
-        let err_reader = std::thread::spawn(move || {
+        let (err_tx, err_rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
             use std::io::Read as _;
             let mut s = String::new();
             if let Some(mut e) = stderr_pipe {
                 let _ = e.read_to_string(&mut s);
             }
-            s
+            let _ = err_tx.send(s);
         });
 
         let mut sink = task.stream_log.and_then(|p| {
@@ -487,11 +599,46 @@ impl ClaudeAdapter {
         });
 
         let started = Instant::now();
+        let pid = child.id();
         let mut raw_lines: Vec<String> = Vec::new();
+        // Set once the agent process itself has exited: the deadline for
+        // draining whatever is still buffered in the pipe afterwards.
+        let mut drain_deadline: Option<Instant> = None;
         loop {
-            if let Some(err) = Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)
+            // Only while the agent is still running. Once `drain_deadline` is
+            // set the agent has ALREADY exited, and what remains is reading
+            // bytes it left in the pipe.
+            //
+            // For the timeout half: charging that read against the node's
+            // timeout would report `TimedOut` for an agent that finished
+            // inside its budget, purely because a leftover descendant made the
+            // final read slow.
+            //
+            // For the cancel half: a cancellation arriving during the drain is
+            // ignored for at most `drain_budget()`, which is deliberate and
+            // harmless. Cancellation exists to stop WORK and reclaim the
+            // machine, and there is no work left to stop - the agent is gone
+            // and its group was killed on the line below. All that remains is
+            // copying bytes out of a pipe. Honouring it here would abandon
+            // output the run has already paid for, in exchange for ending a
+            // bounded, idle wait slightly sooner.
+            if drain_deadline.is_none()
+                && let Some(err) =
+                    Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)
             {
                 return Err(err);
+            }
+            // This loop used to end ONLY on stdout EOF - but EOF is not the
+            // agent's to give. A grandchild that inherited the pipe (a real
+            // agent spawns MCP servers and tool subprocesses) holds it open
+            // after the agent is gone, and a node with no `timeout_seconds`
+            // then spun here forever, waiting on output from a process that no
+            // longer existed. So notice the agent's own exit, release the pipes
+            // (whatever still holds them is by definition not the agent), and
+            // let the reader hand over what it has within a bounded window.
+            if drain_deadline.is_none() && matches!(child.try_wait(), Ok(Some(_))) {
+                kill_process_group(pid);
+                drain_deadline = Some(Instant::now() + drain_budget());
             }
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(line) => {
@@ -505,16 +652,67 @@ impl ClaudeAdapter {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
+            // Backstop for the one case the group kill above cannot reach: a
+            // descendant that left the process group while holding the pipe.
+            if drain_deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
         }
-        let _ = reader.join();
-        let stderr = err_reader.join().unwrap_or_default();
-
-        let status = child.wait().map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("wait `{}` failed: {e}", self.program),
-            )
-        })?;
+        // Bounded because the loop above exited on stdout EOF, and stdout EOF
+        // is NOT proof the agent exited: it can close stdout (or hand it to a
+        // grandchild that then closes it) and keep running. `child.wait()`
+        // here would block for as long as it does, with the drive's own
+        // timeout already behind us. So: wait with a deadline, and if the
+        // agent overstays it, tear down the tree and report a timeout rather
+        // than hang.
+        //
+        // `reader` is deliberately NOT joined. On the normal path it has
+        // already finished (the loop broke because it dropped its sender), so
+        // a join would be a no-op; on the backstop path it is still blocked on
+        // a pipe held by a descendant that escaped the group, and joining it
+        // is precisely the unbounded wait being avoided. It owns nothing the
+        // caller needs - every line reached us through the channel - so it is
+        // abandoned and dies with the process.
+        drop(reader);
+        let grace = exit_after_eof_budget();
+        let status = match wait_bounded(&mut child, grace) {
+            Some(Ok(status)) => status,
+            Some(Err(e)) => {
+                return Err((
+                    ErrorClass::ProcessExit,
+                    format!("wait `{}` failed: {e}", self.program),
+                ));
+            }
+            None => {
+                // The agent will not exit. Tear the tree down either way, but
+                // do not throw away a run that actually finished: if the
+                // stream already carried its terminal `result` event, the
+                // agent said everything it had to say and only failed to exit
+                // afterwards. Reporting that as a timeout would discard
+                // completed work over a process-lifecycle detail, which is the
+                // same call this wave made for an agent that exits leaving a
+                // grandchild on its pipes - the work counts, the leftover
+                // process is noise. `Timeout` is reserved for the case where
+                // no result was ever seen, which is a genuinely unfinished
+                // node.
+                kill_process_tree(&mut child);
+                return match parse_stream_result(&raw_lines) {
+                    Ok(report) => Ok(report),
+                    Err(_) => Err((
+                        ErrorClass::Timeout,
+                        format!(
+                            "`{}` closed its stdout without a terminal result event and was still \
+                             running {grace:?} later; killed its process group",
+                            self.program
+                        ),
+                    )),
+                };
+            }
+        };
+        // The leader is reaped; anything left in its group would still be
+        // holding stderr, so clear the group before collecting.
+        kill_process_group(pid);
+        let stderr = err_rx.recv_timeout(drain_budget()).unwrap_or_default();
         if !status.success() {
             return Err((
                 ErrorClass::ProcessExit,
@@ -570,18 +768,20 @@ fn parse_stream_result(lines: &[String]) -> Result<AgentReport, (ErrorClass, Str
 
 impl AgentAdapter for ClaudeAdapter {
     fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)> {
-        // A non-cancellable run is a cancellable run with an always-false flag.
-        self.run_cancellable(task, &AtomicBool::new(false))
+        // A non-cancellable run is a cancellable run with an always-false flag
+        // and no spawn hook.
+        self.run_cancellable(task, &AtomicBool::new(false), None)
     }
 
     fn run_cancellable(
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
+        on_spawn: Option<&dyn Fn(u32)>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         match self.spec.transport {
-            Transport::Headless => self.run_headless(task, cancel),
-            Transport::Acp => self.run_acp(task, cancel),
+            Transport::Headless => self.run_headless(task, cancel, on_spawn),
+            Transport::Acp => self.run_acp(task, cancel, on_spawn),
         }
     }
 

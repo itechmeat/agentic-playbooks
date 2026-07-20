@@ -19,7 +19,7 @@ use serde::{Deserialize, Serialize};
 use crate::fsutil::atomic_write;
 use crate::registry::{Registry, is_frozen_dir, is_safe_segment};
 use crate::schema::{Playbook, SchemaError};
-use crate::validate::{Severity, ValidationContext, validate};
+use crate::validate::{Issue, Severity, ValidationContext, validate};
 
 const MAX_RENAME_ATTEMPTS: u32 = 100;
 
@@ -27,8 +27,8 @@ const MAX_RENAME_ATTEMPTS: u32 = 100;
 pub enum VersioningError {
     #[error("playbook `{0}` not found")]
     NotFound(String),
-    #[error("validation failed: {0:?}")]
-    Validation(Vec<String>),
+    #[error("{}", crate::validate::render_issues(.0))]
+    Validation(Vec<Issue>),
     #[error("schema error: {0}")]
     Schema(String),
     #[error("version conflict: {0}")]
@@ -221,9 +221,14 @@ pub fn create_patch_version(
         return Err(VersioningError::NotFound(format!("{id}@{base_version}")));
     }
     if !matches!(classification, "improvement" | "workaround") {
-        return Err(VersioningError::Validation(vec![
-            "classification".to_string(),
-        ]));
+        return Err(VersioningError::Validation(vec![Issue {
+            code: "classification",
+            severity: Severity::Error,
+            message: format!(
+                "classification `{classification}` must be `improvement` or `workaround`"
+            ),
+            node: None,
+        }]));
     }
     if parse_version_triple(base_version).is_none() {
         return Err(VersioningError::Conflict(format!(
@@ -716,11 +721,10 @@ pub fn create_draft_in(
         playbook_origin: origin,
     };
     let report = validate(&playbook, &ctx);
-    let errors: Vec<String> = report
+    let errors: Vec<Issue> = report
         .issues
-        .iter()
+        .into_iter()
         .filter(|i| i.severity == Severity::Error)
-        .map(|i| i.code.to_string())
         .collect();
     if !errors.is_empty() {
         return Err(VersioningError::Validation(errors));
@@ -800,13 +804,12 @@ fn validate_playbook(root: &Path, playbook: &Playbook) -> Result<(), VersioningE
     if report.is_valid() {
         return Ok(());
     }
-    let codes = report
+    let issues: Vec<Issue> = report
         .issues
-        .iter()
+        .into_iter()
         .filter(|issue| issue.severity == Severity::Error)
-        .map(|issue| issue.code.to_string())
         .collect();
-    Err(VersioningError::Validation(codes))
+    Err(VersioningError::Validation(issues))
 }
 
 fn parse_version_triple(s: &str) -> Option<(u32, u32, u32)> {

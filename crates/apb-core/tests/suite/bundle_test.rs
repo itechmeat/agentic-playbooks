@@ -1,8 +1,9 @@
 use std::fs;
 use std::path::Path;
 
-use apb_core::bundle::{PlaybookBundle, export_bundle, import_bundle};
+use apb_core::bundle::{BundleError, PlaybookBundle, export_bundle, import_bundle};
 use apb_core::registry::{Registry, init_project};
+use apb_core::versioning::VersioningError;
 
 const PLAYBOOK: &str = r#"schema: 1
 id: va
@@ -61,6 +62,36 @@ fn export_import_round_trip_preserves_playbook_and_layout() {
     assert_eq!(loaded.version, "1.0.0");
     assert!(loaded.playbook.nodes.iter().any(|n| n.id == "w"));
     assert!(loaded.layout.is_some(), "imported layout must be restored");
+}
+
+#[test]
+fn import_invalid_playbook_surfaces_formatted_validation_lines_through_bundle_error() {
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let invalid = PLAYBOOK.replace(r#"prompt: "do""#, r#"prompt: "{{outputs.x}}""#);
+    let bundle = PlaybookBundle {
+        apb_bundle: 1,
+        id: "va".to_string(),
+        version: "1.0.0".to_string(),
+        playbook: invalid,
+        layout: None,
+    };
+
+    let err = import_bundle(b.path(), &bundle, true).unwrap_err();
+    assert!(matches!(
+        err,
+        BundleError::Versioning(VersioningError::Validation(_))
+    ));
+    let msg = err.to_string();
+    assert!(
+        msg.contains("validation failed:"),
+        "expected `validation failed:` to survive through BundleError's Display, got: {msg}"
+    );
+    assert!(
+        msg.lines()
+            .any(|l| l.starts_with("- V13 error (node `w`):")),
+        "expected a `- V13 error (node `w`):` line, got: {msg}"
+    );
 }
 
 #[test]

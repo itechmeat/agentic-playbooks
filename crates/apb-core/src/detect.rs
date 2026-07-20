@@ -280,6 +280,71 @@ struct ProbeOut {
 
 const MAX_STDERR_BYTES: usize = 4 * 1024;
 
+/// SIGKILLs every process in the group led by `pid`, which is the probe child
+/// (it is spawned with `process_group(0)`, so its pgid equals its pid).
+///
+/// This is `libc::kill(-pid, SIGKILL)` rather than a `kill -KILL -<pgid>`
+/// subprocess on purpose. BSD kill (macOS) accepts a negative pid as a
+/// positional argument, but procps-ng kill (Linux, and so CI) feeds it to
+/// getopt first and rejects it as an unknown option - the subprocess exits
+/// non-zero, the signal is never delivered, and the daemonized descendants
+/// this call exists to reap survive holding the probe's pipes. The status of
+/// the spawned `kill` was discarded, so the failure was invisible. The syscall
+/// has no argument-parsing layer and behaves identically on both platforms.
+/// `apb_engine::proc::run_capture` moved off the subprocess form for the same
+/// reason.
+///
+/// Safe to call after the leader has been reaped: a pgid is not recycled while
+/// any process remains in the group, and the call is a harmless ESRCH once the
+/// group is empty.
+fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    kill_group_with(pid, &|target| {
+        // SAFETY: `kill` is async-signal-safe and takes no pointers; `target`
+        // came from `group_target`, so it is a validated negative group id,
+        // and an unknown group is reported as ESRCH rather than undefined.
+        unsafe {
+            libc::kill(target, libc::SIGKILL);
+        }
+    });
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
+/// The decision half of a group kill, with delivery injected, so a test can
+/// assert exactly what would reach `kill(2)` without sending a signal. See
+/// `apb_engine::proc::kill_group_with`: testing `group_target` alone would
+/// keep passing if the guard were dropped from the call site, so what has to
+/// be pinned is that it is wired in.
+fn kill_group_with(pid: u32, send: &dyn Fn(i32)) {
+    if let Some(target) = group_target(pid) {
+        send(target);
+    }
+}
+
+/// The `kill(2)` argument addressing the group led by `pid`, or `None` when
+/// `pid` cannot lead an addressable one.
+///
+/// Refuses the three inputs that are wildcards rather than errors, because the
+/// group form negates its argument: `0` negates to 0 ("my own group"), `1`
+/// negates to -1 ("every process I may signal", the catastrophic one), and
+/// anything above `i32::MAX` narrows negative first so negating it lands on a
+/// small unrelated pid. The probe child here is always a `Child` we spawned,
+/// so none of these is reachable today; the check is what keeps it that way if
+/// a caller ever passes a pid read from a file.
+///
+/// `apb_engine::proc::group_target` is the same rule for the engine's spawns.
+/// The duplication is deliberate: apb-core must not depend on apb-engine, and
+/// a shared crate for six lines would be worse than two audited copies.
+fn group_target(pid: u32) -> Option<i32> {
+    match i32::try_from(pid) {
+        Ok(p) if p > 1 => Some(-p),
+        _ => None,
+    }
+}
+
 /// Runs `program args...` in a sanitized environment. Child PATH - trusted
 /// system directories plus `extra_path` (the canonical parent of the found
 /// binary), so a CLI with a `#!/usr/bin/env node` shebang finds its
@@ -368,28 +433,24 @@ fn run_probe(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // The probe exited, but may have left daemonized grandchildren
+                // that inherited its pipes, and EOF is theirs to give, not the
+                // probe's. Reap the whole group BEFORE reading anything: it
+                // stops those processes and reader threads accumulating across
+                // repeated `detect --refresh` runs, and - because it is what
+                // makes EOF actually arrive - it is also the difference
+                // between collecting the probe's output and timing out on it.
+                // Reaping after the read (as this did originally) meant any
+                // agent that daemonizes a helper reported no version at all.
+                kill_process_group(child.id());
                 if !status.success() {
                     return Err(format!("exited with {:?}{}", status.code(), stderr_snip()));
                 }
-                // The process exited: wait for the collected stdout, but with
-                // a deadline - a descendant hanging on the pipe must not
-                // block us forever.
+                // Still deadlined: a descendant that left the process group
+                // holds the pipe beyond the reach of the kill above.
                 let (kept, truncated) = rx
                     .recv_timeout(Duration::from_millis(500))
                     .unwrap_or_default();
-                // The direct child exited, but may have left daemonized
-                // grandchildren that inherited the pipe (the reader thread
-                // would then never see EOF). We reap the whole process group
-                // on the success path too - otherwise repeated
-                // `detect --refresh` runs would accumulate hanging processes
-                // and reader threads.
-                #[cfg(unix)]
-                {
-                    let _ = std::process::Command::new("kill")
-                        .arg("-KILL")
-                        .arg(format!("-{}", child.id()))
-                        .status();
-                }
                 return Ok(ProbeOut {
                     stdout: String::from_utf8_lossy(&kept).into_owned(),
                     truncated,
@@ -401,13 +462,7 @@ fn run_probe(
                     // down daemonized descendants too - they then close the
                     // pipe, reader threads see EOF and finish (they don't
                     // pile up on repeated `detect --refresh` runs).
-                    #[cfg(unix)]
-                    {
-                        let _ = std::process::Command::new("kill")
-                            .arg("-KILL")
-                            .arg(format!("-{}", child.id()))
-                            .status();
-                    }
+                    kill_process_group(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err("probe timed out".into());
@@ -761,5 +816,43 @@ fn write_cache(cache: &DetectCache) {
     };
     if let Ok(json) = serde_json::to_vec_pretty(cache) {
         let _ = crate::fsutil::atomic_write(&path, &json);
+    }
+}
+
+#[cfg(test)]
+mod signal_target_tests {
+    use super::kill_group_with;
+    use std::cell::RefCell;
+
+    fn targets_sent_for(pid: u32) -> Vec<i32> {
+        let sent = RefCell::new(Vec::new());
+        kill_group_with(pid, &|target| sent.borrow_mut().push(target));
+        sent.into_inner()
+    }
+
+    /// The probe reaper's guard, pinned as wired in rather than merely
+    /// correct. Delivery is injected, so a regression is caught without a
+    /// single signal being sent - calling the real killer to prove this would
+    /// mean a test that ends the developer's session the moment the guard is
+    /// removed.
+    ///
+    /// pid 1 is the one to look at: the group form negates its argument, so it
+    /// becomes `kill(-1, SIGKILL)`, "every process I may signal".
+    #[test]
+    fn a_group_kill_delivers_nothing_for_a_target_it_cannot_address() {
+        for pid in [0, 1, u32::MAX, u32::MAX - 1, (i32::MAX as u32) + 1] {
+            assert_eq!(
+                targets_sent_for(pid),
+                Vec::<i32>::new(),
+                "pid {pid} cannot address a group, so no signal may be sent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_kill_of_a_real_pid_addresses_exactly_that_group() {
+        assert_eq!(targets_sent_for(2), vec![-2]);
+        assert_eq!(targets_sent_for(4321), vec![-4321]);
+        assert_eq!(targets_sent_for(i32::MAX as u32), vec![-i32::MAX]);
     }
 }

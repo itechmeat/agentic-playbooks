@@ -2,8 +2,9 @@
 //!
 //! Registers the nine read/run tools of Phase 3, the three write tools of
 //! Phase 5a, and the eight supervisor tools of Phase 4b (gated by token and
-//! capability). `run_cancel` as a standalone tool is out of scope and is not
-//! registered - cancellation is available through `supervisor_run_abort`.
+//! capability). Cancellation is available two ways: `supervisor_run_abort`
+//! for a supervisor holding a session token, and the operator-facing
+//! `run_stop`, which additionally finalizes a run whose driver has died.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;

@@ -479,3 +479,71 @@ fn hermes_missing_binary_reports_not_installed() {
     assert!(!h.installed);
     assert!(h.version.is_none());
 }
+
+// A probe whose agent daemonizes a descendant that inherits the probe's
+// stdout. `run_probe` spawns every probe with `process_group(0)` precisely so
+// it can SIGKILL that whole group afterwards, on the SUCCESS path as well as
+// on timeout - otherwise each `detect --refresh` leaves behind a live process
+// and a reader thread blocked on a pipe that will never reach EOF.
+//
+// What this test can and cannot prove, stated plainly: the defect it guards
+// was Linux-only. `detect` used to reap the group by spawning
+// `kill -KILL -<pgid>`, which BSD kill (macOS) accepts and procps-ng kill
+// (Linux) rejects as a bad option, silently delivering nothing - and the
+// discarded ExitStatus hid it. So on macOS this test passed BEFORE the fix
+// too, and only on Linux does it distinguish the syscall from the subprocess.
+// It is kept because it pins the property on every platform and would catch a
+// regression back to any signalling method that does not reach the group; it
+// is not evidence that the Linux bug is fixed. That evidence can only come
+// from CI.
+#[test]
+fn probe_reaps_a_daemonized_descendant_of_the_agent() {
+    let _l = lock();
+    let e = setup();
+    let pidfile = e.home.join("probe-descendant.pid");
+    // Backgrounds a long sleep (inheriting stdout), records its pid, then
+    // answers the version probe and exits.
+    write_agent(
+        &e.bin,
+        "agy",
+        &e.counter,
+        &format!("sleep 300 &\necho $! > '{}'\necho 1.2.3", pidfile.display()),
+    );
+
+    let start = std::time::Instant::now();
+    let agents = detect::detect(true);
+    assert!(
+        start.elapsed() < std::time::Duration::from_secs(60),
+        "the probe blocked on a descendant holding its stdout: {:?}",
+        start.elapsed()
+    );
+
+    let pid: i32 = std::fs::read_to_string(&pidfile)
+        .expect("the stub agent never recorded its descendant pid")
+        .trim()
+        .parse()
+        .expect("descendant pid");
+
+    // The probe still worked: reaping the group must not cost the answer.
+    let agy = agents.iter().find(|a| a.agent == "agy").unwrap();
+    assert_eq!(
+        agy.version.as_deref(),
+        Some("1.2.3"),
+        "the version probe must still be read before the group is reaped"
+    );
+
+    // ... and the descendant is gone. SIGKILL is not instant, so allow a
+    // moment, but bound the wait rather than looping forever.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    // SAFETY: signal 0 only performs the existence check.
+    while unsafe { libc::kill(pid, 0) } == 0 {
+        if std::time::Instant::now() >= deadline {
+            // SAFETY: as above. Do not leak a 300-second sleep on failure.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+            panic!("the probe left a daemonized descendant (pid {pid}) alive");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}

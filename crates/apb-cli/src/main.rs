@@ -19,8 +19,8 @@ use crate::manage::{
 };
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
-    drive_supervised_child, resume_cmd, review_cmd, run_cmd, run_doctor, run_list, run_validate,
-    runs_cmd,
+    drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd, run_doctor,
+    run_list, run_validate, runs_cmd, stop_cmd,
 };
 use crate::serve::{dev_cmd, mcp_cmd, serve};
 use crate::util::resolve_port;
@@ -75,8 +75,16 @@ enum Command {
     List,
     /// Validate playbook schema
     Validate { name: Option<String> },
-    /// Diagnose environment (agents, executors, profiles, runners, playbooks)
-    Doctor,
+    /// Diagnose environment (agents, executors, profiles, runners, playbooks),
+    /// or one run's health with --run
+    Doctor {
+        /// Diagnose this run instead of the environment: folded statuses, open
+        /// attempts and their pid liveness, the driver and workdir-lock
+        /// holders, unapplied control entries, repeated supervisor actions.
+        /// Read-only, like the environment doctor: it repairs nothing.
+        #[arg(long, value_name = "ID")]
+        run: Option<String>,
+    },
     /// Export a playbook (with layout) to a single bundle file
     Export {
         name: String,
@@ -131,6 +139,11 @@ enum Command {
         #[arg(long)]
         from_node: Option<String>,
     },
+    /// Stop a run: interrupt whatever node it is executing right now, and
+    /// finalize it outright if the process driving it is gone
+    Stop { run_id: String },
+    /// Post a supervisor note (ContextAppend) to a run's control channel
+    Note { run_id: String, text: String },
     /// Decide a human_review node of a running run
     Review {
         run_id: String,
@@ -188,6 +201,25 @@ enum Command {
         #[arg(long)]
         handshake: PathBuf,
     },
+    /// Drives an already-prepared run at `<root>/.apb/runs/<run-id>` to
+    /// completion in THIS process. Spawned detached by
+    /// `apb_engine::driver::spawn_detached_driver`, so that a run started from
+    /// a chat session (MCP) survives that session dying. Hidden: an internal
+    /// re-exec target, not a user-facing command.
+    #[command(hide = true, name = "__drive-run")]
+    DriveRun {
+        /// Project root holding `.apb/runs` (absolute: the parent resolves it).
+        #[arg(long)]
+        root: PathBuf,
+        #[arg(long = "run-id")]
+        run_id: String,
+        /// Passed through to the resume planner; only meaningful with `--resume`.
+        #[arg(long = "from-node")]
+        from_node: Option<String>,
+        /// Resume an existing run instead of driving a freshly prepared one.
+        #[arg(long)]
+        resume: bool,
+    },
 }
 
 fn main() -> ExitCode {
@@ -206,7 +238,7 @@ fn main() -> ExitCode {
         Some(Command::Init) => run_init(&root),
         Some(Command::List) => run_list(&root),
         Some(Command::Validate { name }) => run_validate(&root, name),
-        Some(Command::Doctor) => run_doctor(&root),
+        Some(Command::Doctor { run }) => run_doctor(&root, run.as_deref()),
         Some(Command::Export { name, version, out }) => {
             export_cmd(&root, &name, version.as_deref(), out.as_deref())
         }
@@ -237,6 +269,8 @@ fn main() -> ExitCode {
         Some(Command::Resume { run_id, from_node }) => {
             resume_cmd(&root, &run_id, from_node.as_deref())
         }
+        Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
+        Some(Command::Note { run_id, text }) => note_cmd(&root, &run_id, &text),
         Some(Command::Review {
             run_id,
             node_id,
@@ -270,6 +304,14 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             &handshake,
         ),
+        // Deliberately uses the `--root` it was given, not the process cwd:
+        // the spawning parent knows which project the run belongs to.
+        Some(Command::DriveRun {
+            root: run_root,
+            run_id,
+            from_node,
+            resume,
+        }) => drive_run_child(&run_root, &run_id, from_node.as_deref(), resume),
         None => serve(resolve_port(None), false),
     }
 }

@@ -18,7 +18,8 @@ pub(crate) fn render_node_prompt(
     cfg: &RunConfig,
     prompt: &str,
 ) -> Result<String, EngineError> {
-    let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
+    let context =
+        build_context_for_render(run_dir, &read_all(run_dir)?, cfg.instruction.as_deref())?;
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -35,10 +36,15 @@ pub(crate) fn render_node_prompt(
 }
 
 /// A single execution of a node. Returns (NodeStatus, output, events).
-/// Events (AttemptStarted/Finished, RetryStarted, FallbackTriggered) are NOT
-/// written here but returned: the caller (drive) writes them - the sole writer of
-/// events.jsonl. Thanks to this, execute_node never touches the log and can be
-/// run on a background thread for parallel branches (7c-2).
+///
+/// The two attempt-lifecycle events are journaled directly through `journal`:
+/// `attempt_started` at spawn time (so a crash mid-attempt leaves an open
+/// attempt on disk, later folded to interrupted) and `attempt_finished` at
+/// return time (carrying `duration_ms`). Every OTHER event (RetryStarted,
+/// FallbackTriggered) is still returned in the Vec for drive to write in its
+/// return batch - drive remains the sole writer of those. `journal` wraps the
+/// same single log in a Mutex, so this stays safe on the parallel batch's
+/// worker threads (each append is one atomic line write).
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -51,6 +57,7 @@ pub(crate) fn execute_node(
     override_prompt: Option<String>,
     cancel: &AtomicBool,
     env_scrub: &[String],
+    journal: &Journal,
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
     let node = playbook
         .node(node_id)
@@ -194,15 +201,34 @@ pub(crate) fn execute_node(
             // The node's final status once all attempts are exhausted: TimedOut if
             // the last attempt was interrupted by a timeout, otherwise Failed.
             let mut last_timed_out = false;
+            // Fallback sameness guard: the (agent, model) pair of the step that
+            // was just actually attempted (not the positionally-previous step,
+            // which may itself have been skipped). Compared against each
+            // candidate step in turn, so a chain X -> Y -> X still attempts the
+            // third step (it differs from Y, the step that just failed), while
+            // X -> X collapses (identical to the step that just failed, most
+            // likely doomed by the same external cause - e.g. a token lacking
+            // permission - not by the agent or model).
+            let mut last_tried: Option<(String, String)> = None;
             for (idx, step) in steps.iter().enumerate() {
                 if idx > 0 {
+                    let same_binding = last_tried
+                        .as_ref()
+                        .is_some_and(|(agent, model)| *agent == step.agent && *model == step.model);
+                    if same_binding {
+                        continue;
+                    }
                     events.push(EventPayload::FallbackTriggered {
                         node: node_id.into(),
-                        from: steps[idx - 1].agent.clone(),
+                        from: last_tried
+                            .as_ref()
+                            .map(|(agent, _)| agent.clone())
+                            .unwrap_or_else(|| steps[idx - 1].agent.clone()),
                         to: step.agent.clone(),
                         profile: profile_key.clone(),
                     });
                 }
+                last_tried = Some((step.agent.clone(), step.model.clone()));
                 // The profile path builds the adapter from the fixed invocation
                 // (call form + canonical binary from the manifest), so that editing
                 // agents.<id>.invocation in the config between start and resume does
@@ -227,13 +253,6 @@ pub(crate) fn execute_node(
                             attempt,
                         });
                     }
-                    events.push(EventPayload::AttemptStarted {
-                        node: node_id.into(),
-                        attempt,
-                        agent: step.agent.clone(),
-                        soul_delivery: step.soul_delivery.clone(),
-                        skills_mode: Some(skills_mode.to_string()),
-                    });
                     // Attempt working directory. For an isolated node - a FRESH
                     // per-attempt directory `work/<node>/<attempt>` with skills
                     // freshly materialized from the snapshot: a hostile/failed
@@ -270,13 +289,61 @@ pub(crate) fn execute_node(
                         grant_autonomy,
                         connector_policy: &connector_policy,
                     };
-                    match adapter.run_cancellable(&task, cancel) {
+                    // Spawn-time attempt journaling. The adapter invokes `on_spawn`
+                    // right after the agent process starts, so `attempt_started`
+                    // (carrying the child pid) is on disk BEFORE the agent does any
+                    // work: a crash mid-attempt then leaves an open attempt the
+                    // fold maps to interrupted. `spawn_at` records the spawn instant
+                    // for `duration_ms`; `spawn_err` carries an append failure from
+                    // inside the callback back out so it is not swallowed.
+                    let cur_attempt = attempt;
+                    let agent_name = step.agent.clone();
+                    let soul_del = step.soul_delivery.clone();
+                    let smode = Some(skills_mode.to_string());
+                    let spawn_at: std::cell::Cell<Option<std::time::Instant>> =
+                        std::cell::Cell::new(None);
+                    let spawn_err: std::cell::RefCell<Option<EngineError>> =
+                        std::cell::RefCell::new(None);
+                    let on_spawn = |pid: u32| {
+                        spawn_at.set(Some(std::time::Instant::now()));
+                        if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                            node: node_id.to_string(),
+                            attempt: cur_attempt,
+                            agent: agent_name.clone(),
+                            soul_delivery: soul_del.clone(),
+                            skills_mode: smode.clone(),
+                            pid: Some(pid),
+                        }) {
+                            *spawn_err.borrow_mut() = Some(e);
+                        }
+                    };
+                    let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn));
+                    if let Some(e) = spawn_err.borrow_mut().take() {
+                        return Err(e);
+                    }
+                    let spawn_instant = spawn_at.get();
+                    // The spawn itself failed before the callback ran: still journal
+                    // a started (pid unknown) so every attempt_finished is preceded
+                    // by an attempt_started.
+                    if spawn_instant.is_none() {
+                        journal.append(EventPayload::AttemptStarted {
+                            node: node_id.into(),
+                            attempt,
+                            agent: step.agent.clone(),
+                            soul_delivery: step.soul_delivery.clone(),
+                            skills_mode: Some(skills_mode.to_string()),
+                            pid: None,
+                        })?;
+                    }
+                    let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
+                    match outcome {
                         Ok(report) => {
-                            events.push(EventPayload::AttemptFinished {
+                            journal.append(EventPayload::AttemptFinished {
                                 node: node_id.into(),
                                 attempt,
                                 status: report.status.as_str().into(),
-                            });
+                                duration_ms,
+                            })?;
                             if report.status == NodeStatus::Succeeded {
                                 // A deterministic check on top of the self-report (spec 6.2):
                                 // a non-zero check exit code makes the node Failed regardless
@@ -325,11 +392,12 @@ pub(crate) fn execute_node(
                             } else {
                                 "failed"
                             };
-                            events.push(EventPayload::AttemptFinished {
+                            journal.append(EventPayload::AttemptFinished {
                                 node: node_id.into(),
                                 attempt,
                                 status: attempt_status.into(),
-                            });
+                                duration_ms,
+                            })?;
                             last_msg = msg;
                             // A transport error and a timeout break the retry loop for this
                             // executor and go to fallback.
@@ -379,7 +447,11 @@ pub(crate) fn execute_node(
 /// resolution/trust to an agent_task), the prompt renders with the full
 /// standard context, but no skills are delivered and there is no success_check
 /// and no isolation. Timeout/retries fall back to `defaults`. Returns
-/// (status, answer, events); drive writes the events (single writer).
+/// (status, answer, events). Like `execute_node`, the two attempt-lifecycle
+/// events are journaled directly (`attempt_started` with pid at spawn,
+/// `attempt_finished` with `duration_ms` at return) so a crash during the
+/// terminal answer composition leaves an open attempt on disk; every other
+/// event is returned for drive to write in its return batch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_finish_answer(
     playbook: &Playbook,
@@ -390,9 +462,12 @@ pub(crate) fn execute_finish_answer(
     state: &RunState,
     cfg: &RunConfig,
     prompt: &str,
+    cancel: &AtomicBool,
     env_scrub: &[String],
+    journal: &Journal,
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
-    let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
+    let context =
+        build_context_for_render(run_dir, &read_all(run_dir)?, cfg.instruction.as_deref())?;
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -424,12 +499,10 @@ pub(crate) fn execute_finish_answer(
         )));
     }
 
-    // Cancellation happens at drive-loop boundaries (the top-of-loop
-    // control.jsonl scan and join:any teardown), never mid-agent: like the
-    // inline agent_task path (which drive calls with a fresh `AtomicBool`), this
-    // finish-answer agent runs synchronously on the drive thread, so this local
-    // token is never set during the call (review I1, accepted as pre-existing).
-    let cancel = AtomicBool::new(false);
+    // The drive's run-level cancel flag (Task 8), the same one the inline
+    // agent_task path gets: a stop posted while this finish-answer agent is
+    // composing the run answer kills its process tree instead of waiting it
+    // out. Before Task 8 this was a fresh, permanently-false local token.
     // Connector env isolation (spec 4.3): the finish-answer agent is a spawned
     // agent too, so its inherited connector tokens are scrubbed and it gets the
     // run-context env.
@@ -442,15 +515,29 @@ pub(crate) fn execute_finish_answer(
     let mut attempt: u32 = 0;
     let mut last_msg = String::new();
     let mut last_timed_out = false;
+    // Fallback sameness guard (same semantics as `execute_node` above): compare
+    // each candidate step against the (agent, model) pair actually attempted
+    // last, not against the positionally-previous step.
+    let mut last_tried: Option<(String, String)> = None;
     for (idx, ri) in entry.chain.iter().enumerate() {
         if idx > 0 {
+            let same_binding = last_tried
+                .as_ref()
+                .is_some_and(|(agent, model)| *agent == ri.agent_id && *model == ri.model);
+            if same_binding {
+                continue;
+            }
             events.push(EventPayload::FallbackTriggered {
                 node: node_id.into(),
-                from: entry.chain[idx - 1].agent_id.clone(),
+                from: last_tried
+                    .as_ref()
+                    .map(|(agent, _)| agent.clone())
+                    .unwrap_or_else(|| entry.chain[idx - 1].agent_id.clone()),
                 to: ri.agent_id.clone(),
                 profile: Some(entry.key()),
             });
         }
+        last_tried = Some((ri.agent_id.clone(), ri.model.clone()));
         let adapter = crate::adapter::ClaudeAdapter {
             program: ri.canonical_executable.to_string_lossy().into_owned(),
             spec: ri.spec.clone(),
@@ -463,13 +550,6 @@ pub(crate) fn execute_finish_answer(
                     attempt,
                 });
             }
-            events.push(EventPayload::AttemptStarted {
-                node: node_id.into(),
-                attempt,
-                agent: ri.agent_id.clone(),
-                soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
-                skills_mode: None,
-            });
             let stream_log = run_dir
                 .join("agent-stream")
                 .join(format!("{node_id}-{attempt}.jsonl"));
@@ -483,13 +563,55 @@ pub(crate) fn execute_finish_answer(
                 grant_autonomy,
                 connector_policy: &connector_policy,
             };
-            match adapter.run_cancellable(&task, &cancel) {
+            // Spawn-time attempt journaling (identical shape to execute_node):
+            // `on_spawn` journals attempt_started with the child pid before the
+            // agent runs, and records the spawn instant for duration_ms, so a
+            // crash during the terminal answer composition leaves an open attempt
+            // the fold maps to interrupted.
+            let cur_attempt = attempt;
+            let agent_name = ri.agent_id.clone();
+            let soul_del = Some(soul_delivery_str(ri.soul_delivery));
+            let spawn_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
+            let spawn_err: std::cell::RefCell<Option<EngineError>> = std::cell::RefCell::new(None);
+            let on_spawn = |pid: u32| {
+                spawn_at.set(Some(std::time::Instant::now()));
+                if let Err(e) = journal.append(EventPayload::AttemptStarted {
+                    node: node_id.to_string(),
+                    attempt: cur_attempt,
+                    agent: agent_name.clone(),
+                    soul_delivery: soul_del.clone(),
+                    skills_mode: None,
+                    pid: Some(pid),
+                }) {
+                    *spawn_err.borrow_mut() = Some(e);
+                }
+            };
+            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn));
+            if let Some(e) = spawn_err.borrow_mut().take() {
+                return Err(e);
+            }
+            let spawn_instant = spawn_at.get();
+            // Spawn failed before the callback ran: still journal a started
+            // (pid unknown) so every attempt_finished is preceded by a started.
+            if spawn_instant.is_none() {
+                journal.append(EventPayload::AttemptStarted {
+                    node: node_id.into(),
+                    attempt,
+                    agent: ri.agent_id.clone(),
+                    soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
+                    skills_mode: None,
+                    pid: None,
+                })?;
+            }
+            let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
+            match outcome {
                 Ok(report) => {
-                    events.push(EventPayload::AttemptFinished {
+                    journal.append(EventPayload::AttemptFinished {
                         node: node_id.into(),
                         attempt,
                         status: report.status.as_str().into(),
-                    });
+                        duration_ms,
+                    })?;
                     if report.status == NodeStatus::Succeeded {
                         return Ok((NodeStatus::Succeeded, report.summary, events));
                     }
@@ -498,7 +620,7 @@ pub(crate) fn execute_finish_answer(
                 }
                 Err((class, msg)) => {
                     last_timed_out = class == ErrorClass::Timeout;
-                    events.push(EventPayload::AttemptFinished {
+                    journal.append(EventPayload::AttemptFinished {
                         node: node_id.into(),
                         attempt,
                         status: if last_timed_out {
@@ -507,7 +629,8 @@ pub(crate) fn execute_finish_answer(
                             "failed"
                         }
                         .into(),
-                    });
+                        duration_ms,
+                    })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {
                         break;
@@ -699,7 +822,7 @@ pub(crate) fn run_playbook_node(
     // falls back to its own draft). Reuses the `events` read above (review M1).
     let child_instruction = match node_instruction {
         Some(t) => {
-            let context = build_context_for_render(run_dir, &events)?;
+            let context = build_context_for_render(run_dir, &events, cfg.instruction.as_deref())?;
             let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
                 .into_iter()
                 .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -809,6 +932,7 @@ pub(crate) fn run_playbook_node(
         &mut cp.log,
         &cp.cfg,
         cp.start_node.clone(),
+        StartMode::Rerun,
         cp.run_id.clone(),
         RunMode::Autonomous,
         cp.supervisor_expected,
@@ -952,13 +1076,13 @@ pub(crate) fn maybe_compact_context(
 /// join). On a ready join:any it cancels the other unfinished frontier branches
 /// (marking them cancelled). The sole writer of events (cancelled) is the
 /// calling drive, so the single-writer invariant is preserved.
-pub(crate) fn advance_frontier(
-    playbook: &Playbook,
-    node: &str,
-    state: &RunState,
-    frontier: &mut Vec<String>,
-    log: &mut EventLog,
-) -> Result<(), EngineError> {
+/// The ready successors a node hands the frontier: its outgoing edges evaluated
+/// against the folded status and outputs, dropping the node itself and any join
+/// that is not yet ready. Pure - it reads state and writes nothing, so a resume
+/// can ask "would advancing past this node have anything to run" WITHOUT any
+/// journal side effect. `advance_frontier` layers the join:any cancellation and
+/// the frontier writes on top of this.
+pub(crate) fn seed_successors(playbook: &Playbook, node: &str, state: &RunState) -> Vec<String> {
     let mut runnable: Vec<String> = Vec::new();
     for s in parallel::successors(playbook, node, state) {
         let ready = if parallel::is_join(playbook, &s) {
@@ -969,10 +1093,24 @@ pub(crate) fn advance_frontier(
         } else {
             true
         };
-        if ready && s != node && !runnable.contains(&s) && !frontier.contains(&s) {
+        if ready && s != node && !runnable.contains(&s) {
             runnable.push(s);
         }
     }
+    runnable
+}
+
+pub(crate) fn advance_frontier(
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    frontier: &mut Vec<String>,
+    log: &mut EventLog,
+) -> Result<(), EngineError> {
+    let mut runnable: Vec<String> = seed_successors(playbook, node, state)
+        .into_iter()
+        .filter(|s| !frontier.contains(s))
+        .collect();
     if let Some(join) = runnable
         .iter()
         .find(|s| {
@@ -994,8 +1132,28 @@ pub(crate) fn advance_frontier(
         }
         runnable.retain(|s| s == &join);
     }
+    // The edges actually selected out of `node` for this advance. Used only to
+    // decide which pushes cross a bounded edge and must be journaled. Computed
+    // from the same `state`, so it agrees with the `runnable` set above.
+    let selected = parallel::selected_edges(playbook, node, state);
     for s in runnable {
         if !frontier.contains(&s) {
+            // Journal a traversal ONLY when the edge taken carries
+            // max_traversals (keeps the journal lean). The cap check itself
+            // already happened in the pure `selected_edges`/`seed_successors`
+            // evaluation; this is where the edge is actually taken, so this is
+            // the single counting site (never in the pure seed evaluation), and
+            // the resume StartMode::After path counts through here exactly once
+            // because it advances via this same function.
+            if selected
+                .iter()
+                .any(|e| e.to == s && e.max_traversals.is_some())
+            {
+                log.append(EventPayload::EdgeTraversed {
+                    from: node.to_string(),
+                    to: s.clone(),
+                })?;
+            }
             frontier.push(s);
         }
     }

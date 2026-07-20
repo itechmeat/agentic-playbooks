@@ -146,6 +146,41 @@ fn create_patch_version_rejects_invalid_input() {
 }
 
 #[test]
+fn validation_error_display_omits_node_segment_when_issue_has_no_node() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+
+    // The classification check has no node to attribute the issue to, so
+    // this is a natural fixture for the node-`None` rendering branch.
+    let err = create_patch_version(
+        dir.path(),
+        "implement-task",
+        "1.0.0",
+        VALID,
+        "run-42",
+        "other",
+    )
+    .unwrap_err();
+    match &err {
+        VersioningError::Validation(issues) => {
+            let issue = issues
+                .iter()
+                .find(|i| i.code == "classification")
+                .expect("expected a classification issue");
+            assert!(issue.node.is_none(), "fixture must have no node");
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
+
+    let msg = err.to_string();
+    assert!(
+        msg.lines()
+            .any(|l| l.starts_with("- classification error: ") && !l.contains("(node ")),
+        "expected a node-less `- classification error: <message>` line, got: {msg}"
+    );
+}
+
+#[test]
 fn create_version_for_existing_playbook() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
@@ -208,7 +243,9 @@ fn create_version_rejects_invalid_playbook() {
 
     let err = create_version(dir.path(), "implement-task", &invalid, None, true).unwrap_err();
     match &err {
-        VersioningError::Validation(codes) => assert!(codes.contains(&"V03".to_string())),
+        VersioningError::Validation(issues) => {
+            assert!(issues.iter().any(|i| i.code == "V03"))
+        }
         other => panic!("expected Validation, got {other:?}"),
     }
 
@@ -221,6 +258,32 @@ fn create_version_rejects_invalid_playbook() {
     let current =
         fs::read_to_string(dir.path().join(".apb/playbooks/implement-task/current")).unwrap();
     assert_eq!(current.trim(), "1.0.0");
+}
+
+#[test]
+fn create_version_rejects_invalid_playbook_exposes_issue_message_and_node() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+
+    let invalid = VALID.replace(
+        "  - id: plan",
+        "  - id: start2\n    type: start\n    title: Second start\n  - id: plan",
+    );
+
+    let err = create_version(dir.path(), "implement-task", &invalid, None, true).unwrap_err();
+    match err {
+        VersioningError::Validation(issues) => {
+            let issue = issues
+                .iter()
+                .find(|i| i.code == "V03")
+                .expect("expected a V03 issue");
+            assert!(
+                !issue.message.is_empty(),
+                "issue must expose a human message"
+            );
+        }
+        other => panic!("expected Validation, got {other:?}"),
+    }
 }
 
 #[test]

@@ -43,6 +43,38 @@ fn wait_for_wake(run_dir: &Path) -> Event {
     })
 }
 
+// `wait_for_run_status` observes the RunPaused/terminal EVENT, which `drive`
+// appends before it returns - but the workdir lock guard (`WorkdirGuard`,
+// held by `drive_prepared`'s `PreparedRun`) is only dropped slightly later,
+// once `drive_prepared`'s stack frame unwinds after `drive` returns. All
+// tests in this binary share one process, so `acquire`'s pid-liveness check
+// (`kill -0 <own pid>`) is always true regardless of which run held the
+// lock - a `resume` called immediately after `wait_for_run_status` can race
+// a still-attached guard and fail with `WorkdirBusy`. Polling for the lock
+// file to actually clear closes that window without an arbitrary sleep.
+fn wait_for_workdir_unlocked(root: &Path) {
+    poll_until("the workdir lock to clear", || {
+        (!root.join(".apb/workdir.lock").is_file()).then_some(())
+    })
+}
+
+// Ensures the drive loop has finished at least one node before a proactively
+// posted Pause/ContextAppend is caught by the top-of-loop scan - otherwise a
+// Pause could race ahead of even the `start` node, leaving `RunState` with no
+// `last_node` at all, and `resume(..., None)` would then fail with "nothing
+// to resume from" rather than exercising the cursor-persistence fix this
+// suite is testing.
+fn wait_for_any_node_finished(run_dir: &Path) {
+    poll_until("at least one NodeFinished event", || {
+        read_all(run_dir).ok().and_then(|events| {
+            events
+                .iter()
+                .any(|e| matches!(e.payload, EventPayload::NodeFinished { .. }))
+                .then_some(())
+        })
+    })
+}
+
 /// Polls events.jsonl until the folded RunState shows the desired
 /// terminal/paused status, and returns the event log at that point.
 fn wait_for_run_status(run_dir: &Path, want: RunStatus) -> Vec<Event> {
@@ -364,5 +396,91 @@ fn autonomous_proactive_context_append_then_pause_at_node_boundary() {
     assert!(
         context_md.contains(note),
         "expected context.md to contain the note, got:\n{context_md}"
+    );
+}
+
+// Scenario 5 (Task 4 completion-plan defect 1, ContextAppend half): `drive`
+// used to reset its control cursor to `None` on every invocation and re-read
+// control.jsonl from the very start - so an already-applied ContextAppend was
+// re-applied by a resumed drive, a duplicate SupervisorAction{context_append}.
+// Reuses the proactive-Pause mechanism from Scenario 3/4b (no wake needed):
+// drive N applies the note then pauses at the nearest node boundary; drive
+// N+1 (resume) must complete the run WITHOUT replaying that note.
+#[test]
+fn resume_does_not_replay_an_already_applied_context_append() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_slow_multistep(dir.path(), "onceapp");
+
+    let run_id = run_background(dir.path(), "onceapp", None, RunOptions::default()).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    wait_for_any_node_finished(&run_dir);
+
+    let note = "applied exactly once across drive N and N+1";
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::ContextAppend { note: note.into() },
+    )
+    .unwrap();
+    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+
+    // Drive N: applies the note, then pauses at the nearest node boundary.
+    wait_for_run_status(&run_dir, RunStatus::Paused);
+    wait_for_workdir_unlocked(dir.path());
+
+    // Drive N+1: resume must finish the remaining nodes without re-applying
+    // the ContextAppend drive N already consumed.
+    let res = resume(dir.path(), &run_id, None).unwrap();
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "resume must complete the run rather than re-pause on the already-consumed Pause"
+    );
+
+    let events = read_all(&run_dir).unwrap();
+    let applied = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::SupervisorAction { action, detail, .. } if action == "context_append" && detail == note))
+        .count();
+    assert_eq!(
+        applied, 1,
+        "expected exactly one context_append SupervisorAction across both drives, got {applied}"
+    );
+}
+
+// Scenario 6 (Task 4 completion-plan defect 1, Pause half): the same
+// reset-cursor bug also re-fires a Pause a prior drive already consumed -
+// without a persisted cursor, the resumed drive N+1 sees the very same Pause
+// entry again (its seq unchanged) and re-pauses immediately instead of
+// finishing the run. Exactly one RunPaused event must exist once resume
+// completes.
+#[test]
+fn resume_does_not_replay_a_consumed_pause() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_slow_multistep(dir.path(), "oncepause");
+
+    let run_id = run_background(dir.path(), "oncepause", None, RunOptions::default()).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    wait_for_any_node_finished(&run_dir);
+
+    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    wait_for_run_status(&run_dir, RunStatus::Paused);
+    wait_for_workdir_unlocked(dir.path());
+
+    let res = resume(dir.path(), &run_id, None).unwrap();
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "a Pause consumed by drive N must not re-pause drive N+1"
+    );
+
+    let events = read_all(&run_dir).unwrap();
+    let paused = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::RunPaused { .. }))
+        .count();
+    assert_eq!(
+        paused, 1,
+        "expected exactly one RunPaused event (from drive N only), got {paused}"
     );
 }

@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
 use apb_core::versioning::{create_patch_version, read_provenance};
-use apb_engine::control::Control;
+use apb_engine::control::{Control, read_control_cursor};
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{
     PreparedRun, RunMode, RunOptions, RunResult, drive_prepared, post_supervisor_command,
@@ -440,4 +440,74 @@ fn runs_without_patch_keep_autonomous_and_supervised_behavior() {
     )
     .unwrap();
     assert_eq!(supervised_result.outcome, RunStatus::Succeeded);
+}
+
+// Fix-review Critical regression test (Task 4): the top-of-loop `Control::Patch`
+// arm must apply the patch's effect (`apply_patch`, whose very first step is
+// `read_all(run_dir)?`) BEFORE persisting the control cursor - not the other
+// way around. If the cursor were persisted first and the effect then failed,
+// the Patch entry would be marked "applied" on disk while nothing had actually
+// happened, permanently dropping it (it would never resurface on a later
+// drive). This corrupts events.jsonl with a malformed trailing line right
+// before driving: `prepare()` already opened the run's `EventLog` (its append
+// handle does not re-parse the file, so it keeps working), but `apply_patch`'s
+// own fresh `read_all` will fail to parse that line - a deterministic,
+// environment-independent way to make the Patch effect fail (unlike a
+// filesystem-permission trick, which silently no-ops when tests run as root).
+#[test]
+fn failed_patch_effect_does_not_advance_the_persisted_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), WF_PROMPTS);
+    let (prepared, run_id, run_dir) = prepare(dir.path());
+    let version = create_patch_version(
+        dir.path(),
+        "migrate",
+        "1.0.0",
+        PATCH_IMPROVEMENT,
+        &run_id,
+        "improvement",
+    )
+    .unwrap();
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Patch {
+            version: version.clone(),
+            classification: "improvement".into(),
+            continue_from: "p1".into(),
+        },
+    )
+    .unwrap();
+
+    // The cursor has never advanced yet at this point (drive has not started).
+    assert_eq!(read_control_cursor(&run_dir).unwrap(), None);
+
+    {
+        use std::io::Write as _;
+        let mut f = fs::OpenOptions::new()
+            .append(true)
+            .open(run_dir.join("events.jsonl"))
+            .unwrap();
+        writeln!(f, "not valid json").unwrap();
+    }
+
+    let rx = drive_in_background(dir.path().to_path_buf(), prepared);
+    let result = rx
+        .recv_timeout(POLL_DEADLINE)
+        .unwrap_or_else(|_| panic!("drive did not complete within {POLL_DEADLINE:?}"));
+    assert!(
+        result.is_err(),
+        "expected the corrupted events.jsonl to fail apply_patch's read_all, got: {result:?}"
+    );
+
+    // The cursor must still be exactly what it was before the Patch entry was
+    // even posted (None here - the run never got past its very first control
+    // entry) - proof that a failed effect never gets marked as consumed.
+    assert_eq!(
+        read_control_cursor(&run_dir).unwrap(),
+        None,
+        "the cursor must not advance past a Patch entry whose effect failed - \
+         it must resurface (be re-attempted) on the next drive rather than \
+         being silently dropped"
+    );
 }

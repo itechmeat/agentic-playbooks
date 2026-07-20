@@ -3,7 +3,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use apb_core::registry::{Registry, RegistryError, is_safe_segment};
-use apb_core::validate::{Severity, ValidationContext, validate};
+use apb_core::validate::{Issue, Severity, ValidationContext, validate};
 use apb_core::versioning::{
     VersioningError, create_patch_version, create_version, delete_playbook,
 };
@@ -12,8 +12,8 @@ use apb_engine::event::read_all;
 use apb_engine::run_config::ChildExpectation;
 use apb_engine::state::RunState;
 use apb_engine::{
-    EngineError, RunMode, RunOptions, list_runs, post_supervisor_command, resume, run,
-    run_background, run_cancel, run_inspect as engine_run_inspect, touch_heartbeat, wait_wake,
+    EngineError, RunMode, RunOptions, list_runs, plan_resume, post_supervisor_command, run,
+    run_cancel, run_inspect as engine_run_inspect, stop_run, touch_heartbeat, wait_wake,
     write_supervisor_report,
 };
 use serde_json::{Value, json};
@@ -54,12 +54,21 @@ impl From<VersioningError> for ToolError {
     fn from(e: VersioningError) -> Self {
         match e {
             VersioningError::NotFound(w) => ToolError::NotFound(w),
-            VersioningError::Validation(codes) => {
-                ToolError::Engine(format!("validation failed: {codes:?}"))
+            VersioningError::Validation(issues) => {
+                ToolError::Engine(render_validation_issues(&issues))
             }
             other => ToolError::Engine(other.to_string()),
         }
     }
+}
+
+/// Renders a validation failure as `validation failed:` followed by one line
+/// per issue. Delegates to `apb_core::validate::render_issues`, the single
+/// canonical rendering shared with `VersioningError::Validation`'s own
+/// `Display` impl, so this surface can never drift from any other consumer
+/// of the same `Vec<Issue>`.
+fn render_validation_issues(issues: &[Issue]) -> String {
+    apb_core::validate::render_issues(issues)
 }
 
 /// Creates a new playbook or a new minor version of an existing one.
@@ -356,6 +365,7 @@ pub fn playbook_trial(
     id: &str,
     version: Option<&str>,
     params: BTreeMap<String, String>,
+    instruction: Option<String>,
     scope: &str,
 ) -> Result<Value, ToolError> {
     use apb_core::schema::Effect;
@@ -381,6 +391,7 @@ pub fn playbook_trial(
     }
 
     let opts = RunOptions {
+        instruction,
         params,
         ..Default::default()
     };
@@ -713,10 +724,15 @@ pub fn playbook_run(
 }
 
 /// A non-blocking run start for a regular (non-supervised) MCP client:
-/// starts the playbook in the background (autonomous) and returns run_id immediately. The client
+/// starts the playbook (autonomous) and returns run_id immediately. The client
 /// then polls `run_status`/`run_events` and resolves reviews via `review_decide`.
 /// Needed because some hosts (e.g. ChatGPT Apps) have a tool-call timeout of
 /// ~60s, while a run can take minutes (design doc, section 13.5).
+///
+/// The run is driven by a DETACHED process, not a thread of this one: the
+/// policy gate, permit verification and manifest snapshot all complete here,
+/// in-process, and only the drive loop is handed across - so an `apb mcp`
+/// bound to a chat session that dies no longer takes the run with it.
 #[allow(clippy::too_many_arguments)]
 pub fn playbook_run_background(
     root: &Path,
@@ -749,7 +765,7 @@ pub fn playbook_run_background(
         expected_connector_accounts,
         cache: Default::default(),
     };
-    let run_id = run_background(root, id, version, opts)?;
+    let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
 }
 
@@ -762,10 +778,28 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
     let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
     let state = RunState::fold(&events);
+    // Liveness overlay (Task 9). The fold is pure and replayable; these three
+    // read the machine's process table at request time, which is precisely why
+    // they are applied here rather than folded into `RunState`.
+    //
+    // The incident behind them: a crashed attempt kept reporting an in-flight
+    // node for 19 minutes and `run_status` carried no timestamps at all, so
+    // "is it stuck or working?" could not be answered from the API. `lost`
+    // answers the first question, `node_times` the second.
+    let lost = apb_engine::liveness::lost_nodes(&events);
+    let node_times = apb_engine::liveness::node_times(&events);
+    let driver_alive = apb_engine::liveness::driver_alive(&dir, run_id);
     let nodes: BTreeMap<String, String> = state
         .nodes
         .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
+        .map(|(k, v)| {
+            let status = if lost.contains(k) {
+                apb_engine::liveness::LOST.to_string()
+            } else {
+                v.as_str().to_string()
+            };
+            (k.clone(), status)
+        })
         .collect();
     let progress = apb_engine::progress::from_run_dir(&dir, &events);
     let answer = apb_engine::progress::run_answer(&dir, &events);
@@ -787,6 +821,8 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "run_id": run_id,
         "run_status": state.run_status.as_str(),
         "nodes": nodes,
+        "node_times": node_times,
+        "driver_alive": driver_alive,
         "outputs": state.outputs,
         "progress": progress,
         "answer": answer,
@@ -886,12 +922,44 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
 }
 
 pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<Value, ToolError> {
-    let res = resume(root, run_id, from_node)?;
-    Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
+    // Compute the resume decision up front so the ack reports where and why the
+    // run resumes. This must run BEFORE the drive: once the run reaches a
+    // terminal state, an argument-free `plan_resume` would refuse it.
+    let decision = plan_resume(root, run_id, from_node)?;
+    // The drive itself happens in a separate OS process: this session may be a
+    // chat host that dies at any moment, and a resumed run must not die with
+    // it. The ack is what the caller gets back, immediately - the run's
+    // progress is read afterwards through `run_status` / `run_events`.
+    // A stop still sitting unapplied in the control queue is consumed by the
+    // resumed drive BEFORE it executes anything, so the run stops again
+    // immediately. Read it before spawning the driver (afterwards the driver
+    // races us to consume it) and say so in the ack, or the caller sees a
+    // successful resume followed by a run that never moved.
+    let pending_stop =
+        apb_engine::control::pending_stop_seq(&root.join(".apb/runs").join(run_id))?.is_some();
+    apb_engine::resume_detached(root, run_id, from_node)?;
+    let mut ack = json!({
+        "run_id": run_id,
+        "resumed_from": decision.start_node,
+        "reason": decision.reason.as_str(),
+        "detached": true,
+    });
+    if pending_stop && let Some(obj) = ack.as_object_mut() {
+        obj.insert("stops_on_pending_abort".into(), json!(true));
+        obj.insert(
+            "note".into(),
+            json!(
+                "a stop was still pending on this run, so this resume applies it and the run stops again without executing anything; call run_resume once more to continue past it"
+            ),
+        );
+    }
+    Ok(ack)
 }
 
-/// Starts a playbook in supervised mode without waiting for it to finish.
-/// The supervisor access token is minted by the server layer (Phase 4b, Task 3), not this function.
+/// Starts a playbook in supervised mode without waiting for it to finish, on a
+/// detached driver process (see `playbook_run_background`). The supervisor
+/// access token is minted by the server layer (Phase 4b, Task 3), not this
+/// function.
 #[allow(clippy::too_many_arguments)]
 pub fn playbook_run_supervised(
     root: &Path,
@@ -927,7 +995,7 @@ pub fn playbook_run_supervised(
         expected_connector_accounts,
         cache: Default::default(),
     };
-    let run_id = run_background(root, id, version, opts)?;
+    let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
 }
 
@@ -991,6 +1059,16 @@ pub fn run_pause(root: &Path, run_id: &str) -> Result<Value, ToolError> {
 pub fn run_abort(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     run_cancel(root, run_id)?;
     Ok(json!({ "ok": true }))
+}
+
+/// Stops a run and reports what that took: signaling a live driver (whose
+/// watcher interrupts the in-flight node), finalizing a run whose driver is
+/// gone, or nothing at all for an already terminal run. Unlike
+/// `supervisor_run_abort` this needs no supervisor session - it is the
+/// operator-facing stop, the same one `apb stop` calls.
+pub fn run_stop(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    let outcome = stop_run(root, run_id)?;
+    Ok(json!({ "run_id": run_id, "outcome": outcome.as_str() }))
 }
 
 pub fn context_append(root: &Path, run_id: &str, note: &str) -> Result<Value, ToolError> {

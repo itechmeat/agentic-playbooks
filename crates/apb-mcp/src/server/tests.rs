@@ -135,6 +135,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_events",
         "run_report",
         "run_resume",
+        "run_stop",
         "review_decide",
         "supervisor_wait_event",
         "supervisor_run_inspect",
@@ -204,6 +205,7 @@ fn tools_carry_safety_annotations() {
         "playbook_update",
         "playbook_delete",
         "run_resume",
+        "run_stop",
         "review_decide",
         "supervisor_node_retry",
         "supervisor_run_continue_from",
@@ -351,20 +353,19 @@ async fn background_run_returns_run_id_without_blocking() {
         );
     }
 
-    let deadline = Instant::now() + Duration::from_secs(30);
-    loop {
-        let status = tools::run_status(dir.path(), &run_id).expect("run_status");
-        match status["run_status"].as_str().unwrap_or("") {
-            "succeeded" | "failed" => break,
-            other => {
-                assert!(
-                    Instant::now() < deadline,
-                    "run did not finish, last status: {other}"
-                );
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        }
-    }
+    // Completion is deliberately NOT asserted here. Since Task 7 a background
+    // start hands the drive to a detached `apb __drive-run` process, re-exec'd
+    // from `current_exe()` - which in this unit-test binary is the test
+    // harness, not the `apb` binary, so no real driver can come up. What this
+    // test owns is the non-blocking start; that the detached driver then
+    // carries the run to completion (and keeps going after its launcher is
+    // killed) is proven end-to-end against the real binary in
+    // `apb-cli/tests/suite/detached_driver_test.rs`.
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    assert!(
+        run_dir.is_dir(),
+        "the run must be fully prepared on disk before the drive is handed off"
+    );
 }
 
 #[test]

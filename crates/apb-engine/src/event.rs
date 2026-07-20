@@ -64,11 +64,24 @@ pub enum EventPayload {
         /// workdir; `advisory` - a pointer string with names in the shared workdir.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         skills_mode: Option<String>,
+        /// OS process id of the spawned agent, captured at spawn time (from
+        /// `child.id()`). Written when the attempt is journaled at spawn so a
+        /// mid-attempt crash leaves an identifiable open attempt. `None` only
+        /// for old logs: every path that spawns an agent - including the
+        /// finish-answer composition - journals the attempt at spawn.
+        #[serde(default)]
+        pid: Option<u32>,
     },
     AttemptFinished {
         node: String,
         attempt: u32,
         status: String,
+        /// Wall-clock milliseconds from the agent spawn to this attempt's
+        /// return, measured from the spawn instant. `None` only for old logs:
+        /// every path that spawns an agent - including the finish-answer
+        /// composition - measures the attempt from its own spawn instant.
+        #[serde(default)]
+        duration_ms: Option<u64>,
     },
     NodeFinished {
         node: String,
@@ -95,6 +108,14 @@ pub enum EventPayload {
     },
     RunPaused {
         reason: String,
+    },
+    /// A resume restarted the run from `from_node` (Task 3: resume rework).
+    /// Folds to `Running`, replacing the old `RunPaused { reason: "resume
+    /// from X" }` marker that used to leave the folded status stuck on paused
+    /// for the rest of the run. Old journals that still carry that legacy
+    /// `RunPaused` marker fold unchanged.
+    RunResumed {
+        from_node: String,
     },
     RunFinished {
         outcome: String,
@@ -250,6 +271,17 @@ pub enum EventPayload {
     NodeCacheRejected {
         node: String,
         reason: String,
+    },
+    /// A bounded loop edge (one carrying `max_traversals`) was traversed (spec
+    /// 2026-07-20-run-reliability). Journaled ONLY for edges that carry
+    /// `max_traversals`, so the journal stays lean: `RunState::fold` counts
+    /// these per `(from, to)` into `edge_counts`, and edge selection blocks the
+    /// edge once the count reaches its cap. A resume restores loop progress
+    /// exactly because the counts come from the journal. Additive variant: old
+    /// logs never carry it.
+    EdgeTraversed {
+        from: String,
+        to: String,
     },
 }
 

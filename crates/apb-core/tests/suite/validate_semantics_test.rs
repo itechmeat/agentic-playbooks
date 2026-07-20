@@ -91,6 +91,69 @@ fn v11_cycle_without_max_loops() {
     assert!(error_codes(&bad).contains(&"V11"));
 }
 
+/// A review/fix loop guarded only by a bounded edge (no condition node with
+/// max_loops). The back edge carries `max_traversals`, which is the new,
+/// alternative loop guard (Task 5: bounded loop edges).
+const BOUNDED_LOOP: &str = r#"schema: 2
+id: loop
+name: Loop
+version: 1.0.0
+defaults: { profile: architect }
+nodes:
+  - { id: start, type: start }
+  - { id: review, type: agent_task, prompt: "r" }
+  - { id: fix, type: agent_task, prompt: "f" }
+  - { id: qa, type: finish, outcome: success }
+edges:
+  - { from: start, to: review }
+  - { from: review, to: fix, condition: { type: node_status, node: review, equals: failure }, max_traversals: 3 }
+  - { from: fix, to: review }
+  - { from: review, to: qa, condition: { type: node_status, node: review, equals: success } }
+"#;
+
+#[test]
+fn v11_bounded_edge_guards_a_cycle() {
+    // With `max_traversals` on the back edge the cycle is accepted (no V11),
+    // even though there is no condition node with max_loops.
+    assert!(
+        !error_codes(BOUNDED_LOOP).contains(&"V11"),
+        "a max_traversals edge should guard the cycle"
+    );
+}
+
+#[test]
+fn v11_cycle_without_bounded_edge_or_max_loops_rejects_and_names_max_traversals() {
+    // Drop the only guard (the `max_traversals` on the back edge): the cycle is
+    // now unguarded and must be rejected with V11, whose message names
+    // `max_traversals` as the remedy.
+    let bad = BOUNDED_LOOP.replace(", max_traversals: 3 }", " }");
+    let playbook = Playbook::from_yaml(&bad).unwrap();
+    let report = validate(&playbook, &ctx());
+    let issue = report
+        .issues
+        .iter()
+        .find(|i| i.code == "V11")
+        .expect("expected a V11 cycle error");
+    assert!(
+        issue.message.contains("max_traversals"),
+        "V11 message must name max_traversals as the remedy, got: {}",
+        issue.message
+    );
+}
+
+#[test]
+fn v30_max_traversals_zero_rejects() {
+    let bad = BOUNDED_LOOP.replace("max_traversals: 3", "max_traversals: 0");
+    let playbook = Playbook::from_yaml(&bad).unwrap();
+    let report = validate(&playbook, &ctx());
+    let issue = report
+        .issues
+        .iter()
+        .find(|i| i.code == "V30")
+        .expect("expected a V30 error for max_traversals: 0");
+    assert_eq!(issue.message, "max_traversals must be at least 1");
+}
+
 #[test]
 fn v12_script_path_escapes_version_dir() {
     let bad = VALID.replace("scripts/node-lint.sh", "../../etc/passwd");
@@ -107,6 +170,73 @@ fn v13_template_references_unknown_param() {
 fn v13_template_references_unknown_node() {
     let bad = VALID.replace("{{nodes.lint.output}}", "{{nodes.ghost.output}}");
     assert!(error_codes(&bad).contains(&"V13"));
+}
+
+#[test]
+fn v13_message_includes_variable_and_known_namespaces() {
+    let bad = VALID.replace("{{params.task}}", "{{outputs.plan}}");
+    let playbook = Playbook::from_yaml(&bad).unwrap();
+    let report = validate(&playbook, &ctx());
+    let issue = report
+        .issues
+        .iter()
+        .find(|i| i.code == "V13")
+        .expect("expected a V13 issue");
+    assert!(
+        issue.message.contains("outputs.plan"),
+        "message must name the unresolved variable: {}",
+        issue.message
+    );
+    assert!(
+        issue.message.contains(
+            "known namespaces: params.*, nodes.<id>.output, nodes.<id>.report, \
+             nodes.<id>.review_note, run.instruction, run.context, run.hooks.*"
+        ),
+        "message must carry the exact known-namespaces suffix: {}",
+        issue.message
+    );
+}
+
+const PARENT_WITH_INSTRUCTION: &str = "schema: 2\nid: parent\nname: parent\nversion: 1.0.0\n\
+     nodes:\n  - { id: s, type: start }\n  - { id: c, type: playbook, playbook: child, \
+     instruction: \"{{outputs.x}}\" }\n  - { id: f, type: finish, outcome: success }\n\
+     edges:\n  - { from: s, to: c }\n  - { from: c, to: f }\n";
+
+#[test]
+fn v13_scans_playbook_node_instruction() {
+    let playbook = Playbook::from_yaml(PARENT_WITH_INSTRUCTION).unwrap();
+    let report = validate(&playbook, &ctx());
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.code == "V13" && i.node.as_deref() == Some("c")),
+        "expected a V13 issue on the playbook node's instruction, got {:?}",
+        report.issues.iter().map(|i| i.code).collect::<Vec<_>>()
+    );
+}
+
+const FINISH_WITH_BAD_PROMPT: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\n\
+     nodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success, \
+     prompt: \"{{outputs.x}}\" }\nedges:\n  - { from: s, to: f }\n";
+
+// A finish-with-prompt node renders {{...}} templates the same as agent_task
+// and prompt nodes (context.rs's `render`), so an unresolvable reference
+// there must be caught at save time too, not left to render empty at run
+// time (the same class of gap V13 already closes for agent_task/prompt/
+// playbook-instruction, see `v13_scans_playbook_node_instruction` above).
+#[test]
+fn v13_scans_finish_node_prompt() {
+    let playbook = Playbook::from_yaml(FINISH_WITH_BAD_PROMPT).unwrap();
+    let report = validate(&playbook, &ctx());
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.code == "V13" && i.node.as_deref() == Some("f")),
+        "expected a V13 issue on the finish node's prompt, got {:?}",
+        report.issues.iter().map(|i| i.code).collect::<Vec<_>>()
+    );
 }
 
 #[test]
