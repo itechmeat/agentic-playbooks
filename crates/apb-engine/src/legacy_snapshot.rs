@@ -20,6 +20,43 @@ use crate::error::EngineError;
 use crate::invocation::{filter_chain, program_for, resolve_invocation};
 use crate::manifest::{ManifestProfile, RunExecutionManifest};
 
+/// Loads the run's immutable playbook snapshot from `<run_dir>/playbook.yaml`.
+/// Returns `None` when the snapshot is missing or fails to parse.
+///
+/// Parsing goes through the shared run-snapshot compatibility parser
+/// (`parse_snapshot_playbook` below), so schema-1 snapshots that the strict
+/// `Playbook::from_yaml` rejects still yield progress (the same tolerance the
+/// resume path uses), without weakening the strict parser for live
+/// definitions.
+///
+/// F3: a missing snapshot is a silent `None` (very old runs never captured
+/// one). An existing-but-unparseable snapshot also collapses to `None`, but is
+/// not silent: it writes one stderr warning naming the run dir. apb-engine has
+/// no tracing facility and we add no dependency for this one branch; snapshots
+/// are immutable and engine-written, so a parse failure is a filesystem-level
+/// fault worth a terminal signal rather than an authoring one.
+///
+/// Lives here rather than in `progress.rs` (its original home) so that
+/// `progress.rs` and `question.rs` - each of which needs this function - stay
+/// a one-way dependency edge onto this module instead of a mutual cycle on
+/// each other (spec 2026-07-20, Task 5 dependency-cycle fix). `progress.rs`
+/// re-exports it (`pub use crate::legacy_snapshot::load_run_playbook`) so the
+/// `apb_engine::progress::load_run_playbook` path external callers
+/// (apb-mcp, apb-server) already use keeps working unchanged.
+pub fn load_run_playbook(run_dir: &Path) -> Option<Playbook> {
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml")).ok()?;
+    match parse_snapshot_playbook(&yaml) {
+        Ok(pb) => Some(pb),
+        Err(e) => {
+            eprintln!(
+                "apb: warning: run snapshot {} unparseable: {e}",
+                run_dir.display()
+            );
+            None
+        }
+    }
+}
+
 /// Legacy executor schema 1: agent + model + an optional fallback chain.
 #[derive(Debug, Clone, Deserialize)]
 struct LegacyExec {

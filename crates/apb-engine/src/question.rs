@@ -20,7 +20,11 @@ use apb_core::schema::{AnswerBy, NodeKind};
 use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
-use crate::progress::load_run_playbook;
+// Sourced from `legacy_snapshot` rather than `progress` (its public
+// re-export path) to avoid a mutual module cycle: `progress.rs` also depends
+// on this module for its channel reads (spec 2026-07-20, Task 5
+// dependency-cycle fix).
+use crate::legacy_snapshot::load_run_playbook;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PostedQuestion {

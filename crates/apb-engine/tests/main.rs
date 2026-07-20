@@ -86,6 +86,8 @@ mod inspect_wait_test;
 mod instruction_precedence_test;
 #[path = "suite/interactive_reprompt_test.rs"]
 mod interactive_reprompt_test;
+#[path = "suite/interactive_timeout_test.rs"]
+mod interactive_timeout_test;
 #[path = "suite/list_runs_resilient_test.rs"]
 mod list_runs_resilient_test;
 #[path = "suite/loop_edges_test.rs"]

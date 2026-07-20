@@ -134,34 +134,13 @@ fn sccs(playbook: &Playbook) -> Vec<Vec<String>> {
     out
 }
 
-/// Loads the run's immutable playbook snapshot from `<run_dir>/playbook.yaml`.
-/// Returns `None` when the snapshot is missing or fails to parse.
-///
-/// Parsing goes through the shared run-snapshot compatibility parser
-/// (`legacy_snapshot::parse_snapshot_playbook`), so schema-1 snapshots that the
-/// strict `Playbook::from_yaml` rejects still yield progress (the same
-/// tolerance the resume path uses), without weakening the strict parser for
-/// live definitions.
-///
-/// F3: a missing snapshot is a silent `None` (very old runs never captured
-/// one). An existing-but-unparseable snapshot also collapses to `None`, but is
-/// not silent: it writes one stderr warning naming the run dir. apb-engine has
-/// no tracing facility and we add no dependency for this one branch; snapshots
-/// are immutable and engine-written, so a parse failure is a filesystem-level
-/// fault worth a terminal signal rather than an authoring one.
-pub fn load_run_playbook(run_dir: &Path) -> Option<Playbook> {
-    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml")).ok()?;
-    match crate::legacy_snapshot::parse_snapshot_playbook(&yaml) {
-        Ok(pb) => Some(pb),
-        Err(e) => {
-            eprintln!(
-                "apb: warning: run snapshot {} unparseable: {e}",
-                run_dir.display()
-            );
-            None
-        }
-    }
-}
+/// Loads the run's immutable playbook snapshot from `<run_dir>/playbook.yaml`
+/// (spec 2026-07-20, Task 5 dependency-cycle fix: defined in
+/// `legacy_snapshot` - the module it is actually built from - and re-exported
+/// here for API stability; `question.rs` needs it too, and `progress.rs` <->
+/// `question.rs` would otherwise be a mutual module cycle). See
+/// `legacy_snapshot::load_run_playbook` for the full doc comment.
+pub use crate::legacy_snapshot::load_run_playbook;
 
 /// The first interactive `agent_task` node with a pending question, read
 /// directly from the `questions.jsonl` / `answers.jsonl` channel files
@@ -267,6 +246,42 @@ fn pending_question_for_node(
         answer_by,
         asked_at,
     })
+}
+
+/// Sums, over `events`, every completed `QuestionAsked`-to-`QuestionAnswered`
+/// interval (ms) for `node`, matched in journal order: the first open
+/// `QuestionAsked` pairs with the next `QuestionAnswered` for the same node,
+/// and so on - mirroring the count-based consumption the drive interactive
+/// branch already uses (`question_asked_count`/`question_answered_count`
+/// in `scheduler.rs`). An open (asked but not yet answered) question
+/// contributes nothing: its duration is not yet known, and by construction
+/// there is at most one open question per node at a time.
+///
+/// Pure and bounded (spec 2026-07-20, Task 5): no I/O, just one scan of the
+/// given slice. Consumed by the node-timeout exclusion wired into
+/// `check_cancel_timeout` (a no-op for the reprompt path within a single
+/// attempt - a park always spans a fresh attempt boundary, so no completed
+/// interval ever falls inside one attempt's own clock) and, later, the live
+/// `ask_user` transport (Task 11), whose single long-lived attempt DOES span
+/// a pending question and needs that duration excluded from the node
+/// timeout.
+pub fn pending_interval_ms(events: &[Event], node: &str) -> u128 {
+    let mut total = 0u128;
+    let mut open_asked_ts: Option<u128> = None;
+    for e in events {
+        match &e.payload {
+            EventPayload::QuestionAsked { node: n, .. } if n == node => {
+                open_asked_ts.get_or_insert(e.ts);
+            }
+            EventPayload::QuestionAnswered { node: n, .. } if n == node => {
+                if let Some(asked_ts) = open_asked_ts.take() {
+                    total += e.ts.saturating_sub(asked_ts);
+                }
+            }
+            _ => {}
+        }
+    }
+    total
 }
 
 /// Computes the progress summary for a run directory, or `None` when the
@@ -1488,5 +1503,78 @@ edges:
         // Root is the temp dir; from_run_dir must find child-1 under root/.apb/runs.
         let p = from_run_dir_with_root(tmp.path(), &parent_dir, &parent_events).unwrap();
         assert_eq!(p.percent, 25);
+    }
+
+    // Task 5 (spec 2026-07-20-interactive-nodes): `pending_interval_ms` is a
+    // pure fold over a hand-built journal, so it is tested inline here rather
+    // than through a full run harness.
+
+    fn ev_at(seq: u64, ts: u128, payload: EventPayload) -> Event {
+        Event { seq, ts, payload }
+    }
+
+    fn asked(seq: u64, ts: u128, node: &str) -> Event {
+        ev_at(
+            seq,
+            ts,
+            EventPayload::QuestionAsked {
+                node: node.into(),
+                question: "q".into(),
+                options: Vec::new(),
+            },
+        )
+    }
+
+    fn answered(seq: u64, ts: u128, node: &str) -> Event {
+        ev_at(
+            seq,
+            ts,
+            EventPayload::QuestionAnswered {
+                node: node.into(),
+                answer: "a".into(),
+                answered_by: "human".into(),
+            },
+        )
+    }
+
+    #[test]
+    fn pending_interval_ms_sums_one_completed_round() {
+        let events = vec![asked(0, 1000, "ask"), answered(1, 4000, "ask")];
+        assert_eq!(pending_interval_ms(&events, "ask"), 3000);
+    }
+
+    #[test]
+    fn pending_interval_ms_sums_two_rounds() {
+        let events = vec![
+            asked(0, 1000, "ask"),
+            answered(1, 4000, "ask"),
+            asked(2, 5000, "ask"),
+            answered(3, 6500, "ask"),
+        ];
+        // 3000 (1000->4000) + 1500 (5000->6500) = 4500
+        assert_eq!(pending_interval_ms(&events, "ask"), 4500);
+    }
+
+    #[test]
+    fn pending_interval_ms_open_question_contributes_nothing() {
+        // The second question is asked but never answered: bounded, pure -
+        // it must not be counted, and must not panic or loop.
+        let events = vec![
+            asked(0, 1000, "ask"),
+            answered(1, 4000, "ask"),
+            asked(2, 5000, "ask"),
+        ];
+        assert_eq!(pending_interval_ms(&events, "ask"), 3000);
+    }
+
+    #[test]
+    fn pending_interval_ms_ignores_other_nodes() {
+        let events = vec![
+            asked(0, 1000, "ask"),
+            answered(1, 4000, "other"),
+            answered(2, 4000, "ask"),
+        ];
+        assert_eq!(pending_interval_ms(&events, "ask"), 3000);
+        assert_eq!(pending_interval_ms(&events, "other"), 0);
     }
 }

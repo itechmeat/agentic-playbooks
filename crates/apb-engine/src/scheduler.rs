@@ -24,7 +24,7 @@ use crate::event::{
 use crate::inspect::{should_declare_lost, supervisor_silence_ms, write_supervisor_session};
 use crate::manifest::{ManifestProfile, ManifestSkill, RunExecutionManifest};
 use crate::parallel::{self, JoinReadiness};
-use crate::question::{post_question, read_answers_after, read_questions_after};
+use crate::question::{post_answer, post_question, read_answers_after, read_questions_after};
 use crate::review::read_reviews_after;
 use crate::run_config::{
     CacheRunMode, RunConfig, copy_scripts, read_run_config, snapshot_playbook, write_run_config,
@@ -329,6 +329,19 @@ fn last_wait_started_ts(events: &[Event], node: &str) -> Option<u128> {
         .iter()
         .rev()
         .find(|e| matches!(&e.payload, EventPayload::WaitStarted { node: n, .. } if n == node))
+        .map(|e| e.ts)
+}
+
+/// The `ts` of the most recent `QuestionAsked` event for `node` - the moment
+/// the currently pending (unanswered) question was raised, since by
+/// construction only one question is ever open per node at a time (spec
+/// 2026-07-20, Task 5). Used by the interactive park loop to evaluate
+/// `question_timeout_seconds` expiry.
+fn last_question_asked_ts(events: &[Event], node: &str) -> Option<u128> {
+    events
+        .iter()
+        .rev()
+        .find(|e| matches!(&e.payload, EventPayload::QuestionAsked { node: n, .. } if n == node))
         .map(|e| e.ts)
 }
 
@@ -1537,8 +1550,15 @@ fn drive(
             // they hold across the bounce. Interactive nodes bypass the node
             // cache entirely (a hit would skip the question), so no
             // NodeCacheMiss is journaled for them.
+            //
+            // `timeout_failed`: set only by the `question_timeout_seconds`
+            // expiry-without-`default_answer` case below (Task 5) - the one
+            // path in this branch that must fail the node without ever
+            // reaching `execute_node`. Every other path either falls through
+            // to run an attempt or `continue`s the drive loop directly.
             let events = read_all(run_dir)?;
             let answered = question_answered_count(&events, &current);
+            let mut timeout_failed: Option<String> = None;
             // A pending (asked-but-unanswered) question means we are parked.
             if question_asked_count(&events, &current) > answered {
                 let for_node: Vec<_> = read_answers_after(run_dir, None)?
@@ -1567,81 +1587,136 @@ fn drive(
                         // Fall through to run the next attempt below.
                     }
                     None => {
-                        // Still waiting: bounce to the top-of-loop control scan
-                        // so control commands keep being applied, then poll again.
-                        std::thread::sleep(AWAIT_CONTROL_POLL);
+                        // Still waiting: check whether `question_timeout_seconds`
+                        // has elapsed for the pending question (spec
+                        // 2026-07-20, Task 5). With a `default_answer`, post it
+                        // through the same channel a human/supervisor answer
+                        // would use (`answered_by: "timeout"` bypasses the
+                        // `answer_by: human` policy in `post_answer`, per spec
+                        // Exact answer semantics), then bounce and let the next
+                        // iteration's normal count-based consumption above pick
+                        // it up. Without one, stop parking and fail the node
+                        // outright: a node that declares a timeout with no
+                        // default has nothing sensible to proceed with.
+                        let (question_timeout_seconds, default_answer) = match &node_kind {
+                            NodeKind::AgentTask {
+                                question_timeout_seconds,
+                                default_answer,
+                                ..
+                            } => (*question_timeout_seconds, default_answer.clone()),
+                            _ => (None, None),
+                        };
+                        let expired = match (
+                            question_timeout_seconds,
+                            last_question_asked_ts(&events, &current),
+                        ) {
+                            (Some(secs), Some(asked_ts)) => {
+                                now_millis().saturating_sub(asked_ts) >= u128::from(secs) * 1000
+                            }
+                            _ => false,
+                        };
+                        if !expired {
+                            std::thread::sleep(AWAIT_CONTROL_POLL);
+                            continue;
+                        }
+                        match default_answer {
+                            Some(ans) => {
+                                post_answer(run_dir, Some(&current), &ans, "timeout")?;
+                                std::thread::sleep(AWAIT_CONTROL_POLL);
+                                continue;
+                            }
+                            None => {
+                                steps += 1;
+                                let secs = question_timeout_seconds.unwrap_or(0);
+                                timeout_failed = Some(format!(
+                                    "interactive node `{current}` timed out after {secs}s waiting for an answer and has no default_answer"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            if let Some(msg) = timeout_failed {
+                (NodeStatus::Failed, msg)
+            } else {
+                // Run one agent attempt. NodeStarted is journaled once per node
+                // visit (guarded by started-vs-finished counts, like the wait
+                // branch): the first attempt of a visit emits it; a
+                // re-invocation after an answer does not (the visit is still
+                // open).
+                if node_started_count(&events, &current) <= node_finished_count(&events, &current) {
+                    steps += 1;
+                    log.append(EventPayload::NodeStarted {
+                        node: current.clone(),
+                        attempt: 1,
+                    })?;
+                }
+                let override_prompt = prompt_overrides.remove(&current);
+                let outcome = {
+                    let journal = Journal::new(&mut *log);
+                    execute_node(
+                        &playbook,
+                        run_dir,
+                        &workdir,
+                        &current,
+                        &run_id,
+                        &state,
+                        cfg,
+                        override_prompt,
+                        &run_cancel,
+                        &env_scrub,
+                        &journal,
+                    )?
+                };
+                match outcome {
+                    AttemptOutcome::Finished {
+                        status,
+                        output,
+                        events: evs,
+                    } => {
+                        for ev in evs {
+                            log.append(ev)?;
+                        }
+                        // Fall to the shared tail (NodeFinished + frontier advance).
+                        (status, output)
+                    }
+                    AttemptOutcome::Suspended { question, options } => {
+                        // Declare the question once per suspension
+                        // (journal-count based, so it survives the loop
+                        // bounce), raise a wake so a waiting supervisor
+                        // returns (Task 8), then bounce to the top-of-loop
+                        // scan; the next iteration parks.
+                        let events = read_all(run_dir)?;
+                        if question_asked_count(&events, &current)
+                            <= question_answered_count(&events, &current)
+                        {
+                            let attempt = attempt_started_count(&events, &current) as u32;
+                            // Idempotent channel post: skip if a crash between
+                            // a prior post_question and its QuestionAsked
+                            // already left an unanswered question for this
+                            // node in questions.jsonl.
+                            if !node_has_unanswered_channel_question(run_dir, &current)? {
+                                post_question(
+                                    run_dir,
+                                    &current,
+                                    attempt,
+                                    &question,
+                                    options.clone(),
+                                )?;
+                            }
+                            log.append(EventPayload::QuestionAsked {
+                                node: current.clone(),
+                                question,
+                                options,
+                            })?;
+                            log.append(EventPayload::WakeRaised {
+                                trigger: WakeTrigger::Anomaly,
+                                node: current.clone(),
+                                detail: "interactive question".into(),
+                            })?;
+                        }
                         continue;
                     }
-                }
-            }
-            // Run one agent attempt. NodeStarted is journaled once per node
-            // visit (guarded by started-vs-finished counts, like the wait
-            // branch): the first attempt of a visit emits it; a re-invocation
-            // after an answer does not (the visit is still open).
-            if node_started_count(&events, &current) <= node_finished_count(&events, &current) {
-                steps += 1;
-                log.append(EventPayload::NodeStarted {
-                    node: current.clone(),
-                    attempt: 1,
-                })?;
-            }
-            let override_prompt = prompt_overrides.remove(&current);
-            let outcome = {
-                let journal = Journal::new(&mut *log);
-                execute_node(
-                    &playbook,
-                    run_dir,
-                    &workdir,
-                    &current,
-                    &run_id,
-                    &state,
-                    cfg,
-                    override_prompt,
-                    &run_cancel,
-                    &env_scrub,
-                    &journal,
-                )?
-            };
-            match outcome {
-                AttemptOutcome::Finished {
-                    status,
-                    output,
-                    events: evs,
-                } => {
-                    for ev in evs {
-                        log.append(ev)?;
-                    }
-                    // Fall to the shared tail (NodeFinished + frontier advance).
-                    (status, output)
-                }
-                AttemptOutcome::Suspended { question, options } => {
-                    // Declare the question once per suspension (journal-count
-                    // based, so it survives the loop bounce), raise a wake so a
-                    // waiting supervisor returns (Task 8), then bounce to the
-                    // top-of-loop scan; the next iteration parks.
-                    let events = read_all(run_dir)?;
-                    if question_asked_count(&events, &current)
-                        <= question_answered_count(&events, &current)
-                    {
-                        let attempt = attempt_started_count(&events, &current) as u32;
-                        // Idempotent channel post: skip if a crash between a
-                        // prior post_question and its QuestionAsked already left
-                        // an unanswered question for this node in questions.jsonl.
-                        if !node_has_unanswered_channel_question(run_dir, &current)? {
-                            post_question(run_dir, &current, attempt, &question, options.clone())?;
-                        }
-                        log.append(EventPayload::QuestionAsked {
-                            node: current.clone(),
-                            question,
-                            options,
-                        })?;
-                        log.append(EventPayload::WakeRaised {
-                            trigger: WakeTrigger::Anomaly,
-                            node: current.clone(),
-                            detail: "interactive question".into(),
-                        })?;
-                    }
-                    continue;
                 }
             }
         } else {

@@ -17,6 +17,7 @@ use crate::error::EngineError;
 // and killing every process the user owns, so it must live in exactly one
 // place.
 use crate::proc::kill_process_group;
+use crate::progress::pending_interval_ms;
 use crate::state::NodeStatus;
 
 /// Spawns the agent in its own process group so that cancellation/timeout can
@@ -427,26 +428,63 @@ impl ClaudeAdapter {
         }
     }
 
+    /// `pending_ms` (spec 2026-07-20, Task 5): milliseconds of pending-
+    /// question time excluded from the elapsed clock, from
+    /// `pending_question_ms` below. A node's `timeout_seconds` budgets the
+    /// agent's own work, not a human/supervisor's answer time - a node that
+    /// budgets 300s of agent work must not be killed because a question sat
+    /// unanswered for an hour. Currently always `0` for the reprompt
+    /// transport (a park always spans a fresh attempt boundary, so no
+    /// completed question interval ever falls inside one attempt's own
+    /// `started..now` window); wired now so the live `ask_user` transport
+    /// (Task 11), whose single long-lived attempt DOES span a pending
+    /// question, needs no change here.
     fn check_cancel_timeout(
         child: &mut Child,
         cancel: &AtomicBool,
         started: Instant,
         timeout: Option<Duration>,
+        pending_ms: u128,
     ) -> Option<(ErrorClass, String)> {
         if cancel.load(Ordering::Relaxed) {
             kill_process_tree(child);
             return Some((ErrorClass::Transport, "cancelled".to_string()));
         }
-        if let Some(limit) = timeout
-            && started.elapsed() >= limit
-        {
-            kill_process_tree(child);
-            return Some((
-                ErrorClass::Timeout,
-                format!("agent timed out after {}s", limit.as_secs()),
-            ));
+        if let Some(limit) = timeout {
+            let pending = Duration::from_millis(u64::try_from(pending_ms).unwrap_or(u64::MAX));
+            if started.elapsed().saturating_sub(pending) >= limit {
+                kill_process_tree(child);
+                return Some((
+                    ErrorClass::Timeout,
+                    format!("agent timed out after {}s", limit.as_secs()),
+                ));
+            }
         }
         None
+    }
+
+    /// Sums `pending_interval_ms` (spec 2026-07-20, Task 5) over the run's
+    /// event log for `task`'s node, restricted to events at or after
+    /// `since_ms` (the wall-clock instant this attempt began) so a
+    /// historical, already-closed question round from a PREVIOUS attempt is
+    /// never double-counted against a freshly started one. `0` when the task
+    /// carries no timeout (nothing to exclude from), no run dir/node id (an
+    /// internal, connector-less call), or the event log cannot be read.
+    fn pending_question_ms(task: &AgentTask, since_ms: u128) -> u128 {
+        if task.timeout.is_none() {
+            return 0;
+        }
+        let (Some(run_dir), Some(node_id)) = (
+            task.connector_policy.run_dir.as_deref(),
+            task.connector_policy.node_id.as_deref(),
+        ) else {
+            return 0;
+        };
+        let Ok(events) = crate::event::read_all(run_dir) else {
+            return 0;
+        };
+        let scoped: Vec<_> = events.into_iter().filter(|e| e.ts >= since_ms).collect();
+        pending_interval_ms(&scoped, node_id)
     }
 
     /// Headless transport: a one-shot buffered run of `claude -p ...`, stdout
@@ -496,8 +534,14 @@ impl ClaudeAdapter {
             // si is dropped here - stdin closes, the agent sees EOF.
         }
         let started = Instant::now();
+        // Pending-question exclusion (spec 2026-07-20, Task 5): computed once
+        // for this attempt rather than per poll tick, since it is fed by
+        // `started`'s own wall-clock instant and only ever changes further
+        // (Task 11 live path) while this same attempt keeps running.
+        let pending_ms = Self::pending_question_ms(task, crate::event::now_millis());
         loop {
-            if let Some(err) = Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)
+            if let Some(err) =
+                Self::check_cancel_timeout(&mut child, cancel, started, task.timeout, pending_ms)
             {
                 return Err(err);
             }
@@ -648,6 +692,10 @@ impl ClaudeAdapter {
         });
 
         let started = Instant::now();
+        // Pending-question exclusion (spec 2026-07-20, Task 5): see
+        // `run_headless` for why this is computed once per attempt rather
+        // than per poll tick.
+        let pending_ms = Self::pending_question_ms(task, crate::event::now_millis());
         let pid = child.id();
         let mut raw_lines: Vec<String> = Vec::new();
         // Set once the agent process itself has exited: the deadline for
@@ -672,8 +720,13 @@ impl ClaudeAdapter {
             // output the run has already paid for, in exchange for ending a
             // bounded, idle wait slightly sooner.
             if drain_deadline.is_none()
-                && let Some(err) =
-                    Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)
+                && let Some(err) = Self::check_cancel_timeout(
+                    &mut child,
+                    cancel,
+                    started,
+                    task.timeout,
+                    pending_ms,
+                )
             {
                 return Err(err);
             }
