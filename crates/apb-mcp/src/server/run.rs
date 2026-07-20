@@ -506,4 +506,48 @@ impl WfMcp {
             &root, &run_id, &node, &decision, &note,
         ))
     }
+
+    #[tool(
+        description = "Answer a pending interactive question on a run (an agent_task with interactive: true that asked the user something). Provide exactly one of run_id (plain/operator path, posts answered_by: \"human\") or token (supervisor-session path, posts answered_by: \"supervisor\"; a node declaring answer_by: human rejects this path with an error asking the supervisor to relay the question to the user instead). Omit node when exactly one question is pending (the common case); otherwise copy it verbatim from run_status's pending_question.node - an unrecognized node name is not checked against the pending channel and silently appends an orphaned answer rather than erroring.",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn run_answer(
+        &self,
+        Parameters(RunAnswerArgs {
+            run_id,
+            token,
+            node,
+            answer,
+            workspace,
+        }): Parameters<RunAnswerArgs>,
+    ) -> CallToolResult {
+        let (root, run_id, answered_by) = match (run_id, token) {
+            (Some(_), Some(_)) | (None, None) => {
+                return to_call_tool_result(Ok(json!({
+                    "error": "exactly_one_of_run_id_or_token_required",
+                })));
+            }
+            (Some(run_id), None) => {
+                let root = match self.effective_root(workspace.as_deref()) {
+                    Ok(r) => r,
+                    Err(e) => return to_call_tool_result(Ok(e)),
+                };
+                (root, run_id, "human")
+            }
+            (None, Some(token)) => {
+                let run_id = match self.resolve_session(&token, "run_answer") {
+                    Ok(r) => r,
+                    Err(e) => return to_call_tool_result(Err(e)),
+                };
+                ((*self.root).clone(), run_id, "supervisor")
+            }
+        };
+        to_call_tool_result(tools::run_answer(
+            &root,
+            &run_id,
+            node.as_deref(),
+            &answer,
+            answered_by,
+        ))
+    }
 }
