@@ -1,8 +1,16 @@
 // Connector trust: the connector's own tree digest, or an account's non-secret
 // field digest, against the local trust store (design doc section 7/9).
 // `invalid` covers a connector that failed to parse at all (a fourth state on
-// top of the three the trust store itself distinguishes).
-export type ConnectorTrust = 'approved' | 'changed' | 'unapproved' | 'invalid'
+// top of the three the trust store itself distinguishes). `not_installed` is
+// the detail endpoint's answer for an embedded connector with no bytes on
+// disk: there is nothing to have decided trust about yet, which is a state of
+// its own and not a trust problem.
+export type ConnectorTrust =
+  | 'approved'
+  | 'changed'
+  | 'unapproved'
+  | 'invalid'
+  | 'not_installed'
 
 export interface ConnectorCard {
   name: string
@@ -66,6 +74,10 @@ export interface ConnectorMeta {
 export interface ConnectorDetail {
   name: string
   version: string
+  // False for an embedded official connector that is offered but has not been
+  // connected yet. Everything else on this object is manifest-derived and is
+  // populated either way.
+  installed: boolean
   trust: ConnectorTrust
   meta: ConnectorMeta
   bodyMd: string
@@ -84,6 +96,8 @@ export function trustBadge(t: ConnectorTrust): {
       return { label: 'changed', tone: 'warn' }
     case 'invalid':
       return { label: 'invalid', tone: 'danger' }
+    case 'not_installed':
+      return { label: 'not connected', tone: 'muted' }
     default:
       return { label: 'unapproved', tone: 'muted' }
   }

@@ -14,6 +14,11 @@ describe('trustBadge', () => {
   it('invalid -> danger tone (unparsable connector)', () => {
     expect(trustBadge('invalid')).toEqual({ label: 'invalid', tone: 'danger' })
   })
+  it('not_installed -> muted tone, never a warning', () => {
+    // Not being connected is a state, not a trust problem, so it must not
+    // borrow the warn or danger tone.
+    expect(trustBadge('not_installed')).toEqual({ label: 'not connected', tone: 'muted' })
+  })
 })
 
 describe('accountReady', () => {

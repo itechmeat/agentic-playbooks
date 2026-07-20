@@ -1,13 +1,22 @@
 <script lang="ts">
   import {
+    ApiError,
     approveConnector,
     fetchConnector,
     fetchConnectorStats,
+    installConnector,
     runConnectorHealthcheck,
+    uninstallConnector,
     type HealthcheckResult,
   } from '../lib/api'
+  import {
+    connectorActionMessage,
+    needsForce,
+    DISCONNECT_KEEPS_CONFIG,
+  } from '../lib/connectorinstall'
   import { accountReady, trustBadge, type ConnectorAccount, type ConnectorDetail } from '../lib/connectors'
   import { errorRate, formatDurationMs, outcomeSummary, type ConnectorStats } from '../lib/connectorstats'
+  import { renderMarkdown } from '../lib/markdown'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
   import ConnectorPlaygroundPanel from '$lib/components/ConnectorPlaygroundPanel.svelte'
@@ -15,10 +24,15 @@
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
   import * as Table from '$lib/components/ui/table'
+  import * as Empty from '$lib/components/ui/empty'
   import { Skeleton } from '$lib/components/ui/skeleton'
   import { Spinner } from '$lib/components/ui/spinner'
   import { toast } from 'svelte-sonner'
+  import * as Alert from '$lib/components/ui/alert'
   import ShieldCheck from '@lucide/svelte/icons/shield-check'
+  import Plug from '@lucide/svelte/icons/plug'
+  import Unplug from '@lucide/svelte/icons/unplug'
+  import Replace from '@lucide/svelte/icons/replace'
   import Stethoscope from '@lucide/svelte/icons/stethoscope'
   import ExternalLink from '@lucide/svelte/icons/external-link'
   import ChartNoAxesColumn from '@lucide/svelte/icons/chart-no-axes-column'
@@ -32,19 +46,39 @@
   let approving = $state<string | null>(null) // account name, or '' for the connector itself
   let probing = $state<string | null>(null)
   let probeResults = $state<Record<string, HealthcheckResult>>({})
+  // Set when the detail endpoint answered 404: the name is neither installed
+  // nor offered by the server, so Connect would be guaranteed to fail. Tracked
+  // apart from a request that never answered, which must not be read as "this
+  // connector does not exist".
+  let unknownName = $state(false)
+  let busy = $state<'connect' | 'disconnect' | null>(null)
+  // A 409 needs_force means a different version is on disk. The replace action
+  // is only ever offered as an explicit second click, never retried silently.
+  let forceOffered = $state(false)
 
   // Monotonic token: an in-flight fetch that resolves after a newer load
   // started (fast navigation between connectors) must not overwrite the
   // current view.
   let loadToken = 0
 
+  // The detail endpoint answers for a connector that is merely not connected
+  // too (its manifest is embedded in the server binary), so there is no
+  // fallback dance here: a 404 means the name is genuinely unknown, and
+  // anything else is a real failure worth a toast.
   async function load(token: number) {
     try {
       const d = await fetchConnector(name, workspace)
       if (token !== loadToken) return
       detail = d
+      unknownName = false
     } catch (e) {
-      if (token === loadToken) toast.error('Failed to load connector', { description: String(e) })
+      if (token !== loadToken) return
+      if (e instanceof ApiError && e.status === 404) {
+        detail = null
+        unknownName = true
+      } else {
+        toast.error('Failed to load connector', { description: String(e) })
+      }
     } finally {
       if (token === loadToken) loaded = true
     }
@@ -73,6 +107,8 @@
     statsLoaded = false
     stats = null
     probeResults = {}
+    unknownName = false
+    forceOffered = false
     const token = ++loadToken
     load(token)
     loadStats(token)
@@ -88,6 +124,67 @@
     danger: 'border-destructive/30 bg-destructive/15 text-destructive',
     muted: '',
   } as const
+
+  // `force` replaces a different installed version and is only ever passed
+  // from the explicit "Replace installed version" action.
+  async function connect(force = false) {
+    if (busy !== null) return
+    busy = 'connect'
+    try {
+      const result = await installConnector(name, force)
+      forceOffered = false
+      if (result.noOp) {
+        toast.success(`${name} is already connected at v${result.version}`)
+      } else {
+        toast.success(`Connected ${name} v${result.version}`)
+      }
+      if (result.trustWarning) {
+        toast.warning('Connected, but trust was not recorded', {
+          description: result.trustWarning,
+        })
+      }
+      await refresh()
+    } catch (e) {
+      const code = e instanceof ApiError ? e.code : undefined
+      const detailText = e instanceof ApiError ? e.detail : undefined
+      forceOffered = needsForce(code)
+      toast.error('Connect failed', {
+        description: connectorActionMessage(code, 'connect', detailText ?? String(e)),
+      })
+    } finally {
+      busy = null
+    }
+  }
+
+  async function disconnect() {
+    if (busy !== null) return
+    busy = 'disconnect'
+    try {
+      const result = await uninstallConnector(name)
+      toast.success(result.noOp ? `${name} was not connected` : `Disconnected ${name}`, {
+        description: DISCONNECT_KEEPS_CONFIG,
+      })
+      await refresh()
+    } catch (e) {
+      const code = e instanceof ApiError ? e.code : undefined
+      const detailText = e instanceof ApiError ? e.detail : undefined
+      toast.error('Disconnect failed', {
+        description: connectorActionMessage(code, 'disconnect', detailText ?? String(e)),
+      })
+    } finally {
+      busy = null
+    }
+  }
+
+  // The server does not necessarily broadcast a change event for install and
+  // uninstall, so the page refetches explicitly rather than waiting on the
+  // WebSocket subscription.
+  // Reuses the current token (the same way `approve` does) so the change
+  // subscription set up by the effect keeps matching.
+  async function refresh() {
+    await load(loadToken)
+    void loadStats(loadToken)
+  }
 
   async function approve(account: string | null) {
     approving = account ?? ''
@@ -121,17 +218,41 @@
   const outcomeTone = (r: HealthcheckResult) => (r.ok ? 'ok' : 'danger') as keyof typeof badgeClass
 
   const fieldEntries = (a: ConnectorAccount) => Object.entries(a.fields)
+
+  // The breadcrumb shows the same label as the card below it, falling back to
+  // the slug while the detail is still loading or the name is unknown.
+  const heading = $derived(detail?.meta.display_name || name)
+  // Everything the manifest describes is public and is shown in both states;
+  // only what actually needs bytes on disk is gated on this.
+  const installed = $derived(detail?.installed === true)
 </script>
 
 <Topbar active="connectors">
   {#snippet title()}
-    <span class="truncate text-sm font-medium">{name}</span>
+    <span class="truncate text-sm font-medium">{heading}</span>
   {/snippet}
   {#snippet actions()}
-    {#if detail && detail.trust !== 'approved'}
-      <Button size="sm" onclick={() => approve(null)} disabled={approving !== null}>
+    {#if detail && !installed}
+      <Button size="sm" class="max-sm:px-2" onclick={() => connect()} disabled={busy !== null}>
+        {#if busy === 'connect'}<Spinner data-icon="inline-start" />{:else}<Plug data-icon="inline-start" />{/if}
+        <span class="max-sm:sr-only">Connect</span>
+      </Button>
+    {:else if installed}
+      <Button
+        size="sm"
+        variant="outline"
+        class="max-sm:px-2"
+        onclick={disconnect}
+        disabled={busy !== null}
+      >
+        {#if busy === 'disconnect'}<Spinner data-icon="inline-start" />{:else}<Unplug data-icon="inline-start" />{/if}
+        <span class="max-sm:sr-only">Disconnect</span>
+      </Button>
+    {/if}
+    {#if installed && detail && detail.trust !== 'approved'}
+      <Button size="sm" class="max-sm:px-2" onclick={() => approve(null)} disabled={approving !== null}>
         {#if approving === ''}<Spinner data-icon="inline-start" />{:else}<ShieldCheck data-icon="inline-start" />{/if}
-        Approve connector
+        <span class="max-sm:sr-only">Approve connector</span>
       </Button>
     {/if}
   {/snippet}
@@ -144,7 +265,23 @@
         {#each Array(3) as _, i (i)}<Skeleton class="h-24 w-full" />{/each}
       </div>
     {:else if !detail}
-      <p class="text-sm text-muted-foreground">Connector not found.</p>
+      <Empty.Root>
+        <Empty.Header>
+          <Empty.Media variant="icon">
+            <Unplug />
+          </Empty.Media>
+          <Empty.Title>{name}</Empty.Title>
+          <Empty.Description>
+            {#if unknownName}
+              No connector by this name is installed or offered by the server. The name in the
+              address may be wrong.
+            {:else}
+              This connector could not be loaded. Check that the server is reachable and try
+              again.
+            {/if}
+          </Empty.Description>
+        </Empty.Header>
+      </Empty.Root>
     {:else}
       {@const badge = trustBadge(detail.trust)}
       <Card.Root>
@@ -177,6 +314,38 @@
             </a>
           {/if}
         </Card.Content>
+        <Card.Footer class="flex flex-col items-start gap-3">
+          {#if installed}
+            <p class="text-sm text-muted-foreground">{DISCONNECT_KEEPS_CONFIG}</p>
+          {:else}
+            <p class="text-sm text-muted-foreground">
+              Connecting installs the connector files locally. Any account configuration you had
+              before is kept in a separate store and is picked up again automatically.
+            </p>
+          {/if}
+          {#if forceOffered}
+            <Alert.Root variant="destructive">
+              <Replace />
+              <Alert.Title>A different version is already installed</Alert.Title>
+              <Alert.Description>
+                <p>
+                  The server refused to connect because another version of this connector is
+                  on disk. Replacing it overwrites the installed files and drops their recorded
+                  trust. Account configuration is not affected.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onclick={() => connect(true)}
+                  disabled={busy !== null}
+                >
+                  {#if busy === 'connect'}<Spinner data-icon="inline-start" />{:else}<Replace data-icon="inline-start" />{/if}
+                  Replace installed version
+                </Button>
+              </Alert.Description>
+            </Alert.Root>
+          {/if}
+        </Card.Footer>
       </Card.Root>
 
       {#if detail.bodyMd}
@@ -185,7 +354,10 @@
             <Card.Title class="text-sm">About</Card.Title>
           </Card.Header>
           <Card.Content>
-            <pre class="whitespace-pre-wrap font-sans text-sm text-foreground">{detail.bodyMd}</pre>
+            <!-- `renderMarkdown` escapes every character coming from the
+                 connector folder, so nothing in PUBLIC.md can turn into a live
+                 tag or attribute here. See lib/markdown.ts. -->
+            <div class="text-foreground">{@html renderMarkdown(detail.bodyMd)}</div>
           </Card.Content>
         </Card.Root>
       {/if}
@@ -279,44 +451,58 @@
                       </Badge>
                     </Table.Cell>
                     <Table.Cell class="align-top">
-                      <div class="flex flex-col items-start gap-2">
-                        <div class="flex flex-wrap gap-2">
-                          {#if a.trust !== 'approved'}
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onclick={() => approve(a.name)}
-                              disabled={approving !== null}
+                      {#if !installed}
+                        <!-- Approving and probing both act on an installed
+                             connector: the probe invokes it, and approving a
+                             connector that is not on disk yet decides nothing
+                             the user can act on. The account rows themselves
+                             stay visible so the required fields can be
+                             reviewed first. -->
+                        <span class="whitespace-normal text-xs text-muted-foreground">
+                          connect to approve or probe
+                        </span>
+                      {:else}
+                        <div class="flex flex-col items-start gap-2">
+                          <div class="flex flex-wrap gap-2">
+                            {#if a.trust !== 'approved'}
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                class="max-sm:px-2"
+                                onclick={() => approve(a.name)}
+                                disabled={approving !== null}
+                              >
+                                {#if approving === a.name}<Spinner data-icon="inline-start" />{:else}<ShieldCheck data-icon="inline-start" />{/if}
+                                <span class="max-sm:sr-only">Approve</span>
+                              </Button>
+                            {/if}
+                            <span
+                              title={a.trust !== 'approved'
+                                ? 'Approve this account before probing - the server refuses an unapproved probe with a permission error.'
+                                : undefined}
                             >
-                              {#if approving === a.name}<Spinner data-icon="inline-start" />{:else}<ShieldCheck data-icon="inline-start" />{/if}
-                              Approve
-                            </Button>
+                              <Button
+                                size="sm"
+                                variant="outline"
+                                class="max-sm:px-2"
+                                onclick={() => probe(a)}
+                                disabled={a.trust !== 'approved' || probing !== null}
+                              >
+                                {#if probing === a.name}<Spinner data-icon="inline-start" />{:else}<Stethoscope data-icon="inline-start" />{/if}
+                                <span class="max-sm:sr-only">Probe</span>
+                              </Button>
+                            </span>
+                          </div>
+                          {#if result}
+                            <Badge variant="outline" class={badgeClass[outcomeTone(result)]}>
+                              {outcomeCode(result)}
+                            </Badge>
                           {/if}
-                          <span
-                            title={a.trust !== 'approved'
-                              ? 'Approve this account before probing - the server refuses an unapproved probe with a permission error.'
-                              : undefined}
-                          >
-                            <Button
-                              size="sm"
-                              variant="outline"
-                              onclick={() => probe(a)}
-                              disabled={a.trust !== 'approved' || probing !== null}
-                            >
-                              {#if probing === a.name}<Spinner data-icon="inline-start" />{:else}<Stethoscope data-icon="inline-start" />{/if}
-                              Probe
-                            </Button>
-                          </span>
+                          {#if !ready}
+                            <span class="text-xs text-muted-foreground">missing env vars</span>
+                          {/if}
                         </div>
-                        {#if result}
-                          <Badge variant="outline" class={badgeClass[outcomeTone(result)]}>
-                            {outcomeCode(result)}
-                          </Badge>
-                        {/if}
-                        {#if !ready}
-                          <span class="text-xs text-muted-foreground">missing env vars</span>
-                        {/if}
-                      </div>
+                      {/if}
                     </Table.Cell>
                   </Table.Row>
                 {/each}
@@ -326,12 +512,16 @@
         </Card.Content>
       </Card.Root>
 
-      <ConnectorPlaygroundPanel
-        {name}
-        {workspace}
-        functions={detail.functions}
-        accounts={detail.accounts}
-      />
+      <!-- The playground actually invokes the connector, so it is the one
+           panel that genuinely needs the installed files and stays gated. -->
+      {#if installed}
+        <ConnectorPlaygroundPanel
+          {name}
+          {workspace}
+          functions={detail.functions}
+          accounts={detail.accounts}
+        />
+      {/if}
 
       <Card.Root>
         <Card.Header>

@@ -87,9 +87,9 @@
 
 <Topbar active="playbooks">
   {#snippet actions()}
-    <Button href="#/new" size="sm">
+    <Button href="#/new" size="sm" class="max-sm:px-2">
       <Plus data-icon="inline-start" />
-      Create
+      <span class="max-sm:sr-only">Create</span>
     </Button>
   {/snippet}
 </Topbar>
@@ -151,21 +151,22 @@
                     <Button
                       variant="ghost"
                       size="sm"
+                      class="max-sm:px-2"
                       onclick={() => duplicate(w)}
                       title={`Duplicate as ${suggestDuplicateId(w.id)}`}
                     >
                       <Copy data-icon="inline-start" />
-                      Duplicate
+                      <span class="max-sm:sr-only">Duplicate</span>
                     </Button>
                     <Button
                       variant="ghost"
                       size="sm"
-                      class="text-muted-foreground hover:text-destructive"
+                      class="max-sm:px-2 text-muted-foreground hover:text-destructive"
                       onclick={() => askRemove(w)}
                       disabled={deleting === key(w)}
                     >
                       <Trash2 data-icon="inline-start" />
-                      Delete
+                      <span class="max-sm:sr-only">Delete</span>
                     </Button>
                   </Card.Action>
                 </Card.Header>

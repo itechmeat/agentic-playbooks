@@ -9,6 +9,7 @@
   import ConnectorList from './pages/ConnectorList.svelte'
   import ConnectorView from './pages/ConnectorView.svelte'
   import { Toaster } from '$lib/components/ui/sonner'
+  import { connectorRouteName, decodeSegment } from '$lib/route'
   import { ModeWatcher } from 'mode-watcher'
 
   let hash = $state(location.hash)
@@ -18,16 +19,7 @@
     return () => window.removeEventListener('hashchange', onHash)
   })
 
-  // decodeURIComponent throws on malformed percent-encoding (e.g. a lone `%`).
-  // A bad hash segment must not blow up route parsing, so fall back to the raw
-  // segment when decoding fails.
-  const dec = (s: string) => {
-    try {
-      return decodeURIComponent(s)
-    } catch {
-      return s
-    }
-  }
+  const dec = decodeSegment
 
   // Routes carry the owning project so the global dashboard can address a
   // playbook/run in any project: #/playbook/<workspace>/<id>, #/edit/<ws>/<id>,
@@ -61,7 +53,10 @@
     if (h.startsWith('#/profile-edit/'))
       return { ...base, page: 'profile-edit', ...profileRef(h.slice(15)) }
     if (h === '#/connectors') return { ...base, page: 'connectors' }
-    if (h.startsWith('#/connector/')) return { ...base, page: 'connector', ...wsId(h.slice(12)) }
+    // Connectors are machine-wide, so this route carries no workspace and
+    // cannot reuse `wsId` (which would read the name as the workspace).
+    if (h.startsWith('#/connector/'))
+      return { ...base, page: 'connector', name: connectorRouteName(h.slice(12)) }
     return base
   })
 </script>
@@ -85,7 +80,7 @@
 {:else if route.page === 'connectors'}
   <ConnectorList />
 {:else if route.page === 'connector'}
-  <ConnectorView name={route.id} workspace={route.workspace} />
+  <ConnectorView name={route.name} />
 {:else}
   <PlaybookList />
 {/if}

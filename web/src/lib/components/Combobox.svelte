@@ -7,7 +7,13 @@
   import ChevronsUpDown from '@lucide/svelte/icons/chevrons-up-down'
 
   type Option = { value: string; label?: string; hint?: string }
-  type Row = { kind: 'option' | 'custom'; value: string; label: string; hint?: string }
+  type Row = {
+    kind: 'option' | 'custom'
+    value: string
+    label: string
+    hint?: string
+    disabled: boolean
+  }
 
   let {
     value = $bindable(''),
@@ -15,14 +21,27 @@
     placeholder = 'Select...',
     emptyText = 'No matches',
     allowCustom = true,
+    disabledValues = [],
     id,
+    onChange,
   }: {
     value?: string
     options?: Option[]
     placeholder?: string
     emptyText?: string
     allowCustom?: boolean
+    // Option values that stay visible but cannot be chosen: skipped by the
+    // arrow keys, ignored by Enter, and rendered as disabled buttons so a
+    // click or a Tab can never reach them. Defaults to none, so existing
+    // callers are unaffected.
+    disabledValues?: string[]
     id?: string
+    // Fired only when the user picks a row (click or Enter), never when
+    // `value` changes for any other reason (e.g. a caller assigning it
+    // programmatically). Callers that need to react to a genuine user
+    // selection - as opposed to a value set from loaded data - should use
+    // this instead of an effect watching `value`.
+    onChange?: (value: string) => void
   } = $props()
 
   let open = $state(false)
@@ -46,6 +65,8 @@
   // allowed and the typed text is not already an option, a trailing "use this"
   // entry. Keeping both in one array means arrow keys and Enter treat the
   // custom entry exactly like an option.
+  const disabledSet = $derived(new Set(disabledValues))
+
   const rows = $derived.by<Row[]>(() => {
     const q = search.trim()
     const rs: Row[] = filtered.map((o) => ({
@@ -53,22 +74,37 @@
       value: o.value,
       label: o.label ?? o.value,
       hint: o.hint,
+      disabled: disabledSet.has(o.value),
     }))
-    if (allowCustom && q && !exactMatch) rs.push({ kind: 'custom', value: q, label: `Use "${q}"` })
+    if (allowCustom && q && !exactMatch)
+      rs.push({ kind: 'custom', value: q, label: `Use "${q}"`, disabled: false })
     return rs
   })
 
-  // Reset the highlight to the first row whenever the popover opens or the
-  // filtered list changes, so it never points past the end of a shrunk list.
+  // The nearest selectable row at or after `from`, walking in `dir`; falls back
+  // to the current highlight when the scan runs off either end, so a run of
+  // disabled rows never strands the keyboard cursor on one of them.
+  function nextEnabled(from: number, dir: 1 | -1): number {
+    for (let i = from; i >= 0 && i < rows.length; i += dir) {
+      if (!rows[i].disabled) return i
+    }
+    return highlighted
+  }
+
+  // Reset the highlight to the first selectable row whenever the popover opens
+  // or the filtered list changes, so it never points past the end of a shrunk
+  // list nor lands on a disabled row.
   $effect(() => {
     void open
-    highlighted = rows.length ? 0 : -1
+    highlighted = rows.findIndex((r) => !r.disabled)
   })
 
   function choose(v: string) {
+    if (disabledSet.has(v)) return
     value = v
     open = false
     search = ''
+    onChange?.(v)
   }
 
   // Clear the filter on close so a reopen never shows a stale search.
@@ -82,14 +118,14 @@
   function onSearchKeydown(e: KeyboardEvent) {
     if (e.key === 'ArrowDown') {
       e.preventDefault()
-      if (rows.length) highlighted = Math.min(highlighted + 1, rows.length - 1)
+      if (rows.length) highlighted = nextEnabled(highlighted + 1, 1)
     } else if (e.key === 'ArrowUp') {
       e.preventDefault()
-      if (rows.length) highlighted = Math.max(highlighted - 1, 0)
+      if (rows.length) highlighted = nextEnabled(highlighted - 1, -1)
     } else if (e.key === 'Enter') {
       e.preventDefault()
       const row = rows[highlighted]
-      if (row) choose(row.value)
+      if (row && !row.disabled) choose(row.value)
     }
   }
 </script>
@@ -122,13 +158,19 @@
           type="button"
           role="option"
           aria-selected={i === highlighted}
+          aria-disabled={row.disabled}
+          disabled={row.disabled}
           class={cn(
             'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm',
-            i === highlighted
-              ? 'bg-accent text-accent-foreground'
-              : 'hover:bg-accent hover:text-accent-foreground',
+            row.disabled
+              ? 'cursor-not-allowed text-muted-foreground opacity-50'
+              : i === highlighted
+                ? 'bg-accent text-accent-foreground'
+                : 'hover:bg-accent hover:text-accent-foreground',
           )}
-          onmousemove={() => (highlighted = i)}
+          onmousemove={() => {
+            if (!row.disabled) highlighted = i
+          }}
           onclick={() => choose(row.value)}
         >
           <Check
