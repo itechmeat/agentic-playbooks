@@ -12,6 +12,14 @@ concurrency:
 jobs:
   build-and-test:
     runs-on: ubuntu-latest
+    # There was no ceiling here, so the default 360 applied: a test that hung
+    # burned half an hour before a human cancelled the job, and would have
+    # burned six. The honest runtime of this job is under 3 minutes, so this is
+    # pure headroom. It is the outer backstop only - a stuck TEST is caught far
+    # earlier, and by name, by nextest's per-test terminate-after (see
+    # .config/nextest.toml). Reaching this ceiling means something outside the
+    # tests wedged.
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -30,6 +38,8 @@ jobs:
         working-directory: web
         run: bun run test
 
+      # Must precede every cargo step: apb-server embeds web/dist through
+      # rust-embed, and web/dist is not checked in.
       - name: Build web (embedded by apb-server via rust-embed)
         working-directory: web
         run: bun run build
@@ -42,6 +52,11 @@ jobs:
       - name: Cache cargo
         uses: Swatinem/rust-cache@v2
 
+      # Prebuilt binary, so this costs seconds and leaves the cargo cache
+      # above untouched (nothing is compiled into target/).
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
       - name: Cargo deny (licenses, advisories, bans)
         uses: EmbarkStudios/cargo-deny-action@v2
 
@@ -51,5 +66,16 @@ jobs:
       - name: Clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 
+      # Replaces `cargo test --workspace`. Coverage is identical: --workspace
+      # is the same selection, and nextest skips #[ignore]d tests by default
+      # exactly as cargo test does. What changes is that each test runs in its
+      # own process, which is what makes the per-test timeout in
+      # .config/nextest.toml enforceable - a hang becomes a named failing test
+      # instead of a dead job.
       - name: Test
-        run: cargo test --workspace
+        run: cargo nextest run --profile ci --workspace
+
+      # nextest does not run doctests; `cargo test --workspace` did. Kept so
+      # the switch loses no coverage.
+      - name: Doctests
+        run: cargo test --workspace --doc
