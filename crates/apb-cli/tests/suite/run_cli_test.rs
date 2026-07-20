@@ -73,6 +73,41 @@ fn runs_command_lists_the_run() {
         .stdout(predicate::str::contains("succeeded"));
 }
 
+// Task 4: `apb note <run_id> <text>` posts a supervisor note by appending a
+// ContextAppend entry to the run's control.jsonl (dispatches to
+// `apb_engine::scheduler::post_supervisor_command`).
+#[test]
+fn note_command_appends_context_append_to_control_jsonl() {
+    let dir = seeded();
+    playbook()
+        .args(["run", "noagent", "--param", "who=world"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let runs_dir = dir.path().join(".apb/runs");
+    let run_id = fs::read_dir(&runs_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+
+    playbook()
+        .args(["note", &run_id, "hello"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let control = fs::read_to_string(runs_dir.join(&run_id).join("control.jsonl")).unwrap();
+    assert!(
+        control.contains("\"cmd\":\"context_append\"") && control.contains("\"note\":\"hello\""),
+        "expected control.jsonl to contain a ContextAppend note, got:\n{control}"
+    );
+}
+
 #[test]
 fn run_without_project_fails_env() {
     let dir = tempfile::tempdir().unwrap();

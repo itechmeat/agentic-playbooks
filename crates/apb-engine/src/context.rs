@@ -111,18 +111,42 @@ pub fn latest_compaction(events: &[Event]) -> Option<(String, u64)> {
     })
 }
 
+/// Renders the leading `## run instruction` section for a non-empty run
+/// instruction, or an empty string when there is none. Shared by
+/// `build_context_for_render` (what `{{run.context}}` actually resolves to in
+/// every rendered node prompt) and `rebuild_context_md` (the context.md
+/// materialized view) so a run-level instruction reaches every node, not only
+/// ones whose author remembered to reference `{{run.instruction}}` explicitly
+/// (a summarizing first node otherwise silently drops it downstream). Blank
+/// after trimming counts as absent, so a run with no real instruction renders
+/// byte-identical to before this section existed.
+pub(crate) fn instruction_section(instruction: Option<&str>) -> String {
+    match instruction.map(str::trim) {
+        Some(text) if !text.is_empty() => format!("## run instruction\n\n{text}\n\n"),
+        _ => String::new(),
+    }
+}
+
 /// Context for rendering a prompt with compaction taken into account:
 /// summary from the compact file (if any) plus the uncompacted tail
 /// (sections newer than up_to_seq). Without compaction - the full context. A
 /// missing/unreadable compact file degrades to an empty summary (the tail is
-/// kept), so an artifact failure does not bring down the run.
-pub fn build_context_for_render(run_dir: &Path, events: &[Event]) -> Result<String, EngineError> {
+/// kept), so an artifact failure does not bring down the run. `instruction` is
+/// the run's `RunConfig.instruction` (the caller already has it in scope as
+/// `cfg.instruction`) - prepended as a `## run instruction` section ahead of
+/// everything else, see `instruction_section`.
+pub fn build_context_for_render(
+    run_dir: &Path,
+    events: &[Event],
+    instruction: Option<&str>,
+) -> Result<String, EngineError> {
+    let header = instruction_section(instruction);
     let Some((file, up_to)) = latest_compaction(events) else {
-        return Ok(build_context(events));
+        return Ok(format!("{header}{}", build_context(events)));
     };
     let summary = std::fs::read_to_string(run_dir.join(&file)).unwrap_or_default();
     let tail = build_context_tail(events, up_to);
-    let mut out = String::new();
+    let mut out = header;
     let summary = summary.trim();
     if !summary.is_empty() {
         out.push_str("## summary (compacted)\n\n");

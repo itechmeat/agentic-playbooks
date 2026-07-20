@@ -66,6 +66,55 @@ fn none_when_no_draft_and_no_explicit() {
     assert_eq!(instruction_of(dir.path(), &res.run_id), None);
 }
 
+// Task 4 completion-plan defect 3: the run instruction used to be rendered
+// only where a playbook author referenced `{{run.instruction}}` explicitly -
+// a summarizing first node silently dropped it downstream for everyone else.
+// `rebuild_context_md` now leads context.md with a `## run instruction`
+// section whenever the run carries a non-empty instruction.
+#[test]
+fn context_md_leads_with_run_instruction_section_when_present() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+
+    let opts = RunOptions {
+        instruction: Some("stay within budget".into()),
+        ..Default::default()
+    };
+    let res = run(dir.path(), "p", None, opts).unwrap();
+
+    let context_md = fs::read_to_string(
+        dir.path()
+            .join(".apb/runs")
+            .join(&res.run_id)
+            .join("context.md"),
+    )
+    .unwrap();
+    assert!(
+        context_md.starts_with("## run instruction\n\nstay within budget\n\n"),
+        "expected context.md to lead with the run instruction section, got:\n{context_md}"
+    );
+}
+
+#[test]
+fn context_md_has_no_instruction_section_when_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+
+    let res = run(dir.path(), "p", None, RunOptions::default()).unwrap();
+
+    let context_md = fs::read_to_string(
+        dir.path()
+            .join(".apb/runs")
+            .join(&res.run_id)
+            .join("context.md"),
+    )
+    .unwrap();
+    assert!(
+        !context_md.contains("## run instruction"),
+        "context.md must have no instruction section when the run has none, got:\n{context_md}"
+    );
+}
+
 #[test]
 fn param_default_is_filled_into_persisted_run_config() {
     // Review I6/R1-I2: a declared param the caller omits falls back to its

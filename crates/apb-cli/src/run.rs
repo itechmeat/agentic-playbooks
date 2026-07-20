@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 use apb_core::fsutil::atomic_write;
 use apb_core::registry::{Registry, is_safe_segment};
 use apb_core::validate::{Severity, ValidationContext, validate};
+use apb_engine::control::Control;
 use apb_engine::run_config::CacheRunMode;
 use apb_engine::state::RunStatus;
 use apb_engine::{
     ReviewCommand, RunMode, RunOptions, drive_prepared, list_runs, post_review,
-    prepare_supervised_background, resume, run,
+    post_supervisor_command, prepare_supervised_background, resume, run,
 };
 
 use crate::util::open_registry;
@@ -538,6 +539,32 @@ pub(crate) fn resume_cmd(root: &Path, run_id: &str, from_node: Option<&str>) -> 
         }
         Err(e) => {
             eprintln!("resume failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Posts a supervisor note (`Control::ContextAppend`) to a run's control
+/// channel: `runs/<id>/control.jsonl`. Applied at the nearest drive-loop
+/// iteration boundary (top-of-loop scan, or immediately if the run is
+/// currently waiting in `await_control`) - the note lands in context.md and
+/// every subsequent `{{run.context}}` render, same as the MCP
+/// `supervisor_context_append` tool. `post_supervisor_command` validates
+/// `run_id` and existence itself; no separate check needed here.
+pub(crate) fn note_cmd(root: &Path, run_id: &str, text: &str) -> ExitCode {
+    match post_supervisor_command(
+        root,
+        run_id,
+        Control::ContextAppend {
+            note: text.to_string(),
+        },
+    ) {
+        Ok(seq) => {
+            println!("note posted for {run_id} (seq {seq})");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("note failed: {e}");
             ExitCode::from(2)
         }
     }

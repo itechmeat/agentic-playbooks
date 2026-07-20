@@ -134,6 +134,7 @@ pub(crate) fn await_control(
                     })?;
                     rebuild_context_md(run_dir)?;
                     cursor = Some(entry.seq);
+                    crate::control::write_control_cursor(run_dir, entry.seq)?;
                 }
                 Control::Progress { done, total, label } => {
                     log.append(EventPayload::RunProgress {
@@ -143,6 +144,7 @@ pub(crate) fn await_control(
                         label,
                     })?;
                     cursor = Some(entry.seq);
+                    crate::control::write_control_cursor(run_dir, entry.seq)?;
                 }
                 other => return Ok((other, entry.seq)),
             }
@@ -178,6 +180,7 @@ pub(crate) fn drain_progress_after_execute(
                     label,
                 })?;
                 cursor = Some(entry.seq);
+                crate::control::write_control_cursor(run_dir, entry.seq)?;
             }
             _ => break,
         }
@@ -189,9 +192,14 @@ pub(crate) fn drain_progress_after_execute(
 /// helper for three call sites: after every executed node, on a proactive
 /// ContextAppend in the top-of-loop scan, and on a ContextAppend inside
 /// await_control - so that {{run.context}} in the next prompt render immediately
-/// sees the new note.
+/// sees the new note. Leads with a `## run instruction` section when the run
+/// config carries a non-empty instruction (Task 4 completion-plan defect 3),
+/// matching what `build_context_for_render` prepends for the actual node-prompt
+/// rendering path - see `instruction_section`.
 pub(crate) fn rebuild_context_md(run_dir: &Path) -> Result<(), EngineError> {
-    let ctx_md = build_context(&read_all(run_dir)?);
+    let cfg = crate::run_config::read_run_config(run_dir)?;
+    let header = crate::context::instruction_section(cfg.instruction.as_deref());
+    let ctx_md = format!("{header}{}", build_context(&read_all(run_dir)?));
     apb_core::fsutil::atomic_write(&run_dir.join("context.md"), ctx_md.as_bytes())?;
     Ok(())
 }

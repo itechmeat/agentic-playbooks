@@ -18,7 +18,8 @@ pub(crate) fn render_node_prompt(
     cfg: &RunConfig,
     prompt: &str,
 ) -> Result<String, EngineError> {
-    let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
+    let context =
+        build_context_for_render(run_dir, &read_all(run_dir)?, cfg.instruction.as_deref())?;
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -445,7 +446,8 @@ pub(crate) fn execute_finish_answer(
     env_scrub: &[String],
     journal: &Journal,
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
-    let context = build_context_for_render(run_dir, &read_all(run_dir)?)?;
+    let context =
+        build_context_for_render(run_dir, &read_all(run_dir)?, cfg.instruction.as_deref())?;
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -788,7 +790,7 @@ pub(crate) fn run_playbook_node(
     // falls back to its own draft). Reuses the `events` read above (review M1).
     let child_instruction = match node_instruction {
         Some(t) => {
-            let context = build_context_for_render(run_dir, &events)?;
+            let context = build_context_for_render(run_dir, &events, cfg.instruction.as_deref())?;
             let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
                 .into_iter()
                 .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))

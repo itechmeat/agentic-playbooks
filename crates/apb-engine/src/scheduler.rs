@@ -16,7 +16,7 @@ use serde::Serialize;
 
 use crate::adapter::{AgentAdapter, AgentTask, ErrorClass, adapter_for};
 use crate::context::{build_context, build_context_for_render, render};
-use crate::control::{Control, read_control_after};
+use crate::control::{Control, read_control_after, read_control_cursor, write_control_cursor};
 use crate::error::EngineError;
 use crate::event::{
     Event, EventLog, EventPayload, ProfileProvenance, WakeTrigger, now_millis, read_all,
@@ -613,7 +613,16 @@ fn drive(
     // twice. Details of the scheme (that top-of-loop advances the cursor only for
     // Pause/Abort/ContextAppend, while Retry/ContinueFrom is advanced only by
     // await_control) are in the comment before the scan below.
-    let mut control_cursor: Option<u64> = None;
+    //
+    // Initialized from the persisted `runs/<id>/control.cursor` (Task 4
+    // completion-plan defect 1), not hardcoded to `None`: without this, EVERY
+    // drive invocation - including a resume, which is simply another `drive`
+    // call - re-read control.jsonl from the very beginning and re-applied every
+    // historical entry (duplicate `supervisor_action` events, a re-growing
+    // context.md, and a stale Pause re-firing on the next drive). Every site
+    // below that advances `control_cursor` also calls `write_control_cursor` in
+    // the same step, so the persisted value never lags the in-memory one.
+    let mut control_cursor: Option<u64> = read_control_cursor(run_dir)?;
     // One-shot prompt overrides set by the Retry{prompt_override} command:
     // node_id -> text that will replace the rendered prompt for EXACTLY the next
     // execution of that node, after which the entry is removed.
@@ -657,6 +666,10 @@ fn drive(
         for entry in read_control_after(run_dir, control_cursor)? {
             match entry.cmd {
                 Control::Abort { reason } => {
+                    // Persisted BEFORE the return: a resumed drive must never
+                    // see this same terminal entry again (Task 4 completion-plan
+                    // defect 1 - a stale stop command re-firing on resume).
+                    write_control_cursor(run_dir, entry.seq)?;
                     log.append(EventPayload::RunAborted { reason })?;
                     return Ok(RunResult {
                         run_id,
@@ -664,6 +677,10 @@ fn drive(
                     });
                 }
                 Control::Pause => {
+                    // Same reasoning as Abort above: without persisting here, a
+                    // resume (just another `drive` call) would re-scan this same
+                    // Pause entry and re-pause immediately instead of proceeding.
+                    write_control_cursor(run_dir, entry.seq)?;
                     log.append(EventPayload::RunPaused {
                         reason: "supervisor pause".into(),
                     })?;
@@ -680,6 +697,7 @@ fn drive(
                     })?;
                     rebuild_context_md(run_dir)?;
                     control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
                 }
                 Control::Patch {
                     version,
@@ -687,6 +705,7 @@ fn drive(
                     continue_from,
                 } => {
                     control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
                     match apply_patch(
                         root,
                         run_dir,
@@ -722,6 +741,7 @@ fn drive(
                         label,
                     })?;
                     control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
                 }
                 Control::Retry { .. } | Control::ContinueFrom { .. } => {
                     // Valid only inside await_control, in response to a wake -
@@ -1323,6 +1343,12 @@ fn drive(
             loop {
                 let (cmd, seq) = await_control(run_dir, log, control_cursor, &current)?;
                 control_cursor = Some(seq);
+                // `await_control` applies ContextAppend/Progress in place (and
+                // persists their own cursor internally) before ever returning;
+                // whatever it DOES return (Retry/ContinueFrom/Pause/Abort/Patch)
+                // is about to be applied right here, so persist its seq too -
+                // otherwise a resumed drive would see it again unconsumed.
+                write_control_cursor(run_dir, seq)?;
                 match cmd {
                     // await_control applies ContextAppend and Progress in-place
                     // and never returns them (see its implementation above) - these

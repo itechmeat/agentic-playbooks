@@ -134,7 +134,7 @@ fn context_compaction_writes_artifact_and_keeps_primary_intact() {
 
     // 5. The render context = summary + uncompacted tail: shorter than the full one and
     //    starts with the summary heading.
-    let rendered = build_context_for_render(&run_dir, &events).unwrap();
+    let rendered = build_context_for_render(&run_dir, &events, None).unwrap();
     assert!(
         rendered.starts_with("## summary (compacted)"),
         "rendered context must lead with summary"

@@ -59,6 +59,43 @@ pub fn post_control(run_dir: &Path, cmd: Control) -> Result<u64, EngineError> {
     Ok(seq)
 }
 
+/// Reads the persisted control cursor for this run (`runs/<id>/control.cursor`):
+/// the seq of the last control.jsonl entry any drive loop of this run has
+/// already applied. A missing file means no control entry has ever been
+/// applied yet - `None`, the exact state a fresh drive starts in. A corrupt
+/// file is a hard error rather than silently degrading to `None`: silently
+/// replaying from the beginning is exactly the duplicate-application bug this
+/// cursor exists to prevent.
+pub fn read_control_cursor(run_dir: &Path) -> Result<Option<u64>, EngineError> {
+    let path = run_dir.join("control.cursor");
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let raw = std::fs::read_to_string(&path)?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    let seq = trimmed
+        .parse::<u64>()
+        .map_err(|e| EngineError::Yaml(format!("invalid control cursor `{trimmed}`: {e}")))?;
+    Ok(Some(seq))
+}
+
+/// Persists the control cursor right after a control.jsonl entry is applied,
+/// atomically (temp + rename, per `apb_core::fsutil::atomic_write`) so a crash
+/// mid-write never leaves a torn cursor file for a later drive to misread.
+/// Every site that advances the in-memory cursor (the drive-loop top-of-loop
+/// scan, `await_control`, `drain_progress_after_execute`) calls this so a
+/// resumed drive - or a fresh wake within the same drive - never re-applies an
+/// entry a prior pass already consumed.
+pub fn write_control_cursor(run_dir: &Path, seq: u64) -> Result<(), EngineError> {
+    Ok(apb_core::fsutil::atomic_write(
+        &run_dir.join("control.cursor"),
+        seq.to_string().as_bytes(),
+    )?)
+}
+
 pub fn read_control_after(
     run_dir: &Path,
     after_seq: Option<u64>,
