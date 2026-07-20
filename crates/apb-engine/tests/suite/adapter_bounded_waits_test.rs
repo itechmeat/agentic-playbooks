@@ -91,6 +91,7 @@ fn task<'a>(
         connector_policy: policy,
         interactive: false,
         node: "test",
+        agent: "claude",
     }
 }
 

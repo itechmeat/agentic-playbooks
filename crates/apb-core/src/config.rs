@@ -80,6 +80,24 @@ pub enum PromptVia {
     Stdin,
 }
 
+/// Ask-transport ceiling for an interactive node's agent (spec 2026-07-20).
+/// The engine treats it as a ceiling, not a promise: it downgrades at runtime
+/// when the preferred transport cannot initialize (`Live` falls to `Resume`,
+/// `Resume` falls to `Reprompt`).
+/// - `live`: the agent asks through a blocking in-process MCP tool (Task 11).
+/// - `resume`: the agent prints a question marker and stops; the answer round
+///   re-enters the agent's own prior session via its resume form.
+/// - `reprompt`: the agent prints a question marker and stops; the answer round
+///   re-invokes the node from scratch with the Q&A transcript appended.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Interaction {
+    Live,
+    Resume,
+    #[default]
+    Reprompt,
+}
+
 /// Declarative form of an agent invocation (spec 6.2). The `{prompt}` and
 /// `{model}` placeholders are only valid as whole argv elements; no shell
 /// interpolation.
@@ -108,6 +126,14 @@ pub struct InvocationDef {
     /// run stays in the default permission mode.
     #[serde(default)]
     pub autonomous_args: Vec<String>,
+    /// Ask-transport ceiling for interactive nodes (spec 2026-07-20). The
+    /// engine treats it as a ceiling, not a promise: it downgrades at runtime
+    /// when the preferred transport cannot initialize (missing session id,
+    /// missing resume form). Defaults to `Reprompt`; the built-in agents set
+    /// their own defaults in `apb_engine::invocation::builtin`, and a config
+    /// agent may override it under `agents.<id>.invocation.interaction`.
+    #[serde(default)]
+    pub interaction: Interaction,
 }
 
 impl InvocationDef {

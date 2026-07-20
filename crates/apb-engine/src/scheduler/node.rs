@@ -62,6 +62,18 @@ fn marker_contract() -> String {
     )
 }
 
+/// A `resume`-transport re-invocation of an interactive node (spec 2026-07-20,
+/// Task 7). Carries the session id captured from the attempt that asked, plus
+/// the user's answer to hand the agent as the follow-up prompt. When present,
+/// `execute_node` re-enters the primary executor's own session via its resume
+/// form instead of re-invoking from scratch with a transcript. Chosen by the
+/// drive loop, which downgrades to a plain (`resume: None`) re-invocation when
+/// no session was captured or the agent has no resume form.
+pub(crate) struct ResumeContext {
+    pub session: String,
+    pub answer: String,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -75,6 +87,7 @@ pub(crate) fn execute_node(
     cancel: &AtomicBool,
     env_scrub: &[String],
     journal: &Journal,
+    resume: Option<ResumeContext>,
 ) -> Result<AttemptOutcome, EngineError> {
     let node = playbook
         .node(node_id)
@@ -112,9 +125,14 @@ pub(crate) fn execute_node(
             interactive,
             ..
         } => {
-            let mut text = match &override_prompt {
-                Some(p) => p.clone(),
-                None => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
+            // On a `resume` re-invocation the follow-up prompt IS the user's
+            // answer (the prior context lives in the agent's own session); an
+            // ordinary attempt renders the node prompt (or takes the reprompt
+            // override the drive loop supplied).
+            let mut text = match (&resume, &override_prompt) {
+                (Some(rc), _) => rc.answer.clone(),
+                (None, Some(p)) => p.clone(),
+                (None, None) => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
@@ -236,6 +254,29 @@ pub(crate) fn execute_node(
                 node_id: Some(node_id.to_string()),
             };
 
+            // Resume argv (spec 2026-07-20, Task 7): when this is a `resume`
+            // re-invocation, resolve the primary agent's declarative resume form
+            // and substitute the captured session id as a whole argv element.
+            // `{prompt}`/`{model}` stay for `build_command`. `None` here means
+            // the drive loop already decided resume is unavailable (it hands a
+            // `resume: None`); leaving it defensively also collapses to the
+            // normal argv. The resume path targets ONLY the primary executor -
+            // the session belongs to it, so there is no fallback to a different
+            // agent.
+            let resume_argv: Option<Vec<String>> = resume.as_ref().and_then(|rc| {
+                crate::invocation::resume_argv(&steps[0].agent).map(|tmpl| {
+                    tmpl.into_iter()
+                        .map(|a| {
+                            if a == "{session}" {
+                                rc.session.clone()
+                            } else {
+                                a
+                            }
+                        })
+                        .collect()
+                })
+            });
+
             let mut attempt: u32 = 0;
             let mut last_msg = String::new();
             // The node's final status once all attempts are exhausted: TimedOut if
@@ -250,7 +291,10 @@ pub(crate) fn execute_node(
             // likely doomed by the same external cause - e.g. a token lacking
             // permission - not by the agent or model).
             let mut last_tried: Option<(String, String)> = None;
-            for (idx, step) in steps.iter().enumerate() {
+            // A resume re-invocation runs the primary step only (see above);
+            // an ordinary attempt walks the whole fallback chain.
+            let step_count = if resume.is_some() { 1 } else { steps.len() };
+            for (idx, step) in steps.iter().enumerate().take(step_count) {
                 if idx > 0 {
                     let same_binding = last_tried
                         .as_ref()
@@ -274,10 +318,25 @@ pub(crate) fn execute_node(
                 // agents.<id>.invocation in the config between start and resume does
                 // not silently change the prompt contract. The executor path is unchanged.
                 let adapter: Box<dyn crate::adapter::AgentAdapter> = match &step.invocation {
-                    Some(ri) => Box::new(crate::adapter::ClaudeAdapter {
-                        program: ri.canonical_executable.to_string_lossy().into_owned(),
-                        spec: ri.spec.clone(),
-                    }),
+                    Some(ri) => {
+                        // On a resume re-invocation the primary step's invocation
+                        // form is replaced by the agent's resume argv (session
+                        // already substituted); the canonical binary, autonomy
+                        // flags, and transport are kept. The resume form always
+                        // delivers the follow-up via argv `{prompt}`.
+                        let spec = match &resume_argv {
+                            Some(rargv) => apb_core::config::InvocationDef {
+                                argv: rargv.clone(),
+                                prompt_via: apb_core::config::PromptVia::Argv,
+                                ..ri.spec.clone()
+                            },
+                            None => ri.spec.clone(),
+                        };
+                        Box::new(crate::adapter::ClaudeAdapter {
+                            program: ri.canonical_executable.to_string_lossy().into_owned(),
+                            spec,
+                        })
+                    }
                     None => adapter_for(&step.agent)?,
                 };
                 for try_i in 0..=retries {
@@ -329,11 +388,19 @@ pub(crate) fn execute_node(
                         workdir: &attempt_workdir,
                         timeout,
                         stream_log: Some(&stream_log),
-                        soul: soul_text.as_deref(),
+                        // A resume re-invocation delivers no SOUL: the resumed
+                        // session already carries its role prompt, and the
+                        // follow-up is only the user's answer.
+                        soul: if resume.is_some() {
+                            None
+                        } else {
+                            soul_text.as_deref()
+                        },
                         grant_autonomy,
                         connector_policy: &connector_policy,
                         interactive: *interactive,
                         node: node_id,
+                        agent: &step.agent,
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -389,7 +456,10 @@ pub(crate) fn execute_node(
                                 attempt,
                                 status: report.status.as_str().into(),
                                 duration_ms,
-                                session: None,
+                                // Session id captured from this attempt (spec
+                                // 2026-07-20, Task 7); the drive loop reads it
+                                // back to resume the agent on the answer round.
+                                session: report.session.clone(),
                             })?;
                             // Interactive suspension (spec 2026-07-20): the agent
                             // asked a question via the stdout marker instead of
@@ -643,6 +713,7 @@ pub(crate) fn execute_finish_answer(
                 // run's terminal answer, it does not ask the user questions.
                 interactive: false,
                 node: node_id,
+                agent: &ri.agent_id,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -692,7 +763,7 @@ pub(crate) fn execute_finish_answer(
                         attempt,
                         status: report.status.as_str().into(),
                         duration_ms,
-                        session: None,
+                        session: report.session.clone(),
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         return Ok((NodeStatus::Succeeded, report.summary, events));
@@ -1157,6 +1228,7 @@ pub(crate) fn maybe_compact_context(
         // Internal summarizer: not a playbook node, never interactive.
         interactive: false,
         node: "__context_compact",
+        agent: "claude-code",
     };
     let summary = match adapter.run(&task) {
         Ok(report) => report.summary,

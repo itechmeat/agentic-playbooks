@@ -214,6 +214,11 @@ pub struct AgentTask<'a> {
     /// The node id this attempt executes, used to name the node in a
     /// malformed-marker error. Internal calls pass an internal placeholder.
     pub node: &'a str,
+    /// The agent id of the executor running this attempt (spec 2026-07-20,
+    /// Task 7). Selects the per-agent session-id parser in [`capture_session`]
+    /// so the finished attempt's `session` can feed the `resume` transport.
+    /// Internal calls pass the agent they invoke (e.g. `claude-code`).
+    pub agent: &'a str,
 }
 
 /// The marker a `resume`/`reprompt` agent prints on its own stdout line to ask
@@ -283,6 +288,65 @@ pub struct AgentReport {
     /// interactive node whose attempt returns `Some(..)`; a non-interactive
     /// node ignores it (`node.rs` gates on the node's `interactive` flag).
     pub question: Option<AskedQuestion>,
+    /// Agent session id captured from this attempt's output, for the `resume`
+    /// transport (spec 2026-07-20, Task 7). `None` when the agent surfaced no
+    /// session id (e.g. a plain-text one-shot run). Set from
+    /// [`capture_session`] using the task's `agent`; the drive loop writes it
+    /// into `AttemptFinished.session` and reads it back to re-enter the agent's
+    /// session on the answer round.
+    pub session: Option<String>,
+}
+
+/// Captures an agent session id from a finished attempt's raw output, for the
+/// `resume` transport (spec 2026-07-20, Task 7). Dispatches on `agent_id`;
+/// returns `None` when the output carries no session id, which forces the
+/// runtime downgrade from `resume` to `reprompt`.
+///
+/// Reality per agent under the CURRENT one-shot invocation forms: only claude's
+/// stream-json output (`--output-format stream-json`, the `acp` transport)
+/// emits a `session_id` field, so claude is the one agent that yields a session
+/// id today; codex/opencode/hermes one-shot output is plain final-answer text
+/// with no session id, so they yield `None` here and rely on the downgrade
+/// path. The per-agent field lists below are wired so that when those agents'
+/// resumable one-shot output lands, only the field name changes here (spec
+/// Transport: resume). No parser is invented for an output shape we do not
+/// produce today: a plain-text line simply never matches.
+pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
+    match agent_id {
+        "claude" | "claude-code" => capture_json_string_field(raw, &["session_id"]),
+        "codex" => capture_json_string_field(raw, &["session_id", "conversation_id"]),
+        "opencode" => capture_json_string_field(raw, &["session_id", "sessionID"]),
+        "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
+        _ => None,
+    }
+}
+
+/// Scans each line of `raw` as a top-level JSON object and returns the LAST
+/// non-empty string value found under any name in `fields` (the terminal event
+/// wins, matching how the stream's final `result` event carries the id).
+/// `None` when no line parses to such an object with such a field - the plain-
+/// text one-shot case.
+fn capture_json_string_field(raw: &str, fields: &[&str]) -> Option<String> {
+    let mut found: Option<String> = None;
+    for line in raw.lines() {
+        let line = line.trim();
+        if !line.starts_with('{') {
+            continue;
+        }
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        for f in fields {
+            if let Some(s) = val
+                .get(*f)
+                .and_then(|v| v.as_str())
+                .filter(|s| !s.is_empty())
+            {
+                found = Some(s.to_string());
+            }
+        }
+    }
+    found
 }
 
 pub trait AgentAdapter {
@@ -608,11 +672,17 @@ impl ClaudeAdapter {
         // and hard-fails on malformed JSON naming the node; a non-interactive
         // node's literal marker text is simply ignored.
         let question = scan_question(&stdout, task)?;
+        // Session capture (spec 2026-07-20, Task 7): pull the agent's session id
+        // from its output so the answer round can resume the same session. The
+        // plain headless `-p` form carries no session id, so this is normally
+        // `None`; the stream path below is where claude surfaces one.
+        let session = capture_session(task.agent, &stdout);
         Ok(AgentReport {
             status,
             summary,
             raw: stdout,
             question,
+            session,
         })
     }
 
@@ -892,11 +962,16 @@ fn parse_stream_result(
         // that is where the marker appears (not the surrounding NDJSON). Gated
         // on `task.interactive`; malformed JSON fails naming the node.
         let question = scan_question(&text, task)?;
+        // Session capture over the whole NDJSON stream (spec 2026-07-20, Task
+        // 7): claude's stream-json events carry a `session_id`, so the parser
+        // scans `raw` (every event line), not just the terminal result text.
+        let session = capture_session(task.agent, &raw);
         return Ok(AgentReport {
             status,
             summary,
             raw,
             question,
+            session,
         });
     }
     Err((

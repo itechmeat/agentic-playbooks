@@ -37,6 +37,7 @@ fn claude_adapter_success_via_stub() {
             connector_policy: &Default::default(),
             interactive: false,
             node: "test",
+            agent: "claude",
         })
         .unwrap();
     assert_eq!(report.status, NodeStatus::Succeeded);
@@ -62,6 +63,7 @@ fn claude_adapter_nonzero_exit_is_process_exit() {
             connector_policy: &Default::default(),
             interactive: false,
             node: "test",
+            agent: "claude",
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::ProcessExit));
@@ -96,6 +98,7 @@ fn hermes_adapter_sends_z_flag_prefixed_soul_and_model_flag() {
             connector_policy: &Default::default(),
             interactive: false,
             node: "test",
+            agent: "claude",
         })
         .unwrap();
     let argv: Vec<&str> = report

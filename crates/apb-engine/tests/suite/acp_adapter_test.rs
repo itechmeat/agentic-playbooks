@@ -48,6 +48,7 @@ fn acp_success_extracts_result_and_streams_to_log() {
             connector_policy: &Default::default(),
             interactive: false,
             node: "test",
+            agent: "claude",
         })
         .unwrap();
 
@@ -82,6 +83,7 @@ fn acp_result_is_error_maps_to_failed_status() {
             connector_policy: &Default::default(),
             interactive: false,
             node: "test",
+            agent: "claude",
         })
         .unwrap();
     // agent_reported_failure: the report is valid, status failure - NOT a transport error.
@@ -106,6 +108,7 @@ fn acp_no_result_event_is_structured_output_missing() {
             connector_policy: &Default::default(),
             interactive: false,
             node: "test",
+            agent: "claude",
         })
         .unwrap_err();
     assert!(
@@ -131,6 +134,7 @@ fn acp_nonzero_exit_is_process_exit() {
             connector_policy: &Default::default(),
             interactive: false,
             node: "test",
+            agent: "claude",
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::ProcessExit), "got: {err:?}");
@@ -154,6 +158,7 @@ fn acp_timeout_kills_streaming_agent() {
             connector_policy: &Default::default(),
             interactive: false,
             node: "test",
+            agent: "claude",
         })
         .unwrap_err();
     let elapsed = started.elapsed();
@@ -185,6 +190,7 @@ fn acp_cancel_stops_streaming_agent() {
                 connector_policy: &Default::default(),
                 interactive: false,
                 node: "test",
+                agent: "claude",
             },
             &cancel,
             None,

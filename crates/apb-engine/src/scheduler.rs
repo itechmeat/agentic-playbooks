@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use apb_core::config::{GlobalConfig, SoulDelivery};
+use apb_core::config::{GlobalConfig, Interaction, SoulDelivery};
 use apb_core::migration::validate_migration;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::{Registry, is_safe_segment};
@@ -345,6 +345,88 @@ fn last_question_asked_ts(events: &[Event], node: &str) -> Option<u128> {
         .rev()
         .find(|e| matches!(&e.payload, EventPayload::QuestionAsked { node: n, .. } if n == node))
         .map(|e| e.ts)
+}
+
+/// The session id captured from the node's MOST RECENT finished attempt (spec
+/// 2026-07-20, Task 7). That attempt is the one that asked the pending
+/// question, so its `AttemptFinished.session` is the session to resume into.
+/// `None` when the latest attempt captured none (the drive loop then downgrades
+/// `resume` to `reprompt`). Deliberately keyed on the latest attempt, not the
+/// latest attempt WITH a session: a fresh attempt that captured nothing must
+/// not silently resume a stale session from an earlier round.
+fn last_attempt_session(events: &[Event], node: &str) -> Option<String> {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::AttemptFinished {
+                node: n, session, ..
+            } if n == node => Some(session.clone()),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// The primary executor's `(agent_id, interaction)` for a node, read from the
+/// run's immutable manifest snapshot (spec 2026-07-20, Task 7). `None` when the
+/// run has no manifest or the node has no bound profile chain - the caller then
+/// treats the node as `Reprompt` (the safe floor). The interaction ceiling is
+/// snapshotted at run start, so editing the live config mid-run cannot change
+/// the transport an in-flight node uses.
+fn node_primary_invocation(
+    run_dir: &Path,
+    node: &str,
+) -> Result<Option<(String, Interaction)>, EngineError> {
+    let Some(manifest) = crate::manifest::read(run_dir)? else {
+        return Ok(None);
+    };
+    Ok(manifest
+        .for_node(node)
+        .and_then(|p| p.chain.first())
+        .map(|ri| (ri.agent_id.clone(), ri.spec.interaction)))
+}
+
+/// The `seq` of the node's most recent `NodeStarted` - the start of the CURRENT
+/// visit (spec 2026-07-20, Task 6 carry-over fix). Used to scope a reprompt
+/// transcript to this visit's Q&A so a looped re-entry does not replay prior
+/// visits' rounds. `0` when the node has never started (no prior questions
+/// to exclude).
+fn current_visit_start_seq(events: &[Event], node: &str) -> u64 {
+    events
+        .iter()
+        .rev()
+        .find(|e| matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node))
+        .map(|e| e.seq)
+        .unwrap_or(0)
+}
+
+/// How many `QuestionAsked` events for `node` were journaled BEFORE `seq` -
+/// i.e. in prior visits, given `seq` is the current visit's `NodeStarted`
+/// (spec 2026-07-20, Task 6). The i-th channel question for a node corresponds
+/// to its i-th `QuestionAsked`, so skipping this many channel questions yields
+/// the current visit's window.
+fn questions_asked_before_seq(events: &[Event], node: &str, seq: u64) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            e.seq < seq
+                && matches!(&e.payload, EventPayload::QuestionAsked { node: n, .. } if n == node)
+        })
+        .count()
+}
+
+/// How many `QuestionAnswered` events for `node` were journaled BEFORE `seq`
+/// (the current visit's `NodeStarted`). The reprompt transcript skips this many
+/// channel answers so it pairs only the current visit's Q&A (spec 2026-07-20,
+/// Task 6).
+fn questions_answered_before_seq(events: &[Event], node: &str, seq: u64) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            e.seq < seq
+                && matches!(&e.payload, EventPayload::QuestionAnswered { node: n, .. } if n == node)
+        })
+        .count()
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry
@@ -1303,6 +1385,10 @@ fn drive(
                                     &cancel_c,
                                     &scrub_c,
                                     journal_ref,
+                                    // Interactive nodes are excluded from the
+                                    // concurrent batch, so a resume never
+                                    // originates here.
+                                    None,
                                 );
                                 let _ = tx.send((node, res));
                             });
@@ -1561,6 +1647,11 @@ fn drive(
             let events = read_all(run_dir)?;
             let answered = question_answered_count(&events, &current);
             let mut timeout_failed: Option<String> = None;
+            // Set by the answer-consumed arm below when the resolved transport
+            // is `resume`: carries the captured session + the answer so the
+            // fall-through `execute_node` re-enters the agent's own session
+            // instead of re-invoking from scratch with a transcript.
+            let mut resume_ctx: Option<ResumeContext> = None;
             // A pending (asked-but-unanswered) question means we are parked.
             if question_asked_count(&events, &current) > answered {
                 let for_node: Vec<_> = read_answers_after(run_dir, None)?
@@ -1569,48 +1660,120 @@ fn drive(
                     .collect();
                 match for_node.into_iter().nth(answered) {
                     Some(entry) => {
-                        // The next answer arrived: consume it (count-based) and
-                        // re-invoke with the answer appended (Task 6/7 refine
-                        // into the full transcript / session resume).
+                        // The next answer arrived: consume it (count-based), then
+                        // pick the re-invocation transport by the node's resolved
+                        // `interaction` ceiling (spec 2026-07-20, Task 7).
                         log.append(EventPayload::QuestionAnswered {
                             node: current.clone(),
                             answer: entry.answer.clone(),
                             answered_by: entry.answered_by.clone(),
                         })?;
-                        let node_prompt = match &node_kind {
-                            NodeKind::AgentTask { prompt, .. } => prompt.clone(),
-                            _ => String::new(),
+
+                        // Resolve the primary executor's transport ceiling from
+                        // the run manifest (snapshotted at start; live config
+                        // edits cannot move it mid-run). An absent manifest/chain
+                        // floors to `reprompt`.
+                        let (agent_id, interaction) = node_primary_invocation(run_dir, &current)?
+                            .unwrap_or_else(|| (String::new(), Interaction::Reprompt));
+                        // Live is NOT implemented in this task (Task 10/11): a
+                        // live-configured node downgrades to resume here, with the
+                        // reason journaled.
+                        let interaction = if interaction == Interaction::Live {
+                            log.append(EventPayload::SupervisorAction {
+                                action: "interaction_downgraded".into(),
+                                node: Some(current.clone()),
+                                detail:
+                                    "live transport is not implemented yet (Task 11); using resume"
+                                        .into(),
+                            })?;
+                            Interaction::Resume
+                        } else {
+                            interaction
                         };
-                        // Re-invocation prompt (spec 2026-07-20, Transport:
-                        // resume/reprompt step 3): the original rendered prompt
-                        // followed by the full Q&A transcript of THIS node
-                        // visit. Questions and answers are paired count-based
-                        // (the i-th answer answers the i-th question), read from
-                        // the channels filtered to this node. The transcript is
-                        // appended AFTER rendering, as plain quoted text, so no
-                        // template expansion runs over agent-generated question
-                        // text or user-supplied answer text (V13 namespaces do
-                        // not apply inside a transcript).
-                        let base = render_node_prompt(run_dir, &run_id, &state, cfg, &node_prompt)?;
-                        let questions: Vec<_> = read_questions_after(run_dir, None)?
-                            .into_iter()
-                            .filter(|q| q.node == current)
-                            .collect();
-                        let answers: Vec<_> = read_answers_after(run_dir, None)?
-                            .into_iter()
-                            .filter(|a| a.node == current)
-                            .collect();
-                        let mut transcript = String::new();
-                        for (q, a) in questions.iter().zip(answers.iter()) {
-                            transcript.push_str(&format!("Q: {}\nA: {}\n\n", q.question, a.answer));
+
+                        // A resume needs both a captured agent session and a
+                        // declarative resume form; either missing downgrades to
+                        // reprompt, journaled with the reason (transport is a
+                        // ceiling, not a promise).
+                        let session = last_attempt_session(&events, &current);
+                        let resume_form = crate::invocation::resume_argv(&agent_id);
+                        let use_resume = match interaction {
+                            Interaction::Reprompt | Interaction::Live => false,
+                            Interaction::Resume => match (&session, &resume_form) {
+                                (Some(_), Some(_)) => true,
+                                (None, _) => {
+                                    log.append(EventPayload::SupervisorAction {
+                                        action: "interaction_downgraded".into(),
+                                        node: Some(current.clone()),
+                                        detail: format!(
+                                            "resume unavailable: no agent session id was captured for node `{current}`; using reprompt"
+                                        ),
+                                    })?;
+                                    false
+                                }
+                                (Some(_), None) => {
+                                    log.append(EventPayload::SupervisorAction {
+                                        action: "interaction_downgraded".into(),
+                                        node: Some(current.clone()),
+                                        detail: format!(
+                                            "resume unavailable: agent `{agent_id}` has no resume form; using reprompt"
+                                        ),
+                                    })?;
+                                    false
+                                }
+                            },
+                        };
+
+                        if use_resume {
+                            // Resume: hand execute_node the captured session and
+                            // the answer as the follow-up prompt; no transcript,
+                            // since the agent re-enters its own session.
+                            resume_ctx = Some(ResumeContext {
+                                session: session.expect("resume implies a captured session"),
+                                answer: entry.answer.clone(),
+                            });
+                        } else {
+                            // Reprompt: the original rendered prompt followed by
+                            // this visit's Q&A transcript, scoped to the CURRENT
+                            // visit window (Task 6 carry-over fix) so a looped
+                            // re-entry does not replay prior visits' rounds. The
+                            // transcript is plain quoted text appended AFTER
+                            // rendering, so no template expansion runs over
+                            // agent/user text (V13 namespaces do not apply).
+                            let node_prompt = match &node_kind {
+                                NodeKind::AgentTask { prompt, .. } => prompt.clone(),
+                                _ => String::new(),
+                            };
+                            let base =
+                                render_node_prompt(run_dir, &run_id, &state, cfg, &node_prompt)?;
+                            let visit_start = current_visit_start_seq(&events, &current);
+                            let prior_q =
+                                questions_asked_before_seq(&events, &current, visit_start);
+                            let prior_a =
+                                questions_answered_before_seq(&events, &current, visit_start);
+                            let questions: Vec<_> = read_questions_after(run_dir, None)?
+                                .into_iter()
+                                .filter(|q| q.node == current)
+                                .skip(prior_q)
+                                .collect();
+                            let answers: Vec<_> = read_answers_after(run_dir, None)?
+                                .into_iter()
+                                .filter(|a| a.node == current)
+                                .skip(prior_a)
+                                .collect();
+                            let mut transcript = String::new();
+                            for (q, a) in questions.iter().zip(answers.iter()) {
+                                transcript
+                                    .push_str(&format!("Q: {}\nA: {}\n\n", q.question, a.answer));
+                            }
+                            prompt_overrides.insert(
+                                current.clone(),
+                                format!(
+                                    "{base}\n\n## prior questions and answers\n{}",
+                                    transcript.trim_end()
+                                ),
+                            );
                         }
-                        prompt_overrides.insert(
-                            current.clone(),
-                            format!(
-                                "{base}\n\n## prior questions and answers\n{}",
-                                transcript.trim_end()
-                            ),
-                        );
                         // Fall through to run the next attempt below.
                     }
                     None => {
@@ -1706,6 +1869,10 @@ fn drive(
                         &run_cancel,
                         &env_scrub,
                         &journal,
+                        // Resume context set by the answer-consumed arm above;
+                        // `None` on the first attempt of a visit and on the
+                        // reprompt path.
+                        resume_ctx.take(),
                     )?
                 };
                 match outcome {
@@ -1861,6 +2028,8 @@ fn drive(
                         &run_cancel,
                         &env_scrub,
                         &journal,
+                        // Non-interactive nodes never resume.
+                        None,
                     )?
                 };
                 let (st, out, evs) = match outcome {

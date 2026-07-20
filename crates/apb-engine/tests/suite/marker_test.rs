@@ -39,6 +39,7 @@ fn task<'a>(
         connector_policy: policy,
         interactive,
         node,
+        agent: "claude",
     }
 }
 

@@ -184,6 +184,7 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
             connector_policy: &policy,
             interactive: false,
             node: "test",
+            agent: "claude",
         })
         .unwrap();
 

@@ -84,6 +84,8 @@ mod heartbeat_lost_test;
 mod inspect_wait_test;
 #[path = "suite/instruction_precedence_test.rs"]
 mod instruction_precedence_test;
+#[path = "suite/interaction_defaults_test.rs"]
+mod interaction_defaults_test;
 #[path = "suite/interactive_reprompt_test.rs"]
 mod interactive_reprompt_test;
 #[path = "suite/interactive_timeout_test.rs"]
@@ -118,6 +120,8 @@ mod progress_api_test;
 mod question_channel_test;
 #[path = "suite/report_summary_test.rs"]
 mod report_summary_test;
+#[path = "suite/resume_capture_test.rs"]
+mod resume_capture_test;
 #[path = "suite/resume_test.rs"]
 mod resume_test;
 #[path = "suite/retry_test.rs"]
