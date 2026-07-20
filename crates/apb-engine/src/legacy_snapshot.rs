@@ -7,6 +7,15 @@
 //! and parse ONLY the run snapshot - the public `Playbook::from_yaml` is not
 //! weakened: it still rejects executors and directs live definitions to
 //! migration.
+//!
+//! Also hosts `load_run_playbook` (spec 2026-07-20, Task 5): general-purpose
+//! run-snapshot loading built on this module's `parse_snapshot_playbook`, used
+//! well beyond legacy resume - by `progress.rs`'s progress fold, `question.rs`'s
+//! `answer_by` lookup, and directly by `apb-mcp`/`apb-server` (via
+//! `progress::load_run_playbook`, re-exported for API stability). It lives
+//! here rather than in one of those callers so `progress.rs` and
+//! `question.rs`, which both need it, stay a one-way dependency edge onto
+//! this module instead of forming a cycle on each other.
 
 use std::collections::BTreeMap;
 use std::path::Path;

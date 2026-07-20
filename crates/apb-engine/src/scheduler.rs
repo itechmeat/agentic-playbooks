@@ -24,7 +24,9 @@ use crate::event::{
 use crate::inspect::{should_declare_lost, supervisor_silence_ms, write_supervisor_session};
 use crate::manifest::{ManifestProfile, ManifestSkill, RunExecutionManifest};
 use crate::parallel::{self, JoinReadiness};
-use crate::question::{post_answer, post_question, read_answers_after, read_questions_after};
+use crate::question::{
+    post_answer_if_unanswered, post_question, read_answers_after, read_questions_after,
+};
 use crate::review::read_reviews_after;
 use crate::run_config::{
     CacheRunMode, RunConfig, copy_scripts, read_run_config, snapshot_playbook, write_run_config,
@@ -1590,14 +1592,14 @@ fn drive(
                         // Still waiting: check whether `question_timeout_seconds`
                         // has elapsed for the pending question (spec
                         // 2026-07-20, Task 5). With a `default_answer`, post it
-                        // through the same channel a human/supervisor answer
-                        // would use (`answered_by: "timeout"` bypasses the
-                        // `answer_by: human` policy in `post_answer`, per spec
-                        // Exact answer semantics), then bounce and let the next
-                        // iteration's normal count-based consumption above pick
-                        // it up. Without one, stop parking and fail the node
-                        // outright: a node that declares a timeout with no
-                        // default has nothing sensible to proceed with.
+                        // through `post_answer_if_unanswered` (`answered_by:
+                        // "timeout"` bypasses the `answer_by: human` policy,
+                        // per spec Exact answer semantics), then bounce and
+                        // let the next iteration's normal count-based
+                        // consumption above pick it up. Without one, stop
+                        // parking and fail the node outright: a node that
+                        // declares a timeout with no default has nothing
+                        // sensible to proceed with.
                         let (question_timeout_seconds, default_answer) = match &node_kind {
                             NodeKind::AgentTask {
                                 question_timeout_seconds,
@@ -1621,7 +1623,20 @@ fn drive(
                         }
                         match default_answer {
                             Some(ans) => {
-                                post_answer(run_dir, Some(&current), &ans, "timeout")?;
+                                // `answered` is the node's answer count as
+                                // observed by the read at the top of this
+                                // branch - exactly the count that made
+                                // `for_node.into_iter().nth(answered)` return
+                                // `None` above. `post_answer_if_unanswered`
+                                // re-checks it under a lock right before
+                                // appending, closing the TOCTOU: a
+                                // human/supervisor answer that lands in the
+                                // gap between that read and this post makes
+                                // the recheck fail, so this posts nothing and
+                                // the genuine answer is what gets consumed.
+                                post_answer_if_unanswered(
+                                    run_dir, &current, &ans, "timeout", answered,
+                                )?;
                                 std::thread::sleep(AWAIT_CONTROL_POLL);
                                 continue;
                             }

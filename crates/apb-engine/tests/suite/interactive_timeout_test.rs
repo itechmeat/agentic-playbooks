@@ -20,6 +20,7 @@ use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
 use apb_engine::event::{Event, EventPayload, read_all};
+use apb_engine::question::post_answer;
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::RunStatus;
 
@@ -188,6 +189,17 @@ fn single_ask_body(counter: &Path) -> String {
     )
 }
 
+/// Invocation 1 asks Q1 and exits. Invocation 2 (only reachable once Q1 is
+/// answered) asks Q2 and exits. Invocation 3 (only reachable once Q2 is
+/// answered, human or timeout-default) finishes successfully. Bounded by
+/// construction, same as `single_ask_body`.
+fn two_ask_body(counter: &Path) -> String {
+    format!(
+        "c=\"{}\"\nn=$(cat \"$c\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$c\"\nif [ \"$n\" = \"1\" ]; then\n  printf '%s\\n' '<<<apb:question>>>'\n  printf '%s\\n' '{{\"question\":\"Q1\",\"options\":[]}}'\n  exit 0\nfi\nif [ \"$n\" = \"2\" ]; then\n  printf '%s\\n' '<<<apb:question>>>'\n  printf '%s\\n' '{{\"question\":\"Q2\",\"options\":[]}}'\n  exit 0\nfi\necho done\nexit 0",
+        counter.display()
+    )
+}
+
 #[test]
 fn expiry_with_default_answer_posts_timeout_answer_and_node_succeeds() {
     let _l = lock();
@@ -328,5 +340,91 @@ fn expiry_without_default_answer_fails_the_node() {
         questions_answered(&events).len(),
         0,
         "no QuestionAnswered may appear when there is no default_answer"
+    );
+}
+
+/// Two rounds end to end (MINOR 1, fix-round-1): round 1 is asked and
+/// answered normally (a human answer, no timeout involved); round 2 is asked
+/// and left unanswered until `question_timeout_seconds` fires the
+/// `default_answer`. Locks in that the park loop re-bases
+/// `last_question_asked_ts` to the CURRENT (second) round's own
+/// `QuestionAsked` timestamp rather than reusing the first round's - if it
+/// didn't, the first round's now-stale timestamp would make the timeout
+/// clock read as already-elapsed the instant round 2 is asked, or a
+/// implementation that never re-reads would simply never fire again.
+#[test]
+fn second_round_expires_via_default_after_first_round_answered_normally() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let counter = bin.path().join("count");
+    seed_playbook(proj.path(), Some("round2-default"));
+    seed_profile(proj.path(), "arch");
+    set_env(
+        &make_stub(bin.path(), &two_ask_body(&counter)),
+        home.path(),
+        cfg.path(),
+    );
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id_of(&run_dir),
+        handle: Some(handle),
+    };
+
+    // Round 1: Q1 asked, answered normally (human, not timeout).
+    poll_until("first QuestionAsked (Q1) for node ask", || {
+        let events = read_all(&run_dir).ok()?;
+        (!questions_asked(&events).is_empty()).then_some(())
+    });
+    assert_eq!(questions_asked(&read_all(&run_dir).unwrap())[0], "Q1");
+    post_answer(&run_dir, Some("ask"), "human-answer-1", "human").unwrap();
+
+    // Round 2: Q2 asked (only reachable after Q1's answer was consumed).
+    poll_until("second QuestionAsked (Q2) for node ask", || {
+        let events = read_all(&run_dir).ok()?;
+        (questions_asked(&events).len() >= 2).then_some(())
+    });
+    let asked = questions_asked(&read_all(&run_dir).unwrap());
+    assert_eq!(asked.len(), 2, "exactly two questions asked");
+    assert_eq!(asked[1], "Q2");
+
+    // Never answer Q2 ourselves: the engine's own `question_timeout_seconds:
+    // 1` clock, re-based to Q2's own asked-at, must fire the default answer.
+    poll_until("second-round timeout QuestionAnswered", || {
+        let events = read_all(&run_dir).ok()?;
+        (questions_answered(&events).len() >= 2).then_some(())
+    });
+
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    let answered = questions_answered(&events);
+    assert_eq!(answered.len(), 2, "exactly two answers, one per round");
+    assert_eq!(
+        answered[0],
+        ("human-answer-1".to_string(), "human".to_string()),
+        "round 1 was answered normally by a human"
+    );
+    assert_eq!(
+        answered[1],
+        ("round2-default".to_string(), "timeout".to_string()),
+        "round 2 expired via its own default_answer"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "ask" && status == "succeeded"
+        )),
+        "the interactive node must finish after both rounds"
     );
 }

@@ -180,13 +180,35 @@ pub fn post_answer(
             "node `{target}` is answer_by: human; relay this question to the user and post their answer verbatim rather than answering as the supervisor"
         )));
     }
+    append_answer(run_dir, &target, answer, answered_by)
+}
 
+/// Lock file serializing `post_answer_if_unanswered`'s recount-then-append
+/// critical section (spec 2026-07-20, Task 5 fix-round-1). Deliberately NOT
+/// taken by plain `post_answer`: a facade race (two humans, or a human and
+/// the supervisor, both answering) is the same last-write-positional
+/// semantics `review.rs` already accepts for review decisions, and is out of
+/// scope here. This lock exists only to protect drive's own timeout path
+/// against posting a stray duplicate over an answer that already arrived.
+const ANSWERS_LOCK: &str = "answers.jsonl.lock";
+
+/// Appends one answer entry to `answers.jsonl`, unconditionally. Shared by
+/// `post_answer` (the facade path) and `post_answer_if_unanswered` (drive's
+/// own conditional timeout path) so the on-disk entry shape and `seq`
+/// numbering (current line count; never reused, recomputed from the file
+/// itself) live in exactly one place.
+fn append_answer(
+    run_dir: &Path,
+    node: &str,
+    answer: &str,
+    answered_by: &str,
+) -> Result<u64, EngineError> {
     std::fs::create_dir_all(run_dir)?;
     let seq = read_answers_after(run_dir, None)?.len() as u64;
 
     let entry = PostedAnswer {
         seq,
-        node: target,
+        node: node.to_string(),
         answer: answer.to_string(),
         answered_by: answered_by.to_string(),
     };
@@ -200,6 +222,54 @@ pub fn post_answer(
     f.flush()?;
 
     Ok(seq)
+}
+
+/// Conditionally appends a (typically `"timeout"`) answer for `node`, but
+/// only if `node`'s channel answer count is still exactly `expected_answers`
+/// at the moment of the append (spec 2026-07-20, Task 5 fix-round-1).
+///
+/// Closes a TOCTOU in the drive park loop: the loop reads "no answer yet for
+/// this node" (count == `expected_answers`), decides `question_timeout_seconds`
+/// has elapsed, and prepares to post the `default_answer` as `"timeout"` -
+/// but a human/supervisor answer can land (via plain `post_answer`, from a
+/// different process) in the gap between that read and this post. Without
+/// this guard the timeout write would land unconditionally, leaving TWO
+/// `answers.jsonl` entries for one pending question; the scheduler's
+/// positional `nth(answered)` consumption would then silently misattribute
+/// the stray second entry to the NEXT question round instead of recognizing
+/// it as a duplicate that must not have been written at all.
+///
+/// Takes the run dir's advisory lock (`apb_core::fsutil::lock_dir` - the same
+/// primitive `stop_run` uses to serialize its own read-check-append) around
+/// a fresh recount of `node`'s channel answers. If that recount no longer
+/// matches `expected_answers` - a genuine answer already landed - this
+/// returns `Ok(None)` and appends nothing; the caller (drive's timeout path)
+/// simply continues polling, and the real answer is picked up by the normal
+/// count-based consumption on the next iteration. `expected_answers` is the
+/// count the caller already observed (drive already has it: it is the same
+/// count for which `for_node.into_iter().nth(answered)` returned `None`).
+///
+/// Deliberately narrower than `post_answer`: no `node: Option<&str>`
+/// resolution (the caller always knows the exact node) and no `answer_by`
+/// policy check (`"timeout"` is always accepted, per spec Exact answer
+/// semantics - this function is drive's own timeout path, never exposed to a
+/// facade).
+pub fn post_answer_if_unanswered(
+    run_dir: &Path,
+    node: &str,
+    answer: &str,
+    answered_by: &str,
+    expected_answers: usize,
+) -> Result<Option<u64>, EngineError> {
+    let _lock = apb_core::fsutil::lock_dir(run_dir, ANSWERS_LOCK)?;
+    let current = read_answers_after(run_dir, None)?
+        .into_iter()
+        .filter(|a| a.node == node)
+        .count();
+    if current != expected_answers {
+        return Ok(None);
+    }
+    append_answer(run_dir, node, answer, answered_by).map(Some)
 }
 
 pub fn read_answers_after(
@@ -322,5 +392,63 @@ mod tests {
         let seq = post_answer(dir.path(), None, "hi", "human").unwrap();
         let answers = read_answers_after(dir.path(), Some(seq.saturating_sub(1))).unwrap();
         assert_eq!(answers.last().unwrap().node, "ask2");
+    }
+
+    // Task 5 fix-round-1 (spec 2026-07-20-interactive-nodes): the TOCTOU
+    // guard between drive's "no answer yet" read and its own timeout post.
+
+    #[test]
+    fn post_answer_if_unanswered_appends_when_expected_count_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        post_question(dir.path(), "ask", 1, "q", Vec::new()).unwrap();
+
+        let seq = post_answer_if_unanswered(dir.path(), "ask", "proceed", "timeout", 0)
+            .unwrap()
+            .expect("expected count matched, so the append must happen");
+
+        let answers = read_answers_after(dir.path(), None).unwrap();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].seq, seq);
+        assert_eq!(answers[0].node, "ask");
+        assert_eq!(answers[0].answer, "proceed");
+        assert_eq!(answers[0].answered_by, "timeout");
+    }
+
+    #[test]
+    fn post_answer_if_unanswered_skips_when_a_real_answer_already_landed() {
+        let dir = tempfile::tempdir().unwrap();
+        post_question(dir.path(), "ask", 1, "q", Vec::new()).unwrap();
+
+        // Simulate the race: a human answer lands in the gap between drive's
+        // stale read (which observed 0 answers for `ask`) and drive's own
+        // conditional timeout post below.
+        post_answer(dir.path(), Some("ask"), "pg", "human").unwrap();
+
+        let result = post_answer_if_unanswered(dir.path(), "ask", "proceed", "timeout", 0)
+            .expect("a stale expected count must not error, only skip");
+        assert!(
+            result.is_none(),
+            "the stale expected count (0) no longer matches reality (1); nothing must be appended"
+        );
+
+        // Exactly the human's answer survives - no stray duplicate.
+        let answers = read_answers_after(dir.path(), None).unwrap();
+        assert_eq!(answers.len(), 1);
+        assert_eq!(answers[0].answered_by, "human");
+    }
+
+    #[test]
+    fn post_answer_if_unanswered_ignores_other_nodes_when_counting() {
+        let dir = tempfile::tempdir().unwrap();
+        post_question(dir.path(), "ask", 1, "q", Vec::new()).unwrap();
+        post_question(dir.path(), "other", 1, "q2", Vec::new()).unwrap();
+        // An answer for a DIFFERENT node must not affect `ask`'s own count.
+        post_answer(dir.path(), Some("other"), "x", "human").unwrap();
+
+        let result = post_answer_if_unanswered(dir.path(), "ask", "proceed", "timeout", 0).unwrap();
+        assert!(
+            result.is_some(),
+            "ask's own count is still 0 regardless of other nodes' answers"
+        );
     }
 }
