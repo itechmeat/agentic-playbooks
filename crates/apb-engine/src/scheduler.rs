@@ -666,24 +666,27 @@ fn drive(
         for entry in read_control_after(run_dir, control_cursor)? {
             match entry.cmd {
                 Control::Abort { reason } => {
-                    // Persisted BEFORE the return: a resumed drive must never
-                    // see this same terminal entry again (Task 4 completion-plan
-                    // defect 1 - a stale stop command re-firing on resume).
-                    write_control_cursor(run_dir, entry.seq)?;
+                    // Effect first, cursor persisted last: if `log.append` errs
+                    // (ordinary I/O failure), the entry must NOT be marked
+                    // applied - it has to resurface on the next drive rather
+                    // than being silently dropped. Persisted before the return
+                    // (once the effect has actually happened) so a resumed
+                    // drive never sees this same terminal entry again (Task 4
+                    // completion-plan defect 1 - a stale stop command re-firing
+                    // on resume).
                     log.append(EventPayload::RunAborted { reason })?;
+                    write_control_cursor(run_dir, entry.seq)?;
                     return Ok(RunResult {
                         run_id,
                         outcome: RunStatus::Aborted,
                     });
                 }
                 Control::Pause => {
-                    // Same reasoning as Abort above: without persisting here, a
-                    // resume (just another `drive` call) would re-scan this same
-                    // Pause entry and re-pause immediately instead of proceeding.
-                    write_control_cursor(run_dir, entry.seq)?;
+                    // Same ordering and reasoning as Abort above.
                     log.append(EventPayload::RunPaused {
                         reason: "supervisor pause".into(),
                     })?;
+                    write_control_cursor(run_dir, entry.seq)?;
                     return Ok(RunResult {
                         run_id,
                         outcome: RunStatus::Paused,
@@ -704,9 +707,13 @@ fn drive(
                     classification,
                     continue_from,
                 } => {
-                    control_cursor = Some(entry.seq);
-                    write_control_cursor(run_dir, entry.seq)?;
-                    match apply_patch(
+                    // Effect first (`apply_patch` can itself err on ordinary
+                    // I/O - unreadable events.jsonl, a bad snapshot read), then
+                    // persist the cursor only once it has actually returned
+                    // Ok: an error here must leave the entry unconsumed so it
+                    // resurfaces on the next drive instead of being silently
+                    // dropped.
+                    let result = apply_patch(
                         root,
                         run_dir,
                         log,
@@ -718,7 +725,10 @@ fn drive(
                             classification,
                             continue_from,
                         },
-                    )? {
+                    )?;
+                    control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
+                    match result {
                         PatchResult::Applied(applied) => {
                             last_applied_patch = Some(*applied);
                             patch_applied = true;
@@ -1342,13 +1352,15 @@ fn drive(
 
             loop {
                 let (cmd, seq) = await_control(run_dir, log, control_cursor, &current)?;
-                control_cursor = Some(seq);
                 // `await_control` applies ContextAppend/Progress in place (and
                 // persists their own cursor internally) before ever returning;
                 // whatever it DOES return (Retry/ContinueFrom/Pause/Abort/Patch)
-                // is about to be applied right here, so persist its seq too -
-                // otherwise a resumed drive would see it again unconsumed.
-                write_control_cursor(run_dir, seq)?;
+                // is applied right here in each arm below. Cursor persistence
+                // happens AFTER the arm's effect (log.append/apply_patch), not
+                // before: those calls can themselves err on ordinary I/O
+                // conditions, and persisting first would permanently drop the
+                // entry (it would never resurface on the next drive) exactly
+                // when its effect failed to happen.
                 match cmd {
                     // await_control applies ContextAppend and Progress in-place
                     // and never returns them (see its implementation above) - these
@@ -1365,6 +1377,8 @@ fn drive(
                             node: Some(node.clone()),
                             detail: prompt_override.clone().unwrap_or_default(),
                         })?;
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
                         if let Some(p) = prompt_override {
                             prompt_overrides.insert(node.clone(), p);
                         }
@@ -1377,6 +1391,8 @@ fn drive(
                             node: Some(node.clone()),
                             detail: String::new(),
                         })?;
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
                         current = node;
                         break;
                     }
@@ -1385,7 +1401,7 @@ fn drive(
                         classification,
                         continue_from,
                     } => {
-                        match apply_patch(
+                        let result = apply_patch(
                             root,
                             run_dir,
                             log,
@@ -1397,7 +1413,10 @@ fn drive(
                                 classification,
                                 continue_from,
                             },
-                        )? {
+                        )?;
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
+                        match result {
                             PatchResult::Applied(applied) => {
                                 last_applied_patch = Some(*applied);
                                 frontier.clear();
@@ -1416,6 +1435,11 @@ fn drive(
                         log.append(EventPayload::RunPaused {
                             reason: "supervisor pause".into(),
                         })?;
+                        // The function returns right below, so there is no
+                        // further loop iteration to read the in-memory
+                        // `control_cursor` back - only the persisted file
+                        // matters here (read by the next drive's init).
+                        write_control_cursor(run_dir, seq)?;
                         return Ok(RunResult {
                             run_id,
                             outcome: RunStatus::Paused,
@@ -1423,6 +1447,7 @@ fn drive(
                     }
                     Control::Abort { reason } => {
                         log.append(EventPayload::RunAborted { reason })?;
+                        write_control_cursor(run_dir, seq)?;
                         return Ok(RunResult {
                             run_id,
                             outcome: RunStatus::Aborted,

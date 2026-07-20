@@ -217,3 +217,31 @@ fn resolve(
         _ => String::new(),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // `instruction_section` is `pub(crate)`, not reachable from the
+    // integration-test binary, so it is covered here inline instead (project
+    // convention: unit tests for non-pub items live next to the code).
+    #[test]
+    fn instruction_section_is_empty_for_none() {
+        assert_eq!(instruction_section(None), "");
+    }
+
+    #[test]
+    fn instruction_section_is_empty_for_blank_and_whitespace_only() {
+        assert_eq!(instruction_section(Some("")), "");
+        assert_eq!(instruction_section(Some("   ")), "");
+        assert_eq!(instruction_section(Some("\n\t  \n")), "");
+    }
+
+    #[test]
+    fn instruction_section_renders_trimmed_text_between_headings() {
+        assert_eq!(
+            instruction_section(Some("  stay within budget  ")),
+            "## run instruction\n\nstay within budget\n\n"
+        );
+    }
+}

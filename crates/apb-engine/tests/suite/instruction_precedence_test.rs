@@ -1,4 +1,5 @@
 use apb_core::registry::{Registry, init_project};
+use apb_engine::event::{EventPayload, read_all};
 use apb_engine::run_config::read_run_config;
 use apb_engine::scheduler::{RunOptions, run};
 use std::fs;
@@ -14,6 +15,23 @@ fn seed(root: &Path) {
     )
     .unwrap();
     fs::write(root.join(".apb/playbooks/p/current"), "1.0.0").unwrap();
+}
+
+// A `prompt` node's output IS its rendered prompt text (`node.rs::execute_node`,
+// `NodeKind::Prompt` arm) - the same `render_node_prompt`/`build_context_for_render`
+// path every real agent prompt goes through. Using `{{run.context}}` here (instead
+// of `{{run.instruction}}` as in `seed` above) exercises the ACTUAL live render
+// path a stub/real node sees, not just the context.md materialized file.
+fn seed_context_prompt(root: &Path) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/ctxprompt/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        "schema: 2\nid: ctxprompt\nname: ctxprompt\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: n, type: prompt, prompt: \"{{run.context}}\" }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: n }\n  - { from: n, to: f }\n",
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/ctxprompt/current"), "1.0.0").unwrap();
 }
 
 fn instruction_of(root: &Path, run_id: &str) -> Option<String> {
@@ -112,6 +130,39 @@ fn context_md_has_no_instruction_section_when_absent() {
     assert!(
         !context_md.contains("## run instruction"),
         "context.md must have no instruction section when the run has none, got:\n{context_md}"
+    );
+}
+
+// Fix-review Important item: the context.md-only tests above do not prove
+// the fix reaches an actual node prompt - `{{run.context}}` in a real render
+// resolves through `build_context_for_render` (called from
+// `render_node_prompt`), which never reads context.md back. This end-to-end
+// run proves the live path: the `n` node's own output IS its rendered
+// `{{run.context}}`, so its NodeFinished output must lead with the section.
+#[test]
+fn rendered_node_prompt_leads_with_run_instruction_when_present() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_context_prompt(dir.path());
+
+    let opts = RunOptions {
+        instruction: Some("stay within budget".into()),
+        ..Default::default()
+    };
+    let res = run(dir.path(), "ctxprompt", None, opts).unwrap();
+
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    let rendered = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::NodeFinished { node, output, .. } if node == "n" => Some(output.clone()),
+            _ => None,
+        })
+        .expect("expected a NodeFinished event for node `n`");
+    assert!(
+        rendered.starts_with("## run instruction\n\nstay within budget\n\n"),
+        "expected the rendered node prompt ({{{{run.context}}}}) to lead with the run \
+         instruction section, got:\n{rendered}"
     );
 }
 

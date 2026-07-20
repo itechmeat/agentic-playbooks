@@ -43,6 +43,21 @@ fn wait_for_wake(run_dir: &Path) -> Event {
     })
 }
 
+// `wait_for_run_status` observes the RunPaused/terminal EVENT, which `drive`
+// appends before it returns - but the workdir lock guard (`WorkdirGuard`,
+// held by `drive_prepared`'s `PreparedRun`) is only dropped slightly later,
+// once `drive_prepared`'s stack frame unwinds after `drive` returns. All
+// tests in this binary share one process, so `acquire`'s pid-liveness check
+// (`kill -0 <own pid>`) is always true regardless of which run held the
+// lock - a `resume` called immediately after `wait_for_run_status` can race
+// a still-attached guard and fail with `WorkdirBusy`. Polling for the lock
+// file to actually clear closes that window without an arbitrary sleep.
+fn wait_for_workdir_unlocked(root: &Path) {
+    poll_until("the workdir lock to clear", || {
+        (!root.join(".apb/workdir.lock").is_file()).then_some(())
+    })
+}
+
 // Ensures the drive loop has finished at least one node before a proactively
 // posted Pause/ContextAppend is caught by the top-of-loop scan - otherwise a
 // Pause could race ahead of even the `start` node, leaving `RunState` with no
@@ -411,6 +426,7 @@ fn resume_does_not_replay_an_already_applied_context_append() {
 
     // Drive N: applies the note, then pauses at the nearest node boundary.
     wait_for_run_status(&run_dir, RunStatus::Paused);
+    wait_for_workdir_unlocked(dir.path());
 
     // Drive N+1: resume must finish the remaining nodes without re-applying
     // the ContextAppend drive N already consumed.
@@ -449,6 +465,7 @@ fn resume_does_not_replay_a_consumed_pause() {
 
     post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
     wait_for_run_status(&run_dir, RunStatus::Paused);
+    wait_for_workdir_unlocked(dir.path());
 
     let res = resume(dir.path(), &run_id, None).unwrap();
     assert_eq!(
