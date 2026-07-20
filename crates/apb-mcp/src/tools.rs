@@ -776,10 +776,28 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
     let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
     let state = RunState::fold(&events);
+    // Liveness overlay (Task 9). The fold is pure and replayable; these three
+    // read the machine's process table at request time, which is precisely why
+    // they are applied here rather than folded into `RunState`.
+    //
+    // The incident behind them: a crashed attempt kept reporting an in-flight
+    // node for 19 minutes and `run_status` carried no timestamps at all, so
+    // "is it stuck or working?" could not be answered from the API. `lost`
+    // answers the first question, `node_times` the second.
+    let lost = apb_engine::liveness::lost_nodes(&events);
+    let node_times = apb_engine::liveness::node_times(&events);
+    let driver_alive = apb_engine::liveness::driver_alive(&dir, run_id);
     let nodes: BTreeMap<String, String> = state
         .nodes
         .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
+        .map(|(k, v)| {
+            let status = if lost.contains(k) {
+                apb_engine::liveness::LOST.to_string()
+            } else {
+                v.as_str().to_string()
+            };
+            (k.clone(), status)
+        })
         .collect();
     let progress = apb_engine::progress::from_run_dir(&dir, &events);
     let answer = apb_engine::progress::run_answer(&dir, &events);
@@ -801,6 +819,8 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "run_id": run_id,
         "run_status": state.run_status.as_str(),
         "nodes": nodes,
+        "node_times": node_times,
+        "driver_alive": driver_alive,
         "outputs": state.outputs,
         "progress": progress,
         "answer": answer,

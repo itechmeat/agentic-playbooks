@@ -21,7 +21,6 @@
 //!     run any more, it appends `RunAborted` itself.
 
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::JoinHandle;
@@ -122,7 +121,7 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
     // it, exactly as `run_cancel` does.
     abort_children(root, run_id)?;
 
-    if driver_is_live(&run_dir, run_id) {
+    if crate::liveness::driver_is_live(&run_dir, run_id) {
         return Ok(StopOutcome::SignaledLiveDriver);
     }
 
@@ -183,126 +182,6 @@ pub(crate) fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineErro
         }
     }
     Ok(())
-}
-
-/// Is a process really driving this run right now?
-///
-/// `driver.pid` alone cannot answer this. Drivers lead their own process group
-/// and are reaped promptly, so their pids are released and REUSED: a bare
-/// `kill -0` would happily succeed for a completely unrelated process that
-/// inherited the number, and we would leave a dead run unfinalized forever.
-///
-/// The disambiguator is free: a detached driver's argv carries
-/// `--run-id <id>`. Around that definitive signal the rule stays biased toward
-/// "live", because a wrong "dead" is the worse error - it appends a terminal
-/// event while real work is still going on, whereas a wrong "live" only leaves
-/// a run that a later stop (or `apb doctor`) can still finalize.
-fn driver_is_live(run_dir: &Path, run_id: &str) -> bool {
-    let Some(pid) = crate::driver::read_driver_pid(run_dir) else {
-        return false;
-    };
-    // A drive running on a thread of THIS process (the CLI's synchronous run,
-    // the in-process background drive) needs no probing and cannot be a
-    // reused pid.
-    if pid == std::process::id() {
-        return true;
-    }
-    let argv = match process_probe(pid) {
-        // The probe worked and the process is gone (or is a zombie, which
-        // holds a pid but drives nothing). The only branch that may conclude
-        // "dead" without knowing what the process is.
-        Probe::NotFound => return false,
-        // The probe itself did not work: no `ps` on this host, an unreadable
-        // answer. We know nothing, so we assume the driver is alive - see the
-        // bias documented above. Concluding "dead" here would let a host
-        // without `ps` write a terminal event over every live run.
-        Probe::Unknown => return true,
-        Probe::Running(argv) => argv,
-    };
-    if driver_argv_names_run(&argv, run_id) {
-        // Definitive: this process is the detached driver of this very run.
-        return true;
-    }
-    if argv.split_whitespace().any(|t| t == "__drive-run") {
-        // A driver, but of some other run: our pid was reused.
-        return false;
-    }
-    // Not a detached driver. Any other `apb` process may still be driving this
-    // run on a thread (`apb run`, `apb mcp`), so we do not finalize behind its
-    // back. Anything that is not `apb` at all is a reused pid.
-    argv_program_is_apb(&argv)
-}
-
-/// Does this command line belong to the detached driver of `run_id`?
-///
-/// Compared token by token rather than as a substring: `--run-id stopflow-12`
-/// is a prefix of `--run-id stopflow-123456`, so a substring test would let a
-/// stop of the short run mistake the long run's driver for its own and report
-/// a live driver that is in fact driving something else. Both the
-/// `--run-id X` and `--run-id=X` spellings are accepted; the engine only ever
-/// spawns the former, but reading argv is a loose contract.
-fn driver_argv_names_run(argv: &str, run_id: &str) -> bool {
-    let mut tokens = argv.split_whitespace();
-    while let Some(tok) = tokens.next() {
-        if tok == "--run-id" {
-            return tokens.next() == Some(run_id);
-        }
-        if let Some(value) = tok.strip_prefix("--run-id=") {
-            return value == run_id;
-        }
-    }
-    false
-}
-
-/// The answer to "what is process `pid`?". Deliberately three-valued: "the
-/// probe says there is no such process" and "the probe could not tell us
-/// anything" are very different facts, and collapsing them into `None` is what
-/// would make a missing `ps` read as a dead driver.
-enum Probe {
-    Running(String),
-    NotFound,
-    Unknown,
-}
-
-fn process_probe(pid: u32) -> Probe {
-    let out = match Command::new("ps")
-        .args(["-o", "stat=", "-o", "args=", "-p", &pid.to_string()])
-        .output()
-    {
-        Ok(out) => out,
-        // `ps` is missing or could not be spawned at all.
-        Err(_) => return Probe::Unknown,
-    };
-    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if !out.status.success() {
-        // The ordinary "no such process" answer: a non-zero exit with nothing
-        // on stdout (the diagnostic goes to stderr). A non-zero exit that DID
-        // print something is some other failure, and we do not guess.
-        return if line.is_empty() {
-            Probe::NotFound
-        } else {
-            Probe::Unknown
-        };
-    }
-    // A successful probe that printed nothing also means no such process.
-    if line.is_empty() {
-        return Probe::NotFound;
-    }
-    let Some((stat, argv)) = line.split_once(char::is_whitespace) else {
-        // Output we cannot parse: unknown, not dead.
-        return Probe::Unknown;
-    };
-    if stat.starts_with('Z') {
-        return Probe::NotFound;
-    }
-    Probe::Running(argv.trim().to_string())
-}
-
-fn argv_program_is_apb(argv: &str) -> bool {
-    argv.split_whitespace()
-        .next()
-        .and_then(|p| p.rsplit('/').next())
-        .is_some_and(|name| name == "apb" || name.starts_with("apb-") || name.starts_with("apb."))
 }
 
 /// How long the watcher waits between control.jsonl reads. Fast enough that an
@@ -391,61 +270,5 @@ mod tests {
         );
         assert_eq!(StopOutcome::FinalizedDeadRun.as_str(), "finalized_dead_run");
         assert_eq!(StopOutcome::AlreadyTerminal.as_str(), "already_terminal");
-    }
-
-    #[test]
-    fn only_an_apb_program_counts_as_a_possible_driver() {
-        assert!(argv_program_is_apb("/usr/local/bin/apb run demo"));
-        assert!(argv_program_is_apb("apb mcp"));
-        assert!(!argv_program_is_apb("/bin/zsh -l"));
-        assert!(!argv_program_is_apb("apbx run demo"));
-        assert!(!argv_program_is_apb(""));
-    }
-
-    #[test]
-    fn the_current_process_is_always_a_live_driver() {
-        let dir = tempfile::tempdir().unwrap();
-        apb_core::fsutil::atomic_write(
-            &crate::driver::driver_pid_path(dir.path()),
-            std::process::id().to_string().as_bytes(),
-        )
-        .unwrap();
-        assert!(driver_is_live(dir.path(), "any-run"));
-    }
-
-    #[test]
-    fn run_id_is_matched_as_a_token_not_a_prefix() {
-        assert!(driver_argv_names_run(
-            "/usr/bin/apb __drive-run --root /w --run-id stopflow-12",
-            "stopflow-12"
-        ));
-        assert!(driver_argv_names_run(
-            "/usr/bin/apb __drive-run --run-id=stopflow-12 --resume",
-            "stopflow-12"
-        ));
-        // The bug this guards: a prefix must not pass for the longer id.
-        assert!(!driver_argv_names_run(
-            "/usr/bin/apb __drive-run --root /w --run-id stopflow-123456",
-            "stopflow-12"
-        ));
-        assert!(!driver_argv_names_run("/usr/bin/apb mcp", "stopflow-12"));
-    }
-
-    #[test]
-    fn a_probe_that_cannot_answer_never_concludes_dead() {
-        // A live pid this test certainly owns.
-        assert!(matches!(
-            process_probe(std::process::id()),
-            Probe::Running(_)
-        ));
-        // `ps` answering "no such process" is the one case that means dead.
-        // Pid 0 is never a normal user process on unix.
-        assert!(matches!(process_probe(u32::MAX), Probe::NotFound));
-    }
-
-    #[test]
-    fn a_missing_pid_file_means_no_driver() {
-        let dir = tempfile::tempdir().unwrap();
-        assert!(!driver_is_live(dir.path(), "any-run"));
     }
 }

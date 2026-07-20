@@ -36,6 +36,8 @@ mod profile_cli_test;
 mod projects_cli_test;
 #[path = "suite/run_cli_test.rs"]
 mod run_cli_test;
+#[path = "suite/run_doctor_cli_test.rs"]
+mod run_doctor_cli_test;
 #[cfg(unix)]
 #[path = "suite/stdio_profile_e2e_test.rs"]
 mod stdio_profile_e2e_test;

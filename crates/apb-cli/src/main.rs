@@ -75,8 +75,16 @@ enum Command {
     List,
     /// Validate playbook schema
     Validate { name: Option<String> },
-    /// Diagnose environment (agents, executors, profiles, runners, playbooks)
-    Doctor,
+    /// Diagnose environment (agents, executors, profiles, runners, playbooks),
+    /// or one run's health with --run
+    Doctor {
+        /// Diagnose this run instead of the environment: folded statuses, open
+        /// attempts and their pid liveness, the driver and workdir-lock
+        /// holders, unapplied control entries, repeated supervisor actions.
+        /// Read-only, like the environment doctor: it repairs nothing.
+        #[arg(long, value_name = "ID")]
+        run: Option<String>,
+    },
     /// Export a playbook (with layout) to a single bundle file
     Export {
         name: String,
@@ -230,7 +238,7 @@ fn main() -> ExitCode {
         Some(Command::Init) => run_init(&root),
         Some(Command::List) => run_list(&root),
         Some(Command::Validate { name }) => run_validate(&root, name),
-        Some(Command::Doctor) => run_doctor(&root),
+        Some(Command::Doctor { run }) => run_doctor(&root, run.as_deref()),
         Some(Command::Export { name, version, out }) => {
             export_cmd(&root, &name, version.as_deref(), out.as_deref())
         }

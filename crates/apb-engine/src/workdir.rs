@@ -1,10 +1,10 @@
 use std::path::{Path, PathBuf};
-use std::process::Command;
 use std::time::{Duration, Instant};
 
 use apb_core::fsutil::atomic_write;
 
 use crate::error::EngineError;
+use crate::liveness::pid_alive;
 
 /// How long a detached driver waits for the preparing process to finish
 /// handing the workdir lock over before it reports the workdir busy. The
@@ -50,23 +50,13 @@ impl Drop for WorkdirGuard {
     }
 }
 
-fn pid_alive(pid: u32) -> bool {
-    // unix: `kill -0 <pid>` exits successfully if the process exists.
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid.to_string())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false)
-}
-
-fn lock_path(root: &Path) -> PathBuf {
+/// Where the workdir lock lives. `pub(crate)` so `run_doctor` can report the
+/// lock holder without a second copy of the path convention.
+pub(crate) fn lock_path(root: &Path) -> PathBuf {
     root.join(".apb/workdir.lock")
 }
 
-fn lock_holder(path: &Path) -> Option<u32> {
+pub(crate) fn lock_holder(path: &Path) -> Option<u32> {
     if !path.is_file() {
         return None;
     }

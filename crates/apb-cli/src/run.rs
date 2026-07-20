@@ -143,7 +143,48 @@ pub(crate) fn run_list(root: &Path) -> ExitCode {
     }
 }
 
-pub(crate) fn run_doctor(root: &Path) -> ExitCode {
+/// `apb doctor`, and with `--run <id>` the per-run doctor.
+///
+/// The two reports print the same way (one `[level] subject: detail` line per
+/// check, non-zero exit on a blocking one) because they answer the same kind
+/// of question at different scopes, and an operator should not have to learn
+/// two output formats while debugging a stuck run.
+pub(crate) fn run_doctor(root: &Path, run: Option<&str>) -> ExitCode {
+    match run {
+        Some(run_id) => doctor_run(root, run_id),
+        None => doctor_env(root),
+    }
+}
+
+/// The per-run doctor. Read-only: it names problems and repairs nothing, so
+/// the repair verbs (`apb stop`, resume) stay explicit operator decisions.
+fn doctor_run(root: &Path, run_id: &str) -> ExitCode {
+    use apb_engine::run_doctor::{FAIL, OK, WARN, diagnose_run, has_failure};
+    let checks = match diagnose_run(root, run_id) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("doctor: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    for c in &checks {
+        let marker = match c.status {
+            OK => "[ok]  ",
+            WARN => "[warn]",
+            FAIL => "[fail]",
+            other => other,
+        };
+        println!("{marker} {}: {}", c.subject, c.detail);
+    }
+    if has_failure(&checks) {
+        eprintln!("doctor: found blocking problems");
+        ExitCode::from(1)
+    } else {
+        ExitCode::SUCCESS
+    }
+}
+
+fn doctor_env(root: &Path) -> ExitCode {
     use apb_core::doctor::{CheckStatus, diagnose};
     let report = diagnose(root);
     for c in &report.checks {

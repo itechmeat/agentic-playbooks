@@ -295,3 +295,150 @@ fn run_stop_finalizes_a_run_whose_driver_is_gone() {
     let again = apb_mcp::tools::run_stop(dir.path(), "noagent-dead").unwrap();
     assert_eq!(again["outcome"], "already_terminal");
 }
+
+// ---------------------------------------------------------------------------
+// Task 9: liveness in run_status.
+//
+// The incident these cover: a crashed attempt kept reading `running` for 19
+// minutes, and `run_status` carried no timestamps at all, so "is it stuck or
+// working?" was unanswerable from the API. The journal is hand-built here so
+// the pid under test is chosen rather than observed: no fixture can reliably
+// produce a *dead* pid otherwise.
+// ---------------------------------------------------------------------------
+
+/// Epoch milliseconds, for building a journal whose timestamps are recent
+/// enough that `attempt_age_ms` is a small number.
+fn now_ms() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis()
+}
+
+/// A pid no process can hold: the probe answers "no such process", which is
+/// the one branch allowed to conclude "dead".
+const DEAD_PID: u32 = u32::MAX;
+
+#[test]
+fn run_status_reports_a_dead_attempt_as_lost_with_node_times() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = bare_run_dir(dir.path(), "r-lost");
+    // `a` opened an attempt under a pid that is not running and never wrote
+    // `attempt_finished`: the crashed-attempt shape. `b` ran and finished
+    // normally, so it must carry timings without any attempt fields.
+    fs::write(
+        run_dir.join("events.jsonl"),
+        format!(
+            "{{\"seq\":0,\"ts\":1000,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}}\n\
+             {{\"seq\":1,\"ts\":3000,\"type\":\"node_started\",\"node\":\"b\",\"attempt\":1}}\n\
+             {{\"seq\":2,\"ts\":4000,\"type\":\"node_finished\",\"node\":\"b\",\"status\":\"succeeded\",\"attempt\":1,\"output\":\"\"}}\n\
+             {{\"seq\":3,\"ts\":5000,\"type\":\"node_started\",\"node\":\"a\",\"attempt\":1}}\n\
+             {{\"seq\":4,\"ts\":6000,\"type\":\"attempt_started\",\"node\":\"a\",\"attempt\":1,\"agent\":\"stub\",\"pid\":{DEAD_PID}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let status = run_status(dir.path(), "r-lost").unwrap();
+
+    // The headline: a running node whose journaled attempt pid is dead is no
+    // longer reported as `running`.
+    assert_eq!(
+        status["nodes"]["a"], "lost",
+        "a running node with a dead attempt pid must report `lost`, got {status}"
+    );
+    assert_eq!(status["nodes"]["b"], "succeeded");
+
+    // No driver.pid at all: unknown, not false.
+    assert!(
+        status.get("driver_alive").is_some(),
+        "driver_alive key must always be present, got {status}"
+    );
+    assert!(
+        status["driver_alive"].is_null(),
+        "driver_alive must be null without a driver.pid, got {status}"
+    );
+
+    let times = &status["node_times"];
+    assert_eq!(times["a"]["started_ms"], 5000);
+    assert_eq!(times["a"]["attempt_pid"], DEAD_PID);
+    assert!(
+        times["a"]["attempt_age_ms"].as_u64().is_some(),
+        "an open attempt must carry an age, got {times}"
+    );
+    // A finished node keeps its start time but has no open attempt.
+    assert_eq!(times["b"]["started_ms"], 3000);
+    assert!(
+        times["b"]["attempt_age_ms"].is_null(),
+        "a node with no open attempt must report a null age, got {times}"
+    );
+    assert!(times["b"]["attempt_pid"].is_null());
+}
+
+#[test]
+fn run_status_reports_a_live_attempt_and_driver() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = bare_run_dir(dir.path(), "r-live");
+
+    // A real, live, foreign pid for the attempt. Reaped at the end of the test
+    // so nothing is leaked and the pid does not linger as a zombie.
+    let mut sleeper = std::process::Command::new("sleep")
+        .arg("30")
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let live_pid = sleeper.id();
+
+    // A drive running on a thread of THIS process is the in-process drive
+    // case, and our own pid is by definition a live driver.
+    fs::write(
+        run_dir.join("driver.pid"),
+        std::process::id().to_string().as_bytes(),
+    )
+    .unwrap();
+
+    let started = now_ms();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        format!(
+            "{{\"seq\":0,\"ts\":{started},\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}}\n\
+             {{\"seq\":1,\"ts\":{started},\"type\":\"node_started\",\"node\":\"a\",\"attempt\":1}}\n\
+             {{\"seq\":2,\"ts\":{started},\"type\":\"attempt_started\",\"node\":\"a\",\"attempt\":1,\"agent\":\"stub\",\"pid\":{live_pid}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let first = run_status(dir.path(), "r-live").unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(30));
+    let second = run_status(dir.path(), "r-live").unwrap();
+
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+
+    assert_eq!(
+        first["driver_alive"], true,
+        "our own pid in driver.pid must read as a live driver, got {first}"
+    );
+    // `lost` is the one status this task introduces, and it is reserved for a
+    // pid the probe positively reports as gone. A live attempt keeps whatever
+    // the pure fold already said about it (today: `interrupted`, because the
+    // attempt is journaled at spawn and has not closed yet) - this task adds a
+    // liveness verdict, it does not restate the fold.
+    assert_ne!(
+        first["nodes"]["a"], "lost",
+        "a node whose attempt pid is alive must never read `lost`, got {first}"
+    );
+    assert_eq!(first["node_times"]["a"]["attempt_pid"], live_pid);
+
+    let age_one = first["node_times"]["a"]["attempt_age_ms"]
+        .as_u64()
+        .expect("a live open attempt must carry an age");
+    let age_two = second["node_times"]["a"]["attempt_age_ms"]
+        .as_u64()
+        .expect("a live open attempt must carry an age");
+    assert!(
+        age_two > age_one,
+        "attempt_age_ms must grow while the attempt runs ({age_one} -> {age_two})"
+    );
+}

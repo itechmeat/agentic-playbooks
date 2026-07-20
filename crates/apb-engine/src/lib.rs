@@ -15,12 +15,14 @@ pub mod hooks;
 pub mod inspect;
 pub mod invocation;
 pub mod legacy_snapshot;
+pub mod liveness;
 pub mod manifest;
 pub mod parallel;
 pub mod proc;
 pub mod progress;
 pub mod review;
 pub mod run_config;
+pub mod run_doctor;
 pub mod scheduler;
 pub mod script;
 pub mod signals;
@@ -35,8 +37,10 @@ pub use inspect::{
     run_inspect, should_declare_lost, supervisor_report_or_summary, supervisor_silence_ms,
     touch_heartbeat, wait_wake, write_supervisor_report, write_supervisor_session,
 };
+pub use liveness::{NodeTimes, driver_alive, lost_nodes, node_times};
 pub use progress::{ProgressSummary, compute as run_progress, node_durations_seconds};
 pub use review::{ReviewCommand, ReviewEntry, post_review, read_reviews_after};
+pub use run_doctor::{RunCheck, diagnose_run};
 pub use scheduler::{
     PreparedRun, ResumeDecision, ResumeReason, RunMode, RunOptions, RunResult, RunSummary,
     StartMode, drive_prepared, drive_run_from_dir, list_runs, plan_resume, post_supervisor_command,

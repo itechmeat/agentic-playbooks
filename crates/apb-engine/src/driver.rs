@@ -52,7 +52,8 @@ pub fn read_driver_pid(run_dir: &Path) -> Option<u32> {
 /// file always names the process that is really doing the work.
 ///
 /// Best effort by design: failing to publish the pid must not abort a run that
-/// is otherwise fine, so write and removal errors are ignored.
+/// is otherwise fine, so write and removal errors are not fatal. They are not
+/// silent either - see `claim`.
 pub(crate) struct DriverPidGuard {
     path: PathBuf,
 }
@@ -60,7 +61,21 @@ pub(crate) struct DriverPidGuard {
 impl DriverPidGuard {
     pub(crate) fn claim(run_dir: &Path) -> Self {
         let path = driver_pid_path(run_dir);
-        let _ = atomic_write(&path, std::process::id().to_string().as_bytes());
+        if let Err(e) = atomic_write(&path, std::process::id().to_string().as_bytes()) {
+            // A live drive with no driver.pid is the one state in which every
+            // liveness consumer is wrong in the dangerous direction:
+            // `stop_run` sees no driver and finalizes a run that is still
+            // working, and `doctor --run` reports no drive in progress. The
+            // failure must not abort the run, but an operator staring at a
+            // spurious finalize needs to be able to correlate it with its
+            // cause. apb-engine has no tracing facility, so this is an
+            // eprintln, matching `stop::abort_children` and the progress
+            // warnings.
+            eprintln!(
+                "apb: warning: could not write {}: this drive is invisible to liveness checks and may be finalized as dead: {e}",
+                path.display()
+            );
+        }
         Self { path }
     }
 }
