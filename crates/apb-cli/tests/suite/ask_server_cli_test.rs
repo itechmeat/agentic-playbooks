@@ -225,6 +225,55 @@ fn sidecar_exits_when_stdin_closes() {
 }
 
 #[test]
+fn sidecar_exits_on_stdin_eof_with_an_in_flight_ask_user() {
+    // The hang class this repo treats as a defect: an `ask_user` blocked
+    // mid-poll (no answer will ever come) must still let the process exit when
+    // stdin closes. Correctness must hold by construction, not by trusting the
+    // library to cancel the in-flight request.
+    let (mut reaper, mut stdin, rx, _tmp, run_dir) = spawn_sidecar("ask");
+    let run_dir = std::path::PathBuf::from(run_dir);
+
+    handshake(&mut stdin, &rx);
+
+    let call = r#"{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"ask_user","arguments":{"question":"Which DB?"}}}"#;
+    writeln!(stdin, "{call}").unwrap();
+    stdin.flush().unwrap();
+
+    // Wait until the call is provably mid-poll (the question reached the
+    // channel), so stdin closes with a request genuinely in flight.
+    let q_deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let qs = read_questions_after(&run_dir, None).unwrap();
+        if qs.iter().any(|q| q.node == "ask") {
+            break;
+        }
+        if Instant::now() > q_deadline {
+            panic!("timed out after 15s waiting for the in-flight ask_user to post its question");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+
+    // No answer is ever posted. Close stdin (EOF) while the call polls.
+    drop(rx);
+    drop(stdin);
+
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        match reaper.child().try_wait().unwrap() {
+            Some(_) => return,
+            None => {
+                if Instant::now() > deadline {
+                    panic!(
+                        "timed out waiting for sidecar to exit after stdin EOF with an in-flight ask_user"
+                    );
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
+}
+
+#[test]
 fn missing_run_dir_exits_nonzero_naming_the_var() {
     let out = Command::new(env!("CARGO_BIN_EXE_apb"))
         .args([

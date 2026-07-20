@@ -46,6 +46,13 @@ use serde::Deserialize;
 /// (append-only JSONL), so a 200 ms cadence is cheap and never a busy loop.
 const POLL_STEP: Duration = Duration::from_millis(200);
 
+/// Consecutive `answers.jsonl` read failures tolerated before the call gives
+/// up. At `POLL_STEP` this is ~5 s: a transient read (e.g. catching a
+/// partially written line mid-append) self-heals on the next tick, so a single
+/// bad read must not kill a question a human is about to answer; only a
+/// persistently unreadable file fails the call, with an error naming the file.
+const MAX_READ_RETRIES: u32 = 25;
+
 /// Default cadence for the keep-alive progress notification (spec: every
 /// 60 s). Overridable via `APB_ASK_PROGRESS_SECS` so a test can shorten it
 /// rather than wait a real minute (`0` fires on every poll).
@@ -135,7 +142,8 @@ impl AskServer {
 
         // Count the answers already present for this node BEFORE posting, so
         // the resolving answer is the first one that lands afterward.
-        let tail = read_answers_after(run_dir, None)?
+        let tail = read_answers_after(run_dir, None)
+            .context("reading answers.jsonl to establish the answer tail")?
             .into_iter()
             .filter(|a| a.node == node)
             .count();
@@ -146,11 +154,29 @@ impl AskServer {
         let token = ctx.meta.get_progress_token();
         let mut last_progress = Instant::now();
         let mut progress_count = 0u64;
+        let mut read_errors: u32 = 0;
 
         loop {
-            let answers = read_answers_after(run_dir, None)?;
-            if let Some(answer) = resolve_answer(&answers, node, tail) {
-                return Ok(answer.to_string());
+            // A read failure is treated as transient (a partially written line
+            // caught mid-append) and retried on the next tick; only a
+            // persistently unreadable file fails the call, so a human's pending
+            // answer is never lost to a momentary hiccup.
+            match read_answers_after(run_dir, None) {
+                Ok(answers) => {
+                    read_errors = 0;
+                    if let Some(answer) = resolve_answer(&answers, node, tail) {
+                        return Ok(answer.to_string());
+                    }
+                }
+                Err(e) => {
+                    read_errors += 1;
+                    if read_errors >= MAX_READ_RETRIES {
+                        return Err(anyhow!(
+                            "answers.jsonl in {} was unreadable for {read_errors} consecutive polls: {e}",
+                            run_dir.display()
+                        ));
+                    }
+                }
             }
 
             if last_progress.elapsed() >= self.progress_interval
