@@ -10,8 +10,8 @@ use apb_engine::control::Control;
 use apb_engine::run_config::CacheRunMode;
 use apb_engine::state::RunStatus;
 use apb_engine::{
-    ReviewCommand, RunMode, RunOptions, drive_prepared, list_runs, post_review,
-    post_supervisor_command, prepare_supervised_background, resume, run,
+    ReviewCommand, RunMode, RunOptions, StopOutcome, drive_prepared, list_runs, post_review,
+    post_supervisor_command, prepare_supervised_background, resume, run, stop_run,
 };
 
 use crate::util::open_registry;
@@ -572,6 +572,34 @@ pub(crate) fn resume_cmd(root: &Path, run_id: &str, from_node: Option<&str>) -> 
         }
         Err(e) => {
             eprintln!("resume failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Stops a run: `apb stop <run_id>`.
+///
+/// Posts the abort, which the driving process picks up within a fraction of a
+/// second and uses to kill whatever agent the run has in flight. When no
+/// process is driving the run any more - a driver that crashed, taking the run
+/// down with it and leaving it reading `running` forever - the stop finalizes
+/// the run itself. `stop_run` validates `run_id` and existence.
+pub(crate) fn stop_cmd(root: &Path, run_id: &str) -> ExitCode {
+    match stop_run(root, run_id) {
+        Ok(StopOutcome::SignaledLiveDriver) => {
+            println!("stopping {run_id}: abort sent to the running driver");
+            ExitCode::SUCCESS
+        }
+        Ok(StopOutcome::FinalizedDeadRun) => {
+            println!("stopped {run_id}: no driver was running, the run is now aborted");
+            ExitCode::SUCCESS
+        }
+        Ok(StopOutcome::AlreadyTerminal) => {
+            println!("{run_id} has already finished, nothing to stop");
+            ExitCode::SUCCESS
+        }
+        Err(e) => {
+            eprintln!("stop failed: {e}");
             ExitCode::from(2)
         }
     }

@@ -462,6 +462,7 @@ pub(crate) fn execute_finish_answer(
     state: &RunState,
     cfg: &RunConfig,
     prompt: &str,
+    cancel: &AtomicBool,
     env_scrub: &[String],
     journal: &Journal,
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
@@ -498,12 +499,10 @@ pub(crate) fn execute_finish_answer(
         )));
     }
 
-    // Cancellation happens at drive-loop boundaries (the top-of-loop
-    // control.jsonl scan and join:any teardown), never mid-agent: like the
-    // inline agent_task path (which drive calls with a fresh `AtomicBool`), this
-    // finish-answer agent runs synchronously on the drive thread, so this local
-    // token is never set during the call (review I1, accepted as pre-existing).
-    let cancel = AtomicBool::new(false);
+    // The drive's run-level cancel flag (Task 8), the same one the inline
+    // agent_task path gets: a stop posted while this finish-answer agent is
+    // composing the run answer kills its process tree instead of waiting it
+    // out. Before Task 8 this was a fresh, permanently-false local token.
     // Connector env isolation (spec 4.3): the finish-answer agent is a spawned
     // agent too, so its inherited connector tokens are scrubbed and it gets the
     // run-context env.
@@ -587,7 +586,7 @@ pub(crate) fn execute_finish_answer(
                     *spawn_err.borrow_mut() = Some(e);
                 }
             };
-            let outcome = adapter.run_cancellable(&task, &cancel, Some(&on_spawn));
+            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn));
             if let Some(e) = spawn_err.borrow_mut().take() {
                 return Err(e);
             }

@@ -256,3 +256,42 @@ fn run_status_children_empty_for_childless_run() {
     let status = run_status(dir.path(), started["run_id"].as_str().unwrap()).unwrap();
     assert_eq!(status["children"].as_array().unwrap().len(), 0);
 }
+
+/// Task 8 smoke: the `run_stop` tool finalizes a run whose driver is gone (the
+/// engine fixture from `stop_run_test.rs`, rebuilt here through the public
+/// event API) and reports the outcome it took.
+#[test]
+fn run_stop_finalizes_a_run_whose_driver_is_gone() {
+    use apb_engine::event::{EventLog, EventPayload, read_all};
+
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let run_dir = dir.path().join(".apb/runs/noagent-dead");
+    fs::create_dir_all(&run_dir).unwrap();
+    let mut log = EventLog::create(&run_dir).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "noagent".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    log.append(EventPayload::NodeStarted {
+        node: "note".into(),
+        attempt: 1,
+    })
+    .unwrap();
+    drop(log);
+
+    let out = apb_mcp::tools::run_stop(dir.path(), "noagent-dead").unwrap();
+    assert_eq!(out["outcome"], "finalized_dead_run");
+    assert!(
+        read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunAborted { .. })),
+        "run_stop must have finalized the abandoned run"
+    );
+
+    // Idempotent: the run is terminal now, so a second stop is a no-op.
+    let again = apb_mcp::tools::run_stop(dir.path(), "noagent-dead").unwrap();
+    assert_eq!(again["outcome"], "already_terminal");
+}

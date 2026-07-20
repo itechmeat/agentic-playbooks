@@ -658,46 +658,7 @@ pub fn run_cancel(root: &Path, run_id: &str) -> Result<(), EngineError> {
     // Propagate the abort into any non-terminal sub-playbook children (spec C):
     // an operator abort of the parent must reach a child that is blocking the
     // parent (e.g. a child paused on human_review).
-    abort_children(root, run_id)?;
-    Ok(())
-}
-
-/// Posts Abort to every non-terminal sub-playbook child of `run_id`, recursively
-/// (spec C). Best-effort per child; a child that no longer exists is skipped.
-/// This is how an operator abort of the parent reaches a child that is blocking
-/// the parent (e.g. a child paused on human_review): the child's own drive loop
-/// scans its control.jsonl at every iteration boundary and returns Aborted, which
-/// the parent maps to a failed node.
-fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineError> {
-    let run_dir = root.join(".apb/runs").join(run_id);
-    let events = read_all(&run_dir)?;
-    for e in &events {
-        if let EventPayload::ChildRunStarted { run_id: child, .. } = &e.payload {
-            let child_dir = root.join(".apb/runs").join(child);
-            if child_dir.is_dir()
-                && !matches!(
-                    RunState::fold(&read_all(&child_dir)?).run_status,
-                    RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
-                )
-            {
-                // Best-effort per child (a child that raced to terminal or lost
-                // its dir must not block the parent abort), but no longer
-                // silent: a failed post is logged with the child run id so an
-                // operator can tell an un-propagated abort from a clean one
-                // (review I7/R1-I9). apb-engine has no tracing facility, so this
-                // is an eprintln, matching the progress/snapshot warnings.
-                if let Err(e) = crate::control::post_control(
-                    &child_dir,
-                    Control::Abort {
-                        reason: "parent aborted".into(),
-                    },
-                ) {
-                    eprintln!("apb: warning: failed to post abort to child run `{child}`: {e}");
-                }
-                abort_children(root, child)?;
-            }
-        }
-    }
+    crate::stop::abort_children(root, run_id)?;
     Ok(())
 }
 
@@ -805,6 +766,21 @@ fn drive(
     // below that advances `control_cursor` also calls `write_control_cursor` in
     // the same step, so the persisted value never lags the in-memory one.
     let mut control_cursor: Option<u64> = read_control_cursor(run_dir)?;
+    // The run-level cancel flag (Task 8). It is handed to every node this drive
+    // executes, and a watcher thread sets it as soon as an Abort shows up in
+    // control.jsonl - which is what lets a stop interrupt an agent that is
+    // already running instead of waiting for it to finish. The watcher only
+    // OBSERVES control.jsonl; the drive loop below still applies the Abort and
+    // owns the cursor, so the abort takes effect exactly once. The guard is
+    // dropped when this function returns, which stops and joins the thread.
+    let run_cancel = Arc::new(AtomicBool::new(false));
+    let _abort_watcher =
+        crate::stop::AbortWatcher::spawn(run_dir, control_cursor, Arc::clone(&run_cancel));
+    // True once the loop has already taken the cancel short-circuit below, so
+    // a pathological case (an unconsumable Retry queued ahead of the Abort
+    // stops the top-of-loop scan before it reaches it) degrades to the old
+    // behavior instead of spinning.
+    let mut cancel_short_circuited = false;
     // One-shot prompt overrides set by the Retry{prompt_override} command:
     // node_id -> text that will replace the rendered prompt for EXACTLY the next
     // execution of that node, after which the entry is removed.
@@ -1002,8 +978,17 @@ fn drive(
                 let (st, out, evs) = {
                     let journal = Journal::new(&mut *log);
                     execute_finish_answer(
-                        &playbook, run_dir, &workdir, &current, &run_id, &state, cfg, p,
-                        &env_scrub, &journal,
+                        &playbook,
+                        run_dir,
+                        &workdir,
+                        &current,
+                        &run_id,
+                        &state,
+                        cfg,
+                        p,
+                        &run_cancel,
+                        &env_scrub,
+                        &journal,
                     )?
                 };
                 for ev in evs {
@@ -1461,7 +1446,7 @@ fn drive(
                         &state,
                         cfg,
                         override_prompt,
-                        &AtomicBool::new(false),
+                        &run_cancel,
                         &env_scrub,
                         &journal,
                     )?
@@ -1515,6 +1500,19 @@ fn drive(
         // Attribute any progress the agent posted while `current` was executing
         // to `current`, before the frontier advances to the successor (B2).
         control_cursor = drain_progress_after_execute(run_dir, log, control_cursor, &current)?;
+
+        // A stop landed while this node was in flight (Task 8): the watcher
+        // set the cancel flag and the agent's process tree was killed, so the
+        // status just journaled is the wreckage of an interrupted node, not a
+        // verdict on the work. Go straight back to the top-of-loop control
+        // scan, which applies the pending Abort exactly as it always has and
+        // returns Aborted. Without this hop that status would first be routed
+        // through the pause/wake/failure handling below and the run would
+        // finalize as Paused or Failed instead of Aborted.
+        if run_cancel.load(Ordering::SeqCst) && !cancel_short_circuited {
+            cancel_short_circuited = true;
+            continue;
+        }
 
         // unknown/interrupted halt progression (Phase 2 without supervisor - run pauses).
         if matches!(status, NodeStatus::Unknown | NodeStatus::Interrupted) {

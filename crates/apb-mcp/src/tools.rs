@@ -13,7 +13,7 @@ use apb_engine::run_config::ChildExpectation;
 use apb_engine::state::RunState;
 use apb_engine::{
     EngineError, RunMode, RunOptions, list_runs, plan_resume, post_supervisor_command, run,
-    run_cancel, run_inspect as engine_run_inspect, touch_heartbeat, wait_wake,
+    run_cancel, run_inspect as engine_run_inspect, stop_run, touch_heartbeat, wait_wake,
     write_supervisor_report,
 };
 use serde_json::{Value, json};
@@ -1020,6 +1020,16 @@ pub fn run_pause(root: &Path, run_id: &str) -> Result<Value, ToolError> {
 pub fn run_abort(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     run_cancel(root, run_id)?;
     Ok(json!({ "ok": true }))
+}
+
+/// Stops a run and reports what that took: signaling a live driver (whose
+/// watcher interrupts the in-flight node), finalizing a run whose driver is
+/// gone, or nothing at all for an already terminal run. Unlike
+/// `supervisor_run_abort` this needs no supervisor session - it is the
+/// operator-facing stop, the same one `apb stop` calls.
+pub fn run_stop(root: &Path, run_id: &str) -> Result<Value, ToolError> {
+    let outcome = stop_run(root, run_id)?;
+    Ok(json!({ "run_id": run_id, "outcome": outcome.as_str() }))
 }
 
 pub fn context_append(root: &Path, run_id: &str, note: &str) -> Result<Value, ToolError> {

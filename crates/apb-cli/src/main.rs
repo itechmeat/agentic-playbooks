@@ -20,7 +20,7 @@ use crate::manage::{
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
     drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd, run_doctor,
-    run_list, run_validate, runs_cmd,
+    run_list, run_validate, runs_cmd, stop_cmd,
 };
 use crate::serve::{dev_cmd, mcp_cmd, serve};
 use crate::util::resolve_port;
@@ -131,6 +131,9 @@ enum Command {
         #[arg(long)]
         from_node: Option<String>,
     },
+    /// Stop a run: interrupt whatever node it is executing right now, and
+    /// finalize it outright if the process driving it is gone
+    Stop { run_id: String },
     /// Post a supervisor note (ContextAppend) to a run's control channel
     Note { run_id: String, text: String },
     /// Decide a human_review node of a running run
@@ -258,6 +261,7 @@ fn main() -> ExitCode {
         Some(Command::Resume { run_id, from_node }) => {
             resume_cmd(&root, &run_id, from_node.as_deref())
         }
+        Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
         Some(Command::Note { run_id, text }) => note_cmd(&root, &run_id, &text),
         Some(Command::Review {
             run_id,

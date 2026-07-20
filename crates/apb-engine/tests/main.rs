@@ -125,6 +125,8 @@ mod script_node_test;
 mod script_test;
 #[path = "suite/state_test.rs"]
 mod state_test;
+#[path = "suite/stop_run_test.rs"]
+mod stop_run_test;
 #[path = "suite/subplaybook_run_test.rs"]
 mod subplaybook_run_test;
 #[path = "suite/success_check_test.rs"]

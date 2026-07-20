@@ -449,6 +449,21 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "Stop a run: interrupts the node it is executing right now, and finalizes it outright if the process that was driving it is gone. Returns which of those happened.",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn run_stop(
+        &self,
+        Parameters(RunRefArgs { run_id, workspace }): Parameters<RunRefArgs>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(tools::run_stop(&root, &run_id))
+    }
+
+    #[tool(
         description = "Resume a run, optionally from a given node",
         annotations(destructive_hint = true)
     )]

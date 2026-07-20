@@ -117,3 +117,47 @@ fn run_without_project_fails_env() {
         .assert()
         .code(2);
 }
+
+/// Task 8 smoke: `apb stop <run_id>` against a run whose driver is gone
+/// finalizes it, and says so.
+#[test]
+fn stop_finalizes_a_run_whose_driver_is_gone() {
+    let dir = seeded();
+    let run_dir = dir.path().join(".apb/runs/noagent-dead");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        concat!(
+            r#"{"seq":0,"ts":1,"type":"run_started","playbook":"noagent","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":2,"type":"node_started","node":"note","attempt":1}"#,
+            "\n"
+        ),
+    )
+    .unwrap();
+
+    playbook()
+        .args(["stop", "noagent-dead"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("noagent-dead"));
+
+    let journal = fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
+    assert!(
+        journal.contains("run_aborted"),
+        "apb stop must have finalized the abandoned run, journal: {journal}"
+    );
+}
+
+/// An unknown run id fails loudly rather than pretending to stop something.
+#[test]
+fn stop_of_an_unknown_run_fails() {
+    let dir = seeded();
+    playbook()
+        .args(["stop", "nope-1"])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("not found"));
+}

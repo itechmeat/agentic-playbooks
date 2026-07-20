@@ -25,6 +25,7 @@ pub mod scheduler;
 pub mod script;
 pub mod signals;
 pub mod state;
+pub mod stop;
 pub mod workdir;
 
 pub use error::EngineError;
@@ -44,3 +45,4 @@ pub use scheduler::{
     start_detached_resolved,
 };
 pub use signals::{SignalCommand, SignalEntry, post_signal, read_signals_after};
+pub use stop::{StopOutcome, stop_run};
