@@ -1,6 +1,6 @@
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
+use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::time::{Duration, Instant};
@@ -34,24 +34,103 @@ fn spawn_in_group(cmd: &mut Command) -> std::io::Result<Child> {
     cmd.spawn()
 }
 
+/// How long the pipe collection gets once the agent process itself is gone.
+/// Not a work budget: by then the agent's own fds are closed and the data is
+/// already buffered, so the normal cost is microseconds. It bounds the case
+/// the process wait cannot see - a daemonized grandchild still holding the
+/// inherited stdout/stderr write ends, which is what decides EOF.
+const DRAIN_BUDGET: Duration = Duration::from_secs(10);
+
+/// How long an agent may keep running after it has closed stdout. Reaching
+/// this means the agent finished talking to us but will not exit, which is
+/// indistinguishable from a wedge; the tree is killed and the attempt fails
+/// as a timeout rather than blocking the drive forever.
+const EXIT_AFTER_EOF_BUDGET: Duration = Duration::from_secs(30);
+
+/// SIGKILLs every process still in the agent's process group. `spawn_in_group`
+/// gives the agent `process_group(0)`, so its pgid equals its pid and one
+/// signal reaches the MCP servers and tool subprocesses it spawned.
+///
+/// Safe to call after the leader has been reaped: a pgid is not recycled while
+/// any process remains in the group, so this can never reach an unrelated
+/// process, and an empty group is a harmless ESRCH.
+fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: `kill` takes no pointers and is async-signal-safe; a
+        // negative pid addresses the process group.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
 /// Terminates the agent's whole process tree and reaps the leader. On Unix
 /// this sends SIGKILL to the group (`kill(-pgid, ...)`, pgid == pid because of
 /// process_group(0) at spawn time) so children are not orphaned; on other
 /// platforms - child.kill().
 fn kill_process_tree(child: &mut Child) {
     #[cfg(unix)]
-    {
-        let pid = child.id() as i32;
-        // A negative pid signals the entire process group.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
+    kill_process_group(child.id());
     #[cfg(not(unix))]
     {
         let _ = child.kill();
     }
+    // Bounded: the leader has just been SIGKILLed, which no process can catch
+    // or ignore, so this reaps a pid that is already dead or dying.
     let _ = child.wait();
+}
+
+/// `child.wait()` with a deadline. `None` means the process was still running
+/// when `budget` ran out; the caller decides what to do about it.
+fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<ExitStatus>> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Some(Ok(status)),
+            Ok(None) => {
+                if Instant::now() >= deadline {
+                    return None;
+                }
+                std::thread::sleep(Duration::from_millis(50));
+            }
+            Err(e) => return Some(Err(e)),
+        }
+    }
+}
+
+/// `child.wait_with_output()` with a deadline, so a grandchild holding the
+/// pipes open cannot stall the drive. The collecting thread is abandoned on a
+/// timeout rather than joined: it owns nothing the caller needs, and joining
+/// it is the very wait being bounded.
+fn wait_with_output_bounded(
+    child: Child,
+    budget: Duration,
+    program: &str,
+) -> Result<std::process::Output, (ErrorClass, String)> {
+    let (tx, rx) = mpsc::channel();
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+    match rx.recv_timeout(budget) {
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(e)) => Err((
+            ErrorClass::ProcessExit,
+            format!("collect `{program}` output failed: {e}"),
+        )),
+        Err(_) => Err((
+            ErrorClass::Timeout,
+            format!(
+                "`{program}` exited but its stdout/stderr were still held open {budget:?} later, \
+                 so its output could not be collected: a descendant that outlived it inherited \
+                 the pipes"
+            ),
+        )),
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -385,12 +464,15 @@ impl ClaudeAdapter {
                 }
             }
         }
-        let output = child.wait_with_output().map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("collect `{}` output failed: {e}", self.program),
-            )
-        })?;
+        // The agent process itself is gone, but `wait_with_output` reads both
+        // pipes to EOF - and EOF is decided by whoever still holds the write
+        // ends, not by the process we just waited for. A real agent spawns MCP
+        // servers and tool subprocesses; any one of them that daemonizes and
+        // outlives its parent keeps those fds open, and this read would then
+        // block for the lifetime of that daemon. Tearing the group down first
+        // is what makes EOF actually arrive.
+        kill_process_group(child.id());
+        let output = wait_with_output_bounded(child, DRAIN_BUDGET, &self.program)?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if !output.status.success() {
@@ -485,14 +567,19 @@ impl ClaudeAdapter {
         // Drain stderr on a separate thread, otherwise heavy stderr output
         // would fill its pipe and block the agent on write (we only read
         // stdout).
+        // Delivered over a channel rather than through `JoinHandle::join`:
+        // there is no timed join in std, and stderr's EOF is decided by
+        // whatever still holds the write end - possibly a daemonized
+        // grandchild rather than the agent. See the bounded receive below.
         let stderr_pipe = child.stderr.take();
-        let err_reader = std::thread::spawn(move || {
+        let (err_tx, err_rx) = mpsc::channel::<String>();
+        std::thread::spawn(move || {
             use std::io::Read as _;
             let mut s = String::new();
             if let Some(mut e) = stderr_pipe {
                 let _ = e.read_to_string(&mut s);
             }
-            s
+            let _ = err_tx.send(s);
         });
 
         let mut sink = task.stream_log.and_then(|p| {
@@ -526,15 +613,41 @@ impl ClaudeAdapter {
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
         }
+        // Bounded because the loop above exited on stdout EOF, and stdout EOF
+        // is NOT proof the agent exited: it can close stdout (or hand it to a
+        // grandchild that then closes it) and keep running. `child.wait()`
+        // here would block for as long as it does, with the drive's own
+        // timeout already behind us. So: wait with a deadline, and if the
+        // agent overstays it, tear down the tree and report a timeout rather
+        // than hang.
+        //
+        // `reader` itself is safe to join - the loop only breaks once that
+        // thread has dropped its sender, so it has already finished.
         let _ = reader.join();
-        let stderr = err_reader.join().unwrap_or_default();
-
-        let status = child.wait().map_err(|e| {
-            (
-                ErrorClass::ProcessExit,
-                format!("wait `{}` failed: {e}", self.program),
-            )
-        })?;
+        let pid = child.id();
+        let status = match wait_bounded(&mut child, EXIT_AFTER_EOF_BUDGET) {
+            Some(Ok(status)) => status,
+            Some(Err(e)) => {
+                return Err((
+                    ErrorClass::ProcessExit,
+                    format!("wait `{}` failed: {e}", self.program),
+                ));
+            }
+            None => {
+                kill_process_tree(&mut child);
+                return Err((
+                    ErrorClass::Timeout,
+                    format!(
+                        "`{}` closed its stdout but was still running {EXIT_AFTER_EOF_BUDGET:?} later; killed its process group",
+                        self.program
+                    ),
+                ));
+            }
+        };
+        // The leader is reaped; anything left in its group would still be
+        // holding stderr, so clear the group before collecting.
+        kill_process_group(pid);
+        let stderr = err_rx.recv_timeout(DRAIN_BUDGET).unwrap_or_default();
         if !status.success() {
             return Err((
                 ErrorClass::ProcessExit,

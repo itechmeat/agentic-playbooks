@@ -108,6 +108,7 @@ dependencies = [
  "assert_cmd",
  "clap",
  "jsonschema",
+ "libc",
  "open",
  "predicates",
  "serde_json",
@@ -122,6 +123,7 @@ version = "0.7.0"
 dependencies = [
  "globset",
  "jsonschema",
+ "libc",
  "percent-encoding",
  "rust-embed",
  "serde",

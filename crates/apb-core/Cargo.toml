@@ -18,5 +18,11 @@ shell-words.workspace = true
 rust-embed = "8.12"
 globset.workspace = true
 
+# Group termination of the agent-detection probe tree (Unix): kill(-pgid,
+# SIGKILL) as a syscall rather than a `kill -KILL -<pgid>` subprocess, whose
+# argument parsing differs between BSD kill (macOS) and procps-ng kill (Linux).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 tempfile = "3.27.0"

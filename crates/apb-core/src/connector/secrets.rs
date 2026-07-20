@@ -13,8 +13,16 @@ use std::io::Read as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
+
+/// How long the pipe-drain threads get to hand back what they read once the
+/// command itself has exited. Generous, because it is not a work budget: the
+/// pipes are normally already at EOF by then and the value arrives instantly.
+/// It exists only so a descendant that inherited the pipes cannot block the
+/// caller forever.
+const DRAIN_BUDGET: Duration = Duration::from_secs(5);
 
 /// Parses a `{{env.VAR}}` secret reference: the whole value must be exactly
 /// that placeholder (no surrounding text), with `VAR` matching
@@ -199,17 +207,27 @@ pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<String, CmdSecret
     // Drain both pipes on their own threads so a large output cannot deadlock
     // the child against a full pipe while we wait; keep the child handle so
     // the deadline can kill it.
+    // Results come back over channels rather than through `JoinHandle::join`:
+    // the command may leave a descendant that inherited these pipes, and that
+    // descendant - not the command we waited for - decides when EOF arrives.
+    // A `join` would then block for as long as the descendant lives, turning
+    // this bounded-by-`timeout` helper into an unbounded one. With channels
+    // the collection carries its own deadline; a reader thread still stuck on
+    // the pipe is abandoned (it holds nothing this process needs) instead of
+    // holding the caller.
     let mut out_pipe = child.stdout.take().expect("stdout piped");
     let mut err_pipe = child.stderr.take().expect("stderr piped");
-    let out_join = thread::spawn(move || {
+    let (out_tx, out_rx) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = out_pipe.read_to_end(&mut buf);
-        buf
+        let _ = out_tx.send(buf);
     });
-    let err_join = thread::spawn(move || {
+    let (err_tx, err_rx) = mpsc::channel::<Vec<u8>>();
+    thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = err_pipe.read_to_end(&mut buf);
-        buf
+        let _ = err_tx.send(buf);
     });
 
     let deadline = Instant::now() + timeout;
@@ -228,8 +246,12 @@ pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<String, CmdSecret
         }
     };
 
-    let stdout = out_join.join().unwrap_or_default();
-    let stderr = err_join.join().unwrap_or_default();
+    // The command has exited, so its own pipe ends are closed and EOF is
+    // normally already there; the budget only covers a surviving descendant
+    // still holding them. Losing the value in that case surfaces as the
+    // ordinary `Empty` error below rather than as a hang.
+    let stdout = out_rx.recv_timeout(DRAIN_BUDGET).unwrap_or_default();
+    let stderr = err_rx.recv_timeout(DRAIN_BUDGET).unwrap_or_default();
     let excerpt = stderr_excerpt(&stderr);
 
     if !status.success() {

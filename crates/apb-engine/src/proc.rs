@@ -6,6 +6,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::time::{Duration, Instant};
 
+/// How long the stdout/stderr reader threads get to deliver what they read
+/// once the script process is gone. Not a work budget: by then the pipes are
+/// normally at EOF already and the value arrives immediately. It bounds the
+/// one case the group kill cannot cover - a descendant that left the process
+/// group while still holding the inherited pipe.
+const DRAIN_BUDGET: Duration = Duration::from_secs(5);
+
 pub struct Captured {
     pub status: Option<ExitStatus>,
     pub stdout: String,
@@ -82,8 +89,22 @@ pub fn run_capture(
         thread::sleep(Duration::from_millis(50));
     };
 
-    let stdout = rx_out.recv().unwrap_or_default().trim().to_string();
-    let stderr = rx_err.recv().unwrap_or_default().trim().to_string();
+    // Bounded, not `recv()`. The group kill above normally guarantees EOF, but
+    // it only reaches the group: a script that calls `setsid` (or otherwise
+    // leaves the group) and keeps the inherited stdout fd open would hold
+    // these reader threads open forever, and an unbounded `recv` would hand
+    // that hang straight to the drive loop. The reader threads are abandoned
+    // in that case, which costs a blocked thread and nothing else.
+    let stdout = rx_out
+        .recv_timeout(DRAIN_BUDGET)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
+    let stderr = rx_err
+        .recv_timeout(DRAIN_BUDGET)
+        .unwrap_or_default()
+        .trim()
+        .to_string();
     Ok(Captured {
         status,
         stdout,

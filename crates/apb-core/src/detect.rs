@@ -280,6 +280,39 @@ struct ProbeOut {
 
 const MAX_STDERR_BYTES: usize = 4 * 1024;
 
+/// SIGKILLs every process in the group led by `pid`, which is the probe child
+/// (it is spawned with `process_group(0)`, so its pgid equals its pid).
+///
+/// This is `libc::kill(-pid, SIGKILL)` rather than a `kill -KILL -<pgid>`
+/// subprocess on purpose. BSD kill (macOS) accepts a negative pid as a
+/// positional argument, but procps-ng kill (Linux, and so CI) feeds it to
+/// getopt first and rejects it as an unknown option - the subprocess exits
+/// non-zero, the signal is never delivered, and the daemonized descendants
+/// this call exists to reap survive holding the probe's pipes. The status of
+/// the spawned `kill` was discarded, so the failure was invisible. The syscall
+/// has no argument-parsing layer and behaves identically on both platforms.
+/// `apb_engine::proc::run_capture` moved off the subprocess form for the same
+/// reason.
+///
+/// Safe to call after the leader has been reaped: a pgid is not recycled while
+/// any process remains in the group, and the call is a harmless ESRCH once the
+/// group is empty.
+fn kill_process_group(pid: u32) {
+    #[cfg(unix)]
+    {
+        // SAFETY: `kill` is async-signal-safe and takes no pointers; a
+        // negative pid addresses the process group, and an unknown group is
+        // reported as ESRCH rather than being undefined.
+        unsafe {
+            libc::kill(-(pid as i32), libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+    }
+}
+
 /// Runs `program args...` in a sanitized environment. Child PATH - trusted
 /// system directories plus `extra_path` (the canonical parent of the found
 /// binary), so a CLI with a `#!/usr/bin/env node` shebang finds its
@@ -383,13 +416,7 @@ fn run_probe(
                 // on the success path too - otherwise repeated
                 // `detect --refresh` runs would accumulate hanging processes
                 // and reader threads.
-                #[cfg(unix)]
-                {
-                    let _ = std::process::Command::new("kill")
-                        .arg("-KILL")
-                        .arg(format!("-{}", child.id()))
-                        .status();
-                }
+                kill_process_group(child.id());
                 return Ok(ProbeOut {
                     stdout: String::from_utf8_lossy(&kept).into_owned(),
                     truncated,
@@ -401,13 +428,7 @@ fn run_probe(
                     // down daemonized descendants too - they then close the
                     // pipe, reader threads see EOF and finish (they don't
                     // pile up on repeated `detect --refresh` runs).
-                    #[cfg(unix)]
-                    {
-                        let _ = std::process::Command::new("kill")
-                            .arg("-KILL")
-                            .arg(format!("-{}", child.id()))
-                            .status();
-                    }
+                    kill_process_group(child.id());
                     let _ = child.kill();
                     let _ = child.wait();
                     return Err("probe timed out".into());
