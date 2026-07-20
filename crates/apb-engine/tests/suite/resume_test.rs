@@ -30,6 +30,40 @@ fn seed(root: &std::path::Path) {
     fs::write(root.join(".apb/playbooks/lin/current"), "1.0.0").unwrap();
 }
 
+/// A playbook that ends in a failure `finish` node (`bad`) with no outgoing
+/// edge: a real run terminates failed at a node that has no successor, which is
+/// exactly the shape an `After`-mode resume must refuse.
+const FAIL_PLAYBOOK: &str = r#"
+schema: 1
+id: fail
+name: Fail
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "x" }
+  - { id: bad, type: finish, outcome: failure }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: bad }
+"#;
+
+fn seed_named(root: &std::path::Path, id: &str, yaml: &str) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks").join(id).join("1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    fs::write(
+        root.join(".apb/playbooks").join(id).join("current"),
+        "1.0.0",
+    )
+    .unwrap();
+}
+
+fn count_events<F: Fn(&EventPayload) -> bool>(root: &Path, run_id: &str, pred: F) -> usize {
+    let events = read_all(&root.join(".apb/runs").join(run_id)).unwrap();
+    events.iter().filter(|e| pred(&e.payload)).count()
+}
+
 #[test]
 fn lists_runs_after_a_run() {
     let dir = tempfile::tempdir().unwrap();
@@ -262,6 +296,56 @@ fn resume_folds_to_running_not_paused() {
     let prefix: Vec<Event> = events[..=cut].to_vec();
     let state = RunState::fold(&prefix);
     assert_eq!(state.run_status, RunStatus::Running);
+}
+
+/// Regression: a no-arg `resume()` of a failed terminal run whose last node has
+/// no matching successor edge must be refused (mentioning `--from-node`) AND
+/// must NOT journal a `RunResumed` marker. Otherwise the marker lands after the
+/// terminal `RunFinished(failed)` and folds the run to running forever, with a
+/// fresh marker appended on every retry.
+#[test]
+fn resume_failed_terminal_no_successor_is_refused_without_journaling() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_named(dir.path(), "fail", FAIL_PLAYBOOK);
+    let res = run(dir.path(), "fail", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+
+    let is_resumed = |p: &EventPayload| matches!(p, EventPayload::RunResumed { .. });
+    assert_eq!(count_events(dir.path(), &res.run_id, is_resumed), 0);
+
+    let err = resume(dir.path(), &res.run_id, None).unwrap_err();
+    assert!(
+        err.to_string().contains("--from-node"),
+        "refusal must mention --from-node, got: {err}"
+    );
+    // Retry to prove the refusal never accumulates a marker.
+    let _ = resume(dir.path(), &res.run_id, None);
+
+    assert_eq!(
+        count_events(dir.path(), &res.run_id, is_resumed),
+        0,
+        "a refused After-mode resume must not journal RunResumed"
+    );
+    let state = RunState::fold(&read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap());
+    assert_eq!(
+        state.run_status,
+        RunStatus::Failed,
+        "folded status must stay failed, never Running"
+    );
+}
+
+/// The `RunResumed` event serializes with the exact snake_case wire tag
+/// `"type":"run_resumed"` - guards against a `rename_all` regression.
+#[test]
+fn run_resumed_serializes_with_snake_case_tag() {
+    let payload = EventPayload::RunResumed {
+        from_node: "a".into(),
+    };
+    let json = serde_json::to_string(&payload).unwrap();
+    assert!(
+        json.contains(r#""type":"run_resumed""#),
+        "expected snake_case tag, got: {json}"
+    );
 }
 
 #[test]

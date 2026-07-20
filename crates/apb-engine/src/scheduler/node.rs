@@ -1042,13 +1042,13 @@ pub(crate) fn maybe_compact_context(
 /// join). On a ready join:any it cancels the other unfinished frontier branches
 /// (marking them cancelled). The sole writer of events (cancelled) is the
 /// calling drive, so the single-writer invariant is preserved.
-pub(crate) fn advance_frontier(
-    playbook: &Playbook,
-    node: &str,
-    state: &RunState,
-    frontier: &mut Vec<String>,
-    log: &mut EventLog,
-) -> Result<(), EngineError> {
+/// The ready successors a node hands the frontier: its outgoing edges evaluated
+/// against the folded status and outputs, dropping the node itself and any join
+/// that is not yet ready. Pure - it reads state and writes nothing, so a resume
+/// can ask "would advancing past this node have anything to run" WITHOUT any
+/// journal side effect. `advance_frontier` layers the join:any cancellation and
+/// the frontier writes on top of this.
+pub(crate) fn seed_successors(playbook: &Playbook, node: &str, state: &RunState) -> Vec<String> {
     let mut runnable: Vec<String> = Vec::new();
     for s in parallel::successors(playbook, node, state) {
         let ready = if parallel::is_join(playbook, &s) {
@@ -1059,10 +1059,24 @@ pub(crate) fn advance_frontier(
         } else {
             true
         };
-        if ready && s != node && !runnable.contains(&s) && !frontier.contains(&s) {
+        if ready && s != node && !runnable.contains(&s) {
             runnable.push(s);
         }
     }
+    runnable
+}
+
+pub(crate) fn advance_frontier(
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    frontier: &mut Vec<String>,
+    log: &mut EventLog,
+) -> Result<(), EngineError> {
+    let mut runnable: Vec<String> = seed_successors(playbook, node, state)
+        .into_iter()
+        .filter(|s| !frontier.contains(s))
+        .collect();
     if let Some(join) = runnable
         .iter()
         .find(|s| {

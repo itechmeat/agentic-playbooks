@@ -588,9 +588,11 @@ fn drive(
             advance_frontier(&playbook, &start_node, &state, &mut frontier, log)?;
             if frontier.is_empty() {
                 // A pointless resume: the start node already finished and has no
-                // pending successor to advance into.
+                // pending successor to advance into. `resume_inner` already
+                // refuses this before journaling `RunResumed`; this is the
+                // defensive backstop for any direct `After` drive.
                 return Err(EngineError::Invalid(format!(
-                    "node `{start_node}` already finished with no pending successor to resume into"
+                    "node `{start_node}` already finished with no pending successor to resume into - pass --from-node to re-run from a specific node"
                 )));
             }
             frontier.remove(0)
@@ -1618,6 +1620,22 @@ fn resume_inner(
     // parallel fork, or honor an explicit `--from-node`. A pointless resume (an
     // argument-free resume of a succeeded run) is refused here.
     let decision = plan_resume(root, run_id, from_node)?;
+    // Refuse a pointless `After`-mode resume BEFORE journaling anything: if the
+    // already-finished start node has no pending successor to advance into (for
+    // example a no-arg resume of a failed terminal run whose last node has no
+    // matching failure edge), return an error with NO journal side effect.
+    // Writing `RunResumed` first and only discovering the empty frontier inside
+    // `drive` would persist a marker after the terminal `RunFinished`, folding
+    // the run to running forever and appending another marker on every retry.
+    if decision.mode == StartMode::After {
+        let state = RunState::fold(&read_all(&run_dir)?);
+        if seed_successors(&playbook, &decision.start_node, &state).is_empty() {
+            return Err(EngineError::Invalid(format!(
+                "node `{}` already finished with no pending successor to resume into - pass --from-node to re-run from a specific node",
+                decision.start_node
+            )));
+        }
+    }
     // Journal a proper `run_resumed` marker (folds to running), replacing the
     // old `RunPaused { reason: "resume from X" }` write that used to leave the
     // folded status stuck on paused for the rest of the run.
