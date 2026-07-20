@@ -311,9 +311,11 @@ pub fn node_times(events: &[Event]) -> BTreeMap<String, NodeTimes> {
             started.insert(node.clone(), e.ts);
         }
     }
-    // The newest open attempt per node wins: a retried node has one open
-    // attempt at a time, and if a journal ever showed two, the later one is
-    // the work actually in flight.
+    // The highest-numbered open attempt per node wins. `open_attempts` yields
+    // `(node, attempt)` in ascending order, so the last insert for a node is
+    // its highest attempt number. A node has one open attempt at a time in
+    // practice (a retry closes the previous one), and where a journal ever
+    // showed two, the higher attempt number is the later work.
     let mut latest: BTreeMap<String, &OpenAttempt> = BTreeMap::new();
     let opens = open_attempts(events);
     for a in &opens {

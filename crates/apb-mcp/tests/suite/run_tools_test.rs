@@ -319,6 +319,37 @@ fn now_ms() -> u128 {
 /// the one branch allowed to conclude "dead".
 const DEAD_PID: u32 = u32::MAX;
 
+/// A short-lived child that exists only to lend the test a real, live,
+/// foreign pid. Killed and waited for on drop, so no path out of the test
+/// leaks a process or leaves a zombie holding the pid (a zombie would probe
+/// as `NotFound` and silently invert what the test is asserting).
+struct Sleeper(std::process::Child);
+
+impl Sleeper {
+    fn spawn() -> Self {
+        Sleeper(
+            std::process::Command::new("sleep")
+                .arg("30")
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .expect("`sleep` must be available to spawn a live pid"),
+        )
+    }
+
+    fn pid(&self) -> u32 {
+        self.0.id()
+    }
+}
+
+impl Drop for Sleeper {
+    fn drop(&mut self) {
+        let _ = self.0.kill();
+        let _ = self.0.wait();
+    }
+}
+
 #[test]
 fn run_status_reports_a_dead_attempt_as_lost_with_node_times() {
     let dir = tempfile::tempdir().unwrap();
@@ -379,16 +410,12 @@ fn run_status_reports_a_live_attempt_and_driver() {
     let dir = tempfile::tempdir().unwrap();
     let run_dir = bare_run_dir(dir.path(), "r-live");
 
-    // A real, live, foreign pid for the attempt. Reaped at the end of the test
-    // so nothing is leaked and the pid does not linger as a zombie.
-    let mut sleeper = std::process::Command::new("sleep")
-        .arg("30")
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-        .unwrap();
-    let live_pid = sleeper.id();
+    // A real, live, foreign pid for the attempt: the probe must resolve it
+    // through the process table, which a fabricated number cannot exercise.
+    // The guard reaps it however this test leaves the scope, so a panicking
+    // assertion cannot leak a child or leave a zombie holding the pid.
+    let sleeper = Sleeper::spawn();
+    let live_pid = sleeper.pid();
 
     // A drive running on a thread of THIS process is the in-process drive
     // case, and our own pid is by definition a live driver.
@@ -412,9 +439,6 @@ fn run_status_reports_a_live_attempt_and_driver() {
     let first = run_status(dir.path(), "r-live").unwrap();
     std::thread::sleep(std::time::Duration::from_millis(30));
     let second = run_status(dir.path(), "r-live").unwrap();
-
-    let _ = sleeper.kill();
-    let _ = sleeper.wait();
 
     assert_eq!(
         first["driver_alive"], true,
