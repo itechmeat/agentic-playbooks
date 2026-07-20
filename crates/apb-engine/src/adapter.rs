@@ -12,6 +12,7 @@ use apb_core::config::{InvocationDef, PromptVia, SoulDelivery, Transport};
 use serde::Deserialize;
 
 use crate::error::EngineError;
+use crate::event::{Event, EventPayload};
 // Shared with `run_capture` rather than duplicated: the signal-target
 // validation it performs is the difference between killing one process group
 // and killing every process the user owns, so it must live in exactly one
@@ -238,6 +239,106 @@ pub struct AskedQuestion {
     pub options: Vec<String>,
 }
 
+/// Default per-server tool timeout injected into claude's `--mcp-config` for a
+/// live interactive node when the node sets no `question_timeout_seconds` (spec
+/// 2026-07-20, Transport: live): about 28 h in ms, so claude's ~30-minute stdio
+/// idle timer never cuts off a blocking `ask_user` call while a human takes
+/// their time. A node WITH a `question_timeout_seconds` uses that instead (its
+/// value in ms), which also bounds the blocking call at the same budget the
+/// engine uses to post the `default_answer`.
+pub const LIVE_TOOL_TIMEOUT_MS_DEFAULT: u64 = 28 * 60 * 60 * 1000;
+
+/// The paragraph appended to a live interactive node's prompt (spec 2026-07-20,
+/// Transport: live): the `ask_user` tool exists, when to use it, and that
+/// free-form questions to the user go through it rather than being answered by
+/// assumption. Kept beside the injection so the two never drift.
+pub const LIVE_PROMPT_PARAGRAPH: &str = "You have an `ask_user` tool available through the apb MCP server. When you need input from the user before you can proceed, call `ask_user` with your question (and optional `options` listing suggested answers) and wait for the reply. Route any free-form question for the user through `ask_user` rather than assuming an answer.";
+
+/// Live-injection inputs for one attempt (spec 2026-07-20, Transport: live).
+/// Built by the drive layer only for an interactive node whose resolved
+/// `interaction` is `Live` on claude/claude-code with a resolvable current exe;
+/// a resolution failure or a non-claude agent downgrades before this is built.
+/// The adapter appends `--mcp-config <json>` pointing claude at the hidden
+/// `apb __ask-server` sidecar.
+pub struct LiveInject {
+    /// Current apb executable (the `apb __ask-server` sidecar host), resolved
+    /// by the drive layer the same way `apb __drive-run` resolves it.
+    pub exe: PathBuf,
+    pub run_id: String,
+    pub attempt: u32,
+    /// Per-server tool timeout in ms: `question_timeout_seconds*1000` when the
+    /// node sets one, else [`LIVE_TOOL_TIMEOUT_MS_DEFAULT`].
+    pub timeout_ms: u64,
+}
+
+/// Live-attempt hooks handed to [`AgentAdapter::run_cancellable`] (spec
+/// 2026-07-20, Transport: live): the sidecar injection plus a per-poll
+/// `on_tick` the adapter calls on the DRIVE thread each wait iteration.
+/// `on_tick` is where drive observes the question/answer channels and journals
+/// `QuestionAsked`/`QuestionAnswered` while the agent blocks in `ask_user`.
+/// Because the poll loop runs on the drive thread, this keeps the single writer
+/// (drive) as the only thread that ever touches the event log.
+pub struct LiveHooks<'a> {
+    pub inject: LiveInject,
+    pub on_tick: &'a dyn Fn(),
+}
+
+/// Builds the `--mcp-config` JSON injected into claude for a live interactive
+/// node (spec 2026-07-20, Transport: live). Points claude at the hidden
+/// `apb __ask-server --run <id> --node <node> --attempt <n>` sidecar with a
+/// large per-server `timeout` so the blocking `ask_user` call is never cut off
+/// by claude's stdio idle timer. No `--strict-mcp-config`: the agent keeps its
+/// own configured servers.
+pub fn ask_server_mcp_config(
+    exe: &Path,
+    run_id: &str,
+    node: &str,
+    attempt: u32,
+    timeout_ms: u64,
+) -> String {
+    serde_json::json!({
+        "mcpServers": {
+            "apb": {
+                "command": exe.to_string_lossy(),
+                "args": [
+                    "__ask-server",
+                    "--run",
+                    run_id,
+                    "--node",
+                    node,
+                    "--attempt",
+                    attempt.to_string(),
+                ],
+                "timeout": timeout_ms,
+            }
+        }
+    })
+    .to_string()
+}
+
+/// The `ts` of the currently-open (asked-but-unanswered) question for `node`,
+/// i.e. the last `QuestionAsked` when the node carries more asked than answered
+/// events (spec 2026-07-20, Transport: live). `None` when no question is open.
+/// Used to exclude the OPEN pending window from a live attempt's node-timeout
+/// clock: [`pending_interval_ms`] only sums CLOSED asked->answered pairs, so a
+/// still-unanswered question would otherwise let the node time out mid-question.
+fn open_question_asked_ts(events: &[Event], node: &str) -> Option<u128> {
+    let mut asked: Vec<u128> = Vec::new();
+    let mut answered = 0usize;
+    for e in events {
+        match &e.payload {
+            EventPayload::QuestionAsked { node: n, .. } if n == node => asked.push(e.ts),
+            EventPayload::QuestionAnswered { node: n, .. } if n == node => answered += 1,
+            _ => {}
+        }
+    }
+    if asked.len() > answered {
+        asked.last().copied()
+    } else {
+        None
+    }
+}
+
 /// Scans agent output for a line equal to [`QUESTION_MARKER`] and parses the
 /// next non-empty line as an [`AskedQuestion`] (spec 2026-07-20, Transport:
 /// resume/reprompt). The scan runs ONLY for an interactive task: on a
@@ -363,15 +464,22 @@ pub trait AgentAdapter {
     /// time so a crash mid-attempt leaves an open attempt on disk. It never
     /// fires if the spawn itself fails.
     ///
-    /// The default ignores `cancel`/`on_spawn` and just calls `run` (for
+    /// `live`, when set (spec 2026-07-20, Transport: live), injects the
+    /// `apb __ask-server` sidecar into the agent's argv and hands the adapter a
+    /// per-poll `on_tick` the drive thread runs to observe the question/answer
+    /// channels while the agent blocks in `ask_user`. `None` for every
+    /// non-live attempt.
+    ///
+    /// The default ignores `cancel`/`on_spawn`/`live` and just calls `run` (for
     /// adapters without kill or spawn-hook support).
     fn run_cancellable(
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
         on_spawn: Option<&dyn Fn(u32)>,
+        live: Option<&LiveHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
-        let _ = (cancel, on_spawn);
+        let _ = (cancel, on_spawn, live);
         self.run(task)
     }
 
@@ -444,6 +552,27 @@ fn build_command(
         PromptVia::Argv => None,
     };
     (argv, stdin_payload)
+}
+
+/// Appends the live `--mcp-config` sidecar injection to `argv` when this is a
+/// live interactive attempt on claude/claude-code (spec 2026-07-20, Transport:
+/// live). The agent guard is belt-and-braces: the drive layer only builds a
+/// `LiveHooks` for claude in the first place, but a non-claude argv must never
+/// gain a claude-only flag. No `--strict-mcp-config`: the agent keeps its own
+/// configured servers.
+fn inject_ask_server(argv: &mut Vec<String>, task: &AgentTask, live: Option<&LiveHooks>) {
+    if let Some(lh) = live
+        && (task.agent == "claude" || task.agent == "claude-code")
+    {
+        argv.push("--mcp-config".to_string());
+        argv.push(ask_server_mcp_config(
+            &lh.inject.exe,
+            &lh.inject.run_id,
+            task.node,
+            lh.inject.attempt,
+            lh.inject.timeout_ms,
+        ));
+    }
 }
 
 /// Tail appended to the prompt: asks the agent to end its reply with a
@@ -525,12 +654,12 @@ impl ClaudeAdapter {
     /// `pending_question_ms` below. A node's `timeout_seconds` budgets the
     /// agent's own work, not a human/supervisor's answer time - a node that
     /// budgets 300s of agent work must not be killed because a question sat
-    /// unanswered for an hour. Currently always `0` for the reprompt
-    /// transport (a park always spans a fresh attempt boundary, so no
-    /// completed question interval ever falls inside one attempt's own
-    /// `started..now` window); wired now so the live `ask_user` transport
-    /// (Task 11), whose single long-lived attempt DOES span a pending
-    /// question, needs no change here.
+    /// unanswered for an hour. `0` for the reprompt transport (a park always
+    /// spans a fresh attempt boundary, so no completed question interval ever
+    /// falls inside one attempt's own `started..now` window). For the live
+    /// `ask_user` transport (Task 11), whose single long-lived attempt DOES
+    /// span the pending question, it is recomputed each poll tick and includes
+    /// the still-open window.
     fn check_cancel_timeout(
         child: &mut Child,
         cancel: &AtomicBool,
@@ -562,7 +691,7 @@ impl ClaudeAdapter {
     /// never double-counted against a freshly started one. `0` when the task
     /// carries no timeout (nothing to exclude from), no run dir/node id (an
     /// internal, connector-less call), or the event log cannot be read.
-    fn pending_question_ms(task: &AgentTask, since_ms: u128) -> u128 {
+    fn pending_question_ms(task: &AgentTask, since_ms: u128, include_open: bool) -> u128 {
         if task.timeout.is_none() {
             return 0;
         }
@@ -576,7 +705,16 @@ impl ClaudeAdapter {
             return 0;
         };
         let scoped: Vec<_> = events.into_iter().filter(|e| e.ts >= since_ms).collect();
-        pending_interval_ms(&scoped, node_id)
+        let mut total = pending_interval_ms(&scoped, node_id);
+        // Live path (spec 2026-07-20, Task 11): a single long-lived attempt
+        // spans the OPEN (asked-but-unanswered) question window, which
+        // `pending_interval_ms` (closed pairs only) does not cover. Add the
+        // elapsed since the currently-open question so a human still thinking
+        // does not push the node past its `timeout_seconds`.
+        if include_open && let Some(asked_ts) = open_question_asked_ts(&scoped, node_id) {
+            total += crate::event::now_millis().saturating_sub(asked_ts);
+        }
+        total
     }
 
     /// Headless transport: a one-shot buffered run of `claude -p ...`, stdout
@@ -586,15 +724,17 @@ impl ClaudeAdapter {
         task: &AgentTask,
         cancel: &AtomicBool,
         on_spawn: Option<&dyn Fn(u32)>,
+        live: Option<&LiveHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
-        let (argv, stdin_payload) = build_command(
+        let (mut argv, stdin_payload) = build_command(
             &self.spec,
             &prompt,
             task.model,
             task.soul,
             task.grant_autonomy,
         );
+        inject_ask_server(&mut argv, task, live);
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(task.workdir)
@@ -626,12 +766,19 @@ impl ClaudeAdapter {
             // si is dropped here - stdin closes, the agent sees EOF.
         }
         let started = Instant::now();
-        // Pending-question exclusion (spec 2026-07-20, Task 5): computed once
-        // for this attempt rather than per poll tick, since it is fed by
-        // `started`'s own wall-clock instant and only ever changes further
-        // (Task 11 live path) while this same attempt keeps running.
-        let pending_ms = Self::pending_question_ms(task, crate::event::now_millis());
+        // Pending-question exclusion. For a non-live attempt it is computed once
+        // (the reprompt park always spans an attempt boundary, so no completed
+        // interval falls inside one attempt's own window). For a LIVE attempt
+        // (spec 2026-07-20, Task 11) the single long-lived attempt DOES span the
+        // pending window, so it is recomputed each poll tick - AFTER `on_tick`
+        // journals the round - and includes the still-open question window.
+        let since = crate::event::now_millis();
+        let mut pending_ms = Self::pending_question_ms(task, since, false);
         loop {
+            if let Some(lh) = live {
+                (lh.on_tick)();
+                pending_ms = Self::pending_question_ms(task, since, true);
+            }
             if let Some(err) =
                 Self::check_cancel_timeout(&mut child, cancel, started, task.timeout, pending_ms)
             {
@@ -706,6 +853,7 @@ impl ClaudeAdapter {
         task: &AgentTask,
         cancel: &AtomicBool,
         on_spawn: Option<&dyn Fn(u32)>,
+        live: Option<&LiveHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
         // Base argv comes from the invocation form; claude-specific streaming
@@ -718,6 +866,7 @@ impl ClaudeAdapter {
             task.soul,
             task.grant_autonomy,
         );
+        inject_ask_server(&mut argv, task, live);
         argv.push("--output-format".to_string());
         argv.push("stream-json".to_string());
         argv.push("--verbose".to_string());
@@ -790,10 +939,11 @@ impl ClaudeAdapter {
         });
 
         let started = Instant::now();
-        // Pending-question exclusion (spec 2026-07-20, Task 5): see
-        // `run_headless` for why this is computed once per attempt rather
-        // than per poll tick.
-        let pending_ms = Self::pending_question_ms(task, crate::event::now_millis());
+        // Pending-question exclusion: once for a non-live attempt, recomputed
+        // each tick (with the open-question window) for a LIVE attempt - see
+        // `run_headless` for the rationale.
+        let since = crate::event::now_millis();
+        let mut pending_ms = Self::pending_question_ms(task, since, false);
         let pid = child.id();
         let mut raw_lines: Vec<String> = Vec::new();
         // Set once the agent process itself has exited: the deadline for
@@ -817,6 +967,17 @@ impl ClaudeAdapter {
             // copying bytes out of a pipe. Honouring it here would abandon
             // output the run has already paid for, in exchange for ending a
             // bounded, idle wait slightly sooner.
+            //
+            // Live observation (spec 2026-07-20, Task 11): while the agent is
+            // still running, run the drive-thread `on_tick` (journals the
+            // question/answer round as it lands) and refresh the pending-window
+            // exclusion so a blocked-on-question agent is never killed as hung.
+            if drain_deadline.is_none()
+                && let Some(lh) = live
+            {
+                (lh.on_tick)();
+                pending_ms = Self::pending_question_ms(task, since, true);
+            }
             if drain_deadline.is_none()
                 && let Some(err) = Self::check_cancel_timeout(
                     &mut child,
@@ -898,6 +1059,13 @@ impl ClaudeAdapter {
                 kill_process_tree(&mut child);
                 return match parse_stream_result(&raw_lines, task) {
                     Ok(report) => Ok(report),
+                    // A malformed-marker Transport error names the node and must
+                    // survive the grace teardown (spec 2026-07-20, Task 6): the
+                    // terminal result WAS seen, and the question after the marker
+                    // was invalid JSON - rewriting that into a generic "no result
+                    // event" Timeout would hide the real, node-named cause. Only a
+                    // genuinely-missing result becomes the grace Timeout.
+                    Err((ErrorClass::Transport, msg)) => Err((ErrorClass::Transport, msg)),
                     Err(_) => Err((
                         ErrorClass::Timeout,
                         format!(
@@ -982,9 +1150,9 @@ fn parse_stream_result(
 
 impl AgentAdapter for ClaudeAdapter {
     fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)> {
-        // A non-cancellable run is a cancellable run with an always-false flag
-        // and no spawn hook.
-        self.run_cancellable(task, &AtomicBool::new(false), None)
+        // A non-cancellable run is a cancellable run with an always-false flag,
+        // no spawn hook, and no live sidecar.
+        self.run_cancellable(task, &AtomicBool::new(false), None, None)
     }
 
     fn run_cancellable(
@@ -992,10 +1160,11 @@ impl AgentAdapter for ClaudeAdapter {
         task: &AgentTask,
         cancel: &AtomicBool,
         on_spawn: Option<&dyn Fn(u32)>,
+        live: Option<&LiveHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         match self.spec.transport {
-            Transport::Headless => self.run_headless(task, cancel, on_spawn),
-            Transport::Acp => self.run_acp(task, cancel, on_spawn),
+            Transport::Headless => self.run_headless(task, cancel, on_spawn, live),
+            Transport::Acp => self.run_acp(task, cancel, on_spawn, live),
         }
     }
 
@@ -1124,6 +1293,52 @@ mod tests {
         let (status, summary) = interpret_report(text);
         assert_eq!(status, NodeStatus::Succeeded);
         assert_eq!(summary, text);
+    }
+
+    #[test]
+    fn ask_server_mcp_config_injects_run_node_attempt_and_timeout() {
+        // Injection JSON (spec 2026-07-20, Task 11): the `--mcp-config` argument
+        // points claude at `apb __ask-server` with the run/node/attempt and the
+        // per-server timeout. `question_timeout_seconds`-derived ms here.
+        let json =
+            ask_server_mcp_config(Path::new("/opt/apb/bin/apb"), "run-xyz", "ask", 3, 120_000);
+        let val: serde_json::Value = serde_json::from_str(&json).expect("valid JSON");
+        let server = &val["mcpServers"]["apb"];
+        assert_eq!(server["command"], "/opt/apb/bin/apb");
+        assert_eq!(
+            server["args"],
+            serde_json::json!([
+                "__ask-server",
+                "--run",
+                "run-xyz",
+                "--node",
+                "ask",
+                "--attempt",
+                "3"
+            ]),
+        );
+        assert_eq!(server["timeout"], 120_000);
+    }
+
+    #[test]
+    fn ask_server_mcp_config_uses_large_default_timeout() {
+        // With no `question_timeout_seconds` the drive layer hands the large
+        // default, so the blocking `ask_user` call outlives claude's idle timer.
+        let json = ask_server_mcp_config(
+            Path::new("/usr/bin/apb"),
+            "r1",
+            "q",
+            1,
+            LIVE_TOOL_TIMEOUT_MS_DEFAULT,
+        );
+        let val: serde_json::Value = serde_json::from_str(&json).unwrap();
+        // The default comfortably exceeds claude's ~30-minute stdio idle timer
+        // (about 28 h in ms) so a blocking `ask_user` call is never cut off.
+        assert_eq!(
+            val["mcpServers"]["apb"]["timeout"],
+            LIVE_TOOL_TIMEOUT_MS_DEFAULT
+        );
+        assert_eq!(val["mcpServers"]["apb"]["timeout"], 100_800_000);
     }
 
     #[test]

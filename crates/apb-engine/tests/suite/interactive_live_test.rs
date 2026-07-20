@@ -1,0 +1,440 @@
+//! Task 11: the live interactive transport for claude via the `apb __ask-server`
+//! sidecar.
+//!
+//! - Injection: the spawned claude argv carries `--mcp-config` pointing at
+//!   `apb __ask-server` with the run/node/attempt and the per-server timeout.
+//! - Live observation: a stub that PRETENDS to be blocked (posts a question to
+//!   the channel itself, then blocks until the answer file lands, then exits
+//!   with a report) drives one long-lived attempt; drive - observing the
+//!   channels on its own thread through the adapter's per-poll `on_tick` -
+//!   journals `QuestionAsked` (+ a wake) and `QuestionAnswered`, and the attempt
+//!   finishes with NO re-invocation (exactly one `attempt_started`).
+//! - Node-timeout exclusion: a short `timeout_seconds` that WOULD fire during
+//!   the open-question window does not, because the pending window is excluded.
+//! - Downgrade: a `live`-configured non-claude agent journals
+//!   `interaction_downgraded` and runs the marker/resume path instead.
+//!
+//! Bounded by construction: the stub blocks on the answer FILE, so it proceeds
+//! only after the test posts the answer; its own loop is self-capped. Every
+//! wait is a bounded poll whose panic message names what it waited on, and a
+//! `RunReaper` built before the first panic point aborts and joins a still-live
+//! drive so no orphaned thread survives a failed assertion.
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::sync::MutexGuard;
+use std::sync::mpsc;
+use std::thread;
+use std::time::{Duration, Instant};
+
+use apb_core::registry::init_project;
+use apb_engine::event::{Event, EventPayload, read_all};
+use apb_engine::question::post_answer;
+use apb_engine::scheduler::{RunOptions, run};
+use apb_engine::state::RunStatus;
+
+use crate::common;
+
+const POLL_DEADLINE: Duration = Duration::from_secs(15);
+const POLL_STEP: Duration = Duration::from_millis(10);
+
+fn lock() -> MutexGuard<'static, ()> {
+    common::env_lock()
+}
+
+struct EnvGuard;
+impl Drop for EnvGuard {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("APB_AGENT_CMD");
+            std::env::remove_var("APB_CONFIG_DIR");
+            std::env::remove_var("HOME");
+        }
+    }
+}
+
+/// Aborts and joins a still-live drive on drop, so a failed assertion mid-run
+/// never leaves an orphaned helper thread (and its stub child) spinning.
+struct RunReaper {
+    root: PathBuf,
+    run_id: String,
+    handle: Option<thread::JoinHandle<()>>,
+}
+impl RunReaper {
+    fn join(&mut self) {
+        if let Some(h) = self.handle.take() {
+            h.join().expect("drive thread joined");
+        }
+    }
+}
+impl Drop for RunReaper {
+    fn drop(&mut self) {
+        if let Some(h) = self.handle.take() {
+            let _ = apb_engine::run_cancel(&self.root, &self.run_id);
+            let _ = h.join();
+        }
+    }
+}
+
+fn make_stub(dir: &Path, body: &str) -> String {
+    let path = dir.join("stub.sh");
+    common::write_sync(&path, &format!("#!/bin/sh\n{body}\n"));
+    let mut p = fs::metadata(&path).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&path, p).unwrap();
+    path.to_string_lossy().to_string()
+}
+
+fn set_env(stub: &str, home: &Path, cfg: &Path) {
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", stub);
+        std::env::set_var("HOME", home);
+        std::env::set_var("APB_CONFIG_DIR", cfg);
+    }
+}
+
+fn seed_profile(root: &Path, agent: &str) {
+    let dir = root.join(".apb/profiles/arch");
+    fs::create_dir_all(&dir).unwrap();
+    let yaml = format!("name: arch\ndescription: d\nexecutor:\n  agent: {agent}\n  model: haiku\n");
+    fs::write(dir.join("profile.yaml"), yaml).unwrap();
+    fs::write(dir.join("SOUL.md"), "role").unwrap();
+}
+
+/// One-node interactive playbook `iq` (schema 1); `timeout` sets the `ask`
+/// node's `timeout_seconds` (0 = omit).
+fn seed_single(root: &Path, timeout: u64) {
+    init_project(root).unwrap();
+    let to = if timeout > 0 {
+        format!(", timeout_seconds: {timeout}")
+    } else {
+        String::new()
+    };
+    let src = format!(
+        "schema: 1\nid: iq\nname: IQ\nversion: 1.0.0\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: ask, type: agent_task, prompt: \"ask something\", profile: arch, interactive: true{to} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: ask }}\n  - {{ from: ask, to: done }}\n"
+    );
+    let dir = root.join(".apb/playbooks/iq/1.0.0");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("playbook.yaml"), src).unwrap();
+    fs::write(root.join(".apb/playbooks/iq/current"), "1.0.0").unwrap();
+}
+
+fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let started = Instant::now();
+    loop {
+        if let Some(value) = f() {
+            return value;
+        }
+        if started.elapsed() > POLL_DEADLINE {
+            panic!("timed out after {POLL_DEADLINE:?} waiting for {what}");
+        }
+        thread::sleep(POLL_STEP);
+    }
+}
+
+fn latest_run_dir(root: &Path) -> PathBuf {
+    poll_until("run dir to appear", || {
+        let runs = root.join(".apb/runs");
+        let entry = fs::read_dir(&runs)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .find(|e| e.path().is_dir())?;
+        Some(entry.path())
+    })
+}
+
+fn run_id_of(run_dir: &Path) -> String {
+    run_dir.file_name().unwrap().to_string_lossy().to_string()
+}
+
+fn count_kind(events: &[Event], f: impl Fn(&EventPayload) -> bool) -> usize {
+    events.iter().filter(|e| f(&e.payload)).count()
+}
+
+fn spawn_run(root: &Path) -> (mpsc::Receiver<RunStatus>, thread::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let root = root.to_path_buf();
+    let handle = thread::spawn(move || {
+        let res = run(&root, "iq", None, RunOptions::default());
+        let status = res.map(|r| r.outcome).unwrap_or(RunStatus::Failed);
+        let _ = tx.send(status);
+    });
+    (rx, handle)
+}
+
+/// A stub claude that pretends to block in `ask_user`: it appends a question to
+/// `$APB_RUN_DIR/questions.jsonl` (the same record the sidecar would post), then
+/// blocks until an answer for node `ask` lands in `answers.jsonl`, then prints a
+/// report and exits. `argv_file`, when set, records the full argv line so the
+/// injection can be asserted. Self-capped so a missing answer cannot hang.
+fn blocking_stub_body(argv_file: Option<&Path>) -> String {
+    let record = match argv_file {
+        Some(p) => format!("printf '%s\\n' \"$*\" >> \"{}\"\n", p.display()),
+        None => String::new(),
+    };
+    format!(
+        "{record}rd=\"$APB_RUN_DIR\"\n\
+         printf '%s\\n' '{{\"seq\":0,\"node\":\"ask\",\"attempt\":1,\"question\":\"Which DB?\",\"options\":[\"pg\",\"sqlite\"]}}' >> \"$rd/questions.jsonl\"\n\
+         i=0\n\
+         while ! grep -q '\"node\":\"ask\"' \"$rd/answers.jsonl\" 2>/dev/null; do\n\
+         i=$((i+1)); [ \"$i\" -gt 400 ] && break\n\
+         sleep 0.05\n\
+         done\n\
+         echo 'picked the database from the user answer'\n\
+         exit 0"
+    )
+}
+
+// --- (a) injection reaches the spawned claude argv ---
+
+#[test]
+fn live_injection_reaches_the_spawned_argv() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let argvfile = bin.path().join("argv");
+    seed_single(proj.path(), 0);
+    seed_profile(proj.path(), "claude");
+    set_env(
+        &make_stub(bin.path(), &blocking_stub_body(Some(&argvfile))),
+        home.path(),
+        cfg.path(),
+    );
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let run_id = run_id_of(&run_dir);
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id.clone(),
+        handle: Some(handle),
+    };
+
+    poll_until("QuestionAsked for node ask", || {
+        let events = read_all(&run_dir).ok()?;
+        (count_kind(
+            &events,
+            |p| matches!(p, EventPayload::QuestionAsked { node, .. } if node == "ask"),
+        ) >= 1)
+            .then_some(())
+    });
+    post_answer(&run_dir, Some("ask"), "pg", "human").unwrap();
+
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let argv = fs::read_to_string(&argvfile).expect("argv recorded by the stub");
+    assert!(
+        argv.contains("--mcp-config"),
+        "claude must be spawned with --mcp-config: {argv}"
+    );
+    assert!(
+        argv.contains("__ask-server"),
+        "the injection must point claude at the ask-server sidecar: {argv}"
+    );
+    assert!(
+        argv.contains(&run_id) && argv.contains("\"ask\"") && argv.contains("\"--attempt\""),
+        "the injection must carry the run/node/attempt: {argv}"
+    );
+    // No `question_timeout_seconds` on the node, so the large default timeout is
+    // injected (about 28 h in ms) so the blocking call outlives the idle timer.
+    assert!(
+        argv.contains("100800000"),
+        "the injection must carry the large default per-server timeout: {argv}"
+    );
+    // The marker was NOT injected on the live path (the live paragraph is used
+    // instead), yet no downgrade happened.
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::SupervisorAction { action, .. } if action == "interaction_downgraded"
+        )),
+        0,
+        "an injectable live node must not downgrade"
+    );
+}
+
+// --- (b) live observation end to end, single attempt, timeout excluded ---
+
+#[test]
+fn live_observation_journals_round_and_excludes_pending_from_timeout() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    // A short node timeout that WOULD fire while the question sits unanswered if
+    // the pending window were not excluded from the clock (timing IS the subject
+    // for this exclusion; the honest budget is the node's `timeout_seconds`).
+    seed_single(proj.path(), 1);
+    seed_profile(proj.path(), "claude");
+    set_env(
+        &make_stub(bin.path(), &blocking_stub_body(None)),
+        home.path(),
+        cfg.path(),
+    );
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id_of(&run_dir),
+        handle: Some(handle),
+    };
+
+    // Drive observes the sidecar-posted question and journals it (+ a wake)
+    // while the agent is still blocked (no answer yet).
+    poll_until("QuestionAsked for node ask", || {
+        let events = read_all(&run_dir).ok()?;
+        (count_kind(&events, |p| {
+            matches!(p, EventPayload::QuestionAsked { node, question, .. }
+                if node == "ask" && question == "Which DB?")
+        }) >= 1)
+            .then_some(())
+    });
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::WakeRaised { node, .. } if node == "ask"
+        )) >= 1,
+        "a wake must be raised when the live question appears"
+    );
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::QuestionAnswered { node, .. } if node == "ask"
+        )),
+        0,
+        "no answer yet, so no QuestionAnswered"
+    );
+
+    // Hold the question OPEN past the node timeout (1s) before answering. Without
+    // the pending-window exclusion the node would be killed as timed out here.
+    thread::sleep(Duration::from_millis(1500));
+    let mid = read_all(&run_dir).unwrap();
+    assert_eq!(
+        count_kind(&mid, |p| matches!(
+            p,
+            EventPayload::NodeFinished { node, .. } if node == "ask"
+        )),
+        0,
+        "the node must not finish (least of all time out) while the question is open"
+    );
+
+    // Answer; the agent unblocks and finishes in the SAME attempt.
+    post_answer(&run_dir, Some("ask"), "pg", "human").unwrap();
+
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    // Exactly one QuestionAsked and one QuestionAnswered, answered_by human.
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::QuestionAsked { node, .. } if node == "ask"
+        )),
+        1,
+        "exactly one live question"
+    );
+    let answered: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::QuestionAnswered {
+                node,
+                answer,
+                answered_by,
+            } if node == "ask" => Some((answer.clone(), answered_by.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(answered, vec![("pg".to_string(), "human".to_string())]);
+    // Exactly one attempt for the node: the live attempt was NOT re-invoked.
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::AttemptStarted { node, .. } if node == "ask"
+        )),
+        1,
+        "the live attempt must not be re-invoked (Q&A resolves in-attempt)"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "ask" && status == "succeeded"
+        )),
+        "the node must succeed after the live answer"
+    );
+}
+
+// --- (c) live-configured non-claude agent downgrades ---
+
+/// Config agent `livex` with `interaction: live` - not claude, so injection is
+/// unavailable and the node downgrades.
+fn write_livex_config(cfg: &Path) {
+    let yaml = "agents:\n  livex:\n    invocation:\n      argv: [\"-p\", \"{prompt}\", \"--model\", \"{model}\"]\n      interaction: live\n";
+    fs::write(cfg.join("config.yaml"), yaml).unwrap();
+}
+
+#[test]
+fn live_configured_non_claude_agent_downgrades() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_single(proj.path(), 0);
+    seed_profile(proj.path(), "livex");
+    write_livex_config(cfg.path());
+    // The stub just finishes normally (no question): the downgrade is journaled
+    // at the first-attempt guard, before the attempt runs, regardless.
+    set_env(
+        &make_stub(bin.path(), "echo done\nexit 0"),
+        home.path(),
+        cfg.path(),
+    );
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id_of(&run_dir),
+        handle: Some(handle),
+    };
+
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    let downgrade = events.iter().find_map(|e| match &e.payload {
+        EventPayload::SupervisorAction {
+            action,
+            node,
+            detail,
+        } if action == "interaction_downgraded" => Some((node.clone(), detail.clone())),
+        _ => None,
+    });
+    let (node, detail) = downgrade.expect("a live->resume downgrade must be journaled");
+    assert_eq!(node.as_deref(), Some("ask"));
+    assert!(
+        detail.contains("claude") && detail.contains("livex"),
+        "the downgrade reason must name the claude requirement and the agent: {detail}"
+    );
+}

@@ -86,6 +86,8 @@ mod inspect_wait_test;
 mod instruction_precedence_test;
 #[path = "suite/interaction_defaults_test.rs"]
 mod interaction_defaults_test;
+#[path = "suite/interactive_live_test.rs"]
+mod interactive_live_test;
 #[path = "suite/interactive_reprompt_test.rs"]
 mod interactive_reprompt_test;
 #[path = "suite/interactive_timeout_test.rs"]

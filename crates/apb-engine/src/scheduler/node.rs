@@ -74,6 +74,21 @@ pub(crate) struct ResumeContext {
     pub answer: String,
 }
 
+/// A `live`-transport execution of an interactive node (spec 2026-07-20, Task
+/// 11). Present only when the drive loop resolved the node's `interaction` to
+/// `Live` on claude/claude-code AND could resolve the current exe; a downgrade
+/// hands `None`. When present, `execute_node` injects the `apb __ask-server`
+/// sidecar into the claude argv, appends the live prompt paragraph instead of
+/// the marker contract, and drives the channel observation on this (the drive)
+/// thread via the adapter's per-poll `on_tick`.
+pub(crate) struct LiveContext {
+    /// Current apb executable, resolved by the drive layer (a resolution
+    /// failure downgrades before we get here, so this is always present).
+    pub exe: std::path::PathBuf,
+    /// Per-server tool timeout in ms handed to the sidecar injection.
+    pub timeout_ms: u64,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -88,6 +103,7 @@ pub(crate) fn execute_node(
     env_scrub: &[String],
     journal: &Journal,
     resume: Option<ResumeContext>,
+    live: Option<LiveContext>,
 ) -> Result<AttemptOutcome, EngineError> {
     let node = playbook
         .node(node_id)
@@ -235,13 +251,18 @@ pub(crate) fn execute_node(
                 }
             }
 
-            // Marker contract (spec 2026-07-20, Transport: resume/reprompt): an
-            // interactive node's agent is told how to ask the user a question
-            // mid-run - print the marker plus a JSON question and stop. Appended
-            // once here, so it rides both the first invocation and each
-            // re-invocation (whose override prompt carries only the transcript,
-            // not the contract). Non-interactive nodes never receive it.
-            if *interactive {
+            // Interactive contract paragraph. A LIVE attempt (spec 2026-07-20,
+            // Task 11) gets the `ask_user` paragraph: the tool exists, when to
+            // use it, and to route free-form questions through it rather than
+            // assuming an answer. A resume/reprompt interactive node gets the
+            // marker contract (print the marker plus a JSON question and stop).
+            // Appended once here so it rides the first invocation and each
+            // re-invocation. Non-interactive nodes receive neither. The marker
+            // scan stays active on a live node too, so a live agent that ignores
+            // the tool and prints the marker still parks (no regression).
+            if live.is_some() {
+                text = format!("{text}\n\n{}", crate::adapter::LIVE_PROMPT_PARAGRAPH);
+            } else if *interactive {
                 text = format!("{text}\n\n{}", marker_contract());
             }
 
@@ -430,8 +451,44 @@ pub(crate) fn execute_node(
                             *spawn_err.borrow_mut() = Some(e);
                         }
                     };
-                    let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn));
+                    // Live channel observation (spec 2026-07-20, Task 11): for a
+                    // live attempt the adapter's drive-owned poll loop calls
+                    // `on_tick` on THIS (the drive) thread each wait iteration,
+                    // where drive journals the question/answer round as it lands
+                    // through `observe_live_channels`. The single-writer
+                    // invariant holds: no second thread journals. A journal
+                    // failure is carried out of the closure like `spawn_err`.
+                    let tick_err: std::cell::RefCell<Option<EngineError>> =
+                        std::cell::RefCell::new(None);
+                    let on_tick = || {
+                        if tick_err.borrow().is_some() {
+                            return;
+                        }
+                        // Unqualified via `use super::*`: node.rs already reaches
+                        // scheduler that way, so no new module edge is added.
+                        if let Err(e) = observe_live_channels(run_dir, node_id, journal) {
+                            *tick_err.borrow_mut() = Some(e);
+                        }
+                    };
+                    let live_hooks = live.as_ref().map(|lc| crate::adapter::LiveHooks {
+                        inject: crate::adapter::LiveInject {
+                            exe: lc.exe.clone(),
+                            run_id: run_id.to_string(),
+                            attempt: cur_attempt,
+                            timeout_ms: lc.timeout_ms,
+                        },
+                        on_tick: &on_tick,
+                    });
+                    let outcome = adapter.run_cancellable(
+                        &task,
+                        cancel,
+                        Some(&on_spawn),
+                        live_hooks.as_ref(),
+                    );
                     if let Some(e) = spawn_err.borrow_mut().take() {
+                        return Err(e);
+                    }
+                    if let Some(e) = tick_err.borrow_mut().take() {
                         return Err(e);
                     }
                     let spawn_instant = spawn_at.get();
@@ -738,7 +795,9 @@ pub(crate) fn execute_finish_answer(
                     *spawn_err.borrow_mut() = Some(e);
                 }
             };
-            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn));
+            // A finish-answer node is never interactive, so it never runs the
+            // live sidecar (`None`).
+            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None);
             if let Some(e) = spawn_err.borrow_mut().take() {
                 return Err(e);
             }

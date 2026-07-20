@@ -250,6 +250,55 @@ fn question_answered_count(events: &[Event], node: &str) -> usize {
         .count()
 }
 
+/// Observes the question/answer channels for a LIVE interactive attempt and
+/// journals `QuestionAsked` (+ a `WakeRaised`) and `QuestionAnswered` for each
+/// new channel entry beyond what the log already carries (spec 2026-07-20, Task
+/// 11). Count-based, exactly like the parked branch, so it is idempotent across
+/// repeated ticks.
+///
+/// Single-writer invariant: this runs ONLY on the drive thread - from the
+/// adapter's drive-owned poll loop through the live `on_tick` hook, and once
+/// more as a final sweep after the attempt returns. The live agent blocks
+/// inside its `ask_user` tool (via the sidecar) while drive keeps journaling
+/// here, so drive remains the sole writer of the event log throughout.
+pub(crate) fn observe_live_channels(
+    run_dir: &Path,
+    node: &str,
+    journal: &Journal,
+) -> Result<(), EngineError> {
+    let events = read_all(run_dir)?;
+    let asked = question_asked_count(&events, node);
+    let answered = question_answered_count(&events, node);
+    let questions: Vec<_> = read_questions_after(run_dir, None)?
+        .into_iter()
+        .filter(|q| q.node == node)
+        .collect();
+    for q in questions.iter().skip(asked) {
+        journal.append(EventPayload::QuestionAsked {
+            node: node.to_string(),
+            question: q.question.clone(),
+            options: q.options.clone(),
+        })?;
+        journal.append(EventPayload::WakeRaised {
+            trigger: WakeTrigger::Anomaly,
+            node: node.to_string(),
+            detail: "interactive question".into(),
+        })?;
+    }
+    let answers: Vec<_> = read_answers_after(run_dir, None)?
+        .into_iter()
+        .filter(|a| a.node == node)
+        .collect();
+    for a in answers.iter().skip(answered) {
+        journal.append(EventPayload::QuestionAnswered {
+            node: node.to_string(),
+            answer: a.answer.clone(),
+            answered_by: a.answered_by.clone(),
+        })?;
+    }
+    Ok(())
+}
+
 /// How many `AttemptStarted` events a node already carries - the number of the
 /// current attempt while one is open, used to tag a posted question.
 fn attempt_started_count(events: &[Event], node: &str) -> usize {
@@ -1473,8 +1522,9 @@ fn drive(
                                     &scrub_c,
                                     journal_ref,
                                     // Interactive nodes are excluded from the
-                                    // concurrent batch, so a resume never
-                                    // originates here.
+                                    // concurrent batch, so neither a resume nor
+                                    // the live sidecar ever originates here.
+                                    None,
                                     None,
                                 );
                                 let _ = tx.send((node, res));
@@ -1739,6 +1789,59 @@ fn drive(
             // fall-through `execute_node` re-enters the agent's own session
             // instead of re-invoking from scratch with a transcript.
             let mut resume_ctx: Option<ResumeContext> = None;
+
+            // Live transport pre-flight (spec 2026-07-20, Task 11). The primary
+            // executor's `(agent, interaction)` is snapshotted in the manifest;
+            // a `Live` ceiling on claude/claude-code injects the `apb
+            // __ask-server` sidecar into the single blocking attempt when the
+            // current exe resolves. Otherwise a `Live` ceiling downgrades one
+            // tier to `resume` (journaled once per visit at the NodeStarted
+            // guard below), which `resume_decision` may further drop to
+            // reprompt. Recomputed each drive iteration - cheap, and it never
+            // moves mid-run because the manifest is immutable.
+            let (prim_agent, prim_interaction) = node_primary_invocation(run_dir, &current)?
+                .unwrap_or_else(|| (String::new(), Interaction::Reprompt));
+            let live_exe: Option<std::path::PathBuf> = std::env::current_exe().ok();
+            let live_claude = prim_agent == "claude" || prim_agent == "claude-code";
+            let live_injectable =
+                prim_interaction == Interaction::Live && live_claude && live_exe.is_some();
+            // Downgrade reason when the ceiling is `Live` but injection is
+            // unavailable (non-claude agent, or the current exe could not be
+            // resolved). `None` when injectable, or the ceiling is not `Live`.
+            let live_downgrade_detail: Option<String> = if prim_interaction == Interaction::Live
+                && !live_injectable
+            {
+                Some(if !live_claude {
+                    format!(
+                        "live transport requires claude/claude-code; agent `{prim_agent}` for node `{current}` falls back to resume/reprompt"
+                    )
+                } else {
+                    format!(
+                        "live transport unavailable for node `{current}`: the current exe could not be resolved; falling back to resume/reprompt"
+                    )
+                })
+            } else {
+                None
+            };
+            // The transport actually used for an answer round: a downgraded
+            // `Live` becomes `resume` (then resume_decision may drop to
+            // reprompt); every other ceiling is used verbatim.
+            let effective_interaction = if live_downgrade_detail.is_some() {
+                Interaction::Resume
+            } else {
+                prim_interaction
+            };
+            // Per-server tool timeout for the sidecar injection:
+            // `question_timeout_seconds*1000` when set, else the large default.
+            let live_timeout_ms = match &node_kind {
+                NodeKind::AgentTask {
+                    question_timeout_seconds,
+                    ..
+                } => question_timeout_seconds
+                    .map(|s| s.saturating_mul(1000))
+                    .unwrap_or(crate::adapter::LIVE_TOOL_TIMEOUT_MS_DEFAULT),
+                _ => crate::adapter::LIVE_TOOL_TIMEOUT_MS_DEFAULT,
+            };
             // A pending (asked-but-unanswered) question means we are parked.
             if question_asked_count(&events, &current) > answered {
                 let for_node: Vec<_> = read_answers_after(run_dir, None)?
@@ -1756,37 +1859,25 @@ fn drive(
                             answered_by: entry.answered_by.clone(),
                         })?;
 
-                        // Resolve the primary executor's transport ceiling from
-                        // the run manifest (snapshotted at start; live config
-                        // edits cannot move it mid-run). An absent manifest/chain
-                        // floors to `reprompt`.
-                        let (agent_id, interaction) = node_primary_invocation(run_dir, &current)?
-                            .unwrap_or_else(|| (String::new(), Interaction::Reprompt));
-                        // Live is NOT implemented in this task (Task 10/11): a
-                        // live-configured node downgrades to resume here, with the
-                        // reason journaled.
-                        let interaction = if interaction == Interaction::Live {
-                            log.append(EventPayload::SupervisorAction {
-                                action: "interaction_downgraded".into(),
-                                node: Some(current.clone()),
-                                detail:
-                                    "live transport is not implemented yet (Task 11); using resume"
-                                        .into(),
-                            })?;
-                            Interaction::Resume
-                        } else {
-                            interaction
-                        };
-
+                        // The re-invocation transport comes from the pre-flight
+                        // `effective_interaction` computed above (the manifest
+                        // ceiling, with a `Live` downgrade already folded in and
+                        // journaled once per visit at the NodeStarted guard). A
+                        // live-injectable node only reaches this answer-round arm
+                        // when its agent ignored the tool and printed the marker
+                        // instead (the sidecar happy path answers in-attempt and
+                        // never parks); `resume_decision(Live)` maps that to
+                        // reprompt, which is the marker mechanism itself.
+                        //
                         // A resume needs both a captured agent session and a
                         // declarative resume form; either missing downgrades to
                         // reprompt, journaled with the reason (transport is a
                         // ceiling, not a promise). Pre-flight decision.
                         let session = last_attempt_session(&events, &current);
-                        let resume_form = crate::invocation::resume_argv(&agent_id);
+                        let resume_form = crate::invocation::resume_argv(&prim_agent);
                         match resume_decision(
-                            interaction,
-                            &agent_id,
+                            effective_interaction,
+                            &prim_agent,
                             &current,
                             session.as_ref(),
                             resume_form.as_ref(),
@@ -1904,6 +1995,19 @@ fn drive(
                         node: current.clone(),
                         attempt: 1,
                     })?;
+                    // Journal the live->resume downgrade once per visit (spec
+                    // 2026-07-20, Task 11): the ceiling was `Live` but injection
+                    // is unavailable (non-claude agent or the exe did not
+                    // resolve), so this visit runs the marker/resume path
+                    // instead. Placed under the first-attempt guard so it fires
+                    // exactly once, before the marker attempt runs.
+                    if let Some(detail) = &live_downgrade_detail {
+                        log.append(EventPayload::SupervisorAction {
+                            action: "interaction_downgraded".into(),
+                            node: Some(current.clone()),
+                            detail: detail.clone(),
+                        })?;
+                    }
                 }
                 let override_prompt = prompt_overrides.remove(&current);
                 // Whether THIS attempt is a resume re-invocation: a runtime
@@ -1930,6 +2034,21 @@ fn drive(
                         // `None` on the first attempt of a visit and on the
                         // reprompt path.
                         resume_ctx.take(),
+                        // Live sidecar (spec 2026-07-20, Task 11): injected only
+                        // when the ceiling is `Live` on claude and the exe
+                        // resolved; a downgrade hands `None` and the marker path
+                        // runs. Rebuilt per attempt so each re-invocation of an
+                        // injectable node points the sidecar at the right exe.
+                        if live_injectable {
+                            Some(crate::scheduler::node::LiveContext {
+                                exe: live_exe
+                                    .clone()
+                                    .expect("live_injectable implies a resolved exe"),
+                                timeout_ms: live_timeout_ms,
+                            })
+                        } else {
+                            None
+                        },
                     )?
                 };
                 match outcome {
@@ -1940,6 +2059,16 @@ fn drive(
                     } => {
                         for ev in evs {
                             log.append(ev)?;
+                        }
+                        // Live final sweep (spec 2026-07-20, Task 11): the answer
+                        // that unblocked the agent may have landed in the last
+                        // poll window before the process exited, so observe once
+                        // more to journal its `QuestionAnswered`. Idempotent and
+                        // count-based, so it never double-writes what `on_tick`
+                        // already journaled during the attempt.
+                        if live_injectable {
+                            let journal = Journal::new(&mut *log);
+                            observe_live_channels(run_dir, &current, &journal)?;
                         }
                         // Runtime resume failure (spec 2026-07-20, Task 7): the
                         // resume invocation ran but failed (spawn/transport-init
@@ -2125,6 +2254,8 @@ fn drive(
                         &env_scrub,
                         &journal,
                         // Non-interactive nodes never resume.
+                        None,
+                        // ...and never run the live sidecar.
                         None,
                     )?
                 };
