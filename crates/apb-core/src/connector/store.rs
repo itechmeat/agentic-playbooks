@@ -224,16 +224,25 @@ pub fn public_meta(dir: &Path) -> PublicMeta {
     }
 }
 
+/// The markdown body after `PUBLIC.md`'s frontmatter block, from content
+/// already in memory. Empty when there is no `---`-delimited block. Split out
+/// from [`public_body`] for the same reason as [`public_meta_from_str`]: an
+/// embedded official connector carries `PUBLIC.md` as bytes in the binary and
+/// has no directory to read it from.
+pub fn public_body_from_str(content: &str) -> String {
+    match split_frontmatter(content) {
+        Some((_, body)) => body.to_string(),
+        None => String::new(),
+    }
+}
+
 /// The markdown body of `PUBLIC.md`, after its frontmatter block. Empty
 /// when the file is missing or has no frontmatter block.
 pub fn public_body(dir: &Path) -> String {
     let Ok(content) = std::fs::read_to_string(dir.join("PUBLIC.md")) else {
         return String::new();
     };
-    match split_frontmatter(&content) {
-        Some((_, body)) => body.to_string(),
-        None => String::new(),
-    }
+    public_body_from_str(&content)
 }
 
 #[cfg(test)]

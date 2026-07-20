@@ -1192,3 +1192,97 @@ async fn install_endpoint_unknown_is_404_and_invalid_name_is_400() {
     assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
     assert_eq!(json["error"], serde_json::json!("invalid_name"));
 }
+
+/// `GET /api/connectors/{name}` for an embedded official connector that is NOT
+/// installed: not being installed is a state, not a 404. The manifest half of
+/// the response comes out of the binary and must be fully populated so the
+/// dashboard can show what a connector does before the user connects it, with
+/// `installed: false` and a `not_installed` trust that is honest about there
+/// being no bytes on disk to have a trust decision about.
+#[tokio::test]
+async fn detail_endpoint_serves_embedded_connector_that_is_not_installed() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    // `setup` installs only the fixture connector, so `github` is embedded but
+    // definitely not installed under this temp config dir.
+
+    let (status, json) = get_json(router(root.path()), "/api/connectors/github").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["name"], "github");
+    assert_eq!(json["installed"], serde_json::json!(false));
+    assert_eq!(json["trust"], "not_installed");
+    assert!(
+        json["version"].as_str().is_some_and(|v| !v.is_empty()),
+        "version comes from the embedded manifest: {json}"
+    );
+    assert!(
+        json["body_md"].as_str().is_some_and(|b| !b.is_empty()),
+        "the About body comes from the embedded PUBLIC.md: {json}"
+    );
+    assert!(
+        json["meta"]["display_name"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()),
+        "storefront meta comes from the embedded PUBLIC.md: {json}"
+    );
+    assert!(
+        !json["functions"]
+            .as_array()
+            .expect("functions array")
+            .is_empty(),
+        "functions come from the embedded manifest: {json}"
+    );
+    assert!(json["accounts"].is_array(), "{json}");
+}
+
+/// The installed answer carries the same field, set the other way, so the
+/// dashboard branches on `installed` instead of guessing from a 404.
+#[tokio::test]
+async fn detail_endpoint_marks_installed_connector_installed() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, json) =
+        get_json(router(root.path()), &format!("/api/connectors/{CONNECTOR}")).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["installed"], serde_json::json!(true));
+    assert_eq!(json["trust"], "unapproved");
+}
+
+/// 404 is reserved for a name that is neither installed nor embedded, so the
+/// dashboard can still tell "no such connector" apart from "not connected".
+#[tokio::test]
+async fn detail_endpoint_404s_only_for_a_name_that_is_neither_installed_nor_embedded() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, _json) = get_json(
+        router(root.path()),
+        "/api/connectors/definitely-not-a-connector",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// `GET /api/connectors/{name}/stats` without `?workspace=`: the connector page
+/// is machine-wide and pins no project, so a missing workspace aggregates
+/// instead of erroring. No recorded calls is an empty 200, not a failure.
+#[tokio::test]
+async fn stats_endpoint_aggregates_without_a_workspace() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, json) = get_json(router(root.path()), "/api/connectors/github/stats").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["connector"], "github");
+    assert_eq!(json["calls"], serde_json::json!(0));
+    assert!(json["by_function"].as_array().is_some_and(|a| a.is_empty()));
+}

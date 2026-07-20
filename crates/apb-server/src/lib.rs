@@ -1,7 +1,7 @@
 pub mod lock;
 pub mod watch;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use apb_core::connector::{config, secrets, store};
@@ -1162,69 +1162,110 @@ async fn uninstall_connector_handler(AxPath(name): AxPath<String>) -> impl IntoR
 /// apart from "there were more but we capped".
 const STATS_RUN_CAP: usize = 50;
 
+/// Running totals of one connector's `ConnectorCall` events, summed over one
+/// or more project roots. Kept as a struct so the per-root scan is a single
+/// method the handler calls in a loop, rather than five mutable locals threaded
+/// through it.
+#[derive(Default)]
+struct ConnectorStatsAcc {
+    /// (function, account) -> (calls, errors, total_duration_ms). A BTreeMap
+    /// keeps the response's `by_function` order deterministic across runs, and
+    /// across roots: the same function/account pair used in two projects sums
+    /// into one row.
+    by_fn: std::collections::BTreeMap<(String, String), (u64, u64, u64)>,
+    by_outcome: std::collections::BTreeMap<String, u64>,
+    total_calls: u64,
+    runs_scanned: u64,
+}
+
+impl ConnectorStatsAcc {
+    /// Folds the most recent `STATS_RUN_CAP` runs of one project root into the
+    /// totals. The cap is per root, so the machine-wide view scans at most that
+    /// many runs from each project rather than truncating older projects away.
+    /// A run whose event log cannot be read is skipped.
+    fn scan_root(&mut self, root: &Path, name: &str) -> Result<(), apb_engine::EngineError> {
+        let runs = apb_engine::list_runs(root)?;
+        let runs_dir = root.join(".apb/runs");
+        for run in runs.iter().take(STATS_RUN_CAP) {
+            self.runs_scanned += 1;
+            let Ok(events) = apb_engine::event::read_all(&runs_dir.join(&run.run_id)) else {
+                continue;
+            };
+            for event in &events {
+                let apb_engine::event::EventPayload::ConnectorCall {
+                    connector,
+                    function,
+                    account,
+                    outcome,
+                    duration_ms,
+                    ..
+                } = &event.payload
+                else {
+                    continue;
+                };
+                if connector != name {
+                    continue;
+                }
+                self.total_calls += 1;
+                let entry = self
+                    .by_fn
+                    .entry((function.clone(), account.clone()))
+                    .or_insert((0, 0, 0));
+                entry.0 += 1;
+                if outcome != "ok" {
+                    entry.1 += 1;
+                }
+                entry.2 += duration_ms;
+                *self.by_outcome.entry(outcome.clone()).or_insert(0) += 1;
+            }
+        }
+        Ok(())
+    }
+}
+
 /// GET /api/connectors/{name}/stats: usage stats for one connector,
 /// aggregated by scanning the `ConnectorCall` events (`apb-engine`'s
-/// `event.rs`) of the most recent `STATS_RUN_CAP` runs in the resolved
-/// workspace (spec 9). Calls, error rate, and duration are broken down per
-/// function/account pair as well as summed as `by_outcome`. Purely
-/// read-only: no engine state is written, and `ConnectorCall` events never
-/// carry request/response bodies or secrets by construction (`event.rs`), so
-/// this cannot leak anything the run log itself does not already hold.
+/// `event.rs`) of the most recent `STATS_RUN_CAP` runs (spec 9). Calls, error
+/// rate, and duration are broken down per function/account pair as well as
+/// summed as `by_outcome`. Purely read-only: no engine state is written, and
+/// `ConnectorCall` events never carry request/response bodies or secrets by
+/// construction (`event.rs`), so this cannot leak anything the run log itself
+/// does not already hold.
+///
+/// Scoped like the list and detail endpoints: `?workspace=<id>` is the strict
+/// single-project view and still 500s when that project's runs cannot be
+/// listed, while without it (the connector page is machine-wide and pins no
+/// project) the totals are the sum across every reachable project, and a
+/// project whose run log cannot be read is skipped rather than failing the
+/// whole request. A connector with no recorded calls - including one that is
+/// not installed - is an empty result and a 200, never an error.
 async fn connector_stats_handler(
     State(state): State<AppState>,
     AxPath(name): AxPath<String>,
     Query(q): Query<WsQuery>,
 ) -> impl IntoResponse {
-    let root = match resolve_root(&state, q.workspace.as_deref()) {
+    let roots = match connector_roots(&state, q.workspace.as_deref()) {
         Ok(r) => r,
         Err(e) => return e,
     };
-    let runs = match apb_engine::list_runs(&root) {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    };
-    let runs_dir = root.join(".apb/runs");
-
-    // (function, account) -> (calls, errors, total_duration_ms). A BTreeMap
-    // keeps the response's `by_function` order deterministic across runs.
-    let mut by_fn: std::collections::BTreeMap<(String, String), (u64, u64, u64)> =
-        std::collections::BTreeMap::new();
-    let mut by_outcome: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
-    let mut total_calls: u64 = 0;
-    let mut runs_scanned: u64 = 0;
-
-    for run in runs.iter().take(STATS_RUN_CAP) {
-        runs_scanned += 1;
-        let Ok(events) = apb_engine::event::read_all(&runs_dir.join(&run.run_id)) else {
-            continue;
-        };
-        for event in &events {
-            let apb_engine::event::EventPayload::ConnectorCall {
-                connector,
-                function,
-                account,
-                outcome,
-                duration_ms,
-                ..
-            } = &event.payload
-            else {
-                continue;
-            };
-            if connector != &name {
-                continue;
+    let strict = q.workspace.is_some();
+    let mut acc = ConnectorStatsAcc::default();
+    for root in &roots {
+        match acc.scan_root(root, &name) {
+            Ok(()) => {}
+            Err(e) if strict => {
+                return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
             }
-            total_calls += 1;
-            let entry = by_fn
-                .entry((function.clone(), account.clone()))
-                .or_insert((0, 0, 0));
-            entry.0 += 1;
-            if outcome != "ok" {
-                entry.1 += 1;
-            }
-            entry.2 += duration_ms;
-            *by_outcome.entry(outcome.clone()).or_insert(0) += 1;
+            Err(_) => continue,
         }
     }
+
+    let ConnectorStatsAcc {
+        by_fn,
+        by_outcome,
+        total_calls,
+        runs_scanned,
+    } = acc;
 
     let by_function: Vec<serde_json::Value> = by_fn
         .into_iter()
@@ -1256,6 +1297,43 @@ async fn connector_stats_handler(
     .into_response()
 }
 
+/// The installation-independent half of the connector detail response: the
+/// parsed manifest plus the storefront page. It comes off disk for an
+/// installed connector and straight out of the binary for an embedded official
+/// one that is merely not installed, which is why the two are resolved
+/// together here rather than at each use site.
+struct ConnectorPublic {
+    doc: apb_core::connector::def::ConnectorDoc,
+    meta: store::PublicMeta,
+    body_md: String,
+}
+
+/// The manifest and storefront page of `name`, plus the installed connector it
+/// came from when there is one. `None` for a name that is neither installed
+/// nor embedded - the only case the detail endpoint answers with a 404.
+///
+/// Not being installed is a state, not an error: every official connector's
+/// manifest is baked into this binary and none of it is private, so the public
+/// half is served either way and only the `LoadedConnector` (which describes
+/// bytes on disk) is absent.
+fn connector_public(name: &str) -> Option<(ConnectorPublic, Option<store::LoadedConnector>)> {
+    if let Ok(loaded) = store::load(name) {
+        let public = ConnectorPublic {
+            doc: loaded.doc.clone(),
+            meta: store::public_meta(&loaded.dir),
+            body_md: store::public_body(&loaded.dir),
+        };
+        return Some((public, Some(loaded)));
+    }
+    let embedded = apb_core::connector::official::get(name)?;
+    let public = ConnectorPublic {
+        doc: embedded.doc()?,
+        meta: embedded.meta(),
+        body_md: embedded.public_body(),
+    };
+    Some((public, None))
+}
+
 /// GET /api/connectors/{name}: the manifest (functions, account fields),
 /// storefront body, and the merged account list with non-secret fields,
 /// missing env var NAMES (never values), and per-account trust status (spec
@@ -1267,6 +1345,15 @@ async fn connector_stats_handler(
 /// since all three are root-independent, and the account rows are the union
 /// across every reachable project, each account listed once. A machine with no
 /// reachable project still gets the connector, with an empty account list.
+///
+/// A connector that is not installed but IS embedded answers with the same
+/// shape and `installed: false`, so the dashboard can show what a connector
+/// does before the user connects it. Account rows are still real there:
+/// account config lives in a separate `connector-config/` tree that survives
+/// (and precedes) installation. `trust` describes bytes on disk that do not
+/// exist yet, so it reports its own `not_installed` state rather than
+/// borrowing `unapproved`, which would read as a trust decision nobody made.
+/// 404 is reserved for a name that is neither installed nor embedded.
 async fn get_connector_handler(
     State(state): State<AppState>,
     AxPath(name): AxPath<String>,
@@ -1276,18 +1363,21 @@ async fn get_connector_handler(
         Ok(r) => r,
         Err(e) => return e,
     };
-    let loaded = match store::load(&name) {
-        Ok(l) => l,
-        Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    let Some((public, installed)) = connector_public(&name) else {
+        return (
+            StatusCode::NOT_FOUND,
+            format!("connector `{name}` is not installed and is not an official connector"),
+        )
+            .into_response();
     };
     let accounts_cfg = match merged_accounts(&roots, &name) {
         Ok(a) => a,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     let trust = TrustStore::load();
-    let secret_fields = loaded.doc.secret_fields();
+    let secret_fields = public.doc.secret_fields();
 
-    let functions: Vec<serde_json::Value> = loaded
+    let functions: Vec<serde_json::Value> = public
         .doc
         .functions
         .iter()
@@ -1305,7 +1395,7 @@ async fn get_connector_handler(
     let accounts: Vec<serde_json::Value> = accounts_cfg
         .iter()
         .map(|(root, a)| {
-            let vars: Vec<String> = config::env_refs(&loaded.doc, a).into_values().collect();
+            let vars: Vec<String> = config::env_refs(&public.doc, a).into_values().collect();
             let missing_env = secrets::missing_vars(root, &vars);
             // Non-secret fields only: a secret field's config value is the raw
             // `{{env.VAR}}` reference, not the value itself, but the detail
@@ -1329,14 +1419,18 @@ async fn get_connector_handler(
         })
         .collect();
 
-    let connector_trust = digest_trust_status(&trust, &loaded.digest, &name, Kind::Connector);
+    let connector_trust = match &installed {
+        Some(l) => digest_trust_status(&trust, &l.digest, &name, Kind::Connector),
+        None => "not_installed",
+    };
 
     Json(serde_json::json!({
-        "name": loaded.name,
-        "version": loaded.doc.version,
+        "name": name,
+        "version": public.doc.version,
+        "installed": installed.is_some(),
         "trust": connector_trust,
-        "meta": store::public_meta(&loaded.dir),
-        "body_md": store::public_body(&loaded.dir),
+        "meta": public.meta,
+        "body_md": public.body_md,
         "functions": functions,
         "accounts": accounts,
     }))

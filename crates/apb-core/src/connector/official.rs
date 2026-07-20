@@ -44,6 +44,28 @@ impl OfficialConnector {
         Ok(())
     }
 
+    /// This connector's parsed manifest, from the embedded `connector.yaml`.
+    /// `None` when the file is absent, is not UTF-8, or fails to parse -
+    /// [`list`] already skips such a folder, so a connector obtained from
+    /// [`list`] or [`get`] always parses; the `Option` exists so a caller
+    /// never has to unwrap on that invariant.
+    pub fn doc(&self) -> Option<ConnectorDoc> {
+        let raw = self.files.get("connector.yaml")?;
+        let text = std::str::from_utf8(raw).ok()?;
+        ConnectorDoc::from_yaml(text, &self.name).ok()
+    }
+
+    /// The markdown body of this connector's embedded `PUBLIC.md`, after its
+    /// frontmatter block. Empty when the file is absent, is not UTF-8, or has
+    /// no frontmatter block, matching [`super::store::public_body`].
+    pub fn public_body(&self) -> String {
+        self.files
+            .get("PUBLIC.md")
+            .and_then(|bytes| std::str::from_utf8(bytes).ok())
+            .map(super::store::public_body_from_str)
+            .unwrap_or_default()
+    }
+
     /// The storefront metadata from this connector's embedded `PUBLIC.md`, so
     /// an "available to install" listing can show the same `display_name`,
     /// `summary` and `tags` the installed listing shows. Falls back to a
