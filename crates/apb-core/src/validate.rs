@@ -793,6 +793,10 @@ fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
                 instruction: Some(instruction),
                 ..
             } => check_text(&n.id, instruction, r),
+            NodeKind::Finish {
+                prompt: Some(prompt),
+                ..
+            } => check_text(&n.id, prompt, r),
             _ => {}
         }
     }

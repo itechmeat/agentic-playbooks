@@ -75,7 +75,7 @@ a finish node's `prompt` are rendered as templates before use. This is the
 exact accepted set; any other `{{...}}` reference is rejected at save time as
 a V13 validation error:
 
-- `params.<name>` - a declared playbook param's value, by name.
+- `params.*` - a declared playbook param's value, by name (`params.<name>`).
 - `nodes.<id>.output` - the node's output text.
 - `nodes.<id>.report` - the same value as `.output` (an alias; both names
   resolve identically).
@@ -84,7 +84,8 @@ a V13 validation error:
 - `run.instruction` - the run's input prompt (see below).
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
-- `run.hooks.<key>` - the payload last posted to a `wait` node's webhook `key`.
+- `run.hooks.*` - the payload last posted to a `wait` node's webhook, by key
+  (`run.hooks.<key>`).
 
 An unresolvable reference (an unknown param, a node id that is not in the
 playbook, a namespace outside this list) fails validation before the
@@ -130,14 +131,38 @@ edges:
 
 ## Bounded loops
 
-An edge may carry `max_traversals` (an integer >= 1): the number of times
-that edge may be traversed in one run. A cycle in the graph is only legal
-when at least one of its edges is bounded this way (validator V11); an
-unbounded cycle is refused, and `max_traversals: 0` is refused separately
-(validator V30). Once a bounded edge reaches its cap, edge selection treats
-it as non-matching, so the run takes whatever alternative edge is wired (or
-hits the ordinary no-matching-edge behavior if none is). The canonical
-fix-loop:
+A cycle in the graph is legal only when it carries one of two guards
+(validator V11); a cycle with neither is refused:
+
+- `max_loops` on a `condition` node caps how many times control passes
+  through that node in one run, regardless of how many edges make up the
+  loop. Once the cap is exceeded, the run takes that node's `fallback: true`
+  edge if one is wired, or fails outright if none is. Use this when one
+  `condition` node is naturally the loop's checkpoint.
+- `max_traversals` on an edge (an integer >= 1; `max_traversals: 0` is
+  refused separately, validator V30) caps that one specific edge. Once its
+  count is reached, edge selection treats it as non-matching, so the run
+  takes whatever alternative edge is wired instead (or hits the ordinary
+  no-matching-edge behavior if none is). Use this when the loop has no
+  `condition` node, or when only one edge in the cycle - not the whole loop -
+  needs the cap.
+
+A `condition`-node loop:
+
+```yaml
+nodes:
+  - { id: lint,  type: script, script: "scripts/lint.sh", runner: sh }
+  - { id: check, type: condition, max_loops: 3 }
+  - { id: fix,   type: agent_task, prompt: "fix: {{nodes.lint.output}}", profile: architect }
+  - { id: done,  type: finish, outcome: success }
+edges:
+  - { from: lint,  to: check }
+  - { from: check, to: done, condition: { type: node_status, node: lint, equals: success } }
+  - { from: check, to: fix,  condition: { type: node_status, node: lint, equals: failure } }
+  - { from: fix,   to: lint }
+```
+
+The canonical `max_traversals` fix-loop (no `condition` node in the cycle):
 
 ```yaml
 edges:

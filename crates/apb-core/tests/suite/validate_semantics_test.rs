@@ -216,6 +216,29 @@ fn v13_scans_playbook_node_instruction() {
     );
 }
 
+const FINISH_WITH_BAD_PROMPT: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\n\
+     nodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success, \
+     prompt: \"{{outputs.x}}\" }\nedges:\n  - { from: s, to: f }\n";
+
+// A finish-with-prompt node renders {{...}} templates the same as agent_task
+// and prompt nodes (context.rs's `render`), so an unresolvable reference
+// there must be caught at save time too, not left to render empty at run
+// time (the same class of gap V13 already closes for agent_task/prompt/
+// playbook-instruction, see `v13_scans_playbook_node_instruction` above).
+#[test]
+fn v13_scans_finish_node_prompt() {
+    let playbook = Playbook::from_yaml(FINISH_WITH_BAD_PROMPT).unwrap();
+    let report = validate(&playbook, &ctx());
+    assert!(
+        report
+            .issues
+            .iter()
+            .any(|i| i.code == "V13" && i.node.as_deref() == Some("f")),
+        "expected a V13 issue on the finish node's prompt, got {:?}",
+        report.issues.iter().map(|i| i.code).collect::<Vec<_>>()
+    );
+}
+
 #[test]
 fn v14_unknown_profile_reference() {
     // Explicit `scope: project` - existence is checked by the validator.
