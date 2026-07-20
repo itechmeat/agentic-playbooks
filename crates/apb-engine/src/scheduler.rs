@@ -277,28 +277,24 @@ fn node_finished_count(events: &[Event], node: &str) -> usize {
 }
 
 /// Whether `questions.jsonl` already carries an unanswered question for this
-/// node posted under `attempt`. Guards against a duplicate channel append when
-/// drive crashed after `post_question` but before journaling `QuestionAsked`:
-/// on resume the journal-count declare-once guard would re-post, but the
-/// channel entry is already there. Unanswered questions are the tail beyond the
-/// answered count (count-based consumption), so we only inspect those.
-fn channel_has_unanswered_question(
-    run_dir: &Path,
-    node: &str,
-    attempt: u32,
-) -> Result<bool, EngineError> {
-    let questions: Vec<_> = read_questions_after(run_dir, None)?
+/// node: more question entries than answer entries for it (count-based
+/// consumption). Guards against a duplicate channel append when drive crashed
+/// after `post_question` but before journaling `QuestionAsked` - on resume the
+/// journal-count declare-once guard would re-post, but the channel entry is
+/// already there. Keyed on the unanswered tail rather than the attempt number:
+/// the attempt drifts across a crash-resume (the pre-crash `AttemptStarted` is
+/// durable, so the resumed post computes a higher attempt), which is exactly
+/// the crash window this guard must cover.
+fn node_has_unanswered_channel_question(run_dir: &Path, node: &str) -> Result<bool, EngineError> {
+    let questions = read_questions_after(run_dir, None)?
         .into_iter()
         .filter(|q| q.node == node)
-        .collect();
-    let answered = read_answers_after(run_dir, None)?
+        .count();
+    let answers = read_answers_after(run_dir, None)?
         .into_iter()
         .filter(|a| a.node == node)
         .count();
-    Ok(questions
-        .iter()
-        .skip(answered)
-        .any(|q| q.attempt == attempt))
+    Ok(questions > answers)
 }
 
 fn wait_started_count(events: &[Event], node: &str) -> usize {
@@ -1630,8 +1626,8 @@ fn drive(
                         let attempt = attempt_started_count(&events, &current) as u32;
                         // Idempotent channel post: skip if a crash between a
                         // prior post_question and its QuestionAsked already left
-                        // this exact question in questions.jsonl.
-                        if !channel_has_unanswered_question(run_dir, &current, attempt)? {
+                        // an unanswered question for this node in questions.jsonl.
+                        if !node_has_unanswered_channel_question(run_dir, &current)? {
                             post_question(run_dir, &current, attempt, &question, options.clone())?;
                         }
                         log.append(EventPayload::QuestionAsked {
