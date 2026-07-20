@@ -15,6 +15,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
+use apb_engine::control::{Control, read_control_after, read_control_cursor};
 use apb_engine::error::EngineError;
 use apb_engine::event::{EventLog, EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, RunResult, run};
@@ -81,6 +82,34 @@ fn sleepy_agent(dir: &Path) -> (String, PathBuf) {
     (path.to_string_lossy().to_string(), marker)
 }
 
+/// Sets `APB_AGENT_CMD` for the lifetime of the guard and removes it on drop,
+/// including when the test panics in between. A bare `set_var ... remove_var`
+/// pair leaks the variable whenever an assertion or a `recv_timeout` between
+/// them fails, and because this suite runs as modules of ONE process that leak
+/// would point every later test at a stale stub agent. Holds the shared env
+/// lock for the same span.
+struct AgentEnv {
+    _lock: std::sync::MutexGuard<'static, ()>,
+}
+
+impl AgentEnv {
+    fn set(prog: &str) -> Self {
+        let lock = common::env_lock();
+        unsafe {
+            std::env::set_var("APB_AGENT_CMD", prog);
+        }
+        Self { _lock: lock }
+    }
+}
+
+impl Drop for AgentEnv {
+    fn drop(&mut self) {
+        unsafe {
+            std::env::remove_var("APB_AGENT_CMD");
+        }
+    }
+}
+
 const WF: &str = r#"
 schema: 1
 id: stopflow
@@ -119,10 +148,7 @@ fn stop_interrupts_an_in_flight_agent() {
     seed(dir.path(), "stopflow");
     let (prog, marker) = sleepy_agent(dir.path());
 
-    let _env = common::env_lock();
-    unsafe {
-        std::env::set_var("APB_AGENT_CMD", &prog);
-    }
+    let _env = AgentEnv::set(&prog);
 
     let root = dir.path().to_path_buf();
     let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
@@ -149,10 +175,6 @@ fn stop_interrupts_an_in_flight_agent() {
         )
     });
     let elapsed = started.elapsed();
-    unsafe {
-        std::env::remove_var("APB_AGENT_CMD");
-    }
-    drop(_env);
 
     assert!(
         elapsed < Duration::from_secs(AGENT_SLEEP_SECS),
@@ -178,6 +200,21 @@ fn stop_interrupts_an_in_flight_agent() {
             .count(),
         1,
         "the abort must be applied exactly once"
+    );
+    // The watcher only OBSERVES control.jsonl. Advancing the cursor is the
+    // drive loop's job and happens once, when it applies the abort - so the
+    // persisted cursor must name exactly the abort entry the drive consumed,
+    // never a value the watcher raced ahead to.
+    let posted = read_control_after(&run_dir, None).unwrap();
+    let abort_seq = posted
+        .iter()
+        .find(|e| matches!(e.cmd, Control::Abort { .. }))
+        .expect("the stop must have posted an Abort")
+        .seq;
+    assert_eq!(
+        read_control_cursor(&run_dir).unwrap(),
+        Some(abort_seq),
+        "the drive loop, not the watcher, owns the control cursor"
     );
 }
 
@@ -214,10 +251,7 @@ fn stop_aborts_even_when_the_killed_node_has_no_way_forward() {
     common::seed_main(dir.path());
     let (prog, marker) = sleepy_agent(dir.path());
 
-    let _env = common::env_lock();
-    unsafe {
-        std::env::set_var("APB_AGENT_CMD", &prog);
-    }
+    let _env = AgentEnv::set(&prog);
 
     let root = dir.path().to_path_buf();
     let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
@@ -235,10 +269,6 @@ fn stop_aborts_even_when_the_killed_node_has_no_way_forward() {
     let res = rx
         .recv_timeout(ABORT_DEADLINE)
         .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
-    unsafe {
-        std::env::remove_var("APB_AGENT_CMD");
-    }
-    drop(_env);
 
     let res = res.expect("a stopped run must abort cleanly, not fail the drive with an error");
     assert_eq!(res.outcome, RunStatus::Aborted);

@@ -595,7 +595,11 @@ pub(crate) fn stop_cmd(root: &Path, run_id: &str) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(StopOutcome::AlreadyTerminal) => {
-            println!("{run_id} has already finished, nothing to stop");
+            // Deliberately not "nothing to stop": this outcome also covers a
+            // run that finished while the stop was in flight, in which case an
+            // abort has already been posted. What is true in both cases is
+            // that the run had reached a terminal state on its own.
+            println!("{run_id} had already finished, so no run was stopped");
             ExitCode::SUCCESS
         }
         Err(e) => {

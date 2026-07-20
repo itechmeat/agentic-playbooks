@@ -52,8 +52,16 @@ pub enum StopOutcome {
     /// Nothing was driving the run any more, so this call wrote the terminal
     /// `RunAborted` itself.
     FinalizedDeadRun,
-    /// The run had already reached a terminal state. Nothing was posted and
-    /// nothing was written.
+    /// The run was already terminal, so this call wrote no terminal event.
+    ///
+    /// Note that this does NOT always mean nothing happened. On the common
+    /// path the run was terminal on entry and the call is a pure no-op. It is
+    /// also returned when the run turned terminal under us - a driver
+    /// finalizing between our first journal read and the re-check we do
+    /// immediately before finalizing - and on that path the abort has already
+    /// been posted to control.jsonl and propagated to sub-playbook children.
+    /// What the variant promises is only this: no terminal event was written
+    /// by us, because the run already had one.
     AlreadyTerminal,
 }
 
@@ -82,6 +90,11 @@ fn is_terminal(status: RunStatus) -> bool {
 /// terminal event: writing one here as well would double-apply the abort and
 /// race the driver's own journal writes. If no driver is alive, nobody else
 /// ever will, so this call has to do it or the run stays `running` forever.
+///
+/// A run that is terminal on entry short-circuits before anything is posted.
+/// A run that BECOMES terminal while we work returns `AlreadyTerminal` too,
+/// but by then the abort has been posted and propagated to children - see the
+/// variant's own documentation.
 pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -149,11 +162,7 @@ pub(crate) fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineErro
     for e in &events {
         if let EventPayload::ChildRunStarted { run_id: child, .. } = &e.payload {
             let child_dir = root.join(".apb/runs").join(child);
-            if child_dir.is_dir()
-                && !matches!(
-                    RunState::fold(&read_all(&child_dir)?).run_status,
-                    RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
-                )
+            if child_dir.is_dir() && !is_terminal(RunState::fold(&read_all(&child_dir)?).run_status)
             {
                 // Best-effort per child (a child that raced to terminal or lost
                 // its dir must not block the parent abort), but no longer
@@ -198,14 +207,23 @@ fn driver_is_live(run_dir: &Path, run_id: &str) -> bool {
     if pid == std::process::id() {
         return true;
     }
-    let Some(argv) = process_argv(pid) else {
-        return false;
+    let argv = match process_probe(pid) {
+        // The probe worked and the process is gone (or is a zombie, which
+        // holds a pid but drives nothing). The only branch that may conclude
+        // "dead" without knowing what the process is.
+        Probe::NotFound => return false,
+        // The probe itself did not work: no `ps` on this host, an unreadable
+        // answer. We know nothing, so we assume the driver is alive - see the
+        // bias documented above. Concluding "dead" here would let a host
+        // without `ps` write a terminal event over every live run.
+        Probe::Unknown => return true,
+        Probe::Running(argv) => argv,
     };
-    if argv.contains(&format!("--run-id {run_id}")) {
+    if driver_argv_names_run(&argv, run_id) {
         // Definitive: this process is the detached driver of this very run.
         return true;
     }
-    if argv.contains("__drive-run") {
+    if argv.split_whitespace().any(|t| t == "__drive-run") {
         // A driver, but of some other run: our pid was reused.
         return false;
     }
@@ -215,22 +233,69 @@ fn driver_is_live(run_dir: &Path, run_id: &str) -> bool {
     argv_program_is_apb(&argv)
 }
 
-/// The full command line of `pid`, or `None` when there is no such live
-/// process. A zombie is reported as dead: it holds a pid but drives nothing.
-fn process_argv(pid: u32) -> Option<String> {
-    let out = Command::new("ps")
+/// Does this command line belong to the detached driver of `run_id`?
+///
+/// Compared token by token rather than as a substring: `--run-id stopflow-12`
+/// is a prefix of `--run-id stopflow-123456`, so a substring test would let a
+/// stop of the short run mistake the long run's driver for its own and report
+/// a live driver that is in fact driving something else. Both the
+/// `--run-id X` and `--run-id=X` spellings are accepted; the engine only ever
+/// spawns the former, but reading argv is a loose contract.
+fn driver_argv_names_run(argv: &str, run_id: &str) -> bool {
+    let mut tokens = argv.split_whitespace();
+    while let Some(tok) = tokens.next() {
+        if tok == "--run-id" {
+            return tokens.next() == Some(run_id);
+        }
+        if let Some(value) = tok.strip_prefix("--run-id=") {
+            return value == run_id;
+        }
+    }
+    false
+}
+
+/// The answer to "what is process `pid`?". Deliberately three-valued: "the
+/// probe says there is no such process" and "the probe could not tell us
+/// anything" are very different facts, and collapsing them into `None` is what
+/// would make a missing `ps` read as a dead driver.
+enum Probe {
+    Running(String),
+    NotFound,
+    Unknown,
+}
+
+fn process_probe(pid: u32) -> Probe {
+    let out = match Command::new("ps")
         .args(["-o", "stat=", "-o", "args=", "-p", &pid.to_string()])
         .output()
-        .ok()?;
-    if !out.status.success() {
-        return None;
-    }
+    {
+        Ok(out) => out,
+        // `ps` is missing or could not be spawned at all.
+        Err(_) => return Probe::Unknown,
+    };
     let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    let (stat, argv) = line.split_once(char::is_whitespace)?;
-    if stat.starts_with('Z') {
-        return None;
+    if !out.status.success() {
+        // The ordinary "no such process" answer: a non-zero exit with nothing
+        // on stdout (the diagnostic goes to stderr). A non-zero exit that DID
+        // print something is some other failure, and we do not guess.
+        return if line.is_empty() {
+            Probe::NotFound
+        } else {
+            Probe::Unknown
+        };
     }
-    Some(argv.trim().to_string())
+    // A successful probe that printed nothing also means no such process.
+    if line.is_empty() {
+        return Probe::NotFound;
+    }
+    let Some((stat, argv)) = line.split_once(char::is_whitespace) else {
+        // Output we cannot parse: unknown, not dead.
+        return Probe::Unknown;
+    };
+    if stat.starts_with('Z') {
+        return Probe::NotFound;
+    }
+    Probe::Running(argv.trim().to_string())
 }
 
 fn argv_program_is_apb(argv: &str) -> bool {
@@ -346,6 +411,36 @@ mod tests {
         )
         .unwrap();
         assert!(driver_is_live(dir.path(), "any-run"));
+    }
+
+    #[test]
+    fn run_id_is_matched_as_a_token_not_a_prefix() {
+        assert!(driver_argv_names_run(
+            "/usr/bin/apb __drive-run --root /w --run-id stopflow-12",
+            "stopflow-12"
+        ));
+        assert!(driver_argv_names_run(
+            "/usr/bin/apb __drive-run --run-id=stopflow-12 --resume",
+            "stopflow-12"
+        ));
+        // The bug this guards: a prefix must not pass for the longer id.
+        assert!(!driver_argv_names_run(
+            "/usr/bin/apb __drive-run --root /w --run-id stopflow-123456",
+            "stopflow-12"
+        ));
+        assert!(!driver_argv_names_run("/usr/bin/apb mcp", "stopflow-12"));
+    }
+
+    #[test]
+    fn a_probe_that_cannot_answer_never_concludes_dead() {
+        // A live pid this test certainly owns.
+        assert!(matches!(
+            process_probe(std::process::id()),
+            Probe::Running(_)
+        ));
+        // `ps` answering "no such process" is the one case that means dead.
+        // Pid 0 is never a normal user process on unix.
+        assert!(matches!(process_probe(u32::MAX), Probe::NotFound));
     }
 
     #[test]
