@@ -17,6 +17,8 @@ mod common;
 
 #[path = "suite/advisory_tools_test.rs"]
 mod advisory_tools_test;
+#[path = "suite/ask_server_test.rs"]
+mod ask_server_test;
 #[path = "suite/capture_tools_test.rs"]
 mod capture_tools_test;
 #[path = "suite/catalog_tools_test.rs"]

@@ -93,3 +93,17 @@ pub(crate) fn mcp_cmd(root: &Path) -> ExitCode {
         }
     }
 }
+
+/// `apb __ask-server`: the hidden live-question sidecar (spec 2026-07-20-
+/// interactive-nodes, Task 10). Blocking; serves stdio MCP until the injecting
+/// agent closes stdin. Errors (unset/mismatched `APB_RUN_DIR`, unsafe segment)
+/// exit non-zero with a message that names the offending input.
+pub(crate) fn ask_server_cmd(run: &str, node: &str, attempt: u32) -> ExitCode {
+    match apb_mcp::ask_server::serve(run, node, attempt) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("ask-server failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}

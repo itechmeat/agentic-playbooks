@@ -1,4 +1,5 @@
 pub mod advisory_tools;
+pub mod ask_server;
 pub mod catalog;
 pub mod instructions;
 pub mod plan;

@@ -22,7 +22,7 @@ use crate::run::{
     answer_cmd, drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd,
     run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
 };
-use crate::serve::{dev_cmd, mcp_cmd, serve};
+use crate::serve::{ask_server_cmd, dev_cmd, mcp_cmd, serve};
 use crate::util::resolve_port;
 
 #[derive(Parser)]
@@ -228,6 +228,20 @@ enum Command {
         #[arg(long)]
         resume: bool,
     },
+    /// The live-question sidecar (spec 2026-07-20-interactive-nodes, Task 10):
+    /// a stdio MCP server exposing one `ask_user` tool, injected into the
+    /// coding agent that runs a live interactive `agent_task` node. Resolves
+    /// the run directory from `APB_RUN_DIR` (inherited from the agent). Hidden:
+    /// an internal injection target, not a user-facing command.
+    #[command(hide = true, name = "__ask-server")]
+    AskServer {
+        #[arg(long)]
+        run: String,
+        #[arg(long)]
+        node: String,
+        #[arg(long)]
+        attempt: u32,
+    },
 }
 
 fn main() -> ExitCode {
@@ -323,6 +337,7 @@ fn main() -> ExitCode {
             from_node,
             resume,
         }) => drive_run_child(&run_root, &run_id, from_node.as_deref(), resume),
+        Some(Command::AskServer { run, node, attempt }) => ask_server_cmd(&run, &node, attempt),
         None => serve(resolve_port(None), false),
     }
 }
