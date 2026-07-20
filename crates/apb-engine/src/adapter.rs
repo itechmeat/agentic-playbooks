@@ -9,6 +9,7 @@ use std::time::{Duration, Instant};
 use std::os::unix::process::CommandExt as _;
 
 use apb_core::config::{InvocationDef, PromptVia, SoulDelivery, Transport};
+use serde::Deserialize;
 
 use crate::error::EngineError;
 // Shared with `run_capture` rather than duplicated: the signal-target
@@ -206,11 +207,53 @@ pub struct AgentTask<'a> {
     pub connector_policy: &'a ConnectorEnvPolicy,
 }
 
+/// The marker a `resume`/`reprompt` agent prints on its own stdout line to ask
+/// the user a question mid-run (spec 2026-07-20-interactive-nodes). The very
+/// next non-empty line carries the question as JSON (`AskedQuestion`). The
+/// marker is honored only for interactive nodes (the gate lives in `node.rs`);
+/// on a non-interactive node the literal text has no effect.
+pub const QUESTION_MARKER: &str = "<<<apb:question>>>";
+
+/// A question an agent asked via the stdout marker protocol. Parsed from the
+/// JSON line following [`QUESTION_MARKER`]. `options` is an optional list of
+/// suggested answers; free-text answers are always allowed.
+#[derive(Debug, Clone, Deserialize)]
+pub struct AskedQuestion {
+    pub question: String,
+    #[serde(default)]
+    pub options: Vec<String>,
+}
+
+/// Scans collected stdout for a line equal to [`QUESTION_MARKER`] and parses the
+/// next non-empty line as an [`AskedQuestion`]. Task 4 is lenient: a malformed
+/// JSON line yields `None` (no question), and the attempt is interpreted as a
+/// normal finish. Task 6 tightens this into a hard, node-named failure and adds
+/// the stream-path scan.
+fn scan_question(stdout: &str) -> Option<AskedQuestion> {
+    let mut lines = stdout.lines();
+    while let Some(line) = lines.next() {
+        if line.trim() == QUESTION_MARKER {
+            for next in lines.by_ref() {
+                if next.trim().is_empty() {
+                    continue;
+                }
+                return serde_json::from_str::<AskedQuestion>(next.trim()).ok();
+            }
+        }
+    }
+    None
+}
+
 #[derive(Debug)]
 pub struct AgentReport {
     pub status: NodeStatus,
     pub summary: String,
     pub raw: String,
+    /// Set when the agent asked a question via the stdout marker protocol
+    /// (spec 2026-07-20). `None` on a normal finish. The drive loop parks an
+    /// interactive node whose attempt returns `Some(..)`; a non-interactive
+    /// node ignores it (`node.rs` gates on the node's `interactive` flag).
+    pub question: Option<AskedQuestion>,
 }
 
 pub trait AgentAdapter {
@@ -488,10 +531,16 @@ impl ClaudeAdapter {
         }
         // Status comes from the structured report block (spec 6.2); raw is the full stdout.
         let (status, summary) = interpret_report(&stdout);
+        // Marker scan (spec 2026-07-20, Task 4 minimal headless-path scan): an
+        // interactive node's agent may ask a question instead of finishing. The
+        // interactive gate lives in `node.rs`, so a non-interactive node's
+        // literal marker text is simply ignored there.
+        let question = scan_question(&stdout);
         Ok(AgentReport {
             status,
             summary,
             raw: stdout,
+            question,
         })
     }
 
@@ -758,6 +807,9 @@ fn parse_stream_result(lines: &[String]) -> Result<AgentReport, (ErrorClass, Str
             status,
             summary,
             raw,
+            // The stream-path marker scan lands in Task 6; the reprompt path
+            // (Task 4) uses the headless transport.
+            question: None,
         });
     }
     Err((

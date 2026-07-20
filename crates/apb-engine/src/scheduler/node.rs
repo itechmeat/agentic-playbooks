@@ -35,7 +35,10 @@ pub(crate) fn render_node_prompt(
     ))
 }
 
-/// A single execution of a node. Returns (NodeStatus, output, events).
+/// A single execution of a node. Returns an [`AttemptOutcome`]: `Finished`
+/// (status, output, events) for a normal execution, or `Suspended` when an
+/// interactive `agent_task` asked a question via the stdout marker instead of
+/// finishing (spec 2026-07-20) - drive parks on it and re-invokes on the answer.
 ///
 /// The two attempt-lifecycle events are journaled directly through `journal`:
 /// `attempt_started` at spawn time (so a crash mid-attempt leaves an open
@@ -58,21 +61,33 @@ pub(crate) fn execute_node(
     cancel: &AtomicBool,
     env_scrub: &[String],
     journal: &Journal,
-) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
+) -> Result<AttemptOutcome, EngineError> {
     let node = playbook
         .node(node_id)
         .ok_or_else(|| EngineError::NotFound(node_id.into()))?;
     let mut events: Vec<EventPayload> = Vec::new();
     match &node.kind {
-        NodeKind::Start => Ok((NodeStatus::Succeeded, String::new(), events)),
+        NodeKind::Start => Ok(AttemptOutcome::Finished {
+            status: NodeStatus::Succeeded,
+            output: String::new(),
+            events,
+        }),
         NodeKind::Prompt { prompt } => {
             let text = match &override_prompt {
                 Some(p) => p.clone(),
                 None => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
-            Ok((NodeStatus::Succeeded, text, events))
+            Ok(AttemptOutcome::Finished {
+                status: NodeStatus::Succeeded,
+                output: text,
+                events,
+            })
         }
-        NodeKind::Condition { .. } => Ok((NodeStatus::Succeeded, String::new(), events)),
+        NodeKind::Condition { .. } => Ok(AttemptOutcome::Finished {
+            status: NodeStatus::Succeeded,
+            output: String::new(),
+            events,
+        }),
         NodeKind::AgentTask {
             prompt,
             profile,
@@ -80,6 +95,7 @@ pub(crate) fn execute_node(
             timeout_seconds,
             success_check,
             isolation,
+            interactive,
             ..
         } => {
             let mut text = match &override_prompt {
@@ -244,7 +260,11 @@ pub(crate) fn execute_node(
                     // Cancellation (this branch lost a join:any) - exit with status
                     // Cancelled, not counting this as a failure.
                     if cancel.load(Ordering::Relaxed) {
-                        return Ok((NodeStatus::Cancelled, "cancelled".to_string(), events));
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Cancelled,
+                            output: "cancelled".to_string(),
+                            events,
+                        });
                     }
                     attempt += 1;
                     if try_i > 0 {
@@ -345,6 +365,19 @@ pub(crate) fn execute_node(
                                 duration_ms,
                                 session: None,
                             })?;
+                            // Interactive suspension (spec 2026-07-20): the agent
+                            // asked a question via the stdout marker instead of
+                            // finishing. The attempt genuinely ran (its
+                            // attempt_started/attempt_finished are journaled
+                            // above); we hand drive a suspension to park on rather
+                            // than composing a NodeFinished. The marker is honored
+                            // only on interactive nodes.
+                            if *interactive && let Some(q) = report.question {
+                                return Ok(AttemptOutcome::Suspended {
+                                    question: q.question,
+                                    options: q.options,
+                                });
+                            }
                             if report.status == NodeStatus::Succeeded {
                                 // A deterministic check on top of the self-report (spec 6.2):
                                 // a non-zero check exit code makes the node Failed regardless
@@ -365,14 +398,18 @@ pub(crate) fn execute_node(
                                         None,
                                     )?;
                                     if r.status != NodeStatus::Succeeded {
-                                        return Ok((
-                                            NodeStatus::Failed,
-                                            format!("success_check `{check}` failed"),
+                                        return Ok(AttemptOutcome::Finished {
+                                            status: NodeStatus::Failed,
+                                            output: format!("success_check `{check}` failed"),
                                             events,
-                                        ));
+                                        });
                                     }
                                 }
-                                return Ok((NodeStatus::Succeeded, report.summary, events));
+                                return Ok(AttemptOutcome::Finished {
+                                    status: NodeStatus::Succeeded,
+                                    output: report.summary,
+                                    events,
+                                });
                             }
                             last_msg = report.summary;
                             last_timed_out = false;
@@ -381,11 +418,11 @@ pub(crate) fn execute_node(
                             // Cancellation mid-adapter-work: kill returned Transport,
                             // but this is not a failure - mark the node Cancelled.
                             if cancel.load(Ordering::Relaxed) {
-                                return Ok((
-                                    NodeStatus::Cancelled,
-                                    "cancelled".to_string(),
+                                return Ok(AttemptOutcome::Finished {
+                                    status: NodeStatus::Cancelled,
+                                    output: "cancelled".to_string(),
                                     events,
-                                ));
+                                });
                             }
                             last_timed_out = class == ErrorClass::Timeout;
                             let attempt_status = if last_timed_out {
@@ -415,7 +452,11 @@ pub(crate) fn execute_node(
             } else {
                 NodeStatus::Failed
             };
-            Ok((final_status, last_msg, events))
+            Ok(AttemptOutcome::Finished {
+                status: final_status,
+                output: last_msg,
+                events,
+            })
         }
         NodeKind::Script {
             script,
@@ -427,9 +468,17 @@ pub(crate) fn execute_node(
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
             let r = run_script(run_dir, workdir, script, runner, timeout, Some(cancel))?;
-            Ok((r.status, r.stdout, events))
+            Ok(AttemptOutcome::Finished {
+                status: r.status,
+                output: r.stdout,
+                events,
+            })
         }
-        NodeKind::Finish { .. } => Ok((NodeStatus::Succeeded, String::new(), events)),
+        NodeKind::Finish { .. } => Ok(AttemptOutcome::Finished {
+            status: NodeStatus::Succeeded,
+            output: String::new(),
+            events,
+        }),
         // human_review is handled inside drive itself (pause until a decision), it
         // never reaches here; this branch is defensive. wait - subphase 7b.
         NodeKind::HumanReview { .. } => Err(EngineError::Invalid(format!(
@@ -987,6 +1036,20 @@ pub(crate) fn is_agent_or_script(playbook: &Playbook, node: &str) -> bool {
     matches!(
         playbook.node(node).map(|n| &n.kind),
         Some(NodeKind::AgentTask { .. }) | Some(NodeKind::Script { .. })
+    )
+}
+
+/// Whether a node is an interactive `agent_task` (spec 2026-07-20). Such a node
+/// may park mid-run on a question, so drive keeps it out of the concurrent
+/// batch (which cannot park) and runs it through the sequential park-and-poll
+/// path instead.
+pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
+    matches!(
+        playbook.node(node).map(|n| &n.kind),
+        Some(NodeKind::AgentTask {
+            interactive: true,
+            ..
+        })
     )
 }
 

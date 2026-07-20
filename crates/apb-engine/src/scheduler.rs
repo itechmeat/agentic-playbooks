@@ -24,6 +24,7 @@ use crate::event::{
 use crate::inspect::{should_declare_lost, supervisor_silence_ms, write_supervisor_session};
 use crate::manifest::{ManifestProfile, ManifestSkill, RunExecutionManifest};
 use crate::parallel::{self, JoinReadiness};
+use crate::question::{post_question, read_answers_after};
 use crate::review::read_reviews_after;
 use crate::run_config::{
     CacheRunMode, RunConfig, copy_scripts, read_run_config, snapshot_playbook, write_run_config,
@@ -190,6 +191,25 @@ pub struct RunResult {
     pub outcome: RunStatus,
 }
 
+/// The outcome of one node execution (`execute_node`). A normal execution
+/// `Finished` with a status, output, and the events drive must write in its
+/// return batch. An interactive `agent_task` that asked a question via the
+/// stdout marker instead of finishing returns `Suspended` (spec 2026-07-20):
+/// the drive loop parks it on the question and re-invokes once an answer
+/// arrives. Consumed by Task 5 (timeout expiry in the park loop), Task 6 (the
+/// marker scan that feeds it), and Task 7 (resume-vs-reprompt re-invocation).
+pub(crate) enum AttemptOutcome {
+    Finished {
+        status: NodeStatus,
+        output: String,
+        events: Vec<EventPayload>,
+    },
+    Suspended {
+        question: String,
+        options: Vec<String>,
+    },
+}
+
 fn review_decided_count(events: &[Event], node: &str) -> usize {
     events
         .iter()
@@ -202,6 +222,28 @@ fn review_requested_count(events: &[Event], node: &str) -> usize {
         .iter()
         .filter(
             |e| matches!(&e.payload, EventPayload::ReviewRequested { node: n, .. } if n == node),
+        )
+        .count()
+}
+
+/// How many `QuestionAsked` events a node already carries. Mirrors
+/// `review_requested_count`: drive declares a question once per suspension and
+/// this count keeps the declaration loop-resilient (spec 2026-07-20).
+fn question_asked_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::QuestionAsked { node: n, .. } if n == node))
+        .count()
+}
+
+/// How many `QuestionAnswered` events a node already carries. Mirrors
+/// `review_decided_count`: the N-th answer for a node is consumed once there
+/// are already N `QuestionAnswered` events for it (count-based consumption).
+fn question_answered_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::QuestionAnswered { node: n, .. } if n == node),
         )
         .count()
 }
@@ -803,7 +845,7 @@ fn drive(
     // budget. The limit is checked here, at the start of the iteration.
     let mut steps = 0usize;
 
-    loop {
+    'drive: loop {
         if steps >= max_steps {
             return Err(EngineError::Invalid(format!(
                 "run exceeded {max_steps} steps without reaching a finish node"
@@ -1127,13 +1169,22 @@ fn drive(
         // writes them as threads finish (order = finish order,
         // spec 8.5). Supervised mode never enters here (wake/await is per single
         // node), and neither do human_review/wait/condition (they are not slow and/or they wait).
-        if mode == RunMode::Autonomous {
+        // An interactive `current` never enters the concurrent path: it may park
+        // on a question, and the concurrent batch (which runs on worker threads
+        // that cannot write events or park) has no place to do that. It runs
+        // through the sequential park path below instead. Interactive frontier
+        // nodes are likewise excluded from any batch and picked up as `current`
+        // on a later iteration.
+        if mode == RunMode::Autonomous && !is_interactive(&playbook, &current) {
             let mut batch: Vec<String> = Vec::new();
             if is_agent_or_script(&playbook, &current) {
                 batch.push(current.clone());
             }
             for n in &frontier {
-                if is_agent_or_script(&playbook, n) && !batch.contains(n) {
+                if is_agent_or_script(&playbook, n)
+                    && !is_interactive(&playbook, n)
+                    && !batch.contains(n)
+                {
                     batch.push(n.clone());
                 }
             }
@@ -1195,7 +1246,21 @@ fn drive(
                         drop(tx);
                         // Collect completions in readiness order and write their events.
                         for (node, res) in rx {
-                            let (status, output, evs) = res?;
+                            let (status, output, evs) = match res? {
+                                AttemptOutcome::Finished {
+                                    status,
+                                    output,
+                                    events,
+                                } => (status, output, events),
+                                // Interactive nodes are excluded from the batch
+                                // above, so a suspension here is impossible; be
+                                // explicit rather than silently mishandle it.
+                                AttemptOutcome::Suspended { .. } => {
+                                    return Err(EngineError::Invalid(format!(
+                                        "interactive node `{node}` must not run in a concurrent batch"
+                                    )));
+                                }
+                            };
                             for ev in evs {
                                 journal.append(ev)?;
                             }
@@ -1464,7 +1529,11 @@ fn drive(
             // folded state (`state` predates this iteration's NodeStarted, so a
             // terminal status means a prior NodeFinished for this node).
             let already_finished = state.nodes.get(&current).is_some_and(|st| st.is_finished());
-            let lookup = if already_finished {
+            // An interactive node is never served from cache: a hit would skip
+            // execution and thus the question entirely, silently answering
+            // nothing. It always runs (and re-invokes) live (spec 2026-07-20).
+            let interactive_node = is_interactive(&playbook, &current);
+            let lookup = if already_finished || interactive_node {
                 None
             } else {
                 cache_ctx.as_ref().and_then(|c| c.lookup(cfg))
@@ -1495,59 +1564,164 @@ fn drive(
                         key: ctx.key.clone(),
                     })?;
                 }
-                let override_prompt = prompt_overrides.remove(&current);
-                // The journal borrows `log` for the duration of execute_node so the
-                // node can append attempt_started at spawn time; the block scopes
-                // that borrow so `log` is free again for the return-batch writes.
-                let (st, out, evs) = {
-                    let journal = Journal::new(&mut *log);
-                    execute_node(
-                        &playbook,
-                        run_dir,
-                        &workdir,
-                        &current,
-                        &run_id,
-                        &state,
-                        cfg,
-                        override_prompt,
-                        &run_cancel,
-                        &env_scrub,
-                        &journal,
-                    )?
+                // One-shot Retry override seeds the first invocation; a later
+                // interactive re-invocation replaces it with the answer-carrying
+                // follow-up prompt built below.
+                let mut follow_up = prompt_overrides.remove(&current);
+                // The node's own prompt template, needed to re-render the
+                // follow-up prompt on an interactive re-invocation. Non-agent_task
+                // nodes never suspend, so the empty fallback is never used.
+                let node_prompt = match &node_kind {
+                    NodeKind::AgentTask { prompt, .. } => prompt.clone(),
+                    _ => String::new(),
                 };
-                for ev in evs {
-                    log.append(ev)?;
-                }
-                if let Some(ctx) = &cache_ctx
-                    && st == NodeStatus::Succeeded
-                {
-                    // Scan the run log for this node's connector calls (written
-                    // out of band by the connector-call subprocess) and verify
-                    // each against the read_only set in the run's connector
-                    // snapshot. A script node makes none, so this is (true,
-                    // false) - identical to Task 5's admission.
-                    let (calls_ok, had_calls) = cache::verify_connector_calls(run_dir, &current);
-                    let node = playbook.node(&current).expect("a cache ctx implies a node");
-                    // Capture the node's declared output artifacts. A capture
-                    // error (an unreadable matched file or a path escaping its
-                    // scope root) rejects admission outright: storing a record
-                    // that references artifacts we could not read would be a
-                    // lie. It never fails the run.
-                    match cache::capture_artifacts(node, run_dir, &workdir) {
-                        Ok(captured) => {
-                            node_artifacts = captured.iter().map(|(a, _)| a.clone()).collect();
-                            log.append(ctx.admit(
-                                &workdir, &run_id, &playbook, &out, calls_ok, had_calls, &captured,
-                            ))?;
+                // The interactive re-invocation loop. Each pass runs one attempt.
+                // A normal `Finished` breaks out (a non-interactive node always
+                // takes this path on the first pass). An interactive `Suspended`
+                // parks on the question - exactly like a waiting human_review:
+                // the declaration is journaled once per suspension, a wake is
+                // raised, and drive polls `answers.jsonl` at `AWAIT_CONTROL_POLL`
+                // cadence, bouncing to the top-of-loop control scan on a stop so
+                // stop/abort/resume compose through the existing paths. On an
+                // answer it journals `QuestionAnswered` and re-invokes with the
+                // answer appended (Task 6/7 refine the re-invocation prompt).
+                let (st, out) = 'attempt: loop {
+                    // The journal borrows `log` for the duration of execute_node so
+                    // the node can append attempt_started at spawn time; the block
+                    // scopes that borrow so `log` is free again for the writes below.
+                    let outcome = {
+                        let journal = Journal::new(&mut *log);
+                        execute_node(
+                            &playbook,
+                            run_dir,
+                            &workdir,
+                            &current,
+                            &run_id,
+                            &state,
+                            cfg,
+                            follow_up.take(),
+                            &run_cancel,
+                            &env_scrub,
+                            &journal,
+                        )?
+                    };
+                    let (st, out, evs) = match outcome {
+                        AttemptOutcome::Finished {
+                            status,
+                            output,
+                            events,
+                        } => (status, output, events),
+                        AttemptOutcome::Suspended { question, options } => {
+                            // Declare the question once per suspension (loop- and
+                            // order-resilient, mirroring the human_review
+                            // ReviewRequested guard), and raise a wake so a waiting
+                            // supervisor returns (Task 8).
+                            let events = read_all(run_dir)?;
+                            if question_asked_count(&events, &current)
+                                <= question_answered_count(&events, &current)
+                            {
+                                let attempt = events
+                                    .iter()
+                                    .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == &current))
+                                    .count() as u32;
+                                post_question(
+                                    run_dir,
+                                    &current,
+                                    attempt,
+                                    &question,
+                                    options.clone(),
+                                )?;
+                                log.append(EventPayload::QuestionAsked {
+                                    node: current.clone(),
+                                    question: question.clone(),
+                                    options: options.clone(),
+                                })?;
+                                log.append(EventPayload::WakeRaised {
+                                    trigger: WakeTrigger::Anomaly,
+                                    node: current.clone(),
+                                    detail: "interactive question".into(),
+                                })?;
+                            }
+                            // Park until the next answer for this node arrives.
+                            loop {
+                                // A stop set run_cancel: bounce to the top-of-loop
+                                // control scan (which applies the Abort) without
+                                // re-invoking the agent, composing with
+                                // stop/abort exactly like a parked human_review.
+                                if run_cancel.load(Ordering::SeqCst) {
+                                    continue 'drive;
+                                }
+                                let answered =
+                                    question_answered_count(&read_all(run_dir)?, &current);
+                                let for_node: Vec<_> = read_answers_after(run_dir, None)?
+                                    .into_iter()
+                                    .filter(|a| a.node == current)
+                                    .collect();
+                                if let Some(entry) = for_node.into_iter().nth(answered) {
+                                    log.append(EventPayload::QuestionAnswered {
+                                        node: current.clone(),
+                                        answer: entry.answer.clone(),
+                                        answered_by: entry.answered_by.clone(),
+                                    })?;
+                                    // Floor re-invocation (Task 6/7 refine into the
+                                    // full transcript / session resume): a fresh
+                                    // render of the node prompt with the answer
+                                    // appended as a plain quoted block.
+                                    let base = render_node_prompt(
+                                        run_dir,
+                                        &run_id,
+                                        &state,
+                                        cfg,
+                                        &node_prompt,
+                                    )?;
+                                    follow_up = Some(format!(
+                                        "{base}\n\n## prior answer\n{}",
+                                        entry.answer
+                                    ));
+                                    continue 'attempt;
+                                }
+                                std::thread::sleep(AWAIT_CONTROL_POLL);
+                            }
                         }
-                        Err(reason) => {
-                            log.append(EventPayload::NodeCacheRejected {
-                                node: current.clone(),
-                                reason: format!("artifact capture failed: {reason}"),
-                            })?;
+                    };
+                    for ev in evs {
+                        log.append(ev)?;
+                    }
+                    if let Some(ctx) = &cache_ctx
+                        && st == NodeStatus::Succeeded
+                        && !interactive_node
+                    {
+                        // Scan the run log for this node's connector calls (written
+                        // out of band by the connector-call subprocess) and verify
+                        // each against the read_only set in the run's connector
+                        // snapshot. A script node makes none, so this is (true,
+                        // false) - identical to Task 5's admission.
+                        let (calls_ok, had_calls) =
+                            cache::verify_connector_calls(run_dir, &current);
+                        let node = playbook.node(&current).expect("a cache ctx implies a node");
+                        // Capture the node's declared output artifacts. A capture
+                        // error (an unreadable matched file or a path escaping its
+                        // scope root) rejects admission outright: storing a record
+                        // that references artifacts we could not read would be a
+                        // lie. It never fails the run.
+                        match cache::capture_artifacts(node, run_dir, &workdir) {
+                            Ok(captured) => {
+                                node_artifacts = captured.iter().map(|(a, _)| a.clone()).collect();
+                                log.append(ctx.admit(
+                                    &workdir, &run_id, &playbook, &out, calls_ok, had_calls,
+                                    &captured,
+                                ))?;
+                            }
+                            Err(reason) => {
+                                log.append(EventPayload::NodeCacheRejected {
+                                    node: current.clone(),
+                                    reason: format!("artifact capture failed: {reason}"),
+                                })?;
+                            }
                         }
                     }
-                }
+                    break 'attempt (st, out);
+                };
                 (st, out)
             }
         };
