@@ -63,16 +63,35 @@ fn group_target(pid: u32) -> Option<i32> {
 /// any process remains in the group, and an empty group is a harmless ESRCH.
 pub(crate) fn kill_process_group(pid: u32) {
     #[cfg(unix)]
-    if let Some(target) = group_target(pid) {
+    kill_group_with(pid, &|target| {
         // SAFETY: `kill` takes no pointers and is async-signal-safe; `target`
-        // is a validated negative group id, never a wildcard.
+        // came from `group_target`, so it is a validated negative group id and
+        // never a wildcard.
         unsafe {
             libc::kill(target, libc::SIGKILL);
         }
-    }
+    });
     #[cfg(not(unix))]
     {
         let _ = pid;
+    }
+}
+
+/// The decision half of a group kill, with delivery injected.
+///
+/// Split out so a test can assert the exact `i32` that reaches the syscall,
+/// for every class of input, without delivering a single signal. Testing
+/// `group_target` alone is not enough: both of its tests keep passing if
+/// someone restores a bare `-(pid as i32)` at the call site and deletes the
+/// guard, so what needs pinning is that the guard is WIRED IN, not merely that
+/// it computes the right answer. `kill_process_group` is deliberately nothing
+/// but this function plus the syscall, so there is no third path to drift.
+///
+/// Same shape as `liveness::PsRun`, which injects the process probe so a
+/// broken `ps` can be exercised without touching the real one.
+fn kill_group_with(pid: u32, send: &dyn Fn(i32)) {
+    if let Some(target) = group_target(pid) {
+        send(target);
     }
 }
 
@@ -204,7 +223,43 @@ pub fn run_capture(
 
 #[cfg(test)]
 mod tests {
-    use super::group_target;
+    use super::{group_target, kill_group_with};
+    use std::cell::RefCell;
+
+    /// Every `i32` that a group kill of `pid` would hand to `kill(2)`. Empty
+    /// means no signal would be sent at all.
+    fn targets_sent_for(pid: u32) -> Vec<i32> {
+        let sent = RefCell::new(Vec::new());
+        kill_group_with(pid, &|target| sent.borrow_mut().push(target));
+        sent.into_inner()
+    }
+
+    /// The guard is actually wired into the killer, not merely correct in
+    /// isolation. This is what fails if someone reinstates a bare
+    /// `-(pid as i32)` at the call site, which the `group_target` tests below
+    /// would happily keep passing through.
+    ///
+    /// Delivery is injected rather than real, so a regression is caught with
+    /// zero signals sent. Calling the real killer to prove this would mean a
+    /// test that SIGKILLs the developer's entire session the moment the guard
+    /// is removed, which is not an acceptable way to find out.
+    #[test]
+    fn a_group_kill_delivers_nothing_for_a_target_it_cannot_address() {
+        for pid in [0, 1, u32::MAX, u32::MAX - 1, (i32::MAX as u32) + 1] {
+            assert_eq!(
+                targets_sent_for(pid),
+                Vec::<i32>::new(),
+                "pid {pid} cannot address a group, so no signal may be sent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_kill_of_a_real_pid_addresses_exactly_that_group() {
+        assert_eq!(targets_sent_for(2), vec![-2]);
+        assert_eq!(targets_sent_for(4321), vec![-4321]);
+        assert_eq!(targets_sent_for(i32::MAX as u32), vec![-i32::MAX]);
+    }
 
     /// The signal-target rule, tested as pure arithmetic.
     ///

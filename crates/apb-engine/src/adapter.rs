@@ -607,10 +607,21 @@ impl ClaudeAdapter {
         loop {
             // Only while the agent is still running. Once `drain_deadline` is
             // set the agent has ALREADY exited, and what remains is reading
-            // bytes it left in the pipe; charging that against the node's
+            // bytes it left in the pipe.
+            //
+            // For the timeout half: charging that read against the node's
             // timeout would report `TimedOut` for an agent that finished
             // inside its budget, purely because a leftover descendant made the
             // final read slow.
+            //
+            // For the cancel half: a cancellation arriving during the drain is
+            // ignored for at most `drain_budget()`, which is deliberate and
+            // harmless. Cancellation exists to stop WORK and reclaim the
+            // machine, and there is no work left to stop - the agent is gone
+            // and its group was killed on the line below. All that remains is
+            // copying bytes out of a pipe. Honouring it here would abandon
+            // output the run has already paid for, in exchange for ending a
+            // bounded, idle wait slightly sooner.
             if drain_deadline.is_none()
                 && let Some(err) =
                     Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)

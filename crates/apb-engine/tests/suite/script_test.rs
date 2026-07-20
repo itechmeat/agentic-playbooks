@@ -66,6 +66,56 @@ fn sh_script_timeout_is_timed_out() {
     assert!(elapsed < Duration::from_secs(3), "elapsed = {elapsed:?}");
 }
 
+/// Kills a pid recorded by a stub script, however the test ends.
+///
+/// Constructed BEFORE anything that can panic, and holding an `Option` rather
+/// than requiring a successful read, so that a failed parse or a tripped
+/// assertion still reaps the 300-second `sleep` instead of leaking it into the
+/// developer's session for five minutes.
+///
+/// The pid is validated even though this test wrote the file itself: a signal
+/// target that came from a file gets checked, and `0` would address this test
+/// runner's own process group. Same rule as
+/// `apb_engine::proc::group_target`, in its single-pid form (`> 0`, since no
+/// negation is involved and pid 1 merely EPERMs).
+struct DaemonReaper(Option<i32>);
+
+impl DaemonReaper {
+    /// Reads the pid the stub recorded. Never panics; a missing or malformed
+    /// file simply yields nothing to reap.
+    fn of(pidfile: &std::path::Path) -> Self {
+        Self(
+            fs::read_to_string(pidfile)
+                .ok()
+                .and_then(|s| s.trim().parse::<i32>().ok())
+                .filter(|p| *p > 0),
+        )
+    }
+
+    fn pid(&self) -> i32 {
+        self.0
+            .expect("the script should have recorded a background pid")
+    }
+
+    /// Whether the recorded process is still running.
+    fn target_alive(&self) -> bool {
+        // SAFETY: signal 0 only performs the existence check, and the pid was
+        // validated positive on construction.
+        self.0.is_some_and(|pid| unsafe { libc::kill(pid, 0) } == 0)
+    }
+}
+
+impl Drop for DaemonReaper {
+    fn drop(&mut self) {
+        if let Some(pid) = self.0 {
+            // SAFETY: validated positive pid; `kill` takes no pointers.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+}
+
 // A script that backgrounds a process which inherits its stdout, and then
 // exits. The captured-output drain has to be bounded, because EOF on that pipe
 // belongs to the background process, not to the script: before the bound,
@@ -110,18 +160,11 @@ fn script_backgrounding_a_process_on_its_stdout_is_bounded_and_spares_the_daemon
     .unwrap();
     let elapsed = started.elapsed();
 
-    let pid: i32 = fs::read_to_string(work.path().join("daemon.pid"))
-        .expect("script should have recorded the background pid")
-        .trim()
-        .parse()
-        .expect("background pid");
-
-    // SAFETY: signal 0 only performs the existence check.
-    let daemon_survived = unsafe { libc::kill(pid, 0) } == 0;
-    // SAFETY: reap it either way so the test cannot leak a 300-second sleep.
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
+    // Built before any assertion, so every path out of this test reaps the
+    // background sleep.
+    let daemon = DaemonReaper::of(&work.path().join("daemon.pid"));
+    let daemon_survived = daemon.target_alive();
+    daemon.pid();
 
     assert!(
         elapsed < std::time::Duration::from_secs(60),
@@ -162,15 +205,7 @@ fn an_expired_drain_says_so_instead_of_losing_stdout_silently() {
 
     let captured = apb_engine::proc::run_capture(cmd, None, None).unwrap();
 
-    let pid: i32 = fs::read_to_string(work.path().join("daemon.pid"))
-        .expect("script should have recorded the background pid")
-        .trim()
-        .parse()
-        .expect("background pid");
-    // SAFETY: `kill` takes no pointers; reap it so the test leaks nothing.
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
+    let _daemon = DaemonReaper::of(&work.path().join("daemon.pid"));
 
     assert_eq!(captured.stdout, "", "the drain expired, so stdout is empty");
     assert!(

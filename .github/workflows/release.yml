@@ -70,6 +70,12 @@ jobs:
 
   build:
     needs: [test]
+    # Each matrix leg is one release build of the workspace on a cold cache,
+    # plus the bun build: minutes, not tens of minutes. 45 leaves room for a
+    # slow runner and for the musl leg, which is the heaviest, while still
+    # ending a wedged build in under an hour instead of the default six.
+    # Per-leg, not for the matrix as a whole.
+    timeout-minutes: 45
     strategy:
       fail-fast: false
       matrix:

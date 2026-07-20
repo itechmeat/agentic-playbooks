@@ -299,17 +299,28 @@ const MAX_STDERR_BYTES: usize = 4 * 1024;
 /// group is empty.
 fn kill_process_group(pid: u32) {
     #[cfg(unix)]
-    if let Some(target) = group_target(pid) {
+    kill_group_with(pid, &|target| {
         // SAFETY: `kill` is async-signal-safe and takes no pointers; `target`
-        // is a validated negative group id, and an unknown group is reported
-        // as ESRCH rather than being undefined.
+        // came from `group_target`, so it is a validated negative group id,
+        // and an unknown group is reported as ESRCH rather than undefined.
         unsafe {
             libc::kill(target, libc::SIGKILL);
         }
-    }
+    });
     #[cfg(not(unix))]
     {
         let _ = pid;
+    }
+}
+
+/// The decision half of a group kill, with delivery injected, so a test can
+/// assert exactly what would reach `kill(2)` without sending a signal. See
+/// `apb_engine::proc::kill_group_with`: testing `group_target` alone would
+/// keep passing if the guard were dropped from the call site, so what has to
+/// be pinned is that it is wired in.
+fn kill_group_with(pid: u32, send: &dyn Fn(i32)) {
+    if let Some(target) = group_target(pid) {
+        send(target);
     }
 }
 
@@ -805,5 +816,43 @@ fn write_cache(cache: &DetectCache) {
     };
     if let Ok(json) = serde_json::to_vec_pretty(cache) {
         let _ = crate::fsutil::atomic_write(&path, &json);
+    }
+}
+
+#[cfg(test)]
+mod signal_target_tests {
+    use super::kill_group_with;
+    use std::cell::RefCell;
+
+    fn targets_sent_for(pid: u32) -> Vec<i32> {
+        let sent = RefCell::new(Vec::new());
+        kill_group_with(pid, &|target| sent.borrow_mut().push(target));
+        sent.into_inner()
+    }
+
+    /// The probe reaper's guard, pinned as wired in rather than merely
+    /// correct. Delivery is injected, so a regression is caught without a
+    /// single signal being sent - calling the real killer to prove this would
+    /// mean a test that ends the developer's session the moment the guard is
+    /// removed.
+    ///
+    /// pid 1 is the one to look at: the group form negates its argument, so it
+    /// becomes `kill(-1, SIGKILL)`, "every process I may signal".
+    #[test]
+    fn a_group_kill_delivers_nothing_for_a_target_it_cannot_address() {
+        for pid in [0, 1, u32::MAX, u32::MAX - 1, (i32::MAX as u32) + 1] {
+            assert_eq!(
+                targets_sent_for(pid),
+                Vec::<i32>::new(),
+                "pid {pid} cannot address a group, so no signal may be sent"
+            );
+        }
+    }
+
+    #[test]
+    fn a_group_kill_of_a_real_pid_addresses_exactly_that_group() {
+        assert_eq!(targets_sent_for(2), vec![-2]);
+        assert_eq!(targets_sent_for(4321), vec![-4321]);
+        assert_eq!(targets_sent_for(i32::MAX as u32), vec![-i32::MAX]);
     }
 }

@@ -59,10 +59,34 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 /// reason. A syscall has no argument-parsing layer to disagree about.
 mod sig {
     /// SIGKILLs a single process.
+    ///
+    /// Validated for the same reason `kill_group` is, and it is not academic:
+    /// `DriverReaper` calls both on a pid it parsed out of `driver.pid`. A
+    /// `driver.pid` holding `4294967295` narrows to `-1`, and
+    /// `kill(-1, SIGKILL)` is "every process I may signal" - this test suite
+    /// would end the developer's session.
+    ///
+    /// `> 0` here, where `kill_group` needs `> 1`: the single-pid form does
+    /// not negate its argument, so pid 1 is just init and merely EPERMs. Only
+    /// 0 ("my own process group") and the values that narrow negative have to
+    /// go.
     pub fn kill_pid(pid: u32) {
-        // SAFETY: `kill` takes no pointers; an unknown pid is ESRCH.
+        let Some(pid) = single_target(pid) else {
+            return;
+        };
+        // SAFETY: `kill` takes no pointers; `pid` is a validated positive pid,
+        // never a wildcard, and an unknown pid is ESRCH.
         unsafe {
-            libc::kill(pid as i32, libc::SIGKILL);
+            libc::kill(pid, libc::SIGKILL);
+        }
+    }
+
+    /// The `kill(2)` argument naming a single process, or `None` when `pid`
+    /// cannot name one.
+    fn single_target(pid: u32) -> Option<i32> {
+        match i32::try_from(pid) {
+            Ok(p) if p > 0 => Some(p),
+            _ => None,
         }
     }
 
@@ -544,8 +568,16 @@ fn a_stop_in_the_driver_spawn_window_is_not_lost() {
     // The assertion above is what keeps this honest: `AlreadyTerminal` would
     // ALSO be returned by `stop_run`'s entry check for a run that was terminal
     // before the stop ran at all, and that would mean the premise had
-    // collapsed. Having just proved the run was `Running` one statement
-    // earlier, only the driver-won-the-race reading remains.
+    // collapsed. Proving the run was `Running` one statement earlier rules out
+    // most of that, but not quite all of it: a driver that fails to exec and
+    // journals a terminal FAILURE in the same window would also land here with
+    // the premise quietly gone. What excludes that is downstream - the
+    // `poll_until` below waits for any terminal state, but the `assert_eq!`
+    // straight after it requires that state to be `Aborted`, and the check
+    // after that requires exactly one `RunAborted` in the journal. A driver
+    // that never ran could not have aborted anything, so a collapsed premise
+    // fails there rather than passing quietly. Those assertions, not this one,
+    // are what make the outcome check safe to relax.
     assert!(
         matches!(
             outcome,

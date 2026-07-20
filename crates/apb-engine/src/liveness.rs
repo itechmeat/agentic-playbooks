@@ -72,6 +72,17 @@ fn probeable_pid(pid: u32) -> Option<i32> {
 /// Note this direction is a CHANGE - the old code's `.unwrap_or(false)` on a
 /// failed spawn meant a host without a usable `kill` binary reported every pid
 /// as dead, which is precisely the wrong-"dead" this module exists to prevent.
+///
+/// One caveat, so the bias is not oversold as strictly safer. On a NON-UNIX
+/// host there is no probe at all, so every probeable pid resolves to "alive",
+/// and for the workdir-lock caller that trades one permanent failure mode for
+/// another: `workdir::acquire` would then refuse the workdir for any lock file
+/// holding any positive number, with no self-healing path as the process it
+/// names comes and goes. The escape is `--allow-shared-workdir`, which skips
+/// the lock entirely. This is unreachable today - the release matrix is
+/// aarch64/x86_64-darwin plus linux-gnu/linux-musl, with no Windows target -
+/// and it is recorded here so that adding one is a deliberate decision rather
+/// than a surprise.
 pub fn pid_alive(pid: u32) -> bool {
     // Ahead of the platform split on purpose: a pid that cannot name a process
     // is dead everywhere, and the non-unix arm's "unknown means alive" must
@@ -720,15 +731,30 @@ mod tests {
         assert!(driver_verdict("any-run", Probe::Unknown));
         // ... and a real, live, foreign pid is reported alive by the raw
         // primitive even though it is not ours and carries no identity.
-        let mut child = std::process::Command::new("sh")
-            .arg("-c")
-            .arg("sleep 30")
-            .spawn()
-            .expect("spawn a live child");
-        let pid = child.id();
-        assert!(pid_alive(pid), "a live foreign pid must read as alive");
-        let _ = child.kill();
-        let _ = child.wait();
+        //
+        // Reaped through a guard rather than by a `kill` after the assertion:
+        // a failing assertion unwinds straight past that line and leaks the
+        // `sleep` for its full 30 seconds.
+        struct Reaped(std::process::Child);
+        impl Drop for Reaped {
+            fn drop(&mut self) {
+                let _ = self.0.kill();
+                // Bounded: the child has just been SIGKILLed.
+                let _ = self.0.wait();
+            }
+        }
+
+        let child = Reaped(
+            std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sleep 30")
+                .spawn()
+                .expect("spawn a live child"),
+        );
+        assert!(
+            pid_alive(child.0.id()),
+            "a live foreign pid must read as alive"
+        );
     }
 
     #[test]
