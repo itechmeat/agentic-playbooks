@@ -205,8 +205,47 @@ fn print_pending_question_check(root: &Path, run_id: &str) {
     {
         println!(
             "[warn] pending question: node `{}`: {}",
-            pq.node, pq.question
+            pq.node,
+            sanitize_for_terminal(&pq.question, QUESTION_TEXT_MAX)
         );
+    }
+}
+
+/// Cap on a sanitized question's rendered length (spec 2026-07-20-interactive-
+/// nodes, Security section, fix round 1): long enough to be useful on both
+/// the `apb runs` table line and the `apb doctor --run` check line, short
+/// enough that a maliciously long question cannot dominate either report.
+const QUESTION_TEXT_MAX: usize = 160;
+
+/// Renders agent-generated (untrusted) question text as safe, single-line
+/// plain text for a terminal (spec 2026-07-20-interactive-nodes, Security
+/// section, fix round 1): the node asking the question is under the
+/// playbook author's control, but the question TEXT is model output, so it
+/// must not be interpreted as anything other than literal characters.
+///
+/// Every control character - including the ESC byte that opens an ANSI CSI
+/// sequence, embedded `\r`, and `\n` - becomes a space, which both strips
+/// the escape channel and guarantees the result cannot break the caller's
+/// single-line indent (a raw `\n` would otherwise let the question text
+/// forge extra report lines). Runs of whitespace then collapse to one
+/// space, the result is trimmed, and it is capped at `max` chars
+/// (appending "..." when cut) so one long question cannot dominate the
+/// report it appears in. Shared by both print sites that render a pending
+/// question's text (`print_waiting_on_question`, `print_pending_question_check`);
+/// node ids are not routed through this - they are already validated safe
+/// segments, not model output.
+fn sanitize_for_terminal(s: &str, max: usize) -> String {
+    let cleaned: String = s
+        .chars()
+        .map(|c| if c.is_control() { ' ' } else { c })
+        .collect();
+    let collapsed = cleaned.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim();
+    if trimmed.chars().count() <= max {
+        trimmed.to_string()
+    } else {
+        let truncated: String = trimmed.chars().take(max).collect();
+        format!("{truncated}...")
     }
 }
 
@@ -637,7 +676,8 @@ fn print_waiting_on_question(progress: Option<&apb_engine::ProgressSummary>) {
     if let Some(pq) = progress.and_then(|p| p.pending_question.as_ref()) {
         println!(
             "  waiting on question (node `{}`): {}",
-            pq.node, pq.question
+            pq.node,
+            sanitize_for_terminal(&pq.question, QUESTION_TEXT_MAX)
         );
     }
 }

@@ -139,7 +139,10 @@ fn runs_command_shows_waiting_on_question() {
 }
 
 // (c) `apb doctor --run <id>` lists a check flagging the pending question,
-// naming both the node and the question text.
+// naming both the node and the question text. A pending question is a
+// normal wait state, not a blocking problem, so this must exit success -
+// locked in explicitly so a future change cannot silently flip doctor to
+// failure just because a question is pending.
 #[test]
 fn doctor_run_flags_the_pending_question() {
     let dir = tempfile::tempdir().unwrap();
@@ -151,6 +154,80 @@ fn doctor_run_flags_the_pending_question() {
         .args(["doctor", "--run", "r1"])
         .current_dir(dir.path())
         .assert()
+        .success()
         .stdout(predicate::str::contains("ask"))
         .stdout(predicate::str::contains("which way, human"));
+}
+
+// Fix round 1 (spec 2026-07-20-interactive-nodes, Security section): a
+// question is agent-generated (untrusted) text. An embedded ANSI escape
+// sequence must not survive into the terminal report as a live escape (the
+// ESC byte, 0x1b, must be gone - a terminal would otherwise interpret it as
+// an interpretation channel, e.g. changing colors or moving the cursor), an
+// embedded `\r`/`\n` must not be able to forge extra report lines or wipe
+// the current one, and a very long question must be truncated with "..."
+// rather than dominating the report. Same fixture, both `apb runs` and
+// `apb doctor --run` - both print sites must sanitize identically.
+fn hostile_question() -> String {
+    // ESC[31m ... ESC[0m (red-text ANSI), an embedded CR, an embedded LF,
+    // then 500 chars of padding so truncation is exercised too.
+    format!(
+        "\x1b[31mred\x1b[0m question\r\nwith injected lines{}",
+        "x".repeat(500)
+    )
+}
+
+fn assert_sanitized(stdout: &str) {
+    assert!(
+        !stdout.contains('\x1b'),
+        "an ESC byte (0x1b) must never reach the terminal report: {stdout:?}"
+    );
+    assert!(
+        !stdout.contains('\r'),
+        "an embedded CR must not survive into the report: {stdout:?}"
+    );
+    assert!(
+        stdout.contains("..."),
+        "a question padded past the cap must be truncated with '...': {stdout}"
+    );
+    // The sanitized question renders as plain text on the one line it was
+    // printed on: no raw `\n` inside the question survives to start a new
+    // line the caller did not print itself.
+    let question_lines: Vec<&str> = stdout
+        .lines()
+        .filter(|l| l.contains("red") || l.contains("question"))
+        .collect();
+    assert_eq!(
+        question_lines.len(),
+        1,
+        "the sanitized question must render on exactly one line, got:\n{stdout}"
+    );
+}
+
+#[test]
+fn runs_command_sanitizes_ansi_and_newlines_and_truncates() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path());
+    let rd = run_dir(dir.path(), "r1", INTERACTIVE_PB);
+    apb_engine::question::post_question(&rd, "ask", 1, &hostile_question(), Vec::new()).unwrap();
+
+    let out = apb().arg("runs").current_dir(dir.path()).assert().success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_sanitized(&stdout);
+}
+
+#[test]
+fn doctor_run_sanitizes_ansi_and_newlines_and_truncates() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path());
+    let rd = run_dir(dir.path(), "r1", INTERACTIVE_PB);
+    apb_engine::question::post_question(&rd, "ask", 1, &hostile_question(), Vec::new()).unwrap();
+
+    let out = apb()
+        .args(["doctor", "--run", "r1"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert_sanitized(&stdout);
 }
