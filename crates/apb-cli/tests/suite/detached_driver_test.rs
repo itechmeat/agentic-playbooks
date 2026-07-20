@@ -482,7 +482,7 @@ fn a_stop_in_the_driver_spawn_window_is_not_lost() {
         terminal_at,
         events.len() - 1,
         "nothing may be written after the run was finalized, got {:?}",
-        &events[terminal_at + 1..]
+        events[terminal_at + 1..]
             .iter()
             .map(|e| &e.payload)
             .collect::<Vec<_>>()
