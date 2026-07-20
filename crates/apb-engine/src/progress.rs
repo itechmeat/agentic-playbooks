@@ -202,16 +202,39 @@ fn pending_question_for_node(
     events: &[Event],
     node_id: &str,
 ) -> Option<PendingQuestion> {
-    let questions: Vec<_> = crate::question::read_questions_after(run_dir, None)
-        .ok()?
-        .into_iter()
-        .filter(|q| q.node == node_id)
-        .collect();
-    let answered = crate::question::read_answers_after(run_dir, None)
-        .ok()?
-        .into_iter()
-        .filter(|a| a.node == node_id)
-        .count();
+    // A read failure (corrupt/unreadable questions.jsonl or answers.jsonl) is
+    // not silent: it writes one stderr warning naming the file and error,
+    // the same handling `load_run_playbook` gives an unparseable snapshot,
+    // then collapses to "no pending question" (the channel files are
+    // engine-written and append-only, so a read failure here is a
+    // filesystem-level fault worth a terminal signal rather than an
+    // authoring one).
+    let questions: Vec<_> = match crate::question::read_questions_after(run_dir, None) {
+        Ok(qs) => qs,
+        Err(e) => {
+            eprintln!(
+                "apb: warning: run {} questions.jsonl unreadable: {e}",
+                run_dir.display()
+            );
+            return None;
+        }
+    }
+    .into_iter()
+    .filter(|q| q.node == node_id)
+    .collect();
+    let answered = match crate::question::read_answers_after(run_dir, None) {
+        Ok(ans) => ans,
+        Err(e) => {
+            eprintln!(
+                "apb: warning: run {} answers.jsonl unreadable: {e}",
+                run_dir.display()
+            );
+            return None;
+        }
+    }
+    .into_iter()
+    .filter(|a| a.node == node_id)
+    .count();
     if questions.len() <= answered {
         return None;
     }
@@ -276,12 +299,17 @@ pub fn from_run_dir_with_root(
     // instead of `compute` and `weighted` each rebuilding it independently.
     let gc = GroupContext::build(&pb, events);
     let mut summary = compute_with(&pb, events, &gc);
-    // A pending question takes precedence over whatever `compute_with` set
-    // (a pending human_review, or nothing): it is read from the
+    // A pending question takes precedence over whatever `compute_with` set -
+    // human_review, wait, or nothing - unconditionally: it is read from the
     // questions.jsonl/answers.jsonl channel files, which only a run dir can
     // provide, so this override lives here rather than in the pure
-    // `compute_with` fold. A parked question is the tighter interactive
-    // wait, so it wins whenever both are pending.
+    // `compute_with` fold. This is deliberate even while a Wait node is
+    // Running (the `WaitingKind::Wait` case above): a question needs a human,
+    // a timer wait resolves itself, so the question is always the tighter
+    // block, and `ProgressSummary` can only surface one `waiting_on`. Hiding a
+    // pending question behind a self-resolving wait would be worse than
+    // always showing it, so this never narrows to "only override when
+    // nothing else is waiting".
     if let Some(pq) = pending_question_for_run(run_dir, &pb, events) {
         summary.waiting_on = Some(pq.node.clone());
         summary.waiting_kind = Some(WaitingKind::Question);
@@ -1022,6 +1050,49 @@ edges:
         let p = from_run_dir(&run_dir, &events).expect("run dir must yield progress");
         assert_eq!(p.waiting_on.as_deref(), Some("ask"));
         assert_eq!(p.waiting_kind, Some(WaitingKind::Question));
+    }
+
+    #[test]
+    fn pending_question_takes_precedence_over_running_wait() {
+        // spec: the question/wait override in `from_run_dir_with_root` is
+        // unconditional - it replaces whatever `compute_with` produced, even
+        // a Wait node that is already Running (the tighter human-blocking
+        // question always wins over a self-resolving timer wait).
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: ask, type: agent_task, prompt: hi, interactive: true, answer_by: supervisor }\n  - { id: w, type: wait, wait_for: { type: timer, seconds: 60 }, timeout_seconds: 120 }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: ask }\n  - { from: ask, to: w }\n  - { from: w, to: f }\n",
+        )
+        .unwrap();
+        crate::question::post_question(&run_dir, "ask", 1, "which way", Vec::new()).unwrap();
+
+        let events = vec![
+            ev(
+                0,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                EventPayload::NodeStarted {
+                    node: "w".into(),
+                    attempt: 1,
+                },
+            ),
+        ];
+        let p = from_run_dir(&run_dir, &events).expect("run dir must yield progress");
+        assert_eq!(p.waiting_on.as_deref(), Some("ask"));
+        assert_eq!(p.waiting_kind, Some(WaitingKind::Question));
+        assert_eq!(
+            p.pending_question
+                .expect("pending_question must be Some")
+                .node,
+            "ask"
+        );
     }
 
     fn wait_pb() -> Playbook {
