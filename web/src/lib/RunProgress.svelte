@@ -28,7 +28,9 @@
       ? 'waiting for decision'
       : progress?.waiting_kind === 'wait'
         ? 'waiting for event'
-        : 'waiting',
+        : progress?.waiting_kind === 'question'
+          ? 'waiting for answer'
+          : 'waiting',
   )
 </script>
 

@@ -208,6 +208,23 @@ export const postReview = (
     body: JSON.stringify({ node, decision, note }),
   })
 
+// POST /api/runs/{id}/answer: the web facade for answering an interactive
+// agent_task node's pending question (spec 2026-07-20-interactive-nodes).
+// `node` is omitted when the run has exactly one pending question; the
+// server resolves it the same way `apb_engine::post_answer` does. Always
+// posted as answered_by "human" server-side - the dashboard never sends that
+// field.
+export const postAnswer = (
+  id: string,
+  body: { node?: string; answer: string },
+  workspace = '',
+) =>
+  requestJson<{ posted_seq: number }>(`${run(id)}/answer${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(body),
+  })
+
 export const createPlaybook = (id: string, yaml: string, workspace = '') =>
   requestJson<WriteResult>(`/api/playbooks${qs({ workspace })}`, {
     method: 'POST',

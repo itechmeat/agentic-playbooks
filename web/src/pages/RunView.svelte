@@ -1,14 +1,16 @@
 <script lang="ts">
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
-  import { fetchRun, fetchRunReport, postReview } from '../lib/api'
+  import { fetchRun, fetchRunReport, postAnswer, postReview } from '../lib/api'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { interventionJournal, runEventJournal } from '../lib/journal'
+  import { pendingQuestions, pendingQuestionsFromPayload } from '../lib/questions'
   import { pendingReviews } from '../lib/reviews'
   import { cachedNodeIds } from '../lib/runcache'
   import { pendingWaits } from '../lib/waits'
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
+  import QuestionPanel from '../lib/QuestionPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -27,11 +29,22 @@
   let report = $state<string | null>(null)
   let tab = $state<'events' | 'journal' | 'report'>('events')
   let deciding = $state<string | null>(null)
+  let answering = $state(false)
 
   const nodeTypes = { playbookNode: PlaybookNode }
   const journal = $derived(detail ? interventionJournal(detail.events) : [])
   const eventJournal = $derived(detail ? runEventJournal(detail.events) : [])
   const pending = $derived(detail ? pendingReviews(detail.events) : [])
+  // Prefer the event-journaled questions; before drive journals `question_asked`
+  // for a node, fall back to the channel-derived `progress.pending_question`
+  // the run payload already carries (spec 2026-07-20-interactive-nodes) so the
+  // panel appears the moment the question is posted, not only once drive
+  // observes it.
+  const questions = $derived.by(() => {
+    if (!detail) return []
+    const fromEvents = pendingQuestions(detail.events)
+    return fromEvents.length ? fromEvents : pendingQuestionsFromPayload(detail.progress?.pending_question)
+  })
   const waiting = $derived(detail ? pendingWaits(detail.events) : [])
   const hookEntries = $derived(Object.entries(detail?.hooks ?? {}))
   const children = $derived(detail?.children ?? [])
@@ -45,6 +58,18 @@
       toast.error('Review failed', { description: String(e) })
     } finally {
       deciding = null
+    }
+  }
+
+  async function answer(node: string, value: string) {
+    answering = true
+    try {
+      await postAnswer(id, { node, answer: value }, workspace)
+      await load()
+    } catch (e) {
+      toast.error('Answer failed', { description: String(e) })
+    } finally {
+      answering = false
     }
   }
 
@@ -122,6 +147,10 @@
   </div>
 
   <aside class="flex min-h-0 w-80 shrink-0 flex-col gap-3 overflow-auto border-l border-border p-3">
+    {#each questions as q (q.node)}
+      <QuestionPanel question={q} posting={answering} onAnswer={answer} />
+    {/each}
+
     {#if pending.length}
       <Card.Root class="border-primary/60">
         <Card.Header>

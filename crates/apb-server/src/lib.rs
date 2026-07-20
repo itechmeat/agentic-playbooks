@@ -110,6 +110,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/runs/{id}", get(get_run_handler))
         .route("/api/runs/{id}/report", get(get_run_report_handler))
         .route("/api/runs/{id}/review", post(post_review_handler))
+        .route("/api/runs/{id}/answer", post(post_answer_handler))
         .route("/api/hooks/{run_id}/{secret}", post(post_hook_handler))
         .route("/api/ws", get(ws_handler))
         .fallback(static_handler)
@@ -1772,6 +1773,48 @@ async fn post_review_handler(
         note: body.note,
     };
     match apb_engine::post_review(&run_dir, cmd) {
+        Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    }
+}
+
+/// Body of `POST /api/runs/{id}/answer`: `node` is the interactive node to
+/// answer, defaulting (when omitted) to the single node with a pending
+/// question, exactly like `apb_engine::post_answer`'s own `node: Option<&str>`
+/// resolution (spec 2026-07-20-interactive-nodes).
+#[derive(Deserialize)]
+struct AnswerBody {
+    #[serde(default)]
+    node: Option<String>,
+    answer: String,
+}
+
+/// POST /api/runs/{id}/answer: the web facade for answering an interactive
+/// `agent_task` node's pending question, always posted as `answered_by:
+/// "human"` (the dashboard is a human-facing surface; a supervisor answers
+/// through its own MCP tool instead). Delegates to `apb_engine::post_answer`,
+/// which owns the `answer_by` policy and the pending-node resolution, so this
+/// handler mirrors `post_review_handler` exactly: on failure the engine
+/// error's message (including the policy's relay-instruction text) is
+/// surfaced verbatim as the response body.
+async fn post_answer_handler(
+    State(state): State<AppState>,
+    AxPath(id): AxPath<String>,
+    Query(q): Query<WsQuery>,
+    Json(body): Json<AnswerBody>,
+) -> impl IntoResponse {
+    if !is_safe_id(&id) {
+        return (StatusCode::NOT_FOUND, "not found").into_response();
+    }
+    let root = match resolve_root(&state, q.workspace.as_deref()) {
+        Ok(r) => r,
+        Err(e) => return e,
+    };
+    let run_dir = root.join(".apb/runs").join(&id);
+    if !run_dir.is_dir() {
+        return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
+    }
+    match apb_engine::post_answer(&run_dir, body.node.as_deref(), &body.answer, "human") {
         Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
