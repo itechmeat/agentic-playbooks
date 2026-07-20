@@ -35,17 +35,39 @@ fn spawn_in_group(cmd: &mut Command) -> std::io::Result<Child> {
 }
 
 /// How long the pipe collection gets once the agent process itself is gone.
-/// Not a work budget: by then the agent's own fds are closed and the data is
-/// already buffered, so the normal cost is microseconds. It bounds the case
-/// the process wait cannot see - a daemonized grandchild still holding the
-/// inherited stdout/stderr write ends, which is what decides EOF.
-const DRAIN_BUDGET: Duration = Duration::from_secs(10);
+///
+/// NOT a limit on how long an agent may work. Every use of this budget sits
+/// AFTER the agent has already exited, so the data is buffered and the normal
+/// cost is microseconds. It bounds only the thing the process wait cannot see:
+/// a daemonized grandchild still holding the inherited stdout/stderr write
+/// ends, which is what actually decides EOF. A healthy agent - including one
+/// that worked for hours - cannot reach it, because by then it is gone and its
+/// fds are closed. Tests override it via `APB_AGENT_DRAIN_BUDGET_MS`.
+fn drain_budget() -> Duration {
+    env_duration_ms("APB_AGENT_DRAIN_BUDGET_MS").unwrap_or(Duration::from_secs(10))
+}
 
-/// How long an agent may keep running after it has closed stdout. Reaching
-/// this means the agent finished talking to us but will not exit, which is
-/// indistinguishable from a wedge; the tree is killed and the attempt fails
-/// as a timeout rather than blocking the drive forever.
-const EXIT_AFTER_EOF_BUDGET: Duration = Duration::from_secs(30);
+/// How long an agent may keep running AFTER it has closed its stdout.
+///
+/// Also not a limit on working time. An agent's actual work is governed by the
+/// node's own `timeout_seconds` through `check_cancel_timeout`, inside the
+/// streaming loop; this clock does not start until that loop has already ended
+/// because stdout reached EOF. An agent that streams for six hours never comes
+/// near it. Reaching it means the agent stopped talking to us and then did not
+/// exit for five minutes, which is indistinguishable from a wedge, so the tree
+/// is killed and the attempt fails as a timeout instead of blocking the drive
+/// forever. Deliberately generous: its job is to make an infinite wait finite,
+/// not to enforce promptness. Tests override it via `APB_AGENT_EXIT_GRACE_MS`.
+fn exit_after_eof_budget() -> Duration {
+    env_duration_ms("APB_AGENT_EXIT_GRACE_MS").unwrap_or(Duration::from_secs(300))
+}
+
+fn env_duration_ms(key: &str) -> Option<Duration> {
+    std::env::var(key)
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .map(Duration::from_millis)
+}
 
 /// SIGKILLs every process still in the agent's process group. `spawn_in_group`
 /// gives the agent `process_group(0)`, so its pgid equals its pid and one
@@ -472,7 +494,7 @@ impl ClaudeAdapter {
         // block for the lifetime of that daemon. Tearing the group down first
         // is what makes EOF actually arrive.
         kill_process_group(child.id());
-        let output = wait_with_output_bounded(child, DRAIN_BUDGET, &self.program)?;
+        let output = wait_with_output_bounded(child, drain_budget(), &self.program)?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         if !output.status.success() {
@@ -594,11 +616,27 @@ impl ClaudeAdapter {
         });
 
         let started = Instant::now();
+        let pid = child.id();
         let mut raw_lines: Vec<String> = Vec::new();
+        // Set once the agent process itself has exited: the deadline for
+        // draining whatever is still buffered in the pipe afterwards.
+        let mut drain_deadline: Option<Instant> = None;
         loop {
             if let Some(err) = Self::check_cancel_timeout(&mut child, cancel, started, task.timeout)
             {
                 return Err(err);
+            }
+            // This loop used to end ONLY on stdout EOF - but EOF is not the
+            // agent's to give. A grandchild that inherited the pipe (a real
+            // agent spawns MCP servers and tool subprocesses) holds it open
+            // after the agent is gone, and a node with no `timeout_seconds`
+            // then spun here forever, waiting on output from a process that no
+            // longer existed. So notice the agent's own exit, release the pipes
+            // (whatever still holds them is by definition not the agent), and
+            // let the reader hand over what it has within a bounded window.
+            if drain_deadline.is_none() && matches!(child.try_wait(), Ok(Some(_))) {
+                kill_process_group(pid);
+                drain_deadline = Some(Instant::now() + drain_budget());
             }
             match rx.recv_timeout(Duration::from_millis(50)) {
                 Ok(line) => {
@@ -612,6 +650,11 @@ impl ClaudeAdapter {
                 Err(mpsc::RecvTimeoutError::Disconnected) => break,
                 Err(mpsc::RecvTimeoutError::Timeout) => {}
             }
+            // Backstop for the one case the group kill above cannot reach: a
+            // descendant that left the process group while holding the pipe.
+            if drain_deadline.is_some_and(|d| Instant::now() >= d) {
+                break;
+            }
         }
         // Bounded because the loop above exited on stdout EOF, and stdout EOF
         // is NOT proof the agent exited: it can close stdout (or hand it to a
@@ -621,11 +664,16 @@ impl ClaudeAdapter {
         // agent overstays it, tear down the tree and report a timeout rather
         // than hang.
         //
-        // `reader` itself is safe to join - the loop only breaks once that
-        // thread has dropped its sender, so it has already finished.
-        let _ = reader.join();
-        let pid = child.id();
-        let status = match wait_bounded(&mut child, EXIT_AFTER_EOF_BUDGET) {
+        // `reader` is deliberately NOT joined. On the normal path it has
+        // already finished (the loop broke because it dropped its sender), so
+        // a join would be a no-op; on the backstop path it is still blocked on
+        // a pipe held by a descendant that escaped the group, and joining it
+        // is precisely the unbounded wait being avoided. It owns nothing the
+        // caller needs - every line reached us through the channel - so it is
+        // abandoned and dies with the process.
+        drop(reader);
+        let grace = exit_after_eof_budget();
+        let status = match wait_bounded(&mut child, grace) {
             Some(Ok(status)) => status,
             Some(Err(e)) => {
                 return Err((
@@ -638,7 +686,7 @@ impl ClaudeAdapter {
                 return Err((
                     ErrorClass::Timeout,
                     format!(
-                        "`{}` closed its stdout but was still running {EXIT_AFTER_EOF_BUDGET:?} later; killed its process group",
+                        "`{}` closed its stdout but was still running {grace:?} later; killed its process group",
                         self.program
                     ),
                 ));
@@ -647,7 +695,7 @@ impl ClaudeAdapter {
         // The leader is reaped; anything left in its group would still be
         // holding stderr, so clear the group before collecting.
         kill_process_group(pid);
-        let stderr = err_rx.recv_timeout(DRAIN_BUDGET).unwrap_or_default();
+        let stderr = err_rx.recv_timeout(drain_budget()).unwrap_or_default();
         if !status.success() {
             return Err((
                 ErrorClass::ProcessExit,

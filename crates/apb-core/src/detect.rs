@@ -401,22 +401,24 @@ fn run_probe(
     loop {
         match child.try_wait() {
             Ok(Some(status)) => {
+                // The probe exited, but may have left daemonized grandchildren
+                // that inherited its pipes, and EOF is theirs to give, not the
+                // probe's. Reap the whole group BEFORE reading anything: it
+                // stops those processes and reader threads accumulating across
+                // repeated `detect --refresh` runs, and - because it is what
+                // makes EOF actually arrive - it is also the difference
+                // between collecting the probe's output and timing out on it.
+                // Reaping after the read (as this did originally) meant any
+                // agent that daemonizes a helper reported no version at all.
+                kill_process_group(child.id());
                 if !status.success() {
                     return Err(format!("exited with {:?}{}", status.code(), stderr_snip()));
                 }
-                // The process exited: wait for the collected stdout, but with
-                // a deadline - a descendant hanging on the pipe must not
-                // block us forever.
+                // Still deadlined: a descendant that left the process group
+                // holds the pipe beyond the reach of the kill above.
                 let (kept, truncated) = rx
                     .recv_timeout(Duration::from_millis(500))
                     .unwrap_or_default();
-                // The direct child exited, but may have left daemonized
-                // grandchildren that inherited the pipe (the reader thread
-                // would then never see EOF). We reap the whole process group
-                // on the success path too - otherwise repeated
-                // `detect --refresh` runs would accumulate hanging processes
-                // and reader threads.
-                kill_process_group(child.id());
                 return Ok(ProbeOut {
                     stdout: String::from_utf8_lossy(&kept).into_owned(),
                     truncated,

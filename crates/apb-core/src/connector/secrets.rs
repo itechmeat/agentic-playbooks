@@ -248,9 +248,18 @@ pub fn resolve_cmd(cmdline: &str, timeout: Duration) -> Result<String, CmdSecret
 
     // The command has exited, so its own pipe ends are closed and EOF is
     // normally already there; the budget only covers a surviving descendant
-    // still holding them. Losing the value in that case surfaces as the
-    // ordinary `Empty` error below rather than as a hang.
-    let stdout = out_rx.recv_timeout(DRAIN_BUDGET).unwrap_or_default();
+    // still holding them open. Unlike the agent adapter, this cannot cut that
+    // descendant loose by killing the process group: the command is spawned
+    // into OUR group (no `process_group(0)` here), so a group kill would take
+    // the caller down with it. The budget is therefore the whole defence.
+    //
+    // Reported as `Timeout` rather than falling through to `Empty`: the
+    // command may well have printed a perfectly good secret that is still
+    // sitting unread in the pipe, and "your secret command produced nothing"
+    // would send whoever hits this looking in the wrong place.
+    let Ok(stdout) = out_rx.recv_timeout(DRAIN_BUDGET) else {
+        return Err(CmdSecretError::Timeout);
+    };
     let stderr = err_rx.recv_timeout(DRAIN_BUDGET).unwrap_or_default();
     let excerpt = stderr_excerpt(&stderr);
 
@@ -792,6 +801,51 @@ mod tests {
         assert!(
             started.elapsed() < std::time::Duration::from_secs(5),
             "timeout did not preempt sleep"
+        );
+    }
+
+    // A secret command that exits but leaves a descendant holding its stdout.
+    // A password-manager CLI that talks to (or starts) a long-lived agent
+    // daemon is the realistic shape of this.
+    //
+    // The drain threads read to EOF, and EOF here belongs to the descendant,
+    // not to the command: before the bound, `out_join.join()` waited on it for
+    // as long as it chose to live, hanging the whole resolve. Now the wait is
+    // capped and the failure is named. This is the ONE path where the fix
+    // cannot also rescue the value: the command is spawned into our own
+    // process group, so the group kill that saves the agent adapter would kill
+    // the caller too, and a bounded loss is the best available outcome.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_cmd_descendant_holding_stdout_times_out_instead_of_hanging() {
+        let dir = tempfile::tempdir().unwrap();
+        let stub = write_stub(
+            dir.path(),
+            "daemon-secret",
+            "#!/bin/sh\nsleep 300 &\necho $! > \"$(dirname \"$0\")/held.pid\"\necho tok\n",
+        );
+        let started = std::time::Instant::now();
+        let got = resolve_cmd(&stub.to_string_lossy(), std::time::Duration::from_secs(10));
+
+        // Reap the descendant before asserting, so a failure cannot leak a
+        // 300-second sleep.
+        if let Ok(pid) = std::fs::read_to_string(dir.path().join("held.pid"))
+            && let Ok(pid) = pid.trim().parse::<i32>()
+        {
+            // SAFETY: `kill` takes no pointers; an unknown pid is ESRCH.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+
+        assert!(
+            matches!(got, Err(CmdSecretError::Timeout)),
+            "a descendant holding stdout must surface as Timeout, got {got:?}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(60),
+            "the drain was not bounded: {:?} against a descendant sleeping 300s",
+            started.elapsed()
         );
     }
 
