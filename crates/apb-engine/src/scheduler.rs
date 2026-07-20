@@ -24,7 +24,7 @@ use crate::event::{
 use crate::inspect::{should_declare_lost, supervisor_silence_ms, write_supervisor_session};
 use crate::manifest::{ManifestProfile, ManifestSkill, RunExecutionManifest};
 use crate::parallel::{self, JoinReadiness};
-use crate::question::{post_question, read_answers_after};
+use crate::question::{post_question, read_answers_after, read_questions_after};
 use crate::review::read_reviews_after;
 use crate::run_config::{
     CacheRunMode, RunConfig, copy_scripts, read_run_config, snapshot_playbook, write_run_config,
@@ -246,6 +246,59 @@ fn question_answered_count(events: &[Event], node: &str) -> usize {
             |e| matches!(&e.payload, EventPayload::QuestionAnswered { node: n, .. } if n == node),
         )
         .count()
+}
+
+/// How many `AttemptStarted` events a node already carries - the number of the
+/// current attempt while one is open, used to tag a posted question.
+fn attempt_started_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node: n, .. } if n == node))
+        .count()
+}
+
+/// How many `NodeStarted` / `NodeFinished` events a node already carries. A
+/// node visit is "open" when started exceeds finished; the interactive branch
+/// uses this to journal `NodeStarted` exactly once per visit (like the wait
+/// branch's `wait_started_count`/`wait_ended_count` guard), so re-invocations
+/// and park spins within the same visit do not re-declare it.
+fn node_started_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node))
+        .count()
+}
+
+fn node_finished_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::NodeFinished { node: n, .. } if n == node))
+        .count()
+}
+
+/// Whether `questions.jsonl` already carries an unanswered question for this
+/// node posted under `attempt`. Guards against a duplicate channel append when
+/// drive crashed after `post_question` but before journaling `QuestionAsked`:
+/// on resume the journal-count declare-once guard would re-post, but the
+/// channel entry is already there. Unanswered questions are the tail beyond the
+/// answered count (count-based consumption), so we only inspect those.
+fn channel_has_unanswered_question(
+    run_dir: &Path,
+    node: &str,
+    attempt: u32,
+) -> Result<bool, EngineError> {
+    let questions: Vec<_> = read_questions_after(run_dir, None)?
+        .into_iter()
+        .filter(|q| q.node == node)
+        .collect();
+    let answered = read_answers_after(run_dir, None)?
+        .into_iter()
+        .filter(|a| a.node == node)
+        .count();
+    Ok(questions
+        .iter()
+        .skip(answered)
+        .any(|q| q.attempt == attempt))
 }
 
 fn wait_started_count(events: &[Event], node: &str) -> usize {
@@ -845,7 +898,7 @@ fn drive(
     // budget. The limit is checked here, at the start of the iteration.
     let mut steps = 0usize;
 
-    'drive: loop {
+    loop {
         if steps >= max_steps {
             return Err(EngineError::Invalid(format!(
                 "run exceeded {max_steps} steps without reaching a finish node"
@@ -1476,6 +1529,125 @@ fn drive(
                 child_ref,
                 node_instr.as_deref(),
             )?
+        } else if is_interactive(&playbook, &current) {
+            // Interactive agent_task (spec 2026-07-20): the agent may ask the
+            // user a question mid-run and the node parks until it is answered.
+            // Structured exactly like the human_review branch so it composes
+            // with the whole control channel: every park spin does
+            // `sleep(AWAIT_CONTROL_POLL); continue;` back to the top-of-loop
+            // scan, which keeps applying Pause/Abort/ContextAppend/Patch/
+            // Progress/Retry while the question is outstanding. The declare-once
+            // and count-based-consumption guards are journal-count based, so
+            // they hold across the bounce. Interactive nodes bypass the node
+            // cache entirely (a hit would skip the question), so no
+            // NodeCacheMiss is journaled for them.
+            let events = read_all(run_dir)?;
+            let answered = question_answered_count(&events, &current);
+            // A pending (asked-but-unanswered) question means we are parked.
+            if question_asked_count(&events, &current) > answered {
+                let for_node: Vec<_> = read_answers_after(run_dir, None)?
+                    .into_iter()
+                    .filter(|a| a.node == current)
+                    .collect();
+                match for_node.into_iter().nth(answered) {
+                    Some(entry) => {
+                        // The next answer arrived: consume it (count-based) and
+                        // re-invoke with the answer appended (Task 6/7 refine
+                        // into the full transcript / session resume).
+                        log.append(EventPayload::QuestionAnswered {
+                            node: current.clone(),
+                            answer: entry.answer.clone(),
+                            answered_by: entry.answered_by.clone(),
+                        })?;
+                        let node_prompt = match &node_kind {
+                            NodeKind::AgentTask { prompt, .. } => prompt.clone(),
+                            _ => String::new(),
+                        };
+                        let base = render_node_prompt(run_dir, &run_id, &state, cfg, &node_prompt)?;
+                        prompt_overrides.insert(
+                            current.clone(),
+                            format!("{base}\n\n## prior answer\n{}", entry.answer),
+                        );
+                        // Fall through to run the next attempt below.
+                    }
+                    None => {
+                        // Still waiting: bounce to the top-of-loop control scan
+                        // so control commands keep being applied, then poll again.
+                        std::thread::sleep(AWAIT_CONTROL_POLL);
+                        continue;
+                    }
+                }
+            }
+            // Run one agent attempt. NodeStarted is journaled once per node
+            // visit (guarded by started-vs-finished counts, like the wait
+            // branch): the first attempt of a visit emits it; a re-invocation
+            // after an answer does not (the visit is still open).
+            if node_started_count(&events, &current) <= node_finished_count(&events, &current) {
+                steps += 1;
+                log.append(EventPayload::NodeStarted {
+                    node: current.clone(),
+                    attempt: 1,
+                })?;
+            }
+            let override_prompt = prompt_overrides.remove(&current);
+            let outcome = {
+                let journal = Journal::new(&mut *log);
+                execute_node(
+                    &playbook,
+                    run_dir,
+                    &workdir,
+                    &current,
+                    &run_id,
+                    &state,
+                    cfg,
+                    override_prompt,
+                    &run_cancel,
+                    &env_scrub,
+                    &journal,
+                )?
+            };
+            match outcome {
+                AttemptOutcome::Finished {
+                    status,
+                    output,
+                    events: evs,
+                } => {
+                    for ev in evs {
+                        log.append(ev)?;
+                    }
+                    // Fall to the shared tail (NodeFinished + frontier advance).
+                    (status, output)
+                }
+                AttemptOutcome::Suspended { question, options } => {
+                    // Declare the question once per suspension (journal-count
+                    // based, so it survives the loop bounce), raise a wake so a
+                    // waiting supervisor returns (Task 8), then bounce to the
+                    // top-of-loop scan; the next iteration parks.
+                    let events = read_all(run_dir)?;
+                    if question_asked_count(&events, &current)
+                        <= question_answered_count(&events, &current)
+                    {
+                        let attempt = attempt_started_count(&events, &current) as u32;
+                        // Idempotent channel post: skip if a crash between a
+                        // prior post_question and its QuestionAsked already left
+                        // this exact question in questions.jsonl.
+                        if !channel_has_unanswered_question(run_dir, &current, attempt)? {
+                            post_question(run_dir, &current, attempt, &question, options.clone())?;
+                        }
+                        log.append(EventPayload::QuestionAsked {
+                            node: current.clone(),
+                            question,
+                            options,
+                        })?;
+                        log.append(EventPayload::WakeRaised {
+                            trigger: WakeTrigger::Anomaly,
+                            node: current.clone(),
+                            detail: "interactive question".into(),
+                        })?;
+                    }
+                    continue;
+                }
+            }
         } else {
             steps += 1;
             log.append(EventPayload::NodeStarted {
@@ -1529,11 +1701,7 @@ fn drive(
             // folded state (`state` predates this iteration's NodeStarted, so a
             // terminal status means a prior NodeFinished for this node).
             let already_finished = state.nodes.get(&current).is_some_and(|st| st.is_finished());
-            // An interactive node is never served from cache: a hit would skip
-            // execution and thus the question entirely, silently answering
-            // nothing. It always runs (and re-invokes) live (spec 2026-07-20).
-            let interactive_node = is_interactive(&playbook, &current);
-            let lookup = if already_finished || interactive_node {
+            let lookup = if already_finished {
                 None
             } else {
                 cache_ctx.as_ref().and_then(|c| c.lookup(cfg))
@@ -1564,164 +1732,73 @@ fn drive(
                         key: ctx.key.clone(),
                     })?;
                 }
-                // One-shot Retry override seeds the first invocation; a later
-                // interactive re-invocation replaces it with the answer-carrying
-                // follow-up prompt built below.
-                let mut follow_up = prompt_overrides.remove(&current);
-                // The node's own prompt template, needed to re-render the
-                // follow-up prompt on an interactive re-invocation. Non-agent_task
-                // nodes never suspend, so the empty fallback is never used.
-                let node_prompt = match &node_kind {
-                    NodeKind::AgentTask { prompt, .. } => prompt.clone(),
-                    _ => String::new(),
+                let override_prompt = prompt_overrides.remove(&current);
+                // The journal borrows `log` for the duration of execute_node so the
+                // node can append attempt_started at spawn time; the block scopes
+                // that borrow so `log` is free again for the return-batch writes.
+                let outcome = {
+                    let journal = Journal::new(&mut *log);
+                    execute_node(
+                        &playbook,
+                        run_dir,
+                        &workdir,
+                        &current,
+                        &run_id,
+                        &state,
+                        cfg,
+                        override_prompt,
+                        &run_cancel,
+                        &env_scrub,
+                        &journal,
+                    )?
                 };
-                // The interactive re-invocation loop. Each pass runs one attempt.
-                // A normal `Finished` breaks out (a non-interactive node always
-                // takes this path on the first pass). An interactive `Suspended`
-                // parks on the question - exactly like a waiting human_review:
-                // the declaration is journaled once per suspension, a wake is
-                // raised, and drive polls `answers.jsonl` at `AWAIT_CONTROL_POLL`
-                // cadence, bouncing to the top-of-loop control scan on a stop so
-                // stop/abort/resume compose through the existing paths. On an
-                // answer it journals `QuestionAnswered` and re-invokes with the
-                // answer appended (Task 6/7 refine the re-invocation prompt).
-                let (st, out) = 'attempt: loop {
-                    // The journal borrows `log` for the duration of execute_node so
-                    // the node can append attempt_started at spawn time; the block
-                    // scopes that borrow so `log` is free again for the writes below.
-                    let outcome = {
-                        let journal = Journal::new(&mut *log);
-                        execute_node(
-                            &playbook,
-                            run_dir,
-                            &workdir,
-                            &current,
-                            &run_id,
-                            &state,
-                            cfg,
-                            follow_up.take(),
-                            &run_cancel,
-                            &env_scrub,
-                            &journal,
-                        )?
-                    };
-                    let (st, out, evs) = match outcome {
-                        AttemptOutcome::Finished {
-                            status,
-                            output,
-                            events,
-                        } => (status, output, events),
-                        AttemptOutcome::Suspended { question, options } => {
-                            // Declare the question once per suspension (loop- and
-                            // order-resilient, mirroring the human_review
-                            // ReviewRequested guard), and raise a wake so a waiting
-                            // supervisor returns (Task 8).
-                            let events = read_all(run_dir)?;
-                            if question_asked_count(&events, &current)
-                                <= question_answered_count(&events, &current)
-                            {
-                                let attempt = events
-                                    .iter()
-                                    .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == &current))
-                                    .count() as u32;
-                                post_question(
-                                    run_dir,
-                                    &current,
-                                    attempt,
-                                    &question,
-                                    options.clone(),
-                                )?;
-                                log.append(EventPayload::QuestionAsked {
-                                    node: current.clone(),
-                                    question: question.clone(),
-                                    options: options.clone(),
-                                })?;
-                                log.append(EventPayload::WakeRaised {
-                                    trigger: WakeTrigger::Anomaly,
-                                    node: current.clone(),
-                                    detail: "interactive question".into(),
-                                })?;
-                            }
-                            // Park until the next answer for this node arrives.
-                            loop {
-                                // A stop set run_cancel: bounce to the top-of-loop
-                                // control scan (which applies the Abort) without
-                                // re-invoking the agent, composing with
-                                // stop/abort exactly like a parked human_review.
-                                if run_cancel.load(Ordering::SeqCst) {
-                                    continue 'drive;
-                                }
-                                let answered =
-                                    question_answered_count(&read_all(run_dir)?, &current);
-                                let for_node: Vec<_> = read_answers_after(run_dir, None)?
-                                    .into_iter()
-                                    .filter(|a| a.node == current)
-                                    .collect();
-                                if let Some(entry) = for_node.into_iter().nth(answered) {
-                                    log.append(EventPayload::QuestionAnswered {
-                                        node: current.clone(),
-                                        answer: entry.answer.clone(),
-                                        answered_by: entry.answered_by.clone(),
-                                    })?;
-                                    // Floor re-invocation (Task 6/7 refine into the
-                                    // full transcript / session resume): a fresh
-                                    // render of the node prompt with the answer
-                                    // appended as a plain quoted block.
-                                    let base = render_node_prompt(
-                                        run_dir,
-                                        &run_id,
-                                        &state,
-                                        cfg,
-                                        &node_prompt,
-                                    )?;
-                                    follow_up = Some(format!(
-                                        "{base}\n\n## prior answer\n{}",
-                                        entry.answer
-                                    ));
-                                    continue 'attempt;
-                                }
-                                std::thread::sleep(AWAIT_CONTROL_POLL);
-                            }
-                        }
-                    };
-                    for ev in evs {
-                        log.append(ev)?;
+                let (st, out, evs) = match outcome {
+                    AttemptOutcome::Finished {
+                        status,
+                        output,
+                        events,
+                    } => (status, output, events),
+                    // Only interactive nodes suspend, and they are handled by the
+                    // dedicated branch above, never here (this is defensive).
+                    AttemptOutcome::Suspended { .. } => {
+                        return Err(EngineError::Invalid(format!(
+                            "non-interactive node `{current}` produced a question suspension"
+                        )));
                     }
-                    if let Some(ctx) = &cache_ctx
-                        && st == NodeStatus::Succeeded
-                        && !interactive_node
-                    {
-                        // Scan the run log for this node's connector calls (written
-                        // out of band by the connector-call subprocess) and verify
-                        // each against the read_only set in the run's connector
-                        // snapshot. A script node makes none, so this is (true,
-                        // false) - identical to Task 5's admission.
-                        let (calls_ok, had_calls) =
-                            cache::verify_connector_calls(run_dir, &current);
-                        let node = playbook.node(&current).expect("a cache ctx implies a node");
-                        // Capture the node's declared output artifacts. A capture
-                        // error (an unreadable matched file or a path escaping its
-                        // scope root) rejects admission outright: storing a record
-                        // that references artifacts we could not read would be a
-                        // lie. It never fails the run.
-                        match cache::capture_artifacts(node, run_dir, &workdir) {
-                            Ok(captured) => {
-                                node_artifacts = captured.iter().map(|(a, _)| a.clone()).collect();
-                                log.append(ctx.admit(
-                                    &workdir, &run_id, &playbook, &out, calls_ok, had_calls,
-                                    &captured,
-                                ))?;
-                            }
-                            Err(reason) => {
-                                log.append(EventPayload::NodeCacheRejected {
-                                    node: current.clone(),
-                                    reason: format!("artifact capture failed: {reason}"),
-                                })?;
-                            }
+                };
+                for ev in evs {
+                    log.append(ev)?;
+                }
+                if let Some(ctx) = &cache_ctx
+                    && st == NodeStatus::Succeeded
+                {
+                    // Scan the run log for this node's connector calls (written
+                    // out of band by the connector-call subprocess) and verify
+                    // each against the read_only set in the run's connector
+                    // snapshot. A script node makes none, so this is (true,
+                    // false) - identical to Task 5's admission.
+                    let (calls_ok, had_calls) = cache::verify_connector_calls(run_dir, &current);
+                    let node = playbook.node(&current).expect("a cache ctx implies a node");
+                    // Capture the node's declared output artifacts. A capture
+                    // error (an unreadable matched file or a path escaping its
+                    // scope root) rejects admission outright: storing a record
+                    // that references artifacts we could not read would be a
+                    // lie. It never fails the run.
+                    match cache::capture_artifacts(node, run_dir, &workdir) {
+                        Ok(captured) => {
+                            node_artifacts = captured.iter().map(|(a, _)| a.clone()).collect();
+                            log.append(ctx.admit(
+                                &workdir, &run_id, &playbook, &out, calls_ok, had_calls, &captured,
+                            ))?;
+                        }
+                        Err(reason) => {
+                            log.append(EventPayload::NodeCacheRejected {
+                                node: current.clone(),
+                                reason: format!("artifact capture failed: {reason}"),
+                            })?;
                         }
                     }
-                    break 'attempt (st, out);
-                };
+                }
                 (st, out)
             }
         };

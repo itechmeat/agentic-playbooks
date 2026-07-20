@@ -22,9 +22,10 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
+use apb_engine::control::Control;
 use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::question::post_answer;
-use apb_engine::scheduler::{RunOptions, run};
+use apb_engine::scheduler::{RunOptions, post_supervisor_command, run};
 use apb_engine::state::RunStatus;
 
 use crate::common;
@@ -161,6 +162,15 @@ fn spawn_run(root: &Path) -> (mpsc::Receiver<RunStatus>, thread::JoinHandle<()>)
 
 fn run_id_of(run_dir: &Path) -> String {
     run_dir.file_name().unwrap().to_string_lossy().to_string()
+}
+
+/// Stub body: invocation 1 asks one question and exits (drive parks); any later
+/// invocation (only reachable once an answer arrives) finishes.
+fn single_ask_body(counter: &Path) -> String {
+    format!(
+        "c=\"{}\"\nn=$(cat \"$c\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$c\"\nif [ \"$n\" = \"1\" ]; then\n  printf '%s\\n' '<<<apb:question>>>'\n  printf '%s\\n' '{{\"question\":\"Which DB?\",\"options\":[\"pg\",\"sqlite\"]}}'\n  exit 0\nfi\necho done\nexit 0",
+        counter.display()
+    )
 }
 
 #[test]
@@ -330,5 +340,157 @@ fn two_questions_across_two_suspensions_count_based() {
     assert!(
         ask_seqs[0] < ans_seqs[0] && ans_seqs[0] < ask_seqs[1] && ask_seqs[1] < ans_seqs[1],
         "each question must be answered before the next is asked: asks={ask_seqs:?} answers={ans_seqs:?}"
+    );
+}
+
+#[test]
+fn abort_while_parked_finalizes_run_aborted_without_answer() {
+    // A parked interactive node must compose with the control channel: posting
+    // an Abort while the question is outstanding (never answered) finalizes the
+    // run as Aborted, exactly like aborting a waiting human_review.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let counter = bin.path().join("count");
+    seed_playbook(proj.path());
+    seed_profile(proj.path(), "arch");
+    set_env(
+        &make_stub(bin.path(), &single_ask_body(&counter)),
+        home.path(),
+        cfg.path(),
+    );
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let run_id = run_id_of(&run_dir);
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id.clone(),
+        handle: Some(handle),
+    };
+
+    poll_until("QuestionAsked for node ask", || {
+        let events = read_all(&run_dir).ok()?;
+        (!questions_asked(&events).is_empty()).then_some(())
+    });
+
+    // Abort while parked, without ever answering.
+    post_supervisor_command(
+        proj.path(),
+        &run_id,
+        Control::Abort {
+            reason: "stop while parked".into(),
+        },
+    )
+    .unwrap();
+
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Aborted);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RunAborted { .. })),
+        "the run must finalize with RunAborted"
+    );
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::QuestionAnswered { node, .. } if node == "ask"
+        )),
+        0,
+        "no answer was posted, so no QuestionAnswered may appear"
+    );
+}
+
+#[test]
+fn context_append_while_parked_is_applied_then_node_completes() {
+    // Regression lock for control-command starvation: a ContextAppend posted
+    // while an interactive question is outstanding must be applied (the park
+    // bounces to the top-of-loop control scan every cycle), and after answering
+    // the node still completes normally.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let counter = bin.path().join("count");
+    seed_playbook(proj.path());
+    seed_profile(proj.path(), "arch");
+    set_env(
+        &make_stub(bin.path(), &single_ask_body(&counter)),
+        home.path(),
+        cfg.path(),
+    );
+
+    let (rx, handle) = spawn_run(proj.path());
+    let run_dir = latest_run_dir(proj.path());
+    let run_id = run_id_of(&run_dir);
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: run_id.clone(),
+        handle: Some(handle),
+    };
+
+    poll_until("QuestionAsked for node ask", || {
+        let events = read_all(&run_dir).ok()?;
+        (!questions_asked(&events).is_empty()).then_some(())
+    });
+
+    // Post a ContextAppend while the question is still unanswered.
+    post_supervisor_command(
+        proj.path(),
+        &run_id,
+        Control::ContextAppend {
+            note: "parked-note-marker".into(),
+        },
+    )
+    .unwrap();
+
+    // It must be applied while the question is still outstanding (no answer yet).
+    poll_until(
+        "context_append applied while the question is unanswered",
+        || {
+            let events = read_all(&run_dir).ok()?;
+            let applied = events.iter().any(|e| {
+                matches!(
+                    &e.payload,
+                    EventPayload::SupervisorAction { action, detail, .. }
+                        if action == "context_append" && detail.contains("parked-note-marker")
+                )
+            });
+            let unanswered = count_kind(&events, |p| {
+                matches!(
+                    p,
+                    EventPayload::QuestionAnswered { node, .. } if node == "ask"
+                )
+            }) == 0;
+            (applied && unanswered).then_some(())
+        },
+    );
+
+    // Now answer; the node must complete normally.
+    post_answer(&run_dir, Some("ask"), "pg", "human").unwrap();
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("run finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "ask" && status == "succeeded"
+        )),
+        "the interactive node must finish after the answer, even after a mid-park ContextAppend"
     );
 }
