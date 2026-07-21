@@ -786,12 +786,12 @@ fn prepare_supervised_background_target(
     Ok(PreparedRun(p))
 }
 
-/// Drives a prepared run until a terminal state (or an internal engine
-/// error). If `drive` returned `Err` without a terminal record, appends
-/// `run_finished(failed)` itself - without this fallback the run would stay
-/// stuck in `Running` forever for an external observer (drive already writes a
-/// terminal event on all `Ok(..)` paths: Succeeded/Failed/Paused/Aborted;
-/// we only reach here on an internal error, e.g. from `execute_node`).
+/// Drives a prepared run until a terminal state. `drive` itself now converts
+/// every internal error into a logged `RunError` + `run_finished(failed)`
+/// (issue #42 finding 3), so it no longer returns `Err` in practice; the
+/// fallback below is kept as a defensive backstop in case a future change to
+/// `drive` reopens an `Err` path - without it, such a run would stay stuck in
+/// `Running` forever for an external observer.
 pub fn drive_prepared(root: &Path, prepared: PreparedRun) -> Result<RunResult, EngineError> {
     let mut p = prepared.0;
     let res = drive(
@@ -934,8 +934,10 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
         cfg.mode,
         cfg.supervisor_expected,
     );
-    // Same fallback as `drive_prepared`: an internal error with no terminal
-    // record would leave the run `running` forever for any external observer.
+    // Same defensive backstop as `drive_prepared`: `drive` no longer returns
+    // `Err` in practice (issue #42 finding 3), but without this an internal
+    // error with no terminal record would leave the run `running` forever for
+    // any external observer.
     if res.is_err() {
         let _ = log.append(EventPayload::RunFinished {
             outcome: "failed".into(),
@@ -1083,8 +1085,75 @@ pub fn post_supervisor_command(
 
 /// The shared execution loop: advances the run from `start_node` to a finish node,
 /// a pause, or exhausting the step limit. Used by both `run` and `resume`.
+///
+/// A thin wrapper over [`drive_inner`], which does the actual work and still
+/// returns `Err` for every scheduler/prepare-refusal fault it hits (no
+/// matching outgoing edge, an exceeded step budget, a stalled resume, a
+/// sub-playbook that failed to resolve or prepare, an ordinary I/O fault
+/// reading or writing the journal/control file). Before this wrapper, that
+/// `Err` propagated straight to the caller: two callers (`run`, `run_resolved`)
+/// have no fallback at all, so the run was simply left `running` forever with
+/// no terminal event; the callers that DO have a fallback (`drive_prepared`,
+/// `drive_run_from_dir`) appended a bare `run_finished(failed)` with no
+/// explanation. Diagnosing either shape required reading engine source
+/// (issue #42 finding 3). This wrapper appends the verbatim reason as a
+/// `RunError` event and the terminal `run_finished(failed)` itself, then
+/// returns `Ok` - so every caller, old and new alike, sees a normal terminal
+/// result with the reason already in the journal and in `RunState::fold`'s
+/// `failure_reason`.
 #[allow(clippy::too_many_arguments)]
 fn drive(
+    playbook: Playbook,
+    run_dir: &Path,
+    root: &Path,
+    log: &mut EventLog,
+    cfg: &RunConfig,
+    start_node: String,
+    start_mode: StartMode,
+    run_id: String,
+    mode: RunMode,
+    supervisor_expected: bool,
+) -> Result<RunResult, EngineError> {
+    let run_id_for_failure = run_id.clone();
+    match drive_inner(
+        playbook,
+        run_dir,
+        root,
+        log,
+        cfg,
+        start_node,
+        start_mode,
+        run_id,
+        mode,
+        supervisor_expected,
+    ) {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            // Best effort: the run directory may itself be in a bad state
+            // (the same disk fault that failed the drive loop could also fail
+            // this append) - never let a failure to explain shadow the fact
+            // that the run failed. `node: None` here: `drive_inner`'s error
+            // messages already name the node inline where one is known (`node
+            // `x` has no outgoing edge...`), and there is no single local
+            // variable that reliably holds "the node that was executing" at
+            // every one of its `?` call sites.
+            let _ = log.append(EventPayload::RunError {
+                node: None,
+                reason: e.to_string(),
+            });
+            let _ = log.append(EventPayload::RunFinished {
+                outcome: "failed".into(),
+            });
+            Ok(RunResult {
+                run_id: run_id_for_failure,
+                outcome: RunStatus::Failed,
+            })
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_inner(
     mut playbook: Playbook,
     run_dir: &Path,
     root: &Path,
