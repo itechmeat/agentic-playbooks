@@ -93,13 +93,14 @@ pub(crate) struct LiveContext {
 /// channel is empty. Used as the mid-attempt observation baseline
 /// (`observe_control`) so only messages that arrive AFTER an attempt begins are
 /// acknowledged as received live - a command already queued (an unconsumed
-/// retry the drive's scan stopped short of) is not re-acked. A read error
-/// degrades to `None`: acking one extra pre-existing entry is harmless, and the
-/// per-poll observation is best effort, exactly like the abort watcher.
-fn latest_control_seq(run_dir: &Path) -> Option<u64> {
-    crate::control::read_control_after(run_dir, None)
-        .ok()
-        .and_then(|v| v.last().map(|e| e.seq))
+/// retry the drive's scan stopped short of) is not re-acked. A read failure is
+/// a hard error at attempt start rather than degrading to `None`: a `None`
+/// baseline re-reads the whole channel, and a stale already-consumed
+/// `Control::Interrupt` must never replay into a fresh attempt.
+fn latest_control_seq(run_dir: &Path) -> Result<Option<u64>, EngineError> {
+    Ok(crate::control::read_control_after(run_dir, None)?
+        .last()
+        .map(|e| e.seq))
 }
 
 /// A short machine-facing description of a control command for a
@@ -622,8 +623,11 @@ pub(crate) fn execute_node(
                     let control_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
                     let interrupt = AtomicBool::new(false);
+                    // Hard-fail if the baseline cannot be read: a None baseline
+                    // would replay the channel and a stale interrupt must never
+                    // replay into this fresh attempt.
                     let control_seen: std::cell::Cell<Option<u64>> =
-                        std::cell::Cell::new(latest_control_seq(run_dir));
+                        std::cell::Cell::new(latest_control_seq(run_dir)?);
                     let on_control_poll = || {
                         if control_err.borrow().is_some() {
                             return;
@@ -1694,8 +1698,95 @@ pub(crate) fn advance_frontier(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::control::{Control, post_control};
     use apb_core::profile::ProfileScope;
     use std::collections::BTreeMap;
+
+    /// A corrupt control channel at attempt start must surface as an error, not
+    /// degrade to a `None` baseline that would replay a stale interrupt.
+    #[test]
+    fn latest_control_seq_surfaces_read_error_instead_of_none_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        // Valid interrupt that would be fatal if re-observed with baseline None.
+        let seq = post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "already spent".into(),
+            },
+        )
+        .unwrap();
+        // Append a corrupt line so the next full-channel read fails.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("control.jsonl"))
+            .unwrap();
+        writeln!(f, "{{not-valid-json").unwrap();
+        f.flush().unwrap();
+
+        let err = latest_control_seq(dir.path()).expect_err(
+            "corrupt control.jsonl must fail attempt-start baseline, not degrade to None",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("yaml") || msg.contains("invalid") || msg.contains("expected"),
+            "expected a parse/IO style error, got: {msg}"
+        );
+        // Sanity: the stale interrupt is still on disk (the hazard we refuse to
+        // replay by refusing the None baseline).
+        let raw = std::fs::read_to_string(dir.path().join("control.jsonl")).unwrap();
+        assert!(raw.contains("\"cmd\":\"interrupt\""));
+        assert!(raw.contains(&format!("\"seq\":{seq}")) || raw.contains(r#""seq":0"#));
+    }
+
+    /// With a correct baseline past a already-posted interrupt, observe_control
+    /// must not treat that interrupt as a live request for a fresh attempt.
+    #[test]
+    fn observe_control_skips_interrupt_at_or_before_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        let journal = Journal::new(&mut log);
+        let seq = post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "stale".into(),
+            },
+        )
+        .unwrap();
+
+        let (seen, interrupt) = observe_control(dir.path(), "n1", 1, &journal, Some(seq)).unwrap();
+        assert_eq!(
+            seen,
+            Some(seq),
+            "baseline must not move without new entries"
+        );
+        assert!(
+            !interrupt,
+            "a stale interrupt at-or-before the baseline must not kill a fresh attempt"
+        );
+    }
+
+    /// Documents the hazard option (a) prevents: baseline None re-reads the
+    /// whole channel and would set interrupt on a stale entry.
+    #[test]
+    fn observe_control_none_baseline_would_see_stale_interrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        let journal = Journal::new(&mut log);
+        post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "stale".into(),
+            },
+        )
+        .unwrap();
+
+        let (_seen, interrupt) = observe_control(dir.path(), "n1", 1, &journal, None).unwrap();
+        assert!(
+            interrupt,
+            "None baseline replays the channel; latest_control_seq must not degrade to None on error"
+        );
+    }
 
     /// A gated child spawn threads the pin's verified connector permit maps into
     /// the child's `expected_connectors`/`expected_connector_accounts` verbatim
