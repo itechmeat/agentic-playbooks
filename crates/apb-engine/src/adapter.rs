@@ -387,6 +387,30 @@ pub struct StallHooks<'a> {
     pub on_stall: &'a dyn Fn(Duration),
 }
 
+/// Live control-channel observation for one attempt (finding 7 of issue #42,
+/// third item of issue #40), mirroring [`LiveHooks`]/[`StallHooks`]. The
+/// adapter's drive-owned poll loop calls `on_poll` once per iteration on the
+/// thread that owns this attempt (the drive thread, or the parallel batch's
+/// worker thread). The closure observes control messages that land MID-ATTEMPT
+/// and journals each as received - so a supervisor sees its message was seen
+/// live rather than only discovered at the next node boundary - and, when a
+/// `Control::Interrupt` for this run arrives, sets `interrupt`. On the next
+/// poll the loop SIGKILLs the agent's process group and returns a `ProcessExit`
+/// error, so the killed attempt is journaled failed via the exit-by-signal
+/// path and ordinary retry/fallback/patch proceeds at the next attempt
+/// boundary. Like the live `on_tick`, the closure journals through the shared
+/// `Journal` from this one thread, so no second thread ever writes the event
+/// log. `None` on every path that does not observe control (a bare `run`, the
+/// finish-answer composition, adapter unit tests).
+pub struct ControlHooks<'a> {
+    /// Runs each poll: observes and journals new control messages, and sets
+    /// `interrupt` when one asks to terminate this attempt.
+    pub on_poll: &'a dyn Fn(),
+    /// Set by `on_poll` when an interrupt lands. The poll loop reads it and,
+    /// when set, tears the agent down and fails the attempt.
+    pub interrupt: &'a AtomicBool,
+}
+
 /// Builds the `--mcp-config` JSON injected into claude for a live interactive
 /// node (spec 2026-07-20, Transport: live). Points claude at the hidden
 /// `apb __ask-server --run <id> --node <node> --attempt <n>` sidecar with a
@@ -590,8 +614,13 @@ pub trait AgentAdapter {
     /// raise a one-shot anomaly if this attempt runs past its node's
     /// `expected_duration`; `None` disables the stall watch.
     ///
-    /// The default ignores `cancel`/`on_spawn`/`live`/`stall` and just calls
-    /// `run` (for adapters without kill or spawn-hook support).
+    /// `control`, when set (finding 7 of issue #42, third item of issue #40),
+    /// lets the poll loop observe control messages that land mid-attempt
+    /// (journaling each as received) and terminate the attempt on a supervisor
+    /// interrupt; `None` disables control observation.
+    ///
+    /// The default ignores `cancel`/`on_spawn`/`live`/`stall`/`control` and just
+    /// calls `run` (for adapters without kill or spawn-hook support).
     fn run_cancellable(
         &self,
         task: &AgentTask,
@@ -599,8 +628,9 @@ pub trait AgentAdapter {
         on_spawn: Option<&dyn Fn(u32)>,
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
+        control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
-        let _ = (cancel, on_spawn, live, stall);
+        let _ = (cancel, on_spawn, live, stall, control);
         self.run(task)
     }
 
@@ -893,6 +923,7 @@ impl ClaudeAdapter {
         on_spawn: Option<&dyn Fn(u32)>,
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
+        control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
         let (mut argv, stdin_payload) = build_command(
@@ -967,6 +998,22 @@ impl ClaudeAdapter {
             // pending-question window, exactly like the timeout clock, so a live
             // node waiting on a human is never mistaken for a wedge.
             stall_watch.tick(active_elapsed(started, pending_ms));
+            // Live control observation (finding 7 of issue #42, third item of
+            // issue #40): journal any control message that landed mid-attempt
+            // as received, and on a supervisor interrupt tear the agent down so
+            // the killed attempt is journaled failed (exit-by-signal path) and
+            // ordinary retry/fallback/patch proceeds at the next boundary. This
+            // does NOT abort the run - that stays the run-level cancel's job.
+            if let Some(ch) = control {
+                (ch.on_poll)();
+                if ch.interrupt.load(Ordering::Relaxed) {
+                    kill_process_tree(&mut child);
+                    return Err((
+                        ErrorClass::ProcessExit,
+                        "attempt interrupted by supervisor".to_string(),
+                    ));
+                }
+            }
             if let Some(err) =
                 Self::check_cancel_timeout(&mut child, cancel, started, task.timeout, pending_ms)
             {
@@ -1055,6 +1102,7 @@ impl ClaudeAdapter {
         on_spawn: Option<&dyn Fn(u32)>,
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
+        control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
         // Base argv comes from the invocation form; claude-specific streaming
@@ -1199,6 +1247,23 @@ impl ClaudeAdapter {
             // excludes the pending-question window, like the timeout clock.
             if drain_deadline.is_none() {
                 stall_watch.tick(active_elapsed(started, pending_ms));
+            }
+            // Live control observation (finding 7 of issue #42, third item of
+            // issue #40), only while the agent is still running: journal a
+            // mid-attempt control message as received, and on a supervisor
+            // interrupt tear the agent down so the attempt is journaled failed
+            // (exit-by-signal path) and ordinary retry/fallback/patch proceeds.
+            if drain_deadline.is_none()
+                && let Some(ch) = control
+            {
+                (ch.on_poll)();
+                if ch.interrupt.load(Ordering::Relaxed) {
+                    kill_process_tree(&mut child);
+                    return Err((
+                        ErrorClass::ProcessExit,
+                        "attempt interrupted by supervisor".to_string(),
+                    ));
+                }
             }
             if drain_deadline.is_none()
                 && let Some(err) = Self::check_cancel_timeout(
@@ -1384,8 +1449,9 @@ fn parse_stream_result(
 impl AgentAdapter for ClaudeAdapter {
     fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)> {
         // A non-cancellable run is a cancellable run with an always-false flag,
-        // no spawn hook, no live sidecar, and no stall watch.
-        self.run_cancellable(task, &AtomicBool::new(false), None, None, None)
+        // no spawn hook, no live sidecar, no stall watch, and no control
+        // observation.
+        self.run_cancellable(task, &AtomicBool::new(false), None, None, None, None)
     }
 
     fn run_cancellable(
@@ -1395,10 +1461,11 @@ impl AgentAdapter for ClaudeAdapter {
         on_spawn: Option<&dyn Fn(u32)>,
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
+        control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         match self.spec.transport {
-            Transport::Headless => self.run_headless(task, cancel, on_spawn, live, stall),
-            Transport::Acp => self.run_acp(task, cancel, on_spawn, live, stall),
+            Transport::Headless => self.run_headless(task, cancel, on_spawn, live, stall, control),
+            Transport::Acp => self.run_acp(task, cancel, on_spawn, live, stall, control),
         }
     }
 

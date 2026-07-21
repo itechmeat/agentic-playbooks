@@ -138,6 +138,25 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "Interrupt the RUNNING attempt of a supervised run: SIGKILL the wedged agent so the attempt is journaled failed and ordinary retry/fallback/patch proceeds at the next attempt boundary. Use after a stall anomaly to break a hang rather than wait it out; unlike supervisor_run_abort it does NOT stop the run. A no-op when no attempt is running. Requires the `retry` capability",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn supervisor_interrupt_attempt(
+        &self,
+        Parameters(SupervisorInterruptArgs { token, reason }): Parameters<SupervisorInterruptArgs>,
+    ) -> CallToolResult {
+        let run_id = match self.resolve_session(&token, "supervisor_interrupt_attempt") {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Err(e)),
+        };
+        to_call_tool_result(tools::interrupt_attempt(
+            &self.root,
+            &run_id,
+            reason.as_deref(),
+        ))
+    }
+
+    #[tool(
         description = "Write the final supervisor report for a supervised run. Requires the `observe` capability",
         annotations(destructive_hint = true)
     )]

@@ -1121,6 +1121,33 @@ pub fn context_append(root: &Path, run_id: &str, note: &str) -> Result<Value, To
     Ok(json!({ "posted_seq": seq }))
 }
 
+/// Requests interruption of the run's currently RUNNING attempt (finding 7 of
+/// issue #42, third item of issue #40). Posts `Control::Interrupt`; the
+/// attempt's own poll loop observes it live, SIGKILLs the agent, and journals
+/// `attempt_interrupted`. The killed attempt is journaled failed, so ordinary
+/// retry/fallback/patch then proceeds at the next attempt boundary - the point
+/// being a supervisor can now force the attempt boundary of a wedged attempt
+/// (typically after a stall anomaly woke it) rather than waiting out a hang that
+/// may never end. Unlike `run_abort` this does NOT stop the run. An interrupt
+/// with no attempt running is a harmless no-op. The response reports
+/// `posted_seq`; the resulting `control_received`/`attempt_interrupted` events
+/// are visible via `supervisor_run_inspect` and `run_events`, so a supervisor
+/// can confirm the message was received live.
+pub fn interrupt_attempt(
+    root: &Path,
+    run_id: &str,
+    reason: Option<&str>,
+) -> Result<Value, ToolError> {
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::Interrupt {
+            reason: reason.unwrap_or("supervisor interrupt").to_string(),
+        },
+    )?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
 /// Reports cycle progress for the run's currently executing node group. Posts
 /// a `Control::Progress` command; drive stamps the node and appends the
 /// `RunProgress` event (single-writer). Callable by the executing agent or the

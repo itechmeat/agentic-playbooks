@@ -68,6 +68,8 @@ mod connector_smtp;
 mod context_compaction_test;
 #[path = "suite/context_test.rs"]
 mod context_test;
+#[path = "suite/control_liveness_test.rs"]
+mod control_liveness_test;
 #[path = "suite/control_test.rs"]
 mod control_test;
 #[path = "suite/detached_driver_test.rs"]

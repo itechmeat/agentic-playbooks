@@ -277,18 +277,10 @@ fn control_check(run_dir: &Path) -> Result<RunCheck, EngineError> {
     ))
 }
 
-/// Machine-facing name of a control command, for the doctor line.
+/// Machine-facing name of a control command, for the doctor line. Delegates to
+/// `Control::kind` so the doctor's labels never drift from the drive loop's.
 fn control_name(cmd: &crate::control::Control) -> &'static str {
-    use crate::control::Control;
-    match cmd {
-        Control::Retry { .. } => "retry",
-        Control::ContinueFrom { .. } => "continue_from",
-        Control::Pause => "pause",
-        Control::Abort { .. } => "abort",
-        Control::ContextAppend { .. } => "context_append",
-        Control::Progress { .. } => "progress",
-        Control::Patch { .. } => "patch",
-    }
+    cmd.kind()
 }
 
 /// Repeated supervisor actions on the same node. One retry is a supervisor

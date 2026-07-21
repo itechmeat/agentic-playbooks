@@ -102,7 +102,12 @@ fn capability_for_tool(name: &str) -> &'static str {
         | "supervisor_run_continue_from"
         | "supervisor_run_pause"
         | "supervisor_run_abort"
-        | "supervisor_context_append" => "retry",
+        | "supervisor_context_append"
+        // Interrupting a wedged attempt is a control-flow intervention that
+        // forces the attempt boundary so retry/fallback/patch can proceed - it
+        // belongs with `retry`, the same capability its sibling
+        // `supervisor_node_retry` requires.
+        | "supervisor_interrupt_attempt" => "retry",
         "supervisor_patch_playbook" => "patch_playbook",
         // An unknown tool name must not pass the gate under any policy.
         _ => "unknown",
