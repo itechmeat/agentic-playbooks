@@ -216,6 +216,11 @@ enum Command {
         params: Vec<String>,
         #[arg(long)]
         allow_shared_workdir: bool,
+        /// Predecessor run id for lineage (issue #42 finding 10). Forwarded
+        /// from `apb run --supervise --continued-from` across the detached
+        /// spawn boundary.
+        #[arg(long = "continued-from", value_name = "RUN_ID")]
+        continued_from: Option<String>,
         /// Handshake file: written with the run_id as soon as the run is
         /// prepared (before drive starts), so the parent process can report
         /// it and exit without waiting for the run itself to finish.
@@ -335,6 +340,7 @@ fn main() -> ExitCode {
             instruction,
             params,
             allow_shared_workdir,
+            continued_from,
             handshake,
         }) => drive_supervised_child(
             &root,
@@ -343,6 +349,7 @@ fn main() -> ExitCode {
             instruction,
             params,
             allow_shared_workdir,
+            continued_from,
             &handshake,
         ),
         // Deliberately uses the `--root` it was given, not the process cwd:

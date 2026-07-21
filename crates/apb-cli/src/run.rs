@@ -407,6 +407,7 @@ pub(crate) fn run_cmd(
             instruction.as_deref(),
             &param_args,
             allow_shared_workdir,
+            continued_from.as_deref(),
         );
     }
     let (expected_connectors, expected_connector_accounts) =
@@ -468,6 +469,7 @@ pub(crate) fn spawn_detached_supervised(
     instruction: Option<&str>,
     param_args: &[String],
     allow_shared_workdir: bool,
+    continued_from: Option<&str>,
 ) -> ExitCode {
     let exe = match std::env::current_exe() {
         Ok(e) => e,
@@ -495,6 +497,9 @@ pub(crate) fn spawn_detached_supervised(
     }
     if allow_shared_workdir {
         cmd.arg("--allow-shared-workdir");
+    }
+    if let Some(pred) = continued_from {
+        cmd.arg("--continued-from").arg(pred);
     }
     cmd.arg("--handshake").arg(&handshake);
     cmd.current_dir(root);
@@ -545,6 +550,7 @@ pub(crate) fn spawn_detached_supervised(
 /// only then drives the run forward - the whole drive loop is synchronous in
 /// THIS process, which is what lets the run outlive the original CLI
 /// invocation.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn drive_supervised_child(
     root: &Path,
     name: &str,
@@ -552,6 +558,7 @@ pub(crate) fn drive_supervised_child(
     instruction: Option<String>,
     params: Vec<String>,
     allow_shared_workdir: bool,
+    continued_from: Option<String>,
     handshake: &Path,
 ) -> ExitCode {
     let mut parsed = BTreeMap::new();
@@ -590,7 +597,7 @@ pub(crate) fn drive_supervised_child(
         expected_digest: None,
         expected_profile_bundles: None,
         parent_run: None,
-        continued_from: None,
+        continued_from,
         depth: 0,
         expected_children: None,
         expected_connectors,
