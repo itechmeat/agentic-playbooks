@@ -196,6 +196,15 @@ pub struct SupervisorContextArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SupervisorInterruptArgs {
+    pub token: String,
+    /// Why the running attempt is being interrupted, recorded verbatim in the
+    /// journaled `attempt_interrupted` event. Defaults to a generic reason.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct SupervisorReportArgs {
     pub token: String,
     pub text: String,
