@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
 
-use crate::manage::offer_subscriptions_survey;
+use crate::onboarding::offer_subscriptions_survey;
 use crate::util::print_json;
 
 #[derive(Subcommand)]
