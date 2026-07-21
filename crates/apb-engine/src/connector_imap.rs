@@ -196,6 +196,7 @@ impl ImapCall {
             .with_safe_default_protocol_versions()
             .map_err(|e| self.tls_err(format!("imap TLS provider setup failed: {e}")))?
             .with_platform_verifier()
+            .map_err(|e| self.tls_err(format!("imap TLS platform verifier setup failed: {e}")))?
             .with_no_client_auth();
         let server_name = rustls::pki_types::ServerName::try_from(self.host.clone())
             .map_err(|e| self.tls_err(format!("imap TLS server name is invalid: {e}")))?;
