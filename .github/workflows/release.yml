@@ -142,6 +142,27 @@ jobs:
           bun install --frozen-lockfile
           bun run build
         shell: "bash"
+      - name: "Ensure rustfmt and clippy components"
+        run: "rustup component add rustfmt clippy"
+        shell: "bash"
+      - name: "Install cargo-nextest"
+        uses: "taiki-e/install-action@nextest"
+      - name: "Gate - format check"
+        run: "cargo fmt --all -- --check"
+        shell: "bash"
+      - name: "Gate - clippy"
+        run: "cargo clippy --workspace --all-targets -- -D warnings"
+        shell: "bash"
+      - name: "Gate - test"
+        run: "cargo nextest run --profile ci --workspace"
+        shell: "bash"
+      - name: "Gate - doctests"
+        run: "cargo test --workspace --doc"
+        shell: "bash"
+      - name: "Gate - release notes must exist for this tag"
+        if: "github.ref_type == 'tag'"
+        run: "test -f \"docs/release-notes/${GITHUB_REF_NAME}.md\""
+        shell: "bash"
       - name: Install dist
         run: ${{ matrix.install_dist.run }}
       # Get the dist-manifest

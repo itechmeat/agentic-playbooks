@@ -4,6 +4,8 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Local runner for agentic playbooks with an embedded web dashboard and MCP server"
+homepage = "https://github.com/itechmeat/agentic-playbooks"
 
 [[bin]]
 name = "apb"
