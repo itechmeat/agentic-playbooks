@@ -222,6 +222,9 @@ pub fn program_for(agent_id: &str, global: &GlobalConfig) -> String {
         .agent_program(agent_id)
         .unwrap_or_else(|| match agent_id {
             "claude" | "claude-code" => "claude".to_string(),
+            // cursor is installed as `cursor-agent`; the bare `cursor` binary
+            // is the GUI editor CLI, not the headless agent.
+            "cursor" => "cursor-agent".to_string(),
             other => other.to_string(),
         })
 }
@@ -409,6 +412,20 @@ mod tests {
             interaction: Interaction::default(),
         };
         assert!(native_no_flag.validate().is_err());
+    }
+
+    /// cursor's detected binary is `cursor-agent`, not `cursor` (the GUI
+    /// editor CLI). `program_for` must map the agent id to the real binary so
+    /// the manifest fingerprint and the spawned adapter target the same file;
+    /// every other built-in agent id equals its binary name.
+    #[test]
+    fn program_for_maps_cursor_to_its_binary() {
+        let global = GlobalConfig::default();
+        assert_eq!(program_for("cursor", &global), "cursor-agent");
+        assert_eq!(program_for("grok", &global), "grok");
+        assert_eq!(program_for("codex", &global), "codex");
+        assert_eq!(program_for("claude", &global), "claude");
+        assert_eq!(program_for("claude-code", &global), "claude");
     }
 
     #[test]

@@ -1298,6 +1298,9 @@ pub fn adapter_for(agent: &str) -> Result<Box<dyn AgentAdapter>, EngineError> {
 fn default_program(agent: &str) -> String {
     match agent {
         "claude" | "claude-code" => "claude".to_string(),
+        // cursor is installed as `cursor-agent`; the bare `cursor` binary is
+        // the GUI editor CLI, not the headless agent.
+        "cursor" => "cursor-agent".to_string(),
         other => other.to_string(),
     }
 }
@@ -1305,6 +1308,18 @@ fn default_program(agent: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cursor is installed as `cursor-agent`; the bare `cursor` binary is the
+    /// GUI editor CLI. `default_program` must resolve the agent id to the
+    /// detected binary so `adapter_for` spawns the right executable.
+    #[test]
+    fn default_program_maps_cursor_to_its_binary() {
+        assert_eq!(default_program("cursor"), "cursor-agent");
+        assert_eq!(default_program("grok"), "grok");
+        assert_eq!(default_program("codex"), "codex");
+        assert_eq!(default_program("claude"), "claude");
+        assert_eq!(default_program("claude-code"), "claude");
+    }
 
     #[test]
     fn interpret_report_reads_failure_block() {
