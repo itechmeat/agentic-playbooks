@@ -271,6 +271,76 @@ pub fn load_merged() -> Result<ModelsTable, ModelsError> {
     Ok(table)
 }
 
+/// Vendor a known single-vendor agent is tied to (issue #42 finding 9): used
+/// to narrow the curated table to that vendor's rows for the profile
+/// editor's model selector. An aggregator (opencode, pi, agy, hermes, cursor)
+/// or an unrecognized agent id has no entry here and keeps the whole table -
+/// it is not pinned to one vendor. The legacy `claude-code` id (still found in
+/// profiles saved before the agent id was renamed) resolves to the same
+/// vendor as `claude`.
+pub fn agent_vendor(agent: &str) -> Option<&'static str> {
+    match agent {
+        "claude" | "claude-code" => Some("anthropic"),
+        "codex" => Some("openai"),
+        "grok" => Some("xai"),
+        _ => None,
+    }
+}
+
+/// One model choice offered for a specific agent in the profile editor
+/// (issue #42 finding 9). The curated table drives the option SET; detection
+/// only annotates it - `detected` marks a curated row also named by the
+/// agent's local config/detected model list, and never limits which rows are
+/// offered.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ModelOption {
+    pub id: String,
+    pub vendor: String,
+    pub detected: bool,
+}
+
+/// Builds `agent`'s model option list: `table` rows tied to its vendor (or
+/// every row for an aggregator/unrecognized agent, which is not pinned to a
+/// single vendor), each annotated `detected` when `detected_items` (the
+/// agent's local config/detected model list, e.g. `~/.codex/config.toml`'s
+/// `model` line) also names it. A detected item absent from that curated set
+/// is appended as its own `detected`-only entry, so a model the agent
+/// reports but the curated table does not carry yet is never hidden - it is
+/// added, not used to replace the table.
+pub fn model_options_for_agent(
+    agent: &str,
+    detected_items: &[String],
+    table: &ModelsTable,
+) -> Vec<ModelOption> {
+    let vendor = agent_vendor(agent);
+    let curated: Vec<&ModelRow> = match vendor {
+        Some(v) => table.models.iter().filter(|m| m.vendor == v).collect(),
+        None => table.models.iter().collect(),
+    };
+    let detected_set: std::collections::BTreeSet<&str> =
+        detected_items.iter().map(String::as_str).collect();
+    let mut out: Vec<ModelOption> = curated
+        .iter()
+        .map(|m| ModelOption {
+            id: m.id.clone(),
+            vendor: m.vendor.clone(),
+            detected: detected_set.contains(m.id.as_str()),
+        })
+        .collect();
+    let curated_ids: std::collections::BTreeSet<&str> =
+        curated.iter().map(|m| m.id.as_str()).collect();
+    for item in detected_items {
+        if !curated_ids.contains(item.as_str()) {
+            out.push(ModelOption {
+                id: item.clone(),
+                vendor: vendor.unwrap_or_default().to_string(),
+                detected: true,
+            });
+        }
+    }
+    out
+}
+
 /// Replaces the element with the same key (by `key`), otherwise appends.
 fn upsert_by<T, K: PartialEq>(items: &mut Vec<T>, incoming: T, key: impl Fn(&T) -> K) {
     let k = key(&incoming);
@@ -434,5 +504,118 @@ mod tests {
                 m.id
             );
         }
+    }
+
+    fn table_of(rows: &[(&str, &str)]) -> ModelsTable {
+        ModelsTable {
+            as_of: String::new(),
+            models: rows
+                .iter()
+                .map(|(id, vendor)| ModelRow {
+                    id: (*id).to_string(),
+                    vendor: (*vendor).to_string(),
+                    cost_in_usd_mtok: None,
+                    cost_out_usd_mtok: None,
+                    reasoning: None,
+                    context_tokens: None,
+                    vision: false,
+                    stt: false,
+                    tts: false,
+                    source_url: String::new(),
+                    checked_at: String::new(),
+                    price_basis: String::new(),
+                })
+                .collect(),
+            purposes: Vec::new(),
+            claude_static_models: Vec::new(),
+            subscriptions: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn agent_vendor_ties_known_vendor_agents_only() {
+        assert_eq!(agent_vendor("claude"), Some("anthropic"));
+        assert_eq!(agent_vendor("claude-code"), Some("anthropic"));
+        assert_eq!(agent_vendor("codex"), Some("openai"));
+        assert_eq!(agent_vendor("grok"), Some("xai"));
+        assert_eq!(agent_vendor("opencode"), None);
+        assert_eq!(agent_vendor("cursor"), None);
+        assert_eq!(agent_vendor("some-custom-agent"), None);
+    }
+
+    #[test]
+    fn model_options_for_agent_curated_table_drives_the_set() {
+        let t = table_of(&[
+            ("gpt-5.6-sol", "openai"),
+            ("gpt-5.6-terra", "openai"),
+            ("claude-opus-4-8", "anthropic"),
+        ]);
+        // codex ties to openai: only the two openai rows are offered, in
+        // table order, none detected (an empty local config).
+        let opts = model_options_for_agent("codex", &[], &t);
+        assert_eq!(
+            opts,
+            vec![
+                ModelOption {
+                    id: "gpt-5.6-sol".into(),
+                    vendor: "openai".into(),
+                    detected: false
+                },
+                ModelOption {
+                    id: "gpt-5.6-terra".into(),
+                    vendor: "openai".into(),
+                    detected: false
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn model_options_for_agent_annotation_flag_is_correct() {
+        let t = table_of(&[("gpt-5.6-sol", "openai"), ("gpt-5.6-terra", "openai")]);
+        // config.toml's `model` line names exactly one of the two curated
+        // rows: detection ANNOTATES that one row, it does not shrink the list
+        // to it (finding 9 of issue #42 - the defect this guards against).
+        let opts = model_options_for_agent("codex", &["gpt-5.6-sol".to_string()], &t);
+        assert_eq!(opts.len(), 2, "detection must not narrow the option set");
+        assert!(
+            opts.iter().any(|o| o.id == "gpt-5.6-sol" && o.detected),
+            "the model named in the local config is annotated detected"
+        );
+        assert!(
+            opts.iter().any(|o| o.id == "gpt-5.6-terra" && !o.detected),
+            "a curated sibling model absent from the local config stays offered, undetected"
+        );
+    }
+
+    #[test]
+    fn model_options_for_agent_keeps_a_config_only_model_present() {
+        let t = table_of(&[("gpt-5.6-sol", "openai")]);
+        // The local config names a model the curated table does not carry
+        // yet (e.g. a release too new for the table): it must still be
+        // offered, as its own detected-only entry, not silently dropped.
+        let opts = model_options_for_agent("codex", &["gpt-5-codex-preview".to_string()], &t);
+        assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].id, "gpt-5.6-sol");
+        assert!(!opts[0].detected);
+        assert_eq!(
+            opts[1],
+            ModelOption {
+                id: "gpt-5-codex-preview".into(),
+                vendor: "openai".into(),
+                detected: true,
+            }
+        );
+    }
+
+    #[test]
+    fn model_options_for_agent_keeps_an_aggregator_on_the_full_table() {
+        let t = table_of(&[("gpt-5.6-sol", "openai"), ("claude-opus-4-8", "anthropic")]);
+        // opencode is an aggregator (no single vendor tie): it keeps every
+        // curated row, same as an unrecognized agent id.
+        let opts = model_options_for_agent("opencode", &[], &t);
+        assert_eq!(opts.len(), 2);
+        let unknown = model_options_for_agent("some-custom-agent", &[], &t);
+        assert_eq!(unknown.len(), 2);
     }
 }
