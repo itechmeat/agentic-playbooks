@@ -167,8 +167,23 @@ export interface ModelRow {
   vendor: string
   reasoning?: string | null
 }
+
+// One model choice offered for a specific agent (issue #42 finding 9): the
+// curated table filtered to that agent's vendor (or the whole table for an
+// aggregator), annotated `detected` when the agent's local config/detected
+// model list also names it. Detection only annotates or extends this list,
+// it never replaces it - see `apb_core::models_table::model_options_for_agent`.
+export interface ModelOption {
+  id: string
+  vendor: string
+  detected: boolean
+}
 export const fetchModels = () =>
-  getJson<{ models: ModelRow[]; claude_static: string[] }>('/api/models')
+  getJson<{
+    models: ModelRow[]
+    claude_static: string[]
+    options_by_agent: Record<string, ModelOption[]>
+  }>('/api/models')
 
 export interface AvailableSkill {
   name: string
