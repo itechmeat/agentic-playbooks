@@ -436,7 +436,8 @@ pub struct AgentReport {
 /// Reality per agent under the CURRENT one-shot invocation forms: only claude's
 /// stream-json output (`--output-format stream-json`, the `acp` transport)
 /// emits a `session_id` field, so claude is the one agent that yields a session
-/// id today; codex/opencode/hermes one-shot output is plain final-answer text
+/// id today; codex/opencode/hermes/grok/cursor one-shot output is plain
+/// final-answer text
 /// with no session id, so they yield `None` here and rely on the downgrade
 /// path. The per-agent field lists below are wired so that when those agents'
 /// resumable one-shot output lands, only the field name changes here (spec
@@ -448,6 +449,8 @@ pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
         "codex" => capture_json_string_field(raw, &["session_id", "conversation_id"]),
         "opencode" => capture_json_string_field(raw, &["session_id", "sessionID"]),
         "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
+        "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
+        "cursor" => capture_json_string_field(raw, &["chatId", "chat_id", "session_id"]),
         _ => None,
     }
 }

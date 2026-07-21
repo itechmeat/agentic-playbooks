@@ -528,3 +528,26 @@ fn reprompt_transcript_is_scoped_to_the_current_visit() {
         "visit-2 transcript must NOT replay visit-1's round: {v2}"
     );
 }
+
+/// grok and cursor both emit JSON session ids only under their JSON output
+/// modes; under the plain-text one-shot form used by the built-in invocation
+/// they yield `None` and rely on the resume -> reprompt downgrade, exactly like
+/// codex/opencode/hermes.
+#[test]
+fn capture_session_reads_grok_and_cursor_json_session_ids() {
+    let grok = r#"{"type":"result","session_id":"5f0a1b2c-3d4e-4f50-8a9b-0c1d2e3f4a5b"}"#;
+    assert_eq!(
+        capture_session("grok", grok).as_deref(),
+        Some("5f0a1b2c-3d4e-4f50-8a9b-0c1d2e3f4a5b")
+    );
+
+    let cursor = r#"{"type":"result","chatId":"cursor-chat-42"}"#;
+    assert_eq!(
+        capture_session("cursor", cursor).as_deref(),
+        Some("cursor-chat-42")
+    );
+
+    let plain = "just the final answer text\n";
+    assert_eq!(capture_session("grok", plain), None);
+    assert_eq!(capture_session("cursor", plain), None);
+}
