@@ -24,6 +24,8 @@ fn fold_records_review_decision() {
             EventPayload::ReviewRequested {
                 node: "gate".into(),
                 options: vec!["approved".into(), "rejected".into()],
+                title: None,
+                instruction: String::new(),
             },
         ),
         ev(

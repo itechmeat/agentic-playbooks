@@ -247,6 +247,72 @@ fn run_status_progress_reflects_expected_duration_weighting() {
     assert!(progress["waiting_kind"].is_null());
 }
 
+/// A run parked on a human_review gate (issue #42 finding 4): `run_status`
+/// must expose a first-class `pending_review` block naming the node, its
+/// options, an owner-facing instruction, and how to decide, so an intermediary
+/// that reads status is forced to see the pending decision.
+const REVIEW_GATE_PB: &str = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: gate, type: human_review, title: "Approve the release", options: [approved, rejected] }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: gate }
+  - { from: gate, to: f }
+"#;
+
+#[test]
+fn run_status_exposes_pending_review_block_for_a_gate() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = bare_run_dir(dir.path(), "r-gate");
+    fs::write(run_dir.join("playbook.yaml"), REVIEW_GATE_PB).unwrap();
+    // A ReviewRequested with no matching ReviewDecided: the run is waiting on
+    // the gate. The instruction in the block is rebuilt from the snapshot, so
+    // the fixture event need not carry it.
+    fs::write(
+        run_dir.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n\
+         {\"seq\":1,\"ts\":0,\"type\":\"review_requested\",\"node\":\"gate\",\"options\":[\"approved\",\"rejected\"]}\n",
+    )
+    .unwrap();
+
+    let status = run_status(dir.path(), "r-gate").unwrap();
+    // The progress summary flags the wait as a human_review gate.
+    assert_eq!(status["progress"]["waiting_on"], "gate");
+    assert_eq!(status["progress"]["waiting_kind"], "human_review");
+    // The first-class block, lifted to the top level like pending_question.
+    let pr = &status["pending_review"];
+    assert!(
+        !pr.is_null(),
+        "expected a pending_review block, got {status}"
+    );
+    assert_eq!(pr["node"], "gate");
+    assert_eq!(pr["title"], "Approve the release");
+    assert_eq!(
+        pr["options"],
+        serde_json::json!(["approved", "rejected"]),
+        "got {pr}"
+    );
+    let instruction = pr["instruction"].as_str().expect("instruction is a string");
+    assert!(
+        instruction.contains("Approve the release"),
+        "got: {instruction}"
+    );
+    assert!(instruction.contains("approved"), "got: {instruction}");
+    assert!(instruction.contains("apb review"), "got: {instruction}");
+    assert!(instruction.contains("review_decide"), "got: {instruction}");
+    let how_to = pr["how_to_decide"]
+        .as_str()
+        .expect("how_to_decide is a string");
+    assert!(how_to.contains("apb review"), "got: {how_to}");
+    assert!(how_to.contains("review_decide"), "got: {how_to}");
+}
+
 /// Null path: a run dir with events.jsonl but no playbook.yaml snapshot (e.g.
 /// a legacy run whose snapshot was never captured) must report
 /// `"progress": null`, not omit the key or error.

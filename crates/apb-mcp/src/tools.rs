@@ -813,6 +813,11 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // unchanged.
     let cfg = apb_engine::run_config::read_run_config(&dir).unwrap_or_default();
     let pending_question = progress.as_ref().and_then(|p| p.pending_question.clone());
+    // Lifted to the top level like `pending_question` (issue #42 finding 4):
+    // a human_review gate must be first-class here so an intermediary that
+    // calls `run_status` is forced to see the pending decision, its options,
+    // and how to answer - the gate no longer waits silently forever.
+    let pending_review = progress.as_ref().and_then(|p| p.pending_review.clone());
     let answer = apb_engine::progress::run_answer(&dir, &events);
     let children: Vec<Value> = events
         .iter()
@@ -837,6 +842,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "outputs": state.outputs,
         "progress": progress,
         "pending_question": pending_question,
+        "pending_review": pending_review,
         "answer": answer,
         "children": children,
         "continued_from": cfg.continued_from,
@@ -1031,7 +1037,14 @@ pub fn supervisor_wait_event(
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(25_000));
     let wake = wait_wake(root, run_id, after_seq, timeout)?;
     let status = run_status(root, run_id)?;
-    Ok(json!({ "wake": wake, "run_status": status["run_status"] }))
+    // Surface the pending human-review gate here too (issue #42 finding 4): a
+    // supervisor that wakes on a run must see the gate and its owner-facing
+    // instruction so it relays the decision to the user rather than blocking.
+    Ok(json!({
+        "wake": wake,
+        "run_status": status["run_status"],
+        "pending_review": status["pending_review"],
+    }))
 }
 
 /// A full run summary for the observer (status, nodes, context.md, wakes, actions, events).
