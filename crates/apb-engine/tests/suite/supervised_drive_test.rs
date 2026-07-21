@@ -270,8 +270,11 @@ fn supervised_retry_recovers_after_wake() {
 
 // Scenario 3: autonomous mode is unchanged. The same failing playbook, but now
 // node `work` has only an edge conditioned on success (no fallback and no failure
-// branch) - as before Phase 4a, next_node finds no matching edge and returns
-// EngineError::Invalid; run() must return that same error rather than silently proceed.
+// branch) - as before Phase 4a, next_node finds no matching edge. Before issue
+// #42 finding 3 was fixed, that bubbled as a raw `EngineError::Invalid` out of
+// `run()`, which has no fallback of its own - the run was left `running`
+// forever with no explanatory event. `run()` now returns `Ok` with the run
+// recorded `Failed`, and the event log carries a `RunError` naming why.
 const WF_AUTONOMOUS_NO_FALLBACK: &str = r#"
 schema: 1
 id: autoflow
@@ -301,21 +304,45 @@ fn autonomous_mode_unchanged_errors_without_fallback_edge() {
 
     // RunOptions::default() -> RunMode::Autonomous: behavior must match
     // what it was before Phase 4a - we don't pass any mode by name.
-    let err = run(dir.path(), "autoflow", None, RunOptions::default()).unwrap_err();
+    let res = run(dir.path(), "autoflow", None, RunOptions::default()).unwrap();
     unsafe {
         std::env::remove_var("APB_AGENT_CMD");
     }
     drop(_env);
 
-    match err {
-        EngineError::Invalid(msg) => {
-            assert!(
-                msg.contains("no outgoing edge"),
-                "unexpected message: {msg}"
-            );
-        }
-        other => panic!("expected EngineError::Invalid, got {other:?}"),
-    }
+    // Issue #42 finding 3: `run()` no longer surfaces this as a raw `Err`
+    // (which left the run `running` forever with no terminal event, since
+    // `run()` has no fallback of its own) - it comes back `Ok` with the run
+    // recorded `Failed`.
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let run_dir = find_run_dir(dir.path(), "autoflow-");
+    let events = read_all(&run_dir).unwrap();
+    let reason = events.iter().find_map(|e| match &e.payload {
+        EventPayload::RunError { reason, .. } => Some(reason.clone()),
+        _ => None,
+    });
+    let reason = reason.unwrap_or_else(|| {
+        panic!("expected a RunError event explaining the failure, got {events:?}")
+    });
+    assert!(
+        reason.contains("no outgoing edge"),
+        "unexpected reason: {reason}"
+    );
+    // The RunError comes before the terminal run_finished(failed), not after.
+    let run_error_seq = events
+        .iter()
+        .find(|e| matches!(e.payload, EventPayload::RunError { .. }))
+        .unwrap()
+        .seq;
+    let run_finished_seq = events
+        .iter()
+        .find(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+        .unwrap()
+        .seq;
+    assert!(
+        run_error_seq < run_finished_seq,
+        "RunError must be journaled before run_finished"
+    );
 }
 
 // Scenario 4: Abort also works in autonomous mode. We place an Abort into

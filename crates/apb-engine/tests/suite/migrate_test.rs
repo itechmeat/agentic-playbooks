@@ -495,10 +495,22 @@ fn failed_patch_effect_does_not_advance_the_persisted_cursor() {
     let result = rx
         .recv_timeout(POLL_DEADLINE)
         .unwrap_or_else(|_| panic!("drive did not complete within {POLL_DEADLINE:?}"));
-    assert!(
-        result.is_err(),
+    // Issue #42 finding 3: `drive` (via `drive_prepared`) no longer surfaces
+    // an internal fault (here, apply_patch's own `read_all` failing on the
+    // corrupted trailing line) as a bare `Err` - it comes back `Ok` with the
+    // run recorded `Failed`, and the event log now carries a `RunError`
+    // naming the parse failure.
+    let result = result.expect("drive_prepared no longer returns Err for an internal fault");
+    assert_eq!(
+        result.outcome,
+        RunStatus::Failed,
         "expected the corrupted events.jsonl to fail apply_patch's read_all, got: {result:?}"
     );
+    // The journal itself is unreadable by construction (the corrupted trailing
+    // line above), so its own `RunError`/`run_finished` - appended through the
+    // still-open `EventLog` handle, which does not re-parse the file - cannot
+    // be verified by reading it back here; the outcome and the cursor
+    // invariant below are what this test can observe.
 
     // The cursor must still be exactly what it was before the Patch entry was
     // even posted (None here - the run never got past its very first control

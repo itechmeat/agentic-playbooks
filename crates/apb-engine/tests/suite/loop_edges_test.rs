@@ -122,17 +122,26 @@ fn bounded_loop_exhausts_then_dead_ends_at_review() {
     }
     // review fails every time; after two traversals of review->fix the bounded
     // edge is non-matching and review->done never matches (review failed), so
-    // the run dead-ends at review (the existing no-edge behavior -> Err).
-    let res = run(dir.path(), "loopedge", None, RunOptions::default());
+    // the run dead-ends at review (the existing no-edge behavior). Issue #42
+    // finding 3: this used to surface as a bare `Err` with no explanation in
+    // the log; `run()` now comes back `Ok` with the run recorded `Failed` and
+    // a `RunError` event naming why.
+    let res = run(dir.path(), "loopedge", None, RunOptions::default()).unwrap();
     unsafe {
         std::env::remove_var("APB_AGENT_CMD");
     }
     drop(_env);
 
-    assert!(res.is_err(), "an exhausted loop dead-ends with an error");
-
-    let run_id = only_run_id(dir.path());
-    let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    let reason = events.iter().find_map(|e| match &e.payload {
+        EventPayload::RunError { reason, .. } => Some(reason.clone()),
+        _ => None,
+    });
+    assert!(
+        reason.is_some_and(|r| r.contains("no outgoing edge")),
+        "expected a RunError naming the dead end, got {events:?}"
+    );
 
     assert_eq!(
         count_starts(&events, "review"),

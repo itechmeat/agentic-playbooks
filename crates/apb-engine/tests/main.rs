@@ -76,6 +76,8 @@ mod detached_driver_test;
 mod digest_binding_test;
 #[path = "suite/event_test.rs"]
 mod event_test;
+#[path = "suite/failure_reason_test.rs"]
+mod failure_reason_test;
 #[cfg(unix)]
 #[path = "suite/finish_answer_test.rs"]
 mod finish_answer_test;
