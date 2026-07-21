@@ -110,5 +110,86 @@ fn continued_from_refuses_already_superseded_predecessor() {
         err.to_string().contains("already superseded"),
         "expected superseded refusal, got: {err}"
     );
+    assert!(
+        matches!(err, apb_engine::EngineError::Conflict(_)),
+        "expected Conflict so HTTP/MCP surfaces can map 409, got: {err:?}"
+    );
     let _ = second;
+}
+
+const OTHER: &str = r#"
+schema: 1
+id: other
+name: Other
+version: 1.0.0
+params:
+  - { name: who, type: text }
+nodes:
+  - { id: start, type: start }
+  - { id: note, type: prompt, prompt: "hello {{params.who}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: note }
+  - { from: note, to: done }
+"#;
+
+fn seed_other(root: &std::path::Path) {
+    let vdir = root.join(".apb/playbooks/other/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), OTHER).unwrap();
+    fs::write(root.join(".apb/playbooks/other/current"), "1.0.0").unwrap();
+}
+
+#[test]
+fn continued_from_rejects_different_playbook() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    seed_other(dir.path());
+
+    let first = run(dir.path(), "noagent", None, {
+        let mut o = RunOptions::default();
+        o.params.insert("who".into(), "world".into());
+        o
+    })
+    .unwrap();
+
+    let mut opts = RunOptions::default();
+    opts.params.insert("who".into(), "world".into());
+    opts.continued_from = Some(first.run_id.clone());
+    let err = run(dir.path(), "other", None, opts).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("noagent") && msg.contains("other"),
+        "expected both playbook ids in error, got: {msg}"
+    );
+    assert!(
+        msg.contains("continued_from") || msg.contains("belongs to playbook"),
+        "expected clear cross-playbook lineage refusal, got: {msg}"
+    );
+}
+
+#[test]
+fn continued_from_accepts_same_playbook() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    seed_other(dir.path());
+
+    let first = run(dir.path(), "other", None, {
+        let mut o = RunOptions::default();
+        o.params.insert("who".into(), "world".into());
+        o
+    })
+    .unwrap();
+
+    let mut opts = RunOptions::default();
+    opts.params.insert("who".into(), "world".into());
+    opts.continued_from = Some(first.run_id.clone());
+    let second = run(dir.path(), "other", None, opts).unwrap();
+    assert_eq!(second.outcome, RunStatus::Succeeded);
+
+    let pred_cfg = read_run_config(&dir.path().join(".apb/runs").join(&first.run_id)).unwrap();
+    assert_eq!(
+        pred_cfg.superseded_by.as_deref(),
+        Some(second.run_id.as_str())
+    );
 }
