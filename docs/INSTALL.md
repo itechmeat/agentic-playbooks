@@ -15,6 +15,10 @@ default). It also writes an environment script and an install receipt under
 `~/.config/apb/`; the receipt is what `apb self-update` reads later to update
 in place.
 
+The installer writes an env script and updates your shell profile to add
+`CARGO_HOME` to `PATH`. Open a new shell, or `source` the env script it
+prints the path to, so `apb` is on `PATH` right away.
+
 To pin a specific version instead of the latest release, replace
 `latest/download` with `download/vX.Y.Z`:
 
@@ -86,16 +90,31 @@ To update a source install: `git pull`, rebuild `web/`, re-run
 
 ## 6. Uninstall
 
+Remove the binary for your install method:
+
 - Installer-based install: `rm ~/.cargo/bin/apb` (or wherever `CARGO_HOME`
-  points), and remove the install receipt directory `~/.config/apb/` if you
-  no longer want it around.
+  points).
 - Homebrew: `brew uninstall apb`.
 - Source (`cargo install`): `cargo uninstall apb`.
 
-None of these touch your project data. `.apb/` in each project and
-`~/.config/apb/` (apb's own global config, separate from the install receipt
-mentioned above) are never removed by uninstalling the binary; delete them
-yourself if you want a clean slate.
+None of these touch `.apb/` in your projects or `~/.config/apb/`.
+`~/.config/apb/` is apb's global config directory: it holds the install
+receipt (`apb-receipt.json`, used by `apb self-update`) alongside apb's own
+config (`config.yaml`, `profiles/`, `trust.json`, `connector-config/`,
+`state/`). Uninstalling the binary leaves all of it in place on purpose, so
+reinstalling later picks up where you left off.
+
+If you only want to stop `apb self-update` from finding a receipt (for
+example, before switching from an installer-based install to Homebrew),
+delete just the receipt file: `rm ~/.config/apb/apb-receipt.json`. Leave the
+rest of the directory alone unless you mean to erase your profiles and trust
+store too.
+
+To erase all apb data everywhere (optional, and irreversible): after
+removing the binary, `rm -rf ~/.config/apb/` wipes the global config
+(profiles, trust store, connector config, receipt), and `rm -rf .apb/` in
+each project wipes that project's playbooks and run history. Neither is
+needed for a normal uninstall.
 
 ## 7. After install: `apb init`
 
