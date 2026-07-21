@@ -20,6 +20,7 @@ serde_json.workspace = true
 apb-engine = { version = "0.8.0", path = "../apb-engine" }
 apb-mcp = { version = "0.8.0", path = "../apb-mcp" }
 cliclack = "0.5.5"
+axoupdater = { version = "0.10.0", default-features = false, features = ["github_releases", "blocking"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
