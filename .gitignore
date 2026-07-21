@@ -2,6 +2,11 @@
 node_modules
 web/dist
 .DS_Store
-.apb/
+# .apb is committed (example playbooks and profiles), local junk is not
+.apb/runs/
+.apb/trash/
+.apb/workspace.local
+.apb/backup-*/
+.apb/workdir.lock
 .code-ranker/
 .ai-notes/

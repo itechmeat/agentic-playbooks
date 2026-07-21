@@ -358,5 +358,9 @@ mod tests {
             readme.contains(FEEDBACK_BLOCK),
             "README no longer contains the feedback-loop block verbatim"
         );
+        assert!(
+            FEEDBACK_BLOCK.contains("docs/FEEDBACK-LOOP.md"),
+            "feedback block lost the link to the full reporting instruction"
+        );
     }
 }

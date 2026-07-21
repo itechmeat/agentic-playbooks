@@ -1,0 +1,12 @@
+name: qa
+description: QA engineer for apb; executed-evidence-only verdicts across Rust and web gates.
+executor:
+  agent: claude
+  model: claude-opus-4-8
+  fallbacks: []
+soul: any
+skills:
+- name: rust-skills
+  scope: auto
+- name: bun
+  scope: auto

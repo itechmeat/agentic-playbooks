@@ -1,0 +1,1057 @@
+schema: 2
+id: apb-task-implement
+name: APB board task implementation
+description: |
+  Takes a task from the itechmeat project board (Ready with the label
+  "with brainstorming", or the exact task named in the run instruction),
+  brainstorms it first via the apb-task-brainstorm sub-playbook when it still
+  needs brainstorming, then runs the full development cycle in this
+  repository: scope and branch, TDD implementation with quality gates,
+  independent review and QA with bounded fix rounds, docs, one PR to
+  main, board updates, and a human merge gate.
+version: 1.3.0
+params: []
+defaults:
+  profile:
+    name: developer
+    scope: project
+  max_retries: null
+  timeout_seconds: null
+supervisor: null
+trigger:
+  when:
+  - implement a task from the project board end to end
+  - start implementation of a ready task with brainstorming
+  - develop, review, test and open a PR for a board task
+  avoid_when:
+  - a quick one-off question or trivial edit without process
+  - refining a task is the goal, with no implementation
+  examples:
+  - Возьми задачу с доски в работу
+  - Implement issue 35 from the board
+  - Start implementation of the connectors task
+requires:
+  files:
+  - CLAUDE.md
+  - Cargo.toml
+  commands:
+  - git
+  - gh
+  - cargo
+  - code-ranker
+effects:
+- fs_read
+- fs_write
+- network
+- external
+nodes:
+- id: start
+  title: null
+  expected_duration: null
+  inputs: null
+  outputs: null
+  cache: null
+  type: start
+- id: pick_task
+  title: null
+  expected_duration: 4m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: Task selection from the GitHub project board.
+
+    Board: https://github.com/users/itechmeat/projects/6 (owner
+    itechmeat); items are issues of itechmeat/agentic-playbooks.
+
+    Run instruction (may be empty):
+    {{run.instruction}}
+
+    GitHub access: prefer the bound github connector where its functions
+    cover the call; the project board (Projects v2) and reading issue
+    comments are NOT covered by the connector, use gh CLI for those.
+
+    Selection rules, in priority order:
+    1. If the instruction names a specific task (an issue URL, an issue
+       number, or an issue title), resolve EXACTLY that task on the
+       board and ignore every other task. Use `gh project item-list 6
+       --owner itechmeat --format json --limit 100` and match by URL,
+       number, or title (case-insensitive; a fuzzy title match only when
+       unambiguous). If the named task is not on the board, FAIL this
+       node with "task not found on the board: <the reference>" and do
+       not substitute another task. If the named task is in Backlog and
+       carries the label "brainstorming required", it is a valid pick
+       that first needs brainstorming: mark it below.
+    2. Otherwise take the items with Status Ready carrying the label
+       "with brainstorming" and pick ONE by priority: P0 before P1
+       before P2; a tie breaks to the lowest issue number. If there are
+       none, FAIL with "no Ready tasks with label 'with brainstorming'".
+
+    Do not modify anything anywhere. Emit the closing block ONLY when a
+    task was successfully picked, and end your output with exactly:
+    <task>
+    number: <issue number>
+    url: <issue url>
+    title: <issue title>
+    priority: <P0|P1|P2|none>
+    status: <board status>
+    labels: <comma-separated labels>
+    needs_brainstorm: <yes if status is Backlog and labels include
+    "brainstorming required", otherwise no>
+    </task>
+  profile:
+    name: developer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors:
+  - name: github
+    functions: read_only
+    max_calls: 10
+  interactive: false
+- id: brainstorm_child
+  title: null
+  expected_duration: 1h
+  inputs: null
+  outputs: null
+  cache: null
+  type: playbook
+  playbook:
+    id: apb-task-brainstorm
+    scope: auto
+  instruction: |
+    Brainstorm exactly this board task, do not consider any other task:
+    {{nodes.pick_task.output}}
+    artifact mode: repo (keep the brainstorming files in the repository;
+    do not ask the user about artifact placement).
+- id: lock_scope
+  title: null
+  expected_duration: 10m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: Scope lock and branch, in this repository.
+
+    Task: {{nodes.pick_task.output}}
+    Brainstorm sub-run answer (empty when the task arrived already
+    brainstormed): {{nodes.brainstorm_child.output}}
+
+    GitHub access: prefer the bound github connector where its functions
+    cover the call; the project board (Projects v2) and reading issue
+    comments are NOT covered by the connector, use gh CLI for those.
+
+    1. Re-read the issue with comments: `gh issue view <number> --repo
+       itechmeat/agentic-playbooks --comments`. Locate the brainstorming
+       design: either files under docs/superpowers/specs/ (from the
+       issue body links or the sub-run answer), or content attached in
+       an issue comment with "Intended path" lines; in the attached
+       case restore each file to its intended path in the working tree.
+    2. Working tree intake: `git status --porcelain`. Pre-existing
+       changes are NOT a blocker: the owner may drop work into the tree
+       at any time, and it must be picked up, never lost. Never stash,
+       discard, or reset anything. Sort what you see into two piles:
+       obvious junk that should never be committed (build outputs, temp
+       or scratch files, caches, logs) gets added to .gitignore instead;
+       everything else is commit-worthy. After branching in step 5,
+       commit the commit-worthy pre-existing changes (including any
+       .gitignore additions) as their own commit BEFORE this task's own
+       commits: `chore: workspace changes picked up before <slug>`, with
+       --signoff and the Co-Authored-By trailer, so the task's commits
+       stay clean of unrelated diffs. When in doubt whether something is
+       junk, commit it.
+    3. Set the board Status to In progress. Find the item id via
+       `gh project item-list 6 --owner itechmeat --format json --limit
+       100` (match .content.url), then `gh project item-edit --id
+       <item_id> --project-id PVT_kwHOAo2qi84Bd_bQ --field-id
+       PVTSSF_lAHOAo2qi84Bd_bQzhYc6Ek --single-select-option-id
+       47fc9ee4`.
+    4. Derive a kebab-case slug (3-5 meaningful words) from the task.
+    5. Branch from the fresh default branch WITHOUT committing to local
+       main: `git fetch origin --prune`, then `git checkout -b
+       feat/<slug> origin/main`. If the branch exists from a prior
+       attempt, delete it first with `git branch -D feat/<slug>`.
+    6. If brainstorming artifact files are present uncommitted, commit
+       them on the feature branch as one commit `docs(spec): <slug>
+       brainstorming` with --signoff and the Co-Authored-By trailer.
+
+    Do NOT implement anything yet. End your output with exactly:
+    <scope>
+    slug: <slug>
+    branch: feat/<slug>
+    issue: <issue number>
+    task: <one-paragraph restatement of what to build>
+    acceptance: <semicolon-separated acceptance criteria from the issue>
+    </scope>
+  profile:
+    name: developer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors:
+  - name: github
+    functions: read_only
+    max_calls: 10
+  interactive: false
+- id: implement
+  title: null
+  expected_duration: 2h
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: Implementation, strictly TDD, on the feature branch.
+
+    Scope: {{nodes.lock_scope.output}}
+
+    Follow the design from the brainstorming spec (docs/superpowers/
+    specs/, see the scope). Work item by item: failing test first,
+    minimal implementation, refactor; atomic conventional commits with
+    --signoff and the Co-Authored-By trailer. Single-PR rule: everything
+    stays on the one feat branch and ships as ONE pull request; never
+    push and never open a PR in this node.
+
+    After all items, run the full gate set and fix what they catch:
+    `cargo fmt --all -- --check`, `cargo clippy --workspace
+    --all-targets -- -D warnings`, `cargo test --workspace`; when web/
+    was touched: `bun run check`, `bun run test`, `bun run build` in
+    web/. Then `cargo metadata --format-version 1 >/dev/null` and
+    `code-ranker check .`; fix every violation (read `code-ranker docs
+    base <ID>` before fixing) and re-run until clean.
+
+    If a blocker cannot be resolved in this node, fail with a precise
+    description.
+
+    End with: the commit list, each gate with its real result, and any
+    deliberate deviations from the spec with rationale.
+  profile:
+    name: developer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors: []
+  interactive: false
+- id: review
+  title: null
+  expected_duration: 30m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: Independent review of the full branch diff.
+
+    Scope: {{nodes.lock_scope.output}}
+    Implementation report: {{nodes.implement.output}}
+
+    Review `git diff origin/main...HEAD` per your standing rules; verify
+    the implementer's claimed gate results by re-running the cheap ones
+    (fmt, clippy) and spot-checking the rest; check the changed symbols'
+    blast radius; verify the acceptance criteria from the scope are
+    actually covered by tests.
+
+    Blockers: fail the node with findings ordered by severity, actionable
+    verbatim. No blockers: succeed with a short review summary and any
+    non-blocking notes.
+  profile:
+    name: reviewer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors: []
+  interactive: false
+- id: fix_review
+  title: null
+  expected_duration: 45m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    FIX ROUND after review.
+
+    Scope: {{nodes.lock_scope.output}}
+    Review findings: {{nodes.review.output}}
+
+    Verify each finding against the code before acting. Apply confirmed
+    blockers as additional atomic TDD commits on the same branch
+    (--signoff, trailer): failing test first, minimal diff, no rewrites,
+    no scope expansion, no pushes. Re-run the gates the fixes touch. If
+    a finding is wrong, refute it with evidence in your report instead
+    of implementing it. An unresolvable blocker fails the node with a
+    precise explanation.
+
+    End with: what you fixed or refuted, and the resulting gate status.
+  profile:
+    name: developer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors: []
+  interactive: false
+- id: review2
+  title: null
+  expected_duration: 20m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: Second and FINAL review round. Exactly one fix round is
+    allowed; remaining blockers abort the run for the owner.
+
+    Scope: {{nodes.lock_scope.output}}
+    Original findings: {{nodes.review.output}}
+    Fix report: {{nodes.fix_review.output}}
+
+    Verify each original blocker is genuinely resolved in the current
+    diff against origin/main (not merely claimed) and that the fixes
+    introduced nothing new; re-run fmt and clippy as a spot check. A
+    finding refuted with convincing evidence counts as resolved.
+
+    All clear: succeed with a short confirmation. Anything remaining:
+    fail with the precise findings.
+  profile:
+    name: reviewer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors: []
+  interactive: false
+- id: qa
+  title: null
+  expected_duration: 30m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: QA on the feature branch.
+
+    Scope: {{nodes.lock_scope.output}}
+    Implementation report: {{nodes.implement.output}}
+
+    Derive concrete acceptance criteria from the scope block and the
+    issue, then verify with executed evidence per your standing rules:
+    the full standard pass, the web checks when web/ was touched,
+    playbook validation when .apb/ changed, plus targeted functional
+    checks of the changed behavior (run the built binary where
+    practical). Any failing check or reproduced defect fails the node
+    with exact commands, expected vs actual, and output.
+
+    End with: each check and its result, plus the verdict.
+  profile:
+    name: qa
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors: []
+  interactive: false
+- id: fix_qa
+  title: null
+  expected_duration: 40m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    FIX ROUND after QA.
+
+    Scope: {{nodes.lock_scope.output}}
+    QA report: {{nodes.qa.output}}
+
+    Apply exactly the reported failures as additional atomic TDD commits
+    on the same branch (--signoff, trailer): failing test first, minimal
+    diff, no rewrites, no scope expansion, no pushes. Re-run the touched
+    checks before each commit. An unresolvable defect fails the node
+    with a precise explanation.
+
+    End with: what you fixed and the resulting check status.
+  profile:
+    name: developer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors: []
+  interactive: false
+- id: qa2
+  title: null
+  expected_duration: 20m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: Second and FINAL QA round. Exactly one fix round is allowed;
+    anything still failing aborts the run for the owner.
+
+    Scope: {{nodes.lock_scope.output}}
+    Original QA report: {{nodes.qa.output}}
+    Fix report: {{nodes.fix_qa.output}}
+
+    Re-execute every check that failed originally, plus a regression
+    pass: `cargo test --workspace` and, when web/ was touched, the web
+    checks. Executed evidence only.
+
+    Everything green: succeed with the verdict. Anything red: fail with
+    exact commands and output.
+  profile:
+    name: qa
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors: []
+  interactive: false
+- id: docs
+  title: null
+  expected_duration: 15m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: Docs and push-readiness.
+
+    Scope: {{nodes.lock_scope.output}}
+
+    1. Update the documentation the change touched: CLAUDE.md and
+       AGENTS.md together when shared guidance changed (mirror rule),
+       README.md and docs/ where behavior is user-visible, llms.txt when
+       commands changed. Commit with --signoff and the trailer.
+    2. Push-readiness: `git diff --stat origin/main...HEAD` shows ONLY
+       in-scope files. Do not re-run full suites; only re-check what
+       this node itself changed.
+
+    End with: docs touched and the push-ready confirmation.
+  profile:
+    name: developer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors: []
+  interactive: false
+- id: pr
+  title: null
+  expected_duration: 10m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: Push and open the PR. This is the FIRST moment anything is
+    pushed; all reviews and QA are already done.
+
+    Scope: {{nodes.lock_scope.output}}
+
+    GitHub access: prefer the bound github connector where its functions
+    cover the call; the project board (Projects v2) and reading issue
+    comments are NOT covered by the connector, use gh CLI for those.
+
+    1. `git push -u origin feat/<slug>`. If a PR for the branch already
+       exists, the push updates it; do not create a duplicate.
+    2. `gh pr create --base main --title "<conventional summary>"
+       --body-file <prepared body>`. Body in English: Summary (1-3
+       sentences), What ships (bulleted), Test plan (the actually
+       executed checks and results), and the line "Closes #<issue
+       number>". One paragraph per line; no em-dashes, no exclamation
+       marks, no AI-authorship markers. Do NOT enable auto-merge; the
+       owner merges.
+    3. Move the board Status to In review: item id via `gh project
+       item-list 6 --owner itechmeat --format json --limit 100` (match
+       .content.url), then `gh project item-edit --id <item_id>
+       --project-id PVT_kwHOAo2qi84Bd_bQ --field-id
+       PVTSSF_lAHOAo2qi84Bd_bQzhYc6Ek --single-select-option-id
+       df73e18b`.
+
+    End with: the PR number, URL, and base branch.
+  profile:
+    name: developer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors:
+  - name: github
+    functions:
+    - create_pull
+    - get_pull
+    max_calls: 10
+  interactive: false
+- id: post_pr
+  title: null
+  expected_duration: 30m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    PHASE: Post-PR checks.
+
+    PR: {{nodes.pr.output}}
+
+    GitHub access: prefer the bound github connector where its functions
+    cover the call; the project board (Projects v2) and reading issue
+    comments are NOT covered by the connector, use gh CLI for those.
+
+    1. Required checks are a HARD gate: poll `gh pr checks <n>` (the
+       repo runs a test gate, dist plan, CodeQL, dependency review, and
+       DCO). Diagnose failures via `gh run view --log`; fix the root
+       cause with the smallest diff (never delete, skip, or weaken a
+       test to pass), commit with --signoff and the trailer, push,
+       re-poll. At most 3 fix attempts, then fail the node with the
+       failing check and the key error line.
+    2. Bot review is best-effort, never a gate: wait about 2 minutes,
+       then poll `gh pr view <n> --comments` every ~90 seconds for
+       external review bots (for example coderabbitai). Address valid
+       findings with minimal-diff commits and push; document deliberate
+       skips in a PR comment. No review within ~15 minutes, or an
+       explicit decline: skip without failing.
+
+    Success: required checks green and bot review addressed or skipped,
+    with every fix actually pushed (verify via `gh pr view <n> --json
+    commits`). Otherwise fail with details.
+
+    End with: check status and what was fixed or skipped.
+  profile:
+    name: developer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors:
+  - name: github
+    functions:
+    - get_pull
+    - list_check_runs
+    - get_combined_status
+    - comment_issue
+    max_calls: 40
+  interactive: false
+- id: merge_gate
+  title: null
+  expected_duration: null
+  inputs: null
+  outputs: null
+  cache: null
+  type: human_review
+  options:
+  - merged
+  - abort
+- id: finalize
+  title: null
+  expected_duration: 10m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    FINALIZE. The owner confirmed the merge; verify and clean up. A
+    cleanup hiccup must not fail this node; an unmerged PR must.
+
+    Scope: {{nodes.lock_scope.output}}
+    PR: {{nodes.pr.output}}
+
+    GitHub access: prefer the bound github connector where its functions
+    cover the call; the project board (Projects v2) and reading issue
+    comments are NOT covered by the connector, use gh CLI for those.
+
+    1. Verify the PR is actually MERGED: `gh pr view <n> --json state`.
+       Not merged: fail immediately, no cleanup.
+    2. `git checkout main`, `git pull`; delete this run's feat branch
+       locally (`git branch -D feat/<slug> || true`) and on origin
+       (`git push origin --delete feat/<slug> || true`, skip if GitHub
+       already deleted it).
+    3. Verify the issue closed via the PR's Closes line; close it
+       manually if not. Move the board Status to Done: item id as
+       before, then `gh project item-edit --id <item_id> --project-id
+       PVT_kwHOAo2qi84Bd_bQ --field-id PVTSSF_lAHOAo2qi84Bd_bQzhYc6Ek
+       --single-select-option-id 98236657`.
+
+    End with: merge verification, cleanup status, issue and board state.
+  profile:
+    name: developer
+    scope: auto
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  success_check: null
+  connectors:
+  - name: github
+    functions:
+    - get_pull
+    - get_issue
+    - update_issue
+    max_calls: 10
+  interactive: false
+- id: done
+  title: null
+  expected_duration: 3m
+  inputs: null
+  outputs: null
+  cache: null
+  type: finish
+  outcome: success
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    Compose the final answer for the owner in the language of the run
+    instruction or dialogue: which task shipped (title, issue url), the
+    merged PR link, the executed-check evidence in one compact list, the
+    board state, and any follow-ups or deliberate skips noted during the
+    run.
+  profile: null
+- id: aborted
+  title: null
+  expected_duration: 2m
+  inputs: null
+  outputs: null
+  cache: null
+  type: finish
+  outcome: failure
+  prompt: |
+    REPORTING CONTRACT (overrides the generic report instruction apb
+    appends AFTER this prompt): end your reply with the fenced yaml
+    report block, but the block must contain ONLY the status field
+    (status: success or status: failure) and MUST NOT contain a summary
+    field, even though the appended generic instruction asks for one.
+    When a summary field is present, apb replaces this node's whole
+    output with that one line, the run's routing breaks, and downstream
+    nodes lose the structured output this prompt requires. Status only,
+    never summary, no exceptions.
+
+    Compose a short answer in the user's language stating that the run
+    stopped and why. Quote the failing node's own message verbatim from
+    the run context; do not speculate about causes that are not in the
+    context. Describe the current state of the branch, PR, and board,
+    and what the owner can do next. Your own yaml report block says
+    status: success (the run failed; your composition of this answer
+    did not).
+  profile: null
+edges:
+- from: start
+  to: pick_task
+  condition: null
+  fallback: false
+  join: null
+- from: pick_task
+  to: brainstorm_child
+  condition:
+    type: output_match
+    node: pick_task
+    pattern: 'needs_brainstorm: yes'
+  fallback: false
+  join: null
+- from: pick_task
+  to: lock_scope
+  condition:
+    type: output_match
+    node: pick_task
+    pattern: 'needs_brainstorm: no'
+  fallback: false
+  join: null
+- from: pick_task
+  to: aborted
+  condition:
+    type: node_status
+    node: pick_task
+    equals: failure
+  fallback: false
+  join: null
+- from: brainstorm_child
+  to: lock_scope
+  condition:
+    type: node_status
+    node: brainstorm_child
+    equals: success
+  fallback: false
+  join: null
+- from: brainstorm_child
+  to: aborted
+  condition:
+    type: node_status
+    node: brainstorm_child
+    equals: failure
+  fallback: false
+  join: null
+- from: lock_scope
+  to: implement
+  condition:
+    type: node_status
+    node: lock_scope
+    equals: success
+  fallback: false
+  join: null
+- from: lock_scope
+  to: aborted
+  condition:
+    type: node_status
+    node: lock_scope
+    equals: failure
+  fallback: false
+  join: null
+- from: implement
+  to: review
+  condition:
+    type: node_status
+    node: implement
+    equals: success
+  fallback: false
+  join: null
+- from: implement
+  to: aborted
+  condition:
+    type: node_status
+    node: implement
+    equals: failure
+  fallback: false
+  join: null
+- from: review
+  to: qa
+  condition:
+    type: node_status
+    node: review
+    equals: success
+  fallback: false
+  join: null
+- from: review
+  to: fix_review
+  condition:
+    type: node_status
+    node: review
+    equals: failure
+  fallback: false
+  join: null
+- from: fix_review
+  to: review2
+  condition:
+    type: node_status
+    node: fix_review
+    equals: success
+  fallback: false
+  join: null
+- from: fix_review
+  to: aborted
+  condition:
+    type: node_status
+    node: fix_review
+    equals: failure
+  fallback: false
+  join: null
+- from: review2
+  to: qa
+  condition:
+    type: node_status
+    node: review2
+    equals: success
+  fallback: false
+  join: null
+- from: review2
+  to: aborted
+  condition:
+    type: node_status
+    node: review2
+    equals: failure
+  fallback: false
+  join: null
+- from: qa
+  to: docs
+  condition:
+    type: node_status
+    node: qa
+    equals: success
+  fallback: false
+  join: null
+- from: qa
+  to: fix_qa
+  condition:
+    type: node_status
+    node: qa
+    equals: failure
+  fallback: false
+  join: null
+- from: fix_qa
+  to: qa2
+  condition:
+    type: node_status
+    node: fix_qa
+    equals: success
+  fallback: false
+  join: null
+- from: fix_qa
+  to: aborted
+  condition:
+    type: node_status
+    node: fix_qa
+    equals: failure
+  fallback: false
+  join: null
+- from: qa2
+  to: docs
+  condition:
+    type: node_status
+    node: qa2
+    equals: success
+  fallback: false
+  join: null
+- from: qa2
+  to: aborted
+  condition:
+    type: node_status
+    node: qa2
+    equals: failure
+  fallback: false
+  join: null
+- from: docs
+  to: pr
+  condition:
+    type: node_status
+    node: docs
+    equals: success
+  fallback: false
+  join: null
+- from: docs
+  to: aborted
+  condition:
+    type: node_status
+    node: docs
+    equals: failure
+  fallback: false
+  join: null
+- from: pr
+  to: post_pr
+  condition:
+    type: node_status
+    node: pr
+    equals: success
+  fallback: false
+  join: null
+- from: pr
+  to: aborted
+  condition:
+    type: node_status
+    node: pr
+    equals: failure
+  fallback: false
+  join: null
+- from: post_pr
+  to: merge_gate
+  condition:
+    type: node_status
+    node: post_pr
+    equals: success
+  fallback: false
+  join: null
+- from: post_pr
+  to: aborted
+  condition:
+    type: node_status
+    node: post_pr
+    equals: failure
+  fallback: false
+  join: null
+- from: merge_gate
+  to: finalize
+  condition:
+    type: review_status
+    equals: merged
+  fallback: false
+  join: null
+- from: merge_gate
+  to: aborted
+  condition:
+    type: review_status
+    equals: abort
+  fallback: false
+  join: null
+- from: finalize
+  to: done
+  condition:
+    type: node_status
+    node: finalize
+    equals: success
+  fallback: false
+  join: null
+- from: finalize
+  to: aborted
+  condition:
+    type: node_status
+    node: finalize
+    equals: failure
+  fallback: false
+  join: null

@@ -161,6 +161,20 @@
 #app .svelte-flow__attribution a {
   color: var(--muted-foreground);
 }
+/* Edge condition labels ("match: ...", "node: status") default to a
+   hardcoded white pill with `color: inherit`. The library only swaps that
+   pill to a dark variant when its own root carries a `.dark` class (via the
+   `colorMode` prop), which this app never sets - it themes via a `.dark`
+   class on `<html>` instead, one level up from where the library looks. So
+   the pill background stays white in both themes, while the text color
+   still inherits the page foreground, which is near-white in dark mode:
+   white text on a white pill. Pin both colors to the card tokens so the
+   pill tracks the same light/dark palette as the node cards. */
+#app .svelte-flow__edge-label {
+  color: var(--card-foreground);
+  background-color: var(--card);
+  border-radius: var(--radius-sm);
+}
 
 @layer base {
   * {
