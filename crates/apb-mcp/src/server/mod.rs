@@ -70,6 +70,24 @@ fn to_call_tool_result(result: Result<Value, ToolError>) -> CallToolResult {
     }
 }
 
+/// Merges the policy gate's non-fatal consent-time warnings (finding 11 of
+/// issue #42 - a bound connector with zero configured accounts) into a
+/// successful run response object, so the caller can show them to the user
+/// before the run proceeds. A no-op for an error, a non-object payload, or an
+/// empty warning list, and it never converts a permit into a refusal.
+fn with_warnings(
+    result: Result<Value, ToolError>,
+    warnings: &[String],
+) -> Result<Value, ToolError> {
+    let mut result = result;
+    if !warnings.is_empty()
+        && let Ok(Value::Object(obj)) = &mut result
+    {
+        obj.insert("warnings".to_string(), json!(warnings));
+    }
+    result
+}
+
 fn capability_for_tool(name: &str) -> &'static str {
     match name {
         // `run_answer`'s supervisor-token path (spec 2026-07-20-interactive-
@@ -199,6 +217,7 @@ impl WfMcp {
         expected_connectors: BTreeMap<String, String>,
         expected_connector_accounts: BTreeMap<String, String>,
         continued_from: Option<String>,
+        warnings: Vec<String>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
@@ -231,11 +250,14 @@ impl WfMcp {
             }
         };
         let token = self.mint_token(run_id.clone(), capabilities.clone());
-        to_call_tool_result(Ok(json!({
-            "run_id": run_id,
-            "supervisor_token": token,
-            "capabilities": capabilities,
-        })))
+        to_call_tool_result(with_warnings(
+            Ok(json!({
+                "run_id": run_id,
+                "supervisor_token": token,
+                "capabilities": capabilities,
+            })),
+            &warnings,
+        ))
     }
 
     /// Combined tool router: the per-domain routers (defined in the
