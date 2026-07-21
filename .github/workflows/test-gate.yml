@@ -1,0 +1,72 @@
+name: test-gate
+
+on:
+  workflow_call:
+    inputs:
+      # dist invokes plan-jobs concurrently with the plan job, before the plan
+      # manifest exists, so the generated caller does not pass `with: plan:`.
+      # The gate does not consume the plan, so the input is optional here to
+      # keep the generated release.yml valid (a required-but-unpassed input is
+      # rejected by GitHub). Post-announce jobs like release-notes do receive it.
+      plan:
+        required: false
+        type: string
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    # The gate that a tagged release actually ships through, so it gets the
+    # same ceiling as CI. Without one the default is 360 minutes, and a hung
+    # test would hold a release for six hours reporting nothing. A stuck TEST
+    # is caught far earlier, and by name, by nextest's per-test terminate-after
+    # (.config/nextest.toml).
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@v2
+
+      # web/dist is gitignored: build the frontend BEFORE cargo, since the
+      # tests compile apb-server which embeds it via rust-embed.
+      - name: Build web (needed by rust-embed)
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      # Prebuilt binary: seconds to install, nothing compiled into target/, so
+      # the cargo cache above is untouched.
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Format check
+        run: cargo fmt --all -- --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Mirrors ci.yml: same selection as `cargo test --workspace`, same
+      # #[ignore] handling, but each test in its own process so the per-test
+      # timeout is enforceable and a hang becomes a named failing test.
+      - name: Test
+        run: cargo nextest run --profile ci --workspace
+
+      # nextest does not run doctests; `cargo test --workspace` did.
+      - name: Doctests
+        run: cargo test --workspace --doc
+
+      # The release body comes from a notes file reviewed in the release PR.
+      # Only a tag ref ships, so PR plan runs skip this; failing here on a tag
+      # is deliberate - no silent fallback to an empty or auto-generated body.
+      - name: Release notes must exist for this tag
+        if: github.ref_type == 'tag'
+        run: test -f "docs/release-notes/${GITHUB_REF_NAME}.md"

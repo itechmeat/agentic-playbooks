@@ -1,0 +1,10 @@
+- name: Install Bun
+  uses: oven-sh/setup-bun@v2
+  with:
+    bun-version: latest
+- name: Build web frontend (embedded by apb-server at compile time)
+  shell: bash
+  run: |
+    cd web
+    bun install --frozen-lockfile
+    bun run build
