@@ -243,6 +243,7 @@ impl WfMcp {
             background,
             acknowledge_untrusted,
             scope,
+            continued_from,
         }): Parameters<PlaybookRunArgs>,
     ) -> CallToolResult {
         // Definition scope: a global playbook runs in the current project.
@@ -302,6 +303,7 @@ impl WfMcp {
                 permit.children,
                 permit.connectors,
                 permit.connector_accounts,
+                continued_from,
             );
         }
 
@@ -318,6 +320,7 @@ impl WfMcp {
                 expected_children: Some(permit.children),
                 expected_connectors: permit.connectors,
                 expected_connector_accounts: permit.connector_accounts,
+                continued_from,
                 ..Default::default()
             };
             if background == Some(true) {
@@ -347,6 +350,7 @@ impl WfMcp {
                 Some(permit.children),
                 permit.connectors,
                 permit.connector_accounts,
+                continued_from,
             ));
         }
         to_call_tool_result(tools::playbook_run(
@@ -360,6 +364,7 @@ impl WfMcp {
             Some(permit.children),
             permit.connectors,
             permit.connector_accounts,
+            continued_from,
         ))
     }
 

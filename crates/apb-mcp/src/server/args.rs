@@ -62,6 +62,10 @@ pub struct PlaybookRunArgs {
     /// runs in the current project (spec 5.1).
     #[serde(default)]
     pub scope: Option<String>,
+    /// Run id to continue as a fresh run (issue #42 finding 10). Links the new
+    /// run to the predecessor in runs_list/run_status.
+    #[serde(default)]
+    pub continued_from: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

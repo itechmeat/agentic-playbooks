@@ -699,6 +699,7 @@ pub fn playbook_run(
     expected_children: Option<BTreeMap<String, ChildExpectation>>,
     expected_connectors: BTreeMap<String, String>,
     expected_connector_accounts: BTreeMap<String, String>,
+    continued_from: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -713,6 +714,7 @@ pub fn playbook_run(
         expected_digest,
         expected_profile_bundles,
         parent_run: None,
+        continued_from,
         depth: 0,
         expected_children,
         expected_connectors,
@@ -745,6 +747,7 @@ pub fn playbook_run_background(
     expected_children: Option<BTreeMap<String, ChildExpectation>>,
     expected_connectors: BTreeMap<String, String>,
     expected_connector_accounts: BTreeMap<String, String>,
+    continued_from: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -759,6 +762,7 @@ pub fn playbook_run_background(
         expected_digest,
         expected_profile_bundles,
         parent_run: None,
+        continued_from,
         depth: 0,
         expected_children,
         expected_connectors,
@@ -807,6 +811,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // (`run_answer`'s caller, the web) do not have to drill into `progress`.
     // `progress` itself still carries it too (`progress.pending_question`),
     // unchanged.
+    let cfg = apb_engine::run_config::read_run_config(&dir).unwrap_or_default();
     let pending_question = progress.as_ref().and_then(|p| p.pending_question.clone());
     let answer = apb_engine::progress::run_answer(&dir, &events);
     let children: Vec<Value> = events
@@ -834,6 +839,8 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "pending_question": pending_question,
         "answer": answer,
         "children": children,
+        "continued_from": cfg.continued_from,
+        "superseded_by": cfg.superseded_by,
     }))
 }
 
@@ -979,6 +986,7 @@ pub fn playbook_run_supervised(
     expected_children: Option<BTreeMap<String, ChildExpectation>>,
     expected_connectors: BTreeMap<String, String>,
     expected_connector_accounts: BTreeMap<String, String>,
+    continued_from: Option<String>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence supervisor_expected: false
@@ -996,6 +1004,7 @@ pub fn playbook_run_supervised(
         expected_digest,
         expected_profile_bundles,
         parent_run: None,
+        continued_from,
         depth: 0,
         expected_children,
         expected_connectors,
