@@ -82,6 +82,12 @@ pub enum EventPayload {
         /// composition - measures the attempt from its own spawn instant.
         #[serde(default)]
         duration_ms: Option<u64>,
+        /// Agent session id captured from a finished attempt, for the
+        /// `resume` transport (spec 2026-07-20-interactive-nodes, Transport:
+        /// resume). `None` when the agent surfaced no session id or the
+        /// transport does not resume. Additive.
+        #[serde(default)]
+        session: Option<String>,
     },
     NodeFinished {
         node: String,
@@ -283,6 +289,24 @@ pub enum EventPayload {
         from: String,
         to: String,
     },
+    /// An interactive node's agent asked the user a question (spec
+    /// 2026-07-20-interactive-nodes). Written by drive when it observes a new
+    /// `questions.jsonl` entry for the node (single-writer, like
+    /// `ReviewRequested`). Additive variant: old logs never carry it.
+    QuestionAsked {
+        node: String,
+        question: String,
+        #[serde(default)]
+        options: Vec<String>,
+    },
+    /// The N-th answer matched the N-th asked question for a node
+    /// (count-based consumption, like `ReviewDecided`). `answered_by` is one
+    /// of `"human"`, `"supervisor"`, `"timeout"`.
+    QuestionAnswered {
+        node: String,
+        answer: String,
+        answered_by: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -352,4 +376,107 @@ pub fn read_all(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
         out.push(ev);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn question_asked_round_trips_with_snake_case_tag() {
+        let payload = EventPayload::QuestionAsked {
+            node: "ask".into(),
+            question: "which way".into(),
+            options: vec!["left".into(), "right".into()],
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        assert!(
+            line.contains("\"type\":\"question_asked\""),
+            "expected question_asked tag, got {line}"
+        );
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::QuestionAsked {
+                node,
+                question,
+                options,
+            } => {
+                assert_eq!(node, "ask");
+                assert_eq!(question, "which way");
+                assert_eq!(options, vec!["left".to_string(), "right".to_string()]);
+            }
+            other => panic!("expected QuestionAsked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn question_asked_options_default_to_empty_when_absent() {
+        // Old-style payload without `options` at all must still deserialize
+        // (additive field, spec: options with #[serde(default)]).
+        let line = r#"{"type":"question_asked","node":"ask","question":"q"}"#;
+        let back: EventPayload = serde_json::from_str(line).unwrap();
+        match back {
+            EventPayload::QuestionAsked { options, .. } => {
+                assert_eq!(options, Vec::<String>::new());
+            }
+            other => panic!("expected QuestionAsked, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn question_answered_round_trips_with_snake_case_tag() {
+        let payload = EventPayload::QuestionAnswered {
+            node: "ask".into(),
+            answer: "left".into(),
+            answered_by: "human".into(),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        assert!(
+            line.contains("\"type\":\"question_answered\""),
+            "expected question_answered tag, got {line}"
+        );
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::QuestionAnswered {
+                node,
+                answer,
+                answered_by,
+            } => {
+                assert_eq!(node, "ask");
+                assert_eq!(answer, "left");
+                assert_eq!(answered_by, "human");
+            }
+            other => panic!("expected QuestionAnswered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attempt_finished_without_session_deserializes_to_none() {
+        // An old log line, written before `session` existed.
+        let line = r#"{"type":"attempt_finished","node":"a","attempt":1,"status":"succeeded"}"#;
+        let back: EventPayload = serde_json::from_str(line).unwrap();
+        match back {
+            EventPayload::AttemptFinished { session, .. } => assert_eq!(session, None),
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attempt_finished_with_session_round_trips() {
+        let payload = EventPayload::AttemptFinished {
+            node: "a".into(),
+            attempt: 1,
+            status: "succeeded".into(),
+            duration_ms: Some(42),
+            session: Some("abc".into()),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::AttemptFinished { session, .. } => {
+                assert_eq!(session.as_deref(), Some("abc"));
+            }
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
 }

@@ -20,6 +20,7 @@ pub mod manifest;
 pub mod parallel;
 pub mod proc;
 pub mod progress;
+pub mod question;
 pub mod review;
 pub mod run_config;
 pub mod run_doctor;
@@ -39,6 +40,10 @@ pub use inspect::{
 };
 pub use liveness::{NodeTimes, driver_alive, lost_nodes, node_times};
 pub use progress::{ProgressSummary, compute as run_progress, node_durations_seconds};
+pub use question::{
+    PostedAnswer, PostedQuestion, post_answer, post_question, read_answers_after,
+    read_questions_after,
+};
 pub use review::{ReviewCommand, ReviewEntry, post_review, read_reviews_after};
 pub use run_doctor::{RunCheck, diagnose_run};
 pub use scheduler::{

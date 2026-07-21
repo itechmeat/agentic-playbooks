@@ -137,6 +137,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "run_resume",
         "run_stop",
         "review_decide",
+        "run_answer",
         "supervisor_wait_event",
         "supervisor_run_inspect",
         "supervisor_node_retry",
@@ -207,6 +208,7 @@ fn tools_carry_safety_annotations() {
         "run_resume",
         "run_stop",
         "review_decide",
+        "run_answer",
         "supervisor_node_retry",
         "supervisor_run_continue_from",
         "supervisor_run_pause",
@@ -590,6 +592,143 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
         Some(false),
         "disk-resolved observe-only token should pass observe capability gate: {}",
         result_text(&inspect_result)
+    );
+}
+
+// `run_answer` (spec 2026-07-20-interactive-nodes, Task 8): the plain
+// run_id path (`answered_by: "human"`) and the supervisor-token path
+// (`answered_by: "supervisor"`, gated by `resolve_session` exactly like the
+// other supervisor_* tools), including the `answer_by: human` relay
+// rejection that `apb_engine::post_answer` enforces for every facade.
+
+const SUPERVISOR_ASK_PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: ask, type: agent_task, prompt: hi, interactive: true, answer_by: supervisor }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: ask }\n  - { from: ask, to: f }\n";
+
+const HUMAN_ASK_PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: ask, type: agent_task, prompt: hi, interactive: true }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: ask }\n  - { from: ask, to: f }\n";
+
+/// A bare run dir carrying a playbook snapshot and one pending question on
+/// node `ask` - enough for `resolve_run_dir` + `post_answer`'s `answer_by`
+/// lookup, without a real drive.
+fn interactive_run_dir(root: &Path, run_id: &str, playbook_yaml: &str) -> PathBuf {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    fs::create_dir_all(&run_dir).expect("mkdir run dir");
+    fs::write(run_dir.join("playbook.yaml"), playbook_yaml).expect("write playbook snapshot");
+    apb_engine::question::post_question(&run_dir, "ask", 1, "which way", Vec::new())
+        .expect("post_question");
+    run_dir
+}
+
+#[tokio::test]
+async fn run_answer_token_path_posts_supervisor_answer_on_supervisor_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = interactive_run_dir(dir.path(), "r-sv", SUPERVISOR_ASK_PB);
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let token = server.mint_token("r-sv".to_string(), vec!["observe".to_string()]);
+
+    let result = server
+        .run_answer(Parameters(RunAnswerArgs {
+            run_id: None,
+            token: Some(token),
+            node: None,
+            answer: "left".to_string(),
+            workspace: None,
+        }))
+        .await;
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "unexpected error: {}",
+        result_text(&result)
+    );
+
+    let answers = apb_engine::question::read_answers_after(&run_dir, None).unwrap();
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].node, "ask");
+    assert_eq!(answers[0].answered_by, "supervisor");
+}
+
+#[tokio::test]
+async fn run_answer_token_path_relays_on_human_only_node() {
+    let dir = tempfile::tempdir().unwrap();
+    interactive_run_dir(dir.path(), "r-human", HUMAN_ASK_PB);
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let token = server.mint_token("r-human".to_string(), vec!["observe".to_string()]);
+
+    let result = server
+        .run_answer(Parameters(RunAnswerArgs {
+            run_id: None,
+            token: Some(token),
+            node: None,
+            answer: "left".to_string(),
+            workspace: None,
+        }))
+        .await;
+    assert_eq!(result.is_error, Some(true));
+    assert!(
+        result_text(&result).contains("relay"),
+        "expected a relay instruction, got: {}",
+        result_text(&result)
+    );
+}
+
+#[tokio::test]
+async fn run_answer_run_id_path_posts_human_answer() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = interactive_run_dir(dir.path(), "r-op", HUMAN_ASK_PB);
+    let server = WfMcp::new(dir.path().to_path_buf());
+
+    let result = server
+        .run_answer(Parameters(RunAnswerArgs {
+            run_id: Some("r-op".to_string()),
+            token: None,
+            node: None,
+            answer: "left".to_string(),
+            workspace: None,
+        }))
+        .await;
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "unexpected error: {}",
+        result_text(&result)
+    );
+
+    let answers = apb_engine::question::read_answers_after(&run_dir, None).unwrap();
+    assert_eq!(answers[0].answered_by, "human");
+}
+
+#[tokio::test]
+async fn run_answer_requires_exactly_one_of_run_id_or_token() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = WfMcp::new(dir.path().to_path_buf());
+
+    let neither = server
+        .run_answer(Parameters(RunAnswerArgs {
+            run_id: None,
+            token: None,
+            node: None,
+            answer: "left".to_string(),
+            workspace: None,
+        }))
+        .await;
+    assert!(
+        result_text(&neither).contains("exactly_one_of_run_id_or_token_required"),
+        "got: {}",
+        result_text(&neither)
+    );
+
+    let both = server
+        .run_answer(Parameters(RunAnswerArgs {
+            run_id: Some("r1".to_string()),
+            token: Some("tok".to_string()),
+            node: None,
+            answer: "left".to_string(),
+            workspace: None,
+        }))
+        .await;
+    assert!(
+        result_text(&both).contains("exactly_one_of_run_id_or_token_required"),
+        "got: {}",
+        result_text(&both)
     );
 }
 

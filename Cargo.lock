@@ -104,7 +104,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apb-cli"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "apb-core",
@@ -125,7 +125,7 @@ dependencies = [
 
 [[package]]
 name = "apb-core"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "globset",
  "jsonschema",
@@ -144,7 +144,7 @@ dependencies = [
 
 [[package]]
 name = "apb-engine"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "apb-core",
  "base64 0.22.1",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "apb-mcp"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "anyhow",
  "apb-core",
@@ -188,7 +188,7 @@ dependencies = [
 
 [[package]]
 name = "apb-server"
-version = "0.7.0"
+version = "0.8.0"
 dependencies = [
  "apb-core",
  "apb-engine",

@@ -2,6 +2,7 @@
   import { ApiError, deleteProfile, fetchProfiles, type ProfileSummary } from '../lib/api'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
+  import PageScroll from '$lib/components/PageScroll.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
@@ -92,14 +93,14 @@
 
 <Topbar active="profiles">
   {#snippet actions()}
-    <Button href="#/profile-new" size="sm">
+    <Button href="#/profile-new" size="sm" class="max-sm:px-2">
       <Plus data-icon="inline-start" />
-      Create
+      <span class="max-sm:sr-only">Create</span>
     </Button>
   {/snippet}
 </Topbar>
 
-<div class="min-h-0 flex-1 overflow-auto">
+<PageScroll>
   <div class="mx-auto w-full max-w-4xl px-4 py-6">
     {#if !loaded}
       <div class="flex flex-col gap-3">
@@ -134,7 +135,11 @@
               <Card.Root class="transition-colors hover:border-ring/40">
                 <Card.Header>
                   <div class="flex flex-wrap items-center gap-2">
-                    <Card.Title class="text-base">{p.name}</Card.Title>
+                    <Card.Title class="text-base">
+                      <a href={editHref(p)} class="hover:underline">
+                        {p.name}
+                      </a>
+                    </Card.Title>
                     {#if !p.trusted}
                       <Badge variant="outline" class="gap-1 border-warning/30 bg-warning/15 text-warning">
                         <ShieldAlert class="size-3" />
@@ -148,19 +153,19 @@
                       : ''}
                   </Card.Description>
                   <Card.Action class="flex gap-1">
-                    <Button variant="ghost" size="sm" href={editHref(p)}>
+                    <Button variant="ghost" size="sm" class="max-sm:px-2" href={editHref(p)}>
                       <Pencil data-icon="inline-start" />
-                      Edit
+                      <span class="max-sm:sr-only">Edit</span>
                     </Button>
                     <Button
                       variant="ghost"
                       size="sm"
-                      class="text-muted-foreground hover:text-destructive"
+                      class="max-sm:px-2 text-muted-foreground hover:text-destructive"
                       onclick={() => askRemove(p)}
                       disabled={deleting === key(p)}
                     >
                       <Trash2 data-icon="inline-start" />
-                      Delete
+                      <span class="max-sm:sr-only">Delete</span>
                     </Button>
                   </Card.Action>
                 </Card.Header>
@@ -176,7 +181,7 @@
       {/each}
     {/if}
   </div>
-</div>
+</PageScroll>
 
 <AlertDialog.Root bind:open={confirmOpen}>
   <AlertDialog.Content>

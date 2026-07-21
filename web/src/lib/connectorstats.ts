@@ -16,6 +16,36 @@ export interface ConnectorStats {
   byOutcome: Record<string, number>
 }
 
+// What the Usage card should do this render.
+//
+// `hidden`   nothing here can become meaningful: the connector is not
+//            installed, so no new call can be made from this page, and no old
+//            call was ever recorded.
+// `loading`  the request is in flight for an installed connector, whose card
+//            is going to render either way, so a skeleton is honest here.
+// `error`    the stats request failed. That is not the same answer as "no
+//            calls", so the card stays and says so.
+// `empty`    installed with no recorded calls yet. Kept, because the section
+//            fills itself the moment a playbook calls the connector.
+// `data`     real call history exists. Shown even when the connector is not
+//            currently installed, because run event logs survive an uninstall
+//            and hiding real data would misrepresent it.
+export type UsageCardState = 'hidden' | 'loading' | 'error' | 'empty' | 'data'
+
+export function usageCardState(
+  installed: boolean,
+  loaded: boolean,
+  failed: boolean,
+  stats: ConnectorStats | null,
+): UsageCardState {
+  // A not-installed connector shows nothing while loading rather than a
+  // skeleton that usually resolves to nothing and would flash in and out.
+  if (!loaded) return installed ? 'loading' : 'hidden'
+  if (failed) return 'error'
+  if (stats && stats.calls > 0) return 'data'
+  return installed ? 'empty' : 'hidden'
+}
+
 // Error rate as a whole percentage. 0/0 reads as "0%" (a stat with no calls
 // is not an error rate of NaN or 100%).
 export function errorRate(stat: ConnectorFunctionStat): string {

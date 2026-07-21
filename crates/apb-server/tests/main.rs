@@ -8,6 +8,8 @@
 #[path = "suite/common.rs"]
 mod common;
 
+#[path = "suite/answer_api_test.rs"]
+mod answer_api_test;
 #[path = "suite/api_test.rs"]
 mod api_test;
 #[path = "suite/connectors_api_test.rs"]

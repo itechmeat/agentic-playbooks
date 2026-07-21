@@ -4,6 +4,7 @@
   import { subscribeChanges } from '../lib/ws'
   import type { PlaybookSummary } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
+  import PageScroll from '$lib/components/PageScroll.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
@@ -87,14 +88,14 @@
 
 <Topbar active="playbooks">
   {#snippet actions()}
-    <Button href="#/new" size="sm">
+    <Button href="#/new" size="sm" class="max-sm:px-2">
       <Plus data-icon="inline-start" />
-      Create
+      <span class="max-sm:sr-only">Create</span>
     </Button>
   {/snippet}
 </Topbar>
 
-<div class="min-h-0 flex-1 overflow-auto">
+<PageScroll>
   <div class="mx-auto w-full max-w-4xl px-4 py-6">
     {#if !loaded}
       <div class="flex flex-col gap-3">
@@ -151,21 +152,22 @@
                     <Button
                       variant="ghost"
                       size="sm"
+                      class="max-sm:px-2"
                       onclick={() => duplicate(w)}
                       title={`Duplicate as ${suggestDuplicateId(w.id)}`}
                     >
                       <Copy data-icon="inline-start" />
-                      Duplicate
+                      <span class="max-sm:sr-only">Duplicate</span>
                     </Button>
                     <Button
                       variant="ghost"
                       size="sm"
-                      class="text-muted-foreground hover:text-destructive"
+                      class="max-sm:px-2 text-muted-foreground hover:text-destructive"
                       onclick={() => askRemove(w)}
                       disabled={deleting === key(w)}
                     >
                       <Trash2 data-icon="inline-start" />
-                      Delete
+                      <span class="max-sm:sr-only">Delete</span>
                     </Button>
                   </Card.Action>
                 </Card.Header>
@@ -181,7 +183,7 @@
       {/each}
     {/if}
   </div>
-</div>
+</PageScroll>
 
 <AlertDialog.Root bind:open={confirmOpen}>
   <AlertDialog.Content>

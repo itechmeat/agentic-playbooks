@@ -273,9 +273,9 @@
       </Field.FieldGroup>
 
       <div>
-        <Button size="sm" onclick={call} disabled={!canCall}>
+        <Button size="sm" class="max-sm:px-2" onclick={call} disabled={!canCall}>
           {#if calling}<Spinner data-icon="inline-start" />{:else}<Play data-icon="inline-start" />{/if}
-          {dryRun ? 'Render' : 'Call'}
+          <span class="max-sm:sr-only">{dryRun ? 'Render' : 'Call'}</span>
         </Button>
       </div>
 

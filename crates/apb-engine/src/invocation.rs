@@ -9,7 +9,9 @@
 
 use std::path::{Path, PathBuf};
 
-use apb_core::config::{GlobalConfig, InvocationDef, PromptVia, SoulDelivery, Transport};
+use apb_core::config::{
+    GlobalConfig, Interaction, InvocationDef, PromptVia, SoulDelivery, Transport,
+};
 use apb_core::profile::SoulRequirement;
 
 use crate::error::EngineError;
@@ -31,42 +33,52 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
     let mk = |argv: &[&str],
               soul: SoulDelivery,
               soul_flag: Option<&str>,
-              autonomous_args: &[&str]| InvocationDef {
+              autonomous_args: &[&str],
+              interaction: Interaction| InvocationDef {
         argv: argv.iter().map(|s| s.to_string()).collect(),
         prompt_via: PromptVia::Argv,
         soul,
         soul_flag: soul_flag.map(|s| s.to_string()),
         transport: Transport::Headless,
         autonomous_args: autonomous_args.iter().map(|s| s.to_string()).collect(),
+        interaction,
     };
     match agent_id {
         // claude runs headless one-shot (`-p`); to actually write files and
         // reach the network on an authorized effectful run it needs an explicit
         // non-interactive permission mode, otherwise every tool call blocks
         // waiting for an approval that never comes (spec 8.5).
+        //
+        // Interaction ceiling per spec 2026-07-20: claude gets `live` (the
+        // blocking `ask_user` MCP tool, Task 11); the aggregators that expose a
+        // resumable session get `resume`; agy, which does not, gets `reprompt`.
         "claude" | "claude-code" => Some(mk(
             &["-p", "{prompt}", "--model", "{model}"],
             SoulDelivery::Native,
             Some("--append-system-prompt"),
             &["--permission-mode", "bypassPermissions"],
+            Interaction::Live,
         )),
         "agy" => Some(mk(
             &["-p", "{prompt}", "--model", "{model}"],
             SoulDelivery::Prefix,
             None,
             &[],
+            Interaction::Reprompt,
         )),
         "codex" => Some(mk(
             &["exec", "{prompt}", "-m", "{model}"],
             SoulDelivery::Prefix,
             None,
             &[],
+            Interaction::Resume,
         )),
         "opencode" => Some(mk(
             &["run", "{prompt}", "-m", "{model}"],
             SoulDelivery::Prefix,
             None,
             &[],
+            Interaction::Resume,
         )),
         // hermes one-shot mode prints only the final response text to
         // stdout and auto-bypasses approvals by design (script mode);
@@ -76,7 +88,60 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
             SoulDelivery::Prefix,
             None,
             &[],
+            Interaction::Resume,
         )),
+        _ => None,
+    }
+}
+
+/// Declarative resume-form argv for an agent's `resume` transport (spec
+/// 2026-07-20, Task 7). The answer round substitutes the placeholders as whole
+/// argv elements - `{session}` (the captured session id), `{prompt}` (the
+/// user's answer, delivered as the follow-up), `{model}` - the same way the
+/// primary `argv` template is filled. `None` for an agent with no resume form,
+/// which forces the runtime downgrade to `reprompt`. Kept beside `builtin` so
+/// the resume argv stays as declarative as the launch argv, never string-built
+/// in the scheduler.
+pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
+    let v = |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| s.to_string()).collect() };
+    match agent_id {
+        // claude resumes a prior session with `--resume <id>` and takes the
+        // follow-up as a fresh `-p` prompt.
+        "claude" | "claude-code" => Some(v(&[
+            "--resume",
+            "{session}",
+            "-p",
+            "{prompt}",
+            "--model",
+            "{model}",
+        ])),
+        // codex re-enters a conversation via `exec resume <id>`.
+        "codex" => Some(v(&[
+            "exec",
+            "resume",
+            "{session}",
+            "{prompt}",
+            "-m",
+            "{model}",
+        ])),
+        // opencode re-enters a session via `--session <id>`.
+        "opencode" => Some(v(&[
+            "run",
+            "--session",
+            "{session}",
+            "{prompt}",
+            "-m",
+            "{model}",
+        ])),
+        // hermes re-enters a session via `--resume <id>`, still in script mode.
+        "hermes" => Some(v(&[
+            "-z",
+            "--resume",
+            "{session}",
+            "{prompt}",
+            "-m",
+            "{model}",
+        ])),
         _ => None,
     }
 }
@@ -269,6 +334,7 @@ mod tests {
             soul_flag: None,
             transport: Transport::Headless,
             autonomous_args: vec![],
+            interaction: Interaction::default(),
         };
         assert!(two.validate().is_err());
 
@@ -279,6 +345,7 @@ mod tests {
             soul_flag: None,
             transport: Transport::Headless,
             autonomous_args: vec![],
+            interaction: Interaction::default(),
         };
         assert!(partial.validate().is_err());
 
@@ -289,6 +356,7 @@ mod tests {
             soul_flag: None,
             transport: Transport::Headless,
             autonomous_args: vec![],
+            interaction: Interaction::default(),
         };
         assert!(stdin_with_slot.validate().is_err());
 
@@ -299,6 +367,7 @@ mod tests {
             soul_flag: None,
             transport: Transport::Headless,
             autonomous_args: vec![],
+            interaction: Interaction::default(),
         };
         assert!(native_no_flag.validate().is_err());
     }

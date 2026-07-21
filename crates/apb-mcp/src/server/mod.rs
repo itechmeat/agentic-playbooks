@@ -72,7 +72,14 @@ fn to_call_tool_result(result: Result<Value, ToolError>) -> CallToolResult {
 
 fn capability_for_tool(name: &str) -> &'static str {
     match name {
-        "supervisor_wait_event" | "supervisor_run_inspect" | "supervisor_report" => "observe",
+        // `run_answer`'s supervisor-token path (spec 2026-07-20-interactive-
+        // nodes, Task 8): answering a question is an observational act from
+        // the supervisor session's point of view (it does not retry, patch,
+        // or otherwise alter the run's control flow), so it shares
+        // `supervisor_wait_event`'s capability rather than `retry`'s.
+        "supervisor_wait_event" | "supervisor_run_inspect" | "supervisor_report" | "run_answer" => {
+            "observe"
+        }
         "supervisor_node_retry"
         | "supervisor_run_continue_from"
         | "supervisor_run_pause"

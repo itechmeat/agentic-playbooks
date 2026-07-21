@@ -188,17 +188,36 @@ fn split_frontmatter(content: &str) -> Option<(&str, &str)> {
 }
 
 /// Default metadata for a connector with no usable storefront page: an
-/// otherwise-empty `PublicMeta` whose `display_name` is the folder name, so
+/// otherwise-empty `PublicMeta` whose `display_name` is the connector name, so
 /// the dashboard always has something to show.
-fn fallback_meta(dir: &Path) -> PublicMeta {
-    let display_name = dir
-        .file_name()
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_default();
+fn fallback_meta(name: &str) -> PublicMeta {
     PublicMeta {
-        display_name,
+        display_name: name.to_string(),
         ..Default::default()
     }
+}
+
+/// Parses `PUBLIC.md` frontmatter from content already in memory, falling back
+/// to `fallback_meta(name)` when there is no `---`-delimited block or it fails
+/// to parse as YAML. Split out from [`public_meta`] because an embedded
+/// official connector carries its `PUBLIC.md` as bytes in the binary and never
+/// has a directory to read it from.
+pub fn public_meta_from_str(content: &str, name: &str) -> PublicMeta {
+    let Some((frontmatter, _body)) = split_frontmatter(content) else {
+        return fallback_meta(name);
+    };
+    let mut meta: PublicMeta =
+        serde_yaml_ng::from_str(frontmatter).unwrap_or_else(|_| fallback_meta(name));
+    // Frontmatter that parses but omits `display_name` (or sets it to an
+    // empty/whitespace-only string) deserializes to `""` via the field's
+    // serde default, not the folder name - fall back the same way the
+    // no-frontmatter and parse-error cases already do, so a connector with a
+    // storefront page that simply forgot `display_name` still has a usable
+    // one.
+    if meta.display_name.trim().is_empty() {
+        meta.display_name = name.to_string();
+    }
+    meta
 }
 
 /// Reads and parses `PUBLIC.md`'s frontmatter (spec 3.2). Falls back to a
@@ -206,13 +225,26 @@ fn fallback_meta(dir: &Path) -> PublicMeta {
 /// `---`-delimited frontmatter block, or the frontmatter fails to parse as
 /// YAML - the storefront must never break the machine path.
 pub fn public_meta(dir: &Path) -> PublicMeta {
-    let Ok(content) = std::fs::read_to_string(dir.join("PUBLIC.md")) else {
-        return fallback_meta(dir);
-    };
-    let Some((frontmatter, _body)) = split_frontmatter(&content) else {
-        return fallback_meta(dir);
-    };
-    serde_yaml_ng::from_str(frontmatter).unwrap_or_else(|_| fallback_meta(dir))
+    let name = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().to_string())
+        .unwrap_or_default();
+    match std::fs::read_to_string(dir.join("PUBLIC.md")) {
+        Ok(content) => public_meta_from_str(&content, &name),
+        Err(_) => fallback_meta(&name),
+    }
+}
+
+/// The markdown body after `PUBLIC.md`'s frontmatter block, from content
+/// already in memory. Empty when there is no `---`-delimited block. Split out
+/// from [`public_body`] for the same reason as [`public_meta_from_str`]: an
+/// embedded official connector carries `PUBLIC.md` as bytes in the binary and
+/// has no directory to read it from.
+pub fn public_body_from_str(content: &str) -> String {
+    match split_frontmatter(content) {
+        Some((_, body)) => body.to_string(),
+        None => String::new(),
+    }
 }
 
 /// The markdown body of `PUBLIC.md`, after its frontmatter block. Empty
@@ -221,10 +253,7 @@ pub fn public_body(dir: &Path) -> String {
     let Ok(content) = std::fs::read_to_string(dir.join("PUBLIC.md")) else {
         return String::new();
     };
-    match split_frontmatter(&content) {
-        Some((_, body)) => body.to_string(),
-        None => String::new(),
-    }
+    public_body_from_str(&content)
 }
 
 #[cfg(test)]
@@ -449,6 +478,20 @@ mod tests {
 
         let meta = public_meta(&sub);
         assert_eq!(meta.display_name, "my-connector");
+    }
+
+    #[test]
+    fn public_meta_falls_back_when_frontmatter_omits_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("my-connector");
+        write(
+            &sub.join("PUBLIC.md"),
+            "---\nsummary: does stuff\n---\nBody\n",
+        );
+
+        let meta = public_meta(&sub);
+        assert_eq!(meta.display_name, "my-connector");
+        assert_eq!(meta.summary, "does stuff");
     }
 
     #[test]

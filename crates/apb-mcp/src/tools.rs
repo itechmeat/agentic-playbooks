@@ -802,6 +802,12 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         })
         .collect();
     let progress = apb_engine::progress::from_run_dir(&dir, &events);
+    // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
+    // nodes, Task 8): callers that only care about the pending question
+    // (`run_answer`'s caller, the web) do not have to drill into `progress`.
+    // `progress` itself still carries it too (`progress.pending_question`),
+    // unchanged.
+    let pending_question = progress.as_ref().and_then(|p| p.pending_question.clone());
     let answer = apb_engine::progress::run_answer(&dir, &events);
     let children: Vec<Value> = events
         .iter()
@@ -825,6 +831,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "driver_alive": driver_alive,
         "outputs": state.outputs,
         "progress": progress,
+        "pending_question": pending_question,
         "answer": answer,
         "children": children,
     }))
@@ -1124,6 +1131,27 @@ pub fn playbook_patch(
         },
     )?;
     Ok(json!({ "version": version, "posted_seq": seq }))
+}
+
+/// Answers a pending interactive question on a run (spec
+/// 2026-07-20-interactive-nodes): writes a command into the run's
+/// answers.jsonl channel via `apb_engine::post_answer`. `node` omitted
+/// resolves to the single pending question. The `answer_by` policy (a node
+/// declaring `answer_by: human` rejects `answered_by: "supervisor"`, with an
+/// error instructing the supervisor to relay the question to the user) is
+/// enforced inside `post_answer`, not here - every facade (this MCP tool,
+/// `apb answer`, the web API) shares that one enforcement point, so it
+/// cannot be bypassed by a facade that forgets to check it.
+pub fn run_answer(
+    root: &Path,
+    run_id: &str,
+    node: Option<&str>,
+    answer: &str,
+    answered_by: &str,
+) -> Result<Value, ToolError> {
+    let run_dir = resolve_run_dir(root, run_id)?;
+    let seq = apb_engine::post_answer(&run_dir, node, answer, answered_by)?;
+    Ok(json!({ "posted_seq": seq }))
 }
 
 /// A human_review node decision: writes a command into the run's reviews.jsonl channel.

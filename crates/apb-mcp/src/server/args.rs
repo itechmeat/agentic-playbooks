@@ -126,6 +126,35 @@ pub struct ReviewDecideArgs {
     pub workspace: Option<String>,
 }
 
+/// Answers a pending interactive question on a run (spec
+/// 2026-07-20-interactive-nodes). Exactly one of `run_id`/`token` identifies
+/// the run: `run_id` is the plain/operator path (`answered_by: "human"`),
+/// `token` is the supervisor-session path (`answered_by: "supervisor"`) -
+/// `crate::server::capability_for_tool` maps this tool to the `observe`
+/// capability. `node` should normally be omitted (there is usually exactly
+/// one pending question) or copied verbatim from `run_status`'s
+/// `pending_question.node`: an explicit `node` is not checked against the
+/// pending channel, so a typo'd name silently appends an orphaned answer
+/// instead of erroring.
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunAnswerArgs {
+    /// Run to answer (human/operator path). Provide this OR `token`.
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// Supervisor session token (supervisor path). Provide this OR `run_id`.
+    #[serde(default)]
+    pub token: Option<String>,
+    /// The interactive node; omit when exactly one question is pending.
+    #[serde(default)]
+    pub node: Option<String>,
+    pub answer: String,
+    /// workspace_id of another workspace (spec 7). Only meaningful with
+    /// `run_id`; the supervisor-token path resolves its own run and ignores
+    /// this. None - the current workspace.
+    #[serde(default)]
+    pub workspace: Option<String>,
+}
+
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SupervisorWaitArgs {
     /// Supervisor session token, issued on start with supervise: "self".

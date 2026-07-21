@@ -573,6 +573,26 @@ pub enum NodeKind {
         /// returns an empty slice for every other kind.
         #[serde(default)]
         connectors: Vec<ConnectorBinding>,
+        /// Interactive node (spec 2026-07-20): the agent may ask the user a
+        /// question mid-run. Only meaningful on `agent_task`. Default false.
+        #[serde(default)]
+        interactive: bool,
+        /// Who may answer an interactive node's questions. `human`: the
+        /// supervisor must relay the question to the user and relay the answer
+        /// back verbatim. `supervisor`: the supervisor may answer on its own
+        /// judgment. Default `human`. Serialized only when non-default.
+        #[serde(default, skip_serializing_if = "AnswerBy::is_default")]
+        answer_by: AnswerBy,
+        /// Wait budget for a pending question. `None` (default) waits forever,
+        /// like human_review. On expiry the engine answers with `default_answer`
+        /// (`answered_by: "timeout"`); expiry without a `default_answer` fails
+        /// the attempt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        question_timeout_seconds: Option<u64>,
+        /// The answer supplied automatically when `question_timeout_seconds`
+        /// elapses. Requires `question_timeout_seconds` (validator V32).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        default_answer: Option<String>,
     },
     Script {
         script: String,
@@ -650,6 +670,32 @@ pub enum Isolation {
     BestEffort,
     #[default]
     None,
+}
+
+/// Who may answer an interactive `agent_task` node's questions (spec
+/// 2026-07-20-interactive-nodes). `Human` (default): the supervisor must
+/// relay the question to the user and relay the answer back verbatim.
+/// `Supervisor`: the supervisor may answer on its own judgment.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AnswerBy {
+    #[default]
+    Human,
+    Supervisor,
+}
+
+impl AnswerBy {
+    /// For `skip_serializing_if`: the default (`Human`) is omitted from
+    /// serialized YAML/JSON, matching the schema's minimal-output style.
+    pub fn is_default(&self) -> bool {
+        matches!(self, AnswerBy::Human)
+    }
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            AnswerBy::Human => "human",
+            AnswerBy::Supervisor => "supervisor",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -950,5 +996,109 @@ edges: []
         assert!(yaml.contains("functions: read_only"));
         assert!(!yaml.contains("accounts"));
         assert!(!yaml.contains("max_calls"));
+    }
+
+    #[test]
+    fn interactive_companion_fields_round_trip() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - id: a
+    type: agent_task
+    prompt: hi
+    profile: x
+    interactive: true
+    answer_by: supervisor
+    question_timeout_seconds: 120
+    default_answer: "proceed"
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        match &pb.node("a").unwrap().kind {
+            NodeKind::AgentTask {
+                interactive,
+                answer_by,
+                question_timeout_seconds,
+                default_answer,
+                ..
+            } => {
+                assert!(*interactive);
+                assert_eq!(*answer_by, AnswerBy::Supervisor);
+                assert_eq!(*question_timeout_seconds, Some(120));
+                assert_eq!(default_answer.as_deref(), Some("proceed"));
+            }
+            other => panic!("expected agent_task, got {other:?}"),
+        }
+
+        // Re-serialize and re-parse: the four fields survive the round trip.
+        let reserialized = serde_yaml_ng::to_string(&pb).unwrap();
+        let pb2 = Playbook::from_yaml(&reserialized).unwrap();
+        match &pb2.node("a").unwrap().kind {
+            NodeKind::AgentTask {
+                interactive,
+                answer_by,
+                question_timeout_seconds,
+                default_answer,
+                ..
+            } => {
+                assert!(*interactive);
+                assert_eq!(*answer_by, AnswerBy::Supervisor);
+                assert_eq!(*question_timeout_seconds, Some(120));
+                assert_eq!(default_answer.as_deref(), Some("proceed"));
+            }
+            other => panic!("expected agent_task, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn interactive_companion_fields_omitted_when_default() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        match &pb.node("a").unwrap().kind {
+            NodeKind::AgentTask {
+                interactive,
+                answer_by,
+                question_timeout_seconds,
+                default_answer,
+                ..
+            } => {
+                assert!(!*interactive);
+                assert_eq!(*answer_by, AnswerBy::Human);
+                assert_eq!(*question_timeout_seconds, None);
+                assert_eq!(*default_answer, None);
+            }
+            other => panic!("expected agent_task, got {other:?}"),
+        }
+
+        // The default `answer_by` (Human), an absent `question_timeout_seconds`,
+        // and an absent `default_answer` are all omitted from the serialized
+        // form (skip_serializing_if); only `interactive: false` is written.
+        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        assert!(!out.contains("answer_by"), "got: {out}");
+        assert!(!out.contains("question_timeout_seconds"), "got: {out}");
+        assert!(!out.contains("default_answer"), "got: {out}");
+        assert!(out.contains("interactive: false"), "got: {out}");
+    }
+
+    #[test]
+    fn answer_by_is_default_and_as_str() {
+        assert!(AnswerBy::Human.is_default());
+        assert!(!AnswerBy::Supervisor.is_default());
+        assert_eq!(AnswerBy::Human.as_str(), "human");
+        assert_eq!(AnswerBy::Supervisor.as_str(), "supervisor");
+        assert_eq!(AnswerBy::default(), AnswerBy::Human);
     }
 }

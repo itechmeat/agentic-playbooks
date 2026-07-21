@@ -6,6 +6,7 @@ import {
   fetchDiff,
   fetchInputDraft,
   fetchPlaybook,
+  postAnswer,
   saveInputDraft,
   saveLayout,
   updatePlaybook,
@@ -57,6 +58,46 @@ describe('fetchPlaybook', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse(detail))
     await fetchPlaybook('demo', 'ws-abc', '1.0.0')
     expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?workspace=ws-abc&version=1.0.0')
+  })
+})
+
+describe('postAnswer', () => {
+  it('POSTs { node, answer } to /api/runs/{id}/answer', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ posted_seq: 0 }))
+    const result = await postAnswer('run-1', { node: 'ask', answer: 'left' })
+    expect(result).toEqual({ posted_seq: 0 })
+    expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-1/answer', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ node: 'ask', answer: 'left' }),
+    })
+  })
+
+  it('omits node when the caller does not specify one', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ posted_seq: 0 }))
+    await postAnswer('run-1', { answer: 'left' })
+    const [, init] = fetchMock.mock.calls[0]
+    expect((init as RequestInit).body).toBe(JSON.stringify({ answer: 'left' }))
+  })
+
+  it('adds ?workspace= to select a project on the global dashboard', async () => {
+    fetchMock.mockResolvedValueOnce(jsonResponse({ posted_seq: 0 }))
+    await postAnswer('run-1', { node: 'ask', answer: 'left' }, 'ws-abc')
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/runs/run-1/answer?workspace=ws-abc',
+      expect.objectContaining({ method: 'POST' }),
+    )
+  })
+
+  it('surfaces the engine error message on failure', async () => {
+    fetchMock.mockResolvedValueOnce(
+      new Response('invalid: no pending question to answer (specify a node explicitly)', {
+        status: 500,
+      }),
+    )
+    await expect(postAnswer('run-1', { answer: 'left' })).rejects.toThrow(
+      /invalid: no pending question to answer/,
+    )
   })
 })
 

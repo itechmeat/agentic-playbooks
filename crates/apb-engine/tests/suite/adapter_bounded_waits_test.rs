@@ -89,6 +89,9 @@ fn task<'a>(
         soul: None,
         grant_autonomy: false,
         connector_policy: policy,
+        interactive: false,
+        node: "test",
+        agent: "claude",
     }
 }
 
@@ -331,6 +334,7 @@ fn a_wedged_agent_that_already_reported_keeps_its_result() {
         Some(&|pid| {
             *spawned.lock().unwrap() = pid;
         }),
+        None,
     );
     let elapsed = started.elapsed();
 
@@ -374,6 +378,7 @@ fn a_wedged_agent_with_no_result_fails_as_a_bounded_timeout() {
             Some(&|pid| {
                 *spawned.lock().unwrap() = pid;
             }),
+            None,
         )
         .unwrap_err();
     let elapsed = started.elapsed();

@@ -10,6 +10,7 @@ pub mod common;
 pub mod config;
 pub mod contract;
 pub mod def;
+pub mod install;
 // No glob re-export: `official::{list,get}` would collide with `store::{list,...}`
 // under the `pub use store::*` glob below. Callers use `official::list()` etc.
 pub mod official;
@@ -21,6 +22,7 @@ pub use common::*;
 pub use config::*;
 pub use contract::*;
 pub use def::*;
+pub use install::*;
 pub use resolve::*;
 pub use secrets::*;
 pub use store::*;

@@ -4,7 +4,7 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
-use apb_core::config::{GlobalConfig, SoulDelivery};
+use apb_core::config::{GlobalConfig, Interaction, SoulDelivery};
 use apb_core::migration::validate_migration;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::{Registry, is_safe_segment};
@@ -24,6 +24,9 @@ use crate::event::{
 use crate::inspect::{should_declare_lost, supervisor_silence_ms, write_supervisor_session};
 use crate::manifest::{ManifestProfile, ManifestSkill, RunExecutionManifest};
 use crate::parallel::{self, JoinReadiness};
+use crate::question::{
+    post_answer_if_unanswered, post_question, read_answers_after, read_questions_after,
+};
 use crate::review::read_reviews_after;
 use crate::run_config::{
     CacheRunMode, RunConfig, copy_scripts, read_run_config, snapshot_playbook, write_run_config,
@@ -190,6 +193,25 @@ pub struct RunResult {
     pub outcome: RunStatus,
 }
 
+/// The outcome of one node execution (`execute_node`). A normal execution
+/// `Finished` with a status, output, and the events drive must write in its
+/// return batch. An interactive `agent_task` that asked a question via the
+/// stdout marker instead of finishing returns `Suspended` (spec 2026-07-20):
+/// the drive loop parks it on the question and re-invokes once an answer
+/// arrives. Consumed by Task 5 (timeout expiry in the park loop), Task 6 (the
+/// marker scan that feeds it), and Task 7 (resume-vs-reprompt re-invocation).
+pub(crate) enum AttemptOutcome {
+    Finished {
+        status: NodeStatus,
+        output: String,
+        events: Vec<EventPayload>,
+    },
+    Suspended {
+        question: String,
+        options: Vec<String>,
+    },
+}
+
 fn review_decided_count(events: &[Event], node: &str) -> usize {
     events
         .iter()
@@ -204,6 +226,187 @@ fn review_requested_count(events: &[Event], node: &str) -> usize {
             |e| matches!(&e.payload, EventPayload::ReviewRequested { node: n, .. } if n == node),
         )
         .count()
+}
+
+/// How many `QuestionAsked` events a node already carries. Mirrors
+/// `review_requested_count`: drive declares a question once per suspension and
+/// this count keeps the declaration loop-resilient (spec 2026-07-20).
+fn question_asked_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::QuestionAsked { node: n, .. } if n == node))
+        .count()
+}
+
+/// How many `QuestionAnswered` events a node already carries. Mirrors
+/// `review_decided_count`: the N-th answer for a node is consumed once there
+/// are already N `QuestionAnswered` events for it (count-based consumption).
+fn question_answered_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::QuestionAnswered { node: n, .. } if n == node),
+        )
+        .count()
+}
+
+/// Observes the question/answer channels for a LIVE interactive attempt and
+/// journals `QuestionAsked` (+ a `WakeRaised`) and `QuestionAnswered` for each
+/// new channel entry beyond what the log already carries (spec 2026-07-20, Task
+/// 11). Count-based, exactly like the parked branch, so it is idempotent across
+/// repeated ticks.
+///
+/// Single-writer invariant: this runs ONLY on the drive thread - from the
+/// adapter's drive-owned poll loop through the live `on_tick` hook, and once
+/// more as a final sweep after the attempt returns. The live agent blocks
+/// inside its `ask_user` tool (via the sidecar) while drive keeps journaling
+/// here, so drive remains the sole writer of the event log throughout.
+pub(crate) fn observe_live_channels(
+    run_dir: &Path,
+    node: &str,
+    journal: &Journal,
+) -> Result<(), EngineError> {
+    let events = read_all(run_dir)?;
+    let asked = question_asked_count(&events, node);
+    let answered = question_answered_count(&events, node);
+    let questions: Vec<_> = read_questions_after(run_dir, None)?
+        .into_iter()
+        .filter(|q| q.node == node)
+        .collect();
+    for q in questions.iter().skip(asked) {
+        journal.append(EventPayload::QuestionAsked {
+            node: node.to_string(),
+            question: q.question.clone(),
+            options: q.options.clone(),
+        })?;
+        journal.append(EventPayload::WakeRaised {
+            trigger: WakeTrigger::Anomaly,
+            node: node.to_string(),
+            detail: "interactive question".into(),
+        })?;
+    }
+    let answers: Vec<_> = read_answers_after(run_dir, None)?
+        .into_iter()
+        .filter(|a| a.node == node)
+        .collect();
+    for a in answers.iter().skip(answered) {
+        journal.append(EventPayload::QuestionAnswered {
+            node: node.to_string(),
+            answer: a.answer.clone(),
+            answered_by: a.answered_by.clone(),
+        })?;
+    }
+    Ok(())
+}
+
+/// One drive-thread tick of a live attempt (spec 2026-07-20, Task 11 fix):
+/// observe the channels (journal the round) AND enforce the node's
+/// `question_timeout_seconds` for the currently OPEN question, all on the drive
+/// thread from the adapter's `on_tick`.
+///
+/// When the open question has been unanswered for `>= timeout_secs`:
+/// - WITH `default_answer`, post it via `post_answer_if_unanswered`
+///   (`answered_by: "timeout"`, idempotent under the answers lock so it races a
+///   real answer cleanly); the blocked sidecar returns it to the agent and the
+///   next observation journals the `QuestionAnswered`.
+/// - WITHOUT `default_answer`, return `Ok(Some(msg))` with the Task 5 wording;
+///   the caller sets the abort flag so the adapter tears the agent down and the
+///   attempt fails naming the node and the timeout.
+///
+/// Returns `Ok(None)` when nothing was enforced (no open question, not yet
+/// expired, or a default was posted). Engine-owned: the injected sidecar
+/// timeout is only a larger backstop, never the enforcement mechanism.
+pub(crate) fn tick_live_observation(
+    run_dir: &Path,
+    node: &str,
+    journal: &Journal,
+    timeout_secs: Option<u64>,
+    default_answer: Option<&str>,
+) -> Result<Option<String>, EngineError> {
+    observe_live_channels(run_dir, node, journal)?;
+    let Some(secs) = timeout_secs else {
+        return Ok(None);
+    };
+    let questions = read_questions_after(run_dir, None)?
+        .into_iter()
+        .filter(|q| q.node == node)
+        .count();
+    let answers = read_answers_after(run_dir, None)?
+        .into_iter()
+        .filter(|a| a.node == node)
+        .count();
+    // No open (asked-but-unanswered) question for the node: nothing to enforce.
+    if questions <= answers {
+        return Ok(None);
+    }
+    let events = read_all(run_dir)?;
+    let Some(asked_ts) = last_question_asked_ts(&events, node) else {
+        return Ok(None);
+    };
+    if now_millis().saturating_sub(asked_ts) < u128::from(secs) * 1000 {
+        return Ok(None);
+    }
+    match default_answer {
+        Some(ans) => {
+            // `answers` is the channel answer count observed above;
+            // `post_answer_if_unanswered` re-checks it under the answers lock,
+            // so a real answer landing in the gap makes this a no-op.
+            post_answer_if_unanswered(run_dir, node, ans, "timeout", answers)?;
+            Ok(None)
+        }
+        None => Ok(Some(format!(
+            "interactive node `{node}` timed out after {secs}s waiting for an answer and has no default_answer"
+        ))),
+    }
+}
+
+/// How many `AttemptStarted` events a node already carries - the number of the
+/// current attempt while one is open, used to tag a posted question.
+fn attempt_started_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::AttemptStarted { node: n, .. } if n == node))
+        .count()
+}
+
+/// How many `NodeStarted` / `NodeFinished` events a node already carries. A
+/// node visit is "open" when started exceeds finished; the interactive branch
+/// uses this to journal `NodeStarted` exactly once per visit (like the wait
+/// branch's `wait_started_count`/`wait_ended_count` guard), so re-invocations
+/// and park spins within the same visit do not re-declare it.
+fn node_started_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node))
+        .count()
+}
+
+fn node_finished_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::NodeFinished { node: n, .. } if n == node))
+        .count()
+}
+
+/// Whether `questions.jsonl` already carries an unanswered question for this
+/// node: more question entries than answer entries for it (count-based
+/// consumption). Guards against a duplicate channel append when drive crashed
+/// after `post_question` but before journaling `QuestionAsked` - on resume the
+/// journal-count declare-once guard would re-post, but the channel entry is
+/// already there. Keyed on the unanswered tail rather than the attempt number:
+/// the attempt drifts across a crash-resume (the pre-crash `AttemptStarted` is
+/// durable, so the resumed post computes a higher attempt), which is exactly
+/// the crash window this guard must cover.
+fn node_has_unanswered_channel_question(run_dir: &Path, node: &str) -> Result<bool, EngineError> {
+    let questions = read_questions_after(run_dir, None)?
+        .into_iter()
+        .filter(|q| q.node == node)
+        .count();
+    let answers = read_answers_after(run_dir, None)?
+        .into_iter()
+        .filter(|a| a.node == node)
+        .count();
+    Ok(questions > answers)
 }
 
 fn wait_started_count(events: &[Event], node: &str) -> usize {
@@ -239,6 +442,188 @@ fn last_wait_started_ts(events: &[Event], node: &str) -> Option<u128> {
         .rev()
         .find(|e| matches!(&e.payload, EventPayload::WaitStarted { node: n, .. } if n == node))
         .map(|e| e.ts)
+}
+
+/// The `ts` of the most recent `QuestionAsked` event for `node` - the moment
+/// the currently pending (unanswered) question was raised, since by
+/// construction only one question is ever open per node at a time (spec
+/// 2026-07-20, Task 5). Used by the interactive park loop to evaluate
+/// `question_timeout_seconds` expiry.
+fn last_question_asked_ts(events: &[Event], node: &str) -> Option<u128> {
+    events
+        .iter()
+        .rev()
+        .find(|e| matches!(&e.payload, EventPayload::QuestionAsked { node: n, .. } if n == node))
+        .map(|e| e.ts)
+}
+
+/// The session id captured from the node's MOST RECENT finished attempt (spec
+/// 2026-07-20, Task 7). That attempt is the one that asked the pending
+/// question, so its `AttemptFinished.session` is the session to resume into.
+/// `None` when the latest attempt captured none (the drive loop then downgrades
+/// `resume` to `reprompt`). Deliberately keyed on the latest attempt, not the
+/// latest attempt WITH a session: a fresh attempt that captured nothing must
+/// not silently resume a stale session from an earlier round.
+fn last_attempt_session(events: &[Event], node: &str) -> Option<String> {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::AttemptFinished {
+                node: n, session, ..
+            } if n == node => Some(session.clone()),
+            _ => None,
+        })
+        .flatten()
+}
+
+/// The primary executor's `(agent_id, interaction)` for a node, read from the
+/// run's immutable manifest snapshot (spec 2026-07-20, Task 7). `None` when the
+/// run has no manifest or the node has no bound profile chain - the caller then
+/// treats the node as `Reprompt` (the safe floor). The interaction ceiling is
+/// snapshotted at run start, so editing the live config mid-run cannot change
+/// the transport an in-flight node uses.
+fn node_primary_invocation(
+    run_dir: &Path,
+    node: &str,
+) -> Result<Option<(String, Interaction)>, EngineError> {
+    let Some(manifest) = crate::manifest::read(run_dir)? else {
+        return Ok(None);
+    };
+    Ok(manifest
+        .for_node(node)
+        .and_then(|p| p.chain.first())
+        .map(|ri| (ri.agent_id.clone(), ri.spec.interaction)))
+}
+
+/// The `seq` of the node's most recent `NodeStarted` - the start of the CURRENT
+/// visit (spec 2026-07-20, Task 6 carry-over fix). Used to scope a reprompt
+/// transcript to this visit's Q&A so a looped re-entry does not replay prior
+/// visits' rounds. `0` when the node has never started (no prior questions
+/// to exclude).
+fn current_visit_start_seq(events: &[Event], node: &str) -> u64 {
+    events
+        .iter()
+        .rev()
+        .find(|e| matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node))
+        .map(|e| e.seq)
+        .unwrap_or(0)
+}
+
+/// How many `QuestionAsked` events for `node` were journaled BEFORE `seq` -
+/// i.e. in prior visits, given `seq` is the current visit's `NodeStarted`
+/// (spec 2026-07-20, Task 6). The i-th channel question for a node corresponds
+/// to its i-th `QuestionAsked`, so skipping this many channel questions yields
+/// the current visit's window.
+fn questions_asked_before_seq(events: &[Event], node: &str, seq: u64) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            e.seq < seq
+                && matches!(&e.payload, EventPayload::QuestionAsked { node: n, .. } if n == node)
+        })
+        .count()
+}
+
+/// How many `QuestionAnswered` events for `node` were journaled BEFORE `seq`
+/// (the current visit's `NodeStarted`). The reprompt transcript skips this many
+/// channel answers so it pairs only the current visit's Q&A (spec 2026-07-20,
+/// Task 6).
+fn questions_answered_before_seq(events: &[Event], node: &str, seq: u64) -> usize {
+    events
+        .iter()
+        .filter(|e| {
+            e.seq < seq
+                && matches!(&e.payload, EventPayload::QuestionAnswered { node: n, .. } if n == node)
+        })
+        .count()
+}
+
+/// The re-invocation transport chosen for an interactive node's answer round
+/// (spec 2026-07-20, Task 7), from its resolved `interaction` ceiling, the
+/// session captured from the asking attempt, and the agent's resume form.
+#[cfg_attr(test, derive(Debug))]
+enum ResumeChoice {
+    /// Re-enter the agent's own session (the `resume` transport).
+    Resume,
+    /// Re-invoke from scratch with the Q&A transcript. `reason` is `Some` when
+    /// this is a pre-flight DOWNGRADE from `resume` (the caller journals it);
+    /// `None` when the ceiling was already `reprompt` (nothing to journal).
+    Reprompt { reason: Option<String> },
+}
+
+/// The pre-flight resume-vs-reprompt decision (spec 2026-07-20, Task 7),
+/// factored out as a pure function so every branch - including the defensive
+/// "captured a session but the agent has no resume form" branch, which no
+/// built-in agent can reach today (the agents that capture a session all have a
+/// resume form) - is unit-testable. `Live` is downgraded to `Resume` by the
+/// caller before this runs; a residual `Live` is treated as `Reprompt`
+/// defensively. A missing session or missing resume form downgrades with a
+/// reason naming the failure (transport is a ceiling, not a promise).
+fn resume_decision(
+    interaction: Interaction,
+    agent_id: &str,
+    node: &str,
+    session: Option<&String>,
+    resume_form: Option<&Vec<String>>,
+) -> ResumeChoice {
+    match interaction {
+        Interaction::Reprompt | Interaction::Live => ResumeChoice::Reprompt { reason: None },
+        Interaction::Resume => match (session, resume_form) {
+            (Some(_), Some(_)) => ResumeChoice::Resume,
+            (None, _) => ResumeChoice::Reprompt {
+                reason: Some(format!(
+                    "resume unavailable: no agent session id was captured for node `{node}`; using reprompt"
+                )),
+            },
+            (Some(_), None) => ResumeChoice::Reprompt {
+                reason: Some(format!(
+                    "resume unavailable: agent `{agent_id}` has no resume form; using reprompt"
+                )),
+            },
+        },
+    }
+}
+
+/// Builds the reprompt re-invocation prompt for an interactive node's answer
+/// round (spec 2026-07-20, Task 6/7): the original rendered prompt followed by
+/// THIS visit's Q&A transcript. The window is scoped to the current visit by
+/// skipping the prior visits' channel entries (counted from `events` up to this
+/// visit's `NodeStarted`), so a looped re-entry does not replay earlier rounds.
+/// The transcript is plain quoted text appended AFTER rendering, so no template
+/// expansion runs over agent/user text (V13 namespaces do not apply). Shared by
+/// the pre-flight reprompt path and the runtime downgrade after a failed resume.
+fn build_reprompt_override(
+    run_dir: &Path,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    node_prompt: &str,
+    events: &[Event],
+    node: &str,
+) -> Result<String, EngineError> {
+    let base = render_node_prompt(run_dir, run_id, state, cfg, node_prompt)?;
+    let visit_start = current_visit_start_seq(events, node);
+    let prior_q = questions_asked_before_seq(events, node, visit_start);
+    let prior_a = questions_answered_before_seq(events, node, visit_start);
+    let questions: Vec<_> = read_questions_after(run_dir, None)?
+        .into_iter()
+        .filter(|q| q.node == node)
+        .skip(prior_q)
+        .collect();
+    let answers: Vec<_> = read_answers_after(run_dir, None)?
+        .into_iter()
+        .filter(|a| a.node == node)
+        .skip(prior_a)
+        .collect();
+    let mut transcript = String::new();
+    for (q, a) in questions.iter().zip(answers.iter()) {
+        transcript.push_str(&format!("Q: {}\nA: {}\n\n", q.question, a.answer));
+    }
+    Ok(format!(
+        "{base}\n\n## prior questions and answers\n{}",
+        transcript.trim_end()
+    ))
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry
@@ -1127,13 +1512,22 @@ fn drive(
         // writes them as threads finish (order = finish order,
         // spec 8.5). Supervised mode never enters here (wake/await is per single
         // node), and neither do human_review/wait/condition (they are not slow and/or they wait).
-        if mode == RunMode::Autonomous {
+        // An interactive `current` never enters the concurrent path: it may park
+        // on a question, and the concurrent batch (which runs on worker threads
+        // that cannot write events or park) has no place to do that. It runs
+        // through the sequential park path below instead. Interactive frontier
+        // nodes are likewise excluded from any batch and picked up as `current`
+        // on a later iteration.
+        if mode == RunMode::Autonomous && !is_interactive(&playbook, &current) {
             let mut batch: Vec<String> = Vec::new();
             if is_agent_or_script(&playbook, &current) {
                 batch.push(current.clone());
             }
             for n in &frontier {
-                if is_agent_or_script(&playbook, n) && !batch.contains(n) {
+                if is_agent_or_script(&playbook, n)
+                    && !is_interactive(&playbook, n)
+                    && !batch.contains(n)
+                {
                     batch.push(n.clone());
                 }
             }
@@ -1188,6 +1582,11 @@ fn drive(
                                     &cancel_c,
                                     &scrub_c,
                                     journal_ref,
+                                    // Interactive nodes are excluded from the
+                                    // concurrent batch, so neither a resume nor
+                                    // the live sidecar ever originates here.
+                                    None,
+                                    None,
                                 );
                                 let _ = tx.send((node, res));
                             });
@@ -1195,7 +1594,21 @@ fn drive(
                         drop(tx);
                         // Collect completions in readiness order and write their events.
                         for (node, res) in rx {
-                            let (status, output, evs) = res?;
+                            let (status, output, evs) = match res? {
+                                AttemptOutcome::Finished {
+                                    status,
+                                    output,
+                                    events,
+                                } => (status, output, events),
+                                // Interactive nodes are excluded from the batch
+                                // above, so a suspension here is impossible; be
+                                // explicit rather than silently mishandle it.
+                                AttemptOutcome::Suspended { .. } => {
+                                    return Err(EngineError::Invalid(format!(
+                                        "interactive node `{node}` must not run in a concurrent batch"
+                                    )));
+                                }
+                            };
                             for ev in evs {
                                 journal.append(ev)?;
                             }
@@ -1411,6 +1824,466 @@ fn drive(
                 child_ref,
                 node_instr.as_deref(),
             )?
+        } else if is_interactive(&playbook, &current) {
+            // Interactive agent_task (spec 2026-07-20): the agent may ask the
+            // user a question mid-run and the node parks until it is answered.
+            // Structured exactly like the human_review branch so it composes
+            // with the whole control channel: every park spin does
+            // `sleep(AWAIT_CONTROL_POLL); continue;` back to the top-of-loop
+            // scan, which keeps applying Pause/Abort/ContextAppend/Patch/
+            // Progress/Retry while the question is outstanding. The declare-once
+            // and count-based-consumption guards are journal-count based, so
+            // they hold across the bounce. Interactive nodes bypass the node
+            // cache entirely (a hit would skip the question), so no
+            // NodeCacheMiss is journaled for them.
+            //
+            // `timeout_failed`: set only by the `question_timeout_seconds`
+            // expiry-without-`default_answer` case below (Task 5) - the one
+            // path in this branch that must fail the node without ever
+            // reaching `execute_node`. Every other path either falls through
+            // to run an attempt or `continue`s the drive loop directly.
+            let events = read_all(run_dir)?;
+            let answered = question_answered_count(&events, &current);
+            let mut timeout_failed: Option<String> = None;
+            // Set by the answer-consumed arm below when the resolved transport
+            // is `resume`: carries the captured session + the answer so the
+            // fall-through `execute_node` re-enters the agent's own session
+            // instead of re-invoking from scratch with a transcript.
+            let mut resume_ctx: Option<ResumeContext> = None;
+
+            // Live transport pre-flight (spec 2026-07-20, Task 11). The primary
+            // executor's `(agent, interaction)` is snapshotted in the manifest;
+            // a `Live` ceiling on claude/claude-code injects the `apb
+            // __ask-server` sidecar into the single blocking attempt when the
+            // current exe resolves. Otherwise a `Live` ceiling downgrades one
+            // tier to `resume` (journaled once per visit at the NodeStarted
+            // guard below), which `resume_decision` may further drop to
+            // reprompt. Recomputed each drive iteration - cheap, and it never
+            // moves mid-run because the manifest is immutable.
+            let (prim_agent, prim_interaction) = node_primary_invocation(run_dir, &current)?
+                .unwrap_or_else(|| (String::new(), Interaction::Reprompt));
+            let live_exe: Option<std::path::PathBuf> = std::env::current_exe().ok();
+            let live_claude = prim_agent == "claude" || prim_agent == "claude-code";
+            let live_injectable =
+                prim_interaction == Interaction::Live && live_claude && live_exe.is_some();
+            // Downgrade reason when the ceiling is `Live` but injection is
+            // unavailable (non-claude agent, or the current exe could not be
+            // resolved). `None` when injectable, or the ceiling is not `Live`.
+            let live_downgrade_detail: Option<String> = if prim_interaction == Interaction::Live
+                && !live_injectable
+            {
+                Some(if !live_claude {
+                    format!(
+                        "live transport requires claude/claude-code; agent `{prim_agent}` for node `{current}` falls back to resume/reprompt"
+                    )
+                } else {
+                    format!(
+                        "live transport unavailable for node `{current}`: the current exe could not be resolved; falling back to resume/reprompt"
+                    )
+                })
+            } else {
+                None
+            };
+            // The transport actually used for an answer round: a downgraded
+            // `Live` becomes `resume` (then resume_decision may drop to
+            // reprompt); every other ceiling is used verbatim.
+            let effective_interaction = if live_downgrade_detail.is_some() {
+                Interaction::Resume
+            } else {
+                prim_interaction
+            };
+            // Per-server tool timeout for the sidecar injection: a BACKSTOP
+            // strictly larger than `question_timeout_seconds` (the engine
+            // enforces that budget on the drive thread), else the large default.
+            let live_timeout_ms = match &node_kind {
+                NodeKind::AgentTask {
+                    question_timeout_seconds,
+                    ..
+                } => crate::adapter::live_tool_timeout_ms(*question_timeout_seconds),
+                _ => crate::adapter::live_tool_timeout_ms(None),
+            };
+            // A pending (asked-but-unanswered) question means we are parked.
+            if question_asked_count(&events, &current) > answered {
+                let for_node: Vec<_> = read_answers_after(run_dir, None)?
+                    .into_iter()
+                    .filter(|a| a.node == current)
+                    .collect();
+                match for_node.into_iter().nth(answered) {
+                    Some(entry) => {
+                        // The next answer arrived: consume it (count-based), then
+                        // pick the re-invocation transport by the node's resolved
+                        // `interaction` ceiling (spec 2026-07-20, Task 7).
+                        log.append(EventPayload::QuestionAnswered {
+                            node: current.clone(),
+                            answer: entry.answer.clone(),
+                            answered_by: entry.answered_by.clone(),
+                        })?;
+
+                        // The re-invocation transport comes from the pre-flight
+                        // `effective_interaction` computed above (the manifest
+                        // ceiling, with a `Live` downgrade already folded in and
+                        // journaled once per visit at the NodeStarted guard). A
+                        // live-injectable node only reaches this answer-round arm
+                        // when its agent ignored the tool and printed the marker
+                        // instead (the sidecar happy path answers in-attempt and
+                        // never parks); `resume_decision(Live)` maps that to
+                        // reprompt, which is the marker mechanism itself.
+                        //
+                        // A resume needs both a captured agent session and a
+                        // declarative resume form; either missing downgrades to
+                        // reprompt, journaled with the reason (transport is a
+                        // ceiling, not a promise). Pre-flight decision.
+                        let session = last_attempt_session(&events, &current);
+                        let resume_form = crate::invocation::resume_argv(&prim_agent);
+                        match resume_decision(
+                            effective_interaction,
+                            &prim_agent,
+                            &current,
+                            session.as_ref(),
+                            resume_form.as_ref(),
+                        ) {
+                            ResumeChoice::Resume => {
+                                // Resume: hand execute_node the captured session
+                                // and the answer as the follow-up prompt; no
+                                // transcript, since the agent re-enters its own
+                                // session.
+                                resume_ctx = Some(ResumeContext {
+                                    session: session.expect("resume implies a captured session"),
+                                    answer: entry.answer.clone(),
+                                });
+                            }
+                            ResumeChoice::Reprompt { reason } => {
+                                if let Some(detail) = reason {
+                                    log.append(EventPayload::SupervisorAction {
+                                        action: "interaction_downgraded".into(),
+                                        node: Some(current.clone()),
+                                        detail,
+                                    })?;
+                                }
+                                let node_prompt = match &node_kind {
+                                    NodeKind::AgentTask { prompt, .. } => prompt.clone(),
+                                    _ => String::new(),
+                                };
+                                let ov = build_reprompt_override(
+                                    run_dir,
+                                    &run_id,
+                                    &state,
+                                    cfg,
+                                    &node_prompt,
+                                    &events,
+                                    &current,
+                                )?;
+                                prompt_overrides.insert(current.clone(), ov);
+                            }
+                        }
+                        // Fall through to run the next attempt below.
+                    }
+                    None => {
+                        // Still waiting: check whether `question_timeout_seconds`
+                        // has elapsed for the pending question (spec
+                        // 2026-07-20, Task 5). With a `default_answer`, post it
+                        // through `post_answer_if_unanswered` (`answered_by:
+                        // "timeout"` bypasses the `answer_by: human` policy,
+                        // per spec Exact answer semantics), then bounce and
+                        // let the next iteration's normal count-based
+                        // consumption above pick it up. Without one, stop
+                        // parking and fail the node outright: a node that
+                        // declares a timeout with no default has nothing
+                        // sensible to proceed with.
+                        let (question_timeout_seconds, default_answer) = match &node_kind {
+                            NodeKind::AgentTask {
+                                question_timeout_seconds,
+                                default_answer,
+                                ..
+                            } => (*question_timeout_seconds, default_answer.clone()),
+                            _ => (None, None),
+                        };
+                        let expired = match (
+                            question_timeout_seconds,
+                            last_question_asked_ts(&events, &current),
+                        ) {
+                            (Some(secs), Some(asked_ts)) => {
+                                now_millis().saturating_sub(asked_ts) >= u128::from(secs) * 1000
+                            }
+                            _ => false,
+                        };
+                        if !expired {
+                            std::thread::sleep(AWAIT_CONTROL_POLL);
+                            continue;
+                        }
+                        match default_answer {
+                            Some(ans) => {
+                                // `answered` is the node's answer count as
+                                // observed by the read at the top of this
+                                // branch - exactly the count that made
+                                // `for_node.into_iter().nth(answered)` return
+                                // `None` above. `post_answer_if_unanswered`
+                                // re-checks it under a lock right before
+                                // appending, closing the TOCTOU: a
+                                // human/supervisor answer that lands in the
+                                // gap between that read and this post makes
+                                // the recheck fail, so this posts nothing and
+                                // the genuine answer is what gets consumed.
+                                post_answer_if_unanswered(
+                                    run_dir, &current, &ans, "timeout", answered,
+                                )?;
+                                std::thread::sleep(AWAIT_CONTROL_POLL);
+                                continue;
+                            }
+                            None => {
+                                steps += 1;
+                                let secs = question_timeout_seconds.unwrap_or(0);
+                                timeout_failed = Some(format!(
+                                    "interactive node `{current}` timed out after {secs}s waiting for an answer and has no default_answer"
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            // Live crash-recovery guard (final-fix-wave Finding 1, spec
+            // 2026-07-20-interactive-nodes). Covers exactly this window: on the
+            // live transport the sidecar wrote its question to questions.jsonl
+            // (post_question) but drive crashed before its on_tick observation
+            // journaled the matching QuestionAsked. On resume the journal shows
+            // question_asked_count == 0, so the park arm above did not fire and
+            // we are one step from spawning a FRESH live attempt - whose new
+            // sidecar would compute its answer tail from the current (zero)
+            // count and could swallow the orphaned question's answer as its
+            // own, then journal the orphan afterwards: a mis-delivery. Instead,
+            // adopt the orphaned channel entry: journal QuestionAsked from it,
+            // raise the wake, and bounce to the top-of-loop scan so the next
+            // iteration parks and the answer is delivered by re-invocation (the
+            // reprompt transcript path), never a fresh live attempt racing the
+            // orphan. Gated on `live_injectable`: only the live path posts to
+            // the channel from inside the agent process ahead of the journal;
+            // the marker/reprompt path journals QuestionAsked itself before it
+            // ever posts. The `question_asked_count <= answered` check means we
+            // never reached the park arm (so this is a fresh attempt, not a
+            // consumed-answer re-invocation), and `node_has_unanswered_channel_question`
+            // is what tells the orphan apart from the normal live happy path
+            // (where the channel is still empty at this point).
+            if timeout_failed.is_none()
+                && live_injectable
+                && resume_ctx.is_none()
+                && question_asked_count(&events, &current) <= answered
+                && node_has_unanswered_channel_question(run_dir, &current)?
+            {
+                let answered_in_channel = read_answers_after(run_dir, None)?
+                    .into_iter()
+                    .filter(|a| a.node == current)
+                    .count();
+                if let Some(orphan) = read_questions_after(run_dir, None)?
+                    .into_iter()
+                    .filter(|q| q.node == current)
+                    .nth(answered_in_channel)
+                {
+                    log.append(EventPayload::QuestionAsked {
+                        node: current.clone(),
+                        question: orphan.question,
+                        options: orphan.options,
+                    })?;
+                    log.append(EventPayload::WakeRaised {
+                        trigger: WakeTrigger::Anomaly,
+                        node: current.clone(),
+                        detail: "interactive question".into(),
+                    })?;
+                    continue;
+                }
+            }
+            if let Some(msg) = timeout_failed {
+                (NodeStatus::Failed, msg)
+            } else {
+                // Run one agent attempt. NodeStarted is journaled once per node
+                // visit (guarded by started-vs-finished counts, like the wait
+                // branch): the first attempt of a visit emits it; a
+                // re-invocation after an answer does not (the visit is still
+                // open).
+                if node_started_count(&events, &current) <= node_finished_count(&events, &current) {
+                    steps += 1;
+                    log.append(EventPayload::NodeStarted {
+                        node: current.clone(),
+                        attempt: 1,
+                    })?;
+                    // Journal the live->resume downgrade once per visit (spec
+                    // 2026-07-20, Task 11): the ceiling was `Live` but injection
+                    // is unavailable (non-claude agent or the exe did not
+                    // resolve), so this visit runs the marker/resume path
+                    // instead. Placed under the first-attempt guard so it fires
+                    // exactly once, before the marker attempt runs.
+                    if let Some(detail) = &live_downgrade_detail {
+                        log.append(EventPayload::SupervisorAction {
+                            action: "interaction_downgraded".into(),
+                            node: Some(current.clone()),
+                            detail: detail.clone(),
+                        })?;
+                    }
+                }
+                let override_prompt = prompt_overrides.remove(&current);
+                // Whether THIS attempt is a resume re-invocation: a runtime
+                // failure of a resume attempt downgrades to reprompt for the
+                // SAME answer round (below), at most once (the reprompt attempt
+                // that follows is not a resume attempt, so it never re-downgrades
+                // - no transport ping-pong).
+                let resume_attempt = resume_ctx.is_some();
+                let outcome = {
+                    let journal = Journal::new(&mut *log);
+                    execute_node(
+                        &playbook,
+                        run_dir,
+                        &workdir,
+                        &current,
+                        &run_id,
+                        &state,
+                        cfg,
+                        override_prompt,
+                        &run_cancel,
+                        &env_scrub,
+                        &journal,
+                        // Resume context set by the answer-consumed arm above;
+                        // `None` on the first attempt of a visit and on the
+                        // reprompt path.
+                        resume_ctx.take(),
+                        // Live sidecar (spec 2026-07-20, Task 11): injected only
+                        // when the ceiling is `Live` on claude and the exe
+                        // resolved; a downgrade hands `None` and the marker path
+                        // runs. Rebuilt per attempt so each re-invocation of an
+                        // injectable node points the sidecar at the right exe.
+                        if live_injectable {
+                            Some(crate::scheduler::node::LiveContext {
+                                exe: live_exe
+                                    .clone()
+                                    .expect("live_injectable implies a resolved exe"),
+                                timeout_ms: live_timeout_ms,
+                            })
+                        } else {
+                            None
+                        },
+                    )?
+                };
+                match outcome {
+                    AttemptOutcome::Finished {
+                        status,
+                        output,
+                        events: evs,
+                    } => {
+                        for ev in evs {
+                            log.append(ev)?;
+                        }
+                        // Live final sweep (spec 2026-07-20, Task 11): the answer
+                        // that unblocked the agent may have landed in the last
+                        // poll window before the process exited, so observe once
+                        // more to journal its `QuestionAnswered`. Idempotent and
+                        // count-based, so it never double-writes what `on_tick`
+                        // already journaled during the attempt.
+                        if live_injectable {
+                            let journal = Journal::new(&mut *log);
+                            observe_live_channels(run_dir, &current, &journal)?;
+                        }
+                        // Abandoned-question edge (spec 2026-07-20, Task 11 fix):
+                        // a live agent that finished cleanly while a question was
+                        // still open (it answered its own way and moved on, or
+                        // never waited for the answer) would otherwise leave
+                        // silence. Record it so the run report shows what
+                        // happened. Gated on a SUCCEEDED finish: a FAILED finish
+                        // with an open question is already told by the failure
+                        // itself - most notably the question-timeout-without-
+                        // default path, whose node-named failure covers it.
+                        if live_injectable && status == NodeStatus::Succeeded {
+                            let ev = read_all(run_dir)?;
+                            if question_asked_count(&ev, &current)
+                                > question_answered_count(&ev, &current)
+                            {
+                                log.append(EventPayload::SupervisorAction {
+                                    action: "question_abandoned".into(),
+                                    node: Some(current.clone()),
+                                    detail: format!(
+                                        "live node `{current}` finished with an unanswered question still open"
+                                    ),
+                                })?;
+                            }
+                        }
+                        // Runtime resume failure (spec 2026-07-20, Task 7): the
+                        // resume invocation ran but failed (spawn/transport-init
+                        // error, an invalid/expired session, or an agent error on
+                        // the resume form - drive cannot cheaply tell an agent-
+                        // logic failure from a resume-form failure, so it
+                        // downgrades on ANY failure class here, which is safe: a
+                        // reprompt retry is merely more expensive). The answer is
+                        // already consumed, so downgrade to reprompt and re-run
+                        // the SAME answer round via the transcript instead of
+                        // failing the node. The follow-up reprompt attempt is not
+                        // a resume attempt, so its own failure follows normal
+                        // retry/failure handling.
+                        if resume_attempt
+                            && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut)
+                        {
+                            log.append(EventPayload::SupervisorAction {
+                                action: "interaction_downgraded".into(),
+                                node: Some(current.clone()),
+                                detail: format!(
+                                    "resume re-invocation failed for node `{current}` ({}); retrying the same answer round via reprompt",
+                                    output.trim()
+                                ),
+                            })?;
+                            let node_prompt = match &node_kind {
+                                NodeKind::AgentTask { prompt, .. } => prompt.clone(),
+                                _ => String::new(),
+                            };
+                            let ov = build_reprompt_override(
+                                run_dir,
+                                &run_id,
+                                &state,
+                                cfg,
+                                &node_prompt,
+                                &events,
+                                &current,
+                            )?;
+                            prompt_overrides.insert(current.clone(), ov);
+                            continue;
+                        }
+                        // Fall to the shared tail (NodeFinished + frontier advance).
+                        (status, output)
+                    }
+                    AttemptOutcome::Suspended { question, options } => {
+                        // Declare the question once per suspension
+                        // (journal-count based, so it survives the loop
+                        // bounce), raise a wake so a waiting supervisor
+                        // returns (Task 8), then bounce to the top-of-loop
+                        // scan; the next iteration parks.
+                        let events = read_all(run_dir)?;
+                        if question_asked_count(&events, &current)
+                            <= question_answered_count(&events, &current)
+                        {
+                            let attempt = attempt_started_count(&events, &current) as u32;
+                            // Idempotent channel post: skip if a crash between
+                            // a prior post_question and its QuestionAsked
+                            // already left an unanswered question for this
+                            // node in questions.jsonl.
+                            if !node_has_unanswered_channel_question(run_dir, &current)? {
+                                post_question(
+                                    run_dir,
+                                    &current,
+                                    attempt,
+                                    &question,
+                                    options.clone(),
+                                )?;
+                            }
+                            log.append(EventPayload::QuestionAsked {
+                                node: current.clone(),
+                                question,
+                                options,
+                            })?;
+                            log.append(EventPayload::WakeRaised {
+                                trigger: WakeTrigger::Anomaly,
+                                node: current.clone(),
+                                detail: "interactive question".into(),
+                            })?;
+                        }
+                        continue;
+                    }
+                }
+            }
         } else {
             steps += 1;
             log.append(EventPayload::NodeStarted {
@@ -1499,7 +2372,7 @@ fn drive(
                 // The journal borrows `log` for the duration of execute_node so the
                 // node can append attempt_started at spawn time; the block scopes
                 // that borrow so `log` is free again for the return-batch writes.
-                let (st, out, evs) = {
+                let outcome = {
                     let journal = Journal::new(&mut *log);
                     execute_node(
                         &playbook,
@@ -1513,7 +2386,25 @@ fn drive(
                         &run_cancel,
                         &env_scrub,
                         &journal,
+                        // Non-interactive nodes never resume.
+                        None,
+                        // ...and never run the live sidecar.
+                        None,
                     )?
+                };
+                let (st, out, evs) = match outcome {
+                    AttemptOutcome::Finished {
+                        status,
+                        output,
+                        events,
+                    } => (status, output, events),
+                    // Only interactive nodes suspend, and they are handled by the
+                    // dedicated branch above, never here (this is defensive).
+                    AttemptOutcome::Suspended { .. } => {
+                        return Err(EngineError::Invalid(format!(
+                            "non-interactive node `{current}` produced a question suspension"
+                        )));
+                    }
                 };
                 for ev in evs {
                     log.append(ev)?;
@@ -1975,4 +2866,66 @@ fn resume_inner(
         RunMode::Autonomous,
         supervisor_expected,
     )
+}
+
+#[cfg(test)]
+mod interaction_tests {
+    use super::*;
+
+    fn form() -> Vec<String> {
+        vec!["--resume".to_string(), "{session}".to_string()]
+    }
+
+    #[test]
+    fn resume_when_session_and_form_present() {
+        let s = "sess-1".to_string();
+        let f = form();
+        assert!(matches!(
+            resume_decision(Interaction::Resume, "claude", "ask", Some(&s), Some(&f)),
+            ResumeChoice::Resume
+        ));
+    }
+
+    #[test]
+    fn downgrade_when_no_session() {
+        let f = form();
+        match resume_decision(Interaction::Resume, "claude", "ask", None, Some(&f)) {
+            ResumeChoice::Reprompt { reason: Some(r) } => {
+                assert!(
+                    r.contains("session"),
+                    "reason names the missing session: {r}"
+                );
+            }
+            other => panic!("expected a downgrade reason, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn downgrade_when_session_but_no_resume_form() {
+        // The defensive branch the reviewer flagged: a captured session but no
+        // resume form. No built-in agent reaches it (every agent that captures a
+        // session also has a resume form), so it is covered here at unit level.
+        let s = "sess-1".to_string();
+        match resume_decision(Interaction::Resume, "customx", "ask", Some(&s), None) {
+            ResumeChoice::Reprompt { reason: Some(r) } => {
+                assert!(
+                    r.contains("resume form") && r.contains("customx"),
+                    "reason names the missing resume form and the agent: {r}"
+                );
+            }
+            other => panic!("expected a no-resume-form downgrade, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn reprompt_ceiling_never_downgrades() {
+        // A `reprompt` ceiling reprompts with no journaled reason even when a
+        // session and form are present.
+        let s = "sess-1".to_string();
+        let f = form();
+        assert!(matches!(
+            resume_decision(Interaction::Reprompt, "agy", "ask", Some(&s), Some(&f)),
+            ResumeChoice::Reprompt { reason: None }
+        ));
+    }
 }

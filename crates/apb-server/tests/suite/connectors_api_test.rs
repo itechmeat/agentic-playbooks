@@ -45,6 +45,17 @@ fn set_var(var: &str, value: impl AsRef<std::ffi::OsStr>) -> EnvGuard {
     }
 }
 
+fn unset_var(var: &str) -> EnvGuard {
+    let prior = std::env::var_os(var);
+    unsafe {
+        std::env::remove_var(var);
+    }
+    EnvGuard {
+        var: var.to_string(),
+        prior,
+    }
+}
+
 // --- http helpers ------------------------------------------------------------
 
 async fn get_json(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
@@ -255,6 +266,70 @@ async fn list_endpoint_marks_broken_connector_invalid() {
         entry["trust"], "invalid",
         "a connector whose store::load fails must report invalid, not unapproved: {entry}"
     );
+}
+
+/// Finding 2 (final-fix-wave): a BROKEN installed OFFICIAL connector must not be
+/// masked by the detail endpoint. `store::load` failing with a non-`NotFound`
+/// error (here an escaping symlink -> `ContentError::Escape` -> `Invalid`, the
+/// same mechanism `list_endpoint_marks_broken_connector_invalid` uses) once let
+/// the detail endpoint fall back to the embedded manifest and report
+/// `installed: false` / `trust: "not_installed"` with a Connect button, while
+/// the list endpoint reported `trust: "invalid"` for the same connector - the
+/// two views disagreed. The detail endpoint must now report the same invalid
+/// state (installed, `invalid`), so both views agree.
+#[cfg(unix)]
+#[tokio::test]
+async fn detail_endpoint_surfaces_a_broken_installed_official_connector_as_invalid() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    // Install the real embedded official connector, then break it on disk: an
+    // absolute-target symlink inside its tree makes `store::load` fail (digest
+    // escape) while `store::list` still enumerates it (its connector.yaml
+    // parses). This is precisely the "installed but broken official connector"
+    // the masking bug hid.
+    let (status, _json) = post_no_body(
+        router(root.path()),
+        &format!("/api/connectors/{EMBEDDED}/install"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let dir = cfg.path().join("connectors").join(EMBEDDED);
+    std::os::unix::fs::symlink("/nonexistent-absolute-target", dir.join("broken-link")).unwrap();
+
+    // Detail: it must be reported installed + invalid, NOT not_installed.
+    let (status, detail) =
+        get_json(router(root.path()), &format!("/api/connectors/{EMBEDDED}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["name"], EMBEDDED);
+    assert_eq!(
+        detail["trust"], "invalid",
+        "a broken installed connector must report invalid, not not_installed: {detail}"
+    );
+    assert_eq!(
+        detail["installed"],
+        serde_json::json!(true),
+        "the connector IS installed (bytes on disk), just broken: {detail}"
+    );
+
+    // List: the same connector is invalid there too.
+    let (status, list) = get_json(router(root.path()), "/api/connectors").await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let listed = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == EMBEDDED)
+        .unwrap_or_else(|| panic!("the broken connector must still be listed: {list}"));
+
+    // The two views must agree on the trust state.
+    assert_eq!(
+        listed["trust"], detail["trust"],
+        "list and detail must agree on the broken connector's trust: list={listed} detail={detail}"
+    );
+    assert_eq!(listed["trust"], "invalid", "list view: {listed}");
 }
 
 #[tokio::test]
@@ -480,6 +555,125 @@ async fn run_handler_starts_once_connector_and_account_are_approved() {
         "an approved connector-binding playbook must start: {json}"
     );
     assert!(json["run_id"].is_string(), "expected a run_id: {json}");
+}
+
+// --- machine-wide (workspace-less) reads on the global server --------------
+
+/// Registers `root` in the machine-wide project registry the global server
+/// enumerates, and returns its `workspace_id` plus the env guards that keep
+/// auto-registration enabled (`CI` / `APB_NO_REGISTRY` disable it, and the
+/// consolidated test binary may well run under `CI`). The guards must be kept
+/// alive by the caller.
+fn register_workspace(root: &Path) -> (String, Vec<EnvGuard>) {
+    let guards = vec![unset_var("CI"), unset_var("APB_NO_REGISTRY")];
+    apb_core::projects::touch(root);
+    let id = std::fs::read_to_string(root.join(".apb/workspace.local"))
+        .expect("workspace.local written by registration")
+        .trim()
+        .to_string();
+    (id, guards)
+}
+
+/// The connectors page loads without pinning a project: connectors are
+/// installed machine-wide, so `GET /api/connectors` with no `workspace` must
+/// answer 200 with the array rather than the old 400, and must list each
+/// installed connector exactly once no matter how many projects are reachable.
+#[tokio::test]
+async fn list_endpoint_without_workspace_lists_each_connector_once() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let root2 = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    // A SECOND reachable project also configuring the same connector: the
+    // aggregate must still emit one card per connector, not one per project.
+    let _g2 = setup(cfg.path(), root2.path());
+    let (_id, _reg) = register_workspace(root.path());
+    let (_id2, _reg2) = register_workspace(root2.path());
+
+    let app = build_router(AppState::new_global());
+    let (status, json) = get_json(app, "/api/connectors").await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a workspace-less connector list must not 400: {json}"
+    );
+    let arr = json.as_array().expect("connectors array");
+    let hits = arr.iter().filter(|c| c["name"] == CONNECTOR).count();
+    assert_eq!(
+        hits, 1,
+        "the fixture connector must appear exactly once across projects: {json}"
+    );
+    let entry = arr.iter().find(|c| c["name"] == CONNECTOR).unwrap();
+    assert_eq!(entry["display_name"], "Mock Tracker");
+    assert_eq!(entry["trust"], "unapproved");
+}
+
+/// The single-project contract is unchanged: `?workspace=<id>` still answers
+/// with exactly that project's account numbers.
+#[tokio::test]
+async fn list_endpoint_with_workspace_keeps_single_project_behavior() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let (id, _reg) = register_workspace(root.path());
+
+    let app = build_router(AppState::new_global());
+    let (status, json) = get_json(app, &format!("/api/connectors?workspace={id}")).await;
+    assert_eq!(status, StatusCode::OK, "scoped connector list: {json}");
+    let entry = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == CONNECTOR)
+        .expect("fixture connector listed");
+    assert_eq!(entry["trust"], "unapproved");
+    assert_eq!(entry["accounts_total"], serde_json::json!(1));
+    // TOKEN_VAR is unset, so the one account is configured but not ready.
+    assert_eq!(entry["accounts_ready"], serde_json::json!(0));
+
+    // An unknown workspace stays strict.
+    let app = build_router(AppState::new_global());
+    let (status, _) = get_json(app, "/api/connectors?workspace=no-such-workspace").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// The list page links to a connector without a workspace, so the detail
+/// endpoint must answer there too: identity, manifest and trust are
+/// root-independent, and the account rows are the union across reachable
+/// projects.
+#[tokio::test]
+async fn detail_endpoint_without_workspace_returns_connector() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let (_id, _reg) = register_workspace(root.path());
+
+    let app = build_router(AppState::new_global());
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a workspace-less connector detail must not 400: {json}"
+    );
+    assert_eq!(json["name"], CONNECTOR);
+    assert_eq!(json["trust"], "unapproved");
+    assert!(
+        json["functions"]
+            .as_array()
+            .expect("functions array")
+            .iter()
+            .any(|f| f["name"] == "ping"),
+        "manifest functions are root-independent: {json}"
+    );
+    let accounts = json["accounts"].as_array().expect("accounts array");
+    assert_eq!(
+        accounts.iter().filter(|a| a["name"] == "acct1").count(),
+        1,
+        "each account is listed once in the machine-wide view: {json}"
+    );
 }
 
 // --- usage stats (task 17.5, spec 9's dropped "usage stats" bullet) --------
@@ -798,4 +992,361 @@ async fn call_endpoint_unknown_function_is_config_error() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(json["ok"], serde_json::json!(false));
     assert_eq!(json["error"]["code"], serde_json::json!("config"));
+}
+
+// --- install / uninstall / available -----------------------------------------
+//
+// These exercise the connector lifecycle endpoints against the REAL embedded
+// official set (not the `mock-tracker` fixture above), because that is exactly
+// what the dashboard's connect button installs.
+
+/// An embedded official connector guaranteed to be present in the binary.
+const EMBEDDED: &str = "github";
+
+async fn post_no_body(app: axum::Router, uri: &str) -> (StatusCode, serde_json::Value) {
+    let req = Request::builder()
+        .method("POST")
+        .uri(uri)
+        .body(Body::empty())
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+    (status, json)
+}
+
+fn router(root: &Path) -> axum::Router {
+    build_router(AppState::new(root.to_path_buf()))
+}
+
+/// `GET /api/connectors/available` needs no `?workspace=`: the embedded set
+/// comes out of the binary and the store is machine-wide.
+#[tokio::test]
+async fn available_endpoint_lists_embedded_and_omits_installed() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, json) = get_json(router(root.path()), "/api/connectors/available").await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == EMBEDDED)
+        .unwrap_or_else(|| panic!("embedded `{EMBEDDED}` must be offered: {json}"));
+    assert!(entry["version"].as_str().is_some_and(|v| !v.is_empty()));
+    assert!(
+        entry["display_name"]
+            .as_str()
+            .is_some_and(|v| !v.is_empty()),
+        "display_name comes from the embedded PUBLIC.md: {entry}"
+    );
+    assert!(entry.get("summary").is_some());
+    assert!(entry["tags"].is_array());
+
+    let (status, _) = post_no_body(
+        router(root.path()),
+        &format!("/api/connectors/{EMBEDDED}/install"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (_status, json) = get_json(router(root.path()), "/api/connectors/available").await;
+    assert!(
+        !json
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == EMBEDDED),
+        "an installed connector must drop out of the available list: {json}"
+    );
+}
+
+#[tokio::test]
+async fn install_endpoint_then_list_shows_the_connector() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, json) = post_no_body(
+        router(root.path()),
+        &format!("/api/connectors/{EMBEDDED}/install"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "install failed: {json}");
+    assert_eq!(json["ok"], serde_json::json!(true));
+    assert_eq!(json["name"], serde_json::json!(EMBEDDED));
+    assert_eq!(json["no_op"], serde_json::json!(false));
+    assert_eq!(json["trust_recorded"], serde_json::json!(true));
+    assert!(json["digest"].as_str().unwrap().starts_with("sha256:"));
+
+    let (status, json) = get_json(router(root.path()), "/api/connectors").await;
+    assert_eq!(status, StatusCode::OK);
+    let entry = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == EMBEDDED)
+        .unwrap_or_else(|| panic!("installed connector must be listed: {json}"));
+    // Installed via the bundled-origin path, so it is trusted straight away.
+    assert_eq!(entry["trust"], "approved");
+}
+
+#[tokio::test]
+async fn install_endpoint_twice_is_a_no_op_not_an_error() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let uri = format!("/api/connectors/{EMBEDDED}/install");
+    let (first_status, first) = post_no_body(router(root.path()), &uri).await;
+    let (second_status, second) = post_no_body(router(root.path()), &uri).await;
+
+    assert_eq!(first_status, StatusCode::OK);
+    assert_eq!(second_status, StatusCode::OK, "reinstall failed: {second}");
+    assert_eq!(first["no_op"], serde_json::json!(false));
+    assert_eq!(second["no_op"], serde_json::json!(true));
+    assert_eq!(first["digest"], second["digest"]);
+}
+
+/// A target that exists and DIFFERS needs `?force=true`; without it the answer
+/// is 409 so the dashboard can ask before clobbering a local edit.
+#[tokio::test]
+async fn install_endpoint_conflicts_on_a_differing_target_until_forced() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let uri = format!("/api/connectors/{EMBEDDED}/install");
+    post_no_body(router(root.path()), &uri).await;
+    std::fs::write(
+        cfg.path()
+            .join("connectors")
+            .join(EMBEDDED)
+            .join("EXTRA.md"),
+        "local edit",
+    )
+    .unwrap();
+
+    let (status, json) = post_no_body(router(root.path()), &uri).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{json}");
+    assert_eq!(json["error"], serde_json::json!("needs_force"));
+    assert!(json["detail"].as_str().is_some_and(|d| !d.is_empty()));
+
+    let (status, json) = post_no_body(router(root.path()), &format!("{uri}?force=true")).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["no_op"], serde_json::json!(false));
+}
+
+/// The core promise behind "disconnect but keep the configuration": uninstall
+/// drops the connector out of the list but the account config file written
+/// before it is still on disk afterwards.
+#[tokio::test]
+async fn uninstall_endpoint_removes_connector_but_keeps_account_config() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    post_no_body(
+        router(root.path()),
+        &format!("/api/connectors/{EMBEDDED}/install"),
+    )
+    .await;
+
+    // An account the user configured for this connector, in both scopes.
+    let global = config::global_config_path(EMBEDDED).unwrap();
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(&global, "accounts:\n  - name: work\n    default: true\n").unwrap();
+    let scoped = config::project_config_path(root.path(), EMBEDDED);
+    std::fs::create_dir_all(scoped.parent().unwrap()).unwrap();
+    std::fs::write(&scoped, "accounts:\n  - name: side\n").unwrap();
+
+    let (status, json) = post_no_body(
+        router(root.path()),
+        &format!("/api/connectors/{EMBEDDED}/uninstall"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "uninstall failed: {json}");
+    assert_eq!(json["ok"], serde_json::json!(true));
+    assert_eq!(json["no_op"], serde_json::json!(false));
+
+    let (_status, json) = get_json(router(root.path()), "/api/connectors").await;
+    assert!(
+        !json
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|c| c["name"] == EMBEDDED),
+        "uninstalled connector must leave the list: {json}"
+    );
+
+    assert!(
+        global.is_file(),
+        "global account config must survive an uninstall"
+    );
+    assert!(
+        scoped.is_file(),
+        "project account config must survive an uninstall"
+    );
+    assert_eq!(
+        std::fs::read_to_string(&scoped).unwrap(),
+        "accounts:\n  - name: side\n"
+    );
+
+    // Reconnecting picks the previous accounts back up with no re-entry.
+    post_no_body(
+        router(root.path()),
+        &format!("/api/connectors/{EMBEDDED}/install"),
+    )
+    .await;
+    let accounts = config::load_merged(root.path(), EMBEDDED).unwrap();
+    let names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
+    assert_eq!(names, vec!["work", "side"]);
+}
+
+#[tokio::test]
+async fn uninstall_endpoint_of_an_absent_connector_is_a_no_op() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, json) = post_no_body(
+        router(root.path()),
+        &format!("/api/connectors/{EMBEDDED}/uninstall"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["ok"], serde_json::json!(true));
+    assert_eq!(json["no_op"], serde_json::json!(true));
+}
+
+#[tokio::test]
+async fn install_endpoint_unknown_is_404_and_invalid_name_is_400() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, json) = post_no_body(
+        router(root.path()),
+        "/api/connectors/definitely-not-a-connector/install",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{json}");
+    assert_eq!(json["error"], serde_json::json!("not_found"));
+    assert!(json["detail"].as_str().is_some_and(|d| !d.is_empty()));
+
+    let (status, json) =
+        post_no_body(router(root.path()), "/api/connectors/Bad_Name/install").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], serde_json::json!("invalid_name"));
+
+    // Uninstall shares the name gate but has no 404: an absent connector is a
+    // successful no-op, only a malformed name is refused.
+    let (status, json) =
+        post_no_body(router(root.path()), "/api/connectors/Bad_Name/uninstall").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{json}");
+    assert_eq!(json["error"], serde_json::json!("invalid_name"));
+}
+
+/// `GET /api/connectors/{name}` for an embedded official connector that is NOT
+/// installed: not being installed is a state, not a 404. The manifest half of
+/// the response comes out of the binary and must be fully populated so the
+/// dashboard can show what a connector does before the user connects it, with
+/// `installed: false` and a `not_installed` trust that is honest about there
+/// being no bytes on disk to have a trust decision about.
+#[tokio::test]
+async fn detail_endpoint_serves_embedded_connector_that_is_not_installed() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    // `setup` installs only the fixture connector, so `github` is embedded but
+    // definitely not installed under this temp config dir.
+
+    let (status, json) = get_json(router(root.path()), "/api/connectors/github").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["name"], "github");
+    assert_eq!(json["installed"], serde_json::json!(false));
+    assert_eq!(json["trust"], "not_installed");
+    assert!(
+        json["version"].as_str().is_some_and(|v| !v.is_empty()),
+        "version comes from the embedded manifest: {json}"
+    );
+    assert!(
+        json["body_md"].as_str().is_some_and(|b| !b.is_empty()),
+        "the About body comes from the embedded PUBLIC.md: {json}"
+    );
+    assert!(
+        json["meta"]["display_name"]
+            .as_str()
+            .is_some_and(|d| !d.is_empty()),
+        "storefront meta comes from the embedded PUBLIC.md: {json}"
+    );
+    assert!(
+        !json["functions"]
+            .as_array()
+            .expect("functions array")
+            .is_empty(),
+        "functions come from the embedded manifest: {json}"
+    );
+    assert!(json["accounts"].is_array(), "{json}");
+}
+
+/// The installed answer carries the same field, set the other way, so the
+/// dashboard branches on `installed` instead of guessing from a 404.
+#[tokio::test]
+async fn detail_endpoint_marks_installed_connector_installed() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, json) =
+        get_json(router(root.path()), &format!("/api/connectors/{CONNECTOR}")).await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["installed"], serde_json::json!(true));
+    assert_eq!(json["trust"], "unapproved");
+}
+
+/// 404 is reserved for a name that is neither installed nor embedded, so the
+/// dashboard can still tell "no such connector" apart from "not connected".
+#[tokio::test]
+async fn detail_endpoint_404s_only_for_a_name_that_is_neither_installed_nor_embedded() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, _json) = get_json(
+        router(root.path()),
+        "/api/connectors/definitely-not-a-connector",
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// `GET /api/connectors/{name}/stats` without `?workspace=`: the connector page
+/// is machine-wide and pins no project, so a missing workspace aggregates
+/// instead of erroring. No recorded calls is an empty 200, not a failure.
+#[tokio::test]
+async fn stats_endpoint_aggregates_without_a_workspace() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    let (status, json) = get_json(router(root.path()), "/api/connectors/github/stats").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["connector"], "github");
+    assert_eq!(json["calls"], serde_json::json!(0));
+    assert!(json["by_function"].as_array().is_some_and(|a| a.is_empty()));
 }

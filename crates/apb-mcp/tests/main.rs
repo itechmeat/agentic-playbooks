@@ -17,6 +17,8 @@ mod common;
 
 #[path = "suite/advisory_tools_test.rs"]
 mod advisory_tools_test;
+#[path = "suite/ask_server_test.rs"]
+mod ask_server_test;
 #[path = "suite/capture_tools_test.rs"]
 mod capture_tools_test;
 #[path = "suite/catalog_tools_test.rs"]
@@ -36,6 +38,8 @@ mod profile_tools_test;
 mod read_tools_test;
 #[path = "suite/review_tool_test.rs"]
 mod review_tool_test;
+#[path = "suite/run_answer_test.rs"]
+mod run_answer_test;
 #[path = "suite/run_tools_test.rs"]
 mod run_tools_test;
 #[path = "suite/subplaybook_policy_test.rs"]

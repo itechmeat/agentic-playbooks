@@ -54,6 +54,9 @@ fn timeout_kills_whole_process_tree() {
             soul: None,
             grant_autonomy: false,
             connector_policy: &Default::default(),
+            interactive: false,
+            node: "test",
+            agent: "claude",
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::Timeout), "got: {err:?}");

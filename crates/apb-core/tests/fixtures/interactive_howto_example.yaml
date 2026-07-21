@@ -1,0 +1,32 @@
+schema: 2
+id: deploy-with-confirmation
+name: Deploy with Confirmation
+version: 1.0.0
+
+defaults:
+  profile: architect
+
+nodes:
+  - { id: start, type: start }
+  - id: confirm
+    type: agent_task
+    title: Confirm before deploy
+    prompt: |
+      Check the target environment, then ask the user to confirm before
+      deploying.
+    interactive: true
+    answer_by: supervisor
+    question_timeout_seconds: 900
+    default_answer: "abort"
+    expected_duration: 5m
+  - id: deploy
+    type: agent_task
+    title: Deploy
+    prompt: "Deploy using the confirmed target: {{nodes.confirm.output}}"
+    expected_duration: 10m
+  - { id: done, type: finish, outcome: success }
+
+edges:
+  - { from: start, to: confirm }
+  - { from: confirm, to: deploy }
+  - { from: deploy, to: done }

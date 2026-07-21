@@ -286,9 +286,14 @@
           </Select.Group>
         </Select.Content>
       </Select.Root>
-      <Button variant={showDiff ? 'default' : 'outline'} size="sm" onclick={() => (showDiff = !showDiff)}>
+      <Button
+        variant={showDiff ? 'default' : 'outline'}
+        size="sm"
+        class="max-sm:px-2"
+        onclick={() => (showDiff = !showDiff)}
+      >
         <GitCompare data-icon="inline-start" />
-        diff
+        <span class="max-sm:sr-only">diff</span>
       </Button>
     {/if}
     {#if parseError}
@@ -321,13 +326,14 @@
         <Button
           variant="ghost"
           size="sm"
-          class="h-7 justify-start"
+          class="max-sm:px-2 h-7 justify-start"
           onclick={() => onAddNode(kind)}
           disabled={!canEditStruct}
           title={`Add ${kind} node`}
+          aria-label={`Add ${kind} node`}
         >
           <Plus data-icon="inline-start" />
-          {kind}
+          <span class="max-sm:sr-only">{kind}</span>
         </Button>
       {/each}
     </div>

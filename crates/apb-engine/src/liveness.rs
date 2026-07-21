@@ -770,6 +770,7 @@ mod tests {
                     attempt: 1,
                     status: "succeeded".into(),
                     duration_ms: None,
+                    session: None,
                 },
             ),
         ];

@@ -35,7 +35,10 @@ pub(crate) fn render_node_prompt(
     ))
 }
 
-/// A single execution of a node. Returns (NodeStatus, output, events).
+/// A single execution of a node. Returns an [`AttemptOutcome`]: `Finished`
+/// (status, output, events) for a normal execution, or `Suspended` when an
+/// interactive `agent_task` asked a question via the stdout marker instead of
+/// finishing (spec 2026-07-20) - drive parks on it and re-invokes on the answer.
 ///
 /// The two attempt-lifecycle events are journaled directly through `journal`:
 /// `attempt_started` at spawn time (so a crash mid-attempt leaves an open
@@ -45,6 +48,47 @@ pub(crate) fn render_node_prompt(
 /// return batch - drive remains the sole writer of those. `journal` wraps the
 /// same single log in a Mutex, so this stays safe on the parallel batch's
 /// worker threads (each append is one atomic line write).
+/// The marker contract paragraph appended to an interactive node's prompt for
+/// resume/reprompt agents (spec 2026-07-20, Transport: resume/reprompt block),
+/// quoted verbatim. Interpolates [`crate::adapter::QUESTION_MARKER`] so the
+/// wording and the constant can never drift.
+fn marker_contract() -> String {
+    format!(
+        "If you need input from the user before you can proceed, print a line \
+         containing exactly `{marker}` followed by a JSON object \
+         `{{\"question\": \"...\", \"options\": [\"...\", ...]}}` on the next line, \
+         then stop without doing further work.",
+        marker = crate::adapter::QUESTION_MARKER,
+    )
+}
+
+/// A `resume`-transport re-invocation of an interactive node (spec 2026-07-20,
+/// Task 7). Carries the session id captured from the attempt that asked, plus
+/// the user's answer to hand the agent as the follow-up prompt. When present,
+/// `execute_node` re-enters the primary executor's own session via its resume
+/// form instead of re-invoking from scratch with a transcript. Chosen by the
+/// drive loop, which downgrades to a plain (`resume: None`) re-invocation when
+/// no session was captured or the agent has no resume form.
+pub(crate) struct ResumeContext {
+    pub session: String,
+    pub answer: String,
+}
+
+/// A `live`-transport execution of an interactive node (spec 2026-07-20, Task
+/// 11). Present only when the drive loop resolved the node's `interaction` to
+/// `Live` on claude/claude-code AND could resolve the current exe; a downgrade
+/// hands `None`. When present, `execute_node` injects the `apb __ask-server`
+/// sidecar into the claude argv, appends the live prompt paragraph instead of
+/// the marker contract, and drives the channel observation on this (the drive)
+/// thread via the adapter's per-poll `on_tick`.
+pub(crate) struct LiveContext {
+    /// Current apb executable, resolved by the drive layer (a resolution
+    /// failure downgrades before we get here, so this is always present).
+    pub exe: std::path::PathBuf,
+    /// Per-server tool timeout in ms handed to the sidecar injection.
+    pub timeout_ms: u64,
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -58,21 +102,35 @@ pub(crate) fn execute_node(
     cancel: &AtomicBool,
     env_scrub: &[String],
     journal: &Journal,
-) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
+    resume: Option<ResumeContext>,
+    live: Option<LiveContext>,
+) -> Result<AttemptOutcome, EngineError> {
     let node = playbook
         .node(node_id)
         .ok_or_else(|| EngineError::NotFound(node_id.into()))?;
     let mut events: Vec<EventPayload> = Vec::new();
     match &node.kind {
-        NodeKind::Start => Ok((NodeStatus::Succeeded, String::new(), events)),
+        NodeKind::Start => Ok(AttemptOutcome::Finished {
+            status: NodeStatus::Succeeded,
+            output: String::new(),
+            events,
+        }),
         NodeKind::Prompt { prompt } => {
             let text = match &override_prompt {
                 Some(p) => p.clone(),
                 None => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
-            Ok((NodeStatus::Succeeded, text, events))
+            Ok(AttemptOutcome::Finished {
+                status: NodeStatus::Succeeded,
+                output: text,
+                events,
+            })
         }
-        NodeKind::Condition { .. } => Ok((NodeStatus::Succeeded, String::new(), events)),
+        NodeKind::Condition { .. } => Ok(AttemptOutcome::Finished {
+            status: NodeStatus::Succeeded,
+            output: String::new(),
+            events,
+        }),
         NodeKind::AgentTask {
             prompt,
             profile,
@@ -80,11 +138,27 @@ pub(crate) fn execute_node(
             timeout_seconds,
             success_check,
             isolation,
+            interactive,
+            question_timeout_seconds,
+            default_answer,
             ..
         } => {
-            let mut text = match &override_prompt {
-                Some(p) => p.clone(),
-                None => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
+            // Live question-timeout enforcement inputs (spec 2026-07-20, Task 11
+            // fix): a live attempt enforces `question_timeout_seconds` on the
+            // drive thread from `on_tick`, posting `default_answer` (as
+            // `"timeout"`) or failing the attempt when none is set. Owned so the
+            // per-attempt `on_tick` closure can capture them freely; only ever
+            // consulted on the live path.
+            let live_q_timeout: Option<u64> = *question_timeout_seconds;
+            let live_default: Option<String> = default_answer.clone();
+            // On a `resume` re-invocation the follow-up prompt IS the user's
+            // answer (the prior context lives in the agent's own session); an
+            // ordinary attempt renders the node prompt (or takes the reprompt
+            // override the drive loop supplied).
+            let mut text = match (&resume, &override_prompt) {
+                (Some(rc), _) => rc.answer.clone(),
+                (None, Some(p)) => p.clone(),
+                (None, None) => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
@@ -187,6 +261,21 @@ pub(crate) fn execute_node(
                 }
             }
 
+            // Interactive contract paragraph. A LIVE attempt (spec 2026-07-20,
+            // Task 11) gets the `ask_user` paragraph: the tool exists, when to
+            // use it, and to route free-form questions through it rather than
+            // assuming an answer. A resume/reprompt interactive node gets the
+            // marker contract (print the marker plus a JSON question and stop).
+            // Appended once here so it rides the first invocation and each
+            // re-invocation. Non-interactive nodes receive neither. The marker
+            // scan stays active on a live node too, so a live agent that ignores
+            // the tool and prints the marker still parks (no regression).
+            if live.is_some() {
+                text = format!("{text}\n\n{}", crate::adapter::LIVE_PROMPT_PARAGRAPH);
+            } else if *interactive {
+                text = format!("{text}\n\n{}", marker_contract());
+            }
+
             // Connector env isolation (spec 4.3) for every attempt's agent spawn:
             // scrub inherited connector tokens and hand the agent the run-context
             // env that `apb connector call` reads.
@@ -195,6 +284,29 @@ pub(crate) fn execute_node(
                 run_dir: Some(run_dir.to_path_buf()),
                 node_id: Some(node_id.to_string()),
             };
+
+            // Resume argv (spec 2026-07-20, Task 7): when this is a `resume`
+            // re-invocation, resolve the primary agent's declarative resume form
+            // and substitute the captured session id as a whole argv element.
+            // `{prompt}`/`{model}` stay for `build_command`. `None` here means
+            // the drive loop already decided resume is unavailable (it hands a
+            // `resume: None`); leaving it defensively also collapses to the
+            // normal argv. The resume path targets ONLY the primary executor -
+            // the session belongs to it, so there is no fallback to a different
+            // agent.
+            let resume_argv: Option<Vec<String>> = resume.as_ref().and_then(|rc| {
+                crate::invocation::resume_argv(&steps[0].agent).map(|tmpl| {
+                    tmpl.into_iter()
+                        .map(|a| {
+                            if a == "{session}" {
+                                rc.session.clone()
+                            } else {
+                                a
+                            }
+                        })
+                        .collect()
+                })
+            });
 
             let mut attempt: u32 = 0;
             let mut last_msg = String::new();
@@ -210,7 +322,10 @@ pub(crate) fn execute_node(
             // likely doomed by the same external cause - e.g. a token lacking
             // permission - not by the agent or model).
             let mut last_tried: Option<(String, String)> = None;
-            for (idx, step) in steps.iter().enumerate() {
+            // A resume re-invocation runs the primary step only (see above);
+            // an ordinary attempt walks the whole fallback chain.
+            let step_count = if resume.is_some() { 1 } else { steps.len() };
+            for (idx, step) in steps.iter().enumerate().take(step_count) {
                 if idx > 0 {
                     let same_binding = last_tried
                         .as_ref()
@@ -234,17 +349,36 @@ pub(crate) fn execute_node(
                 // agents.<id>.invocation in the config between start and resume does
                 // not silently change the prompt contract. The executor path is unchanged.
                 let adapter: Box<dyn crate::adapter::AgentAdapter> = match &step.invocation {
-                    Some(ri) => Box::new(crate::adapter::ClaudeAdapter {
-                        program: ri.canonical_executable.to_string_lossy().into_owned(),
-                        spec: ri.spec.clone(),
-                    }),
+                    Some(ri) => {
+                        // On a resume re-invocation the primary step's invocation
+                        // form is replaced by the agent's resume argv (session
+                        // already substituted); the canonical binary, autonomy
+                        // flags, and transport are kept. The resume form always
+                        // delivers the follow-up via argv `{prompt}`.
+                        let spec = match &resume_argv {
+                            Some(rargv) => apb_core::config::InvocationDef {
+                                argv: rargv.clone(),
+                                prompt_via: apb_core::config::PromptVia::Argv,
+                                ..ri.spec.clone()
+                            },
+                            None => ri.spec.clone(),
+                        };
+                        Box::new(crate::adapter::ClaudeAdapter {
+                            program: ri.canonical_executable.to_string_lossy().into_owned(),
+                            spec,
+                        })
+                    }
                     None => adapter_for(&step.agent)?,
                 };
                 for try_i in 0..=retries {
                     // Cancellation (this branch lost a join:any) - exit with status
                     // Cancelled, not counting this as a failure.
                     if cancel.load(Ordering::Relaxed) {
-                        return Ok((NodeStatus::Cancelled, "cancelled".to_string(), events));
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Cancelled,
+                            output: "cancelled".to_string(),
+                            events,
+                        });
                     }
                     attempt += 1;
                     if try_i > 0 {
@@ -285,9 +419,19 @@ pub(crate) fn execute_node(
                         workdir: &attempt_workdir,
                         timeout,
                         stream_log: Some(&stream_log),
-                        soul: soul_text.as_deref(),
+                        // A resume re-invocation delivers no SOUL: the resumed
+                        // session already carries its role prompt, and the
+                        // follow-up is only the user's answer.
+                        soul: if resume.is_some() {
+                            None
+                        } else {
+                            soul_text.as_deref()
+                        },
                         grant_autonomy,
                         connector_policy: &connector_policy,
+                        interactive: *interactive,
+                        node: node_id,
+                        agent: &step.agent,
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -317,9 +461,84 @@ pub(crate) fn execute_node(
                             *spawn_err.borrow_mut() = Some(e);
                         }
                     };
-                    let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn));
+                    // Live channel observation (spec 2026-07-20, Task 11): for a
+                    // live attempt the adapter's drive-owned poll loop calls
+                    // `on_tick` on THIS (the drive) thread each wait iteration,
+                    // where drive journals the question/answer round as it lands
+                    // through `observe_live_channels`. The single-writer
+                    // invariant holds: no second thread journals. A journal
+                    // failure is carried out of the closure like `spawn_err`.
+                    let tick_err: std::cell::RefCell<Option<EngineError>> =
+                        std::cell::RefCell::new(None);
+                    // Set by `on_tick` when the open question timed out with no
+                    // default answer: the message fails the attempt (Task 5
+                    // wording) and `abort` tells the adapter to tear the agent
+                    // down. Attempt-local, so only this node fails.
+                    let timeout_msg: std::cell::RefCell<Option<String>> =
+                        std::cell::RefCell::new(None);
+                    let abort = AtomicBool::new(false);
+                    let on_tick = || {
+                        if tick_err.borrow().is_some() || abort.load(Ordering::Relaxed) {
+                            return;
+                        }
+                        // Unqualified via `use super::*`: node.rs already reaches
+                        // scheduler that way, so no new module edge is added.
+                        match tick_live_observation(
+                            run_dir,
+                            node_id,
+                            journal,
+                            live_q_timeout,
+                            live_default.as_deref(),
+                        ) {
+                            Ok(Some(msg)) => {
+                                *timeout_msg.borrow_mut() = Some(msg);
+                                abort.store(true, Ordering::Relaxed);
+                            }
+                            Ok(None) => {}
+                            Err(e) => *tick_err.borrow_mut() = Some(e),
+                        }
+                    };
+                    let live_hooks = live.as_ref().map(|lc| crate::adapter::LiveHooks {
+                        inject: crate::adapter::LiveInject {
+                            exe: lc.exe.clone(),
+                            run_id: run_id.to_string(),
+                            attempt: cur_attempt,
+                            timeout_ms: lc.timeout_ms,
+                        },
+                        on_tick: &on_tick,
+                        abort: &abort,
+                    });
+                    let outcome = adapter.run_cancellable(
+                        &task,
+                        cancel,
+                        Some(&on_spawn),
+                        live_hooks.as_ref(),
+                    );
                     if let Some(e) = spawn_err.borrow_mut().take() {
                         return Err(e);
+                    }
+                    if let Some(e) = tick_err.borrow_mut().take() {
+                        return Err(e);
+                    }
+                    // Question-timeout-without-default (spec 2026-07-20, Task 11
+                    // fix): the adapter tore the agent down on the abort flag.
+                    // Fail this attempt with the node-named message, journaling
+                    // the paired `attempt_finished`; no retry/fallback, since a
+                    // question timeout does not resolve by re-running the agent.
+                    if let Some(msg) = timeout_msg.borrow_mut().take() {
+                        let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
+                        journal.append(EventPayload::AttemptFinished {
+                            node: node_id.into(),
+                            attempt,
+                            status: "failed".into(),
+                            duration_ms,
+                            session: None,
+                        })?;
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Failed,
+                            output: msg,
+                            events,
+                        });
                     }
                     let spawn_instant = spawn_at.get();
                     // The spawn itself failed before the callback ran: still journal
@@ -343,7 +562,24 @@ pub(crate) fn execute_node(
                                 attempt,
                                 status: report.status.as_str().into(),
                                 duration_ms,
+                                // Session id captured from this attempt (spec
+                                // 2026-07-20, Task 7); the drive loop reads it
+                                // back to resume the agent on the answer round.
+                                session: report.session.clone(),
                             })?;
+                            // Interactive suspension (spec 2026-07-20): the agent
+                            // asked a question via the stdout marker instead of
+                            // finishing. The attempt genuinely ran (its
+                            // attempt_started/attempt_finished are journaled
+                            // above); we hand drive a suspension to park on rather
+                            // than composing a NodeFinished. The marker is honored
+                            // only on interactive nodes.
+                            if *interactive && let Some(q) = report.question {
+                                return Ok(AttemptOutcome::Suspended {
+                                    question: q.question,
+                                    options: q.options,
+                                });
+                            }
                             if report.status == NodeStatus::Succeeded {
                                 // A deterministic check on top of the self-report (spec 6.2):
                                 // a non-zero check exit code makes the node Failed regardless
@@ -364,14 +600,18 @@ pub(crate) fn execute_node(
                                         None,
                                     )?;
                                     if r.status != NodeStatus::Succeeded {
-                                        return Ok((
-                                            NodeStatus::Failed,
-                                            format!("success_check `{check}` failed"),
+                                        return Ok(AttemptOutcome::Finished {
+                                            status: NodeStatus::Failed,
+                                            output: format!("success_check `{check}` failed"),
                                             events,
-                                        ));
+                                        });
                                     }
                                 }
-                                return Ok((NodeStatus::Succeeded, report.summary, events));
+                                return Ok(AttemptOutcome::Finished {
+                                    status: NodeStatus::Succeeded,
+                                    output: report.summary,
+                                    events,
+                                });
                             }
                             last_msg = report.summary;
                             last_timed_out = false;
@@ -380,11 +620,11 @@ pub(crate) fn execute_node(
                             // Cancellation mid-adapter-work: kill returned Transport,
                             // but this is not a failure - mark the node Cancelled.
                             if cancel.load(Ordering::Relaxed) {
-                                return Ok((
-                                    NodeStatus::Cancelled,
-                                    "cancelled".to_string(),
+                                return Ok(AttemptOutcome::Finished {
+                                    status: NodeStatus::Cancelled,
+                                    output: "cancelled".to_string(),
                                     events,
-                                ));
+                                });
                             }
                             last_timed_out = class == ErrorClass::Timeout;
                             let attempt_status = if last_timed_out {
@@ -397,6 +637,7 @@ pub(crate) fn execute_node(
                                 attempt,
                                 status: attempt_status.into(),
                                 duration_ms,
+                                session: None,
                             })?;
                             last_msg = msg;
                             // A transport error and a timeout break the retry loop for this
@@ -413,7 +654,11 @@ pub(crate) fn execute_node(
             } else {
                 NodeStatus::Failed
             };
-            Ok((final_status, last_msg, events))
+            Ok(AttemptOutcome::Finished {
+                status: final_status,
+                output: last_msg,
+                events,
+            })
         }
         NodeKind::Script {
             script,
@@ -425,9 +670,17 @@ pub(crate) fn execute_node(
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
             let r = run_script(run_dir, workdir, script, runner, timeout, Some(cancel))?;
-            Ok((r.status, r.stdout, events))
+            Ok(AttemptOutcome::Finished {
+                status: r.status,
+                output: r.stdout,
+                events,
+            })
         }
-        NodeKind::Finish { .. } => Ok((NodeStatus::Succeeded, String::new(), events)),
+        NodeKind::Finish { .. } => Ok(AttemptOutcome::Finished {
+            status: NodeStatus::Succeeded,
+            output: String::new(),
+            events,
+        }),
         // human_review is handled inside drive itself (pause until a decision), it
         // never reaches here; this branch is defensive. wait - subphase 7b.
         NodeKind::HumanReview { .. } => Err(EngineError::Invalid(format!(
@@ -562,6 +815,11 @@ pub(crate) fn execute_finish_answer(
                 soul: Some(entry.soul.as_str()),
                 grant_autonomy,
                 connector_policy: &connector_policy,
+                // A finish-answer node is never interactive: it composes the
+                // run's terminal answer, it does not ask the user questions.
+                interactive: false,
+                node: node_id,
+                agent: &ri.agent_id,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -586,7 +844,9 @@ pub(crate) fn execute_finish_answer(
                     *spawn_err.borrow_mut() = Some(e);
                 }
             };
-            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn));
+            // A finish-answer node is never interactive, so it never runs the
+            // live sidecar (`None`).
+            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None);
             if let Some(e) = spawn_err.borrow_mut().take() {
                 return Err(e);
             }
@@ -611,6 +871,7 @@ pub(crate) fn execute_finish_answer(
                         attempt,
                         status: report.status.as_str().into(),
                         duration_ms,
+                        session: report.session.clone(),
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         return Ok((NodeStatus::Succeeded, report.summary, events));
@@ -630,6 +891,7 @@ pub(crate) fn execute_finish_answer(
                         }
                         .into(),
                         duration_ms,
+                        session: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {
@@ -986,6 +1248,20 @@ pub(crate) fn is_agent_or_script(playbook: &Playbook, node: &str) -> bool {
     )
 }
 
+/// Whether a node is an interactive `agent_task` (spec 2026-07-20). Such a node
+/// may park mid-run on a question, so drive keeps it out of the concurrent
+/// batch (which cannot park) and runs it through the sequential park-and-poll
+/// path instead.
+pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
+    matches!(
+        playbook.node(node).map(|n| &n.kind),
+        Some(NodeKind::AgentTask {
+            interactive: true,
+            ..
+        })
+    )
+}
+
 /// Context compaction (spec 8.5): if enabled (cfg.context_max_bytes) and the
 /// full context exceeds the threshold, old sections are compacted by a cheap model
 /// into context_compact.md, and a ContextCompacted event is returned, which drive
@@ -1057,6 +1333,10 @@ pub(crate) fn maybe_compact_context(
         // access, so it stays in the default permission posture.
         grant_autonomy: false,
         connector_policy: &connector_policy,
+        // Internal summarizer: not a playbook node, never interactive.
+        interactive: false,
+        node: "__context_compact",
+        agent: "claude-code",
     };
     let summary = match adapter.run(&task) {
         Ok(report) => report.summary,

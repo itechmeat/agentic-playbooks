@@ -119,11 +119,61 @@ Rules when adding or moving a test:
 - `include_str!`/`include!` paths are relative to the source file: a file
   under `tests/suite/` needs one extra `../` versus `tests/`.
 
-## Future options (not adopted yet)
+### 9. CI runs nextest, and every job has a ceiling
 
-- **cargo-nextest**: faster scheduling and better reports, but it runs each
-  test in its own process (one spawn per test). On a host where each binary
-  spawn is scanned, that trades the binary-count win above for a test-count
-  cost, so only adopt it alongside the macOS Developer Tools exemption.
-  It also cannot see the in-process `ENV_LOCK`, so env-mutating tests would
-  need nextest test groups first.
+cargo-nextest was previously listed here as not adopted, on the grounds
+that a spawn per test costs more than a spawn per binary. That trade was
+re-decided when a single unbounded wait in a test helper hung CI: with
+`cargo test`, one stuck test takes its whole binary down with it and the
+job sits there reporting nothing about which test is stuck, until the
+workflow ceiling or a human intervenes. Ours had no ceiling, so the
+default was 360 minutes. A per-test deadline is worth the spawn cost.
+
+What is in place now:
+
+- `.config/nextest.toml` defines two profiles. `default` (local) allows
+  120s per test, which clears the slowest honest case on macOS: the
+  FSEvents watcher registration costs about 34s under `/var/folders`,
+  which the Linux inotify path does not pay. `ci` allows 180s, a wide
+  margin over the real worst case of about 11s. Both work by
+  `slow-timeout` marking a test SLOW and `terminate-after` ending it after
+  N such periods, SIGTERM first and then SIGKILL, failing it BY NAME.
+- Retries are off everywhere. A hang that a retry papers over is a defect
+  that should be visible on the first run.
+- `ci.yml` and `release.yml` both run `cargo nextest run --profile ci
+  --workspace` plus `cargo test --workspace --doc`, because nextest does
+  not run doctests. Coverage matches the old `cargo test --workspace`:
+  same selection, and `#[ignore]`d tests stay ignored.
+- Every job in both workflows carries `timeout-minutes` (30 for test jobs,
+  45 per release build leg). Reaching a job ceiling now means something
+  outside the tests is wrong, since a hung test is caught earlier and by
+  name.
+
+Consequences for how tests are written:
+
+- Locally, both runners must pass. `cargo test` shares one process per
+  binary, so the shared `ENV_LOCK` and the Drop guards from rule 8 are
+  still mandatory. nextest gives each test its own process, which hides
+  exactly those bugs, so a green nextest run is not evidence that
+  process-global state is handled correctly.
+- Prefer `cargo nextest run --workspace` for the run before a PR: it is
+  the only local invocation that turns a hang into a named failure rather
+  than a stalled terminal.
+
+### 10. Wall-clock is a shared cost, and hangs are the worst case
+
+Numbers from the run-reliability branch, for calibration: the full test
+run is about 25s on CI (1039 tests) and the whole pipeline about 2m30s.
+Before the fix, one hung test cost 30 minutes before a human cancelled it,
+against a 6-hour ceiling.
+
+- A stub sleeping 30s so a test can assert "it returned sooner" costs that
+  30s on every run for everyone. Choose the shortest duration that still
+  distinguishes pass from fail.
+- Do not split the CI job to parallelize unless the split is genuinely
+  cheap. Here it is not: `web/dist` is gitignored and rust-embed depends
+  on it, so every cargo step needs the bun build first, and splitting
+  would duplicate the whole pipeline for no gain.
+- The macOS binary-spawn cost from rule 8 still argues for one integration
+  binary per crate. nextest changes the per-test cost, not the per-binary
+  compile and link cost, which is the part that dominates a rebuild.

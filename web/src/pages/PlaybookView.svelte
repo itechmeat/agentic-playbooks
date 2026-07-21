@@ -178,31 +178,32 @@
     <Button
       variant="outline"
       size="sm"
+      class="max-sm:px-2"
       onclick={toggleFreeze}
       disabled={freezing}
       title={frozen ? 'Allow changes to this playbook again' : 'Lock this playbook against any definition change'}
     >
       <Snowflake data-icon="inline-start" />
-      {frozen ? 'Unfreeze' : 'Freeze'}
+      <span class="max-sm:sr-only">{frozen ? 'Unfreeze' : 'Freeze'}</span>
     </Button>
     <Button
       variant="outline"
       size="sm"
-      class="border-warning/50 text-warning hover:border-warning hover:bg-warning/10 hover:text-warning"
+      class="max-sm:px-2 border-warning/50 text-warning hover:border-warning hover:bg-warning/10 hover:text-warning"
       href={`#/edit/${encodeURIComponent(workspace)}/${encodeURIComponent(id)}`}
     >
       <Pencil data-icon="inline-start" />
-      Edit
+      <span class="max-sm:sr-only">Edit</span>
     </Button>
     <Button
       size="sm"
-      class="bg-success text-success-foreground hover:bg-success/90"
+      class="max-sm:px-2 bg-success text-success-foreground hover:bg-success/90"
       onclick={run}
       disabled={starting}
       title="Start a run of this playbook"
     >
       {#if starting}<Spinner data-icon="inline-start" />{:else}<Play data-icon="inline-start" />{/if}
-      {starting ? 'Starting...' : 'Run'}
+      <span class="max-sm:sr-only">{starting ? 'Starting...' : 'Run'}</span>
     </Button>
   {/snippet}
 </Topbar>

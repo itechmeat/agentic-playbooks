@@ -17,8 +17,8 @@ notify = "8.2"
 uuid = { version = "1.23.4", features = ["v4"] }
 rust-embed = "8.12"
 mime_guess = "2.0.5"
-apb-engine = { version = "0.7.0", path = "../apb-engine" }
-apb-mcp = { version = "0.7.0", path = "../apb-mcp" }
+apb-engine = { version = "0.8.0", path = "../apb-engine" }
+apb-mcp = { version = "0.8.0", path = "../apb-mcp" }
 
 [dev-dependencies]
 http-body-util = "0.1.3"

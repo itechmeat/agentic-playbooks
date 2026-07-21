@@ -4,6 +4,7 @@
   import { subscribeChanges } from '../lib/ws'
   import type { RunSummary } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
+  import PageScroll from '$lib/components/PageScroll.svelte'
   import { Badge } from '$lib/components/ui/badge'
   import RunProgress from '$lib/RunProgress.svelte'
   import * as Table from '$lib/components/ui/table'
@@ -40,7 +41,7 @@
 
 <Topbar active="runs" />
 
-<div class="min-h-0 flex-1 overflow-auto">
+<PageScroll>
   <div class="mx-auto w-full max-w-4xl px-4 py-6">
     {#if !loaded}
       <div class="flex flex-col gap-2">
@@ -103,4 +104,4 @@
       </div>
     {/if}
   </div>
-</div>
+</PageScroll>

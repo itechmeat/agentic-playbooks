@@ -43,12 +43,29 @@ export interface PlaybookDetail {
   frozen: boolean
 }
 
+// The pending question for a run parked on an interactive `agent_task` node
+// (spec 2026-07-20-interactive-nodes), mirroring the server's
+// `progress::PendingQuestion`. Present only while `waiting_kind === 'question'`.
+export interface PendingQuestion {
+  node: string
+  question: string
+  options: string[]
+  // "human" or "supervisor" (the node's declared answer_by); the web facade
+  // always posts as "human" regardless of this value.
+  answer_by: string
+  // Milliseconds since epoch, or 0 before drive has journaled the question
+  // event yet (treat 0 as "just now", never synthesize a client-side time).
+  asked_at: number
+}
+
 export interface ProgressSummary {
   percent: number
   label: string | null
   waiting_on: string | null
   // null whenever waiting_on is null.
-  waiting_kind: 'human_review' | 'wait' | null
+  waiting_kind: 'human_review' | 'wait' | 'question' | null
+  // The pending question when waiting_kind === 'question'; null otherwise.
+  pending_question?: PendingQuestion | null
   // Deterministic work-plan identity: changes exactly when a report raises a
   // cycle total or the run migrates to a patched version. Does not change on
   // ordinary done/label updates. This is the only valid reset signal.

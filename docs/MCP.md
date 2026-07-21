@@ -69,6 +69,7 @@ Mutations (destructive):
 | `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below) |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
 | `review_decide` | Decide a run's human_review node |
+| `run_answer` | Answer a pending interactive question on a run (an `agent_task` with `interactive: true`); plain `run_id` path posts `answered_by: "human"`, supervisor-token path posts `answered_by: "supervisor"` |
 | `profile_write` | Create/update a profile (CAS via expected_digest, auto-approves the bundle); current workspace only |
 | `profile_move` | Copy a profile between scopes (the source remains) |
 | `profile_delete` | Delete a profile (blocked on references unless forced) |
@@ -98,6 +99,21 @@ handled. `timeout_ms` bounds the block (default 25000). `wake: null` means
 the run already reached a terminal state, or the call simply timed out with
 nothing new - the caller decides whether to wait again.
 
+An interactive `agent_task` node (`interactive: true`) can park a run on a
+question mid-attempt; `run_status`'s `pending_question` (`{ node, question,
+options, answer_by, asked_at }`, `null` when nothing is pending) and
+`progress.waiting_kind: "question"` report it, and `supervisor_wait_event`
+raises a wake the moment it is asked. The node's `answer_by` sets who may
+resolve it, and this is a contract for a supervisor agent, not just a
+capability check: for `answer_by: human`, relay the question to the user
+verbatim, in the user's chat language, and post back their answer to
+`run_answer` verbatim - never answer such a question with the supervisor's
+own judgment. A supervisor that tries anyway is refused: `run_answer`'s
+supervisor-token path against an `answer_by: human` node returns an error
+instructing it to relay the question instead. For `answer_by: supervisor`,
+the supervisor may answer directly from its own judgment, and should still
+escalate to the user when unsure rather than guess.
+
 ## Asynchronous run model
 
 A run can take minutes, while some hosts have a short timeout on a single
@@ -110,6 +126,9 @@ tool call (for example, ChatGPT Apps at around 60 seconds). That's why
   `seq`) until the status becomes terminal (`succeeded` / `failed`).
 - If the run hits a human_review node, the client resolves it via
   `review_decide`, and the run continues.
+- If the run hits an interactive `agent_task` node that asked a question
+  (`run_status.pending_question` non-null), the client resolves it via
+  `run_answer`, and the run continues.
 
 Without `background: true`, behavior is unchanged: `playbook_run` blocks
 until completion and returns the result. This remains the default for

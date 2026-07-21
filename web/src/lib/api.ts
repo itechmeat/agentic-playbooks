@@ -17,52 +17,71 @@ import type {
   ConnectorTrust,
   JsonSchema,
 } from './connectors'
+import type { AvailableConnector, InstallResult, UninstallResult } from './connectorinstall'
 import type { ConnectorFunctionStat, ConnectorStats } from './connectorstats'
 import type { PlayCallResult } from './connectorplay'
 
 async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url)
-  if (!res.ok) throw new Error(`${url}: HTTP ${res.status}`)
+  if (!res.ok) throw new ApiError(`${url}: HTTP ${res.status}`, res.status)
   return res.json() as Promise<T>
 }
 
 /// An error carrying the HTTP status, so callers can branch on it structurally
-/// (e.g. a 409 conflict) instead of matching substrings in the message.
+/// (e.g. a 409 conflict) instead of matching substrings in the message. `code`
+/// is the machine-readable `error` field of the JSON body when the server sent
+/// one, so a caller can map a documented code to its own copy.
 export class ApiError extends Error {
   status: number
-  constructor(message: string, status: number) {
+  code?: string
+  detail?: string
+  constructor(message: string, status: number, code?: string, detail?: string) {
     super(message)
     this.name = 'ApiError'
     this.status = status
+    this.code = code
+    this.detail = detail
   }
 }
 
 async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   const res = await fetch(url, init)
   if (!res.ok) {
-    const msg = await errorMessage(res)
-    throw new ApiError(msg, res.status)
+    const err = await errorMessage(res)
+    throw new ApiError(err.message, res.status, err.code, err.detail)
   }
   if (res.status === 204) return undefined as T
   return res.json() as Promise<T>
 }
 
-async function errorMessage(res: Response): Promise<string> {
+async function errorMessage(
+  res: Response,
+): Promise<{ message: string; code?: string; detail?: string }> {
   const url = res.url || ''
+  const text = await res.text().catch(() => '')
   try {
-    const body = (await res.json()) as { error?: string; codes?: string[]; message?: string }
+    const body = JSON.parse(text) as {
+      error?: string
+      codes?: string[]
+      message?: string
+      detail?: string
+    }
+    const meta = { code: body.error, detail: body.detail }
     if (body.error === 'validation' && body.codes?.length) {
-      return `${url}: validation: ${body.codes.join(', ')}`
+      return { message: `${url}: validation: ${body.codes.join(', ')}`, ...meta }
     }
     if (body.error === 'schema' && body.message) {
-      return `${url}: schema: ${body.message}`
+      return { message: `${url}: schema: ${body.message}`, ...meta }
     }
-    if (body.error === 'frozen') return `${url}: playbook is frozen`
-    if (body.error) return `${url}: ${body.error}`
+    if (body.error === 'frozen') return { message: `${url}: playbook is frozen`, ...meta }
+    if (body.error) return { message: `${url}: ${body.error}`, ...meta }
   } catch {
-    // body is not JSON
+    // body is not JSON: a plain-text body (e.g. the answer endpoint's
+    // answer_by relay diagnostic) is still worth surfacing verbatim rather
+    // than collapsing to a bare status code.
+    if (text.trim()) return { message: `${url}: ${text.trim()}` }
   }
-  return `${url}: HTTP ${res.status}`
+  return { message: `${url}: HTTP ${res.status}` }
 }
 
 const jsonHeaders = { 'content-type': 'application/json' }
@@ -104,6 +123,9 @@ export interface ProfileWriteBody {
   scope: string
   agent: string
   model: string
+  // Ordered executor fallbacks, walked top to bottom when a step fails. The
+  // primary pair stays in `agent`/`model`; an empty array means no fallbacks.
+  fallbacks?: { agent: string; model: string }[]
   description?: string
   soul?: string
   skills?: string[]
@@ -188,6 +210,23 @@ export const postReview = (
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify({ node, decision, note }),
+  })
+
+// POST /api/runs/{id}/answer: the web facade for answering an interactive
+// agent_task node's pending question (spec 2026-07-20-interactive-nodes).
+// `node` is omitted when the run has exactly one pending question; the
+// server resolves it the same way `apb_engine::post_answer` does. Always
+// posted as answered_by "human" server-side - the dashboard never sends that
+// field.
+export const postAnswer = (
+  id: string,
+  body: { node?: string; answer: string },
+  workspace = '',
+) =>
+  requestJson<{ posted_seq: number }>(`${run(id)}/answer${qs({ workspace })}`, {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify(body),
   })
 
 export const createPlaybook = (id: string, yaml: string, workspace = '') =>
@@ -295,7 +334,9 @@ interface ConnectorFunctionDto {
   name: string
   description: string
   read_only: boolean
-  deprecated: boolean
+  // The manifest's optional deprecation reason. Absent and null both mean
+  // "not deprecated"; the string is human-readable text, not a flag.
+  deprecated?: string | null
   args_schema?: JsonSchema | null
 }
 
@@ -303,13 +344,14 @@ const toConnectorFunction = (d: ConnectorFunctionDto): ConnectorFunction => ({
   name: d.name,
   description: d.description,
   readOnly: d.read_only,
-  deprecated: d.deprecated,
+  deprecated: d.deprecated ?? null,
   argsSchema: d.args_schema ?? null,
 })
 
 interface ConnectorDetailDto {
   name: string
   version: string
+  installed: boolean
   trust: ConnectorTrust
   meta: ConnectorMeta
   body_md: string
@@ -322,6 +364,7 @@ export const fetchConnector = (name: string, workspace = '') =>
     (d): ConnectorDetail => ({
       name: d.name,
       version: d.version,
+      installed: d.installed,
       trust: d.trust,
       meta: d.meta,
       bodyMd: d.body_md,
@@ -352,6 +395,64 @@ export const runConnectorHealthcheck = (name: string, account: string, workspace
     `${conn(name)}/healthcheck/${encodeURIComponent(account)}${qs({ workspace })}`,
     { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) },
   )
+
+interface AvailableConnectorDto {
+  name: string
+  version: string
+  display_name: string
+  summary: string
+  tags: string[]
+}
+
+// GET /api/connectors/available: the embedded official connectors that are NOT
+// installed. Always 200; an empty array means everything is already installed.
+export const fetchAvailableConnectors = () =>
+  getJson<AvailableConnectorDto[]>('/api/connectors/available').then((list) =>
+    list.map(
+      (d): AvailableConnector => ({
+        name: d.name,
+        version: d.version,
+        displayName: d.display_name,
+        summary: d.summary,
+        tags: d.tags,
+      }),
+    ),
+  )
+
+interface InstallResultDto {
+  ok: boolean
+  name: string
+  version: string
+  digest: string
+  no_op: boolean
+  trust_recorded: boolean
+  trust_warning: string | null
+}
+
+// POST /api/connectors/{name}/install: `force` replaces a different installed
+// version, which the server otherwise refuses with 409 needs_force. Only ever
+// sent as a deliberate user action, never as an automatic retry.
+export const installConnector = (name: string, force = false) =>
+  requestJson<InstallResultDto>(`${conn(name)}/install${qs({ force: force ? 'true' : '' })}`, {
+    method: 'POST',
+  }).then(
+    (d): InstallResult => ({
+      ok: d.ok,
+      name: d.name,
+      version: d.version,
+      digest: d.digest,
+      noOp: d.no_op,
+      trustRecorded: d.trust_recorded,
+      trustWarning: d.trust_warning,
+    }),
+  )
+
+// POST /api/connectors/{name}/uninstall: removes the connector tree only. The
+// account configuration lives in a separate store and is left untouched.
+export const uninstallConnector = (name: string) =>
+  requestJson<{ ok: boolean; name: string; no_op: boolean }>(`${conn(name)}/uninstall`, {
+    method: 'POST',
+  }).then((d): UninstallResult => ({ ok: d.ok, name: d.name, noOp: d.no_op }))
 
 export const approveConnector = (name: string, account: string | null = null, workspace = '') =>
   requestJson<{ ok: boolean }>(`/api/connectors/approve${qs({ workspace })}`, {

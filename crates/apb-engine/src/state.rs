@@ -156,6 +156,12 @@ impl RunState {
                 EventPayload::RetryStarted { .. } | EventPayload::FallbackTriggered { .. } => {}
                 EventPayload::RunAborted { .. } => s.run_status = RunStatus::Aborted,
                 EventPayload::WakeRaised { .. } => {}
+                // A question and its answer are audit-only channel mirrors
+                // (spec 2026-07-20-interactive-nodes): they do not change
+                // node status. The pending state itself is derived by
+                // `progress::from_run_dir` directly from the questions.jsonl
+                // / answers.jsonl channel files, not from these events.
+                EventPayload::QuestionAsked { .. } | EventPayload::QuestionAnswered { .. } => {}
                 EventPayload::SupervisorAction { .. } => {}
                 EventPayload::SupervisorLost { .. } => {}
                 EventPayload::PatchApplied { .. }

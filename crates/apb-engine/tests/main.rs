@@ -84,10 +84,20 @@ mod heartbeat_lost_test;
 mod inspect_wait_test;
 #[path = "suite/instruction_precedence_test.rs"]
 mod instruction_precedence_test;
+#[path = "suite/interaction_defaults_test.rs"]
+mod interaction_defaults_test;
+#[path = "suite/interactive_live_test.rs"]
+mod interactive_live_test;
+#[path = "suite/interactive_reprompt_test.rs"]
+mod interactive_reprompt_test;
+#[path = "suite/interactive_timeout_test.rs"]
+mod interactive_timeout_test;
 #[path = "suite/list_runs_resilient_test.rs"]
 mod list_runs_resilient_test;
 #[path = "suite/loop_edges_test.rs"]
 mod loop_edges_test;
+#[path = "suite/marker_test.rs"]
+mod marker_test;
 #[path = "suite/max_loops_test.rs"]
 mod max_loops_test;
 #[path = "suite/migrate_test.rs"]
@@ -108,8 +118,12 @@ mod process_group_test;
 mod profile_run_test;
 #[path = "suite/progress_api_test.rs"]
 mod progress_api_test;
+#[path = "suite/question_channel_test.rs"]
+mod question_channel_test;
 #[path = "suite/report_summary_test.rs"]
 mod report_summary_test;
+#[path = "suite/resume_capture_test.rs"]
+mod resume_capture_test;
 #[path = "suite/resume_test.rs"]
 mod resume_test;
 #[path = "suite/retry_test.rs"]

@@ -171,6 +171,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 attempt: 1,
                 status: "failed".into(),
                 duration_ms: Some(1200),
+                session: None,
             },
         ),
         ev(
