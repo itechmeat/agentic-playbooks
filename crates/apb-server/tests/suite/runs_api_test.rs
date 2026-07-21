@@ -382,3 +382,58 @@ async fn post_playbook_run_continued_from_rejects_superseded_predecessor() {
         "expected superseded detail, got: {body:?}"
     );
 }
+
+const OTHER: &str = r#"
+schema: 1
+id: other
+name: Other
+version: 1.0.0
+params:
+  - { name: who, type: text }
+nodes:
+  - { id: start, type: start }
+  - { id: note, type: prompt, prompt: "hello {{params.who}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: note }
+  - { from: note, to: done }
+"#;
+
+/// Cross-playbook `continued_from` is a client precondition failure
+/// (`EngineError::Invalid`), not a server fault. Must surface as 422.
+#[tokio::test]
+async fn post_playbook_run_continued_from_rejects_cross_playbook() {
+    let dir = seed_with_run();
+    let first_id = apb_engine::list_runs(dir.path()).unwrap()[0].run_id.clone();
+
+    let vdir = dir.path().join(".apb/playbooks/other/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), OTHER).unwrap();
+    fs::write(dir.path().join(".apb/playbooks/other/current"), "1.0.0").unwrap();
+
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/playbooks/other/run")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "params": { "who": "world" },
+                "continued_from": first_id,
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::UNPROCESSABLE_ENTITY,
+        "cross-playbook continued_from must be 422, not 500"
+    );
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        body.contains("noagent") && body.contains("other"),
+        "expected both playbook ids in error, got: {body:?}"
+    );
+}
