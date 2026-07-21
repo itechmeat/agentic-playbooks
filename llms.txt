@@ -4,9 +4,21 @@
 
 The MCP server (started with `apb mcp`) identifies itself as `agentic-playbooks` to MCP clients. The binary name and all CLI commands use `apb`.
 
-## Install from source
+## Install
 
-Requires Rust (stable) and Bun. The web frontend must be built before the Rust binary because it is embedded at compile time via rust-embed.
+Prefer the one-liner installer:
+
+```sh
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/itechmeat/agentic-playbooks/releases/latest/download/apb-installer.sh | sh
+```
+
+This installs the `apb` binary to `CARGO_HOME` (`~/.cargo/bin` by default), no
+build tools required.
+
+Fall back to a source build only if the installer is not usable in your
+environment (for example, no network access to GitHub Releases). This
+requires Rust (stable) and Bun; the web frontend must be built before the Rust
+binary because it is embedded at compile time via rust-embed.
 
 ```sh
 git clone https://github.com/itechmeat/agentic-playbooks && cd agentic-playbooks
@@ -90,7 +102,7 @@ Five crates under `crates/` with dependency direction core <- engine <- mcp, and
 - `apb-core`: domain layer (no async). Playbook schema, validator, profiles, registry, versioning, trust store, atomic state IO.
 - `apb-engine`: execution. Drive loop, node execution, immutable run manifest, agent adapters, append-only event log, background supervisor.
 - `apb-mcp`: rmcp stdio MCP server, policy gate, profile and supervisor tools.
-- `apb-cli`: the `apb` binary; thin dispatch.
+- `apb-cli`: package name `apb` (bin `apb`); thin dispatch.
 - `apb-server`: axum web API with the svelte frontend embedded via rust-embed.
 
 ## Docs
