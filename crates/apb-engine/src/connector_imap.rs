@@ -196,6 +196,7 @@ impl ImapCall {
             .with_safe_default_protocol_versions()
             .map_err(|e| self.tls_err(format!("imap TLS provider setup failed: {e}")))?
             .with_platform_verifier()
+            .map_err(|e| self.tls_err(format!("imap TLS platform verifier setup failed: {e}")))?
             .with_no_client_auth();
         let server_name = rustls::pki_types::ServerName::try_from(self.host.clone())
             .map_err(|e| self.tls_err(format!("imap TLS server name is invalid: {e}")))?;
@@ -925,13 +926,41 @@ fn envelope_message_json(fetch: &imap::types::Fetch) -> Value {
         m.insert("uid".into(), json!(uid));
     }
     if let Some(env) = fetch.envelope() {
-        if let Some(from) = env.from.as_ref().and_then(|v| first_address(v)) {
+        // The address type here is the `imap` crate's own (older, pinned)
+        // imap-proto dependency, which it does not re-export by name. A
+        // shared closure bound once via `let` can't be type-checked ahead of
+        // its use sites (E0282), so this stays a macro: each expansion site
+        // infers the concrete (unnamable) address type independently from
+        // its own `list.iter()` context, while the formatting logic itself
+        // has one source of truth.
+        macro_rules! address_to_string {
+            ($a:expr) => {{
+                let mailbox = $a.mailbox.map(bytes_lossy);
+                let host = $a.host.map(bytes_lossy);
+                match (mailbox, host) {
+                    (Some(mb), Some(h)) => Some(format!("{mb}@{h}")),
+                    (Some(mb), None) => Some(mb),
+                    (None, Some(h)) => Some(h),
+                    (None, None) => None,
+                }
+            }};
+        }
+        if let Some(from) = env
+            .from
+            .as_deref()
+            .and_then(|list| list.iter().find_map(|a| address_to_string!(a)))
+        {
             m.insert("from".into(), json!(from));
         }
         if let Some(to) = env
             .to
-            .as_ref()
-            .map(|v| join_addresses(v))
+            .as_deref()
+            .map(|list| {
+                list.iter()
+                    .filter_map(|a| address_to_string!(a))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            })
             .filter(|s| !s.is_empty())
         {
             m.insert("to".into(), json!(to));
@@ -948,32 +977,6 @@ fn envelope_message_json(fetch: &imap::types::Fetch) -> Value {
         m.insert("size".into(), json!(size));
     }
     Value::Object(m)
-}
-
-/// The first address of an envelope address list, as `mailbox@host`.
-fn first_address(list: &[imap_proto::Address]) -> Option<String> {
-    list.iter().find_map(address_to_string)
-}
-
-/// All addresses of an envelope address list joined by `, `.
-fn join_addresses(list: &[imap_proto::Address]) -> String {
-    list.iter()
-        .filter_map(address_to_string)
-        .collect::<Vec<_>>()
-        .join(", ")
-}
-
-/// Renders one envelope address as `mailbox@host`, or `None` when neither part
-/// is present.
-fn address_to_string(a: &imap_proto::Address) -> Option<String> {
-    let mailbox = a.mailbox.map(bytes_lossy);
-    let host = a.host.map(bytes_lossy);
-    match (mailbox, host) {
-        (Some(mb), Some(h)) => Some(format!("{mb}@{h}")),
-        (Some(mb), None) => Some(mb),
-        (None, Some(h)) => Some(h),
-        (None, None) => None,
-    }
 }
 
 fn bytes_lossy(b: &[u8]) -> String {

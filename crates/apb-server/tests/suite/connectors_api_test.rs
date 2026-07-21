@@ -894,7 +894,7 @@ async fn call_endpoint_real_call_reaches_a_live_mock_http_server() {
 
     let req = server.captured_request().expect("server saw a request");
     assert!(
-        req.contains("Authorization: Bearer secret-value"),
+        req.contains("authorization: Bearer secret-value"),
         "auth header missing/wrong:\n{req}"
     );
 }

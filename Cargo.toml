@@ -24,8 +24,8 @@ sha2 = "0.11"
 hmac = "0.13"
 uuid = { version = "1", features = ["v4"] }
 percent-encoding = "2"
-ureq = { version = "2", features = ["json"] }
-jsonschema = { version = "0.26", default-features = false }
+ureq = { version = "3", features = ["json"] }
+jsonschema = { version = "0.48", default-features = false }
 shell-words = "1"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "hostname"] }
 globset = "0.4"
@@ -37,7 +37,7 @@ imap = { version = "2.4", default-features = false }
 # in imap-proto and are not re-exported by the imap crate, so naming them in
 # the search-result decoder needs this direct dependency (version matched to
 # imap 2.4's transitive pin).
-imap-proto = "0.10"
+imap-proto = "0.16"
 mail-parser = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
-rustls-platform-verifier = "0.5"
+rustls-platform-verifier = "0.7"

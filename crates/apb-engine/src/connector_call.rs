@@ -940,7 +940,7 @@ fn validate_args(schema: &Value, args: &Value) -> Result<(), CallError> {
         )
     })?;
     if let Some(err) = validator.iter_errors(args).next() {
-        let path = err.instance_path.to_string();
+        let path = err.instance_path().to_string();
         let where_ = if path.is_empty() {
             "(root)".to_string()
         } else {
@@ -1105,11 +1105,12 @@ fn validate_url(url: &str) -> Result<(), CallError> {
 
 impl HttpCall {
     /// Sends the request and returns the mapped result, redacting any error
-    /// MESSAGE through the same interim literal scrub as the body. This matters
-    /// because a `ureq` transport error's `Display` includes the request URL,
-    /// which for `query`-kind auth carries the resolved secret; every error
-    /// produced after secrets are resolved must therefore be scrubbed before it
-    /// can be printed or logged (spec 6.2).
+    /// MESSAGE through the same interim literal scrub as the body. Kept as
+    /// defense in depth regardless of what a given transport error's
+    /// `Display` happens to include (ureq 2's did put the request URL in it,
+    /// which for `query`-kind auth carries the resolved secret): every error
+    /// produced after secrets are resolved is scrubbed before it can be
+    /// printed or logged (spec 6.2).
     fn send(&self) -> (Result<CallOk, CallError>, Option<u16>) {
         let (result, status) = self.send_raw();
         (result.map_err(|e| self.redact_error(e)), status)
@@ -1119,11 +1120,36 @@ impl HttpCall {
     /// injecting auth after the pre-auth URL is fixed, then maps the response
     /// (or transport error) into the result taxonomy. Returns the mapped
     /// result and the observed HTTP status when one exists.
+    ///
+    /// ureq 3 notes: `http_status_as_error(false)` keeps every status (2xx
+    /// through 5xx) coming back as `Ok(response)` exactly like ureq 2's
+    /// `Error::Status(_, resp)` did, so the taxonomy below is still driven
+    /// entirely by `map_status` reading the real response, never by ureq's own
+    /// status-to-error translation. `allow_non_standard_methods(true)` keeps
+    /// an unusual/lowercased connector `method` string sendable, matching
+    /// ureq 2's untyped `&str` method (ureq 3's methods are typed
+    /// `http::Method`, which rejects nothing byte-valid but does gate
+    /// non-standard tokens behind this flag).
     fn send_raw(&self) -> (Result<CallOk, CallError>, Option<u16>) {
-        let agent = ureq::AgentBuilder::new()
-            .redirects(0)
-            .timeout(Duration::from_secs(self.timeout_sec))
+        let method = match ureq::http::Method::from_bytes(self.method.as_bytes()) {
+            Ok(m) => m,
+            Err(e) => {
+                return (
+                    Err(CallError::new(
+                        CallErrorCode::Config,
+                        format!("invalid HTTP method `{}`: {e}", self.method),
+                    )),
+                    None,
+                );
+            }
+        };
+        let config = ureq::Agent::config_builder()
+            .max_redirects(0)
+            .timeout_global(Some(Duration::from_secs(self.timeout_sec)))
+            .allow_non_standard_methods(true)
+            .http_status_as_error(false)
             .build();
+        let agent = ureq::Agent::new_with_config(config);
 
         // Build the request URL: the pre-auth URL plus a `query`-kind auth
         // param, if any. Only this final URL is sent; the pre-auth URL is what
@@ -1157,48 +1183,101 @@ impl HttpCall {
             },
         };
 
-        let mut request = agent.request(&self.method, &request_url);
+        let mut builder = ureq::http::Request::builder()
+            .method(method)
+            .uri(&request_url);
         // Headers were fully assembled by `render_http` (function headers plus
         // the default User-Agent unless overridden, spec 4.4), so send them
         // verbatim.
         for (name, value) in &self.headers {
-            request = request.set(name, value);
+            builder = builder.header(name.as_str(), value.as_str());
         }
         // Header / Basic auth injection.
         match self.auth_header(&ctx) {
-            Ok(Some((name, value))) => request = request.set(&name, &value),
+            Ok(Some((name, value))) => builder = builder.header(name, value),
             Ok(None) => {}
             Err(e) => return (Err(e), None),
         }
 
         let response = match &self.rendered_body {
-            Some(body) => request.send_json(body.clone()),
-            None => request.call(),
+            Some(body) => {
+                // Mirrors ureq 2's `send_json`: only add the JSON content type
+                // when the function's own headers did not already set one.
+                let has_content_type = self
+                    .headers
+                    .keys()
+                    .any(|k| k.eq_ignore_ascii_case("content-type"));
+                if !has_content_type {
+                    builder = builder.header("content-type", "application/json");
+                }
+                let json_bytes = match serde_json::to_vec(body) {
+                    Ok(b) => b,
+                    Err(e) => {
+                        return (
+                            Err(CallError::new(
+                                CallErrorCode::Config,
+                                format!("body serialize failed: {e}"),
+                            )),
+                            None,
+                        );
+                    }
+                };
+                match builder.body(json_bytes) {
+                    Ok(request) => agent.run(request),
+                    Err(e) => {
+                        return (
+                            Err(CallError::new(
+                                CallErrorCode::Config,
+                                format!("request could not be built: {e}"),
+                            )),
+                            None,
+                        );
+                    }
+                }
+            }
+            None => match builder.body(()) {
+                Ok(request) => agent.run(request),
+                Err(e) => {
+                    return (
+                        Err(CallError::new(
+                            CallErrorCode::Config,
+                            format!("request could not be built: {e}"),
+                        )),
+                        None,
+                    );
+                }
+            },
         };
 
         let response = match response {
             Ok(resp) => resp,
-            Err(ureq::Error::Status(_, resp)) => resp,
-            Err(ureq::Error::Transport(t)) => {
-                let msg = t.to_string();
-                let code = if msg.to_ascii_lowercase().contains("timed out") {
+            Err(e) => {
+                // ureq 3 gives timeouts their own variant (no more sniffing
+                // "timed out" out of a generic transport error's Display).
+                let code = if matches!(e, ureq::Error::Timeout(_)) {
                     CallErrorCode::Timeout
                 } else {
                     CallErrorCode::Network
                 };
-                return (Err(CallError::new(code, msg)), None);
+                return (Err(CallError::new(code, e.to_string())), None);
             }
         };
 
-        let status = response.status();
+        let status = response.status().as_u16();
         // Parse `Retry-After` before the response is consumed by the reader;
         // only used to populate `retry_after_sec` on a 429 (spec section 8).
         let retry_after = response
-            .header("Retry-After")
+            .headers()
+            .get("Retry-After")
+            .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok());
         // The `Link` header must be read before the response is consumed by the
         // body reader; surfaced verbatim in the result (spec 4.4).
-        let link = response.header("Link").map(|s| s.to_string());
+        let link = response
+            .headers()
+            .get("Link")
+            .and_then(|v| v.to_str().ok())
+            .map(|s| s.to_string());
         let (body, truncated) = read_body(response);
         // 12. Interim literal secret redaction (see the TODO below).
         let body = self.redact(body);
@@ -1317,13 +1396,16 @@ fn redact_value(value: Value, redactions: &[(String, String)]) -> Value {
 /// Reads a response body up to `BODY_CAP` (+1 to detect overflow), returning
 /// the parsed-or-string body and whether it was truncated. A JSON content type
 /// yields a parsed value; anything else yields a lossy-UTF8 string.
-fn read_body(response: ureq::Response) -> (Value, bool) {
-    let is_json = response.content_type().contains("application/json");
+fn read_body(mut response: ureq::http::Response<ureq::Body>) -> (Value, bool) {
+    let is_json = response.body().mime_type() == Some("application/json");
     let mut buf = Vec::new();
     // A read error yields whatever was collected so far rather than failing the
-    // whole call after a response was already obtained.
+    // whole call after a response was already obtained. `as_reader()` is not
+    // capped by ureq itself, so the `.take(BODY_CAP + 1)` below is what bounds
+    // memory (same as before).
     let _ = response
-        .into_reader()
+        .body_mut()
+        .as_reader()
         .take(BODY_CAP as u64 + 1)
         .read_to_end(&mut buf);
     let truncated = buf.len() > BODY_CAP;
