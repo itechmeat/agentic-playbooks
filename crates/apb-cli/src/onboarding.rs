@@ -354,11 +354,9 @@ mod tests {
     #[test]
     fn readme_and_asset_do_not_drift() {
         let readme = include_str!("../../../README.md");
-        for line in FEEDBACK_BLOCK.lines() {
-            assert!(
-                readme.contains(line),
-                "README lost a feedback-loop line: {line}"
-            );
-        }
+        assert!(
+            readme.contains(FEEDBACK_BLOCK),
+            "README no longer contains the feedback-loop block verbatim"
+        );
     }
 }

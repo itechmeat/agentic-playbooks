@@ -56,9 +56,13 @@ Pick the archive that matches your platform from the
 then verify and unpack it:
 
 ```sh
-shasum -a 256 -c apb-aarch64-apple-darwin.tar.gz.sha256
+if command -v shasum >/dev/null 2>&1; then
+  shasum -a 256 -c apb-aarch64-apple-darwin.tar.gz.sha256
+else
+  sha256sum -c apb-aarch64-apple-darwin.tar.gz.sha256
+fi
 tar -xzf apb-aarch64-apple-darwin.tar.gz
-mv apb /usr/local/bin/
+sudo install -m 0755 apb /usr/local/bin/apb
 apb --version
 ```
 
