@@ -88,6 +88,13 @@ pub enum EventPayload {
         /// transport does not resume. Additive.
         #[serde(default)]
         session: Option<String>,
+        /// Display-only one-line summary the agent self-reported in its report
+        /// block (spec 6.2, issue #42 finding 1). Kept here for humans; it is
+        /// NEVER used as the node output (the reply body is - see
+        /// `AgentReport::output`). `None` when the agent gave no summary or the
+        /// attempt did not finish through a report. Additive.
+        #[serde(default)]
+        summary: Option<String>,
     },
     NodeFinished {
         node: String,
@@ -481,6 +488,7 @@ mod tests {
             status: "succeeded".into(),
             duration_ms: Some(42),
             session: Some("abc".into()),
+            summary: Some("did the thing".into()),
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();

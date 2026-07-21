@@ -77,6 +77,22 @@ fn env_duration_ms(key: &str) -> Option<Duration> {
         .map(Duration::from_millis)
 }
 
+/// The signal that terminated the process, if any (unix only). A process killed
+/// by a signal is a FAILED attempt regardless of its reported exit code: a
+/// SIGTERM/SIGKILL that a wrapper turned into a `0` exit, or that lost the
+/// agent's stdout, must never be journaled as success (issue #42, finding 6).
+/// Non-unix has no signal concept, so this is always `None` there and behavior
+/// is unchanged.
+#[cfg(unix)]
+fn terminating_signal(status: &ExitStatus) -> Option<i32> {
+    use std::os::unix::process::ExitStatusExt as _;
+    status.signal()
+}
+#[cfg(not(unix))]
+fn terminating_signal(_status: &ExitStatus) -> Option<i32> {
+    None
+}
+
 /// An attempt's active elapsed: wall time since `started` minus the pending-
 /// question window (`pending_ms`). The stall watch measures against this - the
 /// same basis the node-timeout clock uses - so a node blocked on a
@@ -470,6 +486,15 @@ fn scan_question(
 #[derive(Debug)]
 pub struct AgentReport {
     pub status: NodeStatus,
+    /// The node's output: the agent's full reply body with the trailing report
+    /// block removed (see `interpret_report`). This is the ONLY field consumed
+    /// as node output - by templating (`{{nodes.X.output}}`), `output_match`
+    /// edge conditions, `run_report`, and the MCP `run_status`/`run_events`
+    /// views. Everything the agent wrote before the report block is preserved
+    /// verbatim, so a structured closing block a prompt demanded survives.
+    pub output: String,
+    /// Display-only, one-line self-assessment from the report block (spec 6.2),
+    /// kept in the attempt record for humans. NEVER substituted for `output`.
     pub summary: String,
     pub raw: String,
     /// Set when the agent asked a question via the stdout marker protocol
@@ -682,17 +707,35 @@ fn with_report_instruction(prompt: &str) -> String {
     format!("{prompt}\n\n{REPORT_INSTRUCTION}")
 }
 
-/// Extracts status and summary from the agent's reply per the report contract
-/// (spec 6.2): the last fenced ```yaml block with a `status` field.
-/// `status: failure` is the agent's self-assessment (agent_reported_failure),
-/// and it drives the node_status branching. If there is no block, or it has
-/// no valid status, the default is Succeeded, and the summary is the whole
-/// text (backward compatibility with agents and stubs that have no
-/// structured block). NOTE: the strict variant of the spec (no block ->
-/// unknown + anomaly) is deliberately NOT included so as not to break agents
-/// without the contract; this is a possible future tightening.
-fn interpret_report(text: &str) -> (NodeStatus, String) {
-    if let Some(block) = last_yaml_block(text)
+/// The three things the report contract (spec 6.2) yields from an agent's reply.
+#[derive(Debug)]
+struct ReportOutcome {
+    /// Routing status: the agent's self-assessment from the report block, else
+    /// the default Succeeded.
+    status: NodeStatus,
+    /// The node output: the reply body with the trailing report block removed.
+    /// Everything before the block stays verbatim. When there is no valid
+    /// report block, the whole (trimmed) reply is the output.
+    output: String,
+    /// Display-only one-line summary, kept for humans and NEVER used as output.
+    summary: String,
+}
+
+/// Interprets the agent's reply per the report contract (spec 6.2): the last
+/// fenced ```yaml block with a `status` field. `status: failure` is the agent's
+/// self-assessment (agent_reported_failure) and drives node_status branching.
+///
+/// Critically, the report block is metadata only: the node output is the reply
+/// body with that trailing block stripped, so a structured closing block a
+/// prompt demanded (and everything else the agent wrote) is preserved verbatim
+/// for templating, `output_match`, and downstream consumers - the summary line
+/// never replaces it. When there is no block, or it has no valid status, the
+/// default is Succeeded and the whole trimmed reply is both output and summary
+/// (backward compatibility with agents and stubs that have no structured
+/// block). NOTE: the strict variant of the spec (no block -> unknown + anomaly)
+/// is deliberately NOT included so as not to break agents without the contract.
+fn interpret_report(text: &str) -> ReportOutcome {
+    if let Some((start, end, block)) = last_yaml_block_span(text)
         && let Ok(val) = serde_yaml_ng::from_str::<serde_yaml_ng::Value>(&block)
     {
         let status = match val.get("status").and_then(|s| s.as_str()) {
@@ -707,33 +750,61 @@ fn interpret_report(text: &str) -> (NodeStatus, String) {
                 .map(|s| s.trim().to_string())
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| text.trim().to_string());
-            return (status, summary);
+            return ReportOutcome {
+                status,
+                output: strip_lines(text, start, end),
+                summary,
+            };
         }
     }
-    (NodeStatus::Succeeded, text.trim().to_string())
+    let trimmed = text.trim().to_string();
+    ReportOutcome {
+        status: NodeStatus::Succeeded,
+        output: trimmed.clone(),
+        summary: trimmed,
+    }
 }
 
-/// Body of the last completed fenced ```yaml (or ```yml) block. The scan runs
-/// forward, each opening fence pairs with its OWN nearest closing fence, and
-/// after closing the opening state is reset - so a closing fence can never be
-/// mistakenly paired with an unrelated opening. None if there is no completed
-/// block.
-fn last_yaml_block(text: &str) -> Option<String> {
+/// The reply with the fenced block spanning lines `start..=end` (inclusive)
+/// removed, then trimmed. Used to drop the trailing report block from the node
+/// output while keeping everything before (and any stray content after) it.
+fn strip_lines(text: &str, start: usize, end: usize) -> String {
+    text.lines()
+        .enumerate()
+        .filter_map(|(i, l)| (i < start || i > end).then_some(l))
+        .collect::<Vec<_>>()
+        .join("\n")
+        .trim()
+        .to_string()
+}
+
+/// Line span (opening-fence index, closing-fence index) and body of the last
+/// completed fenced ```yaml (or ```yml) block. The scan runs forward, each
+/// opening fence pairs with its OWN nearest closing fence, and after closing the
+/// opening state is reset - so a closing fence can never be mistakenly paired
+/// with an unrelated opening. None if there is no completed block.
+fn last_yaml_block_span(text: &str) -> Option<(usize, usize, String)> {
     let lines: Vec<&str> = text.lines().collect();
     let mut open: Option<usize> = None;
-    let mut last: Option<String> = None;
+    let mut last: Option<(usize, usize, String)> = None;
     for (i, line) in lines.iter().enumerate() {
         let t = line.trim();
         match open {
             None if t == "```yaml" || t == "```yml" => open = Some(i),
             Some(start) if t == "```" => {
-                last = Some(lines[(start + 1)..i].join("\n"));
+                last = Some((start, i, lines[(start + 1)..i].join("\n")));
                 open = None;
             }
             _ => {}
         }
     }
     last
+}
+
+/// Body of the last completed fenced ```yaml block (see `last_yaml_block_span`).
+#[cfg(test)]
+fn last_yaml_block(text: &str) -> Option<String> {
+    last_yaml_block_span(text).map(|(_, _, body)| body)
 }
 
 impl ClaudeAdapter {
@@ -923,14 +994,25 @@ impl ClaudeAdapter {
         let output = wait_with_output_bounded(child, drain_budget(), &self.program)?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // Signal termination is a failure before anything else is read (issue
+        // #42, finding 6): a wrapper that turned a SIGTERM into a `0` exit, or a
+        // kill that truncated/emptied stdout, must not be journaled as success.
+        if let Some(sig) = terminating_signal(&output.status) {
+            return Err((
+                ErrorClass::ProcessExit,
+                format!("agent terminated by signal {sig}: {stderr}"),
+            ));
+        }
         if !output.status.success() {
             return Err((
                 ErrorClass::ProcessExit,
                 format!("agent exited with {:?}: {stderr}", output.status.code()),
             ));
         }
-        // Status comes from the structured report block (spec 6.2); raw is the full stdout.
-        let (status, summary) = interpret_report(&stdout);
+        // Status comes from the structured report block (spec 6.2); the node
+        // output is the reply body with that block stripped, and raw is the full
+        // stdout for debugging/streaming.
+        let report = interpret_report(&stdout);
         // Marker scan (spec 2026-07-20): an interactive node's agent may ask a
         // question instead of finishing. The scan is gated on `task.interactive`
         // and hard-fails on malformed JSON naming the node; a non-interactive
@@ -942,8 +1024,9 @@ impl ClaudeAdapter {
         // `None`; the stream path below is where claude surfaces one.
         let session = capture_session(task.agent, &stdout);
         Ok(AgentReport {
-            status,
-            summary,
+            status: report.status,
+            output: report.output,
+            summary: report.summary,
             raw: stdout,
             question,
             session,
@@ -1220,6 +1303,15 @@ impl ClaudeAdapter {
         // holding stderr, so clear the group before collecting.
         kill_process_group(pid);
         let stderr = err_rx.recv_timeout(drain_budget()).unwrap_or_default();
+        // Signal termination is a failure even if a terminal result event was
+        // streamed (issue #42, finding 6): a killed agent that a wrapper exited
+        // `0` (or that lost stdout) must not be journaled as success.
+        if let Some(sig) = terminating_signal(&status) {
+            return Err((
+                ErrorClass::ProcessExit,
+                format!("agent terminated by signal {sig}: {}", stderr.trim()),
+            ));
+        }
         if !status.success() {
             return Err((
                 ErrorClass::ProcessExit,
@@ -1257,12 +1349,13 @@ fn parse_stream_result(
             .to_string();
         // Status: the stream's is_error takes priority; otherwise, the
         // agent's self-assessment from the report block in the result text
-        // (spec 6.2), defaulting to success.
-        let (block_status, summary) = interpret_report(&text);
+        // (spec 6.2), defaulting to success. The node output is the message
+        // text with that block stripped; `raw` keeps the full NDJSON stream.
+        let report = interpret_report(&text);
         let status = if is_error {
             NodeStatus::Failed
         } else {
-            block_status
+            report.status
         };
         // Marker scan over the agent's message text (spec 2026-07-20): in the
         // stream transport the agent's prose is the `result` event's text, so
@@ -1275,7 +1368,8 @@ fn parse_stream_result(
         let session = capture_session(task.agent, &raw);
         return Ok(AgentReport {
             status,
-            summary,
+            output: report.output,
+            summary: report.summary,
             raw,
             question,
             session,
@@ -1410,9 +1504,30 @@ mod tests {
     #[test]
     fn interpret_report_reads_failure_block() {
         let text = "did work\n```yaml\nstatus: failure\nsummary: could not finish\n```";
-        let (status, summary) = interpret_report(text);
-        assert_eq!(status, NodeStatus::Failed);
-        assert_eq!(summary, "could not finish");
+        let outcome = interpret_report(text);
+        assert_eq!(outcome.status, NodeStatus::Failed);
+        assert_eq!(outcome.summary, "could not finish");
+        // The report block is metadata: the output is the reply body verbatim,
+        // with the trailing block stripped and the summary NOT substituted.
+        assert_eq!(outcome.output, "did work");
+    }
+
+    #[test]
+    fn interpret_report_preserves_body_and_strips_the_report_block() {
+        // A multi-line body (including a structured closing block a prompt may
+        // have demanded) must survive verbatim; only the trailing report block
+        // is removed, and the one-line summary never replaces the output.
+        let text =
+            "line one\nline two\nRESULT: 42\n```yaml\nstatus: success\nsummary: did the thing\n```";
+        let outcome = interpret_report(text);
+        assert_eq!(outcome.status, NodeStatus::Succeeded);
+        assert_eq!(outcome.summary, "did the thing");
+        assert_eq!(outcome.output, "line one\nline two\nRESULT: 42");
+        assert!(
+            !outcome.output.contains("status:") && !outcome.output.contains("summary:"),
+            "the report block must not leak into the output: {:?}",
+            outcome.output
+        );
     }
 
     #[test]
@@ -1439,15 +1554,20 @@ mod tests {
     #[test]
     fn interpret_report_reads_success_block() {
         let text = "```yaml\nstatus: success\nsummary: done\n```";
-        assert_eq!(interpret_report(text).0, NodeStatus::Succeeded);
+        let outcome = interpret_report(text);
+        assert_eq!(outcome.status, NodeStatus::Succeeded);
+        // A reply that is nothing but a report block leaves an empty output.
+        assert_eq!(outcome.output, "");
     }
 
     #[test]
     fn interpret_report_defaults_to_success_without_block() {
         let text = "just plain output, no block";
-        let (status, summary) = interpret_report(text);
-        assert_eq!(status, NodeStatus::Succeeded);
-        assert_eq!(summary, text);
+        let outcome = interpret_report(text);
+        assert_eq!(outcome.status, NodeStatus::Succeeded);
+        // With no report block the whole reply is both output and summary.
+        assert_eq!(outcome.summary, text);
+        assert_eq!(outcome.output, text);
     }
 
     #[test]
@@ -1524,7 +1644,7 @@ mod tests {
 
         // Two yaml blocks: the last one is returned.
         let two = "```yaml\nstatus: failure\n```\n```yaml\nstatus: success\nsummary: latest\n```";
-        assert_eq!(interpret_report(two).0, NodeStatus::Succeeded);
+        assert_eq!(interpret_report(two).status, NodeStatus::Succeeded);
     }
 
     #[test]
