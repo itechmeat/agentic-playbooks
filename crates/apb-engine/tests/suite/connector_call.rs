@@ -287,7 +287,7 @@ fn ok_json_roundtrip_injects_auth_header() {
     // The auth header was injected with the resolved secret value.
     let req = server.captured_request().expect("server saw a request");
     assert!(
-        req.contains(&format!("Authorization: Bearer {SECRET_VALUE}")),
+        req.contains(&format!("authorization: Bearer {SECRET_VALUE}")),
         "auth header missing/wrong in request:\n{req}"
     );
 
@@ -1080,15 +1080,15 @@ fn sends_function_headers_and_default_user_agent() {
     assert!(ok);
     let req = server.captured_request().unwrap();
     assert!(
-        req.contains("X-Api-Version: 2024-01"),
+        req.contains("x-api-version: 2024-01"),
         "custom header missing: {req}"
     );
     assert!(
-        req.contains("Accept: application/vnd.test+json"),
+        req.contains("accept: application/vnd.test+json"),
         "accept missing: {req}"
     );
     assert!(
-        req.contains("User-Agent: apb/"),
+        req.contains("user-agent: apb/"),
         "default UA missing: {req}"
     );
 }
@@ -1118,11 +1118,11 @@ fn function_user_agent_overrides_the_default() {
     assert!(ok);
     let req = server.captured_request().unwrap();
     assert!(
-        req.contains("User-Agent: custom-agent/9"),
+        req.contains("user-agent: custom-agent/9"),
         "override missing: {req}"
     );
     assert!(
-        !req.contains("User-Agent: apb/"),
+        !req.contains("user-agent: apb/"),
         "default UA must not also be sent: {req}"
     );
 }
@@ -1268,7 +1268,7 @@ fn cmd_secret_is_resolved_and_injected_as_auth_header() {
     assert!(ok, "expected ok: {value}");
     let req = server.captured_request().expect("server saw a request");
     assert!(
-        req.contains("Authorization: Bearer cmd-secret-42"),
+        req.contains("authorization: Bearer cmd-secret-42"),
         "auth header wrong:\n{req}"
     );
 }
