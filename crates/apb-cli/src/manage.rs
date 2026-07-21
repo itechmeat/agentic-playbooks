@@ -179,15 +179,22 @@ pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool) -> ExitCode {
     // On a terminal without a completed survey, we offer the interactive one.
     // A broken state - we warn and do not offer it (we do not pretend it is
     // Uninitialized).
-    if std::io::stdin().is_terminal() {
+    // Only enter the blocking interactive survey when BOTH stdin and stdout are
+    // terminals: with stdout piped (`apb subscriptions | tool`) we must not
+    // stall on a prompt, so we fall through to the plain hint below.
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         match models_table::onboarding::read() {
             Ok(OnboardingState::Uninitialized) => {
-                if let Err(e) = subscriptions_survey_step()
-                    && e.kind() != std::io::ErrorKind::Interrupted
-                {
-                    eprintln!("subscriptions survey failed: {e}");
-                }
-                return ExitCode::SUCCESS;
+                return match subscriptions_survey_step() {
+                    Ok(()) => ExitCode::SUCCESS,
+                    // Cancellation is a clean exit, like blanking out of the old
+                    // survey; a store-write failure exits 2, like `--set`.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("subscriptions error: {e}");
+                        ExitCode::from(2)
+                    }
+                };
             }
             Ok(_) => {}
             Err(e) => eprintln!("onboarding state unreadable: {e}"),
@@ -229,16 +236,18 @@ fn compose_entry(agent: &str, plan: &str, coverage: &str) -> String {
 }
 
 /// Interactive subscriptions survey, re-skinned with cliclack. Self-gates:
-/// only runs on a real terminal with the onboarding state still
-/// `Uninitialized` (mirroring the offer test in `subscriptions_cmd`), and
-/// returns `Ok(())` immediately otherwise. Cancellation (Esc/Ctrl-C) surfaces
-/// as `io::ErrorKind::Interrupted` for the caller to handle. Stored data and
-/// its format are identical to the old line-based survey.
+/// only runs when BOTH stdin and stdout are real terminals (never a blocking
+/// prompt when stdout is piped, e.g. `apb profile write | tool`) and the
+/// onboarding state is still `Uninitialized`; returns `Ok(())` immediately
+/// otherwise. Cancellation (Esc/Ctrl-C) surfaces as `io::ErrorKind::Interrupted`
+/// and a failed store write surfaces as an `io::Error` for the caller to map to
+/// its own exit code. Stored data and its format are identical to the old
+/// line-based survey.
 pub(crate) fn subscriptions_survey_step() -> std::io::Result<()> {
     use apb_core::models_table::{self, OnboardingState};
     use std::io::IsTerminal;
 
-    if !std::io::stdin().is_terminal() {
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
         return Ok(());
     }
     match models_table::onboarding::read() {
@@ -310,10 +319,15 @@ pub(crate) fn subscriptions_survey_step() -> std::io::Result<()> {
         return Ok(());
     }
     match apb_mcp::advisory_tools::subscriptions_set(subs, false) {
-        Ok(_) => cliclack::log::success("Subscriptions recorded")?,
-        Err(e) => cliclack::log::error(format!("subscriptions error: {e}"))?,
+        Ok(_) => {
+            cliclack::log::success("Subscriptions recorded")?;
+            Ok(())
+        }
+        // Surface the store failure so the caller can exit non-zero, matching
+        // the old `interactive_survey` (exit 2) and the `--set` path. A store
+        // failure is distinguishable from a cancellation (`Interrupted`).
+        Err(e) => Err(std::io::Error::other(e.to_string())),
     }
-    Ok(())
 }
 
 /// In an interactive session (stdin is a terminal) with a survey that hasn't
@@ -338,14 +352,23 @@ pub(crate) fn offer_onboarding_if_tty() {
 }
 
 /// Best-effort offer of the subscriptions survey from a command that already
-/// printed its JSON result. The survey self-gates (terminal + `Uninitialized`),
-/// a cancellation (Esc/Ctrl-C) is silent, and any other error is reported
-/// without changing the caller's exit code.
+/// printed its JSON result. On a full terminal (stdin AND stdout) it runs the
+/// interactive survey; a cancellation is silent and any other error is reported
+/// without changing the caller's exit code. When stdin is a terminal but stdout
+/// is piped (`apb profile write | tool`) it must not launch a blocking prompt,
+/// so it falls back to the unobtrusive stderr hint that lived here before.
 pub(crate) fn offer_subscriptions_survey() {
-    if let Err(e) = subscriptions_survey_step()
-        && e.kind() != std::io::ErrorKind::Interrupted
-    {
-        eprintln!("subscriptions survey failed: {e}");
+    use std::io::IsTerminal;
+    let stdin_tty = std::io::stdin().is_terminal();
+    let stdout_tty = std::io::stdout().is_terminal();
+    if stdin_tty && stdout_tty {
+        if let Err(e) = subscriptions_survey_step()
+            && e.kind() != std::io::ErrorKind::Interrupted
+        {
+            eprintln!("subscriptions survey failed: {e}");
+        }
+    } else if stdin_tty {
+        offer_onboarding_if_tty();
     }
 }
 
