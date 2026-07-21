@@ -132,6 +132,8 @@ pub struct RunOptions {
     pub expected_connector_accounts: BTreeMap<String, String>,
     /// Parent run id when this run is a sub-playbook child (spec C).
     pub parent_run: Option<String>,
+    /// Predecessor run id when this run continues an existing run as a new id.
+    pub continued_from: Option<String>,
     /// Sub-playbook nesting depth of THIS run (0 for a top-level run).
     pub depth: usize,
     /// Verified sub-playbook pins from the gate, keyed by playbook-node id.
@@ -2665,6 +2667,10 @@ pub struct RunSummary {
     pub progress: Option<crate::progress::ProgressSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
@@ -2698,9 +2704,10 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             })
             .unwrap_or_else(|| (run_id.clone(), 0));
         let progress = crate::progress::from_run_dir(&entry.path(), &events);
-        let parent_run = crate::run_config::read_run_config(&entry.path())
-            .ok()
-            .and_then(|c| c.parent_run);
+        let cfg = crate::run_config::read_run_config(&entry.path()).ok();
+        let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
+        let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
+        let superseded_by = cfg.as_ref().and_then(|c| c.superseded_by.clone());
         out.push(RunSummary {
             run_id,
             playbook,
@@ -2708,6 +2715,8 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             started_ts,
             progress,
             parent_run,
+            continued_from,
+            superseded_by,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.started_ts));

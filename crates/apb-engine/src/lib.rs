@@ -25,6 +25,7 @@ pub mod question;
 pub mod review;
 pub mod run_config;
 pub mod run_doctor;
+mod run_lineage;
 pub mod scheduler;
 pub mod script;
 pub mod signals;
