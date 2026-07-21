@@ -286,6 +286,7 @@ fn acp_cancel_stops_streaming_agent() {
             &cancel,
             None,
             None,
+            None,
         )
         .unwrap_err();
     assert!(

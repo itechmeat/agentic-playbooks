@@ -159,9 +159,18 @@ ambient-suggestions-enabled = true\n";
     #[test]
     fn strip_drops_every_mcp_servers_table_and_keeps_the_rest() {
         let out = strip_mcp_servers(CONFIG_WITH_MCP);
-        assert!(!out.contains("mcp_servers"), "no mcp_servers table survives: {out}");
-        assert!(!out.contains("codegraph"), "an mcp server body must be gone: {out}");
-        assert!(!out.contains("VAULT_AGENT_NAME"), "a nested mcp env table must be gone: {out}");
+        assert!(
+            !out.contains("mcp_servers"),
+            "no mcp_servers table survives: {out}"
+        );
+        assert!(
+            !out.contains("codegraph"),
+            "an mcp server body must be gone: {out}"
+        );
+        assert!(
+            !out.contains("VAULT_AGENT_NAME"),
+            "a nested mcp env table must be gone: {out}"
+        );
         // Model-relevant top-level keys and unrelated tables are preserved.
         assert!(out.contains("model = \"gpt-5.6\""));
         assert!(out.contains("model_reasoning_effort"));
@@ -187,15 +196,24 @@ ambient-suggestions-enabled = true\n";
         prepare_codex_home(Some(src.path()), &home).unwrap();
 
         let auth = std::fs::read(home.join("auth.json")).unwrap();
-        assert_eq!(auth, b"{\"token\":\"secret\"}", "auth.json is copied verbatim");
+        assert_eq!(
+            auth, b"{\"token\":\"secret\"}",
+            "auth.json is copied verbatim"
+        );
         let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
-        assert!(!config.contains("mcp_servers"), "the isolated config carries no mcp_servers");
+        assert!(
+            !config.contains("mcp_servers"),
+            "the isolated config carries no mcp_servers"
+        );
         assert!(config.contains("model = \"gpt-5.6\""), "model keys survive");
 
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt as _;
-            let mode = std::fs::metadata(home.join("auth.json")).unwrap().permissions().mode();
+            let mode = std::fs::metadata(home.join("auth.json"))
+                .unwrap()
+                .permissions()
+                .mode();
             assert_eq!(mode & 0o777, 0o600, "the copied credential is owner-only");
         }
     }
@@ -229,12 +247,23 @@ ambient-suggestions-enabled = true\n";
             .unwrap()
             .expect("codex has an isolation strategy");
         assert_eq!(name, "CODEX_HOME");
-        assert_eq!(home, run.path().join("agent-home").join("codex").join("build"));
+        assert_eq!(
+            home,
+            run.path().join("agent-home").join("codex").join("build")
+        );
         let config = std::fs::read_to_string(home.join("config.toml")).unwrap();
         assert!(!config.contains("mcp_servers"));
 
         // claude (and every other agent) has no strategy - spawn is unchanged.
-        assert!(prepare("claude", Some(src.path()), run.path(), "build").unwrap().is_none());
-        assert!(prepare("opencode", Some(src.path()), run.path(), "build").unwrap().is_none());
+        assert!(
+            prepare("claude", Some(src.path()), run.path(), "build")
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            prepare("opencode", Some(src.path()), run.path(), "build")
+                .unwrap()
+                .is_none()
+        );
     }
 }

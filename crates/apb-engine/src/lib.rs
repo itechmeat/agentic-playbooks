@@ -28,6 +28,7 @@ pub mod run_doctor;
 pub mod scheduler;
 pub mod script;
 pub mod signals;
+mod stall;
 pub mod state;
 pub mod stop;
 pub mod workdir;

@@ -162,6 +162,12 @@ pub(crate) fn execute_node(
             };
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
+            // Stall detection (spec 2026-07-21 run-reliability) fires ONLY for a
+            // node whose author set an explicit `expected_duration`, never off
+            // the per-kind default, so a run with no estimates raises no false
+            // anomalies. `None` here leaves the attempt's stall watch disabled.
+            let expected_secs: Option<u64> =
+                node.expected_duration.as_ref().and_then(|ed| ed.parsed());
 
             // Autonomy grant (spec 8.5): reaching node execution means the run
             // already cleared the policy/trust gate, where the user consented
@@ -508,16 +514,55 @@ pub(crate) fn execute_node(
                         on_tick: &on_tick,
                         abort: &abort,
                     });
+                    // Stall anomaly (spec 2026-07-21): the adapter's poll loop
+                    // calls this once if the attempt runs past its estimate. It
+                    // journals a SupervisorAction marker (which run_status reads
+                    // back as `past_estimate`) plus an Anomaly wake so a waiting
+                    // supervisor returns. A journal failure is carried out like
+                    // `spawn_err`/`tick_err`. Built only for a node that set
+                    // `expected_duration`; otherwise the hook is `None`.
+                    let stall_err: std::cell::RefCell<Option<EngineError>> =
+                        std::cell::RefCell::new(None);
+                    let on_stall = |elapsed: Duration| {
+                        let detail = format!(
+                            "agent_task node `{node_id}` attempt {cur_attempt} is running past its estimate: {}s elapsed vs {}s expected; the run may be stalled",
+                            elapsed.as_secs(),
+                            expected_secs.unwrap_or(0),
+                        );
+                        if let Err(e) = journal.append(EventPayload::SupervisorAction {
+                            action: crate::stall::STALL_ACTION.to_string(),
+                            node: Some(node_id.to_string()),
+                            detail: detail.clone(),
+                        }) {
+                            *stall_err.borrow_mut() = Some(e);
+                            return;
+                        }
+                        if let Err(e) = journal.append(EventPayload::WakeRaised {
+                            trigger: crate::event::WakeTrigger::Anomaly,
+                            node: node_id.to_string(),
+                            detail,
+                        }) {
+                            *stall_err.borrow_mut() = Some(e);
+                        }
+                    };
+                    let stall_hooks = expected_secs.map(|s| crate::adapter::StallHooks {
+                        expected: Duration::from_secs(s),
+                        on_stall: &on_stall,
+                    });
                     let outcome = adapter.run_cancellable(
                         &task,
                         cancel,
                         Some(&on_spawn),
                         live_hooks.as_ref(),
+                        stall_hooks.as_ref(),
                     );
                     if let Some(e) = spawn_err.borrow_mut().take() {
                         return Err(e);
                     }
                     if let Some(e) = tick_err.borrow_mut().take() {
+                        return Err(e);
+                    }
+                    if let Some(e) = stall_err.borrow_mut().take() {
                         return Err(e);
                     }
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
@@ -845,8 +890,9 @@ pub(crate) fn execute_finish_answer(
                 }
             };
             // A finish-answer node is never interactive, so it never runs the
-            // live sidecar (`None`).
-            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None);
+            // live sidecar (`None`), and it carries no `expected_duration`, so
+            // no stall watch (`None`).
+            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None, None);
             if let Some(e) = spawn_err.borrow_mut().take() {
                 return Err(e);
             }

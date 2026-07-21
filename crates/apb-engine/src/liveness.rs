@@ -415,6 +415,12 @@ pub struct NodeTimes {
     /// The pid of that open attempt. `None` when there is no open attempt, or
     /// when the journal recorded none.
     pub attempt_pid: Option<u32>,
+    /// True when the node's currently open attempt has been flagged as running
+    /// past its `expected_duration` (a stall anomaly was journaled for it, spec
+    /// 2026-07-21). Lets a `run_status` caller tell a normally-slow attempt from
+    /// one the engine already considers anomalously overrun. `false` when there
+    /// is no open attempt or none was flagged.
+    pub past_estimate: bool,
 }
 
 /// Timings for every node the journal has ever started, keyed by node id.
@@ -444,10 +450,32 @@ pub fn node_times(events: &[Event]) -> BTreeMap<String, NodeTimes> {
         .into_iter()
         .map(|(node, ts)| {
             let open = latest.get(&node);
+            // Past-estimate flag (spec 2026-07-21): a stall anomaly the drive
+            // journaled during THIS open attempt, i.e. a `SupervisorAction` with
+            // the stall action, at or after the attempt's start. Scoping by the
+            // attempt's `started_ms` means a stale anomaly from a prior attempt
+            // never marks a fresh one.
+            let past_estimate = open.is_some_and(|a| {
+                events.iter().any(|e| {
+                    if let EventPayload::SupervisorAction {
+                        action,
+                        node: Some(n),
+                        ..
+                    } = &e.payload
+                    {
+                        action.as_str() == crate::stall::STALL_ACTION
+                            && *n == node
+                            && e.ts >= a.started_ms
+                    } else {
+                        false
+                    }
+                })
+            });
             let times = NodeTimes {
                 started_ms: clamp_ms(ts),
                 attempt_age_ms: open.map(|a| clamp_ms(now.saturating_sub(a.started_ms))),
                 attempt_pid: open.and_then(|a| a.pid),
+                past_estimate,
             };
             (node, times)
         })

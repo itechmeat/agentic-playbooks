@@ -77,6 +77,15 @@ fn env_duration_ms(key: &str) -> Option<Duration> {
         .map(Duration::from_millis)
 }
 
+/// An attempt's active elapsed: wall time since `started` minus the pending-
+/// question window (`pending_ms`). The stall watch measures against this - the
+/// same basis the node-timeout clock uses - so a node blocked on a
+/// human/supervisor answer never counts that wait toward a stall.
+fn active_elapsed(started: Instant, pending_ms: u128) -> Duration {
+    let pending = Duration::from_millis(u64::try_from(pending_ms).unwrap_or(u64::MAX));
+    started.elapsed().saturating_sub(pending)
+}
+
 /// Terminates the agent's whole process tree and reaps the leader. On Unix
 /// this sends SIGKILL to the group (`kill(-pgid, ...)`, pgid == pid because of
 /// process_group(0) at spawn time) so children are not orphaned; on other
@@ -340,6 +349,23 @@ pub struct LiveHooks<'a> {
     pub abort: &'a AtomicBool,
 }
 
+/// Stall-detection hook for one attempt (spec 2026-07-21 run-reliability),
+/// mirroring [`LiveHooks`]. Built by the drive layer ONLY for a node that
+/// declared `expected_duration`; every other attempt (no estimate, internal
+/// calls) passes `None` and runs no stall watch. `on_stall` is invoked at most
+/// once, on the thread that owns this attempt's poll loop (the drive thread, or
+/// the parallel batch's worker thread), the first poll at which the attempt's
+/// active (non-pending) elapsed crosses [`crate::stall::stall_threshold`]. The
+/// closure journals the anomaly wake through the shared `Journal`, so - exactly
+/// like the live `on_tick` - no second thread ever writes the event log.
+pub struct StallHooks<'a> {
+    /// The node's declared estimate; the stall threshold is derived from it.
+    pub expected: Duration,
+    /// Called once when the attempt first crosses the threshold; the argument
+    /// is the active elapsed at that poll, for the anomaly detail line.
+    pub on_stall: &'a dyn Fn(Duration),
+}
+
 /// Builds the `--mcp-config` JSON injected into claude for a live interactive
 /// node (spec 2026-07-20, Transport: live). Points claude at the hidden
 /// `apb __ask-server --run <id> --node <node> --attempt <n>` sidecar with a
@@ -527,16 +553,21 @@ pub trait AgentAdapter {
     /// channels while the agent blocks in `ask_user`. `None` for every
     /// non-live attempt.
     ///
-    /// The default ignores `cancel`/`on_spawn`/`live` and just calls `run` (for
-    /// adapters without kill or spawn-hook support).
+    /// `stall`, when set (spec 2026-07-21 run-reliability), lets the poll loop
+    /// raise a one-shot anomaly if this attempt runs past its node's
+    /// `expected_duration`; `None` disables the stall watch.
+    ///
+    /// The default ignores `cancel`/`on_spawn`/`live`/`stall` and just calls
+    /// `run` (for adapters without kill or spawn-hook support).
     fn run_cancellable(
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
         on_spawn: Option<&dyn Fn(u32)>,
         live: Option<&LiveHooks>,
+        stall: Option<&StallHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
-        let _ = (cancel, on_spawn, live);
+        let _ = (cancel, on_spawn, live, stall);
         self.run(task)
     }
 
@@ -782,6 +813,7 @@ impl ClaudeAdapter {
         cancel: &AtomicBool,
         on_spawn: Option<&dyn Fn(u32)>,
         live: Option<&LiveHooks>,
+        stall: Option<&StallHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
         let (mut argv, stdin_payload) = build_command(
@@ -834,6 +866,8 @@ impl ClaudeAdapter {
         // journals the round - and includes the still-open question window.
         let since = crate::event::now_millis();
         let mut pending_ms = Self::pending_question_ms(task, since, false);
+        let mut stall_watch =
+            crate::stall::StallWatch::new(stall.map(|s| s.expected), stall.map(|s| s.on_stall));
         loop {
             if let Some(lh) = live {
                 (lh.on_tick)();
@@ -850,6 +884,10 @@ impl ClaudeAdapter {
                 }
                 pending_ms = Self::pending_question_ms(task, since, true);
             }
+            // Stall watch (spec 2026-07-21): the active elapsed excludes the
+            // pending-question window, exactly like the timeout clock, so a live
+            // node waiting on a human is never mistaken for a wedge.
+            stall_watch.tick(active_elapsed(started, pending_ms));
             if let Some(err) =
                 Self::check_cancel_timeout(&mut child, cancel, started, task.timeout, pending_ms)
             {
@@ -925,6 +963,7 @@ impl ClaudeAdapter {
         cancel: &AtomicBool,
         on_spawn: Option<&dyn Fn(u32)>,
         live: Option<&LiveHooks>,
+        stall: Option<&StallHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = with_report_instruction(task.prompt);
         // Base argv comes from the invocation form; claude-specific streaming
@@ -1018,6 +1057,8 @@ impl ClaudeAdapter {
         // `run_headless` for the rationale.
         let since = crate::event::now_millis();
         let mut pending_ms = Self::pending_question_ms(task, since, false);
+        let mut stall_watch =
+            crate::stall::StallWatch::new(stall.map(|s| s.expected), stall.map(|s| s.on_stall));
         let pid = child.id();
         let mut raw_lines: Vec<String> = Vec::new();
         // Set once the agent process itself has exited: the deadline for
@@ -1061,6 +1102,12 @@ impl ClaudeAdapter {
                     ));
                 }
                 pending_ms = Self::pending_question_ms(task, since, true);
+            }
+            // Stall watch (spec 2026-07-21), only while the agent is still
+            // running (not during the post-exit pipe drain). Active elapsed
+            // excludes the pending-question window, like the timeout clock.
+            if drain_deadline.is_none() {
+                stall_watch.tick(active_elapsed(started, pending_ms));
             }
             if drain_deadline.is_none()
                 && let Some(err) = Self::check_cancel_timeout(
@@ -1235,8 +1282,8 @@ fn parse_stream_result(
 impl AgentAdapter for ClaudeAdapter {
     fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)> {
         // A non-cancellable run is a cancellable run with an always-false flag,
-        // no spawn hook, and no live sidecar.
-        self.run_cancellable(task, &AtomicBool::new(false), None, None)
+        // no spawn hook, no live sidecar, and no stall watch.
+        self.run_cancellable(task, &AtomicBool::new(false), None, None, None)
     }
 
     fn run_cancellable(
@@ -1245,10 +1292,11 @@ impl AgentAdapter for ClaudeAdapter {
         cancel: &AtomicBool,
         on_spawn: Option<&dyn Fn(u32)>,
         live: Option<&LiveHooks>,
+        stall: Option<&StallHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         match self.spec.transport {
-            Transport::Headless => self.run_headless(task, cancel, on_spawn, live),
-            Transport::Acp => self.run_acp(task, cancel, on_spawn, live),
+            Transport::Headless => self.run_headless(task, cancel, on_spawn, live, stall),
+            Transport::Acp => self.run_acp(task, cancel, on_spawn, live, stall),
         }
     }
 
