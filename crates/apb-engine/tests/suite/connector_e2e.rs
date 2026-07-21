@@ -247,7 +247,7 @@ fn e2e_snapshot_and_call_flow() {
         .captured_request()
         .expect("acct1 server saw a request");
     assert!(
-        req.contains(&format!("Authorization: Bearer {SECRET_VALUE}")),
+        req.contains(&format!("authorization: Bearer {SECRET_VALUE}")),
         "auth header missing/wrong: {req}"
     );
 

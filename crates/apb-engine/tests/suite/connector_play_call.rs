@@ -228,7 +228,7 @@ fn approved_real_call_reaches_the_url_with_auth() {
 
     let req = server.captured_request().expect("server saw a request");
     assert!(
-        req.contains("Authorization: Bearer play-secret-value"),
+        req.contains("authorization: Bearer play-secret-value"),
         "auth header missing/wrong in request:\n{req}"
     );
 }
