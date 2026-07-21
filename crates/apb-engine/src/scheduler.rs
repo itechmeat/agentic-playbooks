@@ -2041,6 +2041,56 @@ fn drive(
                     }
                 }
             }
+            // Live crash-recovery guard (final-fix-wave Finding 1, spec
+            // 2026-07-20-interactive-nodes). Covers exactly this window: on the
+            // live transport the sidecar wrote its question to questions.jsonl
+            // (post_question) but drive crashed before its on_tick observation
+            // journaled the matching QuestionAsked. On resume the journal shows
+            // question_asked_count == 0, so the park arm above did not fire and
+            // we are one step from spawning a FRESH live attempt - whose new
+            // sidecar would compute its answer tail from the current (zero)
+            // count and could swallow the orphaned question's answer as its
+            // own, then journal the orphan afterwards: a mis-delivery. Instead,
+            // adopt the orphaned channel entry: journal QuestionAsked from it,
+            // raise the wake, and bounce to the top-of-loop scan so the next
+            // iteration parks and the answer is delivered by re-invocation (the
+            // reprompt transcript path), never a fresh live attempt racing the
+            // orphan. Gated on `live_injectable`: only the live path posts to
+            // the channel from inside the agent process ahead of the journal;
+            // the marker/reprompt path journals QuestionAsked itself before it
+            // ever posts. The `question_asked_count <= answered` check means we
+            // never reached the park arm (so this is a fresh attempt, not a
+            // consumed-answer re-invocation), and `node_has_unanswered_channel_question`
+            // is what tells the orphan apart from the normal live happy path
+            // (where the channel is still empty at this point).
+            if timeout_failed.is_none()
+                && live_injectable
+                && resume_ctx.is_none()
+                && question_asked_count(&events, &current) <= answered
+                && node_has_unanswered_channel_question(run_dir, &current)?
+            {
+                let answered_in_channel = read_answers_after(run_dir, None)?
+                    .into_iter()
+                    .filter(|a| a.node == current)
+                    .count();
+                if let Some(orphan) = read_questions_after(run_dir, None)?
+                    .into_iter()
+                    .filter(|q| q.node == current)
+                    .nth(answered_in_channel)
+                {
+                    log.append(EventPayload::QuestionAsked {
+                        node: current.clone(),
+                        question: orphan.question,
+                        options: orphan.options,
+                    })?;
+                    log.append(EventPayload::WakeRaised {
+                        trigger: WakeTrigger::Anomaly,
+                        node: current.clone(),
+                        detail: "interactive question".into(),
+                    })?;
+                    continue;
+                }
+            }
             if let Some(msg) = timeout_failed {
                 (NodeStatus::Failed, msg)
             } else {

@@ -268,6 +268,70 @@ async fn list_endpoint_marks_broken_connector_invalid() {
     );
 }
 
+/// Finding 2 (final-fix-wave): a BROKEN installed OFFICIAL connector must not be
+/// masked by the detail endpoint. `store::load` failing with a non-`NotFound`
+/// error (here an escaping symlink -> `ContentError::Escape` -> `Invalid`, the
+/// same mechanism `list_endpoint_marks_broken_connector_invalid` uses) once let
+/// the detail endpoint fall back to the embedded manifest and report
+/// `installed: false` / `trust: "not_installed"` with a Connect button, while
+/// the list endpoint reported `trust: "invalid"` for the same connector - the
+/// two views disagreed. The detail endpoint must now report the same invalid
+/// state (installed, `invalid`), so both views agree.
+#[cfg(unix)]
+#[tokio::test]
+async fn detail_endpoint_surfaces_a_broken_installed_official_connector_as_invalid() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+
+    // Install the real embedded official connector, then break it on disk: an
+    // absolute-target symlink inside its tree makes `store::load` fail (digest
+    // escape) while `store::list` still enumerates it (its connector.yaml
+    // parses). This is precisely the "installed but broken official connector"
+    // the masking bug hid.
+    let (status, _json) = post_no_body(
+        router(root.path()),
+        &format!("/api/connectors/{EMBEDDED}/install"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let dir = cfg.path().join("connectors").join(EMBEDDED);
+    std::os::unix::fs::symlink("/nonexistent-absolute-target", dir.join("broken-link")).unwrap();
+
+    // Detail: it must be reported installed + invalid, NOT not_installed.
+    let (status, detail) =
+        get_json(router(root.path()), &format!("/api/connectors/{EMBEDDED}")).await;
+    assert_eq!(status, StatusCode::OK, "{detail}");
+    assert_eq!(detail["name"], EMBEDDED);
+    assert_eq!(
+        detail["trust"], "invalid",
+        "a broken installed connector must report invalid, not not_installed: {detail}"
+    );
+    assert_eq!(
+        detail["installed"],
+        serde_json::json!(true),
+        "the connector IS installed (bytes on disk), just broken: {detail}"
+    );
+
+    // List: the same connector is invalid there too.
+    let (status, list) = get_json(router(root.path()), "/api/connectors").await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let listed = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|c| c["name"] == EMBEDDED)
+        .unwrap_or_else(|| panic!("the broken connector must still be listed: {list}"));
+
+    // The two views must agree on the trust state.
+    assert_eq!(
+        listed["trust"], detail["trust"],
+        "list and detail must agree on the broken connector's trust: list={listed} detail={detail}"
+    );
+    assert_eq!(listed["trust"], "invalid", "list view: {listed}");
+}
+
 #[tokio::test]
 async fn approve_endpoint_flips_connector_trust() {
     let _guard = crate::common::env_lock().await;

@@ -31,7 +31,7 @@ use std::time::{Duration, Instant};
 use apb_core::registry::init_project;
 use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::question::post_answer;
-use apb_engine::scheduler::{RunOptions, run};
+use apb_engine::scheduler::{RunOptions, resume, run};
 use apb_engine::state::RunStatus;
 
 use crate::common;
@@ -197,6 +197,18 @@ fn spawn_run(root: &Path) -> (mpsc::Receiver<RunStatus>, thread::JoinHandle<()>)
     let root = root.to_path_buf();
     let handle = thread::spawn(move || {
         let res = run(&root, "iq", None, RunOptions::default());
+        let status = res.map(|r| r.outcome).unwrap_or(RunStatus::Failed);
+        let _ = tx.send(status);
+    });
+    (rx, handle)
+}
+
+fn spawn_resume(root: &Path, run_id: &str) -> (mpsc::Receiver<RunStatus>, thread::JoinHandle<()>) {
+    let (tx, rx) = mpsc::channel();
+    let root = root.to_path_buf();
+    let run_id = run_id.to_string();
+    let handle = thread::spawn(move || {
+        let res = resume(&root, &run_id, None);
         let status = res.map(|r| r.outcome).unwrap_or(RunStatus::Failed);
         let _ = tx.send(status);
     });
@@ -619,5 +631,185 @@ fn live_question_timeout_without_default_fails_the_attempt() {
         )),
         1,
         "the timed-out live attempt must not be re-invoked"
+    );
+}
+
+// --- (f) live crash-recovery: an orphaned channel question is adopted, never
+//         raced by a fresh live attempt (final-fix-wave Finding 1) ---
+
+/// A stub claude that records each invocation (one line per spawn) to `counter`.
+/// Before any answer exists it posts the sidecar-style question to
+/// `questions.jsonl` and exits (the setup run's single spawn). Once an answer
+/// for `ask` has landed it just reports and exits - the reprompt re-invocation
+/// that consumes the adopted question's answer.
+fn crash_recovery_stub_body(counter: &Path) -> String {
+    format!(
+        "printf '%s\\n' invoked >> \"{}\"\n\
+         rd=\"$APB_RUN_DIR\"\n\
+         if grep -q '\"node\":\"ask\"' \"$rd/answers.jsonl\" 2>/dev/null; then\n\
+         echo 'finished with the answer'\n\
+         exit 0\n\
+         fi\n\
+         printf '%s\\n' '{{\"seq\":0,\"node\":\"ask\",\"attempt\":1,\"question\":\"Which DB?\",\"options\":[\"pg\",\"sqlite\"]}}' >> \"$rd/questions.jsonl\"\n\
+         exit 0",
+        counter.display()
+    )
+}
+
+/// Rewrites the run's journal to keep only through the FIRST `AttemptStarted`
+/// for `ask`, simulating a crash in the exact window this fix covers: the
+/// sidecar already posted to `questions.jsonl`, but drive never journaled the
+/// matching `QuestionAsked`. The folded node is left Interrupted (open attempt,
+/// no finish), which `plan_resume` restarts.
+fn crash_after_attempt_started(run_dir: &Path) {
+    let events = read_all(run_dir).unwrap();
+    let cut = events
+        .iter()
+        .position(
+            |e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == "ask"),
+        )
+        .expect("the setup run must have started an attempt for `ask`");
+    let mut buf = String::new();
+    for e in &events[..=cut] {
+        buf.push_str(&serde_json::to_string(e).unwrap());
+        buf.push('\n');
+    }
+    fs::write(run_dir.join("events.jsonl"), buf).unwrap();
+}
+
+fn count_lines(path: &Path) -> usize {
+    fs::read_to_string(path)
+        .map(|s| s.lines().filter(|l| !l.trim().is_empty()).count())
+        .unwrap_or(0)
+}
+
+#[test]
+fn live_crash_recovery_adopts_orphaned_channel_question() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let counter = bin.path().join("invocations");
+    seed_single(proj.path(), 0);
+    seed_profile(proj.path(), "claude");
+    set_env(
+        &make_stub(bin.path(), &crash_recovery_stub_body(&counter)),
+        home.path(),
+        cfg.path(),
+    );
+
+    // Phase 1 (setup): a real run establishes the run dir + manifest and lets
+    // the stub post its question to questions.jsonl exactly as the live sidecar
+    // would. The stub exits immediately, so the run terminates fast.
+    let res = run(proj.path(), "iq", None, RunOptions::default()).expect("setup run drove");
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+    assert_eq!(
+        count_lines(&run_dir.join("questions.jsonl")),
+        1,
+        "the setup run must leave exactly one channel question for `ask`"
+    );
+    assert_eq!(
+        count_lines(&counter),
+        1,
+        "the setup run spawns the stub exactly once"
+    );
+
+    // Sculpt the crash shape: drop everything from QuestionAsked onward so the
+    // journal knows nothing about the question the sidecar already posted, then
+    // clear the spawn counter so any resume-time spawn is unambiguously new.
+    crash_after_attempt_started(&run_dir);
+    let _ = fs::remove_file(run_dir.join("answers.jsonl"));
+    fs::remove_file(&counter).unwrap();
+
+    // Phase 2 (resume): the guard must adopt the orphan (journal one
+    // QuestionAsked + a wake) and park, WITHOUT spawning a fresh live attempt.
+    let (rx, handle) = spawn_resume(proj.path(), &res.run_id);
+    let mut reaper = RunReaper {
+        root: proj.path().to_path_buf(),
+        run_id: res.run_id.clone(),
+        handle: Some(handle),
+    };
+
+    poll_until("adopted QuestionAsked for node ask on resume", || {
+        let events = read_all(&run_dir).ok()?;
+        (count_kind(&events, |p| {
+            matches!(p, EventPayload::QuestionAsked { node, question, .. }
+                if node == "ask" && question == "Which DB?")
+        }) >= 1)
+            .then_some(())
+    });
+
+    // The recovery journaled the question from the orphaned channel entry - it
+    // did NOT spawn a fresh live attempt (which would have recorded a spawn and
+    // could have raced the orphan's answer).
+    assert_eq!(
+        count_lines(&counter),
+        0,
+        "the crash-recovery guard must not spawn a fresh live attempt"
+    );
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::QuestionAsked { node, .. } if node == "ask"
+        )),
+        1,
+        "exactly one QuestionAsked, adopted from the orphaned channel entry"
+    );
+    assert!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::WakeRaised { node, .. } if node == "ask"
+        )) >= 1,
+        "a wake must be raised for the adopted question"
+    );
+    assert_eq!(
+        count_kind(&events, |p| matches!(
+            p,
+            EventPayload::QuestionAnswered { node, .. } if node == "ask"
+        )),
+        0,
+        "no answer posted yet, so the run stays parked (no QuestionAnswered)"
+    );
+
+    // Answer the adopted question; the node completes via the reprompt path
+    // (one re-invocation) with that answer.
+    post_answer(&run_dir, Some("ask"), "pg", "human").unwrap();
+    let status = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("resume finished within deadline");
+    assert_eq!(status, RunStatus::Succeeded);
+    reaper.join();
+
+    let events = read_all(&run_dir).unwrap();
+    let answered: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::QuestionAnswered {
+                node,
+                answer,
+                answered_by,
+            } if node == "ask" => Some((answer.clone(), answered_by.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        answered,
+        vec![("pg".to_string(), "human".to_string())],
+        "the adopted question is answered exactly once, by the human"
+    );
+    assert_eq!(
+        count_lines(&counter),
+        1,
+        "exactly one re-invocation delivered the answer via the reprompt path"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, status, .. } if node == "ask" && status == "succeeded"
+        )),
+        "the node must succeed after the answer is delivered"
     );
 }
