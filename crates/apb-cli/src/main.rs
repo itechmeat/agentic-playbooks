@@ -133,6 +133,10 @@ enum Command {
         /// a fresh execution overwrites any stale cached result
         #[arg(long)]
         refresh_cache: bool,
+        /// Run id to continue as a fresh top-level retry (issue #42 finding 10).
+        /// Links the new run to the predecessor in `apb runs`.
+        #[arg(long = "continued-from", value_name = "RUN_ID")]
+        continued_from: Option<String>,
     },
     /// List runs
     Runs,
@@ -284,6 +288,7 @@ fn main() -> ExitCode {
             overrides,
             no_cache,
             refresh_cache,
+            continued_from,
         }) => run_cmd(
             &root,
             &name,
@@ -295,6 +300,7 @@ fn main() -> ExitCode {
             overrides.as_deref(),
             no_cache,
             refresh_cache,
+            continued_from,
         ),
         Some(Command::Runs) => runs_cmd(&root),
         Some(Command::Resume { run_id, from_node }) => {

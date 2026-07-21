@@ -432,6 +432,9 @@ struct RunBody {
     instruction: Option<String>,
     #[serde(default)]
     params: std::collections::BTreeMap<String, String>,
+    /// Run id to continue as a fresh run (issue #42 finding 10).
+    #[serde(default)]
+    continued_from: Option<String>,
 }
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
@@ -464,6 +467,7 @@ async fn run_playbook_handler(
     let mut opts = apb_engine::RunOptions {
         instruction: body.instruction,
         params: body.params,
+        continued_from: body.continued_from,
         ..Default::default()
     };
 

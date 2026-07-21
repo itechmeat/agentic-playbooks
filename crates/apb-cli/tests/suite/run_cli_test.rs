@@ -161,3 +161,66 @@ fn stop_of_an_unknown_run_fails() {
         .failure()
         .stderr(predicate::str::contains("not found"));
 }
+
+/// `--continued-from` threads into RunOptions and establishes run lineage.
+#[test]
+fn run_continued_from_establishes_lineage() {
+    let dir = seeded();
+    playbook()
+        .args(["run", "noagent", "--param", "who=world"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let runs_dir = dir.path().join(".apb/runs");
+    let first_id = fs::read_dir(&runs_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+
+    playbook()
+        .args([
+            "run",
+            "noagent",
+            "--param",
+            "who=world",
+            "--continued-from",
+            &first_id,
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let second_id = fs::read_dir(&runs_dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .find(|id| id != &first_id)
+        .expect("successor run dir");
+
+    let pred_cfg = apb_engine::run_config::read_run_config(&runs_dir.join(&first_id)).unwrap();
+    let succ_cfg = apb_engine::run_config::read_run_config(&runs_dir.join(&second_id)).unwrap();
+    assert_eq!(pred_cfg.superseded_by.as_deref(), Some(second_id.as_str()));
+    assert_eq!(succ_cfg.continued_from.as_deref(), Some(first_id.as_str()));
+}
+
+#[test]
+fn run_continued_from_rejects_unknown_predecessor() {
+    let dir = seeded();
+    playbook()
+        .args([
+            "run",
+            "noagent",
+            "--param",
+            "who=world",
+            "--continued-from",
+            "ghost-1",
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("run `ghost-1`"));
+}

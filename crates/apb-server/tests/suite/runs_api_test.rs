@@ -288,3 +288,53 @@ async fn run_id_path_traversal_is_rejected() {
     let (status, _) = get_json(app, &format!("/api/runs/{run_id}")).await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn post_playbook_run_continued_from_establishes_lineage() {
+    let dir = seed_with_run();
+    let first_id = apb_engine::list_runs(dir.path()).unwrap()[0].run_id.clone();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        "/api/playbooks/noagent/run",
+        serde_json::json!({
+            "params": { "who": "world" },
+            "continued_from": first_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let second_id = json["run_id"].as_str().unwrap().to_string();
+
+    let runs_dir = dir.path().join(".apb/runs");
+    let pred_cfg = apb_engine::run_config::read_run_config(&runs_dir.join(&first_id)).unwrap();
+    let succ_cfg = apb_engine::run_config::read_run_config(&runs_dir.join(&second_id)).unwrap();
+    assert_eq!(pred_cfg.superseded_by.as_deref(), Some(second_id.as_str()));
+    assert_eq!(succ_cfg.continued_from.as_deref(), Some(first_id.as_str()));
+}
+
+#[tokio::test]
+async fn post_playbook_run_continued_from_rejects_unknown_predecessor() {
+    let dir = seed_with_run();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/playbooks/noagent/run")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "params": { "who": "world" },
+                "continued_from": "ghost-1",
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::NOT_FOUND);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        body.contains("run `ghost-1`"),
+        "expected clear not-found error, got: {body:?}"
+    );
+}
