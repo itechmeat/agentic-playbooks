@@ -187,6 +187,11 @@ impl ConnectorEnvPolicy {
         if let Some(node) = &self.node_id {
             cmd.env("APB_NODE_ID", node);
         }
+        // Spawned agents are headless; force a pass-through pager so CLI
+        // porcelain (notably `gh issue view`) cannot exit 0 with empty stdout
+        // when a TTY-like pager path is engaged (see issue #42 finding 12).
+        cmd.env("GH_PAGER", "cat");
+        cmd.env("PAGER", "cat");
     }
 }
 
@@ -1520,5 +1525,31 @@ mod tests {
         // Two yaml blocks: the last one is returned.
         let two = "```yaml\nstatus: failure\n```\n```yaml\nstatus: success\nsummary: latest\n```";
         assert_eq!(interpret_report(two).0, NodeStatus::Succeeded);
+    }
+
+    #[test]
+    fn connector_env_policy_forces_pass_through_pager() {
+        // No network: spawn `env` under the default policy and assert the
+        // pager vars land on the child. This is the only defense against gh
+        // porcelain swallowing stdout under a TTY-like pager path.
+        let policy = ConnectorEnvPolicy::default();
+        let mut cmd = Command::new("env");
+        policy.apply(&mut cmd);
+        let out = cmd.output().expect("spawn env");
+        assert!(
+            out.status.success(),
+            "env exited {:?}: {}",
+            out.status.code(),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(
+            stdout.lines().any(|l| l == "GH_PAGER=cat"),
+            "GH_PAGER=cat missing from child env:\n{stdout}"
+        );
+        assert!(
+            stdout.lines().any(|l| l == "PAGER=cat"),
+            "PAGER=cat missing from child env:\n{stdout}"
+        );
     }
 }
