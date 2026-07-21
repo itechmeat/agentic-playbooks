@@ -1652,16 +1652,44 @@ async fn list_agents_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "agents": apb_core::detect::detect(false) })).into_response()
 }
 
-/// GET /api/models: the curated models table (a hint, not a hard binding) plus
-/// the claude static list. Machine-wide. Powers the model combobox.
+/// GET /api/models: the curated models table (a hint, not a hard binding),
+/// the claude static list, and `options_by_agent` - the per-agent option list
+/// the profile form's model combobox now uses (issue #42 finding 9): the
+/// curated table filtered to that agent's vendor, each row annotated
+/// `detected` when the agent's local config/detected model list also names
+/// it, plus a `detected`-only entry for a detected model the table does not
+/// carry. Detection only annotates or extends the list here, it never
+/// replaces it - see `apb_core::models_table::model_options_for_agent`.
+/// Machine-wide. Powers the model combobox.
 async fn list_models_handler() -> impl IntoResponse {
     match apb_core::models_table::load_merged() {
-        Ok(t) => Json(serde_json::json!({
-            "as_of": t.as_of,
-            "models": t.models,
-            "claude_static": t.claude_static_models,
-        }))
-        .into_response(),
+        Ok(t) => {
+            let agents = apb_core::detect::detect(false);
+            let options_by_agent: std::collections::BTreeMap<
+                String,
+                Vec<apb_core::models_table::ModelOption>,
+            > = agents
+                .iter()
+                .map(|a| {
+                    let detected = a
+                        .models
+                        .as_ref()
+                        .map(|m| m.items.clone())
+                        .unwrap_or_default();
+                    (
+                        a.agent.clone(),
+                        apb_core::models_table::model_options_for_agent(&a.agent, &detected, &t),
+                    )
+                })
+                .collect();
+            Json(serde_json::json!({
+                "as_of": t.as_of,
+                "models": t.models,
+                "claude_static": t.claude_static_models,
+                "options_by_agent": options_by_agent,
+            }))
+            .into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
