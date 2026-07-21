@@ -940,7 +940,7 @@ fn validate_args(schema: &Value, args: &Value) -> Result<(), CallError> {
         )
     })?;
     if let Some(err) = validator.iter_errors(args).next() {
-        let path = err.instance_path.to_string();
+        let path = err.instance_path().to_string();
         let where_ = if path.is_empty() {
             "(root)".to_string()
         } else {
