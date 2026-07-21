@@ -422,25 +422,32 @@ mod tests {
     #[test]
     fn list_empty_without_config_dir() {
         let _lock = crate::env_test_lock();
-        struct FullGuard(Option<std::ffi::OsString>);
-        impl Drop for FullGuard {
+        // Save and restore every env var that steers `config_dir()`, so the
+        // test is hermetic. Leaving HOME set (as this test once did) makes
+        // `config_dir()` resolve to the machine's real `~/.config/apb`, which
+        // may hold installed connectors - so the assertion would flip based on
+        // developer state. Clear all three to genuinely exercise the
+        // config-less branch (`connectors_dir()` -> None).
+        struct EnvGuard([(&'static str, Option<std::ffi::OsString>); 3]);
+        impl Drop for EnvGuard {
             fn drop(&mut self) {
-                unsafe {
-                    match &self.0 {
-                        Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
-                        None => std::env::remove_var("APB_CONFIG_DIR"),
+                for (key, prior) in &self.0 {
+                    unsafe {
+                        match prior {
+                            Some(v) => std::env::set_var(key, v),
+                            None => std::env::remove_var(key),
+                        }
                     }
                 }
             }
         }
-        let _g = FullGuard(std::env::var_os("APB_CONFIG_DIR"));
+        let keys = ["APB_CONFIG_DIR", "XDG_CONFIG_HOME", "HOME"];
+        let _g = EnvGuard(keys.map(|k| (k, std::env::var_os(k))));
         unsafe {
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("XDG_CONFIG_HOME");
+            for k in keys {
+                std::env::remove_var(k);
+            }
         }
-        // HOME left as-is: on CI/dev machines it is set, so config_dir()
-        // still resolves to a real (connector-less) directory, and list()
-        // must simply come back empty rather than error.
         assert!(list().is_empty());
     }
 
