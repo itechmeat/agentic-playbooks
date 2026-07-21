@@ -257,3 +257,27 @@ skills: []
     }
   })
 })
+
+describe('vendor agents without an enumerated model list', () => {
+  const table: ModelRow[] = [
+    { id: 'claude-opus-4-8', vendor: 'anthropic' },
+    { id: 'gpt-5.6-sol', vendor: 'openai' },
+    { id: 'grok-4.5', vendor: 'xai' },
+    { id: 'grok-4.3', vendor: 'xai' },
+  ]
+
+  it('narrows grok to the curated xAI rows', () => {
+    const list: AgentInfo[] = [{ agent: 'grok', installed: true, category: 'vendor' }]
+    expect(modelIdsForAgent('grok', list, table)).toEqual(['grok-4.5', 'grok-4.3'])
+  })
+
+  it('leaves an aggregator like cursor on the full table', () => {
+    const list: AgentInfo[] = [{ agent: 'cursor', installed: true, category: 'aggregator' }]
+    expect(modelIdsForAgent('cursor', list, table)).toEqual([
+      'claude-opus-4-8',
+      'gpt-5.6-sol',
+      'grok-4.5',
+      'grok-4.3',
+    ])
+  })
+})

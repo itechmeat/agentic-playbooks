@@ -2,9 +2,24 @@ import { parse } from 'yaml'
 import type { AgentInfo, ModelRow } from './api'
 
 /**
+ * Vendor tie for a built-in agent that runs a single provider's models. Used
+ * only to narrow the fallback model list of a Vendor agent that reports no
+ * enumerated models of its own (grok is the current case). An aggregator has
+ * no entry here and keeps the full table.
+ */
+const AGENT_VENDOR: Record<string, string> = {
+  claude: 'anthropic',
+  codex: 'openai',
+  grok: 'xai',
+}
+
+/**
  * Model ids offered for a given agent: prefer that agent's detected model
- * list; fall back to the curated table. Legacy `claude-code` probes as
- * `claude`. Shared by the model-options list and the agent-change reset
+ * list; otherwise fall back to the curated table. Legacy `claude-code` probes
+ * as `claude`. For a Vendor agent with no enumerated list (for example an
+ * unauthenticated grok), the fallback is narrowed to that vendor's rows so the
+ * user is not offered models the agent cannot run; an aggregator keeps the
+ * whole table. Shared by the model-options list and the agent-change reset
  * below so the two can never disagree.
  */
 export function modelIdsForAgent(
@@ -14,7 +29,13 @@ export function modelIdsForAgent(
 ): string[] {
   const probe = agent === 'claude-code' ? 'claude' : agent
   const a = agents.find((x) => x.agent === probe)
-  return a?.models?.items?.length ? a.models.items : modelsTable.map((m) => m.id)
+  if (a?.models?.items?.length) return a.models.items
+  const vendor = AGENT_VENDOR[probe]
+  if (vendor && a?.category === 'vendor') {
+    const rows = modelsTable.filter((m) => m.vendor === vendor)
+    if (rows.length) return rows.map((m) => m.id)
+  }
+  return modelsTable.map((m) => m.id)
 }
 
 /**
