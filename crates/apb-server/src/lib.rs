@@ -504,6 +504,11 @@ async fn run_playbook_handler(
         Err(apb_engine::EngineError::Conflict(what)) => {
             (StatusCode::CONFLICT, what).into_response()
         }
+        // Client precondition failures (e.g. cross-playbook continued_from)
+        // must not look like server faults.
+        Err(apb_engine::EngineError::Invalid(what)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, what).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }
