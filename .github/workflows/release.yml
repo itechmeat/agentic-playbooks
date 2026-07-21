@@ -113,7 +113,7 @@ jobs:
           targets: ${{ matrix.target }}
 
       - name: Build release binary
-        run: cargo build --release -p apb-cli --target ${{ matrix.target }}
+        run: cargo build --release -p apb --target ${{ matrix.target }}
 
       - name: Package
         run: |

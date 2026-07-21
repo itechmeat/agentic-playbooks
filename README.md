@@ -111,7 +111,7 @@ cargo install --path crates/apb-cli
 Note: `cargo install --git` is not supported; install from a local clone.
 
 To update: `git pull`, rebuild `web/`, re-run `cargo install --path crates/apb-cli`.
-To uninstall: `cargo uninstall apb-cli`. Project state in `.apb/` and global
+To uninstall: `cargo uninstall apb`. Project state in `.apb/` and global
 config in `~/.config/apb/` are never touched by uninstall.
 
 ### Planned for v0.1.0

@@ -35,7 +35,7 @@ code-ranker, see below).
   (`legacy_snapshot.rs`).
 - `apb-mcp` - rmcp stdio MCP server (`server.rs`), the server-side run policy gate
   (`policy.rs`), and profile/advisory/supervisor tools.
-- `apb-cli` - the `apb` binary (`main.rs`); thin dispatch over core/engine/mcp.
+- `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over core/engine/mcp.
 - `apb-server` - axum web API (`lib.rs`) with the svelte frontend from `web/`
   embedded via rust-embed (`web/dist`).
 
