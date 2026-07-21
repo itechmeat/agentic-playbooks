@@ -624,6 +624,12 @@ fn auth_hint(src: &AuthSource, home: &Path) -> (Option<AuthHint>, Option<Vec<Str
 
 /// Probes a single agent (spawns the binary, collects metadata). Always
 /// returns an AgentInfo (installed=false if the binary is not found).
+///
+/// File-based sources (`CodexConfig`, auth hints under HOME) are consulted
+/// even when the binary is absent: a machine can have `~/.codex/config.toml`
+/// (or auth) without `codex` on PATH, and the profile editor's model options
+/// still need that annotation. Binary-dependent probes (version, Command
+/// models, ClaudeStatic) only run when the binary is found.
 fn probe_one(p: &Probe) -> AgentInfo {
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     let mut info = AgentInfo {
@@ -637,40 +643,47 @@ fn probe_one(p: &Probe) -> AgentInfo {
         auth: None,
         notes: Vec::new(),
     };
-    let Some(path) = find_in_path(&p.bins) else {
-        return info;
-    };
-    info.installed = true;
-    info.canonical_path = Some(path.clone());
-    let parent = path.parent();
+    let found = find_in_path(&p.bins);
+    if let Some(path) = &found {
+        info.installed = true;
+        info.canonical_path = Some(path.clone());
+        let parent = path.parent();
 
-    match run_probe(&path, &p.version_args, parent) {
-        Ok(out) => {
-            if out.truncated {
-                info.notes.push(format!(
-                    "version output truncated at {MAX_OUTPUT_BYTES} bytes"
-                ));
-            }
-            info.version = Some(first_line(&out.stdout));
-        }
-        Err(e) => info.notes.push(format!("version probe failed: {e}")),
-    }
-
-    match &p.models_source {
-        ModelsSource::Command { args, authority } => match run_probe(&path, args, parent) {
+        match run_probe(path, &p.version_args, parent) {
             Ok(out) => {
                 if out.truncated {
                     info.notes.push(format!(
-                        "models output truncated at {MAX_OUTPUT_BYTES} bytes"
+                        "version output truncated at {MAX_OUTPUT_BYTES} bytes"
                     ));
                 }
-                info.models = Some(ModelsInventory {
-                    items: nonempty_lines(&out.stdout),
-                    authority: *authority,
-                })
+                info.version = Some(first_line(&out.stdout));
             }
-            Err(e) => info.notes.push(format!("models probe failed: {e}")),
-        },
+            Err(e) => info.notes.push(format!("version probe failed: {e}")),
+        }
+    }
+
+    match &p.models_source {
+        // Command models require spawning the binary.
+        ModelsSource::Command { args, authority } => {
+            if let Some(path) = &found {
+                let parent = path.parent();
+                match run_probe(path, args, parent) {
+                    Ok(out) => {
+                        if out.truncated {
+                            info.notes.push(format!(
+                                "models output truncated at {MAX_OUTPUT_BYTES} bytes"
+                            ));
+                        }
+                        info.models = Some(ModelsInventory {
+                            items: nonempty_lines(&out.stdout),
+                            authority: *authority,
+                        })
+                    }
+                    Err(e) => info.notes.push(format!("models probe failed: {e}")),
+                }
+            }
+        }
+        // File-based: readable without the binary on PATH.
         ModelsSource::CodexConfig => {
             if let Some(home) = &home {
                 let (models, providers) = codex_config(home);
@@ -685,11 +698,14 @@ fn probe_one(p: &Probe) -> AgentInfo {
                 }
             }
         }
+        // Static table only claimed when the agent is actually installed.
         ModelsSource::ClaudeStatic => {
-            info.models = Some(ModelsInventory {
-                items: claude_static_models(),
-                authority: Authority::Static,
-            });
+            if found.is_some() {
+                info.models = Some(ModelsInventory {
+                    items: claude_static_models(),
+                    authority: Authority::Static,
+                });
+            }
         }
         ModelsSource::None => {}
     }

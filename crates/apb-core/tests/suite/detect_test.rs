@@ -307,6 +307,46 @@ fn config_source_change_invalidates_cache_before_ttl() {
     );
 }
 
+/// CI runners (and hermetic tests) often lack a real `codex` on PATH. The
+/// profile editor still needs to annotate models named in
+/// `~/.codex/config.toml`; file-based sources must not be gated on binary
+/// presence (regression that failed PR CI on clean Linux runners).
+#[test]
+fn codex_config_models_read_even_when_binary_absent() {
+    let _l = lock();
+    let e = setup();
+    // PATH is only the empty temp bin dir from setup: no codex binary.
+    let codex_dir = e.home.join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        "model = \"gpt-5.4\"\n[model_providers.openai]\n",
+    )
+    .unwrap();
+
+    let agents = detect::detect(true);
+    let codex = agents.iter().find(|a| a.agent == "codex").unwrap();
+    assert!(
+        !codex.installed,
+        "no binary on PATH must leave installed=false"
+    );
+    let models = codex
+        .models
+        .as_ref()
+        .expect("config.toml model must be reported without the binary");
+    assert_eq!(models.authority, Authority::Partial);
+    assert!(
+        models.items.iter().any(|m| m == "gpt-5.4"),
+        "model from config.toml: {:?}",
+        models.items
+    );
+    assert_eq!(
+        codex.providers,
+        Some(vec!["openai".to_string()]),
+        "model_providers sections are also file-based"
+    );
+}
+
 #[test]
 fn codex_auth_classified_by_key_names_without_leaking_values() {
     let _l = lock();
