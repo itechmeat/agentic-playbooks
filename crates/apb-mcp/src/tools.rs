@@ -10,7 +10,7 @@ use apb_core::versioning::{
 use apb_engine::control::Control;
 use apb_engine::event::read_all;
 use apb_engine::run_config::ChildExpectation;
-use apb_engine::state::RunState;
+use apb_engine::state::{FailureReason, RunState, RunStatus};
 use apb_engine::{
     EngineError, RunMode, RunOptions, list_runs, plan_resume, post_supervisor_command, run,
     run_cancel, run_inspect as engine_run_inspect, stop_run, touch_heartbeat, wait_wake,
@@ -338,7 +338,6 @@ fn truncate_on_char_boundary(s: &mut String, max: usize) {
 
 /// Waits for a terminal run event (succeeded/failed/aborted) up to the deadline.
 fn poll_terminal(run_dir: &Path) -> String {
-    use apb_engine::state::{RunState, RunStatus};
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         if let Ok(events) = read_all(run_dir) {
@@ -828,6 +827,15 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
             _ => None,
         })
         .collect();
+    // The verbatim reason behind a `failed` run (issue #42 finding 3): every
+    // scheduler/prepare path that fails a run now appends a `RunError` before
+    // its terminal `run_finished(failed)`, so an operator reads why directly
+    // from run_status instead of grepping events.jsonl by hand. `None` for
+    // anything other than a failed run, and for a failed run whose log
+    // predates this fix (no `RunError` was ever appended for it).
+    let failure_reason = (state.run_status == RunStatus::Failed)
+        .then(|| state.failure_reason.as_ref().map(FailureReason::display))
+        .flatten();
     Ok(json!({
         "run_id": run_id,
         "run_status": state.run_status.as_str(),
@@ -841,6 +849,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "children": children,
         "continued_from": cfg.continued_from,
         "superseded_by": cfg.superseded_by,
+        "failure_reason": failure_reason,
     }))
 }
 
@@ -1286,6 +1295,61 @@ mod progress_tests {
         let a = table.iter().find(|e| e["node"] == "a").unwrap();
         assert_eq!(a["expected_seconds"], 100);
         assert_eq!(a["measured_seconds"], 5);
+    }
+
+    /// Issue #42 finding 3: `run_status` must expose the terminal error for a
+    /// failed run directly, rather than making an operator open events.jsonl
+    /// by hand to find the `run_error` event.
+    #[test]
+    fn run_status_exposes_failure_reason_for_a_failed_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":1000,"type":"node_started","node":"a","attempt":1}"#,
+                "\n",
+                r#"{"seq":2,"ts":2000,"type":"node_finished","node":"a","status":"failed","attempt":1,"output":"boom"}"#,
+                "\n",
+                r#"{"seq":3,"ts":2500,"type":"run_error","node":"a","reason":"node `a` has no outgoing edge and is not finish"}"#,
+                "\n",
+                r#"{"seq":4,"ts":3000,"type":"run_finished","outcome":"failed"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        assert_eq!(out["run_status"], "failed");
+        let reason = out["failure_reason"]
+            .as_str()
+            .expect("failure_reason must be a string for a failed run with a recorded RunError");
+        assert!(reason.contains("no outgoing edge"));
+        assert!(reason.contains("node `a`"));
+    }
+
+    /// `failure_reason` stays absent (JSON `null`) for a run that is not
+    /// failed - it must not appear on a succeeded/running/paused run.
+    #[test]
+    fn run_status_omits_failure_reason_for_a_succeeded_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":1000,"type":"run_finished","outcome":"succeeded"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        assert_eq!(out["run_status"], "succeeded");
+        assert!(out["failure_reason"].is_null());
     }
 
     #[test]
