@@ -339,6 +339,7 @@ pub(crate) fn run_cmd(
     overrides_path: Option<&Path>,
     no_cache: bool,
     refresh_cache: bool,
+    continued_from: Option<String>,
 ) -> ExitCode {
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
@@ -429,7 +430,7 @@ pub(crate) fn run_cmd(
         expected_digest: None,
         expected_profile_bundles: None,
         parent_run: None,
-        continued_from: None,
+        continued_from,
         depth: 0,
         expected_children: None,
         expected_connectors,
