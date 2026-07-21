@@ -19,7 +19,7 @@ with two files:
   name: architect            # must equal the directory name
   description: senior implementation agent
   executor:
-    agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes) or a configured one
+    agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes, grok, cursor) or a configured one
     model: claude-opus-4-8   # exactly the string that agent's --model expects
     fallbacks:               # optional ordered chain; same role, different executor
       - { agent: codex, model: gpt-5.2-codex }
