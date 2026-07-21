@@ -39,6 +39,8 @@ mod background_run_test;
 mod background_supervisor_test;
 #[path = "suite/cache_test.rs"]
 mod cache_test;
+#[path = "suite/child_connector_prepare.rs"]
+mod child_connector_prepare;
 #[path = "suite/child_run_event_test.rs"]
 mod child_run_event_test;
 #[path = "suite/connector_asana.rs"]
