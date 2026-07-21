@@ -63,6 +63,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     let events = read_all(&run_dir)?;
 
     let mut checks = vec![run_check(&events), nodes_check(&events)];
+    checks.extend(failure_reason_check(&events));
     checks.extend(attempt_checks(&events));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(root));
@@ -86,6 +87,29 @@ fn run_check(events: &[Event]) -> RunCheck {
         _ => OK,
     };
     RunCheck::new(level, "run", format!("folded status: {}", status.as_str()))
+}
+
+/// The recorded reason for a run that ended `failed` (issue #42 finding 3):
+/// scheduler/prepare paths now append a `RunError` event before the terminal
+/// `run_finished(failed)`, so `run_check` no longer has to be the only signal
+/// that something is wrong - this names WHY, blocking (`FAIL`) so a failed run
+/// can no longer read as all-ok. `None` for anything other than a failed run;
+/// for a failed run whose journal predates this fix (no `RunError` ever
+/// appended), still surfaces as a `WARN` naming the gap rather than staying
+/// silent.
+fn failure_reason_check(events: &[Event]) -> Option<RunCheck> {
+    let state = RunState::fold(events);
+    if state.run_status != RunStatus::Failed {
+        return None;
+    }
+    Some(match &state.failure_reason {
+        Some(f) => RunCheck::new(FAIL, "failure reason", f.display()),
+        None => RunCheck::new(
+            WARN,
+            "failure reason",
+            "run failed but no explanatory event was recorded (a journal from before issue #42 finding 3 was fixed)",
+        ),
+    })
 }
 
 /// The folded node statuses, as a count per status. Warns when any node ended
@@ -471,5 +495,65 @@ mod tests {
         assert!(c.detail.contains("retry on a x2"), "{c:?}");
         // A single action of another kind is not a repeat.
         assert!(!c.detail.contains("pause"), "{c:?}");
+    }
+
+    /// Issue #42 finding 3: a failed run must stop reading as all-ok. Before
+    /// this fix `run_check` alone gave a failed run a `WARN` (not `FAIL`)
+    /// verdict with no reason attached, so `has_failure` (the CLI's exit
+    /// code) stayed clean for a run an operator very much needed to see.
+    #[test]
+    fn a_failed_run_with_a_recorded_reason_fails_doctor_and_names_it() {
+        let journal = concat!(
+            r#"{"seq":0,"ts":1000,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":2000,"type":"node_started","node":"a","attempt":1}"#,
+            "\n",
+            r#"{"seq":2,"ts":3000,"type":"node_finished","node":"a","status":"failed","attempt":1,"output":"boom"}"#,
+            "\n",
+            r#"{"seq":3,"ts":3500,"type":"run_error","node":"a","reason":"node `a` has no outgoing edge and is not finish"}"#,
+            "\n",
+            r#"{"seq":4,"ts":4000,"type":"run_finished","outcome":"failed"}"#,
+            "\n",
+        );
+        let (tmp, _) = run_root(journal);
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        assert!(
+            has_failure(&checks),
+            "a failed run with a known reason must block, not read all-ok: {checks:?}"
+        );
+        let c = find(&checks, "failure reason");
+        assert_eq!(c.status, FAIL, "{c:?}");
+        assert!(c.detail.contains("no outgoing edge"), "{c:?}");
+        assert!(c.detail.contains("node `a`"), "{c:?}");
+    }
+
+    /// A failed run whose journal predates this fix (no `run_error` was ever
+    /// appended) still gets a `failure reason` row - a visible gap, not
+    /// silence - rather than just vanishing back into "all ok" for lack of a
+    /// FAIL-level check.
+    #[test]
+    fn a_failed_run_with_no_recorded_reason_still_gets_a_warn_row() {
+        let journal = concat!(
+            r#"{"seq":0,"ts":1000,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":2000,"type":"run_finished","outcome":"failed"}"#,
+            "\n",
+        );
+        let (tmp, _) = run_root(journal);
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        let c = find(&checks, "failure reason");
+        assert_eq!(c.status, WARN, "{c:?}");
+    }
+
+    /// The check is entirely absent for a run that is not `failed` - it must
+    /// not clutter a healthy or a still-running report.
+    #[test]
+    fn a_healthy_run_has_no_failure_reason_row() {
+        let (tmp, _) = run_root(HEALTHY);
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        assert!(
+            !checks.iter().any(|c| c.subject == "failure reason"),
+            "{checks:?}"
+        );
     }
 }
