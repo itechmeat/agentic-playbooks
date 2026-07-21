@@ -224,3 +224,59 @@ fn run_continued_from_rejects_unknown_predecessor() {
         .failure()
         .stderr(predicate::str::contains("run `ghost-1`"));
 }
+
+const OTHER: &str = r#"
+schema: 1
+id: other
+name: Other
+version: 1.0.0
+params:
+  - { name: who, type: text }
+nodes:
+  - { id: start, type: start }
+  - { id: note, type: prompt, prompt: "hi {{params.who}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: note }
+  - { from: note, to: done }
+"#;
+
+#[test]
+fn run_continued_from_rejects_cross_playbook() {
+    let dir = seeded();
+    let vdir = dir.path().join(".apb/playbooks/other/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), OTHER).unwrap();
+    fs::write(dir.path().join(".apb/playbooks/other/current"), "1.0.0").unwrap();
+
+    playbook()
+        .args(["run", "noagent", "--param", "who=world"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    let runs_dir = dir.path().join(".apb/runs");
+    let first_id = fs::read_dir(&runs_dir)
+        .unwrap()
+        .next()
+        .unwrap()
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .into_owned();
+
+    playbook()
+        .args([
+            "run",
+            "other",
+            "--param",
+            "who=world",
+            "--continued-from",
+            &first_id,
+        ])
+        .current_dir(dir.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("noagent"))
+        .stderr(predicate::str::contains("other"));
+}

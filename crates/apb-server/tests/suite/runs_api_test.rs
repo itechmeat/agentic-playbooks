@@ -338,3 +338,47 @@ async fn post_playbook_run_continued_from_rejects_unknown_predecessor() {
         "expected clear not-found error, got: {body:?}"
     );
 }
+
+#[tokio::test]
+async fn post_playbook_run_continued_from_rejects_superseded_predecessor() {
+    let dir = seed_with_run();
+    let first_id = apb_engine::list_runs(dir.path()).unwrap()[0].run_id.clone();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/playbooks/noagent/run",
+        serde_json::json!({
+            "params": { "who": "world" },
+            "continued_from": first_id,
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let _second_id = json["run_id"].as_str().unwrap().to_string();
+
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/playbooks/noagent/run")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "params": { "who": "world" },
+                "continued_from": first_id,
+            }))
+            .unwrap(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(
+        res.status(),
+        StatusCode::CONFLICT,
+        "already-superseded predecessor must be 409, not 500"
+    );
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        body.contains("already superseded"),
+        "expected superseded detail, got: {body:?}"
+    );
+}

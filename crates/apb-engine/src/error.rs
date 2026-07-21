@@ -8,6 +8,10 @@ pub enum EngineError {
     NotFound(String),
     #[error("invalid: {0}")]
     Invalid(String),
+    /// A state conflict (for example, continuing from an already-superseded run).
+    /// Surfaces that map HTTP status codes treat this as 409 Conflict.
+    #[error("conflict: {0}")]
+    Conflict(String),
     #[error("workdir busy: {0}")]
     WorkdirBusy(String),
     #[error("agent adapter error: {0}")]

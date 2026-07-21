@@ -501,6 +501,9 @@ async fn run_playbook_handler(
         Err(apb_engine::EngineError::NotFound(what)) => {
             (StatusCode::NOT_FOUND, what).into_response()
         }
+        Err(apb_engine::EngineError::Conflict(what)) => {
+            (StatusCode::CONFLICT, what).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

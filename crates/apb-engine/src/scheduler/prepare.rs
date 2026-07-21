@@ -383,7 +383,7 @@ pub(crate) fn prepare_run_target(
     let run_id = format!("{id}-{}", now_millis());
     let run_dir = root.join(".apb/runs").join(&run_id);
     if let Some(ref pred) = opts.continued_from {
-        crate::run_lineage::validate_continued_from(root, pred)?;
+        crate::run_lineage::validate_continued_from(root, pred, id)?;
     }
     let mut log = EventLog::create(&run_dir)?;
     // The run snapshot = the effective playbook. Without overrides we write the raw yaml

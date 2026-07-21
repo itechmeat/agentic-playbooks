@@ -45,6 +45,7 @@ impl From<EngineError> for ToolError {
         match e {
             EngineError::NotFound(m) => ToolError::NotFound(m),
             EngineError::Registry(RegistryError::NotFound(w)) => ToolError::NotFound(w),
+            EngineError::Conflict(m) => ToolError::Conflict(m),
             other => ToolError::Engine(other.to_string()),
         }
     }
