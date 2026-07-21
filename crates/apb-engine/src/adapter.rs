@@ -181,6 +181,33 @@ impl ConnectorEnvPolicy {
     }
 }
 
+/// Run-scoped agent config isolation (spec 2026-07-21 run-reliability), applied
+/// at every node-agent spawn right after the connector env scrub. For an agent
+/// with an isolation strategy (codex today) it prepares a private config home
+/// under the run dir and points the spawned process at it via that agent's
+/// config-root env var, so the agent can never inherit the user's interactive
+/// MCP configuration. A no-op for every other agent and for spawn paths that
+/// carry no run dir (internal, connector-less calls such as compaction).
+fn apply_agent_home(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorClass, String)> {
+    let Some(run_dir) = task.connector_policy.run_dir.as_deref() else {
+        return Ok(());
+    };
+    match crate::agent_home::env_for_agent(task.agent, run_dir, task.node) {
+        Ok(Some((name, home))) => {
+            cmd.env(name, home);
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(e) => Err((
+            ErrorClass::ProcessExit,
+            format!(
+                "prepare isolated agent home for `{}` failed: {e}",
+                task.agent
+            ),
+        )),
+    }
+}
+
 pub struct AgentTask<'a> {
     pub prompt: &'a str,
     pub model: &'a str,
@@ -778,6 +805,9 @@ impl ClaudeAdapter {
         // Connector env isolation (spec 4.3): scrub inherited connector tokens
         // and inject the run-context env before spawning the agent.
         task.connector_policy.apply(&mut cmd);
+        // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
+        // spawned codex cannot inherit the user's interactive MCP config.
+        apply_agent_home(&mut cmd, task)?;
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -920,6 +950,9 @@ impl ClaudeAdapter {
         // Connector env isolation (spec 4.3): scrub inherited connector tokens
         // and inject the run-context env before spawning the agent.
         task.connector_policy.apply(&mut cmd);
+        // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
+        // spawned codex cannot inherit the user's interactive MCP config.
+        apply_agent_home(&mut cmd, task)?;
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,

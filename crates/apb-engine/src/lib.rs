@@ -1,4 +1,5 @@
 pub mod adapter;
+mod agent_home;
 pub mod connector_call;
 pub mod connector_imap;
 pub mod connector_prompt;
