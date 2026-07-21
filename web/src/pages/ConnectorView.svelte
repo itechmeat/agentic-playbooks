@@ -14,11 +14,29 @@
     needsForce,
     DISCONNECT_KEEPS_CONFIG,
   } from '../lib/connectorinstall'
-  import { accountReady, trustBadge, type ConnectorAccount, type ConnectorDetail } from '../lib/connectors'
-  import { errorRate, formatDurationMs, outcomeSummary, type ConnectorStats } from '../lib/connectorstats'
+  import {
+    accountReady,
+    deprecationReason,
+    showAbout,
+    showAccounts,
+    showFunctions,
+    showHeaderMeta,
+    showPlayground,
+    trustBadge,
+    type ConnectorAccount,
+    type ConnectorDetail,
+  } from '../lib/connectors'
+  import {
+    errorRate,
+    formatDurationMs,
+    outcomeSummary,
+    usageCardState,
+    type ConnectorStats,
+  } from '../lib/connectorstats'
   import { renderMarkdown } from '../lib/markdown'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
+  import PageScroll from '$lib/components/PageScroll.svelte'
   import ConnectorPlaygroundPanel from '$lib/components/ConnectorPlaygroundPanel.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
@@ -43,6 +61,9 @@
   let loaded = $state(false)
   let stats = $state<ConnectorStats | null>(null)
   let statsLoaded = $state(false)
+  // Tracked apart from `stats === null` so that a failed request is not read
+  // as "this connector has no recorded calls".
+  let statsFailed = $state(false)
   let approving = $state<string | null>(null) // account name, or '' for the connector itself
   let probing = $state<string | null>(null)
   let probeResults = $state<Record<string, HealthcheckResult>>({})
@@ -92,8 +113,12 @@
       const s = await fetchConnectorStats(name, workspace)
       if (token !== loadToken) return
       stats = s
+      statsFailed = false
     } catch {
-      if (token === loadToken) stats = null
+      if (token === loadToken) {
+        stats = null
+        statsFailed = true
+      }
     } finally {
       if (token === loadToken) statsLoaded = true
     }
@@ -106,6 +131,7 @@
     detail = null
     statsLoaded = false
     stats = null
+    statsFailed = false
     probeResults = {}
     unknownName = false
     forceOffered = false
@@ -225,6 +251,7 @@
   // Everything the manifest describes is public and is shown in both states;
   // only what actually needs bytes on disk is gated on this.
   const installed = $derived(detail?.installed === true)
+  const usageState = $derived(usageCardState(installed, statsLoaded, statsFailed, stats))
 </script>
 
 <Topbar active="connectors">
@@ -258,7 +285,7 @@
   {/snippet}
 </Topbar>
 
-<div class="min-h-0 flex-1 overflow-auto">
+<PageScroll>
   <div class="mx-auto flex w-full max-w-4xl flex-col gap-6 px-4 py-6">
     {#if !loaded}
       <div class="flex flex-col gap-3">
@@ -295,25 +322,27 @@
             <Card.Description>{detail.meta.summary}</Card.Description>
           {/if}
         </Card.Header>
-        <Card.Content class="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
-          {#each detail.meta.tags ?? [] as tag (tag)}
-            <Badge variant="secondary">{tag}</Badge>
-          {/each}
-          {#if detail.meta.publisher}
-            <span>by {detail.meta.publisher}</span>
-          {/if}
-          {#if detail.meta.homepage}
-            <a
-              href={detail.meta.homepage}
-              target="_blank"
-              rel="noreferrer"
-              class="inline-flex items-center gap-1 text-primary hover:underline"
-            >
-              <ExternalLink class="size-3.5" />
-              homepage
-            </a>
-          {/if}
-        </Card.Content>
+        {#if showHeaderMeta(detail)}
+          <Card.Content class="flex flex-wrap items-center gap-2 text-sm text-muted-foreground">
+            {#each detail.meta.tags ?? [] as tag (tag)}
+              <Badge variant="secondary">{tag}</Badge>
+            {/each}
+            {#if detail.meta.publisher}
+              <span>by {detail.meta.publisher}</span>
+            {/if}
+            {#if detail.meta.homepage}
+              <a
+                href={detail.meta.homepage}
+                target="_blank"
+                rel="noreferrer"
+                class="inline-flex items-center gap-1 text-primary hover:underline"
+              >
+                <ExternalLink class="size-3.5" />
+                homepage
+              </a>
+            {/if}
+          </Card.Content>
+        {/if}
         <Card.Footer class="flex flex-col items-start gap-3">
           {#if installed}
             <p class="text-sm text-muted-foreground">{DISCONNECT_KEEPS_CONFIG}</p>
@@ -348,7 +377,7 @@
         </Card.Footer>
       </Card.Root>
 
-      {#if detail.bodyMd}
+      {#if showAbout(detail)}
         <Card.Root>
           <Card.Header>
             <Card.Title class="text-sm">About</Card.Title>
@@ -362,159 +391,177 @@
         </Card.Root>
       {/if}
 
-      <Card.Root>
-        <Card.Header>
-          <Card.Title class="text-sm">Functions</Card.Title>
-        </Card.Header>
-        <Card.Content>
-          {#if detail.functions.length === 0}
-            <p class="text-sm text-muted-foreground">This connector declares no functions.</p>
-          {:else}
+      {#if showFunctions(detail)}
+        <Card.Root>
+          <Card.Header>
+            <Card.Title class="text-sm">Functions</Card.Title>
+          </Card.Header>
+          <Card.Content>
             <Table.Root>
               <Table.Header>
                 <Table.Row>
                   <Table.Head>Name</Table.Head>
                   <Table.Head>Description</Table.Head>
                   <Table.Head>Read-only</Table.Head>
-                  <Table.Head>Deprecated</Table.Head>
                 </Table.Row>
               </Table.Header>
               <Table.Body>
                 {#each detail.functions as f (f.name)}
+                  {@const reason = deprecationReason(f)}
                   <Table.Row>
-                    <Table.Cell class="font-mono text-xs">{f.name}</Table.Cell>
+                    <Table.Cell class="align-top whitespace-normal font-mono text-xs">
+                      {f.name}
+                      {#if reason}
+                        <!-- The reason itself is a manifest string, so it is
+                             carried on the marker rather than dropped: title
+                             here, and spelled out under the description. -->
+                        <Badge variant="secondary" class="ml-1 font-normal" title={reason}>
+                          [deprecated]
+                        </Badge>
+                      {/if}
+                    </Table.Cell>
                     <Table.Cell class="whitespace-normal text-muted-foreground">
                       {f.description}
+                      {#if reason}
+                        <span class="mt-1 block text-xs">Deprecated: {reason}</span>
+                      {/if}
                     </Table.Cell>
-                    <Table.Cell>{f.readOnly ? 'yes' : 'no'}</Table.Cell>
-                    <Table.Cell>{f.deprecated ? 'yes' : 'no'}</Table.Cell>
+                    <Table.Cell class="align-top">{f.readOnly ? 'yes' : 'no'}</Table.Cell>
                   </Table.Row>
                 {/each}
               </Table.Body>
             </Table.Root>
-          {/if}
-        </Card.Content>
-      </Card.Root>
+          </Card.Content>
+        </Card.Root>
+      {/if}
 
-      <Card.Root>
-        <Card.Header>
-          <Card.Title class="text-sm">Accounts</Card.Title>
-        </Card.Header>
-        <Card.Content>
-          {#if detail.accounts.length === 0}
-            <p class="text-sm text-muted-foreground">No accounts configured for this connector.</p>
-          {:else}
-            <Table.Root>
-              <Table.Header>
-                <Table.Row>
-                  <Table.Head>Name</Table.Head>
-                  <Table.Head>Fields</Table.Head>
-                  <Table.Head>Missing env</Table.Head>
-                  <Table.Head>Trust</Table.Head>
-                  <Table.Head>Actions</Table.Head>
-                </Table.Row>
-              </Table.Header>
-              <Table.Body>
-                {#each detail.accounts as a (a.name)}
-                  {@const acctBadge = trustBadge(a.trust)}
-                  {@const ready = accountReady(a)}
-                  {@const result = probeResults[a.name]}
+      <!-- Installed: always shown, because this is where accounts get
+           configured and the empty state is the invitation to do it. Not
+           installed: shown only when accounts already exist, which they can,
+           since account config lives outside the installed files. -->
+      {#if showAccounts(detail)}
+        <Card.Root>
+          <Card.Header>
+            <Card.Title class="text-sm">Accounts</Card.Title>
+          </Card.Header>
+          <Card.Content>
+            {#if detail.accounts.length === 0}
+              <p class="text-sm text-muted-foreground">
+                No accounts configured for this connector yet.
+              </p>
+            {:else}
+              <Table.Root>
+                <Table.Header>
                   <Table.Row>
-                    <Table.Cell class="align-top font-mono text-xs">
-                      {a.name}{#if a.default}<span class="ml-1 text-muted-foreground">(default)</span>{/if}
-                    </Table.Cell>
-                    <Table.Cell class="align-top whitespace-normal">
-                      {#if fieldEntries(a).length === 0}
-                        <span class="text-muted-foreground">-</span>
-                      {:else}
-                        <ul class="flex flex-col gap-0.5 font-mono text-xs text-muted-foreground">
-                          {#each fieldEntries(a) as [k, v] (k)}
-                            <li>{k} = {v}</li>
-                          {/each}
-                        </ul>
-                      {/if}
-                    </Table.Cell>
-                    <Table.Cell class="align-top whitespace-normal">
-                      {#if a.missingEnv.length === 0}
-                        <span class="text-muted-foreground">-</span>
-                      {:else}
-                        <div class="flex flex-wrap gap-1">
-                          {#each a.missingEnv as v (v)}
-                            <Badge variant="outline" class={badgeClass.warn}>{v}</Badge>
-                          {/each}
-                        </div>
-                      {/if}
-                    </Table.Cell>
-                    <Table.Cell class="align-top">
-                      <Badge variant="outline" class={badgeClass[acctBadge.tone]}>
-                        {acctBadge.label}
-                      </Badge>
-                    </Table.Cell>
-                    <Table.Cell class="align-top">
-                      {#if !installed}
-                        <!-- Approving and probing both act on an installed
-                             connector: the probe invokes it, and approving a
-                             connector that is not on disk yet decides nothing
-                             the user can act on. The account rows themselves
-                             stay visible so the required fields can be
-                             reviewed first. -->
-                        <span class="whitespace-normal text-xs text-muted-foreground">
-                          connect to approve or probe
-                        </span>
-                      {:else}
-                        <div class="flex flex-col items-start gap-2">
-                          <div class="flex flex-wrap gap-2">
-                            {#if a.trust !== 'approved'}
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                class="max-sm:px-2"
-                                onclick={() => approve(a.name)}
-                                disabled={approving !== null}
-                              >
-                                {#if approving === a.name}<Spinner data-icon="inline-start" />{:else}<ShieldCheck data-icon="inline-start" />{/if}
-                                <span class="max-sm:sr-only">Approve</span>
-                              </Button>
-                            {/if}
-                            <span
-                              title={a.trust !== 'approved'
-                                ? 'Approve this account before probing - the server refuses an unapproved probe with a permission error.'
-                                : undefined}
-                            >
-                              <Button
-                                size="sm"
-                                variant="outline"
-                                class="max-sm:px-2"
-                                onclick={() => probe(a)}
-                                disabled={a.trust !== 'approved' || probing !== null}
-                              >
-                                {#if probing === a.name}<Spinner data-icon="inline-start" />{:else}<Stethoscope data-icon="inline-start" />{/if}
-                                <span class="max-sm:sr-only">Probe</span>
-                              </Button>
-                            </span>
-                          </div>
-                          {#if result}
-                            <Badge variant="outline" class={badgeClass[outcomeTone(result)]}>
-                              {outcomeCode(result)}
-                            </Badge>
-                          {/if}
-                          {#if !ready}
-                            <span class="text-xs text-muted-foreground">missing env vars</span>
-                          {/if}
-                        </div>
-                      {/if}
-                    </Table.Cell>
+                    <Table.Head>Name</Table.Head>
+                    <Table.Head>Fields</Table.Head>
+                    <Table.Head>Missing env</Table.Head>
+                    <Table.Head>Trust</Table.Head>
+                    <Table.Head>Actions</Table.Head>
                   </Table.Row>
-                {/each}
-              </Table.Body>
-            </Table.Root>
-          {/if}
-        </Card.Content>
-      </Card.Root>
+                </Table.Header>
+                <Table.Body>
+                  {#each detail.accounts as a (a.name)}
+                    {@const acctBadge = trustBadge(a.trust)}
+                    {@const ready = accountReady(a)}
+                    {@const result = probeResults[a.name]}
+                    <Table.Row>
+                      <Table.Cell class="align-top font-mono text-xs">
+                        {a.name}{#if a.default}<span class="ml-1 text-muted-foreground">(default)</span>{/if}
+                      </Table.Cell>
+                      <Table.Cell class="align-top whitespace-normal">
+                        {#if fieldEntries(a).length === 0}
+                          <span class="text-muted-foreground">-</span>
+                        {:else}
+                          <ul class="flex flex-col gap-0.5 font-mono text-xs text-muted-foreground">
+                            {#each fieldEntries(a) as [k, v] (k)}
+                              <li>{k} = {v}</li>
+                            {/each}
+                          </ul>
+                        {/if}
+                      </Table.Cell>
+                      <Table.Cell class="align-top whitespace-normal">
+                        {#if a.missingEnv.length === 0}
+                          <span class="text-muted-foreground">-</span>
+                        {:else}
+                          <div class="flex flex-wrap gap-1">
+                            {#each a.missingEnv as v (v)}
+                              <Badge variant="outline" class={badgeClass.warn}>{v}</Badge>
+                            {/each}
+                          </div>
+                        {/if}
+                      </Table.Cell>
+                      <Table.Cell class="align-top">
+                        <Badge variant="outline" class={badgeClass[acctBadge.tone]}>
+                          {acctBadge.label}
+                        </Badge>
+                      </Table.Cell>
+                      <Table.Cell class="align-top">
+                        {#if !installed}
+                          <!-- Approving and probing both act on an installed
+                               connector: the probe invokes it, and approving a
+                               connector that is not on disk yet decides nothing
+                               the user can act on. The account rows themselves
+                               stay visible so the required fields can be
+                               reviewed first. -->
+                          <span class="whitespace-normal text-xs text-muted-foreground">
+                            connect to approve or probe
+                          </span>
+                        {:else}
+                          <div class="flex flex-col items-start gap-2">
+                            <div class="flex flex-wrap gap-2">
+                              {#if a.trust !== 'approved'}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  class="max-sm:px-2"
+                                  onclick={() => approve(a.name)}
+                                  disabled={approving !== null}
+                                >
+                                  {#if approving === a.name}<Spinner data-icon="inline-start" />{:else}<ShieldCheck data-icon="inline-start" />{/if}
+                                  <span class="max-sm:sr-only">Approve</span>
+                                </Button>
+                              {/if}
+                              <span
+                                title={a.trust !== 'approved'
+                                  ? 'Approve this account before probing - the server refuses an unapproved probe with a permission error.'
+                                  : undefined}
+                              >
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  class="max-sm:px-2"
+                                  onclick={() => probe(a)}
+                                  disabled={a.trust !== 'approved' || probing !== null}
+                                >
+                                  {#if probing === a.name}<Spinner data-icon="inline-start" />{:else}<Stethoscope data-icon="inline-start" />{/if}
+                                  <span class="max-sm:sr-only">Probe</span>
+                                </Button>
+                              </span>
+                            </div>
+                            {#if result}
+                              <Badge variant="outline" class={badgeClass[outcomeTone(result)]}>
+                                {outcomeCode(result)}
+                              </Badge>
+                            {/if}
+                            {#if !ready}
+                              <span class="text-xs text-muted-foreground">missing env vars</span>
+                            {/if}
+                          </div>
+                        {/if}
+                      </Table.Cell>
+                    </Table.Row>
+                  {/each}
+                </Table.Body>
+              </Table.Root>
+            {/if}
+          </Card.Content>
+        </Card.Root>
+      {/if}
 
-      <!-- The playground actually invokes the connector, so it is the one
-           panel that genuinely needs the installed files and stays gated. -->
-      {#if installed}
+      <!-- The playground actually invokes the connector, so it needs both the
+           installed files and at least one function to offer. -->
+      {#if showPlayground(detail)}
         <ConnectorPlaygroundPanel
           {name}
           {workspace}
@@ -523,66 +570,85 @@
         />
       {/if}
 
-      <Card.Root>
-        <Card.Header>
-          <div class="flex items-center gap-2">
-            <ChartNoAxesColumn class="size-4 text-muted-foreground" />
-            <Card.Title class="text-sm">Usage</Card.Title>
-          </div>
-          <Card.Description>
-            Calls, error rate, and duration per function and account, read from recent run
-            event logs. Read only - no new state is recorded here.
-          </Card.Description>
-        </Card.Header>
-        <Card.Content>
-          {#if !statsLoaded}
-            <Skeleton class="h-16 w-full" />
-          {:else if !stats || stats.calls === 0}
-            <p class="text-sm text-muted-foreground">
-              No recorded calls{#if stats} in the last {stats.runsScanned} run{stats.runsScanned === 1
-                ? ''
-                : 's'} scanned{/if}.
-            </p>
-          {:else}
-            <div class="flex flex-col gap-3">
-              <p class="text-sm text-muted-foreground">
-                {stats.calls} call{stats.calls === 1 ? '' : 's'} across {stats.runsScanned} run{stats.runsScanned ===
-                1
-                  ? ''
-                  : 's'} scanned (most recent {stats.runsScanned}) - {outcomeSummary(stats.byOutcome)}.
-              </p>
-              <Table.Root>
-                <Table.Header>
-                  <Table.Row>
-                    <Table.Head>Function</Table.Head>
-                    <Table.Head>Account</Table.Head>
-                    <Table.Head>Calls</Table.Head>
-                    <Table.Head>Error rate</Table.Head>
-                    <Table.Head>Avg duration</Table.Head>
-                  </Table.Row>
-                </Table.Header>
-                <Table.Body>
-                  {#each stats.byFunction as f (`${f.function}:${f.account}`)}
-                    <Table.Row>
-                      <Table.Cell class="font-mono text-xs">{f.function}</Table.Cell>
-                      <Table.Cell class="font-mono text-xs">{f.account}</Table.Cell>
-                      <Table.Cell>{f.calls}</Table.Cell>
-                      <Table.Cell>
-                        {#if f.errors > 0}
-                          <Badge variant="outline" class={badgeClass.warn}>{errorRate(f)}</Badge>
-                        {:else}
-                          {errorRate(f)}
-                        {/if}
-                      </Table.Cell>
-                      <Table.Cell>{formatDurationMs(f.avgDurationMs)}</Table.Cell>
-                    </Table.Row>
-                  {/each}
-                </Table.Body>
-              </Table.Root>
+      <!-- Installed: always shown, because the section fills itself as soon as
+           a playbook calls the connector. Not installed: shown only when real
+           history exists, since run event logs survive an uninstall and hiding
+           them would misrepresent the data. A failed request is its own
+           answer and keeps the card in either state. -->
+      {#if usageState !== 'hidden'}
+        <Card.Root>
+          <Card.Header>
+            <div class="flex items-center gap-2">
+              <ChartNoAxesColumn class="size-4 text-muted-foreground" />
+              <Card.Title class="text-sm">Usage</Card.Title>
             </div>
-          {/if}
-        </Card.Content>
-      </Card.Root>
+            <Card.Description>
+              Calls, error rate, and duration per function and account, read from recent run
+              event logs. Read only - no new state is recorded here.
+            </Card.Description>
+          </Card.Header>
+          <Card.Content>
+            {#if usageState === 'loading'}
+              <Skeleton class="h-16 w-full" />
+            {:else if usageState === 'error'}
+              <p class="text-sm text-muted-foreground">
+                Usage stats could not be loaded, so this connector's call history is unknown
+                here.
+              </p>
+            {:else if usageState === 'empty'}
+              <!-- Split rather than an inline {#if}: a conditional that has to
+                   carry its own leading space swallows it and renders
+                   "callsin the last". -->
+              <p class="text-sm text-muted-foreground">
+                {#if stats}
+                  No recorded calls in the last {stats.runsScanned}
+                  run{stats.runsScanned === 1 ? '' : 's'} scanned.
+                {:else}
+                  No recorded calls.
+                {/if}
+                This fills in as playbooks call the connector.
+              </p>
+            {:else if stats}
+              <div class="flex flex-col gap-3">
+                <p class="text-sm text-muted-foreground">
+                  {stats.calls} call{stats.calls === 1 ? '' : 's'} across {stats.runsScanned} run{stats.runsScanned ===
+                  1
+                    ? ''
+                    : 's'} scanned (most recent {stats.runsScanned}) - {outcomeSummary(stats.byOutcome)}.
+                </p>
+                <Table.Root>
+                  <Table.Header>
+                    <Table.Row>
+                      <Table.Head>Function</Table.Head>
+                      <Table.Head>Account</Table.Head>
+                      <Table.Head>Calls</Table.Head>
+                      <Table.Head>Error rate</Table.Head>
+                      <Table.Head>Avg duration</Table.Head>
+                    </Table.Row>
+                  </Table.Header>
+                  <Table.Body>
+                    {#each stats.byFunction as f (`${f.function}:${f.account}`)}
+                      <Table.Row>
+                        <Table.Cell class="font-mono text-xs">{f.function}</Table.Cell>
+                        <Table.Cell class="font-mono text-xs">{f.account}</Table.Cell>
+                        <Table.Cell>{f.calls}</Table.Cell>
+                        <Table.Cell>
+                          {#if f.errors > 0}
+                            <Badge variant="outline" class={badgeClass.warn}>{errorRate(f)}</Badge>
+                          {:else}
+                            {errorRate(f)}
+                          {/if}
+                        </Table.Cell>
+                        <Table.Cell>{formatDurationMs(f.avgDurationMs)}</Table.Cell>
+                      </Table.Row>
+                    {/each}
+                  </Table.Body>
+                </Table.Root>
+              </div>
+            {/if}
+          </Card.Content>
+        </Card.Root>
+      {/if}
     {/if}
   </div>
-</div>
+</PageScroll>

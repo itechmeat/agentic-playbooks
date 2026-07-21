@@ -334,7 +334,9 @@ interface ConnectorFunctionDto {
   name: string
   description: string
   read_only: boolean
-  deprecated: boolean
+  // The manifest's optional deprecation reason. Absent and null both mean
+  // "not deprecated"; the string is human-readable text, not a flag.
+  deprecated?: string | null
   args_schema?: JsonSchema | null
 }
 
@@ -342,7 +344,7 @@ const toConnectorFunction = (d: ConnectorFunctionDto): ConnectorFunction => ({
   name: d.name,
   description: d.description,
   readOnly: d.read_only,
-  deprecated: d.deprecated,
+  deprecated: d.deprecated ?? null,
   argsSchema: d.args_schema ?? null,
 })
 

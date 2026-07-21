@@ -1,5 +1,12 @@
 import { describe, expect, it } from 'vitest'
-import { errorRate, formatDurationMs, outcomeSummary, type ConnectorFunctionStat } from './connectorstats'
+import {
+  errorRate,
+  formatDurationMs,
+  outcomeSummary,
+  usageCardState,
+  type ConnectorFunctionStat,
+  type ConnectorStats,
+} from './connectorstats'
 
 describe('errorRate', () => {
   const stat = (calls: number, errors: number): ConnectorFunctionStat => ({
@@ -48,5 +55,39 @@ describe('formatDurationMs', () => {
   })
   it('non-finite input renders a dash rather than crashing', () => {
     expect(formatDurationMs(Number.NaN)).toBe('-')
+  })
+})
+
+describe('usageCardState', () => {
+  const stats = (over: Partial<ConnectorStats> = {}): ConnectorStats => ({
+    connector: 'github',
+    runsScanned: 5,
+    calls: 0,
+    byFunction: [],
+    byOutcome: {},
+    ...over,
+  })
+
+  it('installed and empty still renders: the section fills as playbooks call it', () => {
+    expect(usageCardState(true, true, false, stats())).toBe('empty')
+    expect(usageCardState(true, true, false, null)).toBe('empty')
+  })
+  it('installed and still loading shows a skeleton, since the card renders either way', () => {
+    expect(usageCardState(true, false, false, null)).toBe('loading')
+  })
+  it('not installed and empty is hidden: no call can be made or was ever made', () => {
+    expect(usageCardState(false, true, false, stats())).toBe('hidden')
+    expect(usageCardState(false, true, false, null)).toBe('hidden')
+  })
+  it('not installed and loading stays hidden rather than flashing a skeleton', () => {
+    expect(usageCardState(false, false, false, null)).toBe('hidden')
+  })
+  it('a failed request is not the same answer as no calls, in either state', () => {
+    expect(usageCardState(true, true, true, null)).toBe('error')
+    expect(usageCardState(false, true, true, null)).toBe('error')
+  })
+  it('real call history shows, uninstalled or not (event logs survive uninstall)', () => {
+    expect(usageCardState(true, true, false, stats({ calls: 3 }))).toBe('data')
+    expect(usageCardState(false, true, false, stats({ calls: 3 }))).toBe('data')
   })
 })

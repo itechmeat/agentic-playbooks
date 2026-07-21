@@ -4,6 +4,7 @@
   import { subscribeChanges } from '../lib/ws'
   import type { PlaybookSummary } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
+  import PageScroll from '$lib/components/PageScroll.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
@@ -94,7 +95,7 @@
   {/snippet}
 </Topbar>
 
-<div class="min-h-0 flex-1 overflow-auto">
+<PageScroll>
   <div class="mx-auto w-full max-w-4xl px-4 py-6">
     {#if !loaded}
       <div class="flex flex-col gap-3">
@@ -182,7 +183,7 @@
       {/each}
     {/if}
   </div>
-</div>
+</PageScroll>
 
 <AlertDialog.Root bind:open={confirmOpen}>
   <AlertDialog.Content>

@@ -9,6 +9,7 @@
   import { connectorHref } from '../lib/route'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
+  import PageScroll from '$lib/components/PageScroll.svelte'
   import ConnectorPickerDialog from '$lib/components/ConnectorPickerDialog.svelte'
   import { Badge } from '$lib/components/ui/badge'
   import { Button } from '$lib/components/ui/button'
@@ -88,7 +89,7 @@
 
 <Topbar active="connectors" />
 
-<div class="min-h-0 flex-1 overflow-auto">
+<PageScroll>
   <div class="mx-auto w-full max-w-4xl px-4 py-6">
     {#if !loaded}
       <div class="flex flex-col gap-3">
@@ -183,7 +184,7 @@
       </div>
     {/if}
   </div>
-</div>
+</PageScroll>
 
 <ConnectorPickerDialog
   bind:open={pickerOpen}

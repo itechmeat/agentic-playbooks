@@ -25,6 +25,7 @@
   import Plus from '@lucide/svelte/icons/plus'
   import Trash2 from '@lucide/svelte/icons/trash-2'
   import Topbar from '$lib/components/Topbar.svelte'
+  import PageScroll from '$lib/components/PageScroll.svelte'
   import Combobox from '$lib/components/Combobox.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
@@ -300,7 +301,7 @@
   {/snippet}
 </Topbar>
 
-<div class="min-h-0 flex-1 overflow-auto">
+<PageScroll>
   <div class="mx-auto w-full max-w-2xl px-4 py-6">
     <Field.FieldGroup>
       <Field.Field>
@@ -493,4 +494,4 @@
       </Field.Field>
     </Field.FieldGroup>
   </div>
-</div>
+</PageScroll>
