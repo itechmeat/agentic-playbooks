@@ -206,7 +206,18 @@ pub fn public_meta_from_str(content: &str, name: &str) -> PublicMeta {
     let Some((frontmatter, _body)) = split_frontmatter(content) else {
         return fallback_meta(name);
     };
-    serde_yaml_ng::from_str(frontmatter).unwrap_or_else(|_| fallback_meta(name))
+    let mut meta: PublicMeta =
+        serde_yaml_ng::from_str(frontmatter).unwrap_or_else(|_| fallback_meta(name));
+    // Frontmatter that parses but omits `display_name` (or sets it to an
+    // empty/whitespace-only string) deserializes to `""` via the field's
+    // serde default, not the folder name - fall back the same way the
+    // no-frontmatter and parse-error cases already do, so a connector with a
+    // storefront page that simply forgot `display_name` still has a usable
+    // one.
+    if meta.display_name.trim().is_empty() {
+        meta.display_name = name.to_string();
+    }
+    meta
 }
 
 /// Reads and parses `PUBLIC.md`'s frontmatter (spec 3.2). Falls back to a
@@ -467,6 +478,20 @@ mod tests {
 
         let meta = public_meta(&sub);
         assert_eq!(meta.display_name, "my-connector");
+    }
+
+    #[test]
+    fn public_meta_falls_back_when_frontmatter_omits_display_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let sub = dir.path().join("my-connector");
+        write(
+            &sub.join("PUBLIC.md"),
+            "---\nsummary: does stuff\n---\nBody\n",
+        );
+
+        let meta = public_meta(&sub);
+        assert_eq!(meta.display_name, "my-connector");
+        assert_eq!(meta.summary, "does stuff");
     }
 
     #[test]

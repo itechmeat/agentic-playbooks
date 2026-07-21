@@ -195,11 +195,15 @@ fn ask_user_posts_question_emits_progress_and_returns_the_answer() {
 
 #[test]
 fn sidecar_exits_when_stdin_closes() {
-    let (mut reaper, stdin, rx, _tmp, _run_dir) = spawn_sidecar("ask");
-    // A pipe reader keeps draining so the child never blocks writing; the
-    // handshake is not needed - closing stdin (EOF) alone must end the serve
-    // loop and exit the process.
-    drop(rx);
+    let (mut reaper, stdin, _rx, _tmp, _run_dir) = spawn_sidecar("ask");
+    // The handshake is not needed - closing stdin (EOF) alone must end the
+    // serve loop and exit the process. `stdin` is dropped first (sending
+    // EOF right away) while `_rx` is kept alive across the wait loop below,
+    // so the background pipe-reader thread it is fed from keeps draining
+    // stdout while the child shuts down: if the child flushes anything on
+    // its way out, the reader is still there to receive it, instead of the
+    // child blocking on a full pipe with nobody reading. `_rx` is only
+    // dropped once this function returns, after exit is already confirmed.
     drop(stdin);
 
     let deadline = Instant::now() + Duration::from_secs(15);

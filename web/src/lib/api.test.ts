@@ -95,7 +95,9 @@ describe('postAnswer', () => {
         status: 500,
       }),
     )
-    await expect(postAnswer('run-1', { answer: 'left' })).rejects.toThrow(/HTTP 500/)
+    await expect(postAnswer('run-1', { answer: 'left' })).rejects.toThrow(
+      /invalid: no pending question to answer/,
+    )
   })
 })
 

@@ -114,7 +114,10 @@ later must carry `#[serde(default)]`.
 A node with an unanswered question is parked: drive spins on the answer
 channel with `AWAIT_CONTROL_POLL`, exactly like an undecided human_review.
 The run status surfaces `waiting_kind: "question"` plus the question text and
-the node id (`pending_question` in `run_status`).
+the node id (`pending_question` in `run_status`). Interactive `agent_task`
+nodes are always executed sequentially, never inside the concurrent batch, so
+at most one question is pending per run at a time and `pending_question` is a
+single object by design, not an array.
 
 While a question is pending, the node's own `timeout_seconds` clock is
 paused: the engine records the asked-at and answered-at instants from the

@@ -58,8 +58,9 @@ async function errorMessage(
   res: Response,
 ): Promise<{ message: string; code?: string; detail?: string }> {
   const url = res.url || ''
+  const text = await res.text().catch(() => '')
   try {
-    const body = (await res.json()) as {
+    const body = JSON.parse(text) as {
       error?: string
       codes?: string[]
       message?: string
@@ -75,7 +76,10 @@ async function errorMessage(
     if (body.error === 'frozen') return { message: `${url}: playbook is frozen`, ...meta }
     if (body.error) return { message: `${url}: ${body.error}`, ...meta }
   } catch {
-    // body is not JSON
+    // body is not JSON: a plain-text body (e.g. the answer endpoint's
+    // answer_by relay diagnostic) is still worth surfacing verbatim rather
+    // than collapsing to a bare status code.
+    if (text.trim()) return { message: `${url}: ${text.trim()}` }
   }
   return { message: `${url}: HTTP ${res.status}` }
 }

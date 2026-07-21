@@ -165,13 +165,41 @@ pub fn install_official(name: &str, force: bool) -> Result<InstallReport, Instal
                 path: target.display().to_string(),
             });
         }
-        if let Err(e) = std::fs::remove_dir_all(&target) {
+
+        // Backup-swap: move the existing target aside before moving staging
+        // into place, so a rename failure partway through never leaves
+        // nothing installed. Any stale backup from a previous interrupted
+        // force-reinstall is cleared first so this rename never fails
+        // because the sibling already exists. On a failed second rename the
+        // backup is moved straight back, restoring the connector that was
+        // there a moment ago; it is removed only once the swap has fully
+        // succeeded.
+        let backup = base.join(format!(".{name}.install-backup"));
+        let _ = std::fs::remove_dir_all(&backup);
+        if let Err(e) = std::fs::rename(&target, &backup) {
             let _ = std::fs::remove_dir_all(&staging);
             return Err(InstallError::Io(format!(
                 "cannot replace {}: {e}",
                 target.display()
             )));
         }
+        if let Err(e) = std::fs::rename(&staging, &target) {
+            let _ = std::fs::rename(&backup, &target);
+            return Err(InstallError::Io(format!(
+                "cannot install into {}: {e}",
+                target.display()
+            )));
+        }
+        let _ = std::fs::remove_dir_all(&backup);
+
+        let trust_warning = record_trust(name, &new_digest);
+        return Ok(InstallReport {
+            name: name.to_string(),
+            version: official.version,
+            digest: new_digest,
+            no_op: false,
+            trust_warning,
+        });
     }
 
     if let Err(e) = std::fs::rename(&staging, &target) {
@@ -330,6 +358,40 @@ mod tests {
         let forced = install_official(EMBEDDED, true).unwrap();
         assert!(!forced.no_op);
         assert!(!dir.join("EXTRA.md").exists());
+        drop(cfg);
+    }
+
+    /// The backup-swap used by a forced reinstall (rename target aside,
+    /// rename staging into place, drop the backup only after the swap
+    /// succeeds) must not leave the sibling `.install-backup` folder behind
+    /// once the swap completes cleanly. Simulating the mid-swap rename
+    /// failure itself is not cleanly testable here without a filesystem
+    /// mock or permission tricks that would not be portable/reliable in CI,
+    /// so this covers the success path's cleanup guarantee instead; the
+    /// preserved-on-failure property is exercised by inspection of the
+    /// implementation (backup is restored before any error return).
+    #[test]
+    fn force_reinstall_removes_the_backup_after_success() {
+        let _lock = crate::env_test_lock();
+        let (cfg, _guard) = set_config_dir();
+
+        install_official(EMBEDDED, false).unwrap();
+        let dir = cfg.path().join("connectors").join(EMBEDDED);
+        std::fs::write(dir.join("EXTRA.md"), "local edit").unwrap();
+        let backup = cfg
+            .path()
+            .join("connectors")
+            .join(format!(".{EMBEDDED}.install-backup"));
+
+        let forced = install_official(EMBEDDED, true).unwrap();
+
+        assert!(!forced.no_op);
+        assert!(dir.is_dir(), "the reinstalled target must be in place");
+        assert!(!dir.join("EXTRA.md").exists());
+        assert!(
+            !backup.exists(),
+            "the swap backup must be removed once the reinstall succeeds"
+        );
         drop(cfg);
     }
 

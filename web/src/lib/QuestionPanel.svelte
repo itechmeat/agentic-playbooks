@@ -30,12 +30,17 @@
     void onAnswer(question.node, opt)
   }
 
-  function submitFreeText(e: SubmitEvent) {
+  async function submitFreeText(e: SubmitEvent) {
     e.preventDefault()
     const value = freeText.trim()
     if (!value || posting) return
-    void onAnswer(question.node, value)
-    freeText = ''
+    freeText = value
+    try {
+      await onAnswer(question.node, value)
+      freeText = ''
+    } catch {
+      // Keep the trimmed draft so the user does not lose their answer.
+    }
   }
 </script>
 
