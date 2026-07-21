@@ -1,41 +1,49 @@
 import { parse } from 'yaml'
-import type { AgentInfo, ModelRow } from './api'
+import type { AgentInfo, ModelOption, ModelRow } from './api'
 
 /**
- * Vendor tie for a built-in agent that runs a single provider's models. Used
- * only to narrow the fallback model list of a Vendor agent that reports no
- * enumerated models of its own (grok is the current case). An aggregator has
- * no entry here and keeps the full table.
+ * Canonical agent id for identity comparisons and model-option lookups.
+ * Legacy `claude-code` is the same agent as `claude`; other ids pass through
+ * after trim. Keep every agent-identity compare in this module on this helper
+ * so alias and non-alias paths cannot diverge.
  */
-const AGENT_VENDOR: Record<string, string> = {
-  claude: 'anthropic',
-  codex: 'openai',
-  grok: 'xai',
+export function normalizeAgentKey(agent: string): string {
+  const trimmed = agent.trim()
+  return trimmed === 'claude-code' ? 'claude' : trimmed
 }
 
 /**
- * Model ids offered for a given agent: prefer that agent's detected model
- * list; otherwise fall back to the curated table. Legacy `claude-code` probes
- * as `claude`. For a Vendor agent with no enumerated list (for example an
- * unauthenticated grok), the fallback is narrowed to that vendor's rows so the
- * user is not offered models the agent cannot run; an aggregator keeps the
- * whole table. Shared by the model-options list and the agent-change reset
- * below so the two can never disagree.
+ * Model options offered for a given agent: the server-computed, curated-table-
+ * driven list from `GET /api/models`'s `options_by_agent` (issue #42 finding
+ * 9 - see `apb_core::models_table::model_options_for_agent`). Detection only
+ * ANNOTATES a row `detected` there, it never narrows the set; a config-only
+ * model absent from the curated table still arrives as its own detected-only
+ * entry. Legacy `claude-code` probes as `claude`. An agent absent from
+ * `optionsByAgent` (a hand-typed id detection never saw) falls back to the
+ * full curated table, undetected - the same "no vendor tie, show everything"
+ * behavior an aggregator gets server-side.
+ */
+export function modelOptionsForAgent(
+  agent: string,
+  optionsByAgent: Record<string, ModelOption[]>,
+  fallbackModels: ModelRow[],
+): ModelOption[] {
+  const opts = optionsByAgent[normalizeAgentKey(agent)]
+  if (opts) return opts
+  return fallbackModels.map((m) => ({ id: m.id, vendor: m.vendor, detected: false }))
+}
+
+/**
+ * Model ids offered for a given agent, in the same order as
+ * `modelOptionsForAgent`. Used by the selection helpers below, which only
+ * ever need the id.
  */
 export function modelIdsForAgent(
   agent: string,
-  agents: AgentInfo[],
-  modelsTable: ModelRow[],
+  optionsByAgent: Record<string, ModelOption[]>,
+  fallbackModels: ModelRow[],
 ): string[] {
-  const probe = agent === 'claude-code' ? 'claude' : agent
-  const a = agents.find((x) => x.agent === probe)
-  if (a?.models?.items?.length) return a.models.items
-  const vendor = AGENT_VENDOR[probe]
-  if (vendor && a?.category === 'vendor') {
-    const rows = modelsTable.filter((m) => m.vendor === vendor)
-    if (rows.length) return rows.map((m) => m.id)
-  }
-  return modelsTable.map((m) => m.id)
+  return modelOptionsForAgent(agent, optionsByAgent, fallbackModels).map((o) => o.id)
 }
 
 /**
@@ -49,10 +57,10 @@ export function modelIdsForAgent(
  */
 export function firstModelForAgent(
   agent: string,
-  agents: AgentInfo[],
-  modelsTable: ModelRow[],
+  optionsByAgent: Record<string, ModelOption[]>,
+  fallbackModels: ModelRow[],
 ): string {
-  return modelIdsForAgent(agent, agents, modelsTable)[0] ?? ''
+  return modelIdsForAgent(agent, optionsByAgent, fallbackModels)[0] ?? ''
 }
 
 /**
@@ -65,14 +73,16 @@ export interface ExecutorGroup {
   model: string
 }
 
-const pairKey = (agent: string, model: string) => `${agent.trim()}\x00${model.trim()}`
+const pairKey = (agent: string, model: string) =>
+  `${normalizeAgentKey(agent)}\x00${model.trim()}`
 
 /**
  * Model ids that group `index` must not select because another group already
  * pairs them with the same agent. Returned so the caller can DISABLE those
  * rows rather than hide them: the user should see that the option exists and
  * is taken. Only groups on the same agent contribute - switching agent frees
- * the models again.
+ * the models again. Agent identity uses `normalizeAgentKey`, so legacy
+ * `claude-code` and `claude` cross-reserve the same models.
  *
  * Pass `index = -1` to consider every group (nothing is treated as "self").
  */
@@ -81,12 +91,12 @@ export function disabledModelIds(
   groups: ExecutorGroup[],
   agent = groups[index]?.agent ?? '',
 ): string[] {
-  const target = agent.trim()
+  const target = normalizeAgentKey(agent)
   if (!target) return []
   const taken = new Set<string>()
   groups.forEach((g, i) => {
     if (i === index) return
-    if (g.agent.trim() !== target) return
+    if (normalizeAgentKey(g.agent) !== target) return
     if (g.model.trim()) taken.add(g.model.trim())
   })
   return [...taken]
@@ -105,11 +115,11 @@ export function firstSelectableModelForAgent(
   agent: string,
   index: number,
   groups: ExecutorGroup[],
-  agents: AgentInfo[],
-  modelsTable: ModelRow[],
+  optionsByAgent: Record<string, ModelOption[]>,
+  fallbackModels: ModelRow[],
 ): string {
   const taken = new Set(disabledModelIds(index, groups, agent))
-  return modelIdsForAgent(agent, agents, modelsTable).find((id) => !taken.has(id)) ?? ''
+  return modelIdsForAgent(agent, optionsByAgent, fallbackModels).find((id) => !taken.has(id)) ?? ''
 }
 
 /**
@@ -121,10 +131,11 @@ export function firstSelectableModelForAgent(
 export function nextFallbackPair(
   groups: ExecutorGroup[],
   agents: AgentInfo[],
-  modelsTable: ModelRow[],
+  optionsByAgent: Record<string, ModelOption[]>,
+  fallbackModels: ModelRow[],
 ): ExecutorGroup | null {
   for (const a of agents.filter((x) => x.installed)) {
-    const model = firstSelectableModelForAgent(a.agent, -1, groups, agents, modelsTable)
+    const model = firstSelectableModelForAgent(a.agent, -1, groups, optionsByAgent, fallbackModels)
     if (model) return { agent: a.agent, model }
   }
   return null
@@ -153,10 +164,14 @@ export function defaultAgentId(agents: AgentInfo[]): string {
 export function defaultPrimaryPair(
   groups: ExecutorGroup[],
   agents: AgentInfo[],
-  modelsTable: ModelRow[],
+  optionsByAgent: Record<string, ModelOption[]>,
+  fallbackModels: ModelRow[],
 ): ExecutorGroup {
   const agent = defaultAgentId(agents)
-  return { agent, model: firstSelectableModelForAgent(agent, 0, groups, agents, modelsTable) }
+  return {
+    agent,
+    model: firstSelectableModelForAgent(agent, 0, groups, optionsByAgent, fallbackModels),
+  }
 }
 
 /**

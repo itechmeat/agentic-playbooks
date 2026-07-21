@@ -145,6 +145,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "supervisor_run_pause",
         "supervisor_run_abort",
         "supervisor_context_append",
+        "supervisor_interrupt_attempt",
         "supervisor_report",
         "supervisor_patch_playbook",
     ];
@@ -214,6 +215,7 @@ fn tools_carry_safety_annotations() {
         "supervisor_run_pause",
         "supervisor_run_abort",
         "supervisor_context_append",
+        "supervisor_interrupt_attempt",
         "supervisor_report",
         "supervisor_patch_playbook",
     ] {
@@ -283,6 +285,7 @@ async fn supervise_self_returns_token() {
             // also applies to supervise:self - confirm explicitly.
             acknowledge_untrusted: Some(true),
             scope: None,
+            continued_from: None,
         }))
         .await;
 
@@ -325,6 +328,7 @@ async fn background_run_returns_run_id_without_blocking() {
             // not the policy gate.
             acknowledge_untrusted: Some(true),
             scope: None,
+            continued_from: None,
         }))
         .await;
     let elapsed = started.elapsed();
@@ -403,6 +407,42 @@ fn patch_playbook_allowed_with_capability() {
     );
 }
 
+/// The interrupt tool (finding 7 of issue #42, third item of issue #40) is
+/// gated exactly like its sibling `supervisor_node_retry`: it is a control-flow
+/// intervention, so it needs the `retry` capability, not `observe`.
+#[test]
+fn interrupt_attempt_tool_maps_to_retry_capability() {
+    assert_eq!(capability_for_tool("supervisor_interrupt_attempt"), "retry");
+}
+
+#[test]
+fn interrupt_attempt_rejected_without_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = WfMcp::new(dir.path().to_path_buf());
+    // A session with only observe - retry (and so interrupt) is not granted.
+    let token = server.mint_token("run-x".to_string(), vec!["observe".to_string()]);
+    let err = server
+        .resolve_session(&token, "supervisor_interrupt_attempt")
+        .unwrap_err();
+    assert!(err.to_string().contains("retry"));
+}
+
+#[test]
+fn interrupt_attempt_allowed_with_retry_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let token = server.mint_token(
+        "run-x".to_string(),
+        vec!["observe".to_string(), "retry".to_string()],
+    );
+    assert_eq!(
+        server
+            .resolve_session(&token, "supervisor_interrupt_attempt")
+            .unwrap(),
+        "run-x"
+    );
+}
+
 #[tokio::test]
 async fn supervisor_tool_rejects_unknown_token() {
     let dir = seeded_root();
@@ -437,6 +477,7 @@ async fn capability_gate_blocks_retry_when_observe_only() {
         None,
         Default::default(),
         Default::default(),
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -494,6 +535,7 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
         None,
         Default::default(),
         Default::default(),
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -550,6 +592,7 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
         None,
         Default::default(),
         Default::default(),
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -1143,6 +1186,7 @@ async fn global_scope_playbook_runs_in_current_project() {
             background: None,
             acknowledge_untrusted: None,
             scope: Some("global".into()),
+            continued_from: None,
         }))
         .await;
     let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();

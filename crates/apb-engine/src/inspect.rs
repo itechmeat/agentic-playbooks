@@ -133,6 +133,12 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
         })
         .collect();
 
+    // The pending human-review gate, if any (issue #42 finding 4): the observer
+    // sees it through `supervisor_run_inspect` too, not only `run_status`, so a
+    // gate is never surfaced in one supervisor path but hidden in the other.
+    let pending_review =
+        crate::progress::from_run_dir(&run_dir, &events).and_then(|p| p.pending_review);
+
     Ok(serde_json::json!({
         "run_id": run_id,
         "run_status": state.run_status.as_str(),
@@ -141,6 +147,7 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
         "context": context,
         "wakes": wakes,
         "actions": actions,
+        "pending_review": pending_review,
         "events": events,
     }))
 }

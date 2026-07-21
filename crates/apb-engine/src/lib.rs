@@ -1,4 +1,5 @@
 pub mod adapter;
+mod agent_home;
 pub mod connector_call;
 pub mod connector_imap;
 pub mod connector_prompt;
@@ -24,9 +25,11 @@ pub mod question;
 pub mod review;
 pub mod run_config;
 pub mod run_doctor;
+mod run_lineage;
 pub mod scheduler;
 pub mod script;
 pub mod signals;
+mod stall;
 pub mod state;
 pub mod stop;
 pub mod workdir;

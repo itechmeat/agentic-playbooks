@@ -408,3 +408,156 @@ fn cmd_secret_passes_env_gate_without_executing_command() {
         "the policy gate must never execute a secret command"
     );
 }
+
+// --- finding 2: sub-playbook child pins carry the connector permit map -----
+
+const PARENT_ID: &str = "conn-parent";
+
+/// A parent whose sub-playbook node `c` runs the connector-binding child
+/// `conn-pb`. The parent itself binds no connectors.
+fn parent_yaml() -> &'static str {
+    r#"schema: 2
+id: conn-parent
+name: conn-parent
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: c, type: playbook, playbook: conn-pb }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: c }
+  - { from: c, to: f }
+"#
+}
+
+fn write_pb_named(root: &Path, id: &str, yaml: &str) {
+    let vdir = root.join(".apb/playbooks").join(id).join("1.0.0");
+    std::fs::create_dir_all(&vdir).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    std::fs::write(
+        root.join(".apb/playbooks").join(id).join("current"),
+        "1.0.0",
+    )
+    .unwrap();
+}
+
+fn approve_named(id: &str, yaml: &str) {
+    let mut store = TrustStore::load();
+    store
+        .approve(&digest_str(yaml), id, OriginKind::LocallyApproved)
+        .unwrap();
+}
+
+fn parent_wref() -> PlaybookRef {
+    PlaybookRef {
+        origin: Origin::Project { workspace_id: None },
+        id: PARENT_ID.into(),
+        version: None,
+    }
+}
+
+#[test]
+fn child_pin_carries_connector_map() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    // `setup` installs the connector, the two-account config, and the child
+    // `conn-pb`, and approves the child's digest.
+    let _g = setup(cfg.path(), root.path(), "https://first.example.com");
+    approve_connector();
+    approve_accounts(root.path(), &parsed_playbook());
+    // Register + approve the parent that references the connector-binding child.
+    write_pb_named(root.path(), PARENT_ID, parent_yaml());
+    approve_named(PARENT_ID, parent_yaml());
+
+    let permit = check_run(root.path(), &parent_wref(), false, false).expect("permit");
+
+    // The parent binds no connectors itself...
+    assert!(
+        permit.connectors.is_empty(),
+        "parent binds no connectors of its own"
+    );
+    // ...but the child pin carries the child's verified connector permit map,
+    // computed in the SAME gate pass (finding 2 of issue #42).
+    let child = permit.children.get("c").expect("child pinned at node c");
+    let loaded = store::load(CONNECTOR_NAME).unwrap();
+    assert_eq!(
+        child.connectors.get(CONNECTOR_NAME),
+        Some(&loaded.digest),
+        "child pin's connector map matches the live tree digest"
+    );
+    // The account map covers EVERY merged account (acct1 granted, acct2 not),
+    // each keyed `connector/account` with its account digest.
+    let out = resolve_playbook(root.path(), &parsed_playbook()).unwrap();
+    let resolved = out.connectors.get(CONNECTOR_NAME).unwrap();
+    assert_eq!(resolved.accounts.len(), 2, "two merged accounts");
+    for account in &resolved.accounts {
+        let key = account_trust_id(CONNECTOR_NAME, &account.name);
+        assert_eq!(
+            child.connector_accounts.get(&key),
+            Some(&account_digest(account)),
+            "child pin account map covers `{key}`"
+        );
+    }
+}
+
+// --- finding 11: a bound connector with zero accounts warns, not refuses ----
+
+const ZERO_PB_ID: &str = "conn-zero";
+
+/// A playbook whose agent node binds `mock-tracker` with no `accounts`
+/// allowlist. With no account config installed the connector resolves to zero
+/// accounts.
+fn zero_account_yaml() -> &'static str {
+    r#"schema: 2
+id: conn-zero
+name: conn-zero
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, connectors: [{ name: mock-tracker }] }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: f }
+"#
+}
+
+fn zero_wref() -> PlaybookRef {
+    PlaybookRef {
+        origin: Origin::Project { workspace_id: None },
+        id: ZERO_PB_ID.into(),
+        version: None,
+    }
+}
+
+#[test]
+fn zero_account_connector_warns_but_permits() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    // Minimal setup: install the connector but write NO account config, so
+    // `mock-tracker` resolves to zero configured accounts.
+    let _cfg = set_var("APB_CONFIG_DIR", &cfg.path().to_string_lossy());
+    init_project(root.path()).unwrap();
+    write_fixture_connector(cfg.path());
+    write_pb_named(root.path(), ZERO_PB_ID, zero_account_yaml());
+    approve_named(ZERO_PB_ID, zero_account_yaml());
+    approve_connector();
+
+    // Not a hard refusal: the gate still permits the run (finding 11).
+    let permit = check_run(root.path(), &zero_wref(), false, false)
+        .expect("a zero-account connector permits, it is not a hard refusal");
+    // It surfaces a consent-time warning naming the connector.
+    assert!(
+        permit.warnings.iter().any(|w| w.contains(CONNECTOR_NAME)),
+        "a bound connector with zero accounts yields a consent-time warning: {:?}",
+        permit.warnings
+    );
+    // The connector is still pinned (trusted); its account map is empty.
+    assert!(permit.connectors.contains_key(CONNECTOR_NAME));
+    assert!(
+        permit.connector_accounts.is_empty(),
+        "zero configured accounts means an empty account permit map"
+    );
+}

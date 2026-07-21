@@ -432,6 +432,9 @@ struct RunBody {
     instruction: Option<String>,
     #[serde(default)]
     params: std::collections::BTreeMap<String, String>,
+    /// Run id to continue as a fresh run (issue #42 finding 10).
+    #[serde(default)]
+    continued_from: Option<String>,
 }
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
@@ -464,6 +467,7 @@ async fn run_playbook_handler(
     let mut opts = apb_engine::RunOptions {
         instruction: body.instruction,
         params: body.params,
+        continued_from: body.continued_from,
         ..Default::default()
     };
 
@@ -496,6 +500,14 @@ async fn run_playbook_handler(
         Ok(run_id) => Json(serde_json::json!({ "run_id": run_id })).into_response(),
         Err(apb_engine::EngineError::NotFound(what)) => {
             (StatusCode::NOT_FOUND, what).into_response()
+        }
+        Err(apb_engine::EngineError::Conflict(what)) => {
+            (StatusCode::CONFLICT, what).into_response()
+        }
+        // Client precondition failures (e.g. cross-playbook continued_from)
+        // must not look like server faults.
+        Err(apb_engine::EngineError::Invalid(what)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, what).into_response()
         }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
@@ -1652,16 +1664,44 @@ async fn list_agents_handler() -> impl IntoResponse {
     Json(serde_json::json!({ "agents": apb_core::detect::detect(false) })).into_response()
 }
 
-/// GET /api/models: the curated models table (a hint, not a hard binding) plus
-/// the claude static list. Machine-wide. Powers the model combobox.
+/// GET /api/models: the curated models table (a hint, not a hard binding),
+/// the claude static list, and `options_by_agent` - the per-agent option list
+/// the profile form's model combobox now uses (issue #42 finding 9): the
+/// curated table filtered to that agent's vendor, each row annotated
+/// `detected` when the agent's local config/detected model list also names
+/// it, plus a `detected`-only entry for a detected model the table does not
+/// carry. Detection only annotates or extends the list here, it never
+/// replaces it - see `apb_core::models_table::model_options_for_agent`.
+/// Machine-wide. Powers the model combobox.
 async fn list_models_handler() -> impl IntoResponse {
     match apb_core::models_table::load_merged() {
-        Ok(t) => Json(serde_json::json!({
-            "as_of": t.as_of,
-            "models": t.models,
-            "claude_static": t.claude_static_models,
-        }))
-        .into_response(),
+        Ok(t) => {
+            let agents = apb_core::detect::detect(false);
+            let options_by_agent: std::collections::BTreeMap<
+                String,
+                Vec<apb_core::models_table::ModelOption>,
+            > = agents
+                .iter()
+                .map(|a| {
+                    let detected = a
+                        .models
+                        .as_ref()
+                        .map(|m| m.items.clone())
+                        .unwrap_or_default();
+                    (
+                        a.agent.clone(),
+                        apb_core::models_table::model_options_for_agent(&a.agent, &detected, &t),
+                    )
+                })
+                .collect();
+            Json(serde_json::json!({
+                "as_of": t.as_of,
+                "models": t.models,
+                "claude_static": t.claude_static_models,
+                "options_by_agent": options_by_agent,
+            }))
+            .into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

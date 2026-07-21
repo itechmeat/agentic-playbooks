@@ -27,6 +27,9 @@ mod acp_config_test;
 #[cfg(unix)]
 #[path = "suite/adapter_bounded_waits_test.rs"]
 mod adapter_bounded_waits_test;
+#[cfg(unix)]
+#[path = "suite/adapter_output_test.rs"]
+mod adapter_output_test;
 #[path = "suite/adapter_test.rs"]
 mod adapter_test;
 #[path = "suite/agent_report_test.rs"]
@@ -39,6 +42,8 @@ mod background_run_test;
 mod background_supervisor_test;
 #[path = "suite/cache_test.rs"]
 mod cache_test;
+#[path = "suite/child_connector_prepare.rs"]
+mod child_connector_prepare;
 #[path = "suite/child_run_event_test.rs"]
 mod child_run_event_test;
 #[path = "suite/connector_asana.rs"]
@@ -63,6 +68,8 @@ mod connector_smtp;
 mod context_compaction_test;
 #[path = "suite/context_test.rs"]
 mod context_test;
+#[path = "suite/control_liveness_test.rs"]
+mod control_liveness_test;
 #[path = "suite/control_test.rs"]
 mod control_test;
 #[path = "suite/detached_driver_test.rs"]
@@ -71,9 +78,14 @@ mod detached_driver_test;
 mod digest_binding_test;
 #[path = "suite/event_test.rs"]
 mod event_test;
+#[path = "suite/failure_reason_test.rs"]
+mod failure_reason_test;
 #[cfg(unix)]
 #[path = "suite/finish_answer_test.rs"]
 mod finish_answer_test;
+#[cfg(unix)]
+#[path = "suite/finish_context_test.rs"]
+mod finish_context_test;
 #[path = "suite/global_config_test.rs"]
 mod global_config_test;
 #[path = "suite/global_scope_run_test.rs"]
@@ -92,6 +104,8 @@ mod interactive_live_test;
 mod interactive_reprompt_test;
 #[path = "suite/interactive_timeout_test.rs"]
 mod interactive_timeout_test;
+#[path = "suite/lineage_test.rs"]
+mod lineage_test;
 #[path = "suite/list_runs_resilient_test.rs"]
 mod list_runs_resilient_test;
 #[path = "suite/loop_edges_test.rs"]

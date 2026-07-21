@@ -62,6 +62,10 @@ pub struct PlaybookRunArgs {
     /// runs in the current project (spec 5.1).
     #[serde(default)]
     pub scope: Option<String>,
+    /// Run id to continue as a fresh run (issue #42 finding 10). Links the new
+    /// run to the predecessor in runs_list/run_status.
+    #[serde(default)]
+    pub continued_from: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -189,6 +193,15 @@ pub struct SupervisorContinueArgs {
 pub struct SupervisorContextArgs {
     pub token: String,
     pub note: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SupervisorInterruptArgs {
+    pub token: String,
+    /// Why the running attempt is being interrupted, recorded verbatim in the
+    /// journaled `attempt_interrupted` event. Defaults to a generic reason.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

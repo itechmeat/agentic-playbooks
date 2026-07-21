@@ -15,7 +15,7 @@ use apb_core::versioning::{promote_policy, promote_version, should_promote};
 use serde::Serialize;
 
 use crate::adapter::{AgentAdapter, AgentTask, ErrorClass, adapter_for};
-use crate::context::{build_context, build_context_for_render, render};
+use crate::context::{build_context, build_context_for_render, build_terminal_context, render};
 use crate::control::{Control, read_control_after, read_control_cursor, write_control_cursor};
 use crate::error::EngineError;
 use crate::event::{
@@ -55,6 +55,34 @@ use prepare::*;
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
+
+/// A one-line, machine-facing detail extracted from a failed finish-answer
+/// attempt's last output, for the `RunError` anomaly reason. Empty output (a
+/// bare spawn/timeout failure with no body) collapses to a fixed phrase so the
+/// reason never renders a dangling `()`.
+fn failure_detail(out: &str) -> String {
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        return "no agent output".to_string();
+    }
+    let first_line = trimmed.lines().next().unwrap_or(trimmed);
+    let capped: String = first_line.chars().take(200).collect();
+    capped
+}
+
+/// The minimal generated closing message a finish-with-prompt falls back to
+/// when its answer-composition agent fails (issue #42 finding 5). The run's
+/// substantive work is already done and its declared outcome stands; this is
+/// only the cosmetic closing text, so a fixed, machine-facing note that points
+/// at the journal is enough. English (machine-facing field), no em-dash or
+/// exclamation per the repo convention.
+fn fallback_finish_answer(node: &str) -> String {
+    format!(
+        "Run complete. The automated closing summary for finish node `{node}` \
+         could not be composed; see the run events for the composition failure \
+         and the full run context."
+    )
+}
 
 /// A shared append handle over the run's single event log, used only for the
 /// two attempt-lifecycle events that are journaled off the return batch:
@@ -132,6 +160,8 @@ pub struct RunOptions {
     pub expected_connector_accounts: BTreeMap<String, String>,
     /// Parent run id when this run is a sub-playbook child (spec C).
     pub parent_run: Option<String>,
+    /// Predecessor run id when this run continues an existing run as a new id.
+    pub continued_from: Option<String>,
     /// Sub-playbook nesting depth of THIS run (0 for a top-level run).
     pub depth: usize,
     /// Verified sub-playbook pins from the gate, keyed by playbook-node id.
@@ -784,12 +814,12 @@ fn prepare_supervised_background_target(
     Ok(PreparedRun(p))
 }
 
-/// Drives a prepared run until a terminal state (or an internal engine
-/// error). If `drive` returned `Err` without a terminal record, appends
-/// `run_finished(failed)` itself - without this fallback the run would stay
-/// stuck in `Running` forever for an external observer (drive already writes a
-/// terminal event on all `Ok(..)` paths: Succeeded/Failed/Paused/Aborted;
-/// we only reach here on an internal error, e.g. from `execute_node`).
+/// Drives a prepared run until a terminal state. `drive` itself now converts
+/// every internal error into a logged `RunError` + `run_finished(failed)`
+/// (issue #42 finding 3), so it no longer returns `Err` in practice; the
+/// fallback below is kept as a defensive backstop in case a future change to
+/// `drive` reopens an `Err` path - without it, such a run would stay stuck in
+/// `Running` forever for an external observer.
 pub fn drive_prepared(root: &Path, prepared: PreparedRun) -> Result<RunResult, EngineError> {
     let mut p = prepared.0;
     let res = drive(
@@ -932,8 +962,10 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
         cfg.mode,
         cfg.supervisor_expected,
     );
-    // Same fallback as `drive_prepared`: an internal error with no terminal
-    // record would leave the run `running` forever for any external observer.
+    // Same defensive backstop as `drive_prepared`: `drive` no longer returns
+    // `Err` in practice (issue #42 finding 3), but without this an internal
+    // error with no terminal record would leave the run `running` forever for
+    // any external observer.
     if res.is_err() {
         let _ = log.append(EventPayload::RunFinished {
             outcome: "failed".into(),
@@ -1081,8 +1113,75 @@ pub fn post_supervisor_command(
 
 /// The shared execution loop: advances the run from `start_node` to a finish node,
 /// a pause, or exhausting the step limit. Used by both `run` and `resume`.
+///
+/// A thin wrapper over [`drive_inner`], which does the actual work and still
+/// returns `Err` for every scheduler/prepare-refusal fault it hits (no
+/// matching outgoing edge, an exceeded step budget, a stalled resume, a
+/// sub-playbook that failed to resolve or prepare, an ordinary I/O fault
+/// reading or writing the journal/control file). Before this wrapper, that
+/// `Err` propagated straight to the caller: two callers (`run`, `run_resolved`)
+/// have no fallback at all, so the run was simply left `running` forever with
+/// no terminal event; the callers that DO have a fallback (`drive_prepared`,
+/// `drive_run_from_dir`) appended a bare `run_finished(failed)` with no
+/// explanation. Diagnosing either shape required reading engine source
+/// (issue #42 finding 3). This wrapper appends the verbatim reason as a
+/// `RunError` event and the terminal `run_finished(failed)` itself, then
+/// returns `Ok` - so every caller, old and new alike, sees a normal terminal
+/// result with the reason already in the journal and in `RunState::fold`'s
+/// `failure_reason`.
 #[allow(clippy::too_many_arguments)]
 fn drive(
+    playbook: Playbook,
+    run_dir: &Path,
+    root: &Path,
+    log: &mut EventLog,
+    cfg: &RunConfig,
+    start_node: String,
+    start_mode: StartMode,
+    run_id: String,
+    mode: RunMode,
+    supervisor_expected: bool,
+) -> Result<RunResult, EngineError> {
+    let run_id_for_failure = run_id.clone();
+    match drive_inner(
+        playbook,
+        run_dir,
+        root,
+        log,
+        cfg,
+        start_node,
+        start_mode,
+        run_id,
+        mode,
+        supervisor_expected,
+    ) {
+        Ok(r) => Ok(r),
+        Err(e) => {
+            // Best effort: the run directory may itself be in a bad state
+            // (the same disk fault that failed the drive loop could also fail
+            // this append) - never let a failure to explain shadow the fact
+            // that the run failed. `node: None` here: `drive_inner`'s error
+            // messages already name the node inline where one is known (`node
+            // `x` has no outgoing edge...`), and there is no single local
+            // variable that reliably holds "the node that was executing" at
+            // every one of its `?` call sites.
+            let _ = log.append(EventPayload::RunError {
+                node: None,
+                reason: e.to_string(),
+            });
+            let _ = log.append(EventPayload::RunFinished {
+                outcome: "failed".into(),
+            });
+            Ok(RunResult {
+                run_id: run_id_for_failure,
+                outcome: RunStatus::Failed,
+            })
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn drive_inner(
     mut playbook: Playbook,
     run_dir: &Path,
     root: &Path,
@@ -1312,6 +1411,17 @@ fn drive(
                     control_cursor = Some(entry.seq);
                     write_control_cursor(run_dir, entry.seq)?;
                 }
+                Control::Interrupt { .. } => {
+                    // A mid-attempt interrupt (finding 7 of issue #42, third
+                    // item of issue #40) reaching a node boundary is spent: the
+                    // running attempt's own poll loop already observed it live
+                    // (journaling control_received / attempt_interrupted) and
+                    // terminated the agent. At a boundary there is no attempt to
+                    // interrupt, so just consume it and move on - an interrupt
+                    // posted with no attempt running is a harmless no-op.
+                    control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
+                }
                 Control::Retry { ref node, .. } | Control::ContinueFrom { ref node } => {
                     // Valid only inside await_control, in response to a wake -
                     // we do not advance the cursor, the command remains unconsumed.
@@ -1444,22 +1554,29 @@ fn drive(
                     log.append(ev)?;
                 }
                 if st != NodeStatus::Succeeded {
-                    log.append(EventPayload::NodeFinished {
-                        node: current.clone(),
-                        status: st.as_str().into(),
-                        attempt: 1,
-                        output: out.clone(),
-                        artifacts: Vec::new(),
+                    // The CLOSING answer failed to compose. This must NOT flip
+                    // the run's real outcome (issue #42 finding 5): reaching a
+                    // terminal finish node means every substantive node already
+                    // ran, so the run's result is the finish node's DECLARED
+                    // `outcome`, not the success of a cosmetic answer step. The
+                    // failed attempt(s) are already journaled by
+                    // `execute_finish_answer`; add a RunError anomaly so the
+                    // composition failure stays visible (harmless on a succeeded
+                    // run - doctor/status read it only while `Failed`), then
+                    // fall back to a minimal generated closing message and let
+                    // the declared outcome stand.
+                    log.append(EventPayload::RunError {
+                        node: Some(current.clone()),
+                        reason: format!(
+                            "finish answer composition failed ({}); \
+                             fell back to a generated closing message",
+                            failure_detail(&out)
+                        ),
                     })?;
-                    log.append(EventPayload::RunFinished {
-                        outcome: "failed".into(),
-                    })?;
-                    return Ok(RunResult {
-                        run_id,
-                        outcome: RunStatus::Failed,
-                    });
+                    fallback_finish_answer(&current)
+                } else {
+                    out
                 }
-                out
             } else {
                 String::new()
             };
@@ -1714,10 +1831,19 @@ fn drive(
                 (NodeStatus::Succeeded, entry.cmd.decision.clone())
             } else {
                 // No decision yet: declare the request once, then wait (poll).
+                // The event carries an owner-facing pending instruction (issue
+                // #42 finding 4) so a supervising agent, or any reader of the
+                // log alone, can tell the owner an action is expected, what the
+                // options are, and how to answer.
                 if review_requested_count(&events, &current) <= decided {
+                    let title = playbook.node(&current).and_then(|n| n.title.clone());
+                    let instruction =
+                        crate::progress::review_instruction(&current, title.as_deref(), options);
                     log.append(EventPayload::ReviewRequested {
                         node: current.clone(),
                         options: options.clone(),
+                        title,
+                        instruction,
                     })?;
                 }
                 std::thread::sleep(AWAIT_CONTROL_POLL);
@@ -2600,6 +2726,16 @@ fn drive(
                             outcome: RunStatus::Aborted,
                         });
                     }
+                    Control::Interrupt { .. } => {
+                        // An interrupt (finding 7 of issue #42, third item of
+                        // issue #40) is a mid-attempt command; at a wake there is
+                        // no running attempt to terminate, so it is spent.
+                        // Consume it (advance the cursor so await_control does not
+                        // hand it back) and keep waiting for a real directive.
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
+                        continue;
+                    }
                 }
             }
             continue;
@@ -2665,6 +2801,10 @@ pub struct RunSummary {
     pub progress: Option<crate::progress::ProgressSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub continued_from: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
 }
 
 pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
@@ -2698,9 +2838,10 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             })
             .unwrap_or_else(|| (run_id.clone(), 0));
         let progress = crate::progress::from_run_dir(&entry.path(), &events);
-        let parent_run = crate::run_config::read_run_config(&entry.path())
-            .ok()
-            .and_then(|c| c.parent_run);
+        let cfg = crate::run_config::read_run_config(&entry.path()).ok();
+        let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
+        let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
+        let superseded_by = cfg.as_ref().and_then(|c| c.superseded_by.clone());
         out.push(RunSummary {
             run_id,
             playbook,
@@ -2708,6 +2849,8 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             started_ts,
             progress,
             parent_run,
+            continued_from,
+            superseded_by,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.started_ts));

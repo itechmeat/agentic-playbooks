@@ -293,6 +293,15 @@ fn resume_after_terminal_child_starts_a_new_child() {
         started[1], "oldchild-1",
         "the retry starts a child with a fresh run id"
     );
+
+    let old_cfg =
+        apb_engine::run_config::read_run_config(&dir.path().join(".apb/runs").join("oldchild-1"))
+            .unwrap();
+    let new_cfg =
+        apb_engine::run_config::read_run_config(&dir.path().join(".apb/runs").join(&started[1]))
+            .unwrap();
+    assert_eq!(old_cfg.superseded_by.as_deref(), Some(started[1].as_str()));
+    assert_eq!(new_cfg.continued_from.as_deref(), Some("oldchild-1"));
 }
 
 #[test]

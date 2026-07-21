@@ -866,14 +866,25 @@ fn finish_answer_fallback_skips_identical_agent_and_model_binding() {
     );
 
     let res = run(proj.path(), "pf", None, RunOptions::default()).expect("run returns");
+    // The one real step of the chain is exhausted and the answer composition
+    // fails - but that no longer flips the run (issue #42 finding 5): the finish
+    // node's declared `outcome: success` stands, with a generated fallback
+    // closing message and a RunError anomaly recording the composition failure.
     assert_eq!(
         res.outcome,
-        RunStatus::Failed,
-        "the answer composition fails once its one real step is exhausted"
+        RunStatus::Succeeded,
+        "a failed finish-answer composition keeps the declared success outcome"
     );
     let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
     let events = read_all(&run_dir).unwrap();
 
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::RunError { node: Some(n), .. } if n == "done"
+        )),
+        "the finish-answer composition failure must be journaled as a RunError anomaly"
+    );
     assert!(
         !events
             .iter()

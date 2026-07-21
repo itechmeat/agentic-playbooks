@@ -365,6 +365,10 @@ pub struct OpenAttempt {
     pub pid: Option<u32>,
     /// Epoch milliseconds of the `attempt_started` event.
     pub started_ms: u128,
+    /// Monotonic journal sequence of the `attempt_started` event. Preferred
+    /// over `started_ms` for ordering against later journal entries: two
+    /// events can share a wall-clock millisecond, but seq never ties.
+    pub started_seq: u64,
 }
 
 /// Every attempt still open at the end of the journal, ordered by node then
@@ -372,13 +376,13 @@ pub struct OpenAttempt {
 /// separate because the fold deliberately throws away the pid and the
 /// timestamp, which are exactly what liveness needs.
 pub fn open_attempts(events: &[Event]) -> Vec<OpenAttempt> {
-    let mut open: BTreeMap<(String, u32), (u128, Option<u32>)> = BTreeMap::new();
+    let mut open: BTreeMap<(String, u32), (u128, u64, Option<u32>)> = BTreeMap::new();
     for e in events {
         match &e.payload {
             EventPayload::AttemptStarted {
                 node, attempt, pid, ..
             } => {
-                open.insert((node.clone(), *attempt), (e.ts, *pid));
+                open.insert((node.clone(), *attempt), (e.ts, e.seq, *pid));
             }
             EventPayload::AttemptFinished { node, attempt, .. } => {
                 open.remove(&(node.clone(), *attempt));
@@ -393,12 +397,15 @@ pub fn open_attempts(events: &[Event]) -> Vec<OpenAttempt> {
         }
     }
     open.into_iter()
-        .map(|((node, attempt), (started_ms, pid))| OpenAttempt {
-            node,
-            attempt,
-            pid,
-            started_ms,
-        })
+        .map(
+            |((node, attempt), (started_ms, started_seq, pid))| OpenAttempt {
+                node,
+                attempt,
+                pid,
+                started_ms,
+                started_seq,
+            },
+        )
         .collect()
 }
 
@@ -415,6 +422,12 @@ pub struct NodeTimes {
     /// The pid of that open attempt. `None` when there is no open attempt, or
     /// when the journal recorded none.
     pub attempt_pid: Option<u32>,
+    /// True when the node's currently open attempt has been flagged as running
+    /// past its `expected_duration` (a stall anomaly was journaled for it, spec
+    /// 2026-07-21). Lets a `run_status` caller tell a normally-slow attempt from
+    /// one the engine already considers anomalously overrun. `false` when there
+    /// is no open attempt or none was flagged.
+    pub past_estimate: bool,
 }
 
 /// Timings for every node the journal has ever started, keyed by node id.
@@ -444,10 +457,33 @@ pub fn node_times(events: &[Event]) -> BTreeMap<String, NodeTimes> {
         .into_iter()
         .map(|(node, ts)| {
             let open = latest.get(&node);
+            // Past-estimate flag (spec 2026-07-21): a stall anomaly the drive
+            // journaled during THIS open attempt, i.e. a `SupervisorAction` with
+            // the stall action after the attempt's start. Scope by journal seq
+            // (not wall-clock ms): a retry can share a millisecond with the
+            // prior attempt's stall action, and that stale anomaly must never
+            // mark the fresh open attempt.
+            let past_estimate = open.is_some_and(|a| {
+                events.iter().any(|e| {
+                    if let EventPayload::SupervisorAction {
+                        action,
+                        node: Some(n),
+                        ..
+                    } = &e.payload
+                    {
+                        action.as_str() == crate::stall::STALL_ACTION
+                            && *n == node
+                            && e.seq > a.started_seq
+                    } else {
+                        false
+                    }
+                })
+            });
             let times = NodeTimes {
                 started_ms: clamp_ms(ts),
                 attempt_age_ms: open.map(|a| clamp_ms(now.saturating_sub(a.started_ms))),
                 attempt_pid: open.and_then(|a| a.pid),
+                past_estimate,
             };
             (node, times)
         })
@@ -771,6 +807,7 @@ mod tests {
                     status: "succeeded".into(),
                     duration_ms: None,
                     session: None,
+                    summary: None,
                 },
             ),
         ];
@@ -919,5 +956,70 @@ mod tests {
             ),
         ];
         assert!(lost_nodes(&events).is_empty());
+    }
+
+    /// A retry whose `AttemptStarted` lands in the same millisecond as the
+    /// prior attempt's stall action must not inherit that stall as
+    /// `past_estimate`. Ordering must use journal seq, not wall-clock ms.
+    #[test]
+    fn past_estimate_keys_on_seq_not_same_millisecond_timestamp() {
+        let same_ms = 10_000_u128;
+        let events = vec![
+            ev(
+                0,
+                1_000,
+                EventPayload::NodeStarted {
+                    node: "a".into(),
+                    attempt: 1,
+                },
+            ),
+            ev(1, 2_000, attempt_started("a", 1, Some(11))),
+            // Prior attempt stalls; timestamp collides with the retry start.
+            ev(
+                2,
+                same_ms,
+                EventPayload::SupervisorAction {
+                    action: crate::stall::STALL_ACTION.into(),
+                    node: Some("a".into()),
+                    detail: "attempt 1 past estimate".into(),
+                },
+            ),
+            ev(
+                3,
+                3_000,
+                EventPayload::AttemptFinished {
+                    node: "a".into(),
+                    attempt: 1,
+                    status: "failed".into(),
+                    duration_ms: None,
+                    session: None,
+                    summary: None,
+                },
+            ),
+            // Fresh retry shares the stall action's millisecond.
+            ev(4, same_ms, attempt_started("a", 2, Some(12))),
+        ];
+        let a = node_times(&events).remove("a").expect("node a");
+        assert!(
+            !a.past_estimate,
+            "stale stall from a prior attempt must not mark a same-ms retry"
+        );
+
+        // A stall journaled after the new AttemptStarted still flags it.
+        let mut with_fresh_stall = events;
+        with_fresh_stall.push(ev(
+            5,
+            same_ms + 1,
+            EventPayload::SupervisorAction {
+                action: crate::stall::STALL_ACTION.into(),
+                node: Some("a".into()),
+                detail: "attempt 2 past estimate".into(),
+            },
+        ));
+        let a = node_times(&with_fresh_stall).remove("a").expect("node a");
+        assert!(
+            a.past_estimate,
+            "a stall after the open AttemptStarted must mark past_estimate"
+        );
     }
 }

@@ -4,9 +4,9 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use apb_mcp::tools::{
-    ToolError, context_append, node_retry, playbook_run_supervised, run_abort, run_continue_from,
-    run_pause, run_status, supervisor_capabilities, supervisor_report, supervisor_wait_event,
-    sv_run_inspect,
+    ToolError, context_append, interrupt_attempt, node_retry, playbook_run_supervised, run_abort,
+    run_continue_from, run_pause, run_status, supervisor_capabilities, supervisor_report,
+    supervisor_wait_event, sv_run_inspect,
 };
 
 // Cargo runs #[test] functions in parallel within one process, so tests
@@ -182,6 +182,7 @@ fn playbook_run_supervised_prepares_the_run_and_hands_off_the_drive() {
         None,
         Default::default(),
         Default::default(),
+        None,
     )
     .unwrap();
     let elapsed = started.elapsed();
@@ -324,6 +325,47 @@ fn traversal_run_id_is_not_found_in_all_tools() {
     assert!(
         matches!(err, ToolError::NotFound(_)),
         "run_continue_from traversal: expected NotFound, got {err:?}"
+    );
+
+    let err = interrupt_attempt(dir.path(), bad, None).unwrap_err();
+    assert!(
+        matches!(err, ToolError::NotFound(_)),
+        "interrupt_attempt traversal: expected NotFound, got {err:?}"
+    );
+}
+
+// Scenario 5b (finding 7 of issue #42, third item of issue #40): the interrupt
+// tool posts a `Control::Interrupt` command onto an existing run's control
+// channel and returns its seq. The drive is what acts on it (SIGKILL of the
+// running attempt); the tool's job is only to post, single-writer.
+#[test]
+fn interrupt_attempt_posts_command() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "noagent_sv", NOAGENT);
+
+    let mut params = BTreeMap::new();
+    params.insert("who".to_string(), "world".to_string());
+    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+
+    let v = interrupt_attempt(dir.path(), &run_id, Some("wedged")).unwrap();
+    assert!(
+        v["posted_seq"].is_u64(),
+        "interrupt_attempt should return posted_seq, got {v:?}"
+    );
+
+    let control = fs::read_to_string(
+        dir.path()
+            .join(".apb/runs")
+            .join(&run_id)
+            .join("control.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        control
+            .lines()
+            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+            .any(|v| v.get("cmd").and_then(|c| c.as_str()) == Some("interrupt")),
+        "control.jsonl must contain an interrupt command, got:\n{control}"
     );
 }
 

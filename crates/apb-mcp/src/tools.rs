@@ -10,7 +10,7 @@ use apb_core::versioning::{
 use apb_engine::control::Control;
 use apb_engine::event::read_all;
 use apb_engine::run_config::ChildExpectation;
-use apb_engine::state::RunState;
+use apb_engine::state::{FailureReason, RunState, RunStatus};
 use apb_engine::{
     EngineError, RunMode, RunOptions, list_runs, plan_resume, post_supervisor_command, run,
     run_cancel, run_inspect as engine_run_inspect, stop_run, touch_heartbeat, wait_wake,
@@ -45,6 +45,7 @@ impl From<EngineError> for ToolError {
         match e {
             EngineError::NotFound(m) => ToolError::NotFound(m),
             EngineError::Registry(RegistryError::NotFound(w)) => ToolError::NotFound(w),
+            EngineError::Conflict(m) => ToolError::Conflict(m),
             other => ToolError::Engine(other.to_string()),
         }
     }
@@ -338,7 +339,6 @@ fn truncate_on_char_boundary(s: &mut String, max: usize) {
 
 /// Waits for a terminal run event (succeeded/failed/aborted) up to the deadline.
 fn poll_terminal(run_dir: &Path) -> String {
-    use apb_engine::state::{RunState, RunStatus};
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
         if let Ok(events) = read_all(run_dir) {
@@ -699,6 +699,7 @@ pub fn playbook_run(
     expected_children: Option<BTreeMap<String, ChildExpectation>>,
     expected_connectors: BTreeMap<String, String>,
     expected_connector_accounts: BTreeMap<String, String>,
+    continued_from: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -713,6 +714,7 @@ pub fn playbook_run(
         expected_digest,
         expected_profile_bundles,
         parent_run: None,
+        continued_from,
         depth: 0,
         expected_children,
         expected_connectors,
@@ -745,6 +747,7 @@ pub fn playbook_run_background(
     expected_children: Option<BTreeMap<String, ChildExpectation>>,
     expected_connectors: BTreeMap<String, String>,
     expected_connector_accounts: BTreeMap<String, String>,
+    continued_from: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -759,6 +762,7 @@ pub fn playbook_run_background(
         expected_digest,
         expected_profile_bundles,
         parent_run: None,
+        continued_from,
         depth: 0,
         expected_children,
         expected_connectors,
@@ -807,7 +811,13 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // (`run_answer`'s caller, the web) do not have to drill into `progress`.
     // `progress` itself still carries it too (`progress.pending_question`),
     // unchanged.
+    let cfg = apb_engine::run_config::read_run_config(&dir).unwrap_or_default();
     let pending_question = progress.as_ref().and_then(|p| p.pending_question.clone());
+    // Lifted to the top level like `pending_question` (issue #42 finding 4):
+    // a human_review gate must be first-class here so an intermediary that
+    // calls `run_status` is forced to see the pending decision, its options,
+    // and how to answer - the gate no longer waits silently forever.
+    let pending_review = progress.as_ref().and_then(|p| p.pending_review.clone());
     let answer = apb_engine::progress::run_answer(&dir, &events);
     let children: Vec<Value> = events
         .iter()
@@ -823,6 +833,15 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
             _ => None,
         })
         .collect();
+    // The verbatim reason behind a `failed` run (issue #42 finding 3): every
+    // scheduler/prepare path that fails a run now appends a `RunError` before
+    // its terminal `run_finished(failed)`, so an operator reads why directly
+    // from run_status instead of grepping events.jsonl by hand. `None` for
+    // anything other than a failed run, and for a failed run whose log
+    // predates this fix (no `RunError` was ever appended for it).
+    let failure_reason = (state.run_status == RunStatus::Failed)
+        .then(|| state.failure_reason.as_ref().map(FailureReason::display))
+        .flatten();
     Ok(json!({
         "run_id": run_id,
         "run_status": state.run_status.as_str(),
@@ -832,8 +851,12 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "outputs": state.outputs,
         "progress": progress,
         "pending_question": pending_question,
+        "pending_review": pending_review,
         "answer": answer,
         "children": children,
+        "continued_from": cfg.continued_from,
+        "superseded_by": cfg.superseded_by,
+        "failure_reason": failure_reason,
     }))
 }
 
@@ -979,6 +1002,7 @@ pub fn playbook_run_supervised(
     expected_children: Option<BTreeMap<String, ChildExpectation>>,
     expected_connectors: BTreeMap<String, String>,
     expected_connector_accounts: BTreeMap<String, String>,
+    continued_from: Option<String>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence supervisor_expected: false
@@ -996,6 +1020,7 @@ pub fn playbook_run_supervised(
         expected_digest,
         expected_profile_bundles,
         parent_run: None,
+        continued_from,
         depth: 0,
         expected_children,
         expected_connectors,
@@ -1022,7 +1047,14 @@ pub fn supervisor_wait_event(
     let timeout = Duration::from_millis(timeout_ms.unwrap_or(25_000));
     let wake = wait_wake(root, run_id, after_seq, timeout)?;
     let status = run_status(root, run_id)?;
-    Ok(json!({ "wake": wake, "run_status": status["run_status"] }))
+    // Surface the pending human-review gate here too (issue #42 finding 4): a
+    // supervisor that wakes on a run must see the gate and its owner-facing
+    // instruction so it relays the decision to the user rather than blocking.
+    Ok(json!({
+        "wake": wake,
+        "run_status": status["run_status"],
+        "pending_review": status["pending_review"],
+    }))
 }
 
 /// A full run summary for the observer (status, nodes, context.md, wakes, actions, events).
@@ -1084,6 +1116,33 @@ pub fn context_append(root: &Path, run_id: &str, note: &str) -> Result<Value, To
         run_id,
         Control::ContextAppend {
             note: note.to_string(),
+        },
+    )?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
+/// Requests interruption of the run's currently RUNNING attempt (finding 7 of
+/// issue #42, third item of issue #40). Posts `Control::Interrupt`; the
+/// attempt's own poll loop observes it live, SIGKILLs the agent, and journals
+/// `attempt_interrupted`. The killed attempt is journaled failed, so ordinary
+/// retry/fallback/patch then proceeds at the next attempt boundary - the point
+/// being a supervisor can now force the attempt boundary of a wedged attempt
+/// (typically after a stall anomaly woke it) rather than waiting out a hang that
+/// may never end. Unlike `run_abort` this does NOT stop the run. An interrupt
+/// with no attempt running is a harmless no-op. The response reports
+/// `posted_seq`; the resulting `control_received`/`attempt_interrupted` events
+/// are visible via `supervisor_run_inspect` and `run_events`, so a supervisor
+/// can confirm the message was received live.
+pub fn interrupt_attempt(
+    root: &Path,
+    run_id: &str,
+    reason: Option<&str>,
+) -> Result<Value, ToolError> {
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::Interrupt {
+            reason: reason.unwrap_or("supervisor interrupt").to_string(),
         },
     )?;
     Ok(json!({ "posted_seq": seq }))
@@ -1277,6 +1336,61 @@ mod progress_tests {
         let a = table.iter().find(|e| e["node"] == "a").unwrap();
         assert_eq!(a["expected_seconds"], 100);
         assert_eq!(a["measured_seconds"], 5);
+    }
+
+    /// Issue #42 finding 3: `run_status` must expose the terminal error for a
+    /// failed run directly, rather than making an operator open events.jsonl
+    /// by hand to find the `run_error` event.
+    #[test]
+    fn run_status_exposes_failure_reason_for_a_failed_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":1000,"type":"node_started","node":"a","attempt":1}"#,
+                "\n",
+                r#"{"seq":2,"ts":2000,"type":"node_finished","node":"a","status":"failed","attempt":1,"output":"boom"}"#,
+                "\n",
+                r#"{"seq":3,"ts":2500,"type":"run_error","node":"a","reason":"node `a` has no outgoing edge and is not finish"}"#,
+                "\n",
+                r#"{"seq":4,"ts":3000,"type":"run_finished","outcome":"failed"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        assert_eq!(out["run_status"], "failed");
+        let reason = out["failure_reason"]
+            .as_str()
+            .expect("failure_reason must be a string for a failed run with a recorded RunError");
+        assert!(reason.contains("no outgoing edge"));
+        assert!(reason.contains("node `a`"));
+    }
+
+    /// `failure_reason` stays absent (JSON `null`) for a run that is not
+    /// failed - it must not appear on a succeeded/running/paused run.
+    #[test]
+    fn run_status_omits_failure_reason_for_a_succeeded_run() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":0,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":1000,"type":"run_finished","outcome":"succeeded"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let out = run_status(tmp.path(), "r1").unwrap();
+        assert_eq!(out["run_status"], "succeeded");
+        assert!(out["failure_reason"].is_null());
     }
 
     #[test]

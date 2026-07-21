@@ -71,6 +71,117 @@ async fn agents_models_and_skills_endpoints() {
     );
     assert!(!json["claude_static"].as_array().unwrap().is_empty());
 
+    // options_by_agent (issue #42 finding 9): codex ties to the curated
+    // table's openai rows - detection must only annotate, never narrow the
+    // set to the single model string-scanned from config.toml.
+    let codex_opts = json["options_by_agent"]["codex"]
+        .as_array()
+        .expect("options_by_agent.codex array");
+    let table_len = json["models"].as_array().unwrap().len();
+    let openai_rows = json["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|m| m["vendor"] == "openai")
+        .count();
+    assert!(
+        openai_rows > 1,
+        "fixture assumption: the curated table carries more than one openai row"
+    );
+    assert_eq!(
+        codex_opts.len(),
+        openai_rows,
+        "codex's option set is the curated openai rows, not a single detected model: {json}"
+    );
+    assert!(
+        codex_opts.iter().all(|o| o["vendor"] == "openai"),
+        "every codex option is tied to the openai vendor: {json}"
+    );
+    assert!(
+        codex_opts.iter().all(|o| o["detected"] == false),
+        "an empty ~/.codex/config.toml annotates nothing detected: {json}"
+    );
+
+    // An aggregator (no single vendor tie) keeps the whole curated table.
+    let opencode_opts = json["options_by_agent"]["opencode"]
+        .as_array()
+        .expect("options_by_agent.opencode array");
+    assert_eq!(
+        opencode_opts.len(),
+        table_len,
+        "an aggregator keeps every curated row: {json}"
+    );
+
+    // Now write a codex config.toml naming a curated model AND a model the
+    // table does not carry, and re-fetch: the curated model must be
+    // annotated `detected`, the option COUNT must stay unchanged for it (not
+    // narrowed to it), and the config-only model must still appear as its
+    // own extra entry rather than being dropped.
+    let curated_openai_id = json["models"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|m| m["vendor"] == "openai")
+        .unwrap()["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let codex_dir = home.path().join(".codex");
+    std::fs::create_dir_all(&codex_dir).unwrap();
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        format!("model = \"{curated_openai_id}\"\n[model_providers.openai]\n"),
+    )
+    .unwrap();
+    let app = build_router(AppState::new(root.clone()));
+    let (status, json) = get_json(app, "/api/models").await;
+    assert_eq!(status, StatusCode::OK);
+    let codex_opts = json["options_by_agent"]["codex"]
+        .as_array()
+        .expect("options_by_agent.codex array");
+    assert_eq!(
+        codex_opts.len(),
+        openai_rows,
+        "one detected model annotates a row, it must not shrink the option set: {json}"
+    );
+    let detected_row = codex_opts
+        .iter()
+        .find(|o| o["id"] == curated_openai_id.as_str())
+        .expect("the config-named model is still offered");
+    assert_eq!(
+        detected_row["detected"], true,
+        "it is annotated detected: {json}"
+    );
+    assert!(
+        codex_opts
+            .iter()
+            .any(|o| o["id"] != curated_openai_id.as_str() && o["detected"] == false),
+        "a curated sibling model stays offered, undetected: {json}"
+    );
+
+    std::fs::write(
+        codex_dir.join("config.toml"),
+        "model = \"gpt-5-codex-not-yet-in-table\"\n",
+    )
+    .unwrap();
+    let app = build_router(AppState::new(root.clone()));
+    let (status, json) = get_json(app, "/api/models").await;
+    assert_eq!(status, StatusCode::OK);
+    let codex_opts = json["options_by_agent"]["codex"]
+        .as_array()
+        .expect("options_by_agent.codex array");
+    assert!(
+        codex_opts
+            .iter()
+            .any(|o| o["id"] == "gpt-5-codex-not-yet-in-table" && o["detected"] == true),
+        "a config-only model absent from the curated table is still present, as a detected extra: {json}"
+    );
+    assert_eq!(
+        codex_opts.len(),
+        openai_rows + 1,
+        "the curated rows are kept AND the config-only model is appended, not swapped in: {json}"
+    );
+
     // /api/skills project scope: project skills first, then global; invalid
     // names filtered.
     let app = build_router(AppState::new(root.clone()));

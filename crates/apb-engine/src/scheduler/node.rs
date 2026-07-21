@@ -89,6 +89,66 @@ pub(crate) struct LiveContext {
     pub timeout_ms: u64,
 }
 
+/// The seq of the last control entry currently posted, or `None` when the
+/// channel is empty. Used as the mid-attempt observation baseline
+/// (`observe_control`) so only messages that arrive AFTER an attempt begins are
+/// acknowledged as received live - a command already queued (an unconsumed
+/// retry the drive's scan stopped short of) is not re-acked. A read failure is
+/// a hard error at attempt start rather than degrading to `None`: a `None`
+/// baseline re-reads the whole channel, and a stale already-consumed
+/// `Control::Interrupt` must never replay into a fresh attempt.
+fn latest_control_seq(run_dir: &Path) -> Result<Option<u64>, EngineError> {
+    Ok(crate::control::read_control_after(run_dir, None)?
+        .last()
+        .map(|e| e.seq))
+}
+
+/// A short machine-facing description of a control command for a
+/// `control_received` acknowledgment detail (finding 7 of issue #42).
+fn control_summary(cmd: &crate::control::Control, seq: u64) -> String {
+    format!("{} (control seq {seq})", cmd.kind())
+}
+
+/// Journals every control message newer than `seen` as a `control_received`
+/// supervisor action (finding 7 of issue #42, third item of issue #40: a
+/// message posted mid-attempt must be acknowledged live, not only discovered at
+/// the next node boundary). On a [`crate::control::Control::Interrupt`] it
+/// additionally journals an explanatory `attempt_interrupted` action and
+/// reports the request back, so the caller's poll loop can tear the agent down.
+/// Runs on the drive thread through the shared `Journal`, so the single-writer
+/// invariant holds. Returns the highest seq acknowledged (the new baseline) and
+/// whether an interrupt was requested.
+fn observe_control(
+    run_dir: &Path,
+    node_id: &str,
+    attempt: u32,
+    journal: &Journal,
+    seen: Option<u64>,
+) -> Result<(Option<u64>, bool), EngineError> {
+    let mut cursor = seen;
+    let mut interrupt = false;
+    for entry in crate::control::read_control_after(run_dir, seen)? {
+        journal.append(EventPayload::SupervisorAction {
+            action: "control_received".into(),
+            node: Some(node_id.to_string()),
+            detail: control_summary(&entry.cmd, entry.seq),
+        })?;
+        if let crate::control::Control::Interrupt { reason } = &entry.cmd {
+            journal.append(EventPayload::SupervisorAction {
+                action: "attempt_interrupted".into(),
+                node: Some(node_id.to_string()),
+                detail: format!(
+                    "supervisor requested interrupt of node `{node_id}` attempt {attempt} (control seq {}): {reason}",
+                    entry.seq
+                ),
+            })?;
+            interrupt = true;
+        }
+        cursor = Some(entry.seq);
+    }
+    Ok((cursor, interrupt))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -162,6 +222,12 @@ pub(crate) fn execute_node(
             };
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
+            // Stall detection (spec 2026-07-21 run-reliability) fires ONLY for a
+            // node whose author set an explicit `expected_duration`, never off
+            // the per-kind default, so a run with no estimates raises no false
+            // anomalies. `None` here leaves the attempt's stall watch disabled.
+            let expected_secs: Option<u64> =
+                node.expected_duration.as_ref().and_then(|ed| ed.parsed());
 
             // Autonomy grant (spec 8.5): reaching node execution means the run
             // already cleared the policy/trust gate, where the user consented
@@ -508,16 +574,102 @@ pub(crate) fn execute_node(
                         on_tick: &on_tick,
                         abort: &abort,
                     });
+                    // Stall anomaly (spec 2026-07-21): the adapter's poll loop
+                    // calls this once if the attempt runs past its estimate. It
+                    // journals a SupervisorAction marker (which run_status reads
+                    // back as `past_estimate`) plus an Anomaly wake so a waiting
+                    // supervisor returns. A journal failure is carried out like
+                    // `spawn_err`/`tick_err`. Built only for a node that set
+                    // `expected_duration`; otherwise the hook is `None`.
+                    let stall_err: std::cell::RefCell<Option<EngineError>> =
+                        std::cell::RefCell::new(None);
+                    let on_stall = |elapsed: Duration| {
+                        let detail = format!(
+                            "agent_task node `{node_id}` attempt {cur_attempt} is running past its estimate: {}s elapsed vs {}s expected; the run may be stalled",
+                            elapsed.as_secs(),
+                            expected_secs.unwrap_or(0),
+                        );
+                        if let Err(e) = journal.append(EventPayload::SupervisorAction {
+                            action: crate::stall::STALL_ACTION.to_string(),
+                            node: Some(node_id.to_string()),
+                            detail: detail.clone(),
+                        }) {
+                            *stall_err.borrow_mut() = Some(e);
+                            return;
+                        }
+                        if let Err(e) = journal.append(EventPayload::WakeRaised {
+                            trigger: crate::event::WakeTrigger::Anomaly,
+                            node: node_id.to_string(),
+                            detail,
+                        }) {
+                            *stall_err.borrow_mut() = Some(e);
+                        }
+                    };
+                    let stall_hooks = expected_secs.map(|s| crate::adapter::StallHooks {
+                        expected: Duration::from_secs(s),
+                        on_stall: &on_stall,
+                    });
+                    // Live control observation (finding 7 of issue #42, third
+                    // item of issue #40): the adapter's poll loop calls this on
+                    // THIS (the drive) thread each iteration. It journals every
+                    // control message that lands mid-attempt as `control_received`
+                    // - so a supervisor sees its message was seen live, not only
+                    // at the next node boundary - and, on a `Control::Interrupt`,
+                    // journals `attempt_interrupted` and sets `interrupt` so the
+                    // poll loop SIGKILLs the agent. A journal failure is carried
+                    // out like `tick_err`/`stall_err`. The baseline is the last
+                    // control seq already posted when this attempt began, so a
+                    // command queued before the attempt is not re-acked.
+                    let control_err: std::cell::RefCell<Option<EngineError>> =
+                        std::cell::RefCell::new(None);
+                    let interrupt = AtomicBool::new(false);
+                    // Hard-fail if the baseline cannot be read: a None baseline
+                    // would replay the channel and a stale interrupt must never
+                    // replay into this fresh attempt.
+                    let control_seen: std::cell::Cell<Option<u64>> =
+                        std::cell::Cell::new(latest_control_seq(run_dir)?);
+                    let on_control_poll = || {
+                        if control_err.borrow().is_some() {
+                            return;
+                        }
+                        match observe_control(
+                            run_dir,
+                            node_id,
+                            cur_attempt,
+                            journal,
+                            control_seen.get(),
+                        ) {
+                            Ok((new_seen, interrupt_requested)) => {
+                                control_seen.set(new_seen);
+                                if interrupt_requested {
+                                    interrupt.store(true, Ordering::Relaxed);
+                                }
+                            }
+                            Err(e) => *control_err.borrow_mut() = Some(e),
+                        }
+                    };
+                    let control_hooks = crate::adapter::ControlHooks {
+                        on_poll: &on_control_poll,
+                        interrupt: &interrupt,
+                    };
                     let outcome = adapter.run_cancellable(
                         &task,
                         cancel,
                         Some(&on_spawn),
                         live_hooks.as_ref(),
+                        stall_hooks.as_ref(),
+                        Some(&control_hooks),
                     );
                     if let Some(e) = spawn_err.borrow_mut().take() {
                         return Err(e);
                     }
                     if let Some(e) = tick_err.borrow_mut().take() {
+                        return Err(e);
+                    }
+                    if let Some(e) = stall_err.borrow_mut().take() {
+                        return Err(e);
+                    }
+                    if let Some(e) = control_err.borrow_mut().take() {
                         return Err(e);
                     }
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
@@ -533,6 +685,7 @@ pub(crate) fn execute_node(
                             status: "failed".into(),
                             duration_ms,
                             session: None,
+                            summary: None,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -566,6 +719,9 @@ pub(crate) fn execute_node(
                                 // 2026-07-20, Task 7); the drive loop reads it
                                 // back to resume the agent on the answer round.
                                 session: report.session.clone(),
+                                // Display-only summary (issue #42 finding 1):
+                                // kept for humans, never used as node output.
+                                summary: Some(report.summary.clone()),
                             })?;
                             // Interactive suspension (spec 2026-07-20): the agent
                             // asked a question via the stdout marker instead of
@@ -581,6 +737,22 @@ pub(crate) fn execute_node(
                                 });
                             }
                             if report.status == NodeStatus::Succeeded {
+                                // Empty-output anomaly (issue #42, finding 6): an
+                                // attempt that reports success but produced no
+                                // output at all is almost always a lost/truncated
+                                // reply (e.g. a signal that emptied stdout). It
+                                // stays succeeded, but a WakeRaised anomaly is
+                                // journaled so the emptiness is visible in the
+                                // event log, exactly like the stall anomaly.
+                                if report.output.trim().is_empty() {
+                                    journal.append(EventPayload::WakeRaised {
+                                        trigger: crate::event::WakeTrigger::Anomaly,
+                                        node: node_id.to_string(),
+                                        detail: format!(
+                                            "agent_task node `{node_id}` attempt {cur_attempt} reported success with empty output"
+                                        ),
+                                    })?;
+                                }
                                 // A deterministic check on top of the self-report (spec 6.2):
                                 // a non-zero check exit code makes the node Failed regardless
                                 // of the agent's report. We run it in the SAME attempt
@@ -609,11 +781,15 @@ pub(crate) fn execute_node(
                                 }
                                 return Ok(AttemptOutcome::Finished {
                                     status: NodeStatus::Succeeded,
-                                    output: report.summary,
+                                    // Node output is the agent's reply body (with
+                                    // the report block stripped), NOT the one-line
+                                    // summary (issue #42 finding 1): templating,
+                                    // output_match, and run_report all read this.
+                                    output: report.output,
                                     events,
                                 });
                             }
-                            last_msg = report.summary;
+                            last_msg = report.output;
                             last_timed_out = false;
                         }
                         Err((class, msg)) => {
@@ -638,6 +814,7 @@ pub(crate) fn execute_node(
                                 status: attempt_status.into(),
                                 duration_ms,
                                 session: None,
+                                summary: None,
                             })?;
                             last_msg = msg;
                             // A transport error and a timeout break the retry loop for this
@@ -719,8 +896,12 @@ pub(crate) fn execute_finish_answer(
     env_scrub: &[String],
     journal: &Journal,
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
-    let context =
-        build_context_for_render(run_dir, &read_all(run_dir)?, cfg.instruction.as_deref())?;
+    // The terminal answer is composed from the FULL log fold, never the lossy
+    // compacted render view (issue #42 finding 5): the closing answer must see
+    // every completed node's raw output, which always survives verbatim in the
+    // append-only log even after the compaction that repeated resume +
+    // patch-migration cycles trigger. See `build_terminal_context`.
+    let context = build_terminal_context(&read_all(run_dir)?, cfg.instruction.as_deref());
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -845,8 +1026,10 @@ pub(crate) fn execute_finish_answer(
                 }
             };
             // A finish-answer node is never interactive, so it never runs the
-            // live sidecar (`None`).
-            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None);
+            // live sidecar (`None`), it carries no `expected_duration`, so no
+            // stall watch (`None`), and the terminal answer composition is not a
+            // supervisor-interruptible node, so no control observation (`None`).
+            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None, None, None);
             if let Some(e) = spawn_err.borrow_mut().take() {
                 return Err(e);
             }
@@ -872,11 +1055,14 @@ pub(crate) fn execute_finish_answer(
                         status: report.status.as_str().into(),
                         duration_ms,
                         session: report.session.clone(),
+                        summary: Some(report.summary.clone()),
                     })?;
                     if report.status == NodeStatus::Succeeded {
-                        return Ok((NodeStatus::Succeeded, report.summary, events));
+                        // The composed finish answer is the agent's reply body,
+                        // not the one-line summary (issue #42 finding 1).
+                        return Ok((NodeStatus::Succeeded, report.output, events));
                     }
-                    last_msg = report.summary;
+                    last_msg = report.output;
                     last_timed_out = false;
                 }
                 Err((class, msg)) => {
@@ -892,6 +1078,7 @@ pub(crate) fn execute_finish_answer(
                         .into(),
                         duration_ms,
                         session: None,
+                        summary: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {
@@ -1034,6 +1221,37 @@ fn parent_run_origin(run_dir: &Path) -> apb_core::scope::Origin {
     Origin::Project { workspace_id: None }
 }
 
+/// Builds the child run's [`RunOptions`] from the (optional) verified pin. A
+/// gated run carries a pin (`Some`) and threads every anti-TOCTOU `expected_*`
+/// map through verbatim, including the child's own verified connector permit
+/// maps (finding 2 of issue #42) - without them a sub-playbook that binds
+/// connectors would be refused at prepare ("connector bindings present but no
+/// connector permit"). An ungated (CLI, `pin: None`) child resolves its
+/// connectors live at prepare time, so the maps default to empty there.
+fn child_run_options(
+    pin: Option<&crate::run_config::ChildExpectation>,
+    child_instruction: Option<String>,
+    parent_run_id: &str,
+    depth: usize,
+    continued_from: Option<String>,
+) -> RunOptions {
+    RunOptions {
+        instruction: child_instruction,
+        allow_shared_workdir: true,
+        parent_run: Some(parent_run_id.to_string()),
+        continued_from,
+        depth,
+        expected_digest: pin.map(|p| p.playbook_digest.clone()),
+        expected_profile_bundles: pin.map(|p| p.profile_bundles.clone()),
+        expected_children: pin.map(|p| p.children.clone()),
+        expected_connectors: pin.map(|p| p.connectors.clone()).unwrap_or_default(),
+        expected_connector_accounts: pin
+            .map(|p| p.connector_accounts.clone())
+            .unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
 /// Executes a `playbook` node (spec C): starts (or, on resume, reattaches to) a
 /// full child run and maps its terminal state to this node's status/output. The
 /// child runs in-process, synchronously, with `allow_shared_workdir: true` (the
@@ -1140,8 +1358,21 @@ pub(crate) fn run_playbook_node(
             id: child_ref.id.clone(),
             version: Some(p.version.clone()),
         };
-        apb_core::store::resolve(root, &cref)
-            .map_err(|e| EngineError::Invalid(format!("sub-playbook `{}`: {e}", child_ref.id)))?
+        // A resolve failure here (issue #42 finding 3b) is a refusal to run
+        // THIS node, not an engine-fatal fault: return it as an ordinary node
+        // failure (like the depth-limit and missing-pin cases above) so it
+        // gets its `node_finished` and normal failure handling (fallback edge
+        // or supervisor wake) instead of aborting the whole drive loop with no
+        // record of why.
+        match apb_core::store::resolve(root, &cref) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok((
+                    NodeStatus::Failed,
+                    format!("sub-playbook `{}`: {e}", child_ref.id),
+                ));
+            }
+        }
     } else {
         let candidates = scope_candidates(child_ref.scope, &parent_run_origin(run_dir));
         let mut resolved_opt = None;
@@ -1156,24 +1387,30 @@ pub(crate) fn run_playbook_node(
                 break;
             }
         }
-        resolved_opt.ok_or_else(|| {
-            EngineError::Invalid(format!(
-                "sub-playbook `{}` (node `{}`) did not resolve in any candidate scope",
-                child_ref.id, node_id
-            ))
-        })?
+        match resolved_opt {
+            Some(r) => r,
+            None => {
+                return Ok((
+                    NodeStatus::Failed,
+                    format!(
+                        "sub-playbook `{}` (node `{}`) did not resolve in any candidate scope",
+                        child_ref.id, node_id
+                    ),
+                ));
+            }
+        }
     };
 
-    let opts = RunOptions {
-        instruction: child_instruction,
-        allow_shared_workdir: true,
-        parent_run: Some(run_id.to_string()),
-        depth: cfg.depth + 1,
-        expected_digest: pin.map(|p| p.playbook_digest.clone()),
-        expected_profile_bundles: pin.map(|p| p.profile_bundles.clone()),
-        expected_children: pin.map(|p| p.children.clone()),
-        ..Default::default()
-    };
+    let predecessor_child =
+        latest_child_run(&events, node_id).filter(|id| run_is_terminal(root, id).unwrap_or(false));
+
+    let opts = child_run_options(
+        pin,
+        child_instruction,
+        run_id,
+        cfg.depth + 1,
+        predecessor_child,
+    );
 
     // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
     let t = PrepareTarget {
@@ -1181,7 +1418,23 @@ pub(crate) fn run_playbook_node(
         execution_root: resolved.execution_root.clone(),
         origin_label: resolved.origin_label,
     };
-    let mut cp = prepare_run_target(&t, &resolved.id, Some(&resolved.version), opts)?;
+    // A prepare refusal here - most notably "connector bindings present but no
+    // connector permit" (issue #42 finding 3b) - is likewise a node failure,
+    // not a fatal engine error: the child's own run directory already exists
+    // at this point (`prepare_run_target` creates it before any of its own
+    // fallible steps) and `prepare_run_target` has already closed it out with
+    // its own `RunError` + `run_finished(failed)`, so returning `Ok` here just
+    // lets the PARENT record the same reason against this node instead of
+    // aborting the parent's own drive loop with nothing to explain why.
+    let mut cp = match prepare_run_target(&t, &resolved.id, Some(&resolved.version), opts) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok((
+                NodeStatus::Failed,
+                format!("sub-playbook `{}` (node `{node_id}`): {e}", child_ref.id),
+            ));
+        }
+    };
     let child_run_id = cp.run_id.clone();
     log.append(EventPayload::ChildRunStarted {
         node_id: node_id.to_string(),
@@ -1338,8 +1591,10 @@ pub(crate) fn maybe_compact_context(
         node: "__context_compact",
         agent: "claude-code",
     };
+    // The compacted context is the summarizer's full reply body (issue #42
+    // finding 1), not its one-line report summary.
     let summary = match adapter.run(&task) {
-        Ok(report) => report.summary,
+        Ok(report) => report.output,
         Err(_) => return Ok(None),
     };
     let compact_file = "context_compact.md";
@@ -1438,4 +1693,167 @@ pub(crate) fn advance_frontier(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::control::{Control, post_control};
+    use apb_core::profile::ProfileScope;
+    use std::collections::BTreeMap;
+
+    /// A corrupt control channel at attempt start must surface as an error, not
+    /// degrade to a `None` baseline that would replay a stale interrupt.
+    #[test]
+    fn latest_control_seq_surfaces_read_error_instead_of_none_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        // Valid interrupt that would be fatal if re-observed with baseline None.
+        let seq = post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "already spent".into(),
+            },
+        )
+        .unwrap();
+        // Append a corrupt line so the next full-channel read fails.
+        use std::io::Write;
+        let mut f = std::fs::OpenOptions::new()
+            .append(true)
+            .open(dir.path().join("control.jsonl"))
+            .unwrap();
+        writeln!(f, "{{not-valid-json").unwrap();
+        f.flush().unwrap();
+
+        let err = latest_control_seq(dir.path()).expect_err(
+            "corrupt control.jsonl must fail attempt-start baseline, not degrade to None",
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains("yaml") || msg.contains("invalid") || msg.contains("expected"),
+            "expected a parse/IO style error, got: {msg}"
+        );
+        // Sanity: the stale interrupt is still on disk (the hazard we refuse to
+        // replay by refusing the None baseline).
+        let raw = std::fs::read_to_string(dir.path().join("control.jsonl")).unwrap();
+        assert!(raw.contains("\"cmd\":\"interrupt\""));
+        assert!(raw.contains(&format!("\"seq\":{seq}")) || raw.contains(r#""seq":0"#));
+    }
+
+    /// With a correct baseline past a already-posted interrupt, observe_control
+    /// must not treat that interrupt as a live request for a fresh attempt.
+    #[test]
+    fn observe_control_skips_interrupt_at_or_before_baseline() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        let journal = Journal::new(&mut log);
+        let seq = post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "stale".into(),
+            },
+        )
+        .unwrap();
+
+        let (seen, interrupt) = observe_control(dir.path(), "n1", 1, &journal, Some(seq)).unwrap();
+        assert_eq!(
+            seen,
+            Some(seq),
+            "baseline must not move without new entries"
+        );
+        assert!(
+            !interrupt,
+            "a stale interrupt at-or-before the baseline must not kill a fresh attempt"
+        );
+    }
+
+    /// Documents the hazard option (a) prevents: baseline None re-reads the
+    /// whole channel and would set interrupt on a stale entry.
+    #[test]
+    fn observe_control_none_baseline_would_see_stale_interrupt() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        let journal = Journal::new(&mut log);
+        post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "stale".into(),
+            },
+        )
+        .unwrap();
+
+        let (_seen, interrupt) = observe_control(dir.path(), "n1", 1, &journal, None).unwrap();
+        assert!(
+            interrupt,
+            "None baseline replays the channel; latest_control_seq must not degrade to None on error"
+        );
+    }
+
+    /// A gated child spawn threads the pin's verified connector permit maps into
+    /// the child's `expected_connectors`/`expected_connector_accounts` verbatim
+    /// (finding 2 of issue #42), so the child prepare no longer refuses a
+    /// connector-binding sub-playbook for want of a permit.
+    #[test]
+    fn child_run_options_threads_pin_connectors() {
+        let mut connectors = BTreeMap::new();
+        connectors.insert("mock-tracker".to_string(), "sha256:conn".to_string());
+        let mut accounts = BTreeMap::new();
+        accounts.insert("mock-tracker/acct1".to_string(), "sha256:acct".to_string());
+        let pin = crate::run_config::ChildExpectation {
+            id: "child".into(),
+            scope: ProfileScope::Project,
+            version: "1.0.0".into(),
+            playbook_digest: "sha256:pb".into(),
+            profile_bundles: BTreeMap::new(),
+            connectors: connectors.clone(),
+            connector_accounts: accounts.clone(),
+            children: BTreeMap::new(),
+        };
+
+        let opts = child_run_options(Some(&pin), None, "parent-run", 2, None);
+        assert_eq!(opts.expected_connectors, connectors);
+        assert_eq!(opts.expected_connector_accounts, accounts);
+        assert_eq!(opts.expected_digest.as_deref(), Some("sha256:pb"));
+        assert_eq!(opts.depth, 2);
+        assert!(opts.allow_shared_workdir);
+    }
+
+    /// An ungated (CLI, no pin) child resolves connectors live at prepare, so
+    /// the spawn passes empty expected maps rather than an unverified pin.
+    #[test]
+    fn child_run_options_ungated_has_empty_connector_maps() {
+        let opts = child_run_options(None, None, "parent-run", 1, None);
+        assert!(opts.expected_connectors.is_empty());
+        assert!(opts.expected_connector_accounts.is_empty());
+        assert!(opts.expected_digest.is_none());
+    }
+
+    /// Lineage threading (issue #40) and connector-permit threading (issue
+    /// #42) must both survive the same helper call: a re-created child after a
+    /// prior terminal attempt carries `continued_from` alongside the pin's
+    /// connector maps.
+    #[test]
+    fn child_run_options_threads_both_lineage_and_connectors() {
+        let mut connectors = BTreeMap::new();
+        connectors.insert("mock-tracker".to_string(), "sha256:conn".to_string());
+        let pin = crate::run_config::ChildExpectation {
+            id: "child".into(),
+            scope: ProfileScope::Project,
+            version: "1.0.0".into(),
+            playbook_digest: "sha256:pb".into(),
+            profile_bundles: BTreeMap::new(),
+            connectors: connectors.clone(),
+            connector_accounts: BTreeMap::new(),
+            children: BTreeMap::new(),
+        };
+
+        let opts = child_run_options(
+            Some(&pin),
+            None,
+            "parent-run",
+            2,
+            Some("predecessor-run".to_string()),
+        );
+        assert_eq!(opts.continued_from.as_deref(), Some("predecessor-run"));
+        assert_eq!(opts.expected_connectors, connectors);
+    }
 }

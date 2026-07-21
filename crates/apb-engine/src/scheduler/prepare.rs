@@ -50,6 +50,37 @@ fn stringify_param_default(v: &serde_yaml_ng::Value) -> String {
     }
 }
 
+/// Best-effort: a prepare failure that happens after the run directory (and
+/// its event log) already exist would otherwise leave that directory with no
+/// explanation - an empty or `RunStarted`-only journal that never reaches
+/// `run_finished` at all (issue #42 finding 3; this is the shape a gated
+/// sub-playbook child left behind on a missing connector permit before this
+/// fix, and `list_runs` silently skips a dir with an empty journal, so the
+/// failure was invisible even to `apb runs`). Notes the verbatim reason and
+/// closes the run out as failed before the caller ever sees the error, which
+/// is returned completely unchanged - this never shadows or replaces it.
+fn finalize_prepare_failure(log: &mut EventLog, e: EngineError) -> EngineError {
+    let _ = log.append(EventPayload::RunError {
+        node: None,
+        reason: e.to_string(),
+    });
+    let _ = log.append(EventPayload::RunFinished {
+        outcome: "failed".into(),
+    });
+    e
+}
+
+/// `?`-friendly wrapper around [`finalize_prepare_failure`] for the fallible
+/// steps of `prepare_run_target` that run after the run directory's event log
+/// is created: `r.map_err(..)` then `?` would also work inline, but this
+/// keeps every call site a one-liner.
+fn prep_try<T, E: Into<EngineError>>(
+    log: &mut EventLog,
+    r: Result<T, E>,
+) -> Result<T, EngineError> {
+    r.map_err(|e| finalize_prepare_failure(log, e.into()))
+}
+
 pub(crate) fn soul_delivery_str(d: SoulDelivery) -> String {
     match d {
         SoulDelivery::Native => "native".to_string(),
@@ -351,16 +382,22 @@ pub(crate) fn prepare_run_target(
 
     let run_id = format!("{id}-{}", now_millis());
     let run_dir = root.join(".apb/runs").join(&run_id);
+    if let Some(ref pred) = opts.continued_from {
+        crate::run_lineage::validate_continued_from(root, pred, id)?;
+    }
     let mut log = EventLog::create(&run_dir)?;
     // The run snapshot = the effective playbook. Without overrides we write the raw yaml
     // (preserving formatting/comments); with overrides we serialize the
     // effective playbook, so the snapshot honestly reflects what actually ran.
     let snapshot_yaml = if has_overrides {
-        serde_yaml_ng::to_string(&playbook).map_err(|e| EngineError::Yaml(e.to_string()))?
+        prep_try(
+            &mut log,
+            serde_yaml_ng::to_string(&playbook).map_err(|e| EngineError::Yaml(e.to_string())),
+        )?
     } else {
         loaded.yaml.clone()
     };
-    snapshot_playbook(&run_dir, &snapshot_yaml)?;
+    prep_try(&mut log, snapshot_playbook(&run_dir, &snapshot_yaml))?;
     // Scripts live in the definition's version directory (<def_parent>/playbooks/<id>/<version>/scripts),
     // not in the run snapshot - we copy them into run_dir, otherwise script nodes would not find
     // their files. The source is definition_parent (for a global playbook this is the
@@ -370,9 +407,9 @@ pub(crate) fn prepare_run_target(
         .join("playbooks")
         .join(id)
         .join(&loaded.version);
-    copy_scripts(&version_dir, &run_dir)?;
+    prep_try(&mut log, copy_scripts(&version_dir, &run_dir))?;
     // The run's webhook hook secrets (for wait nodes, spec 6.7).
-    crate::hooks::generate_hooks(&run_dir, &playbook)?;
+    prep_try(&mut log, crate::hooks::generate_hooks(&run_dir, &playbook))?;
 
     // Run input precedence (spec A): an explicitly passed instruction wins;
     // otherwise the playbook's autosaved draft, read at start time; otherwise
@@ -386,9 +423,9 @@ pub(crate) fn prepare_run_target(
     // `?`; the old `.ok().flatten()` swallowed both cases alike.
     let instruction = match opts.instruction.clone() {
         Some(i) => Some(i),
-        None => reg
-            .read_instruction_draft(id)?
-            .filter(|s| !s.trim().is_empty()),
+        None => {
+            prep_try(&mut log, reg.read_instruction_draft(id))?.filter(|s| !s.trim().is_empty())
+        }
     };
 
     // Schema-default fill (review I6/R1-I2): every declared param that the
@@ -416,6 +453,8 @@ pub(crate) fn prepare_run_target(
         context_compact_model: opts.context_compact_model.clone(),
         overrides: opts.overrides.clone(),
         parent_run: opts.parent_run.clone(),
+        continued_from: opts.continued_from.clone(),
+        superseded_by: None,
         depth: opts.depth,
         expected_children: opts.expected_children.clone(),
         expected_connectors: opts.expected_connectors.clone(),
@@ -425,22 +464,28 @@ pub(crate) fn prepare_run_target(
         // knows from `runs/<id>`, drives the run in the mode it was started in.
         mode: opts.mode,
     };
-    write_run_config(&run_dir, &cfg)?;
+    prep_try(&mut log, write_run_config(&run_dir, &cfg))?;
 
     // Resolve profiles into the run snapshot + the immutable manifest (spec 3.6).
     // The executor path (no profiles) does not write a manifest. `origin` was already
-    // derived above (used both by the validator and here).
-    let manifest = build_run_manifest(
-        &playbook,
-        root,
-        origin,
-        &global,
-        &run_dir,
-        opts.expected_profile_bundles.as_ref(),
-        &opts.expected_connectors,
-        &opts.expected_connector_accounts,
-        opts.overrides.as_ref(),
-        opts.supervisor_expected,
+    // derived above (used both by the validator and here). This is where a
+    // gated sub-playbook child with a missing/drifted connector permit, or a
+    // profile bundle mismatch, is refused (issue #42 finding 3b) - the run
+    // directory and its journal already exist at this point, hence `prep_try`.
+    let manifest = prep_try(
+        &mut log,
+        build_run_manifest(
+            &playbook,
+            root,
+            origin,
+            &global,
+            &run_dir,
+            opts.expected_profile_bundles.as_ref(),
+            &opts.expected_connectors,
+            &opts.expected_connector_accounts,
+            opts.overrides.as_ref(),
+            opts.supervisor_expected,
+        ),
     )?;
     let profiles_prov: Vec<ProfileProvenance> = manifest
         .profiles
@@ -452,7 +497,7 @@ pub(crate) fn prepare_run_target(
         })
         .collect();
     if !manifest.is_empty() {
-        crate::manifest::write(&run_dir, &manifest)?;
+        prep_try(&mut log, crate::manifest::write(&run_dir, &manifest))?;
     }
 
     log.append(EventPayload::RunStarted {
@@ -468,6 +513,12 @@ pub(crate) fn prepare_run_target(
         execution_root: Some(t.execution_root.to_string_lossy().into_owned()),
         profiles: profiles_prov,
     })?;
+    if let Some(ref pred) = opts.continued_from {
+        prep_try(
+            &mut log,
+            crate::run_lineage::establish_run_lineage(root, pred, &run_id),
+        )?;
+    }
 
     Ok(Prepared {
         playbook,

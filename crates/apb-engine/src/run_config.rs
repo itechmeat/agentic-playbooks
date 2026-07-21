@@ -27,6 +27,20 @@ pub struct ChildExpectation {
     pub playbook_digest: String,
     #[serde(default)]
     pub profile_bundles: BTreeMap<String, String>,
+    /// The child's verified connector tree digests, `connector name -> tree
+    /// digest`, computed by the parent's policy gate in the SAME single pass as
+    /// the rest of this pin (finding 2 of issue #42). Handed to the child spawn
+    /// verbatim as `expected_connectors` so a sub-playbook that binds connectors
+    /// is reachable under a gated run; run-start re-verifies it against the live
+    /// resolution and rejects drift. `#[serde(default)]` so pins persisted before
+    /// this field (which carried no connector map) still deserialize.
+    #[serde(default)]
+    pub connectors: BTreeMap<String, String>,
+    /// The child's verified connector account digests, `"connector/account" ->
+    /// account digest`, from the same gate pass. Handed to the child spawn
+    /// verbatim as `expected_connector_accounts`.
+    #[serde(default)]
+    pub connector_accounts: BTreeMap<String, String>,
     #[serde(default)]
     pub children: BTreeMap<String, ChildExpectation>,
 }
@@ -88,6 +102,13 @@ pub struct RunConfig {
     /// The parent run id, when this run is a Part C sub-playbook child.
     #[serde(default)]
     pub parent_run: Option<String>,
+    /// Predecessor run id when this run continues a failed or interrupted run
+    /// as a fresh run directory (issue #42 finding 10).
+    #[serde(default)]
+    pub continued_from: Option<String>,
+    /// Successor run id once a newer run has continued from this one.
+    #[serde(default)]
+    pub superseded_by: Option<String>,
     /// Sub-playbook nesting depth (spec C). A top-level run is 0; each child is
     /// parent depth + 1. Enforced against `MAX_SUBPLAYBOOK_DEPTH`.
     #[serde(default)]
@@ -185,6 +206,8 @@ mod tests {
             version: "1.0.0".into(),
             playbook_digest: "sha256:abc".into(),
             profile_bundles: BTreeMap::new(),
+            connectors: BTreeMap::new(),
+            connector_accounts: BTreeMap::new(),
             children: BTreeMap::new(),
         };
         let yaml = serde_yaml_ng::to_string(&child).unwrap();
@@ -207,9 +230,38 @@ mod tests {
         let legacy = "id: child\nscope: global\nversion: 1.0.0\nplaybook_digest: sha256:abc\n";
         let parsed: ChildExpectation = serde_yaml_ng::from_str(legacy).unwrap();
         assert_eq!(parsed.scope, ProfileScope::Global);
+        // A pre-finding-2 pin carried no connector map; it must still deserialize
+        // with the field defaulting to empty (finding 2 of issue #42).
+        assert!(parsed.connectors.is_empty());
+        assert!(parsed.connector_accounts.is_empty());
 
         // Full roundtrip preserves the value.
         let round: ChildExpectation = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(round, child);
+    }
+
+    /// A child pin carries the connector permit maps the parent gate verified
+    /// (finding 2 of issue #42), and they survive a serialize/deserialize
+    /// roundtrip so the child spawn reads them back verbatim.
+    #[test]
+    fn child_expectation_carries_connector_permit_maps() {
+        let mut connectors = BTreeMap::new();
+        connectors.insert("mock-tracker".to_string(), "sha256:conn".to_string());
+        let mut accounts = BTreeMap::new();
+        accounts.insert("mock-tracker/acct1".to_string(), "sha256:acct".to_string());
+        let child = ChildExpectation {
+            id: "child".into(),
+            scope: ProfileScope::Project,
+            version: "1.0.0".into(),
+            playbook_digest: "sha256:abc".into(),
+            profile_bundles: BTreeMap::new(),
+            connectors: connectors.clone(),
+            connector_accounts: accounts.clone(),
+            children: BTreeMap::new(),
+        };
+        let yaml = serde_yaml_ng::to_string(&child).unwrap();
+        let round: ChildExpectation = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(round.connectors, connectors);
+        assert_eq!(round.connector_accounts, accounts);
     }
 }

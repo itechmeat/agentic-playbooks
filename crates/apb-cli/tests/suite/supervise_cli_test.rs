@@ -221,3 +221,98 @@ fn supervise_flag_spawns_stub_agent_and_run_finishes() {
 
     drop(_env);
 }
+
+/// `--supervise --continued-from` must survive the detached spawn boundary and
+/// establish the same predecessor/successor links as the autonomous path.
+#[test]
+fn supervise_continued_from_establishes_lineage() {
+    let dir = seeded();
+
+    let marker_file = dir.path().join("agent_invocation.txt");
+    let stub = agent_stub(dir.path(), &marker_file);
+
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Predecessor: a normal supervised run that finishes on its own.
+    let assert = playbook()
+        .args(["run", "svnoagent", "--supervise"])
+        .current_dir(dir.path())
+        .env("APB_AGENT_CMD", &stub)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("supervised run started:"));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let runs_dir = dir.path().join(".apb/runs");
+    let first_id = extract_run_id(&stdout, &runs_dir);
+    let first_dir = runs_dir.join(&first_id);
+    poll_until("predecessor run_finished", || {
+        let text = fs::read_to_string(first_dir.join("events.jsonl")).ok()?;
+        if text.contains("\"type\":\"run_finished\"") {
+            Some(())
+        } else {
+            None
+        }
+    });
+
+    // Successor: supervised retry linked via --continued-from.
+    let assert = playbook()
+        .args([
+            "run",
+            "svnoagent",
+            "--supervise",
+            "--continued-from",
+            &first_id,
+        ])
+        .current_dir(dir.path())
+        .env("APB_AGENT_CMD", &stub)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("supervised run started:"));
+    let stdout = String::from_utf8_lossy(&assert.get_output().stdout).to_string();
+    let second_id = extract_run_id(&stdout, &runs_dir);
+    assert_ne!(first_id, second_id, "successor must be a distinct run");
+    let second_dir = runs_dir.join(&second_id);
+    poll_until("successor run_finished", || {
+        let text = fs::read_to_string(second_dir.join("events.jsonl")).ok()?;
+        if text.contains("\"type\":\"run_finished\"") {
+            Some(())
+        } else {
+            None
+        }
+    });
+
+    let pred_cfg = apb_engine::run_config::read_run_config(&first_dir).unwrap();
+    let succ_cfg = apb_engine::run_config::read_run_config(&second_dir).unwrap();
+    assert_eq!(pred_cfg.superseded_by.as_deref(), Some(second_id.as_str()));
+    assert_eq!(succ_cfg.continued_from.as_deref(), Some(first_id.as_str()));
+
+    drop(_env);
+}
+
+/// Supervised prepare rejects an unknown continued_from predecessor the same
+/// way the autonomous path does (handshake surfaces the engine error).
+#[test]
+fn supervise_continued_from_rejects_unknown_predecessor() {
+    let dir = seeded();
+
+    let marker_file = dir.path().join("agent_invocation.txt");
+    let stub = agent_stub(dir.path(), &marker_file);
+
+    let _env = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+
+    playbook()
+        .args([
+            "run",
+            "svnoagent",
+            "--supervise",
+            "--continued-from",
+            "ghost-1",
+        ])
+        .current_dir(dir.path())
+        .env("APB_AGENT_CMD", &stub)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("run `ghost-1`"));
+
+    drop(_env);
+}

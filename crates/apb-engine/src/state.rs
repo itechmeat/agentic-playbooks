@@ -98,6 +98,27 @@ pub struct ReviewDecision {
     pub note: String,
 }
 
+/// The most recent `RunError` folded from the journal (issue #42 finding 3):
+/// the verbatim engine error text behind a run that ended `failed`, and the
+/// node it is attributable to when known. `run_status` and `doctor --run`
+/// surface this so an operator does not have to read events.jsonl by hand.
+#[derive(Debug, Clone)]
+pub struct FailureReason {
+    pub node: Option<String>,
+    pub reason: String,
+}
+
+impl FailureReason {
+    /// A single display line: `node `x`: reason` when a node is known, the
+    /// bare reason otherwise.
+    pub fn display(&self) -> String {
+        match &self.node {
+            Some(n) => format!("node `{n}`: {}", self.reason),
+            None => self.reason.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct RunState {
     pub run_status: RunStatus,
@@ -112,6 +133,11 @@ pub struct RunState {
     /// resume restores loop progress exactly because the counts come from the
     /// journal.
     pub edge_counts: BTreeMap<(String, String), u32>,
+    /// The most recent `RunError` folded from the journal, if any (issue #42
+    /// finding 3). Set even when the run later succeeds via resume/patch past
+    /// the failure - `run_status`/doctor only read it while `run_status` is
+    /// `Failed`, so a stale value from an earlier attempt is harmless.
+    pub failure_reason: Option<FailureReason>,
 }
 
 impl RunState {
@@ -181,6 +207,7 @@ impl RunState {
                 // A child-run marker is an audit record; the node's own status
                 // events carry the run-state effect.
                 EventPayload::ChildRunStarted { .. } => {}
+                EventPayload::RunContinuedFrom { .. } | EventPayload::RunSupersededBy { .. } => {}
                 // A connector call is an audit record (spec 6.2); it does not
                 // change run state.
                 EventPayload::ConnectorCall { .. } => {}
@@ -196,6 +223,16 @@ impl RunState {
                 // edge selection can cap the loop and a resume restores progress.
                 EventPayload::EdgeTraversed { from, to } => {
                     *s.edge_counts.entry((from.clone(), to.clone())).or_insert(0) += 1;
+                }
+                // The explanatory record for an abnormal termination (issue
+                // #42 finding 3): does not itself change node/run status
+                // (the terminal `run_finished`/`node_finished` right next to
+                // it does that) - it only carries the reason forward.
+                EventPayload::RunError { node, reason } => {
+                    s.failure_reason = Some(FailureReason {
+                        node: node.clone(),
+                        reason: reason.clone(),
+                    });
                 }
                 EventPayload::ReviewRequested { .. } => {}
                 EventPayload::ReviewDecided {

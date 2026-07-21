@@ -82,6 +82,8 @@ export interface RunSummary {
   project: string
   progress?: ProgressSummary | null
   parent_run?: string | null
+  continued_from?: string | null
+  superseded_by?: string | null
 }
 
 export interface WfEvent {

@@ -34,6 +34,39 @@ pub enum Control {
         classification: String,
         continue_from: String,
     },
+    /// Terminate the RUNNING attempt's agent process (finding 7 of issue #42,
+    /// third item of issue #40). Posted by a supervisor that has decided -
+    /// typically after a stall anomaly woke it - to break a wedged attempt
+    /// rather than wait out a hang that may never end. The attempt's own poll
+    /// loop observes this live, SIGKILLs the agent's process group, and
+    /// journals it; because a signal-terminated attempt is journaled failed
+    /// (the exit-by-signal path), ordinary retry/fallback/patch then proceeds
+    /// at the next attempt boundary. It NEVER aborts the run (that stays
+    /// `Abort`'s job) and it never applies a patch itself - it only forces the
+    /// attempt boundary to happen. An interrupt with no attempt running is a
+    /// no-op, consumed at the next node boundary.
+    Interrupt {
+        reason: String,
+    },
+}
+
+impl Control {
+    /// Stable machine-facing name of the command, matching its serialized `cmd`
+    /// tag. One definition shared by every site that labels a control entry (the
+    /// doctor's pending-control line, the drive loop's `control_received`
+    /// acknowledgment), so the names can never drift from the tags or each other.
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Control::Retry { .. } => "retry",
+            Control::ContinueFrom { .. } => "continue_from",
+            Control::Pause => "pause",
+            Control::Abort { .. } => "abort",
+            Control::ContextAppend { .. } => "context_append",
+            Control::Progress { .. } => "progress",
+            Control::Patch { .. } => "patch",
+            Control::Interrupt { .. } => "interrupt",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

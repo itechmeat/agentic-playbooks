@@ -9,7 +9,7 @@ use rmcp::{tool, tool_router};
 use serde_json::json;
 
 use super::args::*;
-use super::{WfMcp, to_call_tool_result};
+use super::{WfMcp, to_call_tool_result, with_warnings};
 use crate::tools::{self, ToolError};
 
 #[tool_router(router = run_router, vis = "pub(crate)")]
@@ -243,6 +243,7 @@ impl WfMcp {
             background,
             acknowledge_untrusted,
             scope,
+            continued_from,
         }): Parameters<PlaybookRunArgs>,
     ) -> CallToolResult {
         // Definition scope: a global playbook runs in the current project.
@@ -284,6 +285,11 @@ impl WfMcp {
             Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
         };
 
+        // Consent-time warnings the gate produced (finding 11: a bound connector
+        // with zero configured accounts). Surfaced on every successful run
+        // response so the caller can show them to the user; never a refusal.
+        let warnings = permit.warnings.clone();
+
         // supervise:"self" - a project-scoped supervised run; it does not
         // combine with a global scope.
         if supervise.as_deref() == Some("self") {
@@ -302,6 +308,8 @@ impl WfMcp {
                 permit.children,
                 permit.connectors,
                 permit.connector_accounts,
+                continued_from,
+                warnings,
             );
         }
 
@@ -318,25 +326,48 @@ impl WfMcp {
                 expected_children: Some(permit.children),
                 expected_connectors: permit.connectors,
                 expected_connector_accounts: permit.connector_accounts,
+                continued_from,
                 ..Default::default()
             };
             if background == Some(true) {
                 return match apb_engine::start_detached_resolved(&resolved, opts) {
-                    Ok(run_id) => {
-                        to_call_tool_result(Ok(json!({ "run_id": run_id, "scope": "global" })))
-                    }
+                    Ok(run_id) => to_call_tool_result(with_warnings(
+                        Ok(json!({ "run_id": run_id, "scope": "global" })),
+                        &warnings,
+                    )),
                     Err(e) => to_call_tool_result(Err(ToolError::from(e))),
                 };
             }
             return match apb_engine::run_resolved(&resolved, opts) {
-                Ok(res) => to_call_tool_result(Ok(
-                    json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" }),
+                Ok(res) => to_call_tool_result(with_warnings(
+                    Ok(
+                        json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" }),
+                    ),
+                    &warnings,
                 )),
                 Err(e) => to_call_tool_result(Err(ToolError::from(e))),
             };
         }
         if background == Some(true) {
-            return to_call_tool_result(tools::playbook_run_background(
+            return to_call_tool_result(with_warnings(
+                tools::playbook_run_background(
+                    &self.root,
+                    &id,
+                    version.as_deref(),
+                    params,
+                    instruction,
+                    Some(permit.playbook_digest),
+                    Some(permit.profile_bundles),
+                    Some(permit.children),
+                    permit.connectors,
+                    permit.connector_accounts,
+                    continued_from,
+                ),
+                &warnings,
+            ));
+        }
+        to_call_tool_result(with_warnings(
+            tools::playbook_run(
                 &self.root,
                 &id,
                 version.as_deref(),
@@ -347,19 +378,9 @@ impl WfMcp {
                 Some(permit.children),
                 permit.connectors,
                 permit.connector_accounts,
-            ));
-        }
-        to_call_tool_result(tools::playbook_run(
-            &self.root,
-            &id,
-            version.as_deref(),
-            params,
-            instruction,
-            Some(permit.playbook_digest),
-            Some(permit.profile_bundles),
-            Some(permit.children),
-            permit.connectors,
-            permit.connector_accounts,
+                continued_from,
+            ),
+            &warnings,
         ))
     }
 
@@ -379,7 +400,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Get the current status of a run, including liveness: `driver_alive` (null when no process claims the run), `node_times` with each node's start and the age and pid of its open attempt, and the node status `lost` for a node whose attempt process is gone. Use `node_times` to tell a slow node from a stuck one, and `apb doctor --run <id>` for a full per-run diagnosis.",
+        description = "Get the current status of a run, including liveness: `driver_alive` (null when no process claims the run), `node_times` with each node's start and the age and pid of its open attempt (plus `past_estimate`, true once an open attempt is running past its `expected_duration`), and the node status `lost` for a node whose attempt process is gone. Use `node_times` to tell a slow node from a stuck one, and `apb doctor --run <id>` for a full per-run diagnosis.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn run_status(

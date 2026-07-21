@@ -157,6 +157,30 @@ pub fn build_context_for_render(
     Ok(out)
 }
 
+/// The terminal context: the run-instruction header followed by EVERY section
+/// in the append-only event log, deliberately WITHOUT compaction. The terminal
+/// finish-with-prompt node composes the run's final answer and must see every
+/// completed node's raw output.
+///
+/// `build_context_for_render` is a lossy, budget-driven view for MID-RUN
+/// prompts: once the accumulated context exceeds `context_max_bytes` (which the
+/// re-run duplicate sections of repeated resume + patch-migration cycles push it
+/// over), compaction replaces old sections with a cheap-model summary, and each
+/// further compaction re-summarizes the previous summary until the earliest
+/// nodes' substantive output is gone. That is correct for keeping a running
+/// prompt inside a token budget, but wrong for the terminal answer - the run's
+/// final deliverable would be composed from a summary that reports "no shipped
+/// work" even though every output still lives verbatim in the log (issue #42
+/// finding 5). The full record is always available here, so the terminal node
+/// reads it directly.
+pub fn build_terminal_context(events: &[Event], instruction: Option<&str>) -> String {
+    format!(
+        "{}{}",
+        instruction_section(instruction),
+        build_context(events)
+    )
+}
+
 /// Manual scan for `{{ ... }}` without regex; substitutes known references, unknown ones -> "".
 pub fn render(
     text: &str,

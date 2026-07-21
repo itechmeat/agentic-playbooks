@@ -172,6 +172,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 status: "failed".into(),
                 duration_ms: Some(1200),
                 session: None,
+                summary: None,
             },
         ),
         ev(
@@ -198,4 +199,63 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
     assert_eq!(s.run_status, RunStatus::Interrupted);
     // The open attempt is attempt 2 (the crash window), recorded as the latest.
     assert_eq!(s.attempts.get("ping"), Some(&2));
+}
+
+// Issue #42 finding 3: RunState::fold must carry the last RunError's reason
+// (and node, when known) forward as `failure_reason`, for run_status/doctor
+// to surface without reading events.jsonl directly.
+#[test]
+fn folds_run_error_into_failure_reason() {
+    let events = vec![
+        ev(0, run_started("w")),
+        ev(
+            1,
+            EventPayload::NodeFinished {
+                node: "work".into(),
+                status: "failed".into(),
+                attempt: 1,
+                output: "boom".into(),
+                artifacts: Vec::new(),
+            },
+        ),
+        ev(
+            2,
+            EventPayload::RunError {
+                node: Some("work".into()),
+                reason: "node `work` has no outgoing edge and is not finish".into(),
+            },
+        ),
+        ev(
+            3,
+            EventPayload::RunFinished {
+                outcome: "failed".into(),
+            },
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(s.run_status, RunStatus::Failed);
+    let reason = s.failure_reason.expect("failure_reason must be set");
+    assert_eq!(reason.node.as_deref(), Some("work"));
+    assert!(reason.reason.contains("no outgoing edge"));
+    assert_eq!(
+        reason.display(),
+        "node `work`: node `work` has no outgoing edge and is not finish"
+    );
+}
+
+// A run with no RunError at all (every run before this fix, and every run
+// that never fails) carries no failure_reason.
+#[test]
+fn no_run_error_means_no_failure_reason() {
+    let events = vec![
+        ev(0, run_started("w")),
+        ev(
+            1,
+            EventPayload::RunFinished {
+                outcome: "succeeded".into(),
+            },
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert!(s.failure_reason.is_none());
 }

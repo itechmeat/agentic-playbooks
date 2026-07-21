@@ -70,6 +70,24 @@ fn to_call_tool_result(result: Result<Value, ToolError>) -> CallToolResult {
     }
 }
 
+/// Merges the policy gate's non-fatal consent-time warnings (finding 11 of
+/// issue #42 - a bound connector with zero configured accounts) into a
+/// successful run response object, so the caller can show them to the user
+/// before the run proceeds. A no-op for an error, a non-object payload, or an
+/// empty warning list, and it never converts a permit into a refusal.
+fn with_warnings(
+    result: Result<Value, ToolError>,
+    warnings: &[String],
+) -> Result<Value, ToolError> {
+    let mut result = result;
+    if !warnings.is_empty()
+        && let Ok(Value::Object(obj)) = &mut result
+    {
+        obj.insert("warnings".to_string(), json!(warnings));
+    }
+    result
+}
+
 fn capability_for_tool(name: &str) -> &'static str {
     match name {
         // `run_answer`'s supervisor-token path (spec 2026-07-20-interactive-
@@ -84,7 +102,12 @@ fn capability_for_tool(name: &str) -> &'static str {
         | "supervisor_run_continue_from"
         | "supervisor_run_pause"
         | "supervisor_run_abort"
-        | "supervisor_context_append" => "retry",
+        | "supervisor_context_append"
+        // Interrupting a wedged attempt is a control-flow intervention that
+        // forces the attempt boundary so retry/fallback/patch can proceed - it
+        // belongs with `retry`, the same capability its sibling
+        // `supervisor_node_retry` requires.
+        | "supervisor_interrupt_attempt" => "retry",
         "supervisor_patch_playbook" => "patch_playbook",
         // An unknown tool name must not pass the gate under any policy.
         _ => "unknown",
@@ -198,6 +221,8 @@ impl WfMcp {
         expected_children: BTreeMap<String, apb_engine::run_config::ChildExpectation>,
         expected_connectors: BTreeMap<String, String>,
         expected_connector_accounts: BTreeMap<String, String>,
+        continued_from: Option<String>,
+        warnings: Vec<String>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
@@ -215,6 +240,7 @@ impl WfMcp {
             Some(expected_children),
             expected_connectors,
             expected_connector_accounts,
+            continued_from,
         );
         let value = match started {
             Ok(v) => v,
@@ -229,11 +255,14 @@ impl WfMcp {
             }
         };
         let token = self.mint_token(run_id.clone(), capabilities.clone());
-        to_call_tool_result(Ok(json!({
-            "run_id": run_id,
-            "supervisor_token": token,
-            "capabilities": capabilities,
-        })))
+        to_call_tool_result(with_warnings(
+            Ok(json!({
+                "run_id": run_id,
+                "supervisor_token": token,
+                "capabilities": capabilities,
+            })),
+            &warnings,
+        ))
     }
 
     /// Combined tool router: the per-domain routers (defined in the

@@ -8,6 +8,7 @@
     writeProfile,
     type AgentInfo,
     type ModelRow,
+    type ModelOption,
     type AvailableSkill,
   } from '../lib/api'
   import {
@@ -15,7 +16,7 @@
     disabledModelIds,
     findDuplicatePair,
     firstSelectableModelForAgent,
-    modelIdsForAgent,
+    modelOptionsForAgent,
     nextFallbackPair,
     parseProfileDoc,
     type ExecutorGroup,
@@ -48,7 +49,12 @@
 
   let projects = $state<Project[]>([])
   let agents = $state<AgentInfo[]>([])
+  // The raw curated table (fallback for an agent id detection never saw) and
+  // the server-computed per-agent option list that actually drives the model
+  // combobox (issue #42 finding 9). See profileedit.ts for how the two are
+  // combined.
   let modelsTable = $state<ModelRow[]>([])
+  let optionsByAgent = $state<Record<string, ModelOption[]>>({})
   let availableSkills = $state<AvailableSkill[]>([])
 
   const DESC_MAX = 200
@@ -89,15 +95,18 @@
     agents.filter((a) => a.installed).map((a) => ({ value: a.agent })),
   )
 
-  // Model suggestions depend on the chosen agent. See profileedit.ts for the
-  // agent-id probing (legacy `claude-code` -> `claude`) and fallback rules.
-  // A model already paired with the same agent by another group is still
-  // listed, marked "in use", and disabled - never filtered out.
+  // Model suggestions depend on the chosen agent: the curated table filtered
+  // to that agent's vendor, annotated by detection - never the other way
+  // round (issue #42 finding 9; see profileedit.ts). A model already paired
+  // with the same agent by another group is still listed, marked "in use",
+  // and disabled - never filtered out. A model also named by the agent's
+  // local config/detection is marked "detected" when it is not already
+  // flagged "in use".
   function modelOptionsFor(i: number) {
     const taken = new Set(disabledModelIds(i, groups))
-    return modelIdsForAgent(groups[i].agent, agents, modelsTable).map((id) => ({
-      value: id,
-      hint: taken.has(id) ? 'in use' : undefined,
+    return modelOptionsForAgent(groups[i].agent, optionsByAgent, modelsTable).map((o) => ({
+      value: o.id,
+      hint: taken.has(o.id) ? 'in use' : o.detected ? 'detected' : undefined,
     }))
   }
 
@@ -108,7 +117,7 @@
   // the first SELECTABLE model, so switching agent can never land the group on
   // a pair another group already holds.
   function onAgentChange(i: number, v: string) {
-    groups[i].model = firstSelectableModelForAgent(v, i, groups, agents, modelsTable)
+    groups[i].model = firstSelectableModelForAgent(v, i, groups, optionsByAgent, modelsTable)
   }
 
   function addFallback() {
@@ -116,7 +125,7 @@
     // disabled), kept as a backstop so a programmatic call cannot append a row
     // computed from an empty agent list.
     if (!metaLoaded) return
-    const pair = nextFallbackPair(groups, agents, modelsTable)
+    const pair = nextFallbackPair(groups, agents, optionsByAgent, modelsTable)
     if (!pair) return toast.error('No agent and model combination is left to add')
     groups = [...groups, pair]
   }
@@ -148,7 +157,7 @@
   function applyNewProfileDefaults() {
     if (!isNew || !metaLoaded) return
     if (groups[0].agent && groups[0].model) return
-    const pair = defaultPrimaryPair(groups, agents, modelsTable)
+    const pair = defaultPrimaryPair(groups, agents, optionsByAgent, modelsTable)
     if (!groups[0].agent) groups[0].agent = pair.agent
     if (!groups[0].model && groups[0].agent === pair.agent) groups[0].model = pair.model
   }
@@ -160,6 +169,7 @@
       projects = pj
       agents = ag
       modelsTable = md.models
+      optionsByAgent = md.options_by_agent
       if (isNew && !workspaceInput && projects.length) workspaceInput = projects[0].workspace_id
     } catch (e) {
       toast.error('Failed to load form data', { description: String(e) })
