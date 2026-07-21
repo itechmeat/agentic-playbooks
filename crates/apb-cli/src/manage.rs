@@ -6,6 +6,7 @@ use apb_core::registry::init_project;
 
 use clap::Subcommand;
 
+use crate::onboarding::{offer_onboarding_if_tty, parse_subscription, subscriptions_survey_step};
 use crate::util::print_json;
 
 #[derive(Subcommand)]
@@ -91,40 +92,6 @@ pub(crate) fn adopt_cmd(root: &Path, id: Option<&str>) -> ExitCode {
     }
 }
 
-/// Parses `agent[:plan[:coverage]]` into a subscription. An empty agent, an
-/// unknown coverage, or an extra separator (beyond the three fields) is an
-/// error, not a silent default: otherwise a typo would silently record a
-/// garbage subscription.
-pub(crate) fn parse_subscription(s: &str) -> Result<apb_core::models_table::Subscription, String> {
-    use apb_core::models_table::{Coverage, Subscription};
-    let mut parts = s.splitn(3, ':');
-    let agent = parts.next().unwrap_or("").trim().to_string();
-    if agent.is_empty() {
-        return Err(format!("empty agent in `{s}`"));
-    }
-    let plan = parts
-        .next()
-        .filter(|p| !p.is_empty())
-        .map(|p| p.to_string());
-    let coverage = match parts.next() {
-        None => Coverage::Unknown,
-        Some("full") => Coverage::Full,
-        Some("partial") => Coverage::Partial,
-        Some("unknown") => Coverage::Unknown,
-        // Catches both an invalid value and an extra separator (`a:b:full:x` -> `full:x`).
-        Some(other) => {
-            return Err(format!(
-                "invalid coverage `{other}` in `{s}` (use full|partial|unknown)"
-            ));
-        }
-    };
-    Ok(Subscription {
-        agent,
-        plan,
-        coverage,
-    })
-}
-
 pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool) -> ExitCode {
     use apb_core::models_table::{self, OnboardingState};
     use std::io::IsTerminal;
@@ -179,9 +146,23 @@ pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool) -> ExitCode {
     // On a terminal without a completed survey, we offer the interactive one.
     // A broken state - we warn and do not offer it (we do not pretend it is
     // Uninitialized).
-    if std::io::stdin().is_terminal() {
+    // Only enter the blocking interactive survey when BOTH stdin and stdout are
+    // terminals: with stdout piped (`apb subscriptions | tool`) we must not
+    // stall on a prompt, so we fall through to the plain hint below.
+    if std::io::stdin().is_terminal() && std::io::stdout().is_terminal() {
         match models_table::onboarding::read() {
-            Ok(OnboardingState::Uninitialized) => return interactive_survey(),
+            Ok(OnboardingState::Uninitialized) => {
+                return match subscriptions_survey_step() {
+                    Ok(()) => ExitCode::SUCCESS,
+                    // Cancellation is a clean exit, like blanking out of the old
+                    // survey; a store-write failure exits 2, like `--set`.
+                    Err(e) if e.kind() == std::io::ErrorKind::Interrupted => ExitCode::SUCCESS,
+                    Err(e) => {
+                        eprintln!("subscriptions error: {e}");
+                        ExitCode::from(2)
+                    }
+                };
+            }
             Ok(_) => {}
             Err(e) => eprintln!("onboarding state unreadable: {e}"),
         }
@@ -192,102 +173,14 @@ pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Interactive subscriptions survey (terminal only). Pre-filled from detection;
-/// reads lines of `agent[:plan[:coverage]]`, an empty line finishes it.
-pub(crate) fn interactive_survey() -> ExitCode {
-    use std::io::Write as _;
-    println!("\nDetected agents:");
-    // Pre-fill: for installed agents with a detected auth hint, we suggest a
-    // ready-made subscription line (agent, coverage unknown) - it can be
-    // entered as-is or refined with a plan.
-    let mut prefill: Vec<String> = Vec::new();
-    if let Ok(v) = apb_mcp::advisory_tools::agents_detect(false)
-        && let Some(agents) = v["agents"].as_array()
-    {
-        for a in agents {
-            let installed = a["installed"].as_bool().unwrap_or(false);
-            let name = a["agent"].as_str().unwrap_or("?");
-            let auth = a["auth"]["kind"].as_str();
-            let auth_note = match auth {
-                Some("oauth") => " [auth: oauth]",
-                Some("api_key") => " [auth: api-key]",
-                _ => "",
-            };
-            println!(
-                "  {name} {}{auth_note}",
-                if installed { "(installed)" } else { "" }
-            );
-            if installed && matches!(auth, Some("oauth") | Some("api_key")) {
-                prefill.push(name.to_string());
-            }
-        }
-    }
-    if !prefill.is_empty() {
-        println!("\nSuggested (from detected auth): {}", prefill.join(", "));
-        println!("Enter each as `{{agent}}` or `{{agent}}:{{plan}}:{{coverage}}` to refine.");
-    }
-    println!(
-        "\nEnter subscriptions as agent[:plan[:coverage]], one per line. Blank line finishes. Ctrl-C or blank to skip:"
-    );
-    let mut subs = Vec::new();
-    let stdin = std::io::stdin();
-    loop {
-        print!("> ");
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        if stdin.read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            break;
-        }
-        match parse_subscription(line) {
-            Ok(sub) => subs.push(sub),
-            Err(e) => eprintln!("skipped: {e}"),
-        }
-    }
-    if subs.is_empty() {
-        println!("no subscriptions entered; leaving survey uninitialized");
-        return ExitCode::SUCCESS;
-    }
-    match apb_mcp::advisory_tools::subscriptions_set(subs, false) {
-        Ok(v) => {
-            print_json(&v);
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("subscriptions error: {e}");
-            ExitCode::from(2)
-        }
-    }
-}
-
-/// In an interactive session (stdin is a terminal) with a survey that hasn't
-/// run yet, prints an unobtrusive hint to STDERR (stdout carries JSON - it
-/// must not be cluttered). Non-interactively (piped/redirected stdin) we stay
-/// silent and do NOT change state; a survey already completed/declined is
-/// not re-offered; a broken state is silently skipped (we do not pretend it
-/// is Uninitialized).
-pub(crate) fn offer_onboarding_if_tty() {
-    use apb_core::models_table::{self, OnboardingState};
-    use std::io::IsTerminal;
-    if std::io::stdin().is_terminal()
-        && matches!(
-            models_table::onboarding::read(),
-            Ok(OnboardingState::Uninitialized)
-        )
-    {
-        eprintln!(
-            "\nhint: run `apb subscriptions` to declare your agent subscriptions (improves profile advice)"
-        );
-    }
-}
-
 pub(crate) fn run_init(root: &Path) -> ExitCode {
     match init_project(root) {
         Ok(()) => {
             println!("initialized {}", root.join(".apb").display());
+            // Init dispatch: on success (and only then) offer the interactive
+            // questionnaire. It self-gates on a real terminal and never turns a
+            // successful init into a failure.
+            crate::onboarding::run_init_questionnaire(root);
             ExitCode::SUCCESS
         }
         Err(e) => {

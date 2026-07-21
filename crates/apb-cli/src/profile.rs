@@ -3,7 +3,7 @@ use std::process::ExitCode;
 
 use clap::{Args, Subcommand};
 
-use crate::manage::offer_onboarding_if_tty;
+use crate::onboarding::offer_subscriptions_survey;
 use crate::util::print_json;
 
 #[derive(Subcommand)]
@@ -89,7 +89,7 @@ pub(crate) fn profile_cmd(root: &Path, action: ProfileAction) -> ExitCode {
             print_json(&v);
             // Working with profiles is also a good point to offer the
             // subscriptions survey (interactively, if onboarding hasn't run).
-            offer_onboarding_if_tty();
+            offer_subscriptions_survey();
             ExitCode::SUCCESS
         }
         Err(e) => {
@@ -344,7 +344,7 @@ pub(crate) fn profile_edit_cmd(root: &Path, name: &str, scope: &str) -> ExitCode
             let _ = std::fs::remove_dir_all(&tmp);
             print_json(&v);
             // Like other `apb profile *` commands, offer the onboarding survey interactively.
-            offer_onboarding_if_tty();
+            offer_subscriptions_survey();
             ExitCode::SUCCESS
         }
         Err(e) => {

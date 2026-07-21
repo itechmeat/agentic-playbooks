@@ -1,8 +1,10 @@
 mod cache;
 mod connector;
 mod manage;
+mod onboarding;
 mod profile;
 mod run;
+mod selfupdate;
 mod serve;
 mod util;
 
@@ -22,6 +24,7 @@ use crate::run::{
     answer_cmd, drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd,
     run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
 };
+use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dev_cmd, mcp_cmd, serve};
 use crate::util::resolve_port;
 
@@ -181,6 +184,12 @@ enum Command {
     },
     /// Start stdio MCP server for the current project
     Mcp,
+    /// Update apb to the latest released version
+    SelfUpdate {
+        /// Report whether an update is available without installing it
+        #[arg(long)]
+        check: bool,
+    },
     /// List or manage the workspace registry (spec 6)
     Projects {
         #[command(subcommand)]
@@ -305,6 +314,7 @@ fn main() -> ExitCode {
         Some(Command::Serve { port, no_open }) => serve(resolve_port(port), no_open),
         Some(Command::Dev { no_open }) => dev_cmd(root, no_open),
         Some(Command::Mcp) => mcp_cmd(&root),
+        Some(Command::SelfUpdate { check }) => run_self_update(check),
         Some(Command::Projects { action }) => projects_cmd(action),
         Some(Command::Profile { action }) => profile_cmd(&root, action),
         Some(Command::Connector { action }) => connector_cmd(&root, action),

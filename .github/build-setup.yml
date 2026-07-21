@@ -1,0 +1,41 @@
+- name: Install Bun
+  uses: oven-sh/setup-bun@v2
+  with:
+    bun-version: latest
+- name: Build web frontend (embedded by apb-server at compile time)
+  shell: bash
+  run: |
+    cd web
+    bun install --frozen-lockfile
+    bun run build
+# In-build test gate. This duplicates the fast plan-jobs ./test-gate on purpose.
+# The plan-jobs gate gives quick feedback, but its failure only SKIPS
+# build-local-artifacts (the `needs` has no always()), and dist's host job
+# tolerates skipped build results in its `if` (skipped || success), so a
+# skipped build would still let host run gh release create and the publish
+# chain continue. Running the gate HERE, at the start of every
+# build-local-artifacts leg, makes a gate failure FAIL the build job; host's
+# `if` does not tolerate a failed build, so a failed gate physically blocks
+# publishing. These steps run only on tag releases (in plan pr-run-mode the
+# build jobs are skipped on pull requests, where the plan-jobs gate covers CI).
+- name: Ensure rustfmt and clippy components
+  shell: bash
+  run: rustup component add rustfmt clippy
+- name: Install cargo-nextest
+  uses: taiki-e/install-action@nextest
+- name: Gate - format check
+  shell: bash
+  run: cargo fmt --all -- --check
+- name: Gate - clippy
+  shell: bash
+  run: cargo clippy --workspace --all-targets -- -D warnings
+- name: Gate - test
+  shell: bash
+  run: cargo nextest run --profile ci --workspace
+- name: Gate - doctests
+  shell: bash
+  run: cargo test --workspace --doc
+- name: Gate - release notes must exist for this tag
+  if: github.ref_type == 'tag'
+  shell: bash
+  run: test -f "docs/release-notes/${GITHUB_REF_NAME}.md"

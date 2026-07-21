@@ -90,45 +90,17 @@ edges:
 
 ## Install
 
-**The simplest path - let your agent install it.** Paste this into Claude Code,
-Codex, OpenCode, or any AI agent with shell access:
-
-> Install agentic-playbooks for me by following the instructions at
-> <https://github.com/itechmeat/agentic-playbooks/blob/main/llms.txt>
-
-The agent reads the `llms.txt`, clones the repo, builds the web frontend,
-installs the binary, and verifies with `apb doctor`.
-
-If you prefer running the steps yourself, the project is currently pre-release
-and requires Rust and Bun (the web UI is embedded into the binary at build time):
-
 ```sh
-git clone https://github.com/itechmeat/agentic-playbooks && cd agentic-playbooks
-(cd web && bun install && bun run build)
-cargo install --path crates/apb-cli
+curl --proto '=https' --tlsv1.2 -LsSf https://github.com/itechmeat/agentic-playbooks/releases/latest/download/apb-installer.sh | sh
 ```
 
-Note: `cargo install --git` is not supported; install from a local clone.
+This installs the `apb` binary to `CARGO_HOME` (`~/.cargo/bin` by default). Prefer Homebrew: `brew install itechmeat/agentic-playbooks/apb`.
 
-To update: `git pull`, rebuild `web/`, re-run `cargo install --path crates/apb-cli`.
-To uninstall: `cargo uninstall apb-cli`. Project state in `.apb/` and global
-config in `~/.config/apb/` are never touched by uninstall.
+To update: `apb self-update` (installer installs) or `brew upgrade apb` (Homebrew). `apb self-update --check` reports whether an update is available without installing it.
 
-### Planned for v0.1.0
+Full details, version pinning, manual downloads with checksum verification, building from source, and uninstalling: [docs/INSTALL.md](docs/INSTALL.md).
 
-Prebuilt binaries (aarch64/x86_64 Apple darwin, x86_64 Linux GNU), a Homebrew
-tap, and SHA256 checksums will be published alongside the first tagged release.
-The release archive will include the `apb` binary and a copy of `LICENSE`.
-
-```sh
-# Planned (not yet available):
-tar -xzf apb-aarch64-apple-darwin.tar.gz
-mv apb /usr/local/bin/
-apb --version
-
-# Planned (not yet available):
-brew install itechmeat/tap/apb
-```
+Once installed, run `apb init` in a project to set it up. In an interactive terminal this walks through a short questionnaire (feedback-loop consent, agent subscriptions); non-interactive runs (CI, agents, pipes) skip it and behave as before.
 
 ## Everyday commands
 

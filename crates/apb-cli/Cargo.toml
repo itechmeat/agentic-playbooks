@@ -1,13 +1,18 @@
 [package]
-name = "apb-cli"
+name = "apb"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "Local runner for agentic playbooks with an embedded web dashboard and MCP server"
+homepage = "https://github.com/itechmeat/agentic-playbooks"
 
 [[bin]]
 name = "apb"
 path = "src/main.rs"
+
+[package.metadata.dist]
+dist = true
 
 [dependencies]
 apb-core = { path = "../apb-core" }
@@ -17,8 +22,10 @@ clap = { version = "4.6", features = ["derive"] }
 anyhow = "1.0"
 open = "5.3.6"
 serde_json.workspace = true
-apb-engine = { version = "0.8.0", path = "../apb-engine" }
-apb-mcp = { version = "0.8.0", path = "../apb-mcp" }
+apb-engine = { version = "0.9.0", path = "../apb-engine" }
+apb-mcp = { version = "0.9.0", path = "../apb-mcp" }
+cliclack = "0.5.5"
+axoupdater = { version = "0.10.0", default-features = false, features = ["github_releases", "blocking"] }
 
 [dev-dependencies]
 assert_cmd = "2.2.2"

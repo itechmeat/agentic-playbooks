@@ -35,7 +35,11 @@ code-ranker, see below).
   (`legacy_snapshot.rs`).
 - `apb-mcp` - rmcp stdio MCP server (`server.rs`), the server-side run policy gate
   (`policy.rs`), and profile/advisory/supervisor tools.
-- `apb-cli` - the `apb` binary (`main.rs`); thin dispatch over core/engine/mcp.
+- `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
+  core/engine/mcp. `apb init` runs a short interactive questionnaire in a
+  terminal (feedback-loop consent into CLAUDE.md/AGENTS.md, agent
+  subscriptions survey); non-TTY runs skip it. `apb self-update` updates
+  installer-based installs in place.
 - `apb-server` - axum web API (`lib.rs`) with the svelte frontend from `web/`
   embedded via rust-embed (`web/dist`).
 
@@ -75,6 +79,27 @@ Frontend (`web/`, bun + vite + vitest): `bun run test`, `bun run build`,
 Format and lint gates (must be clean):
 `cargo fmt --all -- --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`.
+
+### Release pipeline (dist)
+
+Releases are built by [cargo-dist](https://opensource.axo.dev/cargo-dist)
+0.32.0, configured in `dist-workspace.toml`. `dist generate` writes
+`.github/workflows/release.yml` from that config; the file is GENERATED and
+must never be hand-edited directly. To change release CI, edit
+`dist-workspace.toml` (and the referenced `.github/build-setup.yml`,
+`.github/workflows/test-gate.yml`, `.github/workflows/release-notes.yml`),
+then re-run `dist generate` and commit the regenerated workflow alongside the
+config change.
+
+Pushing a tag `vX.Y.Z` triggers the release workflow: it builds the shell
+installer, the Homebrew formula (tap `itechmeat/homebrew-agentic-playbooks`),
+and archives for the configured targets. A test gate (fmt, clippy, nextest,
+doctests, and a check that `docs/release-notes/<tag>.md` exists) runs both as
+a fast plan-stage job and again inside every build leg, so a failing gate
+physically blocks publishing rather than just warning. `dist plan` also runs
+on every PR (`pr-run-mode = "plan"`) to catch config drift before a tag is
+pushed. `docs/release-notes/<tag>.md` is required per tag and becomes the
+published release body via a post-announce job.
 
 ## Required gates
 
