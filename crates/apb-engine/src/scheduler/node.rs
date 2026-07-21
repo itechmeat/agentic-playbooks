@@ -89,6 +89,65 @@ pub(crate) struct LiveContext {
     pub timeout_ms: u64,
 }
 
+/// The seq of the last control entry currently posted, or `None` when the
+/// channel is empty. Used as the mid-attempt observation baseline
+/// (`observe_control`) so only messages that arrive AFTER an attempt begins are
+/// acknowledged as received live - a command already queued (an unconsumed
+/// retry the drive's scan stopped short of) is not re-acked. A read error
+/// degrades to `None`: acking one extra pre-existing entry is harmless, and the
+/// per-poll observation is best effort, exactly like the abort watcher.
+fn latest_control_seq(run_dir: &Path) -> Option<u64> {
+    crate::control::read_control_after(run_dir, None)
+        .ok()
+        .and_then(|v| v.last().map(|e| e.seq))
+}
+
+/// A short machine-facing description of a control command for a
+/// `control_received` acknowledgment detail (finding 7 of issue #42).
+fn control_summary(cmd: &crate::control::Control, seq: u64) -> String {
+    format!("{} (control seq {seq})", cmd.kind())
+}
+
+/// Journals every control message newer than `seen` as a `control_received`
+/// supervisor action (finding 7 of issue #42, third item of issue #40: a
+/// message posted mid-attempt must be acknowledged live, not only discovered at
+/// the next node boundary). On a [`crate::control::Control::Interrupt`] it
+/// additionally journals an explanatory `attempt_interrupted` action and
+/// reports the request back, so the caller's poll loop can tear the agent down.
+/// Runs on the drive thread through the shared `Journal`, so the single-writer
+/// invariant holds. Returns the highest seq acknowledged (the new baseline) and
+/// whether an interrupt was requested.
+fn observe_control(
+    run_dir: &Path,
+    node_id: &str,
+    attempt: u32,
+    journal: &Journal,
+    seen: Option<u64>,
+) -> Result<(Option<u64>, bool), EngineError> {
+    let mut cursor = seen;
+    let mut interrupt = false;
+    for entry in crate::control::read_control_after(run_dir, seen)? {
+        journal.append(EventPayload::SupervisorAction {
+            action: "control_received".into(),
+            node: Some(node_id.to_string()),
+            detail: control_summary(&entry.cmd, entry.seq),
+        })?;
+        if let crate::control::Control::Interrupt { reason } = &entry.cmd {
+            journal.append(EventPayload::SupervisorAction {
+                action: "attempt_interrupted".into(),
+                node: Some(node_id.to_string()),
+                detail: format!(
+                    "supervisor requested interrupt of node `{node_id}` attempt {attempt} (control seq {}): {reason}",
+                    entry.seq
+                ),
+            })?;
+            interrupt = true;
+        }
+        cursor = Some(entry.seq);
+    }
+    Ok((cursor, interrupt))
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -549,12 +608,53 @@ pub(crate) fn execute_node(
                         expected: Duration::from_secs(s),
                         on_stall: &on_stall,
                     });
+                    // Live control observation (finding 7 of issue #42, third
+                    // item of issue #40): the adapter's poll loop calls this on
+                    // THIS (the drive) thread each iteration. It journals every
+                    // control message that lands mid-attempt as `control_received`
+                    // - so a supervisor sees its message was seen live, not only
+                    // at the next node boundary - and, on a `Control::Interrupt`,
+                    // journals `attempt_interrupted` and sets `interrupt` so the
+                    // poll loop SIGKILLs the agent. A journal failure is carried
+                    // out like `tick_err`/`stall_err`. The baseline is the last
+                    // control seq already posted when this attempt began, so a
+                    // command queued before the attempt is not re-acked.
+                    let control_err: std::cell::RefCell<Option<EngineError>> =
+                        std::cell::RefCell::new(None);
+                    let interrupt = AtomicBool::new(false);
+                    let control_seen: std::cell::Cell<Option<u64>> =
+                        std::cell::Cell::new(latest_control_seq(run_dir));
+                    let on_control_poll = || {
+                        if control_err.borrow().is_some() {
+                            return;
+                        }
+                        match observe_control(
+                            run_dir,
+                            node_id,
+                            cur_attempt,
+                            journal,
+                            control_seen.get(),
+                        ) {
+                            Ok((new_seen, interrupt_requested)) => {
+                                control_seen.set(new_seen);
+                                if interrupt_requested {
+                                    interrupt.store(true, Ordering::Relaxed);
+                                }
+                            }
+                            Err(e) => *control_err.borrow_mut() = Some(e),
+                        }
+                    };
+                    let control_hooks = crate::adapter::ControlHooks {
+                        on_poll: &on_control_poll,
+                        interrupt: &interrupt,
+                    };
                     let outcome = adapter.run_cancellable(
                         &task,
                         cancel,
                         Some(&on_spawn),
                         live_hooks.as_ref(),
                         stall_hooks.as_ref(),
+                        Some(&control_hooks),
                     );
                     if let Some(e) = spawn_err.borrow_mut().take() {
                         return Err(e);
@@ -563,6 +663,9 @@ pub(crate) fn execute_node(
                         return Err(e);
                     }
                     if let Some(e) = stall_err.borrow_mut().take() {
+                        return Err(e);
+                    }
+                    if let Some(e) = control_err.borrow_mut().take() {
                         return Err(e);
                     }
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
@@ -915,9 +1018,10 @@ pub(crate) fn execute_finish_answer(
                 }
             };
             // A finish-answer node is never interactive, so it never runs the
-            // live sidecar (`None`), and it carries no `expected_duration`, so
-            // no stall watch (`None`).
-            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None, None);
+            // live sidecar (`None`), it carries no `expected_duration`, so no
+            // stall watch (`None`), and the terminal answer composition is not a
+            // supervisor-interruptible node, so no control observation (`None`).
+            let outcome = adapter.run_cancellable(&task, cancel, Some(&on_spawn), None, None, None);
             if let Some(e) = spawn_err.borrow_mut().take() {
                 return Err(e);
             }

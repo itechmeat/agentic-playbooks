@@ -1383,6 +1383,17 @@ fn drive_inner(
                     control_cursor = Some(entry.seq);
                     write_control_cursor(run_dir, entry.seq)?;
                 }
+                Control::Interrupt { .. } => {
+                    // A mid-attempt interrupt (finding 7 of issue #42, third
+                    // item of issue #40) reaching a node boundary is spent: the
+                    // running attempt's own poll loop already observed it live
+                    // (journaling control_received / attempt_interrupted) and
+                    // terminated the agent. At a boundary there is no attempt to
+                    // interrupt, so just consume it and move on - an interrupt
+                    // posted with no attempt running is a harmless no-op.
+                    control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
+                }
                 Control::Retry { ref node, .. } | Control::ContinueFrom { ref node } => {
                     // Valid only inside await_control, in response to a wake -
                     // we do not advance the cursor, the command remains unconsumed.
@@ -2679,6 +2690,16 @@ fn drive_inner(
                             run_id,
                             outcome: RunStatus::Aborted,
                         });
+                    }
+                    Control::Interrupt { .. } => {
+                        // An interrupt (finding 7 of issue #42, third item of
+                        // issue #40) is a mid-attempt command; at a wake there is
+                        // no running attempt to terminate, so it is spent.
+                        // Consume it (advance the cursor so await_control does not
+                        // hand it back) and keep waiting for a real directive.
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
+                        continue;
                     }
                 }
             }
