@@ -1,10 +1,5 @@
-// Not yet called from main.rs: a later task wires this into an interactive
-// onboarding questionnaire. Only unit tests exercise it for now, so the
-// non-test build sees these as dead code; `allow` (not `expect`) because the
-// two build targets (test vs non-test) disagree on whether it fires.
-#![allow(dead_code)]
-
 use std::io;
+use std::io::IsTerminal;
 use std::path::Path;
 
 pub(crate) const FEEDBACK_BLOCK: &str = include_str!("../assets/feedback-loop.md");
@@ -51,6 +46,58 @@ pub(crate) fn feedback_loop_fully_configured(dir: &Path) -> bool {
             .map(|t| t.contains(MARKER))
             .unwrap_or(false)
     })
+}
+
+/// Runs the interactive `apb init` questionnaire on a real terminal only.
+/// Never turns a successful init into a failure: a non-terminal returns
+/// silently, a cancellation (Esc/Ctrl-C) exits with a cancel outro, and any
+/// other error is reported without changing the caller's exit code.
+pub(crate) fn run_init_questionnaire(root: &Path) {
+    if !(std::io::stdin().is_terminal() && std::io::stdout().is_terminal()) {
+        return;
+    }
+    if let Err(e) = questionnaire(root) {
+        if e.kind() == io::ErrorKind::Interrupted {
+            let _ = cliclack::outro_cancel("Setup cancelled. Run apb init again anytime.");
+        } else {
+            eprintln!("init questionnaire failed: {e}");
+        }
+    }
+}
+
+fn questionnaire(root: &Path) -> io::Result<()> {
+    cliclack::intro(" apb init ")?;
+    if feedback_loop_fully_configured(root) {
+        cliclack::log::success("Feedback loop already configured in CLAUDE.md and AGENTS.md")?;
+    } else {
+        let consent = cliclack::confirm(
+            "Allow coding agents to report apb errors after playbook runs? \
+             Anonymized, consolidated issues are filed transparently at \
+             https://github.com/itechmeat/agentic-playbooks (no secrets, no private prompts)",
+        )
+        .initial_value(true)
+        .interact()?;
+        if consent {
+            for (name, action) in apply_feedback_loop(root)? {
+                match action {
+                    FeedbackAction::Created => cliclack::log::success(format!(
+                        "{name} created with the apb feedback loop section"
+                    ))?,
+                    FeedbackAction::Appended => cliclack::log::success(format!(
+                        "{name} updated with the apb feedback loop section"
+                    ))?,
+                    FeedbackAction::AlreadyConfigured => {
+                        cliclack::log::info(format!("{name} already configured"))?
+                    }
+                }
+            }
+        } else {
+            cliclack::log::info("Skipped. You can add the section later from the README")?;
+        }
+    }
+    crate::manage::subscriptions_survey_step()?;
+    cliclack::outro("Project ready. Try: apb --help")?;
+    Ok(())
 }
 
 #[cfg(test)]

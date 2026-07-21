@@ -181,7 +181,14 @@ pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool) -> ExitCode {
     // Uninitialized).
     if std::io::stdin().is_terminal() {
         match models_table::onboarding::read() {
-            Ok(OnboardingState::Uninitialized) => return interactive_survey(),
+            Ok(OnboardingState::Uninitialized) => {
+                if let Err(e) = subscriptions_survey_step()
+                    && e.kind() != std::io::ErrorKind::Interrupted
+                {
+                    eprintln!("subscriptions survey failed: {e}");
+                }
+                return ExitCode::SUCCESS;
+            }
             Ok(_) => {}
             Err(e) => eprintln!("onboarding state unreadable: {e}"),
         }
@@ -192,75 +199,121 @@ pub(crate) fn subscriptions_cmd(set: Vec<String>, decline: bool) -> ExitCode {
     ExitCode::SUCCESS
 }
 
-/// Interactive subscriptions survey (terminal only). Pre-filled from detection;
-/// reads lines of `agent[:plan[:coverage]]`, an empty line finishes it.
-pub(crate) fn interactive_survey() -> ExitCode {
-    use std::io::Write as _;
-    println!("\nDetected agents:");
-    // Pre-fill: for installed agents with a detected auth hint, we suggest a
-    // ready-made subscription line (agent, coverage unknown) - it can be
-    // entered as-is or refined with a plan.
-    let mut prefill: Vec<String> = Vec::new();
+/// Parses one `agent[:plan[:coverage]]` entry and appends it to `subs`.
+/// Extracted verbatim from the old survey loop body so every survey front end
+/// (the cliclack prompt below, and any future caller) stores entries through
+/// exactly the same parse/validate path. It never writes state itself: the
+/// resolved batch is committed once by the caller via `subscriptions_set`.
+fn record_survey_entry(
+    subs: &mut Vec<apb_core::models_table::Subscription>,
+    entry: &str,
+) -> Result<(), String> {
+    subs.push(parse_subscription(entry)?);
+    Ok(())
+}
+
+/// Composes an `agent[:plan[:coverage]]` entry from separately-collected
+/// fields, preserving the positional grammar: a coverage still needs the plan
+/// slot present (`agent::coverage` when the plan is blank).
+fn compose_entry(agent: &str, plan: &str, coverage: &str) -> String {
+    let agent = agent.trim();
+    let plan = plan.trim();
+    let coverage = coverage.trim();
+    if !coverage.is_empty() {
+        format!("{agent}:{plan}:{coverage}")
+    } else if !plan.is_empty() {
+        format!("{agent}:{plan}")
+    } else {
+        agent.to_string()
+    }
+}
+
+/// Interactive subscriptions survey, re-skinned with cliclack. Self-gates:
+/// only runs on a real terminal with the onboarding state still
+/// `Uninitialized` (mirroring the offer test in `subscriptions_cmd`), and
+/// returns `Ok(())` immediately otherwise. Cancellation (Esc/Ctrl-C) surfaces
+/// as `io::ErrorKind::Interrupted` for the caller to handle. Stored data and
+/// its format are identical to the old line-based survey.
+pub(crate) fn subscriptions_survey_step() -> std::io::Result<()> {
+    use apb_core::models_table::{self, OnboardingState};
+    use std::io::IsTerminal;
+
+    if !std::io::stdin().is_terminal() {
+        return Ok(());
+    }
+    match models_table::onboarding::read() {
+        Ok(OnboardingState::Uninitialized) => {}
+        // Already completed/declined, or a broken state: do not offer it and do
+        // not pretend it is Uninitialized (matches the old offer behaviour).
+        _ => return Ok(()),
+    }
+
+    // Detected agents become the multiselect items. Installed agents with a
+    // usable auth hint are pre-selected, matching the old "suggested" prefill.
+    let mut items: Vec<(String, String, String)> = Vec::new();
+    let mut preselected: Vec<String> = Vec::new();
     if let Ok(v) = apb_mcp::advisory_tools::agents_detect(false)
         && let Some(agents) = v["agents"].as_array()
     {
         for a in agents {
             let installed = a["installed"].as_bool().unwrap_or(false);
-            let name = a["agent"].as_str().unwrap_or("?");
+            let name = a["agent"].as_str().unwrap_or("?").to_string();
             let auth = a["auth"]["kind"].as_str();
-            let auth_note = match auth {
-                Some("oauth") => " [auth: oauth]",
-                Some("api_key") => " [auth: api-key]",
-                _ => "",
+            let hint = match (installed, auth) {
+                (true, Some("oauth")) => "installed, auth: oauth".to_string(),
+                (true, Some("api_key")) => "installed, auth: api-key".to_string(),
+                (true, _) => "installed".to_string(),
+                (false, _) => "not detected".to_string(),
             };
-            println!(
-                "  {name} {}{auth_note}",
-                if installed { "(installed)" } else { "" }
-            );
             if installed && matches!(auth, Some("oauth") | Some("api_key")) {
-                prefill.push(name.to_string());
+                preselected.push(name.clone());
             }
+            items.push((name.clone(), name, hint));
         }
     }
-    if !prefill.is_empty() {
-        println!("\nSuggested (from detected auth): {}", prefill.join(", "));
-        println!("Enter each as `{{agent}}` or `{{agent}}:{{plan}}:{{coverage}}` to refine.");
+    if items.is_empty() {
+        cliclack::log::info("No coding agents detected; leaving survey uninitialized")?;
+        return Ok(());
     }
-    println!(
-        "\nEnter subscriptions as agent[:plan[:coverage]], one per line. Blank line finishes. Ctrl-C or blank to skip:"
-    );
+
+    let mut selector = cliclack::multiselect(
+        "Which agent subscriptions do you have? (space to toggle, enter to confirm)",
+    )
+    .items(&items)
+    .required(false);
+    if !preselected.is_empty() {
+        selector = selector.initial_values(preselected);
+    }
+    let selected: Vec<String> = selector.interact()?;
+    if selected.is_empty() {
+        cliclack::log::info("No subscriptions selected; leaving survey uninitialized")?;
+        return Ok(());
+    }
+
     let mut subs = Vec::new();
-    let stdin = std::io::stdin();
-    loop {
-        print!("> ");
-        let _ = std::io::stdout().flush();
-        let mut line = String::new();
-        if stdin.read_line(&mut line).unwrap_or(0) == 0 {
-            break;
-        }
-        let line = line.trim();
-        if line.is_empty() {
-            break;
-        }
-        match parse_subscription(line) {
-            Ok(sub) => subs.push(sub),
-            Err(e) => eprintln!("skipped: {e}"),
+    for agent in &selected {
+        let plan: String = cliclack::input(format!("Plan for {agent} (optional)"))
+            .placeholder("e.g. pro, max, team")
+            .required(false)
+            .interact()?;
+        let coverage: String = cliclack::input(format!("Coverage for {agent} (optional)"))
+            .placeholder("full | partial | unknown")
+            .required(false)
+            .interact()?;
+        let entry = compose_entry(agent, &plan, &coverage);
+        if let Err(e) = record_survey_entry(&mut subs, &entry) {
+            cliclack::log::warning(format!("skipped {agent}: {e}"))?;
         }
     }
     if subs.is_empty() {
-        println!("no subscriptions entered; leaving survey uninitialized");
-        return ExitCode::SUCCESS;
+        cliclack::log::info("No valid subscriptions entered; leaving survey uninitialized")?;
+        return Ok(());
     }
     match apb_mcp::advisory_tools::subscriptions_set(subs, false) {
-        Ok(v) => {
-            print_json(&v);
-            ExitCode::SUCCESS
-        }
-        Err(e) => {
-            eprintln!("subscriptions error: {e}");
-            ExitCode::from(2)
-        }
+        Ok(_) => cliclack::log::success("Subscriptions recorded")?,
+        Err(e) => cliclack::log::error(format!("subscriptions error: {e}"))?,
     }
+    Ok(())
 }
 
 /// In an interactive session (stdin is a terminal) with a survey that hasn't
@@ -284,10 +337,26 @@ pub(crate) fn offer_onboarding_if_tty() {
     }
 }
 
+/// Best-effort offer of the subscriptions survey from a command that already
+/// printed its JSON result. The survey self-gates (terminal + `Uninitialized`),
+/// a cancellation (Esc/Ctrl-C) is silent, and any other error is reported
+/// without changing the caller's exit code.
+pub(crate) fn offer_subscriptions_survey() {
+    if let Err(e) = subscriptions_survey_step()
+        && e.kind() != std::io::ErrorKind::Interrupted
+    {
+        eprintln!("subscriptions survey failed: {e}");
+    }
+}
+
 pub(crate) fn run_init(root: &Path) -> ExitCode {
     match init_project(root) {
         Ok(()) => {
             println!("initialized {}", root.join(".apb").display());
+            // Init dispatch: on success (and only then) offer the interactive
+            // questionnaire. It self-gates on a real terminal and never turns a
+            // successful init into a failure.
+            crate::onboarding::run_init_questionnaire(root);
             ExitCode::SUCCESS
         }
         Err(e) => {

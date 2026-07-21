@@ -19,6 +19,7 @@ open = "5.3.6"
 serde_json.workspace = true
 apb-engine = { version = "0.8.0", path = "../apb-engine" }
 apb-mcp = { version = "0.8.0", path = "../apb-mcp" }
+cliclack = "0.5.5"
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
