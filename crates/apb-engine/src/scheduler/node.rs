@@ -1210,10 +1210,14 @@ pub(crate) fn run_playbook_node(
         })?
     };
 
+    let predecessor_child =
+        latest_child_run(&events, node_id).filter(|id| run_is_terminal(root, id).unwrap_or(false));
+
     let opts = RunOptions {
         instruction: child_instruction,
         allow_shared_workdir: true,
         parent_run: Some(run_id.to_string()),
+        continued_from: predecessor_child,
         depth: cfg.depth + 1,
         expected_digest: pin.map(|p| p.playbook_digest.clone()),
         expected_profile_bundles: pin.map(|p| p.profile_bundles.clone()),

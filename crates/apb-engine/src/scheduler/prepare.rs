@@ -351,6 +351,9 @@ pub(crate) fn prepare_run_target(
 
     let run_id = format!("{id}-{}", now_millis());
     let run_dir = root.join(".apb/runs").join(&run_id);
+    if let Some(ref pred) = opts.continued_from {
+        crate::run_lineage::validate_continued_from(root, pred)?;
+    }
     let mut log = EventLog::create(&run_dir)?;
     // The run snapshot = the effective playbook. Without overrides we write the raw yaml
     // (preserving formatting/comments); with overrides we serialize the
@@ -416,6 +419,8 @@ pub(crate) fn prepare_run_target(
         context_compact_model: opts.context_compact_model.clone(),
         overrides: opts.overrides.clone(),
         parent_run: opts.parent_run.clone(),
+        continued_from: opts.continued_from.clone(),
+        superseded_by: None,
         depth: opts.depth,
         expected_children: opts.expected_children.clone(),
         expected_connectors: opts.expected_connectors.clone(),
@@ -468,6 +473,9 @@ pub(crate) fn prepare_run_target(
         execution_root: Some(t.execution_root.to_string_lossy().into_owned()),
         profiles: profiles_prov,
     })?;
+    if let Some(ref pred) = opts.continued_from {
+        crate::run_lineage::establish_run_lineage(root, pred, &run_id)?;
+    }
 
     Ok(Prepared {
         playbook,

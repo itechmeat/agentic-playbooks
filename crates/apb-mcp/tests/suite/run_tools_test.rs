@@ -44,6 +44,7 @@ fn run_then_inspect() {
         None,
         Default::default(),
         Default::default(),
+        None,
     )
     .unwrap();
     assert_eq!(run["outcome"], "succeeded");
@@ -62,6 +63,66 @@ fn run_then_inspect() {
     let ev2 = run_events(dir.path(), &run_id, Some(2)).unwrap();
     let first_seq = ev2["events"][0]["seq"].as_u64().unwrap();
     assert!(first_seq >= 2);
+}
+
+#[test]
+fn runs_list_and_status_expose_lineage_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let mut params = BTreeMap::new();
+    params.insert("who".to_string(), "world".to_string());
+    let first = playbook_run(
+        dir.path(),
+        "noagent",
+        None,
+        params.clone(),
+        None,
+        None,
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+        None,
+    )
+    .unwrap();
+    let first_id = first["run_id"].as_str().unwrap().to_string();
+
+    let second = playbook_run(
+        dir.path(),
+        "noagent",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+        Some(first_id.clone()),
+    )
+    .unwrap();
+    let second_id = second["run_id"].as_str().unwrap().to_string();
+
+    let listed = runs_list(dir.path()).unwrap();
+    let pred = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == first_id)
+        .unwrap();
+    let succ = listed
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == second_id)
+        .unwrap();
+    assert_eq!(pred["superseded_by"], second_id);
+    assert_eq!(succ["continued_from"], first_id);
+
+    let pred_status = run_status(dir.path(), &first_id).unwrap();
+    let succ_status = run_status(dir.path(), &second_id).unwrap();
+    assert_eq!(pred_status["superseded_by"], second_id);
+    assert_eq!(succ_status["continued_from"], first_id);
 }
 
 #[test]
@@ -223,6 +284,7 @@ fn run_status_carries_answer_key() {
         None,
         Default::default(),
         Default::default(),
+        None,
     )
     .unwrap();
     let run_id = started["run_id"].as_str().unwrap();
@@ -251,6 +313,7 @@ fn run_status_children_empty_for_childless_run() {
         None,
         Default::default(),
         Default::default(),
+        None,
     )
     .unwrap();
     let status = run_status(dir.path(), started["run_id"].as_str().unwrap()).unwrap();

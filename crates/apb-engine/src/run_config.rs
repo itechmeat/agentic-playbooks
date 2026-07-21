@@ -88,6 +88,13 @@ pub struct RunConfig {
     /// The parent run id, when this run is a Part C sub-playbook child.
     #[serde(default)]
     pub parent_run: Option<String>,
+    /// Predecessor run id when this run continues a failed or interrupted run
+    /// as a fresh run directory (issue #42 finding 10).
+    #[serde(default)]
+    pub continued_from: Option<String>,
+    /// Successor run id once a newer run has continued from this one.
+    #[serde(default)]
+    pub superseded_by: Option<String>,
     /// Sub-playbook nesting depth (spec C). A top-level run is 0; each child is
     /// parent depth + 1. Enforced against `MAX_SUBPLAYBOOK_DEPTH`.
     #[serde(default)]

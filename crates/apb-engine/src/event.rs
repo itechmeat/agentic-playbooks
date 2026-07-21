@@ -213,6 +213,18 @@ pub enum EventPayload {
         #[serde(default)]
         run_id: String,
     },
+    /// This run continues from a predecessor run as a fresh run id (issue #42
+    /// finding 10). Written when the lineage link is established.
+    RunContinuedFrom {
+        #[serde(default)]
+        from: String,
+    },
+    /// A successor run has continued from this run (issue #42 finding 10).
+    /// Written when the lineage link is established.
+    RunSupersededBy {
+        #[serde(default)]
+        by: String,
+    },
     /// Resume proceeded despite a change in the agent binary's fingerprint
     /// between start and resume (spec 3.6, `--allow-environment-drift`).
     /// Recorded in the log rather than swallowed silently.

@@ -81,6 +81,12 @@
                     {#if r.parent_run}
                       <span class="block text-muted-foreground">child of {r.parent_run}</span>
                     {/if}
+                    {#if r.superseded_by}
+                      <span class="block text-muted-foreground">superseded by {r.superseded_by}</span>
+                    {/if}
+                    {#if r.continued_from}
+                      <span class="block text-muted-foreground">continued from {r.continued_from}</span>
+                    {/if}
                   </span>
                 </Table.Cell>
                 <Table.Cell>{r.playbook}</Table.Cell>
