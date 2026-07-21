@@ -578,6 +578,7 @@ pub(crate) fn execute_node(
                             status: "failed".into(),
                             duration_ms,
                             session: None,
+                            summary: None,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -611,6 +612,9 @@ pub(crate) fn execute_node(
                                 // 2026-07-20, Task 7); the drive loop reads it
                                 // back to resume the agent on the answer round.
                                 session: report.session.clone(),
+                                // Display-only summary (issue #42 finding 1):
+                                // kept for humans, never used as node output.
+                                summary: Some(report.summary.clone()),
                             })?;
                             // Interactive suspension (spec 2026-07-20): the agent
                             // asked a question via the stdout marker instead of
@@ -626,6 +630,22 @@ pub(crate) fn execute_node(
                                 });
                             }
                             if report.status == NodeStatus::Succeeded {
+                                // Empty-output anomaly (issue #42, finding 6): an
+                                // attempt that reports success but produced no
+                                // output at all is almost always a lost/truncated
+                                // reply (e.g. a signal that emptied stdout). It
+                                // stays succeeded, but a WakeRaised anomaly is
+                                // journaled so the emptiness is visible in the
+                                // event log, exactly like the stall anomaly.
+                                if report.output.trim().is_empty() {
+                                    journal.append(EventPayload::WakeRaised {
+                                        trigger: crate::event::WakeTrigger::Anomaly,
+                                        node: node_id.to_string(),
+                                        detail: format!(
+                                            "agent_task node `{node_id}` attempt {cur_attempt} reported success with empty output"
+                                        ),
+                                    })?;
+                                }
                                 // A deterministic check on top of the self-report (spec 6.2):
                                 // a non-zero check exit code makes the node Failed regardless
                                 // of the agent's report. We run it in the SAME attempt
@@ -654,11 +674,15 @@ pub(crate) fn execute_node(
                                 }
                                 return Ok(AttemptOutcome::Finished {
                                     status: NodeStatus::Succeeded,
-                                    output: report.summary,
+                                    // Node output is the agent's reply body (with
+                                    // the report block stripped), NOT the one-line
+                                    // summary (issue #42 finding 1): templating,
+                                    // output_match, and run_report all read this.
+                                    output: report.output,
                                     events,
                                 });
                             }
-                            last_msg = report.summary;
+                            last_msg = report.output;
                             last_timed_out = false;
                         }
                         Err((class, msg)) => {
@@ -683,6 +707,7 @@ pub(crate) fn execute_node(
                                 status: attempt_status.into(),
                                 duration_ms,
                                 session: None,
+                                summary: None,
                             })?;
                             last_msg = msg;
                             // A transport error and a timeout break the retry loop for this
@@ -918,11 +943,14 @@ pub(crate) fn execute_finish_answer(
                         status: report.status.as_str().into(),
                         duration_ms,
                         session: report.session.clone(),
+                        summary: Some(report.summary.clone()),
                     })?;
                     if report.status == NodeStatus::Succeeded {
-                        return Ok((NodeStatus::Succeeded, report.summary, events));
+                        // The composed finish answer is the agent's reply body,
+                        // not the one-line summary (issue #42 finding 1).
+                        return Ok((NodeStatus::Succeeded, report.output, events));
                     }
-                    last_msg = report.summary;
+                    last_msg = report.output;
                     last_timed_out = false;
                 }
                 Err((class, msg)) => {
@@ -938,6 +966,7 @@ pub(crate) fn execute_finish_answer(
                         .into(),
                         duration_ms,
                         session: None,
+                        summary: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {
@@ -1384,8 +1413,10 @@ pub(crate) fn maybe_compact_context(
         node: "__context_compact",
         agent: "claude-code",
     };
+    // The compacted context is the summarizer's full reply body (issue #42
+    // finding 1), not its one-line report summary.
     let summary = match adapter.run(&task) {
-        Ok(report) => report.summary,
+        Ok(report) => report.output,
         Err(_) => return Ok(None),
     };
     let compact_file = "context_compact.md";

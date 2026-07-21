@@ -799,6 +799,7 @@ mod tests {
                     status: "succeeded".into(),
                     duration_ms: None,
                     session: None,
+                    summary: None,
                 },
             ),
         ];
