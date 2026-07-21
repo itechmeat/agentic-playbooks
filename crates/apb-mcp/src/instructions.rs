@@ -13,6 +13,8 @@ Offering to save: when you just did a multi-step, repeatable action that has no 
 
 Running policy: the server enforces trust and scope. A draft or untrusted playbook will be refused until trial or explicit acknowledgement. Never assume a run is safe because it matched; effects beyond what the request implies (network, secrets, irreversible, deploys) need explicit user confirmation.
 
+Human gates: when a supervised run enters a human_review gate, run_status returns a pending_review block (also on supervisor_wait_event and supervisor_run_inspect). The moment you see it, you MUST relay its instruction to the user in the user's chat language, naming the options and how to decide, and then record their decision with review_decide. The run waits and does nothing until then, so if the gate stays pending across your next checks, repeat the reminder rather than going quiet.
+
 Lifecycle: you may update, clone, version and delete playbooks. Pull playbook_howto only when authoring or reworking one.
 
 Profiles: a node binds its executor only through a profile (agent, model, fallbacks, role prompt, skills). When working with profiles, call profile_list first to reuse an existing one, and pull profile_howto for the format, the models table and detected agents. Name any profiles you create in your final message to the user.
