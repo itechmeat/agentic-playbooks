@@ -17,6 +17,8 @@ fn run_config_round_trips() {
         context_compact_model: None,
         overrides: None,
         parent_run: None,
+        continued_from: None,
+        superseded_by: None,
         depth: 0,
         expected_children: None,
         expected_connectors: Default::default(),
