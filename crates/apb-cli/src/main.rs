@@ -1,6 +1,7 @@
 mod cache;
 mod connector;
 mod manage;
+mod onboarding;
 mod profile;
 mod run;
 mod serve;
