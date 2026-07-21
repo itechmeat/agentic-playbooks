@@ -326,6 +326,25 @@ pub enum EventPayload {
         answer: String,
         answered_by: String,
     },
+    /// An explanatory record for a run that is about to terminate abnormally
+    /// (issue #42 finding 3): written immediately before a `run_finished`
+    /// whose outcome is `"failed"` on every scheduler drive-loop path (no
+    /// matching outgoing edge, a stalled resume, an exceeded step budget) and
+    /// every prepare/refusal path (a missing or drifted connector permit, a
+    /// profile bundle mismatch, a sub-playbook that failed to resolve or
+    /// prepare) that would otherwise leave the log with no record of why.
+    /// Carries the verbatim engine error text, and the node id when the
+    /// failure is attributable to one node (`None` for a run-level failure,
+    /// for example exceeding the step budget). `#[serde(default)]` on both
+    /// fields: old logs never carry this variant at all, so there is nothing
+    /// to default FROM, but a future additive field on it should still follow
+    /// this convention.
+    RunError {
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
+        #[serde(default)]
+        reason: String,
+    },
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -497,6 +516,43 @@ mod tests {
                 assert_eq!(session.as_deref(), Some("abc"));
             }
             other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_error_round_trips_with_snake_case_tag() {
+        let payload = EventPayload::RunError {
+            node: Some("work".into()),
+            reason: "node `work` has no outgoing edge and is not finish".into(),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        assert!(
+            line.contains("\"type\":\"run_error\""),
+            "expected run_error tag, got {line}"
+        );
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::RunError { node, reason } => {
+                assert_eq!(node.as_deref(), Some("work"));
+                assert!(reason.contains("no outgoing edge"));
+            }
+            other => panic!("expected RunError, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn run_error_defaults_both_fields_when_absent() {
+        // No existing log carries this variant at all (it is new), but the
+        // additive-field convention still applies: a bare tag must still
+        // deserialize.
+        let line = r#"{"type":"run_error"}"#;
+        let back: EventPayload = serde_json::from_str(line).unwrap();
+        match back {
+            EventPayload::RunError { node, reason } => {
+                assert_eq!(node, None);
+                assert_eq!(reason, "");
+            }
+            other => panic!("expected RunError, got {other:?}"),
         }
     }
 }

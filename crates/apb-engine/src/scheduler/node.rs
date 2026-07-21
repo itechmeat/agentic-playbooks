@@ -1246,8 +1246,21 @@ pub(crate) fn run_playbook_node(
             id: child_ref.id.clone(),
             version: Some(p.version.clone()),
         };
-        apb_core::store::resolve(root, &cref)
-            .map_err(|e| EngineError::Invalid(format!("sub-playbook `{}`: {e}", child_ref.id)))?
+        // A resolve failure here (issue #42 finding 3b) is a refusal to run
+        // THIS node, not an engine-fatal fault: return it as an ordinary node
+        // failure (like the depth-limit and missing-pin cases above) so it
+        // gets its `node_finished` and normal failure handling (fallback edge
+        // or supervisor wake) instead of aborting the whole drive loop with no
+        // record of why.
+        match apb_core::store::resolve(root, &cref) {
+            Ok(r) => r,
+            Err(e) => {
+                return Ok((
+                    NodeStatus::Failed,
+                    format!("sub-playbook `{}`: {e}", child_ref.id),
+                ));
+            }
+        }
     } else {
         let candidates = scope_candidates(child_ref.scope, &parent_run_origin(run_dir));
         let mut resolved_opt = None;
@@ -1262,12 +1275,18 @@ pub(crate) fn run_playbook_node(
                 break;
             }
         }
-        resolved_opt.ok_or_else(|| {
-            EngineError::Invalid(format!(
-                "sub-playbook `{}` (node `{}`) did not resolve in any candidate scope",
-                child_ref.id, node_id
-            ))
-        })?
+        match resolved_opt {
+            Some(r) => r,
+            None => {
+                return Ok((
+                    NodeStatus::Failed,
+                    format!(
+                        "sub-playbook `{}` (node `{}`) did not resolve in any candidate scope",
+                        child_ref.id, node_id
+                    ),
+                ));
+            }
+        }
     };
 
     let predecessor_child =
@@ -1287,7 +1306,23 @@ pub(crate) fn run_playbook_node(
         execution_root: resolved.execution_root.clone(),
         origin_label: resolved.origin_label,
     };
-    let mut cp = prepare_run_target(&t, &resolved.id, Some(&resolved.version), opts)?;
+    // A prepare refusal here - most notably "connector bindings present but no
+    // connector permit" (issue #42 finding 3b) - is likewise a node failure,
+    // not a fatal engine error: the child's own run directory already exists
+    // at this point (`prepare_run_target` creates it before any of its own
+    // fallible steps) and `prepare_run_target` has already closed it out with
+    // its own `RunError` + `run_finished(failed)`, so returning `Ok` here just
+    // lets the PARENT record the same reason against this node instead of
+    // aborting the parent's own drive loop with nothing to explain why.
+    let mut cp = match prepare_run_target(&t, &resolved.id, Some(&resolved.version), opts) {
+        Ok(p) => p,
+        Err(e) => {
+            return Ok((
+                NodeStatus::Failed,
+                format!("sub-playbook `{}` (node `{node_id}`): {e}", child_ref.id),
+            ));
+        }
+    };
     let child_run_id = cp.run_id.clone();
     log.append(EventPayload::ChildRunStarted {
         node_id: node_id.to_string(),
