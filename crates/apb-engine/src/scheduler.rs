@@ -15,7 +15,7 @@ use apb_core::versioning::{promote_policy, promote_version, should_promote};
 use serde::Serialize;
 
 use crate::adapter::{AgentAdapter, AgentTask, ErrorClass, adapter_for};
-use crate::context::{build_context, build_context_for_render, render};
+use crate::context::{build_context, build_context_for_render, build_terminal_context, render};
 use crate::control::{Control, read_control_after, read_control_cursor, write_control_cursor};
 use crate::error::EngineError;
 use crate::event::{
@@ -55,6 +55,34 @@ use prepare::*;
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
+
+/// A one-line, machine-facing detail extracted from a failed finish-answer
+/// attempt's last output, for the `RunError` anomaly reason. Empty output (a
+/// bare spawn/timeout failure with no body) collapses to a fixed phrase so the
+/// reason never renders a dangling `()`.
+fn failure_detail(out: &str) -> String {
+    let trimmed = out.trim();
+    if trimmed.is_empty() {
+        return "no agent output".to_string();
+    }
+    let first_line = trimmed.lines().next().unwrap_or(trimmed);
+    let capped: String = first_line.chars().take(200).collect();
+    capped
+}
+
+/// The minimal generated closing message a finish-with-prompt falls back to
+/// when its answer-composition agent fails (issue #42 finding 5). The run's
+/// substantive work is already done and its declared outcome stands; this is
+/// only the cosmetic closing text, so a fixed, machine-facing note that points
+/// at the journal is enough. English (machine-facing field), no em-dash or
+/// exclamation per the repo convention.
+fn fallback_finish_answer(node: &str) -> String {
+    format!(
+        "Run complete. The automated closing summary for finish node `{node}` \
+         could not be composed; see the run events for the composition failure \
+         and the full run context."
+    )
+}
 
 /// A shared append handle over the run's single event log, used only for the
 /// two attempt-lifecycle events that are journaled off the return batch:
@@ -1515,22 +1543,29 @@ fn drive_inner(
                     log.append(ev)?;
                 }
                 if st != NodeStatus::Succeeded {
-                    log.append(EventPayload::NodeFinished {
-                        node: current.clone(),
-                        status: st.as_str().into(),
-                        attempt: 1,
-                        output: out.clone(),
-                        artifacts: Vec::new(),
+                    // The CLOSING answer failed to compose. This must NOT flip
+                    // the run's real outcome (issue #42 finding 5): reaching a
+                    // terminal finish node means every substantive node already
+                    // ran, so the run's result is the finish node's DECLARED
+                    // `outcome`, not the success of a cosmetic answer step. The
+                    // failed attempt(s) are already journaled by
+                    // `execute_finish_answer`; add a RunError anomaly so the
+                    // composition failure stays visible (harmless on a succeeded
+                    // run - doctor/status read it only while `Failed`), then
+                    // fall back to a minimal generated closing message and let
+                    // the declared outcome stand.
+                    log.append(EventPayload::RunError {
+                        node: Some(current.clone()),
+                        reason: format!(
+                            "finish answer composition failed ({}); \
+                             fell back to a generated closing message",
+                            failure_detail(&out)
+                        ),
                     })?;
-                    log.append(EventPayload::RunFinished {
-                        outcome: "failed".into(),
-                    })?;
-                    return Ok(RunResult {
-                        run_id,
-                        outcome: RunStatus::Failed,
-                    });
+                    fallback_finish_answer(&current)
+                } else {
+                    out
                 }
-                out
             } else {
                 String::new()
             };

@@ -789,8 +789,12 @@ pub(crate) fn execute_finish_answer(
     env_scrub: &[String],
     journal: &Journal,
 ) -> Result<(NodeStatus, String, Vec<EventPayload>), EngineError> {
-    let context =
-        build_context_for_render(run_dir, &read_all(run_dir)?, cfg.instruction.as_deref())?;
+    // The terminal answer is composed from the FULL log fold, never the lossy
+    // compacted render view (issue #42 finding 5): the closing answer must see
+    // every completed node's raw output, which always survives verbatim in the
+    // append-only log even after the compaction that repeated resume +
+    // patch-migration cycles trigger. See `build_terminal_context`.
+    let context = build_terminal_context(&read_all(run_dir)?, cfg.instruction.as_deref());
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))

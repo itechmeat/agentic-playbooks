@@ -81,6 +81,9 @@ mod failure_reason_test;
 #[cfg(unix)]
 #[path = "suite/finish_answer_test.rs"]
 mod finish_answer_test;
+#[cfg(unix)]
+#[path = "suite/finish_context_test.rs"]
+mod finish_context_test;
 #[path = "suite/global_config_test.rs"]
 mod global_config_test;
 #[path = "suite/global_scope_run_test.rs"]
