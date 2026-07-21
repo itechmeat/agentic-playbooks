@@ -188,3 +188,43 @@ fn onboarding_roundtrip_and_declined() {
         OnboardingState::Declined
     );
 }
+
+/// Curated xAI rows back the grok agent's model suggestions (spec 2026-07-21).
+/// grok-4.5 is the CLI's own default model, so it must be present; every xAI
+/// row carries the full provenance triple the table requires.
+#[test]
+fn builtin_table_carries_curated_xai_rows() {
+    let t = models_table::builtin();
+    let xai: Vec<_> = t.models.iter().filter(|m| m.vendor == "xai").collect();
+    assert!(
+        xai.len() >= 2,
+        "expected curated xAI rows, found {}",
+        xai.len()
+    );
+    assert!(
+        xai.iter().any(|m| m.id == "grok-4.5"),
+        "grok-4.5 (the Grok CLI default model) must be curated"
+    );
+    for m in &xai {
+        assert!(
+            m.cost_in_usd_mtok.is_some() && m.cost_out_usd_mtok.is_some(),
+            "xAI row `{}` is missing a price",
+            m.id
+        );
+        assert!(
+            !m.source_url.is_empty(),
+            "xAI row `{}` is missing source_url",
+            m.id
+        );
+        assert!(
+            !m.checked_at.is_empty(),
+            "xAI row `{}` is missing checked_at",
+            m.id
+        );
+        assert!(
+            !m.price_basis.is_empty(),
+            "xAI row `{}` is missing price_basis",
+            m.id
+        );
+    }
+}

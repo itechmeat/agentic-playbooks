@@ -46,13 +46,20 @@ async fn agents_models_and_skills_endpoints() {
 
     let root = proj.path().to_path_buf();
 
-    // /api/agents: the six built-in probes are always enumerated.
+    // /api/agents: the eight built-in probes are always enumerated (claude,
+    // codex, agy, opencode, pi, hermes, grok, cursor).
     let app = build_router(AppState::new(root.clone()));
     let (status, json) = get_json(app, "/api/agents").await;
     assert_eq!(status, StatusCode::OK);
     let agents = json["agents"].as_array().expect("agents array");
-    assert_eq!(agents.len(), 6, "expected the six built-in probes: {json}");
+    assert_eq!(
+        agents.len(),
+        8,
+        "expected the eight built-in probes: {json}"
+    );
     assert!(agents.iter().any(|a| a["agent"] == "claude"));
+    assert!(agents.iter().any(|a| a["agent"] == "grok"));
+    assert!(agents.iter().any(|a| a["agent"] == "cursor"));
 
     // /api/models: the curated table and the claude static list.
     let app = build_router(AppState::new(root.clone()));

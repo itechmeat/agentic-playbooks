@@ -436,7 +436,8 @@ pub struct AgentReport {
 /// Reality per agent under the CURRENT one-shot invocation forms: only claude's
 /// stream-json output (`--output-format stream-json`, the `acp` transport)
 /// emits a `session_id` field, so claude is the one agent that yields a session
-/// id today; codex/opencode/hermes one-shot output is plain final-answer text
+/// id today; codex/opencode/hermes/grok/cursor one-shot output is plain
+/// final-answer text
 /// with no session id, so they yield `None` here and rely on the downgrade
 /// path. The per-agent field lists below are wired so that when those agents'
 /// resumable one-shot output lands, only the field name changes here (spec
@@ -448,6 +449,8 @@ pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
         "codex" => capture_json_string_field(raw, &["session_id", "conversation_id"]),
         "opencode" => capture_json_string_field(raw, &["session_id", "sessionID"]),
         "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
+        "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
+        "cursor" => capture_json_string_field(raw, &["chatId", "chat_id", "session_id"]),
         _ => None,
     }
 }
@@ -1295,6 +1298,9 @@ pub fn adapter_for(agent: &str) -> Result<Box<dyn AgentAdapter>, EngineError> {
 fn default_program(agent: &str) -> String {
     match agent {
         "claude" | "claude-code" => "claude".to_string(),
+        // cursor is installed as `cursor-agent`; the bare `cursor` binary is
+        // the GUI editor CLI, not the headless agent.
+        "cursor" => "cursor-agent".to_string(),
         other => other.to_string(),
     }
 }
@@ -1302,6 +1308,18 @@ fn default_program(agent: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// cursor is installed as `cursor-agent`; the bare `cursor` binary is the
+    /// GUI editor CLI. `default_program` must resolve the agent id to the
+    /// detected binary so `adapter_for` spawns the right executable.
+    #[test]
+    fn default_program_maps_cursor_to_its_binary() {
+        assert_eq!(default_program("cursor"), "cursor-agent");
+        assert_eq!(default_program("grok"), "grok");
+        assert_eq!(default_program("codex"), "codex");
+        assert_eq!(default_program("claude"), "claude");
+        assert_eq!(default_program("claude-code"), "claude");
+    }
 
     #[test]
     fn interpret_report_reads_failure_block() {

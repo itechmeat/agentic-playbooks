@@ -1,0 +1,10 @@
+name: reviewer
+description: Adversarial code reviewer for apb; judges full branch diff by SOLID/KISS/DRY and verifies gates.
+executor:
+  agent: codex
+  model: gpt-5.6-sol
+  fallbacks: []
+soul: any
+skills:
+- name: rust-skills
+  scope: auto

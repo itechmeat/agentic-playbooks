@@ -57,17 +57,19 @@ then verify and unpack it:
 
 ```sh
 if command -v shasum >/dev/null 2>&1; then
-  shasum -a 256 -c apb-aarch64-apple-darwin.tar.gz.sha256
+  shasum -a 256 -c apb-aarch64-apple-darwin.tar.xz.sha256
 else
-  sha256sum -c apb-aarch64-apple-darwin.tar.gz.sha256
+  sha256sum -c apb-aarch64-apple-darwin.tar.xz.sha256
 fi
-tar -xzf apb-aarch64-apple-darwin.tar.gz
-sudo install -m 0755 apb /usr/local/bin/apb
+tar -xf apb-aarch64-apple-darwin.tar.xz
+sudo install -m 0755 apb-aarch64-apple-darwin/apb /usr/local/bin/apb
 apb --version
 ```
 
-Each archive contains the `apb` binary and a copy of `LICENSE`, with a
-companion `.sha256` checksum file.
+Each archive unpacks into a directory named after the platform (for example
+`apb-aarch64-apple-darwin/`) holding the `apb` binary and a copy of
+`LICENSE`; a companion `.sha256` checksum file sits next to the archive on
+the Releases page.
 
 ## 5. Build from source (contributor path)
 

@@ -125,8 +125,8 @@ pub struct Probe {
     auth_source: AuthSource,
 }
 
-/// Built-in probes for the six agents (claude, codex, agy, opencode, pi,
-/// hermes).
+/// Built-in probes for the eight agents (claude, codex, agy, opencode, pi,
+/// hermes, grok, cursor).
 pub fn builtin_probes() -> Vec<Probe> {
     let v = |s: &str| vec![s.to_string()];
     vec![
@@ -183,6 +183,30 @@ pub fn builtin_probes() -> Vec<Probe> {
             version_args: v("--version"),
             models_source: ModelsSource::None,
             auth_source: AuthSource::Hermes,
+        },
+        // Grok Build (xAI). The CLI installs BOTH `grok` and a generic `agent`
+        // alias pointing at the same binary; Cursor installs a generic `agent`
+        // alias too, so `agent` cannot identify either agent and only the
+        // unambiguous `grok` is probed. Model enumeration via the `models`
+        // subcommand is deferred: it requires authentication, so an
+        // unauthenticated machine would cache an empty list.
+        Probe {
+            id: "grok".into(),
+            bins: v("grok"),
+            category: AgentCategory::Vendor,
+            version_args: v("--version"),
+            models_source: ModelsSource::None,
+            auth_source: AuthSource::None,
+        },
+        // Cursor CLI. An aggregator: it runs gpt, claude, gemini and other
+        // vendor models, so it contributes no curated rows of its own.
+        Probe {
+            id: "cursor".into(),
+            bins: v("cursor-agent"),
+            category: AgentCategory::Aggregator,
+            version_args: v("--version"),
+            models_source: ModelsSource::None,
+            auth_source: AuthSource::None,
         },
     ]
 }
@@ -683,17 +707,18 @@ fn probe_one(p: &Probe) -> AgentInfo {
 }
 
 /// Custom probes from the global config: agents with `probe: true` (the
-/// built-in six are not duplicated). Only checks for the binary's presence -
+/// built-in eight are not duplicated). Only checks for the binary's presence -
 /// no model/auth sources. Best-effort: a malformed config yields an empty
 /// list.
 fn custom_probes() -> Vec<Probe> {
     let Ok(cfg) = crate::config::GlobalConfig::load() else {
         return Vec::new();
     };
-    let builtin: std::collections::BTreeSet<&str> =
-        ["claude", "codex", "agy", "opencode", "pi", "hermes"]
-            .into_iter()
-            .collect();
+    let builtin: std::collections::BTreeSet<&str> = [
+        "claude", "codex", "agy", "opencode", "pi", "hermes", "grok", "cursor",
+    ]
+    .into_iter()
+    .collect();
     let mut out = Vec::new();
     for (id, def) in &cfg.agents {
         if def.probe != Some(true) || builtin.contains(id.as_str()) {

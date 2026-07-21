@@ -1,6 +1,6 @@
 //! Resolving the agent invocation form (spec 2026-07-12, sections 6.2-6.3).
 //!
-//! The invocation form is data (`InvocationDef`), not code: the built-in six
+//! The invocation form is data (`InvocationDef`), not code: the built-in eight
 //! are provided by `builtin`, custom agents come from the global config's
 //! `agents:`. `resolve_invocation` fixes the agent, model, invocation form,
 //! SOUL delivery method, canonical binary path, and its fingerprint - all of
@@ -27,7 +27,7 @@ pub struct ResolvedInvocation {
     pub executable_fingerprint: String,
 }
 
-/// Built-in invocation form for the known six. `None` for unknown agents and
+/// Built-in invocation form for the known eight. `None` for unknown agents and
 /// for pi (details will follow once the binary exists).
 pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
     let mk = |argv: &[&str],
@@ -90,6 +90,32 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
             &[],
             Interaction::Resume,
         )),
+        // grok runs headless one-shot via `-p/--single` and is the only new
+        // agent with a native system-prompt flag (`--system-prompt-override`),
+        // so its SOUL does not have to travel as a prompt prefix. Like claude,
+        // an authorized effectful run needs an explicit non-interactive
+        // permission mode or every tool call blocks on an approval that never
+        // arrives.
+        "grok" => Some(mk(
+            &["-p", "{prompt}", "-m", "{model}"],
+            SoulDelivery::Native,
+            Some("--system-prompt-override"),
+            &["--permission-mode", "bypassPermissions"],
+            Interaction::Resume,
+        )),
+        // cursor's `-p/--print` is a BOOLEAN flag and the prompt is a
+        // positional argument, so the prompt slot goes last, after the
+        // options. `--force` is the non-interactive approval mode and
+        // `--output-format text` pins plain stdout (it only takes effect
+        // together with `--print`). No system-prompt flag exists, so the SOUL
+        // travels as a prefix like the other aggregators.
+        "cursor" => Some(mk(
+            &["-p", "--model", "{model}", "{prompt}"],
+            SoulDelivery::Prefix,
+            None,
+            &["--output-format", "text", "--force"],
+            Interaction::Resume,
+        )),
         _ => None,
     }
 }
@@ -142,6 +168,19 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
             "-m",
             "{model}",
         ])),
+        // grok resumes by id via `-r <id>` and takes the follow-up as a fresh
+        // `-p` single-turn prompt.
+        "grok" => Some(v(&["-r", "{session}", "-p", "{prompt}", "-m", "{model}"])),
+        // cursor resumes a chat via `--resume <chatId>`; the follow-up prompt
+        // stays positional and therefore last.
+        "cursor" => Some(v(&[
+            "--resume",
+            "{session}",
+            "-p",
+            "--model",
+            "{model}",
+            "{prompt}",
+        ])),
         _ => None,
     }
 }
@@ -156,7 +195,7 @@ pub fn spec_for(agent_id: &str, global: &GlobalConfig) -> Result<InvocationDef, 
         .and_then(|a| a.invocation.clone())
         .or_else(|| builtin(agent_id))
         // Agent is defined in config but without an explicit form and is not
-        // one of the built-in six: historical compatibility falls back to
+        // one of the built-in eight: historical compatibility falls back to
         // the claude form (`-p {prompt} --model {model}`).
         .or_else(|| global.agents.get(agent_id).and(builtin("claude")))
         .ok_or_else(|| {
@@ -183,6 +222,9 @@ pub fn program_for(agent_id: &str, global: &GlobalConfig) -> String {
         .agent_program(agent_id)
         .unwrap_or_else(|| match agent_id {
             "claude" | "claude-code" => "claude".to_string(),
+            // cursor is installed as `cursor-agent`; the bare `cursor` binary
+            // is the GUI editor CLI, not the headless agent.
+            "cursor" => "cursor-agent".to_string(),
             other => other.to_string(),
         })
 }
@@ -372,13 +414,76 @@ mod tests {
         assert!(native_no_flag.validate().is_err());
     }
 
+    /// cursor's detected binary is `cursor-agent`, not `cursor` (the GUI
+    /// editor CLI). `program_for` must map the agent id to the real binary so
+    /// the manifest fingerprint and the spawned adapter target the same file;
+    /// every other built-in agent id equals its binary name.
     #[test]
-    fn builtin_six_agents_present_and_valid() {
-        for id in ["claude", "agy", "codex", "opencode", "hermes"] {
+    fn program_for_maps_cursor_to_its_binary() {
+        let global = GlobalConfig::default();
+        assert_eq!(program_for("cursor", &global), "cursor-agent");
+        assert_eq!(program_for("grok", &global), "grok");
+        assert_eq!(program_for("codex", &global), "codex");
+        assert_eq!(program_for("claude", &global), "claude");
+        assert_eq!(program_for("claude-code", &global), "claude");
+    }
+
+    #[test]
+    fn builtin_agents_present_and_valid() {
+        for id in [
+            "claude", "agy", "codex", "opencode", "hermes", "grok", "cursor",
+        ] {
             builtin(id).unwrap().validate().unwrap();
         }
         assert!(builtin("pi").is_none());
         assert!(builtin("unknown").is_none());
+    }
+
+    /// grok delivers the SOUL natively via `--system-prompt-override` and
+    /// resumes with `-r`, both verified against Grok Build 0.2.x `--help`.
+    #[test]
+    fn builtin_grok_form() {
+        let spec = builtin("grok").expect("grok builtin spec");
+        assert_eq!(spec.argv, vec!["-p", "{prompt}", "-m", "{model}"]);
+        assert_eq!(spec.soul, SoulDelivery::Native);
+        assert_eq!(spec.soul_flag.as_deref(), Some("--system-prompt-override"));
+        assert_eq!(spec.transport, Transport::Headless);
+        assert_eq!(
+            spec.autonomous_args,
+            vec!["--permission-mode", "bypassPermissions"]
+        );
+        assert_eq!(spec.interaction, Interaction::Resume);
+        assert_eq!(
+            resume_argv("grok").expect("grok resume argv"),
+            vec!["-r", "{session}", "-p", "{prompt}", "-m", "{model}"]
+        );
+    }
+
+    /// cursor's `-p` is a boolean print flag and the prompt is POSITIONAL, so
+    /// the prompt slot must come last, after every option.
+    #[test]
+    fn builtin_cursor_form() {
+        let spec = builtin("cursor").expect("cursor builtin spec");
+        assert_eq!(spec.argv, vec!["-p", "--model", "{model}", "{prompt}"]);
+        assert_eq!(spec.soul, SoulDelivery::Prefix);
+        assert_eq!(spec.soul_flag, None);
+        assert_eq!(spec.transport, Transport::Headless);
+        assert_eq!(
+            spec.autonomous_args,
+            vec!["--output-format", "text", "--force"]
+        );
+        assert_eq!(spec.interaction, Interaction::Resume);
+        assert_eq!(
+            resume_argv("cursor").expect("cursor resume argv"),
+            vec![
+                "--resume",
+                "{session}",
+                "-p",
+                "--model",
+                "{model}",
+                "{prompt}"
+            ]
+        );
     }
 
     #[test]
