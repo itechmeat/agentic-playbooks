@@ -1716,10 +1716,19 @@ fn drive(
                 (NodeStatus::Succeeded, entry.cmd.decision.clone())
             } else {
                 // No decision yet: declare the request once, then wait (poll).
+                // The event carries an owner-facing pending instruction (issue
+                // #42 finding 4) so a supervising agent, or any reader of the
+                // log alone, can tell the owner an action is expected, what the
+                // options are, and how to answer.
                 if review_requested_count(&events, &current) <= decided {
+                    let title = playbook.node(&current).and_then(|n| n.title.clone());
+                    let instruction =
+                        crate::progress::review_instruction(&current, title.as_deref(), options);
                     log.append(EventPayload::ReviewRequested {
                         node: current.clone(),
                         options: options.clone(),
+                        title,
+                        instruction,
                     })?;
                 }
                 std::thread::sleep(AWAIT_CONTROL_POLL);

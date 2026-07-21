@@ -168,6 +168,18 @@ pub enum EventPayload {
     ReviewRequested {
         node: String,
         options: Vec<String>,
+        /// The gate node's title, copied from the playbook so a reader of the
+        /// log alone can name the gate without the snapshot (issue #42 finding
+        /// 4). `None` for a titleless node and for old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
+        /// Owner-facing pending instruction (issue #42 finding 4): a single
+        /// self-contained line naming the gate, its options, and how to decide
+        /// (apb review CLI / review_decide MCP tool). A supervising agent
+        /// relays this verbatim so the owner is never left waiting without
+        /// knowing an action is expected. Empty for old logs. Additive.
+        #[serde(default)]
+        instruction: String,
     },
     ReviewDecided {
         node: String,

@@ -29,6 +29,22 @@ edges:
   - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
 "#;
 
+const WF_REVIEW_TITLED: &str = r#"
+schema: 1
+id: rev
+name: Review
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, title: "Approve the release", options: [approved, rejected] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
 const WF_OUTPUT_MATCH: &str = r#"
 schema: 1
 id: rev
@@ -131,6 +147,48 @@ fn human_review_rejected_routes_to_failure() {
     decide(dir.path(), &run_dir, "rejected");
     let result = wait_result(&rx);
     assert_eq!(result.outcome, RunStatus::Failed);
+}
+
+#[test]
+fn human_review_entry_event_carries_instruction_and_options() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), WF_REVIEW_TITLED);
+    let rx = run_in_background(dir.path());
+    let run_dir = latest_run_dir(dir.path());
+    // Wait for the gate to declare itself, then inspect the entry event.
+    let (options, title, instruction) = poll_until("review_requested with instruction", || {
+        read_all(&run_dir)
+            .ok()?
+            .into_iter()
+            .find_map(|e| match e.payload {
+                EventPayload::ReviewRequested {
+                    node,
+                    options,
+                    title,
+                    instruction,
+                } if node == "gate" => Some((options, title, instruction)),
+                _ => None,
+            })
+    });
+    assert_eq!(
+        options,
+        vec!["approved".to_string(), "rejected".to_string()]
+    );
+    assert_eq!(title.as_deref(), Some("Approve the release"));
+    // The owner-facing instruction names the gate, lists the options, and says
+    // how to answer (apb review CLI and the review_decide MCP tool).
+    assert!(
+        instruction.contains("Approve the release"),
+        "got: {instruction}"
+    );
+    assert!(instruction.contains("approved"), "got: {instruction}");
+    assert!(instruction.contains("rejected"), "got: {instruction}");
+    assert!(instruction.contains("apb review"), "got: {instruction}");
+    assert!(instruction.contains("review_decide"), "got: {instruction}");
+    // Do not leave the run hanging: decide and let it finish.
+    decide(dir.path(), &run_dir, "approved");
+    let result = wait_result(&rx);
+    assert_eq!(result.outcome, RunStatus::Succeeded);
 }
 
 #[test]

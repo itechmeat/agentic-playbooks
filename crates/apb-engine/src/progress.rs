@@ -49,6 +49,78 @@ pub struct PendingQuestion {
     pub asked_at: u128,
 }
 
+/// The pending human-review gate for a run whose `waiting_kind` is
+/// `Some(WaitingKind::HumanReview)` (issue #42 finding 4). Unlike
+/// `PendingQuestion`, it is derived from the event log plus the run's playbook
+/// snapshot alone (no side channel), so the pure `compute_with` fold populates
+/// it. It exists so an intermediary that reads `run_status` is forced to see
+/// that a decision is expected, what the options are, and how to answer -
+/// rather than the run silently waiting forever.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingReview {
+    pub node: String,
+    /// The gate node's title from the playbook, when it has one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// A single self-contained owner-facing line: names the gate, its options,
+    /// and how to decide. This is the text a supervising agent relays verbatim.
+    pub instruction: String,
+    /// The configured decisions (for a structured UI); empty falls back to
+    /// approve/reject in the instruction text.
+    pub options: Vec<String>,
+    /// The decision mechanics alone (apb review CLI / review_decide MCP tool),
+    /// for callers that render options and mechanics separately.
+    pub how_to_decide: String,
+}
+
+/// The decision mechanics for a human-review gate: how an owner (or an agent
+/// relaying on their behalf) actually records a decision. Single source of the
+/// how-to wording, composed into the full `review_instruction` and also
+/// surfaced on its own in `PendingReview::how_to_decide`.
+pub fn review_how_to_decide(node_id: &str) -> String {
+    format!(
+        "To decide, run `apb review <run-id> {node_id} --decision <option>` \
+         or call the review_decide MCP tool with the same node and decision."
+    )
+}
+
+/// The owner-facing pending instruction for a human-review gate (issue #42
+/// finding 4): one self-contained line naming the gate, listing the available
+/// decisions, and appending `review_how_to_decide`. Shared by the
+/// `ReviewRequested` event and the `run_status` `pending_review` block so the
+/// two never drift.
+pub fn review_instruction(node_id: &str, title: Option<&str>, options: &[String]) -> String {
+    let label = title
+        .map(str::trim)
+        .filter(|t| !t.is_empty())
+        .unwrap_or(node_id);
+    let opts = if options.is_empty() {
+        "approve or reject".to_string()
+    } else {
+        options.join(", ")
+    };
+    format!(
+        "The run is paused at the human-review gate \"{label}\" and needs your decision. \
+         Available decisions: {opts}. {}",
+        review_how_to_decide(node_id)
+    )
+}
+
+/// Assembles the `PendingReview` block for a gate node from its id, title, and
+/// options, reusing `review_instruction` so the instruction matches the event.
+pub fn pending_review(node_id: &str, title: Option<&str>, options: &[String]) -> PendingReview {
+    PendingReview {
+        node: node_id.to_string(),
+        title: title
+            .map(str::trim)
+            .filter(|t| !t.is_empty())
+            .map(str::to_string),
+        instruction: review_instruction(node_id, title, options),
+        options: options.to_vec(),
+        how_to_decide: review_how_to_decide(node_id),
+    }
+}
+
 /// The run-progress summary surfaced by the server and MCP `run_status`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressSummary {
@@ -64,6 +136,12 @@ pub struct ProgressSummary {
     /// path (no run dir to read the channel files from) - only the
     /// `from_run_dir` family populates it.
     pub pending_question: Option<PendingQuestion>,
+    /// The pending human-review gate when `waiting_kind ==
+    /// Some(WaitingKind::HumanReview)` (issue #42 finding 4). Populated by the
+    /// pure `compute_with` fold (it needs only events plus the playbook), so
+    /// unlike `pending_question` it is present on the `compute`/`compute_with`
+    /// path too. `None` whenever the run is not waiting on a gate.
+    pub pending_review: Option<PendingReview>,
     /// Deterministic identity of the work plan behind this percent (spec
     /// section 3): the playbook version bound to the run plus the latest
     /// reported `total` of each cyclic group. It changes exactly when a report
@@ -329,6 +407,9 @@ pub fn from_run_dir_with_root(
         summary.waiting_on = Some(pq.node.clone());
         summary.waiting_kind = Some(WaitingKind::Question);
         summary.pending_question = Some(pq);
+        // The single `waiting_on` now names the question, so a stale gate block
+        // must not linger alongside it (mirrors the one-block invariant).
+        summary.pending_review = None;
     }
     let (done, total) = weighted_with(&pb, events, &gc);
     if total == 0 {
@@ -575,6 +656,22 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     let waiting_on = waiting.as_ref().map(|(id, _)| id.clone());
     let waiting_kind = waiting.map(|(_, kind)| kind);
 
+    // The pending-gate block (issue #42 finding 4): only when the run is
+    // actually waiting on a human_review gate. Built from the node's title and
+    // options in the snapshot, so a `run_status` reader is forced to see the
+    // decision, the options, and how to answer.
+    let pending_review = match (&waiting_on, waiting_kind) {
+        (Some(id), Some(WaitingKind::HumanReview)) => {
+            playbook.node(id).and_then(|n| match &n.kind {
+                NodeKind::HumanReview { options } => {
+                    Some(pending_review(id, n.title.as_deref(), options))
+                }
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+
     // Plan identity (B4): the run's playbook version plus the latest reported
     // total of each cyclic group, entries ordered by the stable SCC group
     // index. This is what actually defines the amount of work, so it changes
@@ -596,6 +693,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         waiting_on,
         waiting_kind,
         pending_question: None,
+        pending_review,
         plan_key,
     }
 }
@@ -902,6 +1000,8 @@ edges:
                 EventPayload::ReviewRequested {
                     node: "r".into(),
                     options: vec!["approve".into(), "reject".into()],
+                    title: None,
+                    instruction: String::new(),
                 },
             ),
         ];
@@ -926,6 +1026,8 @@ edges:
                 EventPayload::ReviewRequested {
                     node: "r".into(),
                     options: vec!["approve".into(), "reject".into()],
+                    title: None,
+                    instruction: String::new(),
                 },
             ),
             ev(
@@ -1059,6 +1161,8 @@ edges:
                 EventPayload::ReviewRequested {
                     node: "r".into(),
                     options: vec!["approve".into(), "reject".into()],
+                    title: None,
+                    instruction: String::new(),
                 },
             ),
         ];
