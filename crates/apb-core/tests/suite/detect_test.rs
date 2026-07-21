@@ -547,3 +547,37 @@ fn probe_reaps_a_daemonized_descendant_of_the_agent() {
         std::thread::sleep(std::time::Duration::from_millis(20));
     }
 }
+
+/// grok and cursor are built-in probes (spec 2026-07-21). The binary names are
+/// verified against the real CLIs: Grok Build installs `grok`, Cursor installs
+/// `cursor-agent`. Both also ship a generic `agent` alias, so `agent` is
+/// deliberately NOT probed - it cannot identify either agent unambiguously.
+#[test]
+fn builtin_probes_include_grok_and_cursor() {
+    let probes = detect::builtin_probes();
+    let by_id = |id: &str| {
+        probes
+            .iter()
+            .find(|p| p.id == id)
+            .unwrap_or_else(|| panic!("built-in probe `{id}` is missing"))
+    };
+
+    let grok = by_id("grok");
+    assert_eq!(grok.bins, vec!["grok".to_string()]);
+    assert_eq!(grok.category, AgentCategory::Vendor);
+    assert_eq!(grok.version_args, vec!["--version".to_string()]);
+
+    let cursor = by_id("cursor");
+    assert_eq!(cursor.bins, vec!["cursor-agent".to_string()]);
+    assert_eq!(cursor.category, AgentCategory::Aggregator);
+    assert_eq!(cursor.version_args, vec!["--version".to_string()]);
+
+    // The ambiguous `agent` alias must not be probed by anyone.
+    for p in &probes {
+        assert!(
+            !p.bins.iter().any(|b| b == "agent"),
+            "probe `{}` claims the ambiguous `agent` binary",
+            p.id
+        );
+    }
+}

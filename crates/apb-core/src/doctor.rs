@@ -142,7 +142,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     }
 
     // Agents: collect the ones mentioned through node profiles; status
-    // comes from the free detect for the built-in six, and for the rest -
+    // comes from the free detect for the built-in eight, and for the rest -
     // a fallback to checking the program in PATH.
     let mut agents: BTreeSet<String> = BTreeSet::new();
     // Resolve the union of: (a) the flat list of project profiles (catches
@@ -182,7 +182,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         }
     }
     // Detect spawns binaries - we call it only if at least one agent from
-    // the built-in six is mentioned (otherwise the PATH fallback is enough;
+    // the built-in eight is mentioned (otherwise the PATH fallback is enough;
     // tests stay fast).
     let detect_ids: BTreeSet<String> = crate::detect::builtin_probes()
         .iter()
