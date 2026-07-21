@@ -225,7 +225,7 @@ fn http_healthcheck_reaches_the_real_url() {
 
     let req = server.captured_request().expect("server saw a request");
     assert!(
-        req.contains("Authorization: Bearer hc-secret-value"),
+        req.contains("authorization: Bearer hc-secret-value"),
         "auth header missing/wrong in request:\n{req}"
     );
 }
