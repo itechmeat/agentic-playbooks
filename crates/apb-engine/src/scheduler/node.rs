@@ -1080,6 +1080,35 @@ fn parent_run_origin(run_dir: &Path) -> apb_core::scope::Origin {
     Origin::Project { workspace_id: None }
 }
 
+/// Builds the child run's [`RunOptions`] from the (optional) verified pin. A
+/// gated run carries a pin (`Some`) and threads every anti-TOCTOU `expected_*`
+/// map through verbatim, including the child's own verified connector permit
+/// maps (finding 2 of issue #42) - without them a sub-playbook that binds
+/// connectors would be refused at prepare ("connector bindings present but no
+/// connector permit"). An ungated (CLI, `pin: None`) child resolves its
+/// connectors live at prepare time, so the maps default to empty there.
+fn child_run_options(
+    pin: Option<&crate::run_config::ChildExpectation>,
+    child_instruction: Option<String>,
+    parent_run_id: &str,
+    depth: usize,
+) -> RunOptions {
+    RunOptions {
+        instruction: child_instruction,
+        allow_shared_workdir: true,
+        parent_run: Some(parent_run_id.to_string()),
+        depth,
+        expected_digest: pin.map(|p| p.playbook_digest.clone()),
+        expected_profile_bundles: pin.map(|p| p.profile_bundles.clone()),
+        expected_children: pin.map(|p| p.children.clone()),
+        expected_connectors: pin.map(|p| p.connectors.clone()).unwrap_or_default(),
+        expected_connector_accounts: pin
+            .map(|p| p.connector_accounts.clone())
+            .unwrap_or_default(),
+        ..Default::default()
+    }
+}
+
 /// Executes a `playbook` node (spec C): starts (or, on resume, reattaches to) a
 /// full child run and maps its terminal state to this node's status/output. The
 /// child runs in-process, synchronously, with `allow_shared_workdir: true` (the
@@ -1210,16 +1239,7 @@ pub(crate) fn run_playbook_node(
         })?
     };
 
-    let opts = RunOptions {
-        instruction: child_instruction,
-        allow_shared_workdir: true,
-        parent_run: Some(run_id.to_string()),
-        depth: cfg.depth + 1,
-        expected_digest: pin.map(|p| p.playbook_digest.clone()),
-        expected_profile_bundles: pin.map(|p| p.profile_bundles.clone()),
-        expected_children: pin.map(|p| p.children.clone()),
-        ..Default::default()
-    };
+    let opts = child_run_options(pin, child_instruction, run_id, cfg.depth + 1);
 
     // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
     let t = PrepareTarget {
@@ -1484,4 +1504,50 @@ pub(crate) fn advance_frontier(
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use apb_core::profile::ProfileScope;
+    use std::collections::BTreeMap;
+
+    /// A gated child spawn threads the pin's verified connector permit maps into
+    /// the child's `expected_connectors`/`expected_connector_accounts` verbatim
+    /// (finding 2 of issue #42), so the child prepare no longer refuses a
+    /// connector-binding sub-playbook for want of a permit.
+    #[test]
+    fn child_run_options_threads_pin_connectors() {
+        let mut connectors = BTreeMap::new();
+        connectors.insert("mock-tracker".to_string(), "sha256:conn".to_string());
+        let mut accounts = BTreeMap::new();
+        accounts.insert("mock-tracker/acct1".to_string(), "sha256:acct".to_string());
+        let pin = crate::run_config::ChildExpectation {
+            id: "child".into(),
+            scope: ProfileScope::Project,
+            version: "1.0.0".into(),
+            playbook_digest: "sha256:pb".into(),
+            profile_bundles: BTreeMap::new(),
+            connectors: connectors.clone(),
+            connector_accounts: accounts.clone(),
+            children: BTreeMap::new(),
+        };
+
+        let opts = child_run_options(Some(&pin), None, "parent-run", 2);
+        assert_eq!(opts.expected_connectors, connectors);
+        assert_eq!(opts.expected_connector_accounts, accounts);
+        assert_eq!(opts.expected_digest.as_deref(), Some("sha256:pb"));
+        assert_eq!(opts.depth, 2);
+        assert!(opts.allow_shared_workdir);
+    }
+
+    /// An ungated (CLI, no pin) child resolves connectors live at prepare, so
+    /// the spawn passes empty expected maps rather than an unverified pin.
+    #[test]
+    fn child_run_options_ungated_has_empty_connector_maps() {
+        let opts = child_run_options(None, None, "parent-run", 1);
+        assert!(opts.expected_connectors.is_empty());
+        assert!(opts.expected_connector_accounts.is_empty());
+        assert!(opts.expected_digest.is_none());
+    }
 }

@@ -103,6 +103,13 @@ pub struct RunPermit {
     /// so trust and drift detection span the full merged set. Handed to the
     /// engine verbatim as `expected_connector_accounts`.
     pub connector_accounts: std::collections::BTreeMap<String, String>,
+    /// Non-fatal, consent-time warnings the caller can show the user before the
+    /// run starts (finding 11 of issue #42). Currently one per bound connector
+    /// that resolved to zero configured accounts: the gate permits it (it is not
+    /// a secret-egress problem), but every node bound to it would fail at call
+    /// time, so the user is told up front rather than only discovering it mid-run.
+    /// Never a refusal channel - a refusal is an `Err(Value)` from the gate.
+    pub warnings: Vec<String>,
 }
 
 /// One-pass walk of a playbook's sub-playbook tree (spec C), shared by the local
@@ -221,8 +228,9 @@ pub fn check_run(
     // check env presence, and gate both connector and account digests. Unlike
     // profile/playbook trust, `acknowledge_untrusted` does NOT bypass this -
     // connector and account trust guard secret egress, not content taste.
-    // Returns the two permit maps handed to the engine verbatim.
-    let (connectors, connector_accounts) =
+    // Returns the two permit maps handed to the engine verbatim, plus any
+    // consent-time warnings (finding 11: a bound connector with zero accounts).
+    let (connectors, connector_accounts, connector_warnings) =
         check_connectors(root, &loaded.playbook, acknowledge_untrusted)?;
 
     // Sub-playbook pins (spec C): walk the reference tree in the same gate pass,
@@ -256,6 +264,7 @@ pub fn check_run(
         children: tree.children,
         connectors,
         connector_accounts,
+        warnings: connector_warnings,
     })
 }
 
@@ -288,14 +297,25 @@ pub fn connector_permit_maps(
     root: &Path,
     playbook: &Playbook,
 ) -> Result<ConnectorPermitMaps, Value> {
-    check_connectors(root, playbook, false)
+    // The public seam needs only the two maps; the consent-time warnings
+    // (finding 11) are surfaced by the full `check_run` gate, so drop them here.
+    let (connectors, accounts, _warnings) = check_connectors(root, playbook, false)?;
+    Ok((connectors, accounts))
 }
+
+/// The two permit maps plus the consent-time warnings (finding 11) that
+/// [`check_connectors`] produces in one pass.
+type ConnectorCheck = (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+    Vec<String>,
+);
 
 fn check_connectors(
     root: &Path,
     playbook: &Playbook,
     acknowledge_untrusted: bool,
-) -> Result<ConnectorPermitMaps, Value> {
+) -> Result<ConnectorCheck, Value> {
     // Deliberately ignored - see the doc comment above (secret egress).
     let _ = acknowledge_untrusted;
 
@@ -307,6 +327,7 @@ fn check_connectors(
         return Ok((
             std::collections::BTreeMap::new(),
             std::collections::BTreeMap::new(),
+            Vec::new(),
         ));
     }
 
@@ -341,6 +362,7 @@ fn check_connectors(
     let mut untrusted_connectors: Vec<String> = Vec::new();
     let mut unapproved_accounts: Vec<String> = Vec::new();
     let mut account_fields = serde_json::Map::new();
+    let mut warnings: Vec<String> = Vec::new();
 
     for (name, resolved) in &resolution.connectors {
         let digest = resolved.loaded.digest.clone();
@@ -348,6 +370,18 @@ fn check_connectors(
             untrusted_connectors.push(name.clone());
         }
         connectors.insert(name.clone(), digest);
+
+        // Zero-account connector (finding 11 of issue #42): an empty
+        // `expected_connector_accounts` for a bound connector passes the gate
+        // silently today and every node bound to it then fails at call time
+        // (nothing to call). Surface it as a consent-time warning rather than a
+        // hard refusal - a missing account is a configuration gap, not the
+        // secret-egress problem the connector/account trust gate guards.
+        if resolved.accounts.is_empty() {
+            warnings.push(format!(
+                "connector `{name}` is bound but has no configured accounts; nodes that call it will fail until an account is added"
+            ));
+        }
 
         for account in &resolved.accounts {
             let id = account_trust_id(name, &account.name);
@@ -376,7 +410,7 @@ fn check_connectors(
         }));
     }
 
-    Ok((connectors, accounts))
+    Ok((connectors, accounts, warnings))
 }
 
 /// Non-secret display of an account for an approval prompt (spec 7: the user
@@ -482,10 +516,15 @@ fn collect_children(
         // connector maps with an exact bidirectional key-set match
         // (`snapshot_connectors`), and a sub-playbook child executes as its own
         // run - handing the parent run a child's connector keys would refuse
-        // the parent as "expected but unused". Threading a child run's own
-        // connector maps into that child run belongs in the engine child-spawn
-        // path (ChildExpectation / scheduler), tracked separately.
-        check_connectors(root, &loaded.playbook, acknowledge_untrusted)?;
+        // the parent as "expected but unused". Instead the child's OWN verified
+        // maps ride the pin (finding 2 of issue #42): they are computed here in
+        // the same single gate pass and threaded verbatim into the child spawn's
+        // `expected_connectors`/`expected_connector_accounts`, so a sub-playbook
+        // that binds connectors is reachable under a gated run. The zero-account
+        // warnings are the parent-run consent surface only, so a child's are
+        // dropped here.
+        let (child_connectors, child_connector_accounts, _child_warnings) =
+            check_connectors(root, &loaded.playbook, acknowledge_untrusted)?;
         // Fold this child's effective effects into the consented union.
         effects.extend(apb_core::effects::effective(&loaded.playbook));
         let worigin = if matches!(child_origin, Origin::Global) {
@@ -541,6 +580,8 @@ fn collect_children(
                 version: resolved.version.clone(),
                 playbook_digest: resolved.digest.clone(),
                 profile_bundles: bundles,
+                connectors: child_connectors,
+                connector_accounts: child_connector_accounts,
                 children: grand,
             },
         );

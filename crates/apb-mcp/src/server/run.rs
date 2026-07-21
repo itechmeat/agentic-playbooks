@@ -9,7 +9,7 @@ use rmcp::{tool, tool_router};
 use serde_json::json;
 
 use super::args::*;
-use super::{WfMcp, to_call_tool_result};
+use super::{WfMcp, to_call_tool_result, with_warnings};
 use crate::tools::{self, ToolError};
 
 #[tool_router(router = run_router, vis = "pub(crate)")]
@@ -284,6 +284,11 @@ impl WfMcp {
             Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
         };
 
+        // Consent-time warnings the gate produced (finding 11: a bound connector
+        // with zero configured accounts). Surfaced on every successful run
+        // response so the caller can show them to the user; never a refusal.
+        let warnings = permit.warnings.clone();
+
         // supervise:"self" - a project-scoped supervised run; it does not
         // combine with a global scope.
         if supervise.as_deref() == Some("self") {
@@ -302,6 +307,7 @@ impl WfMcp {
                 permit.children,
                 permit.connectors,
                 permit.connector_accounts,
+                warnings,
             );
         }
 
@@ -322,21 +328,42 @@ impl WfMcp {
             };
             if background == Some(true) {
                 return match apb_engine::start_detached_resolved(&resolved, opts) {
-                    Ok(run_id) => {
-                        to_call_tool_result(Ok(json!({ "run_id": run_id, "scope": "global" })))
-                    }
+                    Ok(run_id) => to_call_tool_result(with_warnings(
+                        Ok(json!({ "run_id": run_id, "scope": "global" })),
+                        &warnings,
+                    )),
                     Err(e) => to_call_tool_result(Err(ToolError::from(e))),
                 };
             }
             return match apb_engine::run_resolved(&resolved, opts) {
-                Ok(res) => to_call_tool_result(Ok(
-                    json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" }),
+                Ok(res) => to_call_tool_result(with_warnings(
+                    Ok(
+                        json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" }),
+                    ),
+                    &warnings,
                 )),
                 Err(e) => to_call_tool_result(Err(ToolError::from(e))),
             };
         }
         if background == Some(true) {
-            return to_call_tool_result(tools::playbook_run_background(
+            return to_call_tool_result(with_warnings(
+                tools::playbook_run_background(
+                    &self.root,
+                    &id,
+                    version.as_deref(),
+                    params,
+                    instruction,
+                    Some(permit.playbook_digest),
+                    Some(permit.profile_bundles),
+                    Some(permit.children),
+                    permit.connectors,
+                    permit.connector_accounts,
+                ),
+                &warnings,
+            ));
+        }
+        to_call_tool_result(with_warnings(
+            tools::playbook_run(
                 &self.root,
                 &id,
                 version.as_deref(),
@@ -347,19 +374,8 @@ impl WfMcp {
                 Some(permit.children),
                 permit.connectors,
                 permit.connector_accounts,
-            ));
-        }
-        to_call_tool_result(tools::playbook_run(
-            &self.root,
-            &id,
-            version.as_deref(),
-            params,
-            instruction,
-            Some(permit.playbook_digest),
-            Some(permit.profile_bundles),
-            Some(permit.children),
-            permit.connectors,
-            permit.connector_accounts,
+            ),
+            &warnings,
         ))
     }
 
