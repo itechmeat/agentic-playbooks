@@ -37,7 +37,7 @@ imap = { version = "2.4", default-features = false }
 # in imap-proto and are not re-exported by the imap crate, so naming them in
 # the search-result decoder needs this direct dependency (version matched to
 # imap 2.4's transitive pin).
-imap-proto = "0.10"
+imap-proto = "0.16"
 mail-parser = "0.11"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
 rustls-platform-verifier = "0.5"
