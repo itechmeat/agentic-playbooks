@@ -117,6 +117,22 @@ describe('disabledModelIds (duplicate prevention by disabling, not hiding)', () 
       new Set(['claude-opus-4-8', 'claude-sonnet-5']),
     )
   })
+
+  it('reserves a claude-code group model for a claude group (legacy alias)', () => {
+    const groups = [
+      { agent: 'claude-code', model: 'claude-opus-4-8' },
+      { agent: 'claude', model: 'claude-sonnet-5' },
+    ]
+    expect(disabledModelIds(1, groups)).toEqual(['claude-opus-4-8'])
+  })
+
+  it('reserves a claude group model for a claude-code group (legacy alias)', () => {
+    const groups = [
+      { agent: 'claude', model: 'claude-opus-4-8' },
+      { agent: 'claude-code', model: 'claude-sonnet-5' },
+    ]
+    expect(disabledModelIds(1, groups)).toEqual(['claude-opus-4-8'])
+  })
 })
 
 describe('firstSelectableModelForAgent (agent-change reset per group)', () => {

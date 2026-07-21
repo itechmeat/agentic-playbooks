@@ -2,6 +2,17 @@ import { parse } from 'yaml'
 import type { AgentInfo, ModelOption, ModelRow } from './api'
 
 /**
+ * Canonical agent id for identity comparisons and model-option lookups.
+ * Legacy `claude-code` is the same agent as `claude`; other ids pass through
+ * after trim. Keep every agent-identity compare in this module on this helper
+ * so alias and non-alias paths cannot diverge.
+ */
+export function normalizeAgentKey(agent: string): string {
+  const trimmed = agent.trim()
+  return trimmed === 'claude-code' ? 'claude' : trimmed
+}
+
+/**
  * Model options offered for a given agent: the server-computed, curated-table-
  * driven list from `GET /api/models`'s `options_by_agent` (issue #42 finding
  * 9 - see `apb_core::models_table::model_options_for_agent`). Detection only
@@ -17,8 +28,7 @@ export function modelOptionsForAgent(
   optionsByAgent: Record<string, ModelOption[]>,
   fallbackModels: ModelRow[],
 ): ModelOption[] {
-  const probe = agent === 'claude-code' ? 'claude' : agent
-  const opts = optionsByAgent[probe]
+  const opts = optionsByAgent[normalizeAgentKey(agent)]
   if (opts) return opts
   return fallbackModels.map((m) => ({ id: m.id, vendor: m.vendor, detected: false }))
 }
@@ -63,14 +73,16 @@ export interface ExecutorGroup {
   model: string
 }
 
-const pairKey = (agent: string, model: string) => `${agent.trim()}\x00${model.trim()}`
+const pairKey = (agent: string, model: string) =>
+  `${normalizeAgentKey(agent)}\x00${model.trim()}`
 
 /**
  * Model ids that group `index` must not select because another group already
  * pairs them with the same agent. Returned so the caller can DISABLE those
  * rows rather than hide them: the user should see that the option exists and
  * is taken. Only groups on the same agent contribute - switching agent frees
- * the models again.
+ * the models again. Agent identity uses `normalizeAgentKey`, so legacy
+ * `claude-code` and `claude` cross-reserve the same models.
  *
  * Pass `index = -1` to consider every group (nothing is treated as "self").
  */
@@ -79,12 +91,12 @@ export function disabledModelIds(
   groups: ExecutorGroup[],
   agent = groups[index]?.agent ?? '',
 ): string[] {
-  const target = agent.trim()
+  const target = normalizeAgentKey(agent)
   if (!target) return []
   const taken = new Set<string>()
   groups.forEach((g, i) => {
     if (i === index) return
-    if (g.agent.trim() !== target) return
+    if (normalizeAgentKey(g.agent) !== target) return
     if (g.model.trim()) taken.add(g.model.trim())
   })
   return [...taken]
