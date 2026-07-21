@@ -27,6 +27,9 @@ mod acp_config_test;
 #[cfg(unix)]
 #[path = "suite/adapter_bounded_waits_test.rs"]
 mod adapter_bounded_waits_test;
+#[cfg(unix)]
+#[path = "suite/adapter_output_test.rs"]
+mod adapter_output_test;
 #[path = "suite/adapter_test.rs"]
 mod adapter_test;
 #[path = "suite/agent_report_test.rs"]
