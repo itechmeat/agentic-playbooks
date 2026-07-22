@@ -200,6 +200,14 @@ pub struct FunctionSpec {
     pub headers: BTreeMap<String, String>,
     #[serde(default)]
     pub body: Option<serde_json::Value>,
+    /// Form-encoded request body (spec 2026-07-22-official-connectors-wave-3,
+    /// section 4.1): a string-to-template map rendered to an
+    /// `application/x-www-form-urlencoded` body. Mutually exclusive with
+    /// `body`, and only valid on body-carrying methods (POST, PUT, PATCH,
+    /// DELETE). Values follow function-body template rules (`account.*` and
+    /// `args.*` only, never `secret.*`).
+    #[serde(default)]
+    pub body_form: BTreeMap<String, String>,
     #[serde(default)]
     pub args_schema: Option<serde_json::Value>,
     #[serde(default)]
@@ -317,10 +325,11 @@ impl ConnectorDoc {
                                 f.name
                             )));
                         }
+                        validate_body_form_shape(f)?;
                     } else if is_mock {
-                        if !f.query.is_empty() || f.body.is_some() {
+                        if !f.query.is_empty() || f.body.is_some() || !f.body_form.is_empty() {
                             return Err(ConnectorError::Invalid(format!(
-                                "mock function `{}` must not set `query` or `body`",
+                                "mock function `{}` must not set `query`, `body`, or `body_form`",
                                 f.name
                             )));
                         }
@@ -401,14 +410,44 @@ impl ConnectorDoc {
     }
 }
 
+/// `body_form` shape rules (spec 2026-07-22-official-connectors-wave-3,
+/// section 4.1): mutually exclusive with `body`, and allowed only on
+/// body-carrying methods (POST, PUT, PATCH, DELETE, case-insensitively).
+/// `body` itself keeps no method restriction (out of scope for wave 3). Only
+/// called for HTTP functions; the mock/smtp/imap shape checks reject
+/// `body_form` themselves.
+fn validate_body_form_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
+    if f.body_form.is_empty() {
+        return Ok(());
+    }
+    if f.body.is_some() {
+        return Err(ConnectorError::Invalid(format!(
+            "function `{}` must not set both `body` and `body_form`",
+            f.name
+        )));
+    }
+    let method = f.method.as_deref().unwrap_or("");
+    let carries_body = matches!(
+        method.to_ascii_uppercase().as_str(),
+        "POST" | "PUT" | "PATCH" | "DELETE"
+    );
+    if !carries_body {
+        return Err(ConnectorError::Invalid(format!(
+            "function `{}` sets `body_form` on method `{method}`; body_form is only valid on POST, PUT, PATCH, or DELETE",
+            f.name
+        )));
+    }
+    Ok(())
+}
+
 /// SMTP-internal shape rules (spec 4.2): a `verify: true` function carries no
 /// `message`; a `verify: false` function must carry one. An smtp function must
 /// not also carry `query` or `body` (those are HTTP-only).
 fn validate_smtp_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
     let smtp = f.smtp.as_ref().expect("caller checked is_smtp");
-    if !f.query.is_empty() || f.body.is_some() {
+    if !f.query.is_empty() || f.body.is_some() || !f.body_form.is_empty() {
         return Err(ConnectorError::Invalid(format!(
-            "smtp function `{}` must not set `query` or `body`",
+            "smtp function `{}` must not set `query`, `body`, or `body_form`",
             f.name
         )));
     }
@@ -439,6 +478,12 @@ fn validate_imap_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
     if f.body.is_some() {
         return Err(ConnectorError::Invalid(format!(
             "imap function `{}` must not set `body`",
+            f.name
+        )));
+    }
+    if !f.body_form.is_empty() {
+        return Err(ConnectorError::Invalid(format!(
+            "imap function `{}` must not set `body_form`",
             f.name
         )));
     }
@@ -595,6 +640,16 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
             for (ns, name) in placeholders(value)? {
                 reject_auth(ns, &format!("function `{}` headers", f.name))?;
                 reject_secret(ns, &format!("function `{}` headers", f.name))?;
+                fields.check(ns, &name)?;
+            }
+        }
+        // body_form values follow function-body rules (spec
+        // 2026-07-22-official-connectors-wave-3, section 4.1), walked the same
+        // way `query` values are.
+        for value in f.body_form.values() {
+            for (ns, name) in placeholders(value)? {
+                reject_auth(ns, &format!("function `{}` body_form", f.name))?;
+                reject_secret(ns, &format!("function `{}` body_form", f.name))?;
                 fields.check(ns, &name)?;
             }
         }
@@ -1310,6 +1365,100 @@ functions:
         let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: password\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: \"{{secret.password}}\" }\n      op: search\n      params: { folder: \"{{secret.password}}\", limit: \"10\" }\n";
         let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
         assert!(err.contains("secret"), "message was: {err}");
+    }
+
+    // -- body_form (spec 2026-07-22-official-connectors-wave-3, section 4.1) --
+
+    const FORM_YAML: &str = r#"
+name: chat
+version: 0.1.0
+account_fields:
+  - name: base_url
+    required: true
+functions:
+  - name: send_message
+    description: Send a message with a form-encoded body
+    method: POST
+    url: "{{account.base_url}}/messages"
+    body_form:
+      type: stream
+      to: "{{args.to}}"
+      content: "{{args.content}}"
+    args_schema: { type: object, properties: { to: { type: string }, content: { type: string } }, required: [to, content] }
+"#;
+
+    #[test]
+    fn parses_body_form_function() {
+        let doc = ConnectorDoc::from_yaml(FORM_YAML, "chat").unwrap();
+        let f = doc.function("send_message").unwrap();
+        assert_eq!(f.body_form.len(), 3);
+        assert_eq!(f.body_form.get("type").map(String::as_str), Some("stream"));
+        assert!(f.body.is_none());
+    }
+
+    #[test]
+    fn body_and_body_form_together_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: POST\n    url: http://a\n    body: \"{{args}}\"\n    body_form: { k: v }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("f") && err.contains("body_form"), "was: {err}");
+    }
+
+    #[test]
+    fn body_form_on_get_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: http://a\n    body_form: { k: v }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("f") && err.contains("body_form"), "was: {err}");
+    }
+
+    #[test]
+    fn body_form_on_body_carrying_methods_accepted() {
+        // The method check is case-insensitive; `body` itself keeps no such
+        // restriction (out of scope for wave 3).
+        for method in ["POST", "PUT", "PATCH", "DELETE", "post"] {
+            let y = format!(
+                "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: {method}\n    url: http://a\n    body_form: {{ k: v }}\n"
+            );
+            assert!(
+                ConnectorDoc::from_yaml(&y, "x").is_ok(),
+                "method {method} must accept body_form"
+            );
+        }
+    }
+
+    #[test]
+    fn body_form_on_mock_smtp_or_imap_rejected() {
+        let mock = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    body_form: { k: v }\n    mock: { status: 200, body: {} }\n";
+        let err = ConnectorDoc::from_yaml(mock, "x").unwrap_err().to_string();
+        assert!(err.contains("body_form"), "was: {err}");
+
+        let smtp = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    body_form: { k: v }\n    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n      verify: true\n";
+        let err = ConnectorDoc::from_yaml(smtp, "x").unwrap_err().to_string();
+        assert!(err.contains("body_form"), "was: {err}");
+
+        let imap = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    body_form: { k: v }\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: p }\n      op: verify\n";
+        let err = ConnectorDoc::from_yaml(imap, "x").unwrap_err().to_string();
+        assert!(err.contains("body_form"), "was: {err}");
+    }
+
+    #[test]
+    fn secret_in_body_form_value_rejected() {
+        let y = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: token\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    method: POST\n    url: http://a\n    body_form: { k: \"{{secret.token}}\" }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("secret") && err.contains("auth"), "was: {err}");
+    }
+
+    #[test]
+    fn auth_placeholder_in_body_form_value_rejected() {
+        let y = "name: x\nversion: 0.1.0\nauth:\n  kind: path\n  value_template: \"bot{{secret.token}}\"\naccount_fields:\n  - name: base_url\n  - name: token\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    method: POST\n    url: \"{{account.base_url}}/{{auth}}/x\"\n    body_form: { k: \"{{auth}}\" }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("auth"), "was: {err}");
+    }
+
+    #[test]
+    fn unknown_account_field_in_body_form_rejected() {
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    method: POST\n    url: http://a\n    body_form: { k: \"{{account.nope}}\" }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("nope"), "was: {err}");
     }
 
     #[test]
