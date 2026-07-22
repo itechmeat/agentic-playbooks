@@ -337,11 +337,14 @@ replies without allowing new top-level posts. Healthcheck:
 `examples/playbooks/sentry-triage.yaml` and
 `examples/playbooks/release-announce.yaml` exercise the github,
 telegram, smtp, and sentry connectors end to end;
-`examples/playbooks/inbox-triage.yaml` exercises imap and asana the
-same way. All three double as reference examples for grant allowlists
-and `max_calls`. They validate in CI against fake accounts and are not
-run against real services there; run them manually once your own
-accounts are configured and approved.
+`examples/playbooks/inbox-triage.yaml` exercises imap and asana, and
+`examples/playbooks/release-heartbeat.yaml` exercises gitlab,
+youtrack, and slack (checking the latest pipeline, posting a summary,
+and filing an issue on failure; `trigger_pipeline` is deliberately
+absent from its grants). All four double as reference examples for
+grant allowlists and `max_calls`. They validate in CI against fake
+accounts and are not run against real services there; run them
+manually once your own accounts are configured and approved.
 
 ### Coverage note
 

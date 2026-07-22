@@ -1,0 +1,63 @@
+schema: 2
+id: release-heartbeat
+name: Release heartbeat
+description: >-
+  Check the latest GitLab pipeline on a branch, have an agent summarize
+  its state, post the summary to Slack, and file a YouTrack issue when
+  the pipeline failed.
+version: 1.0.0
+params:
+  - { name: gitlab_project, type: text, label: "GitLab project id or group/project path" }
+  - { name: gitlab_ref, type: text, label: "Branch or tag to check, e.g. main" }
+  - { name: slack_channel, type: text, label: "Slack channel id to notify" }
+  - { name: youtrack_project, type: text, label: "YouTrack project database id, e.g. 0-0" }
+defaults:
+  profile: main
+effects: [network, external, irreversible]
+nodes:
+  - { id: start, type: start }
+  - id: check_pipeline
+    type: agent_task
+    prompt: >-
+      Fetch the most recent pipeline for ref {{params.gitlab_ref}} in
+      project {{params.gitlab_project}} using the gitlab connector's
+      list_pipelines function (pass ref {{params.gitlab_ref}}, leave
+      status unset, first page), then fetch that pipeline's details with
+      get_pipeline. Report the pipeline id, status, ref, and web_url.
+    connectors:
+      - { name: gitlab, accounts: [default], functions: [list_pipelines, get_pipeline], max_calls: 5 }
+  - id: summarize
+    type: agent_task
+    prompt: >-
+      Summarize the pipeline state found in
+      {{nodes.check_pipeline.output}} in two or three sentences for a
+      release channel: the status, the ref, what failed if anything, and
+      the pipeline link.
+  - id: file_issue
+    type: agent_task
+    prompt: >-
+      If the pipeline summary in {{nodes.summarize.output}} describes a
+      failed pipeline, create exactly one YouTrack issue in project
+      {{params.youtrack_project}} using the youtrack connector's
+      create_issue function: a short summary naming the ref and pipeline
+      id, and a description carrying the failure details and the
+      pipeline link. If the pipeline did not fail, do nothing and state
+      that no issue was needed.
+    connectors:
+      - { name: youtrack, accounts: [default], functions: [create_issue], max_calls: 3 }
+  - id: notify
+    type: agent_task
+    prompt: >-
+      Post the pipeline summary from {{nodes.summarize.output}}, plus
+      the YouTrack issue reference from {{nodes.file_issue.output}} when
+      one was filed, to Slack channel {{params.slack_channel}} using the
+      slack connector's send_message function.
+    connectors:
+      - { name: slack, accounts: [default], functions: [send_message], max_calls: 3 }
+  - { id: finish, type: finish, outcome: success }
+edges:
+  - { from: start, to: check_pipeline }
+  - { from: check_pipeline, to: summarize }
+  - { from: summarize, to: file_issue }
+  - { from: file_issue, to: notify }
+  - { from: notify, to: finish }

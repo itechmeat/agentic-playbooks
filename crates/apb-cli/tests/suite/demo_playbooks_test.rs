@@ -134,6 +134,21 @@ fn setup(dir: &Path) -> std::path::PathBuf {
         "imap",
         "accounts:\n  - name: default\n    host: imap.example.com\n    port: \"993\"\n    use_tls: \"true\"\n    auth_method: password\n    username: mailbox@example.com\n    password: \"{{env.DEMO_IMAP_PASSWORD}}\"\n",
     );
+    install_and_approve(
+        &root,
+        "gitlab",
+        "accounts:\n  - name: default\n    api_base: https://gitlab.com/api/v4\n    token: \"{{env.DEMO_GITLAB_TOKEN}}\"\n",
+    );
+    install_and_approve(
+        &root,
+        "youtrack",
+        "accounts:\n  - name: default\n    api_base: https://example.youtrack.cloud/api\n    token: \"{{env.DEMO_YOUTRACK_TOKEN}}\"\n",
+    );
+    install_and_approve(
+        &root,
+        "slack",
+        "accounts:\n  - name: default\n    api_base: https://slack.com/api\n    token: \"{{env.DEMO_SLACK_TOKEN}}\"\n",
+    );
 
     seed_profile_main(&root);
     root
@@ -174,6 +189,25 @@ fn release_announce_demo_playbook_validates() {
     assert!(
         stdout.contains("release-announce: OK"),
         "release-announce should validate cleanly: {stdout}"
+    );
+}
+
+#[test]
+fn release_heartbeat_demo_playbook_validates() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = setup(dir.path());
+    register_playbook(
+        &root,
+        "release-heartbeat",
+        "1.0.0",
+        &repo_playbook_yaml("release-heartbeat.yaml"),
+    );
+
+    let out = apb_ok(&root, &["validate", "release-heartbeat"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("release-heartbeat: OK"),
+        "release-heartbeat should validate cleanly: {stdout}"
     );
 }
 
