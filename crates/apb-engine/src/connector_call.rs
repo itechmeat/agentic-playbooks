@@ -203,6 +203,11 @@ struct HttpCall {
     /// NOT). This is the URL recorded in the event log.
     pre_auth_url: String,
     rendered_body: Option<Value>,
+    /// Rendered `body_form` pairs, DECODED (spec
+    /// 2026-07-22-official-connectors-wave-3, section 4.1); percent-encoded
+    /// into the wire body by `send_raw`. Mutually exclusive with
+    /// `rendered_body` by validation.
+    rendered_form: Option<Vec<(String, String)>>,
     /// Rendered per-function headers (spec 4.4). Values use `account.*`/`args.*`
     /// only; `secret.*` is forbidden here by `validate_templates`.
     headers: BTreeMap<String, String>,
@@ -631,6 +636,7 @@ fn build_prepared(
             method: rendered.method,
             pre_auth_url: rendered.pre_auth_url,
             rendered_body: rendered.rendered_body,
+            rendered_form: rendered.rendered_form,
             headers: rendered.headers,
             // `--full` bypasses the projection (spec 4.5), returning the raw body.
             response_pick: if full {
@@ -1253,30 +1259,42 @@ impl HttpCall {
             Err(e) => return (Err(e), None),
         }
 
-        let response = match &self.rendered_body {
-            Some(body) => {
-                // Mirrors ureq 2's `send_json`: only add the JSON content type
-                // when the function's own headers did not already set one.
+        // The outgoing body payload: a JSON body serializes with the JSON
+        // content type, a form body (spec 2026-07-22-official-connectors-wave-3,
+        // section 4.1) percent-encodes its pairs with the urlencoded content
+        // type. The two are mutually exclusive by validation.
+        let payload = match &self.rendered_body {
+            Some(body) => match serde_json::to_vec(body) {
+                Ok(bytes) => Some((bytes, "application/json")),
+                Err(e) => {
+                    return (
+                        Err(CallError::new(
+                            CallErrorCode::Config,
+                            format!("body serialize failed: {e}"),
+                        )),
+                        None,
+                    );
+                }
+            },
+            None => self.rendered_form.as_ref().map(|pairs| {
+                (
+                    encode_form_body(pairs).into_bytes(),
+                    "application/x-www-form-urlencoded",
+                )
+            }),
+        };
+        let response = match payload {
+            Some((bytes, content_type)) => {
+                // Mirrors ureq 2's `send_json`: only add the default content
+                // type when the function's own headers did not already set one.
                 let has_content_type = self
                     .headers
                     .keys()
                     .any(|k| k.eq_ignore_ascii_case("content-type"));
                 if !has_content_type {
-                    builder = builder.header("content-type", "application/json");
+                    builder = builder.header("content-type", content_type);
                 }
-                let json_bytes = match serde_json::to_vec(body) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        return (
-                            Err(CallError::new(
-                                CallErrorCode::Config,
-                                format!("body serialize failed: {e}"),
-                            )),
-                            None,
-                        );
-                    }
-                };
-                match builder.body(json_bytes) {
+                match builder.body(bytes) {
                     Ok(request) => agent.run(request),
                     Err(e) => {
                         return (
@@ -1627,6 +1645,18 @@ fn encode_component(s: &str) -> String {
     utf8_percent_encode(s, SET).to_string()
 }
 
+/// Encodes DECODED form pairs into the `application/x-www-form-urlencoded`
+/// wire body, percent-encoding keys and values with the same component set
+/// query rendering uses so encoding stays uniform (spec
+/// 2026-07-22-official-connectors-wave-3, section 4.1).
+fn encode_form_body(pairs: &[(String, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode_component(k), encode_component(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// Standard RFC 4648 base64 (with padding). Local to keep the engine lean: the
 /// only use is HTTP Basic auth, and pulling a base64 crate for `user:pass`
 /// encoding is not worth the dependency.
@@ -1860,6 +1890,18 @@ mod tests {
                 ("content".to_string(), "hello world & more".to_string()),
                 ("type".to_string(), "stream".to_string()),
             ])
+        );
+    }
+
+    #[test]
+    fn encode_form_body_percent_encodes_keys_and_values() {
+        let pairs = vec![
+            ("a key".to_string(), "b&c=d".to_string()),
+            ("content".to_string(), "hello world/100%".to_string()),
+        ];
+        assert_eq!(
+            encode_form_body(&pairs),
+            "a%20key=b%26c%3Dd&content=hello%20world%2F100%25"
         );
     }
 
