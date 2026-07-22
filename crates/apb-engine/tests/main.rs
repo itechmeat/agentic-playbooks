@@ -64,6 +64,8 @@ mod connector_play_call;
 mod connector_run;
 #[path = "suite/connector_smtp.rs"]
 mod connector_smtp;
+#[path = "suite/connector_youtrack.rs"]
+mod connector_youtrack;
 #[path = "suite/context_compaction_test.rs"]
 mod context_compaction_test;
 #[path = "suite/context_test.rs"]

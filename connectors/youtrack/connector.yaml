@@ -1,0 +1,182 @@
+name: youtrack
+version: 0.1.0
+healthcheck: get_me
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+account_fields:
+  - name: api_base
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_me
+    description: Get the authenticated user's identity
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me"
+    query:
+      fields: "id,login,name,email"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [id, login, name, email]
+
+  - name: list_projects
+    description: List projects the authenticated user can access
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/admin/projects"
+    query:
+      fields: "id,name,shortName"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [id, name, shortName]
+
+  - name: search_issues
+    description: Search issues by YouTrack query syntax
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/issues"
+    query:
+      query: "{{args.query}}"
+      "$skip": "{{args.skip}}"
+      "$top": "{{args.top}}"
+      fields: "idReadable,summary,resolved,project(shortName),reporter(login)"
+    args_schema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: >-
+            YouTrack query syntax. Examples: `state: Fixed` for issues in the
+            Fixed state, `project: DEMO` for issues in the DEMO project,
+            `for: me #Unresolved` for unresolved issues assigned to the
+            current user.
+        skip: { type: integer, minimum: 0, description: "number of issues to skip for pagination" }
+        top: { type: integer, minimum: 1, maximum: 500, description: "maximum number of issues to return" }
+      required: [query]
+    examples:
+      - args: { query: "state: Fixed" }
+        note: "skip and top are optional; omit both for the first page and pass skip from the previous page to page forward."
+      - args: { query: "project: DEMO", skip: 25, top: 25 }
+        note: "page through results by increasing skip by top each call."
+    response_pick: [idReadable, summary, resolved, project.shortName, reporter.login]
+
+  - name: get_issue
+    description: Get one issue by its human-readable id
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/issues/{{args.id}}"
+    query:
+      fields: "idReadable,summary,resolved,project(shortName),reporter(login)"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "issue idReadable, e.g. DEMO-42" }
+      required: [id]
+    response_pick: [idReadable, summary, resolved, project.shortName, reporter.login]
+
+  - name: create_issue
+    description: Create an issue in a project
+    method: POST
+    url: "{{account.api_base}}/issues"
+    body:
+      project:
+        id: "{{args.project}}"
+      summary: "{{args.summary}}"
+      description: "{{args.description}}"
+    query:
+      fields: "idReadable,summary,resolved,project(shortName),reporter(login)"
+    args_schema:
+      type: object
+      properties:
+        project: { type: string, description: "project database id, e.g. 0-0; get it from list_projects" }
+        summary: { type: string }
+        description: { type: string }
+      required: [project, summary]
+    examples:
+      - args: { project: "0-0", summary: "Build fails on main", description: "The CI pipeline fails after the last merge." }
+        note: "description is optional; get the project database id from list_projects, not the shortName."
+    response_pick: [idReadable, summary, resolved, project.shortName, reporter.login]
+
+  - name: update_issue
+    description: Update an issue's summary or description
+    method: POST
+    url: "{{account.api_base}}/issues/{{args.id}}"
+    body:
+      summary: "{{args.summary}}"
+      description: "{{args.description}}"
+    query:
+      fields: "idReadable,summary,resolved,project(shortName),reporter(login)"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "issue idReadable, e.g. DEMO-42" }
+        summary: { type: string }
+        description: { type: string }
+      required: [id]
+    examples:
+      - args: { id: "DEMO-42", summary: "Build fails on main (updated)" }
+        note: "summary and description are both optional; only the fields you pass are changed, every field left out is unchanged on the issue."
+    response_pick: [idReadable, summary, resolved, project.shortName, reporter.login]
+
+  - name: list_comments
+    description: List comments on an issue
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/issues/{{args.id}}/comments"
+    query:
+      fields: "id,text,author(login),created"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "issue idReadable, e.g. DEMO-42" }
+      required: [id]
+    response_pick: [id, text, author.login, created]
+
+  - name: add_comment
+    description: Add a comment to an issue
+    method: POST
+    url: "{{account.api_base}}/issues/{{args.id}}/comments"
+    body:
+      text: "{{args.text}}"
+    query:
+      fields: "id,text,author(login),created"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "issue idReadable, e.g. DEMO-42" }
+        text: { type: string }
+      required: [id, text]
+    response_pick: [id, text, author.login, created]
+
+  - name: apply_command
+    description: Apply a YouTrack command to one or more issues
+    method: POST
+    url: "{{account.api_base}}/commands"
+    body:
+      query: "{{args.query}}"
+      issues: "{{args.issues}}"
+    args_schema:
+      type: object
+      properties:
+        query:
+          type: string
+          description: >-
+            YouTrack command syntax. Examples: `state Fixed` to set the state,
+            `tag regression` to add a tag, `for me priority Critical` to
+            assign to the current user and set the priority.
+        issues:
+          type: array
+          description: >-
+            issues to apply the command to, each an object with an idReadable
+            field, e.g. [{idReadable: DEMO-1}, {idReadable: DEMO-2}].
+          items:
+            type: object
+            properties:
+              idReadable: { type: string }
+            required: [idReadable]
+      required: [query, issues]
+    examples:
+      - args: { query: "state Fixed", issues: [{idReadable: "DEMO-1"}, {idReadable: "DEMO-2"}] }
+        note: "one command applies to every issue in the issues array; a grant that includes apply_command allows ALL commands, including state changes, tagging, assignment, and priority."
