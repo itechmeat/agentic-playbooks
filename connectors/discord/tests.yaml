@@ -1,0 +1,58 @@
+cases:
+  - function: get_me
+    account: { api_base: https://discord.com/api/v10 }
+    args: {}
+    expect:
+      method: GET
+      url: https://discord.com/api/v10/users/@me
+
+  - function: list_channels
+    account: { api_base: https://discord.com/api/v10 }
+    args: { guild_id: "123456789012345678" }
+    expect:
+      method: GET
+      url: https://discord.com/api/v10/guilds/123456789012345678/channels
+
+  - function: list_channels
+    account: { api_base: https://discord.com/api/v10 }
+    args: { guild_id: "acme/guild" }
+    expect:
+      method: GET
+      url: https://discord.com/api/v10/guilds/acme%2Fguild/channels
+
+  - function: get_messages
+    account: { api_base: https://discord.com/api/v10 }
+    args: { channel_id: "987654321098765432" }
+    expect:
+      method: GET
+      url: https://discord.com/api/v10/channels/987654321098765432/messages
+
+  - function: get_messages
+    account: { api_base: https://discord.com/api/v10 }
+    args: { channel_id: "987654321098765432", limit: 25, before: "111222333444555666" }
+    expect:
+      method: GET
+      url: "https://discord.com/api/v10/channels/987654321098765432/messages?before=111222333444555666&limit=25"
+
+  - function: send_message
+    account: { api_base: https://discord.com/api/v10 }
+    args: { channel_id: "987654321098765432", content: "Build finished on main." }
+    expect:
+      method: POST
+      url: https://discord.com/api/v10/channels/987654321098765432/messages
+      body_contains:
+        content: "Build finished on main."
+
+  - function: reply_to_message
+    account: { api_base: https://discord.com/api/v10 }
+    args:
+      channel_id: "987654321098765432"
+      message_id: "111222333444555666"
+      content: "Acknowledged."
+    expect:
+      method: POST
+      url: https://discord.com/api/v10/channels/987654321098765432/messages
+      body_contains:
+        content: "Acknowledged."
+        message_reference:
+          message_id: "111222333444555666"
