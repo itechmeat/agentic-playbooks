@@ -370,8 +370,7 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
 
     build_prepared(
         &function,
-        doc.auth.as_ref(),
-        doc.error_when.as_ref(),
+        &doc,
         account_name,
         maccount,
         &req.args,
@@ -529,8 +528,7 @@ fn render_form(
 /// never be duplicated between the two callers.
 fn build_prepared(
     function: &FunctionSpec,
-    auth: Option<&AuthSpec>,
-    error_when: Option<&ErrorWhen>,
+    doc: &ConnectorDoc,
     account_name: String,
     maccount: &ManifestAccount,
     args: &Value,
@@ -538,6 +536,11 @@ fn build_prepared(
     mode: CallMode,
 ) -> Result<Prepared, CallError> {
     let CallMode { dry_run, full } = mode;
+    // The two connector-level bindings an HTTP call snapshots from the
+    // (snapshot or live) doc: the auth block and the error_when predicate
+    // (spec 2026-07-22-official-connectors-wave-3, section 4.2).
+    let auth = doc.auth.as_ref();
+    let error_when = doc.error_when.as_ref();
     // 5. Validate args against the function schema.
     if let Some(schema) = &function.args_schema {
         validate_args(schema, args)?;
@@ -856,8 +859,7 @@ fn prepare_play_call(
 
     build_prepared(
         &function,
-        loaded.doc.auth.as_ref(),
-        loaded.doc.error_when.as_ref(),
+        &loaded.doc,
         acct.name.clone(),
         &maccount,
         args,
