@@ -70,6 +70,8 @@ mod connector_run;
 mod connector_smtp;
 #[path = "suite/connector_youtrack.rs"]
 mod connector_youtrack;
+#[path = "suite/connector_zulip.rs"]
+mod connector_zulip;
 #[path = "suite/context_compaction_test.rs"]
 mod context_compaction_test;
 #[path = "suite/context_test.rs"]
