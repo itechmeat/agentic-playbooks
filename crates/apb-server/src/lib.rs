@@ -1397,6 +1397,7 @@ fn connector_public(name: &str) -> Option<(ConnectorPublic, InstallState)> {
                     version: String::new(),
                     healthcheck: None,
                     auth: None,
+                    error_when: None,
                     account_fields: Vec::new(),
                     functions: Vec::new(),
                 },
