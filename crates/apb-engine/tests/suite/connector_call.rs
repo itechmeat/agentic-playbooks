@@ -76,6 +76,22 @@ functions:
     method: GET
     url: "{{account.base_url}}/pick"
     response_pick: [number, user.login, labels.name]
+  - name: submit_form
+    description: Send a form-encoded body
+    method: POST
+    url: "{{account.base_url}}/form"
+    body_form:
+      content: "{{args.content}}"
+      to: "{{args.to}}"
+    args_schema: { type: object, properties: { content: { type: string }, to: { type: string } }, required: [content] }
+  - name: submit_form_ctype
+    description: Form body with an explicit content-type header
+    method: POST
+    url: "{{account.base_url}}/form"
+    headers:
+      Content-Type: application/x-www-form-urlencoded; charset=utf-8
+    body_form:
+      content: "{{args.content}}"
   - name: ping
     description: A canned mock, no network
     mock: { status: 200, body: { ok: true } }
@@ -522,6 +538,84 @@ fn dry_run_resolves_without_secrets_and_records_no_event() {
             .iter()
             .any(|e| matches!(e.payload, EventPayload::ConnectorCall { .. })),
         "dry-run must not append a ConnectorCall event"
+    );
+}
+
+#[test]
+fn body_form_sends_urlencoded_wire_body_and_content_type() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    let server = common::spawn_http(200, "OK", &[], r#"{"id":1}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["submit_form"],
+        None,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "submit_form",
+        None,
+        serde_json::json!({"content": "hello world & more", "to": "general"}),
+        false,
+    );
+    assert!(ok, "expected ok result: {value}");
+
+    // The wire body is the percent-encoded pair list, and the engine set the
+    // form content type (spec 2026-07-22-official-connectors-wave-3, 4.1).
+    let req = server.captured_request().expect("server saw a request");
+    assert!(
+        req.contains("content-type: application/x-www-form-urlencoded"),
+        "form content type missing in request:\n{req}"
+    );
+    assert!(
+        req.ends_with("content=hello%20world%20%26%20more&to=general"),
+        "encoded form body missing/wrong in request:\n{req}"
+    );
+}
+
+#[test]
+fn body_form_drops_absent_pair_and_keeps_explicit_content_type() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    let server = common::spawn_http(200, "OK", &[], r#"{"id":1}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["submit_form_ctype"],
+        None,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "submit_form_ctype",
+        None,
+        serde_json::json!({"content": "hi"}),
+        false,
+    );
+    assert!(ok, "expected ok result: {value}");
+
+    // A function header naming content-type explicitly wins, mirroring the
+    // JSON body behavior.
+    let req = server.captured_request().expect("server saw a request");
+    assert!(
+        req.contains("content-type: application/x-www-form-urlencoded; charset=utf-8"),
+        "explicit content type not preserved in request:\n{req}"
+    );
+    assert!(
+        req.ends_with("content=hi"),
+        "encoded form body missing/wrong in request:\n{req}"
     );
 }
 
