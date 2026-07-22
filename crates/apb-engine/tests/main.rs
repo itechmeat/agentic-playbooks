@@ -52,6 +52,8 @@ mod connector_asana;
 mod connector_call;
 #[path = "suite/connector_e2e.rs"]
 mod connector_e2e;
+#[path = "suite/connector_gitlab.rs"]
+mod connector_gitlab;
 #[path = "suite/connector_healthcheck.rs"]
 mod connector_healthcheck;
 #[path = "suite/connector_imap.rs"]

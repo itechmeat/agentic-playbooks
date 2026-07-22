@@ -1,0 +1,225 @@
+cases:
+  - function: get_user
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: {}
+    expect:
+      method: GET
+      url: https://gitlab.com/api/v4/user
+
+  - function: list_issues
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", state: opened, labels: bug, page: 1, per_page: 20 }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/42/issues?labels=bug&page=1&per_page=20&state=opened"
+
+  - function: list_issues
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "group/project" }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/group%2Fproject/issues"
+
+  - function: get_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 7 }
+    expect:
+      method: GET
+      url: https://gitlab.com/api/v4/projects/42/issues/7
+
+  - function: create_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", title: "Broken build", description: "CI red on main", labels: "bug,ci" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/issues
+      body_contains: { title: "Broken build", description: "CI red on main", labels: "bug,ci" }
+
+  - function: update_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 7, state_event: close }
+    expect:
+      method: PUT
+      url: https://gitlab.com/api/v4/projects/42/issues/7
+      body_contains: { state_event: close }
+
+  - function: update_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args:
+      project: "42"
+      iid: 7
+      title: "Retitled"
+      add_labels: "needs-triage"
+      remove_labels: "bug"
+      assignee_ids: [3, 5]
+    expect:
+      method: PUT
+      url: https://gitlab.com/api/v4/projects/42/issues/7
+      body_contains:
+        title: "Retitled"
+        add_labels: "needs-triage"
+        remove_labels: "bug"
+        assignee_ids: [3, 5]
+
+  - function: comment_issue
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 7, body: "Looking into this." }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/issues/7/notes
+      body_contains: { body: "Looking into this." }
+
+  - function: list_merge_requests
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", state: opened, page: 2, per_page: 10 }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/42/merge_requests?page=2&per_page=10&state=opened"
+
+  - function: list_merge_requests
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42" }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/42/merge_requests"
+
+  - function: get_merge_request
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 3 }
+    expect:
+      method: GET
+      url: https://gitlab.com/api/v4/projects/42/merge_requests/3
+
+  - function: create_merge_request
+    account: { api_base: https://gitlab.com/api/v4 }
+    args:
+      project: "42"
+      source_branch: feature
+      target_branch: main
+      title: "Add feature"
+      description: "Implements the new flow"
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/merge_requests
+      body_contains:
+        source_branch: feature
+        target_branch: main
+        title: "Add feature"
+        description: "Implements the new flow"
+
+  - function: create_merge_request
+    account: { api_base: https://gitlab.com/api/v4 }
+    args:
+      project: "42"
+      source_branch: feature
+      target_branch: main
+      title: "Add feature"
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/merge_requests
+      body_contains:
+        source_branch: feature
+        target_branch: main
+        title: "Add feature"
+
+  - function: merge_merge_request
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 3 }
+    expect:
+      method: PUT
+      url: https://gitlab.com/api/v4/projects/42/merge_requests/3/merge
+
+  - function: approve_merge_request
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 3 }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/merge_requests/3/approve
+
+  - function: comment_merge_request
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", iid: 3, body: "LGTM" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/merge_requests/3/notes
+      body_contains: { body: "LGTM" }
+
+  - function: create_release
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", tag_name: v1.4.0, name: "v1.4.0", description: "Ship it" }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/releases
+      body_contains: { tag_name: v1.4.0, name: "v1.4.0", description: "Ship it" }
+
+  - function: get_release_by_tag
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", tag_name: v1.2.0 }
+    expect:
+      method: GET
+      url: https://gitlab.com/api/v4/projects/42/releases/v1.2.0
+
+  - function: get_release_by_tag
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", tag_name: "rc 1" }
+    expect:
+      method: GET
+      url: https://gitlab.com/api/v4/projects/42/releases/rc%201
+
+  - function: list_pipelines
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", ref: main, status: success, page: 1, per_page: 5 }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/42/pipelines?page=1&per_page=5&ref=main&status=success"
+
+  - function: list_pipelines
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42" }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/42/pipelines"
+
+  - function: get_pipeline
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", pipeline_id: 99 }
+    expect:
+      method: GET
+      url: https://gitlab.com/api/v4/projects/42/pipelines/99
+
+  - function: list_pipeline_jobs
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", pipeline_id: 99, page: 1, per_page: 50 }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/42/pipelines/99/jobs?page=1&per_page=50"
+
+  - function: list_pipeline_jobs
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", pipeline_id: 99 }
+    expect:
+      method: GET
+      url: "https://gitlab.com/api/v4/projects/42/pipelines/99/jobs"
+
+  - function: trigger_pipeline
+    account: { api_base: https://gitlab.com/api/v4 }
+    args:
+      project: "42"
+      ref: main
+      variables:
+        - { key: DEPLOY_ENV, value: staging }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/pipeline
+      body_contains:
+        ref: main
+        variables:
+          - { key: DEPLOY_ENV, value: staging }
+
+  - function: trigger_pipeline
+    account: { api_base: https://gitlab.com/api/v4 }
+    args: { project: "42", ref: main }
+    expect:
+      method: POST
+      url: https://gitlab.com/api/v4/projects/42/pipeline
+      body_contains: { ref: main }
