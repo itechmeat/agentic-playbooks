@@ -66,6 +66,8 @@ mod connector_manifest;
 mod connector_play_call;
 #[path = "suite/connector_run.rs"]
 mod connector_run;
+#[path = "suite/connector_slack.rs"]
+mod connector_slack;
 #[path = "suite/connector_smtp.rs"]
 mod connector_smtp;
 #[path = "suite/connector_youtrack.rs"]

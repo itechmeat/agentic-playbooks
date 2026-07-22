@@ -138,9 +138,10 @@ a call without executing it, or the dashboard healthcheck to probe an account.
 
 ## Official connectors
 
-Ten official connectors ship inside the `apb` binary and install with
+Eleven official connectors ship inside the `apb` binary and install with
 `apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`,
-`asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`. Installing
+`asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`, `slack`.
+Installing
 from the binary records trust for the
 connector's tree digest in the same action, since the bytes are already
 part of the binary you are running; `apb connector install --from-dir
@@ -307,6 +308,29 @@ functions so a grant can allow thread replies without allowing new
 top-level posts. Discord rate limits are aggressive and per-route:
 avoid tight polling loops and bound calls with `max_calls` grants.
 Healthcheck: `get_me`.
+
+### slack
+
+Account fields: `api_base` (`https://slack.com/api`) and `token`
+(secret), a bot token (`xoxb-...`): create an app at
+[api.slack.com/apps](https://api.slack.com/apps), add bot token scopes
+under OAuth and Permissions, install the app to the workspace, and
+copy the Bot User OAuth Token. Scopes: `channels:read` for
+`list_channels`, `channels:history` for `get_messages` and
+`get_thread` (plus the `groups:*` twins for private channels), and
+`chat:write` for `send_message` and `reply_in_thread`. Scopes are
+granular, so a missing one fails per function (as `missing_scope`),
+not at the healthcheck; reinstall the app after adding a scope. The
+bot must be invited to a channel (`/invite @your-app`) before reading
+or posting there. Slack reports failures as HTTP 200 with
+`"ok": false`; the manifest's `error_when` block reclassifies such a
+response into a service error carrying Slack's `error` string, so
+retries and fallbacks react to it. Channel ids are call arguments;
+list and history functions page with a body-carried cursor (pass
+`response_metadata.next_cursor` back as `cursor`). `send_message` and
+`reply_in_thread` are separate functions so a grant can allow thread
+replies without allowing new top-level posts. Healthcheck:
+`auth_test` (a POST by Slack API convention, mutates nothing).
 
 ### Demo playbooks
 

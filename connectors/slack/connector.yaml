@@ -1,0 +1,140 @@
+name: slack
+version: 0.1.0
+healthcheck: auth_test
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+error_when:
+  path: ok
+  equals: false
+  message_path: error
+account_fields:
+  - name: api_base
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: auth_test
+    description: Verify the bot token and get the authenticated identity
+    read_only: true
+    method: POST
+    url: "{{account.api_base}}/auth.test"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [team, user, team_id, user_id]
+    examples:
+      - args: {}
+        note: "healthcheck; a POST by Slack API convention but mutates nothing."
+
+  - name: list_channels
+    description: List channels the bot can see, with cursor pagination
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/conversations.list"
+    query:
+      types: "{{args.types}}"
+      cursor: "{{args.cursor}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        types:
+          type: string
+          description: "comma-separated channel types, e.g. public_channel,private_channel; omit for public_channel"
+        cursor:
+          type: string
+          description: "pagination cursor from the previous call's response_metadata.next_cursor; omit on the first call"
+        limit: { type: integer, minimum: 1, maximum: 1000, description: "page size" }
+      required: []
+    response_pick: [channels.id, channels.name, channels.is_private, response_metadata.next_cursor]
+    examples:
+      - args: { types: "public_channel", limit: 100 }
+        note: "pass response_metadata.next_cursor from the result back as cursor to page; an empty next_cursor means the last page."
+
+  - name: get_messages
+    description: Read recent messages in a channel, newest first
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/conversations.history"
+    query:
+      channel: "{{args.channel}}"
+      cursor: "{{args.cursor}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        channel: { type: string, description: "channel id, e.g. C0123456789" }
+        cursor:
+          type: string
+          description: "pagination cursor from the previous call's response_metadata.next_cursor; omit on the first call"
+        limit: { type: integer, minimum: 1, maximum: 1000, description: "page size" }
+      required: [channel]
+    response_pick: [messages.ts, messages.user, messages.text, messages.thread_ts, has_more, response_metadata.next_cursor]
+    examples:
+      - args: { channel: "C0123456789", limit: 50 }
+        note: "the bot must be a member of the channel; a message with thread_ts is part of a thread readable via get_thread."
+
+  - name: get_thread
+    description: Read the replies of a message thread
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/conversations.replies"
+    query:
+      channel: "{{args.channel}}"
+      ts: "{{args.ts}}"
+      cursor: "{{args.cursor}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        channel: { type: string, description: "channel id the thread lives in" }
+        ts: { type: string, description: "timestamp id of the thread's parent message, e.g. 1721745600.000100" }
+        cursor:
+          type: string
+          description: "pagination cursor from the previous call's response_metadata.next_cursor; omit on the first call"
+        limit: { type: integer, minimum: 1, maximum: 1000, description: "page size" }
+      required: [channel, ts]
+    response_pick: [messages.ts, messages.user, messages.text, has_more, response_metadata.next_cursor]
+    examples:
+      - args: { channel: "C0123456789", ts: "1721745600.000100" }
+        note: "ts is the parent message's ts; the first returned message is the parent itself."
+
+  - name: send_message
+    description: Post a new top-level message to a channel
+    method: POST
+    url: "{{account.api_base}}/chat.postMessage"
+    body:
+      channel: "{{args.channel}}"
+      text: "{{args.text}}"
+    args_schema:
+      type: object
+      properties:
+        channel: { type: string, description: "channel id, e.g. C0123456789" }
+        text: { type: string, description: "message text in Slack mrkdwn" }
+      required: [channel, text]
+    examples:
+      - args: { channel: "C0123456789", text: "Release pipeline is green." }
+        note: "posts a top-level message; use reply_in_thread to reply inside a thread."
+
+  - name: reply_in_thread
+    description: Reply inside an existing message thread
+    method: POST
+    url: "{{account.api_base}}/chat.postMessage"
+    body:
+      channel: "{{args.channel}}"
+      thread_ts: "{{args.thread_ts}}"
+      text: "{{args.text}}"
+    args_schema:
+      type: object
+      properties:
+        channel: { type: string, description: "channel id the thread lives in" }
+        thread_ts: { type: string, description: "ts of the thread's parent message" }
+        text: { type: string, description: "reply text in Slack mrkdwn" }
+      required: [channel, thread_ts, text]
+    examples:
+      - args:
+          channel: "C0123456789"
+          thread_ts: "1721745600.000100"
+          text: "Acknowledged."
+        note: "a separate function from send_message so a grant can allow thread replies without allowing new top-level posts."
