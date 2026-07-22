@@ -244,6 +244,25 @@ impl FunctionSpec {
     }
 }
 
+/// Connector-level false-success predicate (spec
+/// 2026-07-22-official-connectors-wave-3, section 4.2): after a 2xx response
+/// on any HTTP function of the connector, the engine evaluates `path` against
+/// the parsed JSON body; when the value there equals `equals` (JSON
+/// equality), the call maps to a `service` error whose message is the string
+/// at `message_path` (a fixed fallback when absent). `path` and
+/// `message_path` are dot-separated field chains over objects, like
+/// `response_pick` paths without array semantics. Mock, smtp, and imap
+/// functions ignore the block; non-2xx statuses keep the status-table
+/// mapping.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ErrorWhen {
+    pub path: String,
+    pub equals: serde_json::Value,
+    #[serde(default)]
+    pub message_path: Option<String>,
+}
+
 /// The content of `connector.yaml`: the whole connector manifest.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -254,6 +273,11 @@ pub struct ConnectorDoc {
     pub healthcheck: Option<String>,
     #[serde(default)]
     pub auth: Option<AuthSpec>,
+    /// Declares when a 2xx response is actually an error (spec
+    /// 2026-07-22-official-connectors-wave-3, section 4.2). Connector-level:
+    /// applies to every HTTP function.
+    #[serde(default)]
+    pub error_when: Option<ErrorWhen>,
     #[serde(default)]
     pub account_fields: Vec<AccountField>,
     #[serde(default)]
@@ -274,6 +298,11 @@ impl ConnectorDoc {
     /// 4. Each function is HTTP xor mock.
     /// 5. `healthcheck`, when present, names an existing function.
     /// 6. Account field names pass `validate_snake_name` and are unique.
+    /// 7. `error_when`, when present, has a non-empty `path` and the
+    ///    connector has at least one HTTP function (the block applies only
+    ///    to HTTP responses; the spec's "warn" on the no-HTTP case is a hard
+    ///    error here because the validator has no warning channel and the
+    ///    combination has no legitimate use).
     pub fn from_yaml(yaml: &str, expected_name: &str) -> Result<Self, ConnectorError> {
         let doc: ConnectorDoc =
             serde_yaml_ng::from_str(yaml).map_err(|e| ConnectorError::Yaml(e.to_string()))?;
@@ -365,6 +394,25 @@ impl ConnectorDoc {
             return Err(ConnectorError::Invalid(format!(
                 "healthcheck names unknown function `{hc}`"
             )));
+        }
+
+        if let Some(ew) = &doc.error_when {
+            if ew.path.trim().is_empty() {
+                return Err(ConnectorError::Invalid(
+                    "error_when requires a non-empty `path`".to_string(),
+                ));
+            }
+            // The predicate only ever runs against HTTP responses; a
+            // connector with the block and zero HTTP functions is an
+            // authoring error (spec wave-3 4.2 says "warn", hardened to an
+            // error here since the validator has no warning channel).
+            let has_http = doc.functions.iter().any(|f| f.method.is_some());
+            if !has_http {
+                return Err(ConnectorError::Invalid(format!(
+                    "connector `{}` declares error_when but has no HTTP functions",
+                    doc.name
+                )));
+            }
         }
 
         let mut seen_fields = std::collections::HashSet::new();
@@ -1472,5 +1520,79 @@ functions:
 
         let account = "name: x\nversion: 0.1.0\naccount_fields:\n  - name: password\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: \"{{account.password}}\" }\n      op: verify\n";
         assert!(ConnectorDoc::from_yaml(account, "x").is_err());
+    }
+
+    // -- error_when (spec 2026-07-22-official-connectors-wave-3, section 4.2) --
+
+    const ERROR_WHEN_YAML: &str = r#"
+name: chat
+version: 0.1.0
+error_when:
+  path: ok
+  equals: false
+  message_path: error
+account_fields:
+  - name: base_url
+    required: true
+functions:
+  - name: list_items
+    description: List items
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/items"
+"#;
+
+    #[test]
+    fn parses_error_when_block() {
+        let doc = ConnectorDoc::from_yaml(ERROR_WHEN_YAML, "chat").unwrap();
+        let ew = doc.error_when.as_ref().unwrap();
+        assert_eq!(ew.path, "ok");
+        assert_eq!(ew.equals, serde_json::json!(false));
+        assert_eq!(ew.message_path.as_deref(), Some("error"));
+    }
+
+    #[test]
+    fn error_when_defaults_to_none() {
+        let doc = ConnectorDoc::from_yaml(JIRA_YAML, "jira").unwrap();
+        assert!(doc.error_when.is_none());
+    }
+
+    #[test]
+    fn error_when_message_path_is_optional_and_equals_is_any_scalar() {
+        let y = "name: x\nversion: 0.1.0\nerror_when:\n  path: status\n  equals: error\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: http://a\n";
+        let doc = ConnectorDoc::from_yaml(y, "x").unwrap();
+        let ew = doc.error_when.as_ref().unwrap();
+        assert_eq!(ew.equals, serde_json::json!("error"));
+        assert!(ew.message_path.is_none());
+    }
+
+    #[test]
+    fn error_when_unknown_field_is_rejected() {
+        let y = "name: x\nversion: 0.1.0\nerror_when:\n  path: ok\n  equals: false\n  bogus: 1\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: http://a\n";
+        assert!(ConnectorDoc::from_yaml(y, "x").is_err());
+    }
+
+    #[test]
+    fn error_when_empty_path_is_rejected() {
+        let y = "name: x\nversion: 0.1.0\nerror_when:\n  path: \"\"\n  equals: false\nfunctions:\n  - name: f\n    description: d\n    method: GET\n    url: http://a\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(
+            err.contains("error_when") && err.contains("path"),
+            "was: {err}"
+        );
+    }
+
+    #[test]
+    fn error_when_without_http_functions_is_rejected() {
+        // The spec says validation "warns" here; the connector validator has
+        // no warning channel, so the case is a hard error (deliberate
+        // deviation: a manifest with the block and zero HTTP functions is an
+        // authoring error with no legitimate use).
+        let y = "name: x\nversion: 0.1.0\nerror_when:\n  path: ok\n  equals: false\nfunctions:\n  - name: f\n    description: d\n    mock: { status: 200, body: { ok: false } }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(
+            err.contains("error_when") && err.contains("HTTP"),
+            "was: {err}"
+        );
     }
 }
