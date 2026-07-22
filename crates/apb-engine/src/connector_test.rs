@@ -73,6 +73,8 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
             url,
             headers,
             body_contains,
+            // Runner support lands in the follow-up commit.
+            body_form_contains: _,
         } => eval_http(
             doc,
             function,
