@@ -471,6 +471,151 @@ fn live_imap_verify_and_list_folders() {
     );
 }
 
+#[test]
+#[ignore]
+fn live_gitlab_healthcheck_and_list_pipelines() {
+    if std::env::var("APB_LIVE_TEST_GITLAB")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_GITLAB not set");
+        return;
+    }
+    let Some(vals) = require_env(&["GITLAB_TOKEN", "GITLAB_TEST_PROJECT"]) else {
+        return;
+    };
+    let (token, project) = (&vals[0], &vals[1]);
+
+    run_live_probe(
+        "gitlab",
+        &[("api_base", "https://gitlab.com/api/v4")],
+        "token",
+        "GITLAB_TOKEN",
+        token,
+        "get_user",
+        "{}",
+        "list_pipelines",
+        &format!(r#"{{"project":"{project}"}}"#),
+    );
+}
+
+#[test]
+#[ignore]
+fn live_youtrack_healthcheck_and_list_projects() {
+    if std::env::var("APB_LIVE_TEST_YOUTRACK")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_YOUTRACK not set");
+        return;
+    }
+    // YOUTRACK_API_BASE is instance-specific (`https://<org>.youtrack.cloud/api`
+    // or a self-hosted `/api` base), so it comes from the environment rather
+    // than a fixed literal.
+    let Some(vals) = require_env(&["YOUTRACK_API_BASE", "YOUTRACK_TOKEN"]) else {
+        return;
+    };
+    let (api_base, token) = (&vals[0], &vals[1]);
+
+    run_live_probe(
+        "youtrack",
+        &[("api_base", api_base)],
+        "token",
+        "YOUTRACK_TOKEN",
+        token,
+        "get_me",
+        "{}",
+        "list_projects",
+        "{}",
+    );
+}
+
+#[test]
+#[ignore]
+fn live_zulip_healthcheck_and_list_streams() {
+    if std::env::var("APB_LIVE_TEST_ZULIP")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_ZULIP not set");
+        return;
+    }
+    // ZULIP_API_BASE is organization-specific
+    // (`https://<org>.zulipchat.com/api/v1` or a self-hosted `/api/v1` base).
+    let Some(vals) = require_env(&["ZULIP_API_BASE", "ZULIP_EMAIL", "ZULIP_API_KEY"]) else {
+        return;
+    };
+    let (api_base, email, api_key) = (&vals[0], &vals[1], &vals[2]);
+
+    run_live_probe(
+        "zulip",
+        &[("api_base", api_base), ("email", email)],
+        "api_key",
+        "ZULIP_API_KEY",
+        api_key,
+        "get_me",
+        "{}",
+        "list_streams",
+        "{}",
+    );
+}
+
+#[test]
+#[ignore]
+fn live_discord_healthcheck_and_list_channels() {
+    if std::env::var("APB_LIVE_TEST_DISCORD")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_DISCORD not set");
+        return;
+    }
+    let Some(vals) = require_env(&["DISCORD_BOT_TOKEN", "DISCORD_TEST_GUILD_ID"]) else {
+        return;
+    };
+    let (token, guild_id) = (&vals[0], &vals[1]);
+
+    run_live_probe(
+        "discord",
+        &[("api_base", "https://discord.com/api/v10")],
+        "token",
+        "DISCORD_BOT_TOKEN",
+        token,
+        "get_me",
+        "{}",
+        "list_channels",
+        &format!(r#"{{"guild_id":"{guild_id}"}}"#),
+    );
+}
+
+#[test]
+#[ignore]
+fn live_slack_healthcheck_and_list_channels() {
+    if std::env::var("APB_LIVE_TEST_SLACK")
+        .unwrap_or_default()
+        .is_empty()
+    {
+        println!("skipping live test: APB_LIVE_TEST_SLACK not set");
+        return;
+    }
+    let Some(vals) = require_env(&["SLACK_BOT_TOKEN"]) else {
+        return;
+    };
+    let token = &vals[0];
+
+    run_live_probe(
+        "slack",
+        &[("api_base", "https://slack.com/api")],
+        "token",
+        "SLACK_BOT_TOKEN",
+        token,
+        "auth_test",
+        "{}",
+        "list_channels",
+        r#"{"limit":10}"#,
+    );
+}
+
 /// Live smoke for the `hermes` agent (not a connector probe): invokes the
 /// real `hermes` binary directly with the exact flag order `builtin("hermes")`
 /// uses (crates/apb-engine/src/invocation.rs, `-z {prompt} -m {model}`), so
