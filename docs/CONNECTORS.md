@@ -138,9 +138,10 @@ a call without executing it, or the dashboard healthcheck to probe an account.
 
 ## Official connectors
 
-Six official connectors ship inside the `apb` binary and install with
+Ten official connectors ship inside the `apb` binary and install with
 `apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`,
-`asana`, `imap`. Installing from the binary records trust for the
+`asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`. Installing
+from the binary records trust for the
 connector's tree digest in the same action, since the bytes are already
 part of the binary you are running; `apb connector install --from-dir
 <path>` (the development loop for this repository, `connectors/<name>/`)
@@ -227,6 +228,85 @@ and no sending: this connector only reads and marks read/unread, and is
 meant to be installed alongside `smtp` for a read-and-reply workflow.
 Healthcheck: `verify` (connects, negotiates TLS, authenticates, without
 opening or reading any mailbox).
+
+### gitlab
+
+Account fields: `api_base` (`https://gitlab.com/api/v4`, or your
+self-hosted instance's API base ending in `/api/v4`) and `token`
+(secret). Create a personal access token under Preferences > Access
+tokens (user settings, not project or group tokens): scope `api`
+covers the full connector surface; `read_api` is enough for the
+read-only subset. Every project-scoped function takes a `project`
+argument, either the numeric id or the `group/project` path with a
+literal slash; the engine percent-encodes the substituted path value,
+so never pre-encode the slash yourself. List functions follow GitLab
+page pagination via optional `page` and `per_page` (max 100)
+arguments; omit both for the first page. Label edits go through
+`update_issue` (`labels` replaces the full set, `add_labels` and
+`remove_labels` are comma-separated deltas). `trigger_pipeline`
+starts CI on a branch or tag (optional `variables` is an array of
+`{key, value}` objects); grant it only when a playbook is meant to
+start pipelines, not just observe them. Healthcheck: `get_user`.
+
+### youtrack
+
+Account fields: `api_base` (`https://<org>.youtrack.cloud/api` on
+YouTrack Cloud, `https://<host>/api` self-hosted; the `/api` suffix
+is required) and `token` (secret). Create the token as a permanent
+access token: open your profile, go to Account Security, then Access
+Tokens; the token acts as the user who created it, with that user's
+full permissions, and there is no separate scope to select. Read
+functions bake a literal `fields=` projection matching their
+`response_pick`, so a response carries exactly the projected fields.
+`search_issues` uses YouTrack's native query syntax in its `query`
+argument (`state: Fixed`, `project: DEMO`, `for: me #Unresolved`)
+and pages with optional `$skip` and `$top` arguments. `create_issue`
+takes the project database id (for example `0-0`), not the short
+name; find it with `list_projects`. `apply_command` runs YouTrack's
+command syntax, which can change almost anything on an issue (state,
+tags, assignment, priority, custom fields), so restrict it in grant
+allowlists accordingly. Healthcheck: `get_me`.
+
+### zulip
+
+Account fields: `api_base` (`https://<org>.zulipchat.com/api/v1` on
+Zulip Cloud, `https://<host>/api/v1` self-hosted), `email`, and
+`api_key` (secret). Find the API key in Zulip settings under Account
+and privacy > Show API key for a personal account, or in the bot
+panel for a bot; `email` is the matching account or bot address.
+Every request authenticates with HTTP Basic auth (the email as the
+username, the API key as the password), and write functions post
+`application/x-www-form-urlencoded` bodies via the manifest-level
+`body_form` field, matching Zulip's native write contract. A Zulip
+conversation lives in a stream divided into topics:
+`send_stream_message` posts to a given stream and topic, and
+replying in a thread is the same call to the same topic, so there is
+no separate reply function. `get_messages` takes optional `anchor`
+(a numeric message id to page around; omit for newest), `num_before`,
+and `narrow` (Zulip's filter, passed verbatim as a string whose
+content is a JSON array of operator/operand objects). Healthcheck:
+`get_me`.
+
+### discord
+
+Account fields: `api_base` (`https://discord.com/api/v10`) and
+`token` (secret), a bot token from the Discord Developer Portal:
+create an application, open its Bot tab, and reset or create the
+token there. Invite the bot to each guild with an OAuth2 URL that
+includes the bot scope plus the permissions the playbook needs: View
+Channels for everything, Read Message History for `get_messages`,
+Send Messages for `send_message` and `reply_to_message`. The
+connector is REST-only, so the gateway-only message-content
+privileged intent is not needed. Guild and channel ids are call
+arguments, not account fields, so one bot account serves every guild
+the bot has been invited to; threads are channels, so read or post
+into a thread by passing the thread's channel id. `get_messages`
+pages backward with optional `limit` (1-100) and `before` (a message
+id) arguments. `send_message` and `reply_to_message` are separate
+functions so a grant can allow thread replies without allowing new
+top-level posts. Discord rate limits are aggressive and per-route:
+avoid tight polling loops and bound calls with `max_calls` grants.
+Healthcheck: `get_me`.
 
 ### Demo playbooks
 
