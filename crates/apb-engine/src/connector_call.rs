@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use apb_core::connector::config;
-use apb_core::connector::def::{AuthSpec, ConnectorDoc, FunctionSpec};
+use apb_core::connector::def::{AuthSpec, ConnectorDoc, ErrorWhen, FunctionSpec};
 use apb_core::connector::secrets;
 use apb_core::connector::store;
 use apb_core::connector::template::{
@@ -215,6 +215,11 @@ struct HttpCall {
     /// function declares none or `--full` bypasses it.
     response_pick: Vec<String>,
     auth: Option<AuthSpec>,
+    /// The connector-level false-success predicate (spec
+    /// 2026-07-22-official-connectors-wave-3, section 4.2), applied by
+    /// `send_raw` after a 2xx maps Ok and after body redaction, BEFORE the
+    /// `response_pick` projection.
+    error_when: Option<ErrorWhen>,
     secrets: BTreeMap<String, String>,
     account_fields: BTreeMap<String, String>,
     timeout_sec: u64,
@@ -365,7 +370,7 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
 
     build_prepared(
         &function,
-        doc.auth.as_ref(),
+        &doc,
         account_name,
         maccount,
         &req.args,
@@ -523,7 +528,7 @@ fn render_form(
 /// never be duplicated between the two callers.
 fn build_prepared(
     function: &FunctionSpec,
-    auth: Option<&AuthSpec>,
+    doc: &ConnectorDoc,
     account_name: String,
     maccount: &ManifestAccount,
     args: &Value,
@@ -531,6 +536,11 @@ fn build_prepared(
     mode: CallMode,
 ) -> Result<Prepared, CallError> {
     let CallMode { dry_run, full } = mode;
+    // The two connector-level bindings an HTTP call snapshots from the
+    // (snapshot or live) doc: the auth block and the error_when predicate
+    // (spec 2026-07-22-official-connectors-wave-3, section 4.2).
+    let auth = doc.auth.as_ref();
+    let error_when = doc.error_when.as_ref();
     // 5. Validate args against the function schema.
     if let Some(schema) = &function.args_schema {
         validate_args(schema, args)?;
@@ -645,6 +655,7 @@ fn build_prepared(
                 function.response_pick.clone()
             },
             auth: auth.cloned(),
+            error_when: error_when.cloned(),
             secrets,
             account_fields,
             timeout_sec: function.timeout_sec,
@@ -848,7 +859,7 @@ fn prepare_play_call(
 
     build_prepared(
         &function,
-        loaded.doc.auth.as_ref(),
+        &loaded.doc,
         acct.name.clone(),
         &maccount,
         args,
@@ -1354,6 +1365,21 @@ impl HttpCall {
         // 12. Interim literal secret redaction (see the TODO below).
         let body = self.redact(body);
         let mut mapped = map_status(status, body, truncated, retry_after);
+        // error_when reclassification (spec
+        // 2026-07-22-official-connectors-wave-3, section 4.2): a 2xx body
+        // matching the connector's predicate maps to a `service` error
+        // instead of a false success. Runs on the already-redacted body, so
+        // an extracted message is scrubbed like any other body text, and
+        // BEFORE the `response_pick` projection below (a reclassified
+        // response is never projected; the error envelope carries the
+        // extracted message instead). Non-2xx statuses arrive here as Err
+        // and keep the status-table mapping untouched.
+        if let Ok(CallOk::Http { body, .. }) = &mapped
+            && let Some(rule) = &self.error_when
+            && let Some(err) = reclassify_error_when(rule, body, status)
+        {
+            mapped = Err(err);
+        }
         if let Ok(CallOk::Http {
             link: link_slot,
             body: body_slot,
@@ -1542,6 +1568,39 @@ fn map_status(
     Err(err)
 }
 
+/// Evaluates the connector's `error_when` predicate (spec
+/// 2026-07-22-official-connectors-wave-3, section 4.2) against a 2xx response
+/// body: when the value at `path` equals `equals` (JSON equality), returns
+/// the `service` error the call reclassifies to, carrying the real HTTP
+/// status (e.g. 200) and the message extracted at `message_path` - or a
+/// fixed fallback when `message_path` is absent, resolves to nothing, or the
+/// value there is not a string. A `path` that resolves to nothing means no
+/// match (success passes through).
+fn reclassify_error_when(rule: &ErrorWhen, body: &Value, status: u16) -> Option<CallError> {
+    if lookup_path(body, &rule.path) != Some(&rule.equals) {
+        return None;
+    }
+    let message = rule
+        .message_path
+        .as_deref()
+        .and_then(|p| lookup_path(body, p))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "the service reported an error in the response body".to_string());
+    let mut err = CallError::new(CallErrorCode::Service, message);
+    err.http_status = Some(status);
+    Some(err)
+}
+
+/// Resolves a dot-separated field chain over JSON objects (like
+/// `response_pick` paths, spec 4.5, without array semantics). `None` when any
+/// segment is missing or a value midway through the chain is not an object.
+fn lookup_path<'a>(body: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(body, |value, segment| {
+        value.as_object().and_then(|map| map.get(segment))
+    })
+}
+
 /// Percent-encodes the top-level string values of an args object so they can
 /// be substituted RAW into a URL template without letting an argument inject
 /// path traversal or extra query structure. Non-string scalars pass through
@@ -1707,6 +1766,85 @@ fn append_event(req: &CallRequest, meta: &EventMeta) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- error_when reclassification (spec
+    // 2026-07-22-official-connectors-wave-3, section 4.2) --
+
+    fn rule(
+        path: &str,
+        equals: Value,
+        message_path: Option<&str>,
+    ) -> apb_core::connector::def::ErrorWhen {
+        apb_core::connector::def::ErrorWhen {
+            path: path.to_string(),
+            equals,
+            message_path: message_path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn error_when_match_reclassifies_to_service_with_extracted_message() {
+        let r = rule("ok", json!(false), Some("error"));
+        let body = json!({ "ok": false, "error": "missing_scope" });
+        let err = reclassify_error_when(&r, &body, 200).unwrap();
+        assert_eq!(err.code, CallErrorCode::Service);
+        assert_eq!(err.message, "missing_scope");
+        // The error carries the real HTTP status of the reclassified response.
+        assert_eq!(err.http_status, Some(200));
+    }
+
+    #[test]
+    fn error_when_no_match_passes_through() {
+        let r = rule("ok", json!(false), Some("error"));
+        assert!(reclassify_error_when(&r, &json!({ "ok": true }), 200).is_none());
+    }
+
+    #[test]
+    fn error_when_path_resolving_to_nothing_means_no_match() {
+        let r = rule("ok", json!(false), Some("error"));
+        assert!(reclassify_error_when(&r, &json!({ "status": "fine" }), 200).is_none());
+        // A non-object midway through the chain resolves to nothing too.
+        let nested = rule("a.b", json!(false), None);
+        assert!(reclassify_error_when(&nested, &json!({ "a": 1 }), 200).is_none());
+    }
+
+    #[test]
+    fn error_when_nested_paths_resolve_over_objects() {
+        let r = rule("result.ok", json!(false), Some("result.detail.message"));
+        let body = json!({ "result": { "ok": false, "detail": { "message": "bad" } } });
+        let err = reclassify_error_when(&r, &body, 201).unwrap();
+        assert_eq!(err.message, "bad");
+        assert_eq!(err.http_status, Some(201));
+    }
+
+    #[test]
+    fn error_when_fallback_message_when_message_path_absent_or_not_string() {
+        // No message_path declared at all.
+        let none = rule("ok", json!(false), None);
+        let fallback = reclassify_error_when(&none, &json!({ "ok": false }), 200)
+            .unwrap()
+            .message;
+        assert!(!fallback.is_empty());
+        // message_path resolves to nothing.
+        let r = rule("ok", json!(false), Some("error"));
+        let missing = reclassify_error_when(&r, &json!({ "ok": false }), 200).unwrap();
+        assert_eq!(missing.message, fallback);
+        // message_path resolves to a non-string.
+        let non_string =
+            reclassify_error_when(&r, &json!({ "ok": false, "error": 42 }), 200).unwrap();
+        assert_eq!(non_string.message, fallback);
+    }
+
+    #[test]
+    fn error_when_equals_compares_by_json_equality() {
+        let s = rule("status", json!("error"), None);
+        assert!(reclassify_error_when(&s, &json!({ "status": "error" }), 200).is_some());
+        assert!(reclassify_error_when(&s, &json!({ "status": "fine" }), 200).is_none());
+        // A number does not equal its string form.
+        let n = rule("code", json!(1), None);
+        assert!(reclassify_error_when(&n, &json!({ "code": 1 }), 200).is_some());
+        assert!(reclassify_error_when(&n, &json!({ "code": "1" }), 200).is_none());
+    }
 
     #[test]
     fn render_http_builds_method_url_body_and_headers_offline() {
