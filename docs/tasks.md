@@ -34,7 +34,7 @@ Navigate the code through **codegraph** (symbol/edge index) - use it actively in
 - [x] **Frontend: scaffold** - Bun + Vite 8 + Svelte 5 + TypeScript, proxy to :7321.
 - [x] **Frontend: model -> graph** - conversion to svelte-flow, dagre auto-layout (vitest).
 - [x] **Frontend: list and graph** - read-only viewer, live reload over WS.
-- [x] **Static baking** - rust-embed, `apb serve` opens the browser.
+- [x] **Static baking** - rust-embed, `apb dashboard` opens the browser.
 - [x] **Node connection points** - start has no incoming, finish has no outgoing (visual).
 - [x] **Full-screen layout** - 40px header, graph fills the area, no side panels or footer.
 
@@ -68,7 +68,7 @@ Order of remaining phases was reshuffled by dependency: the MCP transport comes 
 - [x] **Read tools** - playbook_list, playbook_get, playbook_validate.
 - [x] **Run tools** - playbook_run (params, instruction), run_status, run_events (pagination by seq), run_report, run_resume. Blocking (foreground) run; background (non-blocking) mode and run_cancel - Phase 4 (needed to observe an in-flight run).
 - [~] **Claude Code integration** - connecting via `claude mcp add` / `.mcp.json` documented, end-to-end JSON-RPC smoke test (initialize -> tools/call playbook_run) green; manual verification in an interactive Claude Code session in this environment not done.
-- [ ] Groundwork for the supervisor token model and thin-client mode (attach to a running `apb serve`) - implementation in Phase 4 / later.
+- [ ] Groundwork for the supervisor token model and thin-client mode (attach to a running `apb dashboard`) - implementation in Phase 4 / later.
 
 ## Phase 4 - Controlling agent (CA): observation + repair (was 3A; on top of MCP)
 

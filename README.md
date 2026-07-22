@@ -22,7 +22,7 @@ log behind.
   models never means editing the playbook.
 - **Deterministic and resumable runs.** Append-only event log, immutable
   per-run snapshot of the playbook and profiles, `apb resume` after a crash.
-- **Visual editor and live monitor.** `apb serve` opens a svelte-flow web UI:
+- **Visual editor and live monitor.** `apb dashboard` opens a svelte-flow web UI:
   edit YAML and graph side by side, watch runs light up node by node.
 - **Built for agents, not just humans.** `apb mcp` exposes the whole surface
   as MCP tools, so an agent can create, run, and supervise playbooks itself.
@@ -37,7 +37,7 @@ log behind.
 ```sh
 apb init          # create the .apb/ structure in your project
 apb detect        # find installed coding agents, set up profiles
-apb serve         # web UI at http://127.0.0.1:7321 - create a playbook
+apb dashboard     # web UI at http://127.0.0.1:7321 - create a playbook
 apb run <id>      # run it from the terminal
 ```
 
@@ -115,7 +115,7 @@ apb stop <run>      stop a run: interrupt the running node, finalize if the driv
 apb note <run> <t>  post a note (context append) to a run's control channel
 apb review          decide a pending human_review node
 apb answer <run> <t> answer an interactive node's pending question (--node)
-apb serve           web UI (port 7321)
+apb dashboard       web UI (port 7321)
 apb mcp             stdio MCP server for coding agents
 ```
 
@@ -193,7 +193,7 @@ More: [docs/INSTALL.md](docs/INSTALL.md), [docs/MCP.md](docs/MCP.md),
 > [!WARNING]
 > Playbooks can execute local scripts and invoke coding agents. Treat third-party
 > playbooks and imported bundles as executable code. Review them before running,
-> and do not expose `apb serve` or `apb mcp` to untrusted users or networks.
+> and do not expose `apb dashboard` or `apb mcp` to untrusted users or networks.
 
 Please report suspected vulnerabilities privately as described in
 [SECURITY.md](SECURITY.md).

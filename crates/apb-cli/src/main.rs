@@ -25,7 +25,7 @@ use crate::run::{
     run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
 };
 use crate::selfupdate::run_self_update;
-use crate::serve::{ask_server_cmd, dev_cmd, mcp_cmd, serve};
+use crate::serve::{ask_server_cmd, dashboard, dev_cmd, mcp_cmd};
 use crate::util::resolve_port;
 
 #[derive(Parser)]
@@ -173,8 +173,9 @@ enum Command {
         #[command(subcommand)]
         cmd: CacheCmd,
     },
-    /// Start web server (see Task 8/13)
-    Serve {
+    /// Start the web dashboard (global, all projects)
+    #[command(alias = "serve")]
+    Dashboard {
         /// Port: the flag overrides the global config, default 7321.
         #[arg(long)]
         port: Option<u16>,
@@ -322,7 +323,7 @@ fn main() -> ExitCode {
         Some(Command::Answer { run, node, text }) => {
             answer_cmd(&root, &run, node.as_deref(), &text)
         }
-        Some(Command::Serve { port, no_open }) => serve(resolve_port(port), no_open),
+        Some(Command::Dashboard { port, no_open }) => dashboard(resolve_port(port), no_open),
         Some(Command::Dev { no_open }) => dev_cmd(root, no_open),
         Some(Command::Mcp) => mcp_cmd(&root),
         Some(Command::SelfUpdate { check }) => run_self_update(check),
@@ -361,6 +362,6 @@ fn main() -> ExitCode {
             resume,
         }) => drive_run_child(&run_root, &run_id, from_node.as_deref(), resume),
         Some(Command::AskServer { run, node, attempt }) => ask_server_cmd(&run, &node, attempt),
-        None => serve(resolve_port(None), false),
+        None => dashboard(resolve_port(None), false),
     }
 }

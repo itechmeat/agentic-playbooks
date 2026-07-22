@@ -85,3 +85,28 @@ fn list_without_apb_dir_fails() {
         .assert()
         .code(2);
 }
+
+#[test]
+fn dashboard_is_visible_and_serve_alias_parses() {
+    // Primary name is visible; the hidden `serve` alias is not listed.
+    playbook()
+        .arg("--help")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("dashboard"))
+        .stdout(predicate::str::contains("Start the web dashboard"))
+        .stdout(predicate::str::contains("  serve").not());
+
+    // Hidden alias still resolves to the same command (help works).
+    playbook()
+        .args(["serve", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Start the web dashboard"));
+
+    playbook()
+        .args(["dashboard", "--help"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("Start the web dashboard"));
+}

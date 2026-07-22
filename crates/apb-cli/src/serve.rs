@@ -6,7 +6,7 @@ use apb_core::registry::init_project;
 /// Starts the single, global dashboard for the machine. There is no
 /// project-scoped server: the dashboard aggregates every registered project,
 /// so it does not bind to (or initialize) the current directory.
-pub(crate) fn serve(port: u16, no_open: bool) -> ExitCode {
+pub(crate) fn dashboard(port: u16, no_open: bool) -> ExitCode {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if !no_open {
         let url = format!("http://127.0.0.1:{port}");
@@ -15,7 +15,7 @@ pub(crate) fn serve(port: u16, no_open: bool) -> ExitCode {
     match rt.block_on(apb_server::run_server(port)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            eprintln!("serve failed: {e}");
+            eprintln!("dashboard failed: {e}");
             ExitCode::from(2)
         }
     }

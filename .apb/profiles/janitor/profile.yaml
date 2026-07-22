@@ -1,0 +1,8 @@
+name: janitor
+description: Repository hygiene after orchestrated runs; removes worktrees and temporary branches, never touches feature-branch commits.
+executor:
+  agent: claude
+  model: claude-sonnet-5
+  fallbacks: []
+soul: any
+skills: []
