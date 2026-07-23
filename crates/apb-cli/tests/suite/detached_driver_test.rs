@@ -396,6 +396,7 @@ fn spawn_driver_at_returns_the_driver_pid_and_drives_the_run_alone() {
         &run_id,
         None,
         false,
+        false,
     )
     .unwrap();
     // Hand the lock across exactly as `start_detached` does, so the driver
@@ -458,6 +459,7 @@ fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
         dir.path(),
         &run_id,
         None,
+        false,
         false,
     )
     .unwrap();

@@ -145,6 +145,14 @@ enum Command {
         run_id: String,
         #[arg(long)]
         from_node: Option<String>,
+        /// Continue even though an agent binary changed on disk since the run
+        /// started (environment drift). The run manifest fingerprints every
+        /// agent executable at start; a different fingerprint at resume means
+        /// the agent that would drive a node is no longer the one recorded, so
+        /// resume refuses by default. Set this to override and proceed anyway
+        /// (the accepted drift is recorded as an event in the run log).
+        #[arg(long = "allow-environment-drift")]
+        allow_environment_drift: bool,
     },
     /// Stop a run: interrupt whatever node it is executing right now, and
     /// finalize it outright if the process driving it is gone
@@ -246,6 +254,11 @@ enum Command {
         /// Resume an existing run instead of driving a freshly prepared one.
         #[arg(long)]
         resume: bool,
+        /// Forwarded from `apb resume --allow-environment-drift` across the
+        /// detached spawn boundary: lets the resumed child write its accepted
+        /// drift events instead of refusing.
+        #[arg(long = "allow-environment-drift")]
+        allow_environment_drift: bool,
     },
     /// The live-question sidecar (spec 2026-07-20-interactive-nodes, Task 10):
     /// a stdio MCP server exposing one `ask_user` tool, injected into the
@@ -309,9 +322,16 @@ fn main() -> ExitCode {
             continued_from,
         ),
         Some(Command::Runs) => runs_cmd(&root),
-        Some(Command::Resume { run_id, from_node }) => {
-            resume_cmd(&root, &run_id, from_node.as_deref())
-        }
+        Some(Command::Resume {
+            run_id,
+            from_node,
+            allow_environment_drift,
+        }) => resume_cmd(
+            &root,
+            &run_id,
+            from_node.as_deref(),
+            allow_environment_drift,
+        ),
         Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
         Some(Command::Note { run_id, text }) => note_cmd(&root, &run_id, &text),
         Some(Command::Review {
@@ -360,7 +380,14 @@ fn main() -> ExitCode {
             run_id,
             from_node,
             resume,
-        }) => drive_run_child(&run_root, &run_id, from_node.as_deref(), resume),
+            allow_environment_drift,
+        }) => drive_run_child(
+            &run_root,
+            &run_id,
+            from_node.as_deref(),
+            resume,
+            allow_environment_drift,
+        ),
         Some(Command::AskServer { run, node, attempt }) => ask_server_cmd(&run, &node, attempt),
         None => dashboard(resolve_port(None), false),
     }

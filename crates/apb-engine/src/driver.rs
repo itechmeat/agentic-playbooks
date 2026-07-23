@@ -124,14 +124,25 @@ impl Drop for DriverPidGuard {
 ///
 /// `resume` selects the resume path (`--resume`, honouring `from_node` through
 /// the normal resume planner) over re-opening a freshly prepared run.
+/// `allow_environment_drift` is forwarded to the resume path as
+/// `--allow-environment-drift` so a resume that the caller already cleared for
+/// drift writes its `EnvironmentDriftAccepted` events instead of refusing.
 pub fn spawn_detached_driver(
     root: &Path,
     run_id: &str,
     from_node: Option<&str>,
     resume: bool,
+    allow_environment_drift: bool,
 ) -> io::Result<u32> {
     let exe = std::env::current_exe()?;
-    spawn_driver_at(&exe, root, run_id, from_node, resume)
+    spawn_driver_at(
+        &exe,
+        root,
+        run_id,
+        from_node,
+        resume,
+        allow_environment_drift,
+    )
 }
 
 /// `spawn_detached_driver` against an explicitly named driver binary, for
@@ -145,6 +156,7 @@ pub fn spawn_driver_at(
     run_id: &str,
     from_node: Option<&str>,
     resume: bool,
+    allow_environment_drift: bool,
 ) -> io::Result<u32> {
     // The child gets an absolute root: it starts from a different working
     // directory context and must not have to guess what a relative path meant
@@ -162,6 +174,9 @@ pub fn spawn_driver_at(
     }
     if resume {
         cmd.arg("--resume");
+        if allow_environment_drift {
+            cmd.arg("--allow-environment-drift");
+        }
     }
     cmd.current_dir(&root);
     // Null stdio: the child must not hold the parent's pipes open (a chat host

@@ -112,6 +112,12 @@ pub struct RunResumeArgs {
     pub run_id: String,
     /// Node to resume from (determined automatically by default).
     pub from_node: Option<String>,
+    /// Continue despite environment drift: an agent executable recorded in the
+    /// run manifest changed on disk since the run started. By default resume
+    /// refuses this and returns the drift error inline; set true to override
+    /// (the accepted drift is recorded as an event in the run log).
+    #[serde(default)]
+    pub allow_environment_drift: bool,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
