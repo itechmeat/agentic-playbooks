@@ -33,15 +33,34 @@ fn migration_allows_changes_outside_executed_nodes_and_continue_from() {
     new_node.id = "new-step".into();
     with_new_node.nodes.push(new_node);
     validate_migration(&base, &with_new_node, &["start".into()], "start").unwrap();
+
+    // Issue #45 finding 6: an already-executed node that lies AFTER the continue
+    // point (forward-reachable from it) is re-run on the migrated version, so
+    // hardening it is allowed. Graph: start -> plan -> lint -> check -> ...;
+    // continue from plan, change the executed `lint` that plan reaches.
+    let mut changed_reachable = base.clone();
+    change_node_title(&mut changed_reachable, "lint");
+    validate_migration(
+        &base,
+        &changed_reachable,
+        &["plan".into(), "lint".into()],
+        "plan",
+    )
+    .unwrap();
 }
 
 #[test]
-fn migration_rejects_a_changed_executed_node_outside_continue_from() {
+fn migration_rejects_a_changed_preserved_prefix_node() {
+    // Issue #45 finding 6: immutability is scoped to the preserved prefix that
+    // the migration will NOT re-run. Continue from `lint`; `plan` is executed
+    // but not forward-reachable from `lint` (the graph loops lint->check->fix->
+    // lint and never returns to plan), so changing it is still rejected.
     let base = playbook();
     let mut patched = base.clone();
     change_node_title(&mut patched, "plan");
 
-    let err = validate_migration(&base, &patched, &["plan".into()], "start").unwrap_err();
+    let err =
+        validate_migration(&base, &patched, &["plan".into(), "lint".into()], "lint").unwrap_err();
     assert!(matches!(err, MigrationError::ExecutedNodeChanged(id) if id == "plan"));
 }
 
