@@ -58,6 +58,19 @@ export interface PendingQuestion {
   asked_at: number
 }
 
+// The pending supervisor decision for a run parked after a node failure/timeout
+// wake (issue #45 finding 4), mirroring `progress::PendingSupervisor`. Present
+// only while `waiting_kind === 'supervisor'`.
+export interface PendingSupervisor {
+  node: string
+  // "node_failed" or "node_timeout".
+  trigger: string
+  instruction: string
+  // Typically retry / continue_from / abort.
+  options: string[]
+  how_to_decide: string
+}
+
 export interface ProgressSummary {
   percent: number
   label: string | null
@@ -66,6 +79,8 @@ export interface ProgressSummary {
   waiting_kind: 'human_review' | 'wait' | 'question' | 'supervisor' | null
   // The pending question when waiting_kind === 'question'; null otherwise.
   pending_question?: PendingQuestion | null
+  // The pending supervisor park when waiting_kind === 'supervisor'; null otherwise.
+  pending_supervisor?: PendingSupervisor | null
   // Deterministic work-plan identity: changes exactly when a report raises a
   // cycle total or the run migrates to a patched version. Does not change on
   // ordinary done/label updates. This is the only valid reset signal.
