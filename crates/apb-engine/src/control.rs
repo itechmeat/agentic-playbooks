@@ -48,6 +48,22 @@ pub enum Control {
     Interrupt {
         reason: String,
     },
+    /// Rebind a node's executor profile to a new one mid-run (issue #45 finding
+    /// 5). Posted by a supervisor holding the `rebind` capability once the policy
+    /// gate has trust-verified the new profile bundle. `bundle` is that verified
+    /// digest, pinned so the drive loop re-snapshots the profile and refuses any
+    /// drift between gate and apply (anti-TOCTOU, exactly as run start). Applied
+    /// in place - the node's future attempts use the new binding - and never
+    /// terminal; a rebind that fails re-verification is journaled `RebindRejected`
+    /// and the node keeps its old binding.
+    Rebind {
+        node: String,
+        profile: String,
+        scope: apb_core::profile::ProfileScope,
+        bundle: String,
+        #[serde(default)]
+        reason: Option<String>,
+    },
 }
 
 impl Control {
@@ -65,6 +81,7 @@ impl Control {
             Control::Progress { .. } => "progress",
             Control::Patch { .. } => "patch",
             Control::Interrupt { .. } => "interrupt",
+            Control::Rebind { .. } => "rebind",
         }
     }
 }

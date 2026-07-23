@@ -157,6 +157,35 @@ pub enum EventPayload {
     PatchRejected {
         reason: String,
     },
+    /// A supervisor rebound a node's executor profile mid-run (issue #45
+    /// finding 5). The node's EFFECTIVE binding becomes `profile`
+    /// (`<scope>/<name>`) for every future attempt, recorded in the journaled
+    /// rebind overlay - the immutable run manifest stays intact as the record of
+    /// what the run started with. `bundle` is the profile bundle digest that the
+    /// policy gate trust-verified and that was re-verified from the run snapshot
+    /// at apply time (anti-TOCTOU pinning). `reason` carries the supervisor's
+    /// optional note, empty when none. Fields default so old logs read unchanged.
+    ProfileRebound {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        profile: String,
+        #[serde(default)]
+        bundle: String,
+        #[serde(default)]
+        reason: String,
+    },
+    /// A mid-run profile rebind was refused at apply time (issue #45 finding 5):
+    /// the new profile no longer resolves, or its bundle drifted from the digest
+    /// the policy gate verified between gate and apply (TOCTOU). Non-terminal -
+    /// the node keeps its existing binding, mirroring `PatchRejected`. Fields
+    /// default so old logs read unchanged.
+    RebindRejected {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        reason: String,
+    },
     RunMigrated {
         from_version: String,
         to_version: String,

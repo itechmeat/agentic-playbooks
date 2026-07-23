@@ -228,6 +228,29 @@ pub struct SupervisorPatchArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct SupervisorRebindArgs {
+    pub token: String,
+    /// Node whose executor profile should be rebound. Must be a profile-bound
+    /// node (agent_task or finish-with-prompt).
+    pub node: String,
+    /// Name of the new profile to bind the node to.
+    pub profile: String,
+    /// Scope of the new profile: "project", "global", or "auto" (default). Auto
+    /// resolves it the same way a node profile reference does - the run's origin
+    /// first, then global.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Acknowledge an untrusted profile bundle, mirroring run start. Required
+    /// (after user confirmation) when the new bundle is not approved; otherwise
+    /// the rebind is refused with `untrusted_profile_requires_acknowledge`.
+    #[serde(default)]
+    pub acknowledge_untrusted: bool,
+    /// Optional note recorded verbatim in the journaled `profile_rebound` event.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct PlaybookCatalogArgs {
     /// Catalog revision known to the client. If it matches the current one,
     /// the body is not returned (response `{ unchanged: true }`).

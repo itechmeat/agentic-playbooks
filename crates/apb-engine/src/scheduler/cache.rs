@@ -141,7 +141,11 @@ pub(crate) fn agent_key_parts(
     node_id: &str,
 ) -> Option<(String, String, String, Vec<String>)> {
     let manifest = crate::manifest::read(run_dir).ok().flatten()?;
-    let entry = manifest.for_node(node_id)?;
+    // The EFFECTIVE binding: a rebound node (issue #45 finding 5) caches under
+    // its new profile's bundle, not the manifest's original.
+    let entry = effective_for_node(run_dir, &manifest, node_id)
+        .ok()
+        .flatten()?;
     let primary = entry.chain.first()?;
     let bundle = entry.bundle_digest.clone();
     let agent = primary.agent_id.clone();

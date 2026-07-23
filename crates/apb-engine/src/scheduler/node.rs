@@ -273,7 +273,9 @@ pub(crate) fn execute_node(
                     "node `{node_id}` has no execution manifest: this run predates agent profiles and cannot be resumed after the schema 2 upgrade - start a fresh run"
                 ))
             })?;
-            let entry = manifest.for_node(node_id).cloned().ok_or_else(|| {
+            // The EFFECTIVE binding: a mid-run rebind (issue #45 finding 5)
+            // overlays the manifest for future attempts of this node.
+            let entry = effective_for_node(run_dir, &manifest, node_id)?.ok_or_else(|| {
                 EngineError::Invalid(format!(
                     "no manifest entry for node `{node_id}` (no profile bound)"
                 ))
@@ -959,7 +961,8 @@ pub(crate) fn execute_finish_answer(
     let manifest = crate::manifest::read(run_dir)?.ok_or_else(|| {
         EngineError::Invalid(format!("finish node `{node_id}` has no execution manifest"))
     })?;
-    let entry = manifest.for_node(node_id).cloned().ok_or_else(|| {
+    // The EFFECTIVE binding: honor a mid-run rebind (issue #45 finding 5).
+    let entry = effective_for_node(run_dir, &manifest, node_id)?.ok_or_else(|| {
         EngineError::Invalid(format!("no manifest entry for finish node `{node_id}`"))
     })?;
     if entry.chain.is_empty() {
