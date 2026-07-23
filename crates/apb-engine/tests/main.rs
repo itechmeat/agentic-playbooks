@@ -174,6 +174,8 @@ mod subplaybook_run_test;
 mod success_check_test;
 #[path = "suite/supervised_drive_test.rs"]
 mod supervised_drive_test;
+#[path = "suite/supervisor_channel_delivery_test.rs"]
+mod supervisor_channel_delivery_test;
 #[path = "suite/supervisor_commands_test.rs"]
 mod supervisor_commands_test;
 #[path = "suite/wait_test.rs"]
