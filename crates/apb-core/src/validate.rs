@@ -4,6 +4,7 @@ use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
 use crate::schema::{
     CacheMode, CacheSpec, EdgeCondition, FunctionsAllow, Isolation, NodeKind, Playbook,
+    SuccessCheck,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,6 +98,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_cache(playbook, &mut r); // V27, V28, V29
     check_edges(playbook, &mut r); // V30
     check_interactive(playbook, &mut r); // V31, V32
+    check_success_check(playbook, &mut r); // V33
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     if r.is_valid() {
@@ -761,26 +763,55 @@ fn check_interactive(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
+/// V33: a `success_check` is a post-agent gate that only an `agent_task` node
+/// runs (the engine enforces it in the agent-attempt path). Declaring it on any
+/// other node kind is a no-op that silently misleads the author, so it is an
+/// error. A completion-marker check with an empty (or whitespace-only) marker
+/// is also an error: the engine tests for the literal marker in the output, and
+/// an empty marker would match every non-empty output, defeating the check.
+fn check_success_check(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        let Some(sc) = n.success_check.as_ref() else {
+            continue;
+        };
+        if !matches!(n.kind, NodeKind::AgentTask { .. }) {
+            r.error(
+                "V33",
+                Some(&n.id),
+                "success_check is only valid on an agent_task node".to_string(),
+            );
+            continue;
+        }
+        if let SuccessCheck::Marker { marker } = sc
+            && marker.trim().is_empty()
+        {
+            r.error(
+                "V33",
+                Some(&n.id),
+                "success_check marker must not be empty".to_string(),
+            );
+        }
+    }
+}
+
 fn check_scripts(playbook: &Playbook, r: &mut ValidationReport) {
     let escapes =
         |script: &str| script.starts_with('/') || script.split('/').any(|seg| seg == "..");
     for n in &playbook.nodes {
-        match &n.kind {
-            NodeKind::Script { script, .. } if escapes(script) => {
-                r.error(
-                    "V12",
-                    Some(&n.id),
-                    format!("script path `{script}` must stay inside the version directory"),
-                );
-            }
-            NodeKind::AgentTask {
-                success_check: Some(script),
-                ..
-            } if escapes(script) || !script.starts_with("scripts/") => {
-                r.error("V12", Some(&n.id),
-                    format!("success_check path `{script}` must live under `scripts/` inside the version directory"));
-            }
-            _ => {}
+        if let NodeKind::Script { script, .. } = &n.kind
+            && escapes(script)
+        {
+            r.error(
+                "V12",
+                Some(&n.id),
+                format!("script path `{script}` must stay inside the version directory"),
+            );
+        }
+        if let Some(script) = n.success_check.as_ref().and_then(SuccessCheck::script_path)
+            && (escapes(script) || !script.starts_with("scripts/"))
+        {
+            r.error("V12", Some(&n.id),
+                format!("success_check path `{script}` must live under `scripts/` inside the version directory"));
         }
     }
 }
@@ -1175,5 +1206,128 @@ edges: []"#,
         let c = codes(&pb);
         assert!(!c.contains(&("V31", Severity::Error)), "got {c:?}");
         assert!(!c.contains(&("V32", Severity::Error)), "got {c:?}");
+    }
+}
+
+#[cfg(test)]
+mod success_check_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn error_codes(pb: &Playbook) -> Vec<&'static str> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.code)
+            .collect()
+    }
+
+    #[test]
+    fn v33_success_check_on_non_agent_task_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: sc, type: script, script: "scripts/x.sh", runner: sh, success_check: { marker: "DONE" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: sc }
+  - { from: sc, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V33"), "expected V33");
+    }
+
+    #[test]
+    fn v33_empty_marker_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: { marker: "" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V33"), "expected V33");
+    }
+
+    #[test]
+    fn v33_whitespace_only_marker_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: { marker: "   " } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V33"), "expected V33");
+    }
+
+    #[test]
+    fn valid_marker_on_agent_task_has_no_v33() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: { marker: "WAVE-COMPLETE" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(!c.contains(&"V33"), "got {c:?}");
+    }
+
+    #[test]
+    fn valid_script_form_on_agent_task_has_no_v33_or_v12() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: "scripts/check.sh" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(!c.contains(&"V33"), "got {c:?}");
+        assert!(!c.contains(&"V12"), "got {c:?}");
+    }
+
+    #[test]
+    fn v12_script_form_outside_scripts_dir_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: "check.sh" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V12"), "expected V12");
     }
 }

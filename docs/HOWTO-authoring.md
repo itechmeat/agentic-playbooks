@@ -61,6 +61,31 @@ and each account are digest-pinned separately and must be approved before a run.
 Installing connectors, configuring accounts, secrets, trust, and the
 `apb connector` CLI are covered in CONNECTORS.md.
 
+## Success checks
+
+An `agent_task` node may carry an optional `success_check` that gates the
+agent's own success report. When the agent reports success, the engine runs
+the check before the node advances; when the check fails, the attempt is
+treated as a failure and flows through the normal retry and failure-edge
+machinery. Absent, the self-report is trusted as is. Two forms:
+
+```yaml
+nodes:
+  # Script form: an sh script under the version's scripts/ whose non-zero
+  # exit fails the node even when the agent reported success.
+  - { id: build, type: agent_task, prompt: "build", profile: dev, success_check: "scripts/verify.sh" }
+  # Marker form: the literal string must appear in the node output, else the
+  # reported success is rejected.
+  - { id: wave, type: agent_task, prompt: "run the wave", profile: dev, success_check: { marker: "WAVE-COMPLETE" } }
+```
+
+The marker form requires the agent to emit an explicit completion marker in
+its output, so an attempt that reports success while its output only contains
+interim text is rejected with `success report rejected: completion marker
+<marker> not found in output`. A `success_check` on any node other than
+`agent_task`, or a marker that is empty, is a V33 validation error; a script
+path outside `scripts/` is a V12 error.
+
 ## Node types
 
 `start`, `agent_task`, `script`, `prompt`, `condition`, `human_review`,

@@ -196,7 +196,6 @@ pub(crate) fn execute_node(
             profile,
             max_retries,
             timeout_seconds,
-            success_check,
             isolation,
             interactive,
             question_timeout_seconds,
@@ -753,31 +752,53 @@ pub(crate) fn execute_node(
                                         ),
                                     })?;
                                 }
-                                // A deterministic check on top of the self-report (spec 6.2):
-                                // a non-zero check exit code makes the node Failed regardless
-                                // of the agent's report. We run it in the SAME attempt
-                                // workdir the agent worked in (for an isolated node -
-                                // attempt_workdir, otherwise the shared workdir), otherwise
-                                // the check would validate a directory the agent never wrote to.
-                                if let Some(check) = success_check.as_ref() {
-                                    // success_check runs only AFTER this branch's agent
-                                    // has succeeded (meaning this branch was not
-                                    // cancelled) - we do not propagate cancellation here.
-                                    let r = run_script(
-                                        run_dir,
-                                        &attempt_workdir,
-                                        check,
-                                        "sh",
-                                        None,
-                                        None,
-                                    )?;
-                                    if r.status != NodeStatus::Succeeded {
+                                // A success_check gates the self-report. It runs only
+                                // AFTER this branch's agent has succeeded (meaning this
+                                // branch was not cancelled) - we do not propagate
+                                // cancellation here. Two shapes:
+                                match node.success_check.as_ref() {
+                                    // Deterministic sh-script check (spec 6.2): a non-zero
+                                    // exit makes the node Failed regardless of the agent's
+                                    // report. We run it in the SAME attempt workdir the
+                                    // agent worked in (for an isolated node - attempt_workdir,
+                                    // otherwise the shared workdir), otherwise the check would
+                                    // validate a directory the agent never wrote to.
+                                    Some(apb_core::schema::SuccessCheck::Script(check)) => {
+                                        let r = run_script(
+                                            run_dir,
+                                            &attempt_workdir,
+                                            check,
+                                            "sh",
+                                            None,
+                                            None,
+                                        )?;
+                                        if r.status != NodeStatus::Succeeded {
+                                            return Ok(AttemptOutcome::Finished {
+                                                status: NodeStatus::Failed,
+                                                output: format!("success_check `{check}` failed"),
+                                                events,
+                                            });
+                                        }
+                                    }
+                                    // Completion-marker check (issue 45 finding 1): the
+                                    // literal marker must appear in the node output, else the
+                                    // reported success is rejected and flows through the
+                                    // normal retry/failure-edge machinery. This defends
+                                    // against a long-running orchestrator that exits early at
+                                    // its first wait phase and records interim text as
+                                    // success.
+                                    Some(apb_core::schema::SuccessCheck::Marker { marker })
+                                        if !report.output.contains(marker.as_str()) =>
+                                    {
                                         return Ok(AttemptOutcome::Finished {
                                             status: NodeStatus::Failed,
-                                            output: format!("success_check `{check}` failed"),
+                                            output: format!(
+                                                "success report rejected: completion marker `{marker}` not found in output"
+                                            ),
                                             events,
                                         });
                                     }
+                                    Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => {}
                                 }
                                 return Ok(AttemptOutcome::Finished {
                                     status: NodeStatus::Succeeded,
