@@ -1,6 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
@@ -375,6 +375,10 @@ pub fn now_millis() -> u128 {
 }
 
 pub struct EventLog {
+    /// Absolute path of `events.jsonl` - retained so [`Self::resync_seq`] can
+    /// re-read the on-disk high-water mark after another writer (a nested
+    /// child mirroring a wake onto this parent run) has appended.
+    path: PathBuf,
     file: File,
     next_seq: u64,
 }
@@ -393,7 +397,25 @@ impl EventLog {
             0
         };
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
-        Ok(Self { file, next_seq })
+        Ok(Self {
+            path,
+            file,
+            next_seq,
+        })
+    }
+
+    /// Re-reads the last on-disk seq and advances `next_seq` past it when a
+    /// concurrent append (child-to-parent wake mirror) raced ahead of this
+    /// handle. Call after nested child work returns and before any further
+    /// appends on a parent log that was open for the whole child drive.
+    pub fn resync_seq(&mut self) -> Result<(), EngineError> {
+        if let Some(last) = last_seq_on_disk(&self.path)? {
+            let next = last.saturating_add(1);
+            if next > self.next_seq {
+                self.next_seq = next;
+            }
+        }
+        Ok(())
     }
 
     pub fn append(&mut self, payload: EventPayload) -> Result<Event, EngineError> {
@@ -408,6 +430,113 @@ impl EventLog {
         self.next_seq += 1;
         Ok(event)
     }
+}
+
+/// Last seq recorded in an events.jsonl file, if any.
+fn last_seq_on_disk(path: &Path) -> Result<Option<u64>, EngineError> {
+    if !path.is_file() {
+        return Ok(None);
+    }
+    let mut last: Option<u64> = None;
+    for line in BufReader::new(File::open(path)?).lines() {
+        let line = line?;
+        if line.trim().is_empty() {
+            continue;
+        }
+        let ev: Event =
+            serde_json::from_str(&line).map_err(|e| EngineError::Yaml(e.to_string()))?;
+        last = Some(ev.seq);
+    }
+    Ok(last)
+}
+
+/// Mirrors a child-run wake into the parent run's event log so the parent's
+/// `supervisor_wait_event` observes it (issue #45 finding 8). No-op when this
+/// run has no `parent_run`. Best-effort: a missing or unreadable parent is
+/// ignored so a forensics orphan cannot abort the child drive.
+///
+/// The mirrored event keeps the child's trigger, names the parent's playbook
+/// node that started this child (falling back to `child_node`), and encodes
+/// `child_run=<id> child_node=<node>: <detail>` in the detail so the
+/// controlling agent can identify the nested run and node.
+pub fn propagate_wake_to_parent(
+    child_run_dir: &Path,
+    trigger: WakeTrigger,
+    child_node: &str,
+    detail: &str,
+) -> Result<(), EngineError> {
+    let cfg = match crate::run_config::read_run_config(child_run_dir) {
+        Ok(c) => c,
+        Err(_) => return Ok(()),
+    };
+    let Some(parent_id) = cfg.parent_run.as_deref() else {
+        return Ok(());
+    };
+    if !apb_core::registry::is_safe_segment(parent_id) {
+        return Ok(());
+    }
+    let Some(runs_dir) = child_run_dir.parent() else {
+        return Ok(());
+    };
+    let parent_dir = runs_dir.join(parent_id);
+    if !parent_dir.is_dir() {
+        return Ok(());
+    }
+    let child_run_id = child_run_dir
+        .file_name()
+        .map(|s| s.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if child_run_id.is_empty() {
+        return Ok(());
+    }
+    let parent_events = match read_all(&parent_dir) {
+        Ok(e) => e,
+        Err(_) => return Ok(()),
+    };
+    let parent_node = parent_events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::ChildRunStarted { node_id, run_id } if run_id == &child_run_id => {
+                Some(node_id.clone())
+            }
+            _ => None,
+        })
+        .unwrap_or_else(|| child_node.to_string());
+    let mirrored_detail = format!("child_run={child_run_id} child_node={child_node}: {detail}");
+    // Fresh handle: the parent drive holds its own EventLog open, so we rely on
+    // the parent calling `resync_seq` after the child returns (see
+    // `run_playbook_node`). Append-only + flush keeps both writers coherent.
+    let mut parent_log = match EventLog::open(&parent_dir) {
+        Ok(l) => l,
+        Err(_) => return Ok(()),
+    };
+    parent_log.append(EventPayload::WakeRaised {
+        trigger,
+        node: parent_node,
+        detail: mirrored_detail,
+    })?;
+    Ok(())
+}
+
+/// Journals a `WakeRaised` on this run and, when nested, mirrors it to the
+/// parent run's supervisor channel (issue #45 finding 8).
+pub fn raise_wake(
+    run_dir: &Path,
+    log: &mut EventLog,
+    trigger: WakeTrigger,
+    node: &str,
+    detail: impl Into<String>,
+) -> Result<(), EngineError> {
+    let detail = detail.into();
+    log.append(EventPayload::WakeRaised {
+        trigger,
+        node: node.to_string(),
+        detail: detail.clone(),
+    })?;
+    // Propagation is best-effort for the parent; never fail the child on it.
+    let _ = propagate_wake_to_parent(run_dir, trigger, node, &detail);
+    Ok(())
 }
 
 pub fn read_all(run_dir: &Path) -> Result<Vec<Event>, EngineError> {

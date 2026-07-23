@@ -219,6 +219,14 @@ pub(crate) fn execute_node(
                 (None, Some(p)) => p.clone(),
                 (None, None) => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
+            // Issue #45 finding 2: deliver every applied supervisor note into
+            // the agent attempt prompt, even when the template never references
+            // `{{run.context}}`. Resume re-invocations carry only the user's
+            // answer (session holds prior context) and skip this. Script nodes
+            // never reach this arm.
+            if resume.is_none() {
+                text = crate::context::with_supervisor_notes(&text, &read_all(run_dir)?);
+            }
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
             // Stall detection (spec 2026-07-21 run-reliability) fires ONLY for a
@@ -596,11 +604,12 @@ pub(crate) fn execute_node(
                             *stall_err.borrow_mut() = Some(e);
                             return;
                         }
-                        if let Err(e) = journal.append(EventPayload::WakeRaised {
-                            trigger: crate::event::WakeTrigger::Anomaly,
-                            node: node_id.to_string(),
+                        if let Err(e) = journal.raise_wake(
+                            run_dir,
+                            crate::event::WakeTrigger::Anomaly,
+                            node_id,
                             detail,
-                        }) {
+                        ) {
                             *stall_err.borrow_mut() = Some(e);
                         }
                     };
@@ -744,13 +753,14 @@ pub(crate) fn execute_node(
                                 // journaled so the emptiness is visible in the
                                 // event log, exactly like the stall anomaly.
                                 if report.output.trim().is_empty() {
-                                    journal.append(EventPayload::WakeRaised {
-                                        trigger: crate::event::WakeTrigger::Anomaly,
-                                        node: node_id.to_string(),
-                                        detail: format!(
+                                    journal.raise_wake(
+                                        run_dir,
+                                        crate::event::WakeTrigger::Anomaly,
+                                        node_id,
+                                        format!(
                                             "agent_task node `{node_id}` attempt {cur_attempt} reported success with empty output"
                                         ),
-                                    })?;
+                                    )?;
                                 }
                                 // A success_check gates the self-report. It runs only
                                 // AFTER this branch's agent has succeeded (meaning this
@@ -922,7 +932,8 @@ pub(crate) fn execute_finish_answer(
     // every completed node's raw output, which always survives verbatim in the
     // append-only log even after the compaction that repeated resume +
     // patch-migration cycles trigger. See `build_terminal_context`.
-    let context = build_terminal_context(&read_all(run_dir)?, cfg.instruction.as_deref());
+    let events = read_all(run_dir)?;
+    let context = build_terminal_context(&events, cfg.instruction.as_deref());
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -936,6 +947,9 @@ pub(crate) fn execute_finish_answer(
         &hooks,
         &context,
     );
+    // Finish-with-prompt is an agent attempt: same note delivery as agent_task
+    // (issue #45 finding 2).
+    let text = crate::context::with_supervisor_notes(&text, &events);
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)
@@ -1315,6 +1329,8 @@ pub(crate) fn run_playbook_node(
         && !run_is_terminal(root, &existing)?
     {
         let res = resume_inner(root, &existing, None, false, true)?;
+        // Nested resume can also mirror wakes onto the parent log.
+        log.resync_seq()?;
         return Ok(map_child_outcome(root, &existing, res.outcome));
     }
 
@@ -1473,6 +1489,9 @@ pub(crate) fn run_playbook_node(
         RunMode::Autonomous,
         cp.supervisor_expected,
     )?;
+    // Child may have mirrored wakes onto this parent log while we held it open
+    // (issue #45 finding 8). Re-sync next_seq before any further parent appends.
+    log.resync_seq()?;
     Ok(map_child_outcome(root, &child_run_id, res.outcome))
 }
 

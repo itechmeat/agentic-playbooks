@@ -116,6 +116,25 @@ impl<'a> Journal<'a> {
             .append(payload)?;
         Ok(())
     }
+
+    /// Journals a wake and mirrors it to a parent run when nested (issue #45
+    /// finding 8). Same contract as [`crate::event::raise_wake`].
+    pub(crate) fn raise_wake(
+        &self,
+        run_dir: &Path,
+        trigger: crate::event::WakeTrigger,
+        node: &str,
+        detail: impl Into<String>,
+    ) -> Result<(), EngineError> {
+        let detail = detail.into();
+        self.append(EventPayload::WakeRaised {
+            trigger,
+            node: node.to_string(),
+            detail: detail.clone(),
+        })?;
+        let _ = crate::event::propagate_wake_to_parent(run_dir, trigger, node, &detail);
+        Ok(())
+    }
 }
 
 #[derive(Debug, Default)]
@@ -309,11 +328,7 @@ pub(crate) fn observe_live_channels(
             question: q.question.clone(),
             options: q.options.clone(),
         })?;
-        journal.append(EventPayload::WakeRaised {
-            trigger: WakeTrigger::Anomaly,
-            node: node.to_string(),
-            detail: "interactive question".into(),
-        })?;
+        journal.raise_wake(run_dir, WakeTrigger::Anomaly, node, "interactive question")?;
     }
     let answers: Vec<_> = read_answers_after(run_dir, None)?
         .into_iter()
@@ -2210,11 +2225,13 @@ fn drive_inner(
                         question: orphan.question,
                         options: orphan.options,
                     })?;
-                    log.append(EventPayload::WakeRaised {
-                        trigger: WakeTrigger::Anomaly,
-                        node: current.clone(),
-                        detail: "interactive question".into(),
-                    })?;
+                    crate::event::raise_wake(
+                        run_dir,
+                        log,
+                        WakeTrigger::Anomaly,
+                        &current,
+                        "interactive question",
+                    )?;
                     continue;
                 }
             }
@@ -2401,11 +2418,13 @@ fn drive_inner(
                                 question,
                                 options,
                             })?;
-                            log.append(EventPayload::WakeRaised {
-                                trigger: WakeTrigger::Anomaly,
-                                node: current.clone(),
-                                detail: "interactive question".into(),
-                            })?;
+                            crate::event::raise_wake(
+                                run_dir,
+                                log,
+                                WakeTrigger::Anomaly,
+                                &current,
+                                "interactive question",
+                            )?;
                         }
                         continue;
                     }
@@ -2618,11 +2637,7 @@ fn drive_inner(
             } else {
                 WakeTrigger::NodeFailed
             };
-            log.append(EventPayload::WakeRaised {
-                trigger,
-                node: current.clone(),
-                detail: output.clone(),
-            })?;
+            crate::event::raise_wake(run_dir, log, trigger, &current, output.clone())?;
 
             loop {
                 let (cmd, seq) = await_control(run_dir, log, control_cursor, &current)?;

@@ -50,6 +50,53 @@ fn sections(events: &[Event]) -> Vec<Section> {
     out
 }
 
+/// Applied supervisor context notes, oldest first (issue #45 finding 2).
+/// Source of truth is the event log (`SupervisorAction{action: context_append}`),
+/// not the control channel: only notes the drive has already applied are
+/// returned, so a note posted mid-attempt is not visible until the next
+/// attempt boundary.
+pub fn applied_supervisor_notes(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::SupervisorAction { action, detail, .. } if action == "context_append" => {
+                Some(detail.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+/// Delimited block injected into agent attempt prompts so notes reach the
+/// executor even when the playbook template does not reference
+/// `{{run.context}}`. Empty string when there are no applied notes.
+///
+/// Delivery scope (also documented on the MCP tool): every NEW agent_task
+/// (and finish-with-prompt) attempt that starts after a note was applied sees
+/// all notes applied so far, most recent last. Notes never enter script nodes
+/// and are never written into the immutable run manifest.
+pub fn supervisor_notes_section(events: &[Event]) -> String {
+    let notes = applied_supervisor_notes(events);
+    if notes.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("\n\nSupervisor notes:\n");
+    for note in &notes {
+        let _ = writeln!(out, "- {note}");
+    }
+    out
+}
+
+/// Appends [`supervisor_notes_section`] to `prompt` when any notes are present.
+pub fn with_supervisor_notes(prompt: &str, events: &[Event]) -> String {
+    let section = supervisor_notes_section(events);
+    if section.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{prompt}{section}")
+    }
+}
+
 /// The full context (all sections), the materialized view for context.md and the compaction threshold.
 pub fn build_context(events: &[Event]) -> String {
     sections(events).into_iter().map(|s| s.text).collect()
@@ -267,5 +314,74 @@ mod tests {
             instruction_section(Some("  stay within budget  ")),
             "## run instruction\n\nstay within budget\n\n"
         );
+    }
+
+    fn ev(seq: u64, p: EventPayload) -> Event {
+        Event {
+            seq,
+            ts: 0,
+            payload: p,
+        }
+    }
+
+    #[test]
+    fn supervisor_notes_section_is_empty_without_notes() {
+        let events = vec![ev(
+            0,
+            EventPayload::NodeFinished {
+                node: "a".into(),
+                status: "succeeded".into(),
+                attempt: 1,
+                output: "ok".into(),
+                artifacts: Vec::new(),
+            },
+        )];
+        assert_eq!(supervisor_notes_section(&events), "");
+        assert_eq!(with_supervisor_notes("do work", &events), "do work");
+    }
+
+    #[test]
+    fn supervisor_notes_section_lists_notes_oldest_first() {
+        let events = vec![
+            ev(
+                0,
+                EventPayload::SupervisorAction {
+                    action: "context_append".into(),
+                    node: None,
+                    detail: "first note".into(),
+                },
+            ),
+            ev(
+                1,
+                EventPayload::SupervisorAction {
+                    action: "node_retry".into(),
+                    node: Some("a".into()),
+                    detail: String::new(),
+                },
+            ),
+            ev(
+                2,
+                EventPayload::SupervisorAction {
+                    action: "context_append".into(),
+                    node: None,
+                    detail: "second note".into(),
+                },
+            ),
+        ];
+        let section = supervisor_notes_section(&events);
+        assert!(
+            section.starts_with("\n\nSupervisor notes:\n"),
+            "got: {section:?}"
+        );
+        let first = section.find("first note").expect("first note");
+        let second = section.find("second note").expect("second note");
+        assert!(first < second, "most recent last: {section}");
+        let injected = with_supervisor_notes("do work", &events);
+        assert!(
+            injected.starts_with("do work\n\nSupervisor notes:\n"),
+            "got: {injected}"
+        );
+        assert!(injected.contains("- first note"));
+        assert!(injected.contains("- second note"));
     }
 }

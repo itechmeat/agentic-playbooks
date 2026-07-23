@@ -123,7 +123,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Append a supervisor note to a supervised run's context. Requires the `retry` capability",
+        description = "Append a supervisor note for subsequent agent attempts on this run. Delivery scope: once the drive applies the note (control cursor advances), every NEW agent_task or finish-with-prompt attempt that starts afterward receives all applied notes so far in a trailing `Supervisor notes:` block (oldest first, most recent last), whether or not the node template references `{{run.context}}`. Notes do not reach an already-running attempt, do not enter script nodes, and are not written into the immutable run manifest. They also remain in context.md / `{{run.context}}` for templates that use that. Requires the `retry` capability",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn supervisor_context_append(
