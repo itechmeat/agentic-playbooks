@@ -63,7 +63,7 @@ export interface ProgressSummary {
   label: string | null
   waiting_on: string | null
   // null whenever waiting_on is null.
-  waiting_kind: 'human_review' | 'wait' | 'question' | null
+  waiting_kind: 'human_review' | 'wait' | 'question' | 'supervisor' | null
   // The pending question when waiting_kind === 'question'; null otherwise.
   pending_question?: PendingQuestion | null
   // Deterministic work-plan identity: changes exactly when a report raises a

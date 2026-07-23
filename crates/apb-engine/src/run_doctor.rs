@@ -21,7 +21,7 @@ use crate::control::{read_control_after, read_control_cursor};
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload, read_all};
 use crate::liveness;
-use crate::state::{NodeStatus, RunState, RunStatus};
+use crate::state::{RunState, RunStatus};
 
 /// One diagnosis line. `status` is one of `"ok"`, `"warn"`, `"fail"` - the
 /// same three levels `apb_core::doctor::CheckStatus` uses, as plain strings so
@@ -64,6 +64,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
 
     let mut checks = vec![run_check(&events), nodes_check(&events)];
     checks.extend(failure_reason_check(&events));
+    checks.extend(supervisor_wait_check(&events));
     checks.extend(attempt_checks(&events));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(root));
@@ -77,16 +78,35 @@ pub fn has_failure(checks: &[RunCheck]) -> bool {
     checks.iter().any(|c| c.status == FAIL)
 }
 
-/// The folded run status. Only the two bad terminal outcomes warn: a run that
-/// is still going, paused, or succeeded is not a problem to be reported.
-/// `interrupted` warns too - it is exactly the state a crashed driver leaves.
+/// The live-reported run status (pure fold plus process-table overlay so a
+/// live open attempt never reads as interrupted - issue #45 finding 9). Only
+/// the two bad terminal outcomes warn: a run that is still going, paused, or
+/// succeeded is not a problem to be reported. `interrupted` warns too - it is
+/// exactly the state a crashed driver leaves.
 fn run_check(events: &[Event]) -> RunCheck {
-    let status = RunState::fold(events).run_status;
+    let status = liveness::reported_run_status(events);
     let level = match status {
         RunStatus::Failed | RunStatus::Aborted | RunStatus::Interrupted => WARN,
         _ => OK,
     };
     RunCheck::new(level, "run", format!("folded status: {}", status.as_str()))
+}
+
+/// When a supervised run is parked on a failure/timeout wake, name the wake
+/// and the available options so doctor does not read as silent "running"
+/// (issue #45 finding 4).
+fn supervisor_wait_check(events: &[Event]) -> Option<RunCheck> {
+    let pending = crate::progress::pending_supervisor_decision(events)?;
+    Some(RunCheck::new(
+        WARN,
+        "supervisor wait",
+        format!(
+            "waiting for supervisor decision after {} on node `{}`; options: {}",
+            pending.trigger,
+            pending.node,
+            pending.options.join(", ")
+        ),
+    ))
 }
 
 /// The recorded reason for a run that ended `failed` (issue #42 finding 3):
@@ -112,20 +132,23 @@ fn failure_reason_check(events: &[Event]) -> Option<RunCheck> {
     })
 }
 
-/// The folded node statuses, as a count per status. Warns when any node ended
-/// badly, so the summary line alone tells an operator whether to read further.
+/// The live-reported node statuses, as a count per status. Warns when any node
+/// ended badly, so the summary line alone tells an operator whether to read
+/// further. Uses the same overlay as `run_status` (live open attempts report
+/// as running, dead ones as lost) so doctor and status cannot disagree on an
+/// healthy in-flight attempt (issue #45 finding 9).
 fn nodes_check(events: &[Event]) -> RunCheck {
-    let state = RunState::fold(events);
-    if state.nodes.is_empty() {
+    let nodes = liveness::reported_node_statuses(events);
+    if nodes.is_empty() {
         return RunCheck::new(OK, "nodes", "no nodes have started");
     }
-    let mut counts: BTreeMap<&'static str, usize> = BTreeMap::new();
+    let mut counts: BTreeMap<&str, usize> = BTreeMap::new();
     let mut bad = false;
-    for status in state.nodes.values() {
+    for status in nodes.values() {
         *counts.entry(status.as_str()).or_default() += 1;
         bad |= matches!(
-            status,
-            NodeStatus::Failed | NodeStatus::TimedOut | NodeStatus::Interrupted
+            status.as_str(),
+            "failed" | "timed_out" | "interrupted" | "lost"
         );
     }
     let detail = counts
@@ -169,46 +192,80 @@ fn attempt_checks(events: &[Event]) -> Vec<RunCheck> {
         .collect()
 }
 
-/// `runs/<id>/driver.pid` against the process table. A stale pid file is the
-/// single reason `stop_run` refuses to finalize a run whose driver is gone,
-/// so it is worth a blocking verdict rather than a warning.
+/// Drive claim against the process table. A stale `driver.pid` is the single
+/// reason `stop_run` refuses to finalize a run whose driver is gone, so it is
+/// worth a blocking verdict rather than a warning. Parent-driven children
+/// (issue #45 finding 10) follow the parent's drive via `driven_by` /
+/// `parent_run` and must not FAIL while the parent is healthy.
 fn driver_check(run_dir: &Path, run_id: &str) -> RunCheck {
     const NO_DRIVE: &str = "no driver.pid, so no drive is in progress";
-    let Some(pid) = crate::driver::read_driver_pid(run_dir) else {
-        return RunCheck::new(OK, "driver", NO_DRIVE);
+    let parent_id = || {
+        crate::driver::read_driven_by(run_dir).or_else(|| {
+            crate::run_config::read_run_config(run_dir)
+                .ok()
+                .and_then(|c| c.parent_run)
+        })
     };
-    // The verdict is taken against the pid we just read, never by re-reading
-    // the file: `driver_pid_is_live` documents why a second read turns a
-    // cleanly finished drive into a reported dead one.
-    if liveness::driver_pid_is_live(pid, run_id) {
-        return RunCheck::new(
-            OK,
-            "driver",
-            format!("driver.pid names pid {pid}, which is driving this run"),
-        );
-    }
-    // The pid is not driving this run. Before calling that a stale file - the
-    // only verdict in this whole report that exits non-zero - confirm the file
-    // still says what it said when we read it. A drive that finished cleanly
-    // while we probed has already removed it, and reporting a run that just
-    // completed normally as wedged is precisely the false alarm this doctor
-    // exists to prevent.
-    match crate::driver::read_driver_pid(run_dir) {
-        None => RunCheck::new(
-            OK,
-            "driver",
-            format!("{NO_DRIVE} (pid {pid} released it while this check ran)"),
-        ),
-        Some(now) if now != pid => RunCheck::new(
-            OK,
-            "driver",
-            format!("driver.pid moved from pid {pid} to pid {now} while this check ran"),
-        ),
-        Some(_) => RunCheck::new(
-            FAIL,
-            "driver",
-            format!("driver.pid names pid {pid}, which is not driving this run: stale pid file"),
-        ),
+    let own_pid_live = || {
+        crate::driver::read_driver_pid(run_dir)
+            .is_some_and(|pid| liveness::driver_pid_is_live(pid, run_id))
+    };
+
+    match liveness::driver_alive(run_dir, run_id) {
+        Some(true) => {
+            // Nested in-process drive (no dedicated live claim of our own).
+            if let Some(parent) = parent_id()
+                && !own_pid_live()
+            {
+                return RunCheck::new(
+                    OK,
+                    "driver",
+                    format!("driven in-process by parent run `{parent}`, which is live"),
+                );
+            }
+            if let Some(pid) = crate::driver::read_driver_pid(run_dir) {
+                return RunCheck::new(
+                    OK,
+                    "driver",
+                    format!("driver.pid names pid {pid}, which is driving this run"),
+                );
+            }
+            RunCheck::new(OK, "driver", "drive claim is live")
+        }
+        Some(false) => {
+            if let Some(parent) = parent_id() {
+                return RunCheck::new(
+                    FAIL,
+                    "driver",
+                    format!("parent-driven child of `{parent}`, but the parent drive is not live"),
+                );
+            }
+            let Some(pid) = crate::driver::read_driver_pid(run_dir) else {
+                return RunCheck::new(OK, "driver", NO_DRIVE);
+            };
+            // Confirm the file still holds the same pid before FAIL (same race
+            // guard as before: a clean finish mid-check must not read as wedged).
+            match crate::driver::read_driver_pid(run_dir) {
+                None => RunCheck::new(
+                    OK,
+                    "driver",
+                    format!("{NO_DRIVE} (pid {pid} released it while this check ran)"),
+                ),
+                Some(now) if now != pid => RunCheck::new(
+                    OK,
+                    "driver",
+                    format!("driver.pid moved from pid {pid} to pid {now} while this check ran"),
+                ),
+                Some(_) => RunCheck::new(
+                    FAIL,
+                    "driver",
+                    format!(
+                        "driver.pid names pid {pid}, which is not driving this run: stale pid file"
+                    ),
+                ),
+            }
+        }
+        None => RunCheck::new(OK, "driver", NO_DRIVE),
     }
 }
 
@@ -547,5 +604,107 @@ mod tests {
             !checks.iter().any(|c| c.subject == "failure reason"),
             "{checks:?}"
         );
+    }
+
+    /// Issue #45 finding 4: a supervised failure wake must surface as a
+    /// dedicated doctor line, not a silent "folded status: running".
+    #[test]
+    fn supervisor_wait_after_node_failed_is_named() {
+        let journal = concat!(
+            r#"{"seq":0,"ts":1000,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":2000,"type":"node_started","node":"work","attempt":1}"#,
+            "\n",
+            r#"{"seq":2,"ts":3000,"type":"node_finished","node":"work","status":"failed","attempt":1,"output":"boom"}"#,
+            "\n",
+            r#"{"seq":3,"ts":4000,"type":"wake_raised","trigger":"node_failed","node":"work","detail":"boom"}"#,
+            "\n",
+        );
+        let (tmp, _) = run_root(journal);
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        let c = find(&checks, "supervisor wait");
+        assert_eq!(c.status, WARN, "{c:?}");
+        assert!(c.detail.contains("work"), "{c:?}");
+        assert!(c.detail.contains("retry"), "{c:?}");
+        assert!(c.detail.contains("continue_from"), "{c:?}");
+        assert!(c.detail.contains("abort"), "{c:?}");
+        // Run status itself stays running (the drive is parked, not crashed).
+        assert_eq!(find(&checks, "run").detail, "folded status: running");
+    }
+
+    /// Issue #45 finding 9: a live open attempt must not make doctor report
+    /// folded status interrupted while the attempt line says running.
+    #[test]
+    fn live_open_attempt_does_not_report_interrupted_run() {
+        let live = std::process::id();
+        let journal = format!(
+            concat!(
+                r#"{{"seq":0,"ts":1000,"type":"run_started","playbook":"p","version":"1.0.0"}}"#,
+                "\n",
+                r#"{{"seq":1,"ts":2000,"type":"node_started","node":"a","attempt":1}}"#,
+                "\n",
+                r#"{{"seq":2,"ts":3000,"type":"attempt_started","node":"a","attempt":1,"agent":"stub","pid":{pid}}}"#,
+                "\n",
+            ),
+            pid = live
+        );
+        let (tmp, _) = run_root(&journal);
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        assert_eq!(
+            find(&checks, "run").detail,
+            "folded status: running",
+            "{checks:?}"
+        );
+        assert!(
+            find(&checks, "nodes").detail.contains("running"),
+            "{checks:?}"
+        );
+        let attempt = find(&checks, "attempt a#1");
+        assert_eq!(attempt.status, OK, "{attempt:?}");
+    }
+
+    /// Issue #45 finding 10: a parent-driven child with a live parent must
+    /// not FAIL on driver (no stale pid file).
+    #[test]
+    fn parent_driven_child_with_live_parent_is_ok() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runs = tmp.path().join(".apb/runs");
+        let parent_dir = runs.join("parent-1");
+        let child_dir = runs.join("child-1");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+        std::fs::write(parent_dir.join("events.jsonl"), HEALTHY).unwrap();
+        std::fs::write(
+            child_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":1000,"type":"run_started","playbook":"c","version":"1.0.0"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            parent_dir.join("driver.pid"),
+            std::process::id().to_string(),
+        )
+        .unwrap();
+        crate::run_config::write_run_config(
+            &child_dir,
+            &crate::run_config::RunConfig {
+                parent_run: Some("parent-1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        apb_core::fsutil::atomic_write(&crate::driver::driven_by_path(&child_dir), b"parent-1")
+            .unwrap();
+
+        let checks = diagnose_run(tmp.path(), "child-1").unwrap();
+        let c = find(&checks, "driver");
+        assert_eq!(c.status, OK, "{c:?}");
+        assert!(
+            c.detail.contains("parent-1") || c.detail.contains("parent"),
+            "{c:?}"
+        );
+        assert!(!has_failure(&checks), "{checks:?}");
     }
 }

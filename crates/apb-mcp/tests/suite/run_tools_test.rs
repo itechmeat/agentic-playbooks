@@ -293,6 +293,7 @@ fn run_status_exposes_pending_review_block_for_a_gate() {
     );
     assert_eq!(pr["node"], "gate");
     assert_eq!(pr["title"], "Approve the release");
+    assert!(status["pending_supervisor"].is_null());
     assert_eq!(
         pr["options"],
         serde_json::json!(["approved", "rejected"]),
@@ -590,14 +591,15 @@ fn run_status_reports_a_live_attempt_and_driver() {
         first["driver_alive"], true,
         "our own pid in driver.pid must read as a live driver, got {first}"
     );
-    // `lost` is the one status this task introduces, and it is reserved for a
-    // pid the probe positively reports as gone. A live attempt keeps whatever
-    // the pure fold already said about it (today: `interrupted`, because the
-    // attempt is journaled at spawn and has not closed yet) - this task adds a
-    // liveness verdict, it does not restate the fold.
-    assert_ne!(
-        first["nodes"]["a"], "lost",
-        "a node whose attempt pid is alive must never read `lost`, got {first}"
+    // Issue #45 finding 9: a live open attempt must report as running (never
+    // the pure-fold crash shape `interrupted`, and never `lost`).
+    assert_eq!(
+        first["nodes"]["a"], "running",
+        "a node whose attempt pid is alive must report running, got {first}"
+    );
+    assert_eq!(
+        first["run_status"], "running",
+        "a run with a live open attempt must report running, got {first}"
     );
     assert_eq!(first["node_times"]["a"]["attempt_pid"], live_pid);
 
@@ -610,5 +612,94 @@ fn run_status_reports_a_live_attempt_and_driver() {
     assert!(
         age_two > age_one,
         "attempt_age_ms must grow while the attempt runs ({age_one} -> {age_two})"
+    );
+}
+
+/// Issue #45 finding 4: a supervised failure wake must surface on run_status
+/// as waiting_kind=supervisor with a first-class pending_supervisor block.
+#[test]
+fn run_status_exposes_pending_supervisor_after_failure_wake() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = bare_run_dir(dir.path(), "r-wake");
+    fs::write(
+        run_dir.join("playbook.yaml"),
+        r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: work, type: agent_task, prompt: hi }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: work }
+  - { from: work, to: f }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n\
+         {\"seq\":1,\"ts\":1,\"type\":\"node_finished\",\"node\":\"work\",\"status\":\"failed\",\"attempt\":1,\"output\":\"boom\"}\n\
+         {\"seq\":2,\"ts\":2,\"type\":\"wake_raised\",\"trigger\":\"node_failed\",\"node\":\"work\",\"detail\":\"boom\"}\n",
+    )
+    .unwrap();
+
+    let status = run_status(dir.path(), "r-wake").unwrap();
+    assert_eq!(status["run_status"], "running");
+    assert_eq!(status["progress"]["waiting_on"], "work");
+    assert_eq!(status["progress"]["waiting_kind"], "supervisor");
+    let ps = &status["pending_supervisor"];
+    assert!(!ps.is_null(), "expected pending_supervisor, got {status}");
+    assert_eq!(ps["node"], "work");
+    assert_eq!(ps["trigger"], "node_failed");
+    assert!(
+        ps["options"]
+            .as_array()
+            .is_some_and(|o| o.iter().any(|v| v == "retry")
+                && o.iter().any(|v| v == "continue_from")
+                && o.iter().any(|v| v == "abort")),
+        "options must name retry/continue_from/abort, got {ps}"
+    );
+}
+
+/// Issue #45 finding 10: a parent-driven child with a live parent reports
+/// driver_alive true even with no (or a stale) driver.pid of its own.
+#[test]
+fn run_status_parent_driven_child_reports_driver_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent_dir = bare_run_dir(dir.path(), "parent-1");
+    let child_dir = bare_run_dir(dir.path(), "child-1");
+    fs::write(
+        parent_dir.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        child_dir.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"c\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        parent_dir.join("driver.pid"),
+        std::process::id().to_string().as_bytes(),
+    )
+    .unwrap();
+    apb_engine::run_config::write_run_config(
+        &child_dir,
+        &apb_engine::run_config::RunConfig {
+            parent_run: Some("parent-1".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    fs::write(child_dir.join("driven_by"), b"parent-1").unwrap();
+
+    let status = run_status(dir.path(), "child-1").unwrap();
+    assert_eq!(
+        status["driver_alive"], true,
+        "parent-driven child with live parent must report driver_alive true, got {status}"
     );
 }

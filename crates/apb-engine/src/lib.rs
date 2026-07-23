@@ -41,8 +41,13 @@ pub use inspect::{
     run_inspect, should_declare_lost, supervisor_report_or_summary, supervisor_silence_ms,
     touch_heartbeat, wait_wake, write_supervisor_report, write_supervisor_session,
 };
-pub use liveness::{NodeTimes, driver_alive, lost_nodes, node_times};
-pub use progress::{ProgressSummary, compute as run_progress, node_durations_seconds};
+pub use liveness::{
+    NodeTimes, driver_alive, lost_nodes, node_times, reported_node_statuses, reported_run_status,
+};
+pub use progress::{
+    PendingSupervisor, ProgressSummary, compute as run_progress, node_durations_seconds,
+    pending_supervisor_decision,
+};
 pub use question::{
     PostedAnswer, PostedQuestion, post_answer, post_question, read_answers_after,
     read_questions_after,

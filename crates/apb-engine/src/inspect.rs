@@ -1,4 +1,3 @@
-use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::thread::sleep;
@@ -93,11 +92,10 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
 
     let context = std::fs::read_to_string(run_dir.join("context.md")).unwrap_or_default();
 
-    let nodes: BTreeMap<String, String> = state
-        .nodes
-        .iter()
-        .map(|(node, status)| (node.clone(), status.as_str().to_string()))
-        .collect();
+    // Same live overlay as `run_status` (issue #45 finding 9): a live open
+    // attempt must not report as interrupted here either.
+    let nodes = crate::liveness::reported_node_statuses(&events);
+    let run_status = crate::liveness::reported_run_status(&events);
 
     let wakes: Vec<serde_json::Value> = events
         .iter()
@@ -136,18 +134,20 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
     // The pending human-review gate, if any (issue #42 finding 4): the observer
     // sees it through `supervisor_run_inspect` too, not only `run_status`, so a
     // gate is never surfaced in one supervisor path but hidden in the other.
-    let pending_review =
-        crate::progress::from_run_dir(&run_dir, &events).and_then(|p| p.pending_review);
+    let progress = crate::progress::from_run_dir(&run_dir, &events);
+    let pending_review = progress.as_ref().and_then(|p| p.pending_review.clone());
+    let pending_supervisor = progress.as_ref().and_then(|p| p.pending_supervisor.clone());
 
     Ok(serde_json::json!({
         "run_id": run_id,
-        "run_status": state.run_status.as_str(),
+        "run_status": run_status.as_str(),
         "nodes": nodes,
         "outputs": state.outputs,
         "context": context,
         "wakes": wakes,
         "actions": actions,
         "pending_review": pending_review,
+        "pending_supervisor": pending_supervisor,
         "events": events,
     }))
 }
