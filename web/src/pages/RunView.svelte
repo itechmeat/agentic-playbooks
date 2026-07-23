@@ -8,6 +8,7 @@
   import { pendingReviews } from '../lib/reviews'
   import { cachedNodeIds } from '../lib/runcache'
   import { pendingWaits } from '../lib/waits'
+  import { pendingSupervisorFromPayload } from '../lib/supervisors'
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
@@ -46,6 +47,9 @@
     return fromEvents.length ? fromEvents : pendingQuestionsFromPayload(detail.progress?.pending_question)
   })
   const waiting = $derived(detail ? pendingWaits(detail.events) : [])
+  const supervisor = $derived(
+    detail ? pendingSupervisorFromPayload(detail.progress?.pending_supervisor) : null,
+  )
   const hookEntries = $derived(Object.entries(detail?.hooks ?? {}))
   const children = $derived(detail?.children ?? [])
 
@@ -229,6 +233,30 @@
               <span class="text-muted-foreground"> · awaiting signal or timer</span>
             </div>
           {/each}
+        </Card.Content>
+      </Card.Root>
+    {/if}
+
+    {#if supervisor}
+      <Card.Root class="border-warning/60">
+        <Card.Header>
+          <Card.Title class="text-sm">Waiting for supervisor</Card.Title>
+        </Card.Header>
+        <Card.Content class="flex flex-col gap-2 text-xs">
+          <div>
+            <span class="font-mono">{supervisor.node}</span>
+            <span class="text-muted-foreground"> · {supervisor.trigger}</span>
+          </div>
+          {#if supervisor.instruction}
+            <p class="text-muted-foreground">{supervisor.instruction}</p>
+          {/if}
+          {#if supervisor.options.length}
+            <div class="flex flex-wrap gap-1">
+              {#each supervisor.options as opt (opt)}
+                <Badge variant="outline">{opt}</Badge>
+              {/each}
+            </div>
+          {/if}
         </Card.Content>
       </Card.Root>
     {/if}

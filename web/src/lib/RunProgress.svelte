@@ -1,7 +1,7 @@
 <script lang="ts">
   import { untrack } from 'svelte'
   import type { ProgressSummary } from './types'
-  import { nextDisplay, showBar, type ProgressDisplayState } from './progress'
+  import { nextDisplay, showBar, waitingKindText, type ProgressDisplayState } from './progress'
   import { Badge } from '$lib/components/ui/badge'
 
   let { progress, status, runKey }: {
@@ -23,15 +23,7 @@
   const shown = $derived(state?.shown ?? 0)
   const visible = $derived(showBar(status) && !!progress)
   const waiting = $derived(progress?.waiting_on ?? null)
-  const waitingText = $derived(
-    progress?.waiting_kind === 'human_review'
-      ? 'waiting for decision'
-      : progress?.waiting_kind === 'wait'
-        ? 'waiting for event'
-        : progress?.waiting_kind === 'question'
-          ? 'waiting for answer'
-          : 'waiting',
-  )
+  const waitingText = $derived(waitingKindText(progress?.waiting_kind ?? null))
 </script>
 
 {#if visible}
