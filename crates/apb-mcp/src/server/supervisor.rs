@@ -7,6 +7,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
 use rmcp::{tool, tool_router};
 
+use serde_json::json;
+
 use super::args::*;
 use super::{WfMcp, to_call_tool_result};
 use crate::tools::{self, ToolError};
@@ -123,7 +125,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Append a supervisor note to a supervised run's context. Requires the `retry` capability",
+        description = "Append a supervisor note for subsequent agent attempts on this run. Delivery scope: once the drive applies the note (control cursor advances), every NEW agent_task or finish-with-prompt attempt that starts afterward receives all applied notes so far in a trailing `Supervisor notes:` block (oldest first, most recent last), whether or not the node template references `{{run.context}}`. Notes do not reach an already-running attempt, do not enter script nodes, and are not written into the immutable run manifest. They also remain in context.md / `{{run.context}}` for templates that use that. Requires the `retry` capability",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn supervisor_context_append(
@@ -169,6 +171,61 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Err(e)),
         };
         to_call_tool_result(tools::supervisor_report(&self.root, &run_id, &text))
+    }
+
+    #[tool(
+        description = "Rebind a node's executor profile mid-run when its bound agent is wedged (issue #45 finding 5): a sanctioned escape hatch past the immutable manifest's per-node executor pin. Re-runs the trust gate for the NEW profile bundle exactly as run start does (an untrusted bundle is refused with `untrusted_profile_requires_acknowledge` unless acknowledge_untrusted is set; an unresolved one with `profile_unresolved`), journals the accepted rebind as `profile_rebound`, and changes the node's EFFECTIVE binding for future attempts via a journaled overlay - the original run manifest stays intact. The verified bundle is pinned and re-checked from the run snapshot at apply time, so drift between gate and apply is refused (`rebind_rejected`). The next supervisor_node_retry picks up the new profile. Requires the `rebind` capability",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn supervisor_rebind_profile(
+        &self,
+        Parameters(SupervisorRebindArgs {
+            token,
+            node,
+            profile,
+            scope,
+            acknowledge_untrusted,
+            reason,
+        }): Parameters<SupervisorRebindArgs>,
+    ) -> CallToolResult {
+        let run_id = match self.resolve_session(&token, "supervisor_rebind_profile") {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Err(e)),
+        };
+        let scope = match scope.as_deref() {
+            None | Some("auto") => apb_core::profile::ProfileScope::Auto,
+            Some("project") => apb_core::profile::ProfileScope::Project,
+            Some("global") => apb_core::profile::ProfileScope::Global,
+            Some(other) => {
+                return to_call_tool_result(Err(ToolError::Engine(format!(
+                    "unknown scope `{other}`"
+                ))));
+            }
+        };
+        // The run's own origin drives `auto` scope resolution, so a rebind
+        // resolves the new profile exactly as run start resolved node profiles.
+        let origin = match apb_engine::run_profile_origin(&self.root, &run_id) {
+            Ok(o) => o,
+            Err(e) => return to_call_tool_result(Err(ToolError::from(e))),
+        };
+        // Trust gate for the new bundle - same refusal surface as run start. The
+        // verified digest is passed verbatim to the engine (never recomputed), so
+        // no profile edit can slip in between the gate and the pinned bundle.
+        let bundle = match crate::policy::check_rebind(
+            &self.root,
+            origin,
+            &profile,
+            scope,
+            acknowledge_untrusted,
+        ) {
+            Ok(b) => b,
+            Err(refusal) => {
+                return to_call_tool_result(Ok(json!({ "policy_refusal": refusal })));
+            }
+        };
+        to_call_tool_result(tools::rebind_profile(
+            &self.root, &run_id, &node, &profile, scope, &bundle, reason,
+        ))
     }
 
     #[tool(

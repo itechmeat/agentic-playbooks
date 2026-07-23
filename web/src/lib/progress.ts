@@ -13,6 +13,23 @@ export interface ProgressDisplayState {
   shown: number
 }
 
+// Badge copy for progress.waiting_kind. Distinct per kind so the run list and
+// run view never collapse supervisor park into the generic "waiting" label.
+export function waitingKindText(kind: ProgressSummary['waiting_kind']): string {
+  switch (kind) {
+    case 'human_review':
+      return 'waiting for decision'
+    case 'wait':
+      return 'waiting for event'
+    case 'question':
+      return 'waiting for answer'
+    case 'supervisor':
+      return 'waiting for supervisor'
+    default:
+      return 'waiting'
+  }
+}
+
 function clamp(percent: number): number {
   return Math.min(100, Math.max(0, percent))
 }

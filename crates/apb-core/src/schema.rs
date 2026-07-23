@@ -537,8 +537,63 @@ pub struct Node {
     pub outputs: Option<NodeFiles>,
     #[serde(default)]
     pub cache: Option<CacheSpec>,
+    /// Post-agent success gate layered on top of the agent's own self-report.
+    /// Only meaningful on an `agent_task` node (validator V33 rejects it on any
+    /// other kind). Absent -> today's behavior (the self-report is trusted as
+    /// is). See `SuccessCheck` for the two accepted shapes. Additive to schema
+    /// 2; no migration. Because `kind` is flattened, this serializes at the
+    /// same node-mapping level as the legacy inline form did, so a playbook
+    /// that already carried `success_check` on an `agent_task` node round-trips
+    /// unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub success_check: Option<SuccessCheck>,
     #[serde(flatten)]
     pub kind: NodeKind,
+}
+
+/// Post-agent success gate on an `agent_task` node (spec 6.2, plus issue 45
+/// finding 1). Two shapes are accepted:
+///
+/// - a bare string names a deterministic `sh` script under the version's
+///   `scripts/`; a non-zero exit fails the node even when the agent reported
+///   success (the original `success_check` behavior, kept for backward
+///   compatibility).
+/// - `{ marker: "<literal string>" }` requires the literal marker string to be
+///   present in the node output; a success report whose output lacks the
+///   marker is rejected. This defends against a long-running orchestrator that
+///   exits early at its first wait phase and records interim text as success
+///   (issue 45): the completion marker is emitted only on genuine completion.
+///
+/// `untagged` so the bare-string form deserializes unchanged; a map is matched
+/// against the `Marker` variant. Any other shape fails to deserialize, so an
+/// unknown form is rejected at parse time.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(untagged)]
+pub enum SuccessCheck {
+    /// Deterministic sh-script check: path (relative to the version's
+    /// `scripts/`) whose non-zero exit fails the node.
+    Script(String),
+    /// Completion-marker check: the literal `marker` string must appear in the
+    /// node output, otherwise the reported success is rejected.
+    Marker { marker: String },
+}
+
+impl SuccessCheck {
+    /// The script path when this is the sh-script form, else `None`.
+    pub fn script_path(&self) -> Option<&str> {
+        match self {
+            SuccessCheck::Script(path) => Some(path),
+            SuccessCheck::Marker { .. } => None,
+        }
+    }
+
+    /// The completion marker when this is the marker form, else `None`.
+    pub fn marker(&self) -> Option<&str> {
+        match self {
+            SuccessCheck::Marker { marker } => Some(marker),
+            SuccessCheck::Script(_) => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -560,12 +615,6 @@ pub enum NodeKind {
         workdir: Option<String>,
         #[serde(default)]
         isolation: Option<Isolation>,
-        /// Deterministic script check of the result on top of the agent's
-        /// self-assessment (spec 6.2): script path (sh) relative to the
-        /// version's scripts/. A non-zero exit code makes the node Failed even
-        /// if the agent reported success. `None` - no check is performed.
-        #[serde(default)]
-        success_check: Option<String>,
         /// Connector bindings for this node (spec
         /// 2026-07-18-connectors-design section 5): additive to schema 2, so
         /// an old playbook without the field parses unchanged. Only
@@ -719,7 +768,7 @@ pub struct Edge {
     pub max_traversals: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EdgeCondition {
     NodeStatus { node: String, equals: StatusEq },
@@ -1100,5 +1149,102 @@ edges: []
         assert_eq!(AnswerBy::Human.as_str(), "human");
         assert_eq!(AnswerBy::Supervisor.as_str(), "supervisor");
         assert_eq!(AnswerBy::default(), AnswerBy::Human);
+    }
+
+    #[test]
+    fn success_check_script_string_form_backward_compatible() {
+        // The legacy bare-string form still parses into the Script variant and
+        // round-trips as a plain string (no map wrapper).
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x, success_check: "scripts/check.sh" }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let sc = pb.node("a").unwrap().success_check.as_ref().unwrap();
+        assert_eq!(sc.script_path(), Some("scripts/check.sh"));
+        assert_eq!(sc.marker(), None);
+
+        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        assert!(
+            out.contains("success_check: scripts/check.sh"),
+            "got: {out}"
+        );
+        let pb2 = Playbook::from_yaml(&out).unwrap();
+        assert_eq!(
+            pb2.node("a").unwrap().success_check,
+            Some(SuccessCheck::Script("scripts/check.sh".to_string()))
+        );
+    }
+
+    #[test]
+    fn success_check_marker_map_form_parses_and_round_trips() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x, success_check: { marker: "WAVE-COMPLETE" } }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        let sc = pb.node("a").unwrap().success_check.as_ref().unwrap();
+        assert_eq!(sc.marker(), Some("WAVE-COMPLETE"));
+        assert_eq!(sc.script_path(), None);
+
+        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        let pb2 = Playbook::from_yaml(&out).unwrap();
+        assert_eq!(
+            pb2.node("a").unwrap().success_check,
+            Some(SuccessCheck::Marker {
+                marker: "WAVE-COMPLETE".to_string()
+            })
+        );
+    }
+
+    #[test]
+    fn success_check_absent_is_none() {
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x }
+edges: []
+"#;
+        let pb = Playbook::from_yaml(yaml).unwrap();
+        assert_eq!(pb.node("a").unwrap().success_check, None);
+        // Omitted from the serialized form (skip_serializing_if).
+        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        assert!(!out.contains("success_check"), "got: {out}");
+    }
+
+    #[test]
+    fn success_check_unknown_shape_rejected() {
+        // A map that is neither the script string nor a `{ marker: ... }`
+        // matches no untagged variant, so parsing fails.
+        let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x, success_check: { bogus: "y" } }
+edges: []
+"#;
+        assert!(
+            Playbook::from_yaml(yaml).is_err(),
+            "an unknown success_check shape must be rejected"
+        );
     }
 }

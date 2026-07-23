@@ -29,8 +29,18 @@ use apb_core::fsutil::atomic_write;
 /// File inside `runs/<id>` naming the OS process currently driving the run.
 pub const DRIVER_PID_FILE: &str = "driver.pid";
 
+/// File inside a parent-driven child run naming the parent run id that is
+/// driving it in-process (issue #45 finding 10). Written instead of
+/// `driver.pid` so doctor/status never treat the parent's process as a
+/// dedicated (and therefore "stale") driver of the child.
+pub const DRIVEN_BY_FILE: &str = "driven_by";
+
 pub fn driver_pid_path(run_dir: &Path) -> PathBuf {
     run_dir.join(DRIVER_PID_FILE)
+}
+
+pub fn driven_by_path(run_dir: &Path) -> PathBuf {
+    run_dir.join(DRIVEN_BY_FILE)
 }
 
 /// The pid recorded as driving this run, or `None` when no drive is in
@@ -43,6 +53,18 @@ pub fn read_driver_pid(run_dir: &Path) -> Option<u32> {
         .trim()
         .parse()
         .ok()
+}
+
+/// The parent run id recorded as driving this child in-process, or `None`
+/// when the run is not currently nested under a parent drive.
+pub fn read_driven_by(run_dir: &Path) -> Option<String> {
+    let s = std::fs::read_to_string(driven_by_path(run_dir)).ok()?;
+    let s = s.trim();
+    if s.is_empty() {
+        None
+    } else {
+        Some(s.to_string())
+    }
 }
 
 /// Publishes `pid` as the process driving this run, from the process that just
@@ -118,20 +140,95 @@ impl Drop for DriverPidGuard {
     }
 }
 
+/// Owns `runs/<id>/driven_by` for the lifetime of a nested in-process drive
+/// of a sub-playbook child (issue #45 finding 10).
+///
+/// A child run is driven on the same OS process as its parent; publishing
+/// that process as `driver.pid` of the child makes doctor/status treat the
+/// parent's detached argv (`__drive-run --run-id <parent>`) as a stale claim
+/// for the child. Instead we record the parent run id and let liveness follow
+/// the parent's drive.
+///
+/// Also clears any leftover `driver.pid` so a transitional file from an older
+/// build cannot keep failing the child as "stale pid file".
+pub(crate) struct NestedDriveGuard {
+    driven_by: PathBuf,
+    driver_pid: PathBuf,
+}
+
+impl NestedDriveGuard {
+    pub(crate) fn claim(run_dir: &Path, parent_run_id: &str) -> Self {
+        let driven_by = driven_by_path(run_dir);
+        let driver_pid = driver_pid_path(run_dir);
+        // Drop a misleading parent-process claim if one is present.
+        let _ = std::fs::remove_file(&driver_pid);
+        if let Err(e) = atomic_write(&driven_by, parent_run_id.as_bytes()) {
+            eprintln!(
+                "apb: warning: could not write {}: this nested child is invisible to parent-driven liveness checks: {e}",
+                driven_by.display()
+            );
+        }
+        Self {
+            driven_by,
+            driver_pid,
+        }
+    }
+}
+
+impl Drop for NestedDriveGuard {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.driven_by);
+        // Defensive: never leave a driver.pid behind for a nested drive.
+        let _ = std::fs::remove_file(&self.driver_pid);
+    }
+}
+
+/// Claim for the duration of one `drive` call: either an owned `driver.pid`
+/// (top-level run) or a parent-driven `driven_by` marker (sub-playbook child).
+///
+/// Held only so the inner guard's `Drop` runs; nothing reads the payload.
+#[allow(dead_code)]
+pub(crate) enum DriveClaim {
+    Owned(DriverPidGuard),
+    Nested(NestedDriveGuard),
+}
+
+impl DriveClaim {
+    /// Top-level runs own `driver.pid`; nested children with a parent record
+    /// `driven_by` instead (issue #45 finding 10).
+    pub(crate) fn claim(run_dir: &Path, parent_run: Option<&str>) -> Self {
+        match parent_run {
+            Some(parent) => Self::Nested(NestedDriveGuard::claim(run_dir, parent)),
+            None => Self::Owned(DriverPidGuard::claim(run_dir)),
+        }
+    }
+}
+
 /// Re-execs this binary as `apb __drive-run ...` in a separate, detached OS
 /// process and returns its pid. The child drives the run at `runs/<run_id>` to
 /// completion on its own and outlives us.
 ///
 /// `resume` selects the resume path (`--resume`, honouring `from_node` through
 /// the normal resume planner) over re-opening a freshly prepared run.
+/// `allow_environment_drift` is forwarded to the resume path as
+/// `--allow-environment-drift` so a resume that the caller already cleared for
+/// drift writes its `EnvironmentDriftAccepted` events instead of refusing.
 pub fn spawn_detached_driver(
     root: &Path,
     run_id: &str,
     from_node: Option<&str>,
     resume: bool,
+    allow_environment_drift: bool,
 ) -> io::Result<u32> {
     let exe = std::env::current_exe()?;
-    spawn_driver_at(&exe, root, run_id, from_node, resume)
+    spawn_driver_at(
+        &exe,
+        root,
+        run_id,
+        from_node,
+        resume,
+        allow_environment_drift,
+    )
 }
 
 /// `spawn_detached_driver` against an explicitly named driver binary, for
@@ -145,6 +242,7 @@ pub fn spawn_driver_at(
     run_id: &str,
     from_node: Option<&str>,
     resume: bool,
+    allow_environment_drift: bool,
 ) -> io::Result<u32> {
     // The child gets an absolute root: it starts from a different working
     // directory context and must not have to guess what a relative path meant
@@ -162,6 +260,9 @@ pub fn spawn_driver_at(
     }
     if resume {
         cmd.arg("--resume");
+        if allow_environment_drift {
+            cmd.arg("--allow-environment-drift");
+        }
     }
     cmd.current_dir(&root);
     // Null stdio: the child must not hold the parent's pipes open (a chat host

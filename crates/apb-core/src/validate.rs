@@ -4,6 +4,7 @@ use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
 use crate::schema::{
     CacheMode, CacheSpec, EdgeCondition, FunctionsAllow, Isolation, NodeKind, Playbook,
+    SuccessCheck,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -95,8 +96,9 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_playbook_ref(playbook, &mut r); // V22
     check_connectors(playbook, &mut r); // V23, V24, V25, V26
     check_cache(playbook, &mut r); // V27, V28, V29
-    check_edges(playbook, &mut r); // V30
+    check_edges(playbook, &mut r); // V30, V34
     check_interactive(playbook, &mut r); // V31, V32
+    check_success_check(playbook, &mut r); // V33
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     if r.is_valid() {
@@ -718,10 +720,119 @@ fn check_cycles(playbook: &Playbook, r: &mut ValidationReport) {
 
 /// V30 (error): a `max_traversals` of 0 on an edge. A bounded edge that can
 /// never be traversed is an authoring mistake; the minimum useful cap is 1.
+///
+/// V34 (error): two edges from the same node whose first-match routing keys are
+/// structurally identical but whose targets differ. Under first-match routing
+/// (see `apb_engine::parallel::selected_edges`) only one of those targets is
+/// ever chosen, so the graph is contradictory. The routing key is:
+///
+///   * a non-fallback edge with a condition: the full condition (type +
+///     parameters), compared structurally;
+///   * a fallback edge (`fallback: true`): all fallbacks from a node share one
+///     key, since selection takes the first fallback when nothing else matches.
+///
+/// Unconditional non-fallback edges are deliberately excluded: several of them
+/// from one node are parallel fan-out (join:any / join:all), not first-match.
+/// Two edges with identical keys and the same target are redundant but not
+/// contradictory, so they are allowed.
+///
+/// Also V34: an unconditional non-fallback edge from a node makes every
+/// conditional non-fallback edge from that same node unreachable (selection
+/// returns the unconditional set as soon as it is non-empty). Flagged because
+/// first-match routing makes the outcome precise and predictable.
 fn check_edges(playbook: &Playbook, r: &mut ValidationReport) {
     for e in &playbook.edges {
         if e.max_traversals == Some(0) {
             r.error("V30", None, "max_traversals must be at least 1".to_string());
+        }
+    }
+    check_duplicate_route_edges(playbook, r);
+}
+
+/// Structural identity of an edge's first-match routing key. See [`check_edges`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+enum RouteKey<'a> {
+    /// Non-fallback edge with a condition; first matching wins.
+    Conditional(&'a EdgeCondition),
+    /// Fallback edge; first fallback wins when nothing else matches.
+    Fallback,
+}
+
+fn route_key(e: &crate::schema::Edge) -> Option<RouteKey<'_>> {
+    if e.fallback {
+        return Some(RouteKey::Fallback);
+    }
+    e.condition.as_ref().map(RouteKey::Conditional)
+}
+
+fn describe_route_key(key: &RouteKey<'_>) -> String {
+    match key {
+        RouteKey::Fallback => "fallback".to_string(),
+        RouteKey::Conditional(EdgeCondition::NodeStatus { node, equals }) => {
+            format!("node_status node=`{node}` equals={equals:?}")
+        }
+        RouteKey::Conditional(EdgeCondition::ReviewStatus { equals }) => {
+            format!("review_status equals=`{equals}`")
+        }
+        RouteKey::Conditional(EdgeCondition::OutputMatch { node, pattern }) => {
+            format!("output_match node=`{node}` pattern=`{pattern}`")
+        }
+    }
+}
+
+fn check_duplicate_route_edges(playbook: &Playbook, r: &mut ValidationReport) {
+    // Group edges by source for a single pass per node.
+    let mut by_from: HashMap<&str, Vec<&crate::schema::Edge>> = HashMap::new();
+    for e in &playbook.edges {
+        by_from.entry(e.from.as_str()).or_default().push(e);
+    }
+    for (from, outs) in by_from {
+        // Unconditional non-fallback edges shadow every conditional edge under
+        // first-match routing (selected_edges returns the unconditional set
+        // wholesale and never consults conditions).
+        let has_unconditional = outs.iter().any(|e| e.condition.is_none() && !e.fallback);
+        let shadowed: Vec<&&crate::schema::Edge> = outs
+            .iter()
+            .filter(|e| e.condition.is_some() && !e.fallback)
+            .collect();
+        if has_unconditional && !shadowed.is_empty() {
+            let targets: Vec<&str> = shadowed.iter().map(|e| e.to.as_str()).collect();
+            r.error(
+                "V34",
+                Some(from),
+                format!(
+                    "unconditional edge from `{from}` makes conditional edge(s) to [{}] unreachable under first-match routing",
+                    targets.join(", ")
+                ),
+            );
+        }
+
+        // Identical first-match keys with different targets.
+        let mut groups: HashMap<RouteKey<'_>, Vec<&str>> = HashMap::new();
+        for e in &outs {
+            let Some(key) = route_key(e) else {
+                // Unconditional non-fallback: parallel fan-out, not first-match.
+                continue;
+            };
+            groups.entry(key).or_default().push(e.to.as_str());
+        }
+        for (key, targets) in groups {
+            let mut unique: Vec<&str> = targets.clone();
+            unique.sort_unstable();
+            unique.dedup();
+            if unique.len() <= 1 {
+                // Same target (or a single edge): redundant at worst, not contradictory.
+                continue;
+            }
+            r.error(
+                "V34",
+                Some(from),
+                format!(
+                    "contradictory edges from `{from}` with identical condition ({}) to different targets: [{}]",
+                    describe_route_key(&key),
+                    unique.join(", ")
+                ),
+            );
         }
     }
 }
@@ -761,26 +872,55 @@ fn check_interactive(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
+/// V33: a `success_check` is a post-agent gate that only an `agent_task` node
+/// runs (the engine enforces it in the agent-attempt path). Declaring it on any
+/// other node kind is a no-op that silently misleads the author, so it is an
+/// error. A completion-marker check with an empty (or whitespace-only) marker
+/// is also an error: the engine tests for the literal marker in the output, and
+/// an empty marker would match every non-empty output, defeating the check.
+fn check_success_check(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        let Some(sc) = n.success_check.as_ref() else {
+            continue;
+        };
+        if !matches!(n.kind, NodeKind::AgentTask { .. }) {
+            r.error(
+                "V33",
+                Some(&n.id),
+                "success_check is only valid on an agent_task node".to_string(),
+            );
+            continue;
+        }
+        if let SuccessCheck::Marker { marker } = sc
+            && marker.trim().is_empty()
+        {
+            r.error(
+                "V33",
+                Some(&n.id),
+                "success_check marker must not be empty".to_string(),
+            );
+        }
+    }
+}
+
 fn check_scripts(playbook: &Playbook, r: &mut ValidationReport) {
     let escapes =
         |script: &str| script.starts_with('/') || script.split('/').any(|seg| seg == "..");
     for n in &playbook.nodes {
-        match &n.kind {
-            NodeKind::Script { script, .. } if escapes(script) => {
-                r.error(
-                    "V12",
-                    Some(&n.id),
-                    format!("script path `{script}` must stay inside the version directory"),
-                );
-            }
-            NodeKind::AgentTask {
-                success_check: Some(script),
-                ..
-            } if escapes(script) || !script.starts_with("scripts/") => {
-                r.error("V12", Some(&n.id),
-                    format!("success_check path `{script}` must live under `scripts/` inside the version directory"));
-            }
-            _ => {}
+        if let NodeKind::Script { script, .. } = &n.kind
+            && escapes(script)
+        {
+            r.error(
+                "V12",
+                Some(&n.id),
+                format!("script path `{script}` must stay inside the version directory"),
+            );
+        }
+        if let Some(script) = n.success_check.as_ref().and_then(SuccessCheck::script_path)
+            && (escapes(script) || !script.starts_with("scripts/"))
+        {
+            r.error("V12", Some(&n.id),
+                format!("success_check path `{script}` must live under `scripts/` inside the version directory"));
         }
     }
 }
@@ -1175,5 +1315,306 @@ edges: []"#,
         let c = codes(&pb);
         assert!(!c.contains(&("V31", Severity::Error)), "got {c:?}");
         assert!(!c.contains(&("V32", Severity::Error)), "got {c:?}");
+    }
+}
+
+#[cfg(test)]
+mod success_check_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn error_codes(pb: &Playbook) -> Vec<&'static str> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.code)
+            .collect()
+    }
+
+    #[test]
+    fn v33_success_check_on_non_agent_task_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: sc, type: script, script: "scripts/x.sh", runner: sh, success_check: { marker: "DONE" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: sc }
+  - { from: sc, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V33"), "expected V33");
+    }
+
+    #[test]
+    fn v33_empty_marker_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: { marker: "" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V33"), "expected V33");
+    }
+
+    #[test]
+    fn v33_whitespace_only_marker_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: { marker: "   " } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V33"), "expected V33");
+    }
+
+    #[test]
+    fn valid_marker_on_agent_task_has_no_v33() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: { marker: "WAVE-COMPLETE" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(!c.contains(&"V33"), "got {c:?}");
+    }
+
+    #[test]
+    fn valid_script_form_on_agent_task_has_no_v33_or_v12() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: "scripts/check.sh" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(!c.contains(&"V33"), "got {c:?}");
+        assert!(!c.contains(&"V12"), "got {c:?}");
+    }
+
+    #[test]
+    fn v12_script_form_outside_scripts_dir_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: "check.sh" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V12"), "expected V12");
+    }
+}
+
+#[cfg(test)]
+mod duplicate_route_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn error_codes(pb: &Playbook) -> Vec<&'static str> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.code)
+            .collect()
+    }
+
+    fn v34_messages(pb: &Playbook) -> Vec<String> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .filter(|i| i.code == "V34")
+            .map(|i| i.message.clone())
+            .collect()
+    }
+
+    /// The issue-45 finding 7 shape: two edges from `finalize` both matching
+    /// `failure`, pointing at different targets. First-match would send a
+    /// failed finalize into the success finish.
+    #[test]
+    fn v34_identical_failure_conditions_different_targets() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: finalize, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: finalize }
+  - { from: finalize, to: done, condition: { type: node_status, node: finalize, equals: failure } }
+  - { from: finalize, to: aborted, condition: { type: node_status, node: finalize, equals: failure } }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V34"), "expected V34");
+        let msgs = v34_messages(&pb);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("finalize") && m.contains("done") && m.contains("aborted")),
+            "V34 must name the node and both targets, got: {msgs:?}"
+        );
+    }
+
+    /// Success vs failure are different conditions; that is the normal branch shape.
+    #[test]
+    fn different_conditions_to_different_targets_is_ok() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: finalize, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: finalize }
+  - { from: finalize, to: done, condition: { type: node_status, node: finalize, equals: success } }
+  - { from: finalize, to: aborted, condition: { type: node_status, node: finalize, equals: failure } }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(!c.contains(&"V34"), "got {c:?}");
+    }
+
+    /// Identical condition and the same target is redundant, not contradictory.
+    #[test]
+    fn identical_condition_same_target_is_ok() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done, condition: { type: node_status, node: a, equals: success } }
+  - { from: a, to: done, condition: { type: node_status, node: a, equals: success } }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(
+            !c.contains(&"V34"),
+            "same-target duplicates must not be V34, got {c:?}"
+        );
+    }
+
+    /// Several unconditional edges from one node are parallel fan-out, not V34.
+    #[test]
+    fn parallel_unconditional_edges_are_ok() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi }
+  - { id: b, type: agent_task, prompt: hi }
+  - { id: join, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: join, join: all }
+  - { from: b, to: join, join: all }
+  - { from: join, to: done }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(
+            !c.contains(&"V34"),
+            "parallel fan-out must not be V34, got {c:?}"
+        );
+    }
+
+    /// Two fallback edges with different targets: first-match takes only the first.
+    #[test]
+    fn v34_two_fallbacks_different_targets() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done, fallback: true }
+  - { from: a, to: aborted, fallback: true }"#,
+        );
+        assert!(
+            error_codes(&pb).contains(&"V34"),
+            "expected V34 for dual fallbacks"
+        );
+    }
+
+    /// An unconditional edge makes every conditional edge from the same node
+    /// unreachable under first-match routing.
+    #[test]
+    fn v34_unconditional_shadows_conditional() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }
+  - { from: a, to: aborted, condition: { type: node_status, node: a, equals: failure } }"#,
+        );
+        assert!(
+            error_codes(&pb).contains(&"V34"),
+            "expected V34 for shadowing"
+        );
+        let msgs = v34_messages(&pb);
+        assert!(
+            msgs.iter().any(|m| m.contains("unreachable")),
+            "V34 shadowing message must say unreachable, got: {msgs:?}"
+        );
     }
 }

@@ -486,6 +486,7 @@ supervisor:
         vec![
             "observe".to_string(),
             "retry".to_string(),
+            "rebind".to_string(),
             "patch_playbook".to_string()
         ],
         "absent capabilities key should return default (all implemented), got {caps:?}"

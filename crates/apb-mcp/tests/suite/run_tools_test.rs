@@ -136,7 +136,7 @@ fn status_unknown_run_is_error() {
 fn resume_unknown_run_is_not_found() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
-    let err = apb_mcp::tools::run_resume(dir.path(), "ghost-1", None).unwrap_err();
+    let err = apb_mcp::tools::run_resume(dir.path(), "ghost-1", None, false).unwrap_err();
     assert!(
         matches!(err, apb_mcp::tools::ToolError::NotFound(_)),
         "expected NotFound, got {err:?}"
@@ -293,6 +293,7 @@ fn run_status_exposes_pending_review_block_for_a_gate() {
     );
     assert_eq!(pr["node"], "gate");
     assert_eq!(pr["title"], "Approve the release");
+    assert!(status["pending_supervisor"].is_null());
     assert_eq!(
         pr["options"],
         serde_json::json!(["approved", "rejected"]),
@@ -590,14 +591,15 @@ fn run_status_reports_a_live_attempt_and_driver() {
         first["driver_alive"], true,
         "our own pid in driver.pid must read as a live driver, got {first}"
     );
-    // `lost` is the one status this task introduces, and it is reserved for a
-    // pid the probe positively reports as gone. A live attempt keeps whatever
-    // the pure fold already said about it (today: `interrupted`, because the
-    // attempt is journaled at spawn and has not closed yet) - this task adds a
-    // liveness verdict, it does not restate the fold.
-    assert_ne!(
-        first["nodes"]["a"], "lost",
-        "a node whose attempt pid is alive must never read `lost`, got {first}"
+    // Issue #45 finding 9: a live open attempt must report as running (never
+    // the pure-fold crash shape `interrupted`, and never `lost`).
+    assert_eq!(
+        first["nodes"]["a"], "running",
+        "a node whose attempt pid is alive must report running, got {first}"
+    );
+    assert_eq!(
+        first["run_status"], "running",
+        "a run with a live open attempt must report running, got {first}"
     );
     assert_eq!(first["node_times"]["a"]["attempt_pid"], live_pid);
 
@@ -611,4 +613,240 @@ fn run_status_reports_a_live_attempt_and_driver() {
         age_two > age_one,
         "attempt_age_ms must grow while the attempt runs ({age_one} -> {age_two})"
     );
+}
+
+/// Issue #45 finding 4: a supervised failure wake must surface on run_status
+/// as waiting_kind=supervisor with a first-class pending_supervisor block.
+#[test]
+fn run_status_exposes_pending_supervisor_after_failure_wake() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = bare_run_dir(dir.path(), "r-wake");
+    fs::write(
+        run_dir.join("playbook.yaml"),
+        r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: work, type: agent_task, prompt: hi }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: work }
+  - { from: work, to: f }
+"#,
+    )
+    .unwrap();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n\
+         {\"seq\":1,\"ts\":1,\"type\":\"node_finished\",\"node\":\"work\",\"status\":\"failed\",\"attempt\":1,\"output\":\"boom\"}\n\
+         {\"seq\":2,\"ts\":2,\"type\":\"wake_raised\",\"trigger\":\"node_failed\",\"node\":\"work\",\"detail\":\"boom\"}\n",
+    )
+    .unwrap();
+
+    let status = run_status(dir.path(), "r-wake").unwrap();
+    assert_eq!(status["run_status"], "running");
+    assert_eq!(status["progress"]["waiting_on"], "work");
+    assert_eq!(status["progress"]["waiting_kind"], "supervisor");
+    let ps = &status["pending_supervisor"];
+    assert!(!ps.is_null(), "expected pending_supervisor, got {status}");
+    assert_eq!(ps["node"], "work");
+    assert_eq!(ps["trigger"], "node_failed");
+    assert!(
+        ps["options"]
+            .as_array()
+            .is_some_and(|o| o.iter().any(|v| v == "retry")
+                && o.iter().any(|v| v == "continue_from")
+                && o.iter().any(|v| v == "abort")),
+        "options must name retry/continue_from/abort, got {ps}"
+    );
+}
+
+/// Issue #45 finding 10: a parent-driven child with a live parent reports
+/// driver_alive true even with no (or a stale) driver.pid of its own.
+#[test]
+fn run_status_parent_driven_child_reports_driver_alive() {
+    let dir = tempfile::tempdir().unwrap();
+    let parent_dir = bare_run_dir(dir.path(), "parent-1");
+    let child_dir = bare_run_dir(dir.path(), "child-1");
+    fs::write(
+        parent_dir.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        child_dir.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"c\",\"version\":\"1.0.0\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        parent_dir.join("driver.pid"),
+        std::process::id().to_string().as_bytes(),
+    )
+    .unwrap();
+    apb_engine::run_config::write_run_config(
+        &child_dir,
+        &apb_engine::run_config::RunConfig {
+            parent_run: Some("parent-1".into()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    fs::write(child_dir.join("driven_by"), b"parent-1").unwrap();
+
+    let status = run_status(dir.path(), "child-1").unwrap();
+    assert_eq!(
+        status["driver_alive"], true,
+        "parent-driven child with live parent must report driver_alive true, got {status}"
+    );
+}
+
+// Issue #45 finding 3: the MCP `run_resume` tool is where the drift bug bit
+// hardest - it spawned a detached driver that failed its own drift check on
+// null stdio and died silently, leaving the ack reporting `detached: true` for
+// a run that never moved. These tests lock in the fix at the tool boundary:
+// the drift preflight now runs in-process, so `run_resume` returns the drift
+// error inline, and the `allow_environment_drift` override threads through.
+//
+// Unix-only: drift is simulated by rewriting an executable stub, which needs
+// `PermissionsExt` to restore the exec bit.
+#[cfg(unix)]
+mod drift_resume {
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::Path;
+
+    use apb_engine::scheduler::{RunOptions, run};
+    use apb_engine::state::RunStatus;
+    use apb_mcp::profile_tools::{self, ExecutorInput};
+
+    use crate::common::env_lock as lock;
+
+    struct EnvGuard;
+    impl Drop for EnvGuard {
+        fn drop(&mut self) {
+            unsafe {
+                std::env::remove_var("APB_AGENT_CMD");
+                std::env::remove_var("APB_CONFIG_DIR");
+                std::env::remove_var("HOME");
+            }
+        }
+    }
+
+    fn write_stub(path: &Path, body: &str) {
+        std::fs::write(path, body).unwrap();
+        let mut p = std::fs::metadata(path).unwrap().permissions();
+        p.set_mode(0o755);
+        std::fs::set_permissions(path, p).unwrap();
+    }
+
+    fn seed_playbook(root: &Path) {
+        apb_core::registry::init_project(root).unwrap();
+        let src = "schema: 1\nid: p\nname: P\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: t, type: agent_task, prompt: \"do\", profile: arch }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: t }\n  - { from: t, to: done }\n";
+        let dir = root.join(".apb/playbooks/p/1.0.0");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("playbook.yaml"), src).unwrap();
+        std::fs::write(root.join(".apb/playbooks/p/current"), "1.0.0").unwrap();
+    }
+
+    /// Runs playbook `p` to success on a stub agent, then drifts the stub so a
+    /// resume of node `t` must re-fingerprint a changed binary. Returns the
+    /// project root guard and the run id.
+    fn run_then_drift() -> (
+        tempfile::TempDir,
+        tempfile::TempDir,
+        tempfile::TempDir,
+        String,
+    ) {
+        let proj = tempfile::tempdir().unwrap();
+        let home = tempfile::tempdir().unwrap();
+        let cfg = tempfile::tempdir().unwrap();
+        let bin = tempfile::tempdir().unwrap();
+        let stub = bin.path().join("stub.sh");
+        write_stub(&stub, "#!/bin/sh\necho done\n");
+        unsafe {
+            std::env::set_var("APB_AGENT_CMD", &stub);
+            std::env::set_var("HOME", home.path());
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        }
+        seed_playbook(proj.path());
+        profile_tools::profile_write(
+            proj.path(),
+            profile_tools::ProfileWrite {
+                name: "arch".into(),
+                scope: "project".into(),
+                description: "architect".into(),
+                soul_md: "You are the architect.".into(),
+                skills: vec![],
+                executor: ExecutorInput {
+                    agent: "claude".into(),
+                    model: "haiku".into(),
+                    fallbacks: vec![],
+                },
+                ..Default::default()
+            },
+        )
+        .expect("profile_write ok");
+
+        let res = run(proj.path(), "p", None, RunOptions::default()).expect("run ok");
+        assert_eq!(res.outcome, RunStatus::Succeeded);
+
+        // Different content -> different fingerprint than the one the manifest
+        // recorded at run start: environment drift.
+        write_stub(
+            &stub,
+            "#!/bin/sh\n# changed binary, different size now\necho done\n",
+        );
+        // Keep `bin` alive by returning it alongside the roots.
+        std::mem::forget(bin);
+        (proj, home, cfg, res.run_id)
+    }
+
+    #[test]
+    fn run_resume_surfaces_drift_error_inline_instead_of_detached_true() {
+        let _l = lock();
+        let _g = EnvGuard;
+        let (proj, _home, _cfg, run_id) = run_then_drift();
+
+        // Without the override the tool must return the drift error itself,
+        // NOT an Ok ack with `detached: true` for a run that would never move.
+        let err = apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), false).unwrap_err();
+        assert!(
+            err.to_string().contains("environment drift"),
+            "run_resume must surface the drift error inline, got: {err:?}"
+        );
+    }
+
+    #[test]
+    fn run_resume_override_passes_preflight_and_acks_with_override_note() {
+        let _l = lock();
+        let _g = EnvGuard;
+        let (proj, _home, _cfg, run_id) = run_then_drift();
+
+        // With the override the preflight passes and the tool acks detached.
+        // The detached child re-execs this test binary (no `__drive-run`
+        // subcommand) and exits fast, but that is AFTER the in-process preflight
+        // returned Ok - which is exactly what this asserts: the override reaches
+        // the engine path and is reflected back in the ack.
+        let ack = apb_mcp::tools::run_resume(proj.path(), &run_id, Some("t"), true)
+            .expect("override must pass the preflight and ack");
+        assert_eq!(ack["detached"], serde_json::json!(true));
+        assert!(
+            ack["note"]
+                .as_str()
+                .is_some_and(|n| n.contains("environment drift override accepted")),
+            "override ack must carry the drift-override note, got: {ack}"
+        );
+
+        // Reap the short-lived detached child so it does not linger.
+        if let Some(pid) =
+            apb_engine::driver::read_driver_pid(&proj.path().join(".apb/runs").join(&run_id))
+        {
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
+        }
+    }
 }

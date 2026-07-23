@@ -112,6 +112,12 @@ pub struct RunResumeArgs {
     pub run_id: String,
     /// Node to resume from (determined automatically by default).
     pub from_node: Option<String>,
+    /// Continue despite environment drift: an agent executable recorded in the
+    /// run manifest changed on disk since the run started. By default resume
+    /// refuses this and returns the drift error inline; set true to override
+    /// (the accepted drift is recorded as an event in the run log).
+    #[serde(default)]
+    pub allow_environment_drift: bool,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
@@ -219,6 +225,29 @@ pub struct SupervisorPatchArgs {
     pub classification: String,
     /// Node the run will resume from after the migration.
     pub continue_from: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SupervisorRebindArgs {
+    pub token: String,
+    /// Node whose executor profile should be rebound. Must be a profile-bound
+    /// node (agent_task or finish-with-prompt).
+    pub node: String,
+    /// Name of the new profile to bind the node to.
+    pub profile: String,
+    /// Scope of the new profile: "project", "global", or "auto" (default). Auto
+    /// resolves it the same way a node profile reference does - the run's origin
+    /// first, then global.
+    #[serde(default)]
+    pub scope: Option<String>,
+    /// Acknowledge an untrusted profile bundle, mirroring run start. Required
+    /// (after user confirmation) when the new bundle is not approved; otherwise
+    /// the rebind is refused with `untrusted_profile_requires_acknowledge`.
+    #[serde(default)]
+    pub acknowledge_untrusted: bool,
+    /// Optional note recorded verbatim in the journaled `profile_rebound` event.
+    #[serde(default)]
+    pub reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

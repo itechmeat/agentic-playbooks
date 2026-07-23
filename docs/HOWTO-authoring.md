@@ -61,6 +61,58 @@ and each account are digest-pinned separately and must be approved before a run.
 Installing connectors, configuring accounts, secrets, trust, and the
 `apb connector` CLI are covered in CONNECTORS.md.
 
+## Success checks
+
+An `agent_task` node may carry an optional `success_check` that gates the
+agent's own success report. When the agent reports success, the engine runs
+the check before the node advances; when the check fails, the attempt is
+treated as a failure and flows through the normal retry and failure-edge
+machinery. Absent, the self-report is trusted as is. Two forms:
+
+```yaml
+nodes:
+  # Script form: an sh script under the version's scripts/ whose non-zero
+  # exit fails the node even when the agent reported success.
+  - { id: build, type: agent_task, prompt: "build", profile: dev, success_check: "scripts/verify.sh" }
+  # Marker form: the literal string must appear in the node output, else the
+  # reported success is rejected.
+  - { id: wave, type: agent_task, prompt: "run the wave", profile: dev, success_check: { marker: "WAVE-COMPLETE" } }
+```
+
+The marker form requires the agent to emit an explicit completion marker in
+its output, so an attempt that reports success while its output only contains
+interim text is rejected with `success report rejected: completion marker
+<marker> not found in output`. A `success_check` on any node other than
+`agent_task`, or a marker that is empty, is a V33 validation error; a script
+path outside `scripts/` is a V12 error.
+
+### Warning: premature success in long-running orchestrator nodes
+
+A single-process agent node that spawns background workers and is expected to
+wait for them is not reliable, no matter how firmly the prompt forbids ending
+the reply. Observed repeatedly in real runs: a coordinator agent backgrounds
+its workers, then exits minutes later at its first wait phase with interim
+text plus a success report, the engine accepts the report at face value, the
+run advances, and cleanup nodes destroy the still-running workers' state.
+Prompt discipline alone does not hold.
+
+Author around it, in order of strength:
+
+- Give such a node a marker `success_check`. The coordinator is told to emit
+  the marker only at true completion; an early exit with interim text is then
+  rejected and flows into the normal retry and failure-edge machinery instead
+  of advancing the run.
+- Pair strict verification with empowered repair. Add a review or qa node
+  that treats every named deliverable as mandatory and fails when one is
+  absent, regardless of which subtask was supposed to produce it, and route
+  its failure into a fix node whose prompt explicitly allows implementing the
+  missing deliverable in full. This combination makes the graph self-healing
+  when a coordinator dies early anyway.
+- Prefer graph-level orchestration over prompt-level orchestration. When work
+  splits into parallel pieces, model them as parallel branches with a join,
+  or as sub-playbooks, rather than asking one agent node to babysit external
+  processes for the whole duration.
+
 ## Node types
 
 `start`, `agent_task`, `script`, `prompt`, `condition`, `human_review`,
@@ -114,7 +166,13 @@ An edge's `condition` gates traversal on one of three types:
 - `output_match { node, pattern }` - matches when the named node's output
   contains `pattern` as a substring (not a regex).
 
-An edge with no `condition` always matches. A worked example wiring a review
+An edge with no `condition` always matches. Two edges from the same node with
+structurally identical conditions (or two fallbacks) and different targets are
+a V34 validation error: first-match routing would only ever take one of them,
+so the other target is dead or contradictory. Several unconditional edges from
+one node are parallel fan-out and are fine; an unconditional edge combined with
+a conditional one from the same node is also V34, because the unconditional
+edge makes the conditional unreachable. A worked example wiring a review
 gate:
 
 ```yaml

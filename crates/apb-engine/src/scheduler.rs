@@ -46,12 +46,14 @@ mod cache;
 mod node;
 mod patch;
 mod prepare;
+mod rebind;
 mod resume;
 mod supervisor;
 
 use node::*;
 use patch::*;
 use prepare::*;
+use rebind::*;
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
@@ -114,6 +116,25 @@ impl<'a> Journal<'a> {
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .append(payload)?;
+        Ok(())
+    }
+
+    /// Journals a wake and mirrors it to a parent run when nested (issue #45
+    /// finding 8). Same contract as [`crate::event::raise_wake`].
+    pub(crate) fn raise_wake(
+        &self,
+        run_dir: &Path,
+        trigger: crate::event::WakeTrigger,
+        node: &str,
+        detail: impl Into<String>,
+    ) -> Result<(), EngineError> {
+        let detail = detail.into();
+        self.append(EventPayload::WakeRaised {
+            trigger,
+            node: node.to_string(),
+            detail: detail.clone(),
+        })?;
+        let _ = crate::event::propagate_wake_to_parent(run_dir, trigger, node, &detail);
         Ok(())
     }
 }
@@ -217,6 +238,20 @@ pub fn run_playbook_ref(root: &Path, run_id: &str) -> Result<(String, String), E
     }
 }
 
+/// The origin (project vs global) a run was started under, from its provenance.
+/// Used by the MCP rebind gate to resolve and trust-check a new profile the same
+/// way run start resolved the run's node profiles (issue #45 finding 5).
+pub fn run_profile_origin(root: &Path, run_id: &str) -> Result<PlaybookOrigin, EngineError> {
+    if !is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(run_id.to_string()));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(EngineError::NotFound(run_id.to_string()));
+    }
+    rebind::run_origin(&run_dir)
+}
+
 #[derive(Debug)]
 pub struct RunResult {
     pub run_id: String,
@@ -309,11 +344,7 @@ pub(crate) fn observe_live_channels(
             question: q.question.clone(),
             options: q.options.clone(),
         })?;
-        journal.append(EventPayload::WakeRaised {
-            trigger: WakeTrigger::Anomaly,
-            node: node.to_string(),
-            detail: "interactive question".into(),
-        })?;
+        journal.raise_wake(run_dir, WakeTrigger::Anomaly, node, "interactive question")?;
     }
     let answers: Vec<_> = read_answers_after(run_dir, None)?
         .into_iter()
@@ -520,9 +551,10 @@ fn node_primary_invocation(
     let Some(manifest) = crate::manifest::read(run_dir)? else {
         return Ok(None);
     };
-    Ok(manifest
-        .for_node(node)
-        .and_then(|p| p.chain.first())
+    // The EFFECTIVE binding: a rebound node's interaction ceiling comes from its
+    // new profile (issue #45 finding 5).
+    Ok(effective_for_node(run_dir, &manifest, node)?
+        .and_then(|p| p.chain.first().cloned())
         .map(|ri| (ri.agent_id.clone(), ri.spec.interaction)))
 }
 
@@ -1015,7 +1047,7 @@ pub fn start_detached_resolved(
 /// the child looks at the lock before that write lands.
 fn hand_to_detached_driver(root: &Path, prepared: PreparedRun) -> Result<String, EngineError> {
     let run_id = prepared.run_id().to_string();
-    let pid = match crate::driver::spawn_detached_driver(root, &run_id, None, false) {
+    let pid = match crate::driver::spawn_detached_driver(root, &run_id, None, false, false) {
         Ok(pid) => pid,
         Err(e) => {
             // No driver was started, so nothing will ever move this run. Close
@@ -1044,23 +1076,56 @@ fn hand_to_detached_driver(root: &Path, prepared: PreparedRun) -> Result<String,
 /// immediately. The caller is expected to have already computed the resume
 /// decision (`plan_resume`) for its acknowledgement: the child re-derives the
 /// same decision from the same journal.
+///
+/// Equivalent to `resume_detached_with(root, run_id, from_node, false)`:
+/// refuses on environment drift.
 pub fn resume_detached(
     root: &Path,
     run_id: &str,
     from_node: Option<&str>,
 ) -> Result<u32, EngineError> {
+    resume_detached_with(root, run_id, from_node, false)
+}
+
+/// Like `resume_detached`, but with explicit permission to continue despite
+/// environment drift (issue #45 finding 3). The drift preflight runs HERE,
+/// before the detached driver is spawned: a drift the caller did not allow is
+/// returned as an `Err` inline, instead of the old behaviour where the spawned
+/// child failed its own drift check on null stdio and died silently, leaving
+/// `run_resume` reporting `detached: true` for a run that never moved. When
+/// drift is allowed, the override flag is forwarded to the child so it writes
+/// the `EnvironmentDriftAccepted` events and skips its own refusal.
+pub fn resume_detached_with(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+) -> Result<u32, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    if !root.join(".apb/runs").join(run_id).is_dir() {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    let pid = crate::driver::spawn_detached_driver(root, run_id, from_node, true)
-        .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
+    // Synchronous preflight: surface a drift refusal HERE rather than letting
+    // the detached child hit it with null stdio. The child re-runs the same
+    // check (it is the authoritative one and writes the accepted events when
+    // allowed); this parent-side pass exists only so the error reaches the
+    // caller instead of vanishing with the child process.
+    check_environment_drift(&run_dir, allow_environment_drift)?;
+    let pid = crate::driver::spawn_detached_driver(
+        root,
+        run_id,
+        from_node,
+        true,
+        allow_environment_drift,
+    )
+    .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
     // As in `hand_to_detached_driver`: name the driver before returning, so a
     // stop issued the moment this call comes back sees a live driver instead of
     // finalizing a run the child is about to drive.
-    crate::driver::publish_driver_pid(&root.join(".apb/runs").join(run_id), pid);
+    crate::driver::publish_driver_pid(&run_dir, pid);
     Ok(pid)
 }
 
@@ -1193,12 +1258,13 @@ fn drive_inner(
     mode: RunMode,
     supervisor_expected: bool,
 ) -> Result<RunResult, EngineError> {
-    // Publish which OS process is driving this run, for as long as the drive
-    // lasts (Task 7). Every drive invocation takes one - the CLI's synchronous
-    // run, the in-process background thread, and the detached driver child
-    // alike - and the guard removes the file on every exit path, so
-    // `driver.pid` present means "a process claims to be driving this run".
-    let _driver_pid = crate::driver::DriverPidGuard::claim(run_dir);
+    // Publish who is driving this run, for as long as the drive lasts
+    // (Task 7 / issue #45 finding 10). Top-level runs own `driver.pid`;
+    // sub-playbook children driven in-process by a parent write `driven_by`
+    // instead so doctor/status never treat the parent process as a stale
+    // dedicated driver of the child. The guard removes the claim on every
+    // exit path.
+    let _driver_claim = crate::driver::DriveClaim::claim(run_dir, cfg.parent_run.as_deref());
     let workdir = root.to_path_buf();
     // Adapter env scrubbing (spec 4.3): the union of every env var name
     // referenced by ANY installed connector config (both scopes), computed once
@@ -1419,6 +1485,33 @@ fn drive_inner(
                     // terminated the agent. At a boundary there is no attempt to
                     // interrupt, so just consume it and move on - an interrupt
                     // posted with no attempt running is a harmless no-op.
+                    control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
+                }
+                Control::Rebind {
+                    node,
+                    profile,
+                    scope,
+                    bundle,
+                    reason,
+                } => {
+                    // Applied in place like ContextAppend: the effect (verify +
+                    // journal + overlay) runs first, the cursor is persisted only
+                    // once it returns Ok, so an I/O fault leaves the entry to
+                    // resurface on the next drive instead of being dropped. Never
+                    // terminal - the scan continues.
+                    apply_rebind(
+                        root,
+                        run_dir,
+                        log,
+                        RebindCommand {
+                            node,
+                            profile,
+                            scope,
+                            bundle,
+                            reason,
+                        },
+                    )?;
                     control_cursor = Some(entry.seq);
                     write_control_cursor(run_dir, entry.seq)?;
                 }
@@ -2209,11 +2302,13 @@ fn drive_inner(
                         question: orphan.question,
                         options: orphan.options,
                     })?;
-                    log.append(EventPayload::WakeRaised {
-                        trigger: WakeTrigger::Anomaly,
-                        node: current.clone(),
-                        detail: "interactive question".into(),
-                    })?;
+                    crate::event::raise_wake(
+                        run_dir,
+                        log,
+                        WakeTrigger::Anomaly,
+                        &current,
+                        "interactive question",
+                    )?;
                     continue;
                 }
             }
@@ -2400,11 +2495,13 @@ fn drive_inner(
                                 question,
                                 options,
                             })?;
-                            log.append(EventPayload::WakeRaised {
-                                trigger: WakeTrigger::Anomaly,
-                                node: current.clone(),
-                                detail: "interactive question".into(),
-                            })?;
+                            crate::event::raise_wake(
+                                run_dir,
+                                log,
+                                WakeTrigger::Anomaly,
+                                &current,
+                                "interactive question",
+                            )?;
                         }
                         continue;
                     }
@@ -2617,11 +2714,7 @@ fn drive_inner(
             } else {
                 WakeTrigger::NodeFailed
             };
-            log.append(EventPayload::WakeRaised {
-                trigger,
-                node: current.clone(),
-                detail: output.clone(),
-            })?;
+            crate::event::raise_wake(run_dir, log, trigger, &current, output.clone())?;
 
             loop {
                 let (cmd, seq) = await_control(run_dir, log, control_cursor, &current)?;
@@ -2732,6 +2825,35 @@ fn drive_inner(
                         // no running attempt to terminate, so it is spent.
                         // Consume it (advance the cursor so await_control does not
                         // hand it back) and keep waiting for a real directive.
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
+                        continue;
+                    }
+                    Control::Rebind {
+                        node,
+                        profile,
+                        scope,
+                        bundle,
+                        reason,
+                    } => {
+                        // Rebinding the wedged node's profile (issue #45 finding
+                        // 5) is exactly the intervention a supervisor makes at a
+                        // wake before retrying. Apply it in place - effect first,
+                        // cursor persisted only on Ok - and keep waiting for the
+                        // retry/continue directive that follows. The next attempt
+                        // resolves the node through the rebind overlay.
+                        apply_rebind(
+                            root,
+                            run_dir,
+                            log,
+                            RebindCommand {
+                                node,
+                                profile,
+                                scope,
+                                bundle,
+                                reason,
+                            },
+                        )?;
                         control_cursor = Some(seq);
                         write_control_cursor(run_dir, seq)?;
                         continue;
@@ -3009,6 +3131,33 @@ fn resume_inner(
         RunMode::Autonomous,
         supervisor_expected,
     )
+}
+
+/// Appends a `RunError` event for a detached driver that failed to start
+/// (issue #45 finding 3), so the reason is visible through `run_status`
+/// (`failure_reason`) and `apb doctor --run` instead of dying with the
+/// driver's null stdio. `node` is `None` because a startup failure happens
+/// before any node executes. Best-effort: a write failure here is logged to
+/// stderr and swallowed, never masking the original error the caller holds.
+pub fn record_run_error(
+    root: &Path,
+    run_id: &str,
+    node: Option<&str>,
+    reason: &str,
+) -> Result<(), EngineError> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    let mut log = EventLog::open(&run_dir)?;
+    log.append(EventPayload::RunError {
+        node: node.map(str::to_string),
+        reason: reason.to_string(),
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]

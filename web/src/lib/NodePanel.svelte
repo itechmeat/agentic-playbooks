@@ -3,6 +3,12 @@
   import type { PlaybookNode } from './types'
   import { profileToField, fieldToProfile } from './profileref'
   import { playbookRefToField, fieldToPlaybookRef } from './playbookref'
+  import {
+    fieldsToSuccessCheck,
+    isSuccessCheckMode,
+    successCheckToFields,
+    type SuccessCheckMode,
+  } from './successcheck'
   import { parseBinding, serializeBinding, toggleListEntry, type ConnectorBinding } from './connectorbinding'
   import { trustBadge, type ConnectorCard, type ConnectorDetail } from './connectors'
   import { fetchInputDraft, saveInputDraft, fetchPlaybooks, fetchConnectors, fetchConnector } from './api'
@@ -125,11 +131,16 @@
   // Local field state, re-synced only when the node (id) or version (revision)
   // changes - not on every keystroke, else the yaml round-trip rolls back text.
   let f = $state<Record<string, string>>({})
+  // success_check is either a bare script path or `{ marker }`; mode lives
+  // outside the plain-string record so a marker form is never String()'d.
+  let successMode = $state<SuccessCheckMode>('script')
   $effect(() => {
     void node.id
     void revision
     untrack(() => {
       const n = node
+      const sc = successCheckToFields(n.success_check)
+      successMode = sc.mode
       f = {
         title: str(n.title),
         prompt: str(n.prompt),
@@ -141,7 +152,7 @@
         max_loops: num(n.max_loops),
         timeout_seconds: num(n.timeout_seconds),
         isolation: str(n.isolation),
-        success_check: str(n.success_check),
+        success_check: sc.value,
         playbook: playbookRefToField(n.playbook),
         instruction: str(n.instruction),
       }
@@ -317,6 +328,11 @@
     f.playbook = raw
     onChange({ playbook: fieldToPlaybookRef(raw) })
   }
+  function setSuccessCheck(mode: SuccessCheckMode, raw: string) {
+    successMode = mode
+    f.success_check = raw
+    onChange({ success_check: fieldsToSuccessCheck(mode, raw) })
+  }
   function setStr(key: string, raw: string) {
     f[key] = raw
     onChange(raw === '' ? { [key]: undefined } : { [key]: raw })
@@ -333,6 +349,9 @@
 
   const isolationLabel = $derived(
     ISOLATION.find((o) => o.value === (f.isolation ?? ''))?.label ?? '(default: none)',
+  )
+  const successModeLabel = $derived(
+    successMode === 'marker' ? 'completion marker' : 'script path',
   )
 </script>
 
@@ -442,12 +461,31 @@
         </Select.Root>
       </Field.Field>
       <Field.Field>
-        <Field.FieldLabel for="np-success">success_check</Field.FieldLabel>
-        <Input
-          id="np-success"
-          value={f.success_check}
-          oninput={(e) => setStr('success_check', e.currentTarget.value)}
-        />
+        <Field.FieldLabel>success_check</Field.FieldLabel>
+        <div class="flex flex-col gap-2">
+          <Select.Root
+            type="single"
+            value={successMode}
+            onValueChange={(v) => {
+              const mode = isSuccessCheckMode(v) ? v : 'script'
+              setSuccessCheck(mode, f.success_check)
+            }}
+          >
+            <Select.Trigger class="w-full">{successModeLabel}</Select.Trigger>
+            <Select.Content>
+              <Select.Group>
+                <Select.Item value="script" label="script path">script path</Select.Item>
+                <Select.Item value="marker" label="completion marker">completion marker</Select.Item>
+              </Select.Group>
+            </Select.Content>
+          </Select.Root>
+          <Input
+            id="np-success"
+            placeholder={successMode === 'marker' ? 'WAVE-COMPLETE' : 'scripts/verify.sh'}
+            value={f.success_check}
+            oninput={(e) => setSuccessCheck(successMode, e.currentTarget.value)}
+          />
+        </div>
       </Field.Field>
 
       <Field.Field>

@@ -88,6 +88,121 @@ pub(crate) fn soul_delivery_str(d: SoulDelivery) -> String {
     }
 }
 
+/// Anti-TOCTOU expectation for a single profile's snapshotted bundle digest.
+/// `None` skips the check (an ephemeral executor, or a path with no trust gate);
+/// `Verify(Some(d))` requires the recomputed digest to equal `d`; `Verify(None)`
+/// means a gate ran but never covered this key, which fails closed.
+pub(crate) enum ExpectedBundle<'a> {
+    None,
+    Verify(Option<&'a str>),
+}
+
+/// Resolves ONE already-loaded profile into a snapshotted [`ManifestProfile`]:
+/// copies profile.yaml/SOUL/skills into `runs/<id>/profiles/<scope>/<name>`,
+/// recomputes the bundle digest from that snapshot, checks it against `expected`
+/// (anti-TOCTOU), and builds the executor chain. Shared by run-start manifest
+/// building and mid-run profile rebinding (issue #45 finding 5) so both verify
+/// the new bundle by the exact same code path. `scope`/`name`/`key` are the
+/// record identity (`ephemeral/<node>` for an ephemeral executor). `eph`, when
+/// set, replaces the chain with a single ad-hoc invocation while SOUL/skills
+/// still come from `loaded`.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn snapshot_loaded_profile(
+    root: &Path,
+    global: &GlobalConfig,
+    run_dir: &Path,
+    scope: &str,
+    name: &str,
+    key: &str,
+    loaded: &profile_store::LoadedProfile,
+    eph: Option<&apb_core::overrides::EphemeralExecutor>,
+    expected: ExpectedBundle<'_>,
+) -> Result<ManifestProfile, EngineError> {
+    let limits = apb_core::content::TreeLimits::default();
+
+    // Snapshot of the profile definition (under the record key: for an ephemeral one - `ephemeral/<node>`).
+    let dest = run_dir.join("profiles").join(scope).join(name);
+    std::fs::create_dir_all(&dest)?;
+    apb_core::fsutil::atomic_write(&dest.join("profile.yaml"), loaded.profile_yaml.as_bytes())?;
+    apb_core::fsutil::atomic_write(&dest.join("SOUL.md"), loaded.soul.as_bytes())?;
+
+    let mut mskills = Vec::new();
+    let mut skill_pairs = Vec::new();
+    for skill in &loaded.doc.skills {
+        let resolved = apb_core::skills::resolve_skill(root, loaded.scope, skill)
+            .map_err(|e| EngineError::Invalid(format!("skill `{}`: {e}", skill.name)))?;
+        let sscope = profile_store::scope_str(resolved.scope).to_string();
+        // The snapshot path includes scope: same-named project/global skills in
+        // one profile would otherwise collide in `skills/<name>` (snapshot_tree
+        // would reject the already-existing dest).
+        let sdest = dest.join("skills").join(&sscope).join(&resolved.name);
+        let sdigest = apb_core::content::snapshot_tree(&resolved.canonical_path, &sdest, &limits)
+            .map_err(|e| {
+            EngineError::Invalid(format!("skill snapshot `{}`: {e}", resolved.name))
+        })?;
+        skill_pairs.push((format!("{sscope}/{}", resolved.name), sdigest.clone()));
+        mskills.push(ManifestSkill {
+            name: resolved.name,
+            scope: sscope,
+            digest: sdigest,
+        });
+    }
+    let bundle = apb_core::content::bundle_digest(&loaded.profile_digest, &skill_pairs);
+
+    // Anti-TOCTOU: the bundle recomputed from the snapshot must EXACTLY match
+    // what the trust gate checked. A missing key in expected means the profile
+    // did not go through the trust check (fail closed); a different digest means
+    // the content changed between the gate and the snapshot (spec 5.1).
+    match expected {
+        ExpectedBundle::None => {}
+        ExpectedBundle::Verify(Some(exp)) if exp == bundle => {}
+        ExpectedBundle::Verify(Some(_)) => {
+            return Err(EngineError::Invalid(format!(
+                "profile `{key}` changed since the trust check (bundle mismatch)"
+            )));
+        }
+        ExpectedBundle::Verify(None) => {
+            return Err(EngineError::Invalid(format!(
+                "profile `{key}` was not covered by the trust check"
+            )));
+        }
+    }
+
+    let mut chain = Vec::new();
+    if let Some(e) = eph {
+        let program = crate::invocation::program_for(&e.agent, global);
+        chain.push(crate::invocation::resolve_invocation(
+            &e.agent, &e.model, &program, global,
+        )?);
+    } else {
+        let ex = &loaded.doc.executor;
+        let program = crate::invocation::program_for(&ex.agent, global);
+        chain.push(crate::invocation::resolve_invocation(
+            &ex.agent, &ex.model, &program, global,
+        )?);
+        for f in &ex.fallbacks {
+            let p = crate::invocation::program_for(&f.agent, global);
+            chain.push(crate::invocation::resolve_invocation(
+                &f.agent, &f.model, &p, global,
+            )?);
+        }
+    }
+    let soul_empty = loaded.soul.trim().is_empty();
+    let chain = crate::invocation::filter_chain(chain, loaded.doc.soul, soul_empty)?;
+
+    Ok(ManifestProfile {
+        scope: scope.to_string(),
+        name: name.to_string(),
+        profile_digest: loaded.profile_digest.clone(),
+        bundle_digest: bundle,
+        soul: loaded.soul.clone(),
+        soul_requirement: loaded.doc.soul,
+        skills: mskills,
+        chain,
+        ephemeral: eph.is_some(),
+    })
+}
+
 /// Resolves node (and supervisor) profiles into the run snapshot: copies
 /// profile.yaml, SOUL.md, and skill contents into `runs/<id>/profiles/<scope>/<name>/`,
 /// builds the invocation chain and bundle_digest, and returns the immutable
@@ -165,17 +280,16 @@ pub(crate) fn build_run_manifest(
     if bindings.is_empty() {
         return Ok(manifest);
     }
-    let limits = apb_core::content::TreeLimits::default();
 
-    for (node_id, pref) in bindings {
-        let loaded = profile_store::resolve_profile(root, origin, &pref)
+    for (node_id, pref) in &bindings {
+        let loaded = profile_store::resolve_profile(root, origin, pref)
             .map_err(|e| EngineError::Invalid(format!("profile `{}`: {e}", pref.name)))?;
         // A run-local ephemeral executor (completion-plan Task 4): we take SOUL/skills
         // from the node's profile and replace the chain with a single invocation. A
         // per-node entry (scope `ephemeral`, name = node id), not deduplicated and not
         // covered by bundle trust. Supervisor overrides do not apply here (nodes are agent nodes).
         let eph = overrides
-            .and_then(|o| o.nodes.get(&node_id))
+            .and_then(|o| o.nodes.get(node_id))
             .and_then(|n| n.ephemeral_executor.clone());
         let (scope, name) = match &eph {
             Some(_) => ("ephemeral".to_string(), node_id.clone()),
@@ -185,98 +299,35 @@ pub(crate) fn build_run_manifest(
             ),
         };
         let key = format!("{scope}/{name}");
-        manifest.node_bindings.insert(node_id, key.clone());
+        manifest.node_bindings.insert(node_id.clone(), key.clone());
         if manifest.profiles.iter().any(|p| p.key() == key) {
             continue; // the profile is already recorded (ephemeral keys are unique per-node)
         }
 
-        // Snapshot of the profile definition (under the record key: for an ephemeral one - `ephemeral/<node>`).
-        let dest = run_dir.join("profiles").join(&scope).join(&name);
-        std::fs::create_dir_all(&dest)?;
-        apb_core::fsutil::atomic_write(&dest.join("profile.yaml"), loaded.profile_yaml.as_bytes())?;
-        apb_core::fsutil::atomic_write(&dest.join("SOUL.md"), loaded.soul.as_bytes())?;
-
-        let mut mskills = Vec::new();
-        let mut skill_pairs = Vec::new();
-        for skill in &loaded.doc.skills {
-            let resolved = apb_core::skills::resolve_skill(root, loaded.scope, skill)
-                .map_err(|e| EngineError::Invalid(format!("skill `{}`: {e}", skill.name)))?;
-            let sscope = profile_store::scope_str(resolved.scope).to_string();
-            // The snapshot path includes scope: same-named project/global skills in
-            // one profile would otherwise collide in `skills/<name>` (snapshot_tree
-            // would reject the already-existing dest).
-            let sdest = dest.join("skills").join(&sscope).join(&resolved.name);
-            let sdigest =
-                apb_core::content::snapshot_tree(&resolved.canonical_path, &sdest, &limits)
-                    .map_err(|e| {
-                        EngineError::Invalid(format!("skill snapshot `{}`: {e}", resolved.name))
-                    })?;
-            skill_pairs.push((format!("{sscope}/{}", resolved.name), sdigest.clone()));
-            mskills.push(ManifestSkill {
-                name: resolved.name,
-                scope: sscope,
-                digest: sdigest,
-            });
-        }
-        let bundle = apb_core::content::bundle_digest(&loaded.profile_digest, &skill_pairs);
-
-        // Anti-TOCTOU: the bundle recomputed from the snapshot must EXACTLY match
-        // what the bundle gate checked. A missing key in expected means the
-        // profile did not go through the trust check (fail closed); a different digest
-        // means the content changed between the gate and the snapshot (spec 5.1).
-        // An ephemeral executor is ad-hoc and not covered by bundle trust - we do not
-        // apply the expected check to it (there is no `ephemeral/<node>` key in expected).
-        if eph.is_none()
-            && let Some(expected) = expected_bundles
-        {
-            match expected.get(&key) {
-                Some(exp) if exp == &bundle => {}
-                Some(_) => {
-                    return Err(EngineError::Invalid(format!(
-                        "profile `{key}` changed since the trust check (bundle mismatch)"
-                    )));
-                }
-                None => {
-                    return Err(EngineError::Invalid(format!(
-                        "profile `{key}` was not covered by the trust check"
-                    )));
-                }
-            }
-        }
-
-        let mut chain = Vec::new();
-        if let Some(e) = &eph {
-            let program = crate::invocation::program_for(&e.agent, global);
-            chain.push(crate::invocation::resolve_invocation(
-                &e.agent, &e.model, &program, global,
-            )?);
+        // An ephemeral executor is ad-hoc and not covered by bundle trust, so it
+        // skips the expected-bundle check (there is no `ephemeral/<node>` key in
+        // expected). Otherwise the snapshot's recomputed bundle must match the
+        // gate's verified digest exactly.
+        let expected = if eph.is_some() {
+            ExpectedBundle::None
         } else {
-            let ex = &loaded.doc.executor;
-            let program = crate::invocation::program_for(&ex.agent, global);
-            chain.push(crate::invocation::resolve_invocation(
-                &ex.agent, &ex.model, &program, global,
-            )?);
-            for f in &ex.fallbacks {
-                let p = crate::invocation::program_for(&f.agent, global);
-                chain.push(crate::invocation::resolve_invocation(
-                    &f.agent, &f.model, &p, global,
-                )?);
+            match expected_bundles {
+                None => ExpectedBundle::None,
+                Some(map) => ExpectedBundle::Verify(map.get(&key).map(String::as_str)),
             }
-        }
-        let soul_empty = loaded.soul.trim().is_empty();
-        let chain = crate::invocation::filter_chain(chain, loaded.doc.soul, soul_empty)?;
-
-        manifest.profiles.push(ManifestProfile {
-            scope,
-            name,
-            profile_digest: loaded.profile_digest.clone(),
-            bundle_digest: bundle,
-            soul: loaded.soul.clone(),
-            soul_requirement: loaded.doc.soul,
-            skills: mskills,
-            chain,
-            ephemeral: eph.is_some(),
-        });
+        };
+        let profile = snapshot_loaded_profile(
+            root,
+            global,
+            run_dir,
+            &scope,
+            &name,
+            &key,
+            &loaded,
+            eph.as_ref(),
+            expected,
+        )?;
+        manifest.profiles.push(profile);
     }
 
     // Exact set equality: expected must not have any leftover keys that are

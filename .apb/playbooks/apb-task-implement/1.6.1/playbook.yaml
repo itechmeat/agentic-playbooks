@@ -1233,14 +1233,10 @@ edges:
     equals: abort
   fallback: false
   join: null
-- from: finalize
-  to: done
-  condition:
-    type: node_status
-    node: finalize
-    equals: failure
-  fallback: false
-  join: null
+# Fixed for V34 (issue 45 finding 7): 1.6.1 previously carried both
+# finalize->done on failure and finalize->aborted on failure; first-match
+# routing would have sent a failed finalize into the success finish. Kept the
+# success and failure branches only.
 - from: finalize
   to: done
   condition:

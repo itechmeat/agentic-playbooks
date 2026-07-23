@@ -24,6 +24,10 @@ pub enum WaitingKind {
     /// not yet been answered (spec 2026-07-20-interactive-nodes). Serializes
     /// to `"question"`.
     Question,
+    /// A supervised run raised a wake after a node failure/timeout and is
+    /// parked waiting for a supervisor command (issue #45 finding 4).
+    /// Serializes to `"supervisor"`.
+    Supervisor,
 }
 
 /// The pending question for a run whose `waiting_kind` is
@@ -121,6 +125,132 @@ pub fn pending_review(node_id: &str, title: Option<&str>, options: &[String]) ->
     }
 }
 
+/// Supervisor options available after a node failure/timeout wake (issue #45
+/// finding 4). Shared by the progress block and doctor so the lists never drift.
+pub fn supervisor_decision_options() -> Vec<String> {
+    vec![
+        "retry".to_string(),
+        "continue_from".to_string(),
+        "abort".to_string(),
+    ]
+}
+
+/// Decision mechanics for a supervised failure/timeout wake: how a supervisor
+/// (or an operator) actually posts a command. Single source of the how-to
+/// wording.
+pub fn supervisor_how_to_decide(node_id: &str) -> String {
+    format!(
+        "To decide, use the supervisor tools: node_retry (re-run node `{node_id}`), \
+         run_continue_from (advance from a chosen node), or run_abort."
+    )
+}
+
+/// Owner/supervisor-facing pending instruction for a failure/timeout wake.
+pub fn supervisor_instruction(node_id: &str, trigger: &str) -> String {
+    let what = match trigger {
+        "node_timeout" => "timed out",
+        _ => "failed",
+    };
+    let opts = supervisor_decision_options().join(", ");
+    format!(
+        "The supervised run is waiting for a supervisor decision after node `{node_id}` {what}. \
+         Available options: {opts}. {}",
+        supervisor_how_to_decide(node_id)
+    )
+}
+
+/// The pending supervisor decision for a run whose `waiting_kind` is
+/// `Some(WaitingKind::Supervisor)` (issue #45 finding 4). Derived from the
+/// event log alone: a `WakeRaised` for node failure/timeout with no later
+/// resolving supervisor action and a non-terminal run.
+#[derive(Debug, Clone, Serialize)]
+pub struct PendingSupervisor {
+    pub node: String,
+    /// `"node_failed"` or `"node_timeout"`, matching `WakeTrigger` serde names.
+    pub trigger: String,
+    /// Self-contained line naming the wake, the failed node, the options, and
+    /// how to decide.
+    pub instruction: String,
+    pub options: Vec<String>,
+    pub how_to_decide: String,
+}
+
+/// Whether a `SupervisorAction` resolves a prior failure/timeout wake. Only
+/// retry and continue_from leave the park loop to resume driving; context and
+/// progress notes do not. Abort/pause clear the pending state via their own
+/// terminal events (`RunAborted` / `RunPaused`), not via this action list.
+fn supervisor_action_resolves_wake(action: &str) -> bool {
+    matches!(action, "node_retry" | "run_continue_from")
+}
+
+/// The outstanding failure/timeout wake, if the supervised driver is parked
+/// waiting for a supervisor command (issue #45 finding 4).
+///
+/// Pure journal fold: finds the latest `WakeRaised` with trigger
+/// `node_failed`/`node_timeout` that is not followed by a resolving
+/// `SupervisorAction` or a terminal/paused run event. Anomaly wakes (questions,
+/// stalls) are not included - those surface through other waiting kinds.
+pub fn pending_supervisor_decision(events: &[Event]) -> Option<PendingSupervisor> {
+    use crate::event::WakeTrigger;
+    use crate::state::RunStatus;
+
+    let state = RunState::fold(events);
+    // A terminal or paused pure-fold run is not waiting on the supervisor park
+    // loop (that loop only exists while the drive is still inside the
+    // supervised failure branch). Interrupted with no live attempt is a crash
+    // shape, not a deliberate supervisor wait.
+    if matches!(
+        state.run_status,
+        RunStatus::Succeeded
+            | RunStatus::Failed
+            | RunStatus::Aborted
+            | RunStatus::Paused
+            | RunStatus::Interrupted
+            | RunStatus::Created
+    ) {
+        return None;
+    }
+
+    let mut pending: Option<(String, &'static str)> = None;
+    for e in events {
+        match &e.payload {
+            EventPayload::WakeRaised {
+                trigger: WakeTrigger::NodeFailed,
+                node,
+                ..
+            } => {
+                pending = Some((node.clone(), "node_failed"));
+            }
+            EventPayload::WakeRaised {
+                trigger: WakeTrigger::NodeTimeout,
+                node,
+                ..
+            } => {
+                pending = Some((node.clone(), "node_timeout"));
+            }
+            EventPayload::SupervisorAction { action, .. }
+                if supervisor_action_resolves_wake(action) =>
+            {
+                pending = None;
+            }
+            EventPayload::RunFinished { .. }
+            | EventPayload::RunAborted { .. }
+            | EventPayload::RunPaused { .. }
+            | EventPayload::PatchApplied { .. } => {
+                pending = None;
+            }
+            _ => {}
+        }
+    }
+    pending.map(|(node, trigger)| PendingSupervisor {
+        instruction: supervisor_instruction(&node, trigger),
+        how_to_decide: supervisor_how_to_decide(&node),
+        options: supervisor_decision_options(),
+        node,
+        trigger: trigger.to_string(),
+    })
+}
+
 /// The run-progress summary surfaced by the server and MCP `run_status`.
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressSummary {
@@ -142,6 +272,10 @@ pub struct ProgressSummary {
     /// unlike `pending_question` it is present on the `compute`/`compute_with`
     /// path too. `None` whenever the run is not waiting on a gate.
     pub pending_review: Option<PendingReview>,
+    /// The pending supervisor decision when `waiting_kind ==
+    /// Some(WaitingKind::Supervisor)` (issue #45 finding 4). Populated by the
+    /// pure fold from the event log alone.
+    pub pending_supervisor: Option<PendingSupervisor>,
     /// Deterministic identity of the work plan behind this percent (spec
     /// section 3): the playbook version bound to the run plus the latest
     /// reported `total` of each cyclic group. It changes exactly when a report
@@ -407,9 +541,10 @@ pub fn from_run_dir_with_root(
         summary.waiting_on = Some(pq.node.clone());
         summary.waiting_kind = Some(WaitingKind::Question);
         summary.pending_question = Some(pq);
-        // The single `waiting_on` now names the question, so a stale gate block
-        // must not linger alongside it (mirrors the one-block invariant).
+        // The single `waiting_on` now names the question, so a stale gate or
+        // supervisor block must not linger alongside it (one-block invariant).
         summary.pending_review = None;
+        summary.pending_supervisor = None;
     }
     let (done, total) = weighted_with(&pb, events, &gc);
     if total == 0 {
@@ -653,8 +788,8 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         }
         _ => None,
     });
-    let waiting_on = waiting.as_ref().map(|(id, _)| id.clone());
-    let waiting_kind = waiting.map(|(_, kind)| kind);
+    let mut waiting_on = waiting.as_ref().map(|(id, _)| id.clone());
+    let mut waiting_kind = waiting.map(|(_, kind)| kind);
 
     // The pending-gate block (issue #42 finding 4): only when the run is
     // actually waiting on a human_review gate. Built from the node's title and
@@ -670,6 +805,21 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
             })
         }
         _ => None,
+    };
+
+    // Supervised failure/timeout park (issue #45 finding 4): only when nothing
+    // tighter (human_review / wait) is already waiting. Derived from WakeRaised
+    // events in the journal so a run_status reader sees the wake, the failed
+    // node, and the options (retry / continue_from / abort).
+    let pending_supervisor = if waiting_kind.is_none() {
+        let ps = pending_supervisor_decision(events);
+        if let Some(ref p) = ps {
+            waiting_on = Some(p.node.clone());
+            waiting_kind = Some(WaitingKind::Supervisor);
+        }
+        ps
+    } else {
+        None
     };
 
     // Plan identity (B4): the run's playbook version plus the latest reported
@@ -694,6 +844,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         waiting_kind,
         pending_question: None,
         pending_review,
+        pending_supervisor,
         plan_key,
     }
 }
@@ -1680,5 +1831,97 @@ edges:
         ];
         assert_eq!(pending_interval_ms(&events, "ask"), 3000);
         assert_eq!(pending_interval_ms(&events, "other"), 0);
+    }
+
+    /// Issue #45 finding 4: a WakeRaised for node_failed with no later
+    /// resolving action surfaces as waiting_kind=supervisor with options.
+    #[test]
+    fn pending_supervisor_decision_after_node_failed_wake() {
+        let pb = Playbook::from_yaml(
+            r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: work, type: agent_task, prompt: hi }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: work }
+  - { from: work, to: f }
+"#,
+        )
+        .unwrap();
+        let events = vec![
+            ev(
+                0,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                EventPayload::NodeFinished {
+                    node: "work".into(),
+                    status: "failed".into(),
+                    attempt: 1,
+                    output: "boom".into(),
+                    artifacts: Vec::new(),
+                },
+            ),
+            ev(
+                2,
+                EventPayload::WakeRaised {
+                    trigger: crate::event::WakeTrigger::NodeFailed,
+                    node: "work".into(),
+                    detail: "boom".into(),
+                },
+            ),
+        ];
+        let p = compute(&pb, &events);
+        assert_eq!(p.waiting_on.as_deref(), Some("work"));
+        assert_eq!(p.waiting_kind, Some(WaitingKind::Supervisor));
+        let ps = p
+            .pending_supervisor
+            .expect("pending_supervisor must be set");
+        assert_eq!(ps.node, "work");
+        assert_eq!(ps.trigger, "node_failed");
+        assert!(ps.options.contains(&"retry".to_string()));
+        assert!(ps.options.contains(&"continue_from".to_string()));
+        assert!(ps.options.contains(&"abort".to_string()));
+        assert!(ps.instruction.contains("work"));
+    }
+
+    #[test]
+    fn supervisor_decision_clears_after_node_retry() {
+        let events = vec![
+            ev(
+                0,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                EventPayload::WakeRaised {
+                    trigger: crate::event::WakeTrigger::NodeTimeout,
+                    node: "work".into(),
+                    detail: String::new(),
+                },
+            ),
+            ev(
+                2,
+                EventPayload::SupervisorAction {
+                    action: "node_retry".into(),
+                    node: Some("work".into()),
+                    detail: String::new(),
+                },
+            ),
+        ];
+        assert!(pending_supervisor_decision(&events).is_none());
     }
 }

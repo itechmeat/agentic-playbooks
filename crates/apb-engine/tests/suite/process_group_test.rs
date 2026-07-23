@@ -34,34 +34,8 @@ fn pid_alive(pid: &str) -> bool {
         .unwrap_or(false)
 }
 
-#[test]
-fn timeout_kills_whole_process_tree() {
-    let bindir = tempfile::tempdir().unwrap();
-    let work = tempfile::tempdir().unwrap();
-    let prog = write_spawning_agent(bindir.path());
-    let ad = ClaudeAdapter {
-        program: prog,
-        spec: builtin("claude").unwrap(),
-    };
-
-    let err = ad
-        .run(&AgentTask {
-            prompt: "go",
-            model: "haiku",
-            workdir: work.path(),
-            timeout: Some(Duration::from_secs(1)),
-            stream_log: None,
-            soul: None,
-            grant_autonomy: false,
-            connector_policy: &Default::default(),
-            interactive: false,
-            node: "test",
-            agent: "claude",
-        })
-        .unwrap_err();
-    assert!(matches!(err.0, ErrorClass::Timeout), "got: {err:?}");
-
-    let pid = fs::read_to_string(work.path().join("grandchild.pid"))
+fn assert_grandchild_dead(work: &Path) {
+    let pid = fs::read_to_string(work.join("grandchild.pid"))
         .expect("agent should have recorded a grandchild pid");
     let pid = pid.trim();
     assert!(!pid.is_empty(), "empty grandchild pid");
@@ -79,6 +53,100 @@ fn timeout_kills_whole_process_tree() {
     }
     assert!(
         !alive,
-        "grandchild pid {pid} survived timeout: process tree not killed"
+        "grandchild pid {pid} survived tear-down: process tree not killed"
     );
+}
+
+fn agent_task<'a>(
+    work: &'a Path,
+    timeout: Option<Duration>,
+    policy: &'a apb_engine::adapter::ConnectorEnvPolicy,
+) -> AgentTask<'a> {
+    AgentTask {
+        prompt: "go",
+        model: "haiku",
+        workdir: work,
+        timeout,
+        stream_log: None,
+        soul: None,
+        grant_autonomy: false,
+        connector_policy: policy,
+        interactive: false,
+        node: "test",
+        agent: "claude",
+    }
+}
+
+#[test]
+fn timeout_kills_whole_process_tree() {
+    let bindir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let prog = write_spawning_agent(bindir.path());
+    let ad = ClaudeAdapter {
+        program: prog,
+        spec: builtin("claude").unwrap(),
+    };
+    let policy = Default::default();
+
+    let err = ad
+        .run(&agent_task(
+            work.path(),
+            Some(Duration::from_secs(1)),
+            &policy,
+        ))
+        .unwrap_err();
+    assert!(matches!(err.0, ErrorClass::Timeout), "got: {err:?}");
+    assert_grandchild_dead(work.path());
+}
+
+/// Issue 45 finding 11: cancel and timeout share `kill_process_tree`. A
+/// mid-run cancel flag must tear down the whole attempt process group the same
+/// way a node timeout does, so no grandchild of the cancelled attempt survives.
+#[test]
+fn cancel_kills_whole_process_tree() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::thread;
+
+    let bindir = tempfile::tempdir().unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let prog = write_spawning_agent(bindir.path());
+    let ad = ClaudeAdapter {
+        program: prog,
+        spec: builtin("claude").unwrap(),
+    };
+    let policy = Default::default();
+    let cancel = Arc::new(AtomicBool::new(false));
+    let cancel_flag = Arc::clone(&cancel);
+    let pid_file = work.path().join("grandchild.pid");
+
+    // Wait until the agent has written grandchild.pid, then cancel. Without
+    // that barrier a fast cancel could race the spawn and the assertion would
+    // have no pid to check.
+    thread::spawn(move || {
+        let started = Instant::now();
+        while started.elapsed() < Duration::from_secs(5) {
+            if pid_file.is_file() {
+                break;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+        cancel_flag.store(true, Ordering::Relaxed);
+    });
+
+    let err = ad
+        .run_cancellable(
+            &agent_task(work.path(), None, &policy),
+            &cancel,
+            None,
+            None,
+            None,
+            None,
+        )
+        .unwrap_err();
+    assert!(
+        matches!(err.0, ErrorClass::Transport) && err.1.contains("cancelled"),
+        "got: {err:?}"
+    );
+    assert_grandchild_dead(work.path());
 }

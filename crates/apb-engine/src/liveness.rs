@@ -306,18 +306,64 @@ fn driver_verdict(run_id: &str, probe: Probe) -> bool {
 }
 
 /// Driver liveness as a three-valued answer for reporting: `None` when there
-/// is no `driver.pid` at all (nothing claims to be driving, which is the
+/// is no drive claim at all (nothing claims to be driving, which is the
 /// normal state of a finished run), otherwise whether that claim holds.
 ///
 /// `run_status` needs the distinction: "no drive in progress" and "the drive
 /// that claimed this run is gone" look identical under a plain bool, and only
 /// the second one is a problem.
+///
+/// Parent-driven children (issue #45 finding 10): a sub-playbook run driven
+/// in-process by its parent does not own a dedicated driver process. Its
+/// liveness follows the parent's drive (via `driven_by` and/or
+/// `run.yaml`'s `parent_run`), so doctor/status never report a healthy child
+/// as dead just because `driver.pid` named the parent process.
 pub fn driver_alive(run_dir: &Path, run_id: &str) -> Option<bool> {
     // One read, then the verdict against that pid: see `driver_pid_is_live`
     // for why reading `driver.pid` twice reports a cleanly finished drive as a
     // dead one.
-    let pid = crate::driver::read_driver_pid(run_dir)?;
-    Some(driver_pid_is_live(pid, run_id))
+    if let Some(pid) = crate::driver::read_driver_pid(run_dir) {
+        if driver_pid_is_live(pid, run_id) {
+            return Some(true);
+        }
+        // Stale-looking pid on a parent-driven child: the file often names the
+        // parent's process (legacy claim) or a reused number. Fall through to
+        // the parent-drive check before calling the claim false.
+        if let Some(v) = parent_driven_alive(run_dir) {
+            return Some(v);
+        }
+        return Some(false);
+    }
+    parent_driven_alive(run_dir)
+}
+
+/// Whether this run is driven in-process by a live parent drive.
+///
+/// `Some(true)` / `Some(false)` when a parent relationship is known;
+/// `None` when this run has no parent (top-level, or no claim either way).
+fn parent_driven_alive(run_dir: &Path) -> Option<bool> {
+    let parent_id = crate::driver::read_driven_by(run_dir).or_else(|| {
+        crate::run_config::read_run_config(run_dir)
+            .ok()
+            .and_then(|c| c.parent_run)
+    })?;
+    let parent_dir = run_dir.parent()?.join(&parent_id);
+    if !parent_dir.is_dir() {
+        // Parent run directory gone: the relationship is recorded but nothing
+        // can be driving through it.
+        return Some(false);
+    }
+    // Recurse: a nested child of a nested child follows the same rule. Depth
+    // is bounded by MAX_SUBPLAYBOOK_DEPTH, so this cannot stack overflow on a
+    // well-formed tree.
+    match driver_alive(&parent_dir, &parent_id) {
+        // Parent has an active drive claim.
+        Some(v) => Some(v),
+        // Parent has no claim of its own either. A finished parent cannot be
+        // driving this child; report dead rather than "no claim" so a
+        // non-terminal orphaned child is not invisible.
+        None => Some(false),
+    }
 }
 
 /// Does this command line belong to the detached driver of `run_id`?
@@ -529,6 +575,57 @@ pub fn lost_nodes(events: &[Event]) -> BTreeSet<String> {
         })
         .filter(|a| a.pid.is_some_and(|pid| !pid_is_live(pid)))
         .map(|a| a.node)
+        .collect()
+}
+
+/// Nodes whose currently open attempt process is still alive. The pure fold
+/// maps an open `attempt_started` to `interrupted` (crash-shape for offline
+/// readers); live reporting must re-promote those nodes to running so an
+/// healthy in-flight agent never flaps to interrupted (issue #45 finding 9).
+pub fn live_open_nodes(events: &[Event]) -> BTreeSet<String> {
+    let lost = lost_nodes(events);
+    open_attempts(events)
+        .into_iter()
+        .filter(|a| !lost.contains(&a.node))
+        .filter(|a| a.pid.is_some_and(pid_is_live))
+        .map(|a| a.node)
+        .collect()
+}
+
+/// Run status for live reporting: pure fold plus the process-table overlay.
+///
+/// An open attempt with a live pid forces `running` even when the pure fold
+/// said `interrupted` (issue #45 finding 9). Terminal and paused pure-fold
+/// outcomes are left alone.
+pub fn reported_run_status(events: &[Event]) -> crate::state::RunStatus {
+    use crate::state::RunStatus;
+    let pure = RunState::fold(events).run_status;
+    if matches!(pure, RunStatus::Interrupted) && !live_open_nodes(events).is_empty() {
+        return RunStatus::Running;
+    }
+    pure
+}
+
+/// Per-node status string for live reporting: pure fold, with `lost` for a
+/// dead attempt pid and `running` for a live open attempt that the pure fold
+/// would otherwise call `interrupted` (issue #45 finding 9).
+pub fn reported_node_statuses(events: &[Event]) -> BTreeMap<String, String> {
+    let state = RunState::fold(events);
+    let lost = lost_nodes(events);
+    let live = live_open_nodes(events);
+    state
+        .nodes
+        .iter()
+        .map(|(k, v)| {
+            let status = if lost.contains(k) {
+                LOST.to_string()
+            } else if live.contains(k) {
+                NodeStatus::Running.as_str().to_string()
+            } else {
+                v.as_str().to_string()
+            };
+            (k.clone(), status)
+        })
         .collect()
 }
 
@@ -1021,5 +1118,119 @@ mod tests {
             a.past_estimate,
             "a stall after the open AttemptStarted must mark past_estimate"
         );
+    }
+
+    /// Issue #45 finding 9: pure fold says interrupted for an open attempt,
+    /// but a live pid must report as running at the status surface.
+    #[test]
+    fn live_open_attempt_reports_running_not_interrupted() {
+        let live = std::process::id();
+        let events = vec![
+            ev(
+                0,
+                1000,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                2000,
+                EventPayload::NodeStarted {
+                    node: "a".into(),
+                    attempt: 1,
+                },
+            ),
+            ev(2, 3000, attempt_started("a", 1, Some(live))),
+        ];
+        // Pure fold still captures the crash shape for offline readers.
+        assert_eq!(
+            RunState::fold(&events).run_status,
+            crate::state::RunStatus::Interrupted
+        );
+        assert_eq!(
+            RunState::fold(&events).nodes.get("a"),
+            Some(&NodeStatus::Interrupted)
+        );
+        // Live reporting re-promotes.
+        assert_eq!(
+            reported_run_status(&events),
+            crate::state::RunStatus::Running
+        );
+        assert_eq!(
+            reported_node_statuses(&events).get("a").map(String::as_str),
+            Some("running")
+        );
+        assert!(live_open_nodes(&events).contains("a"));
+        assert!(!lost_nodes(&events).contains("a"));
+    }
+
+    /// Issue #45 finding 10: a child with no driver.pid but a live parent
+    /// drive must report driver_alive true (parent-driven, not dead).
+    #[test]
+    fn parent_driven_child_follows_parent_driver_liveness() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runs = tmp.path().join(".apb/runs");
+        let parent_dir = runs.join("parent-1");
+        let child_dir = runs.join("child-1");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        // Parent owns a live driver.pid (this process).
+        apb_core::fsutil::atomic_write(
+            &crate::driver::driver_pid_path(&parent_dir),
+            std::process::id().to_string().as_bytes(),
+        )
+        .unwrap();
+        // Child is nested: driven_by + parent_run, no driver.pid of its own.
+        apb_core::fsutil::atomic_write(&crate::driver::driven_by_path(&child_dir), b"parent-1")
+            .unwrap();
+        crate::run_config::write_run_config(
+            &child_dir,
+            &crate::run_config::RunConfig {
+                parent_run: Some("parent-1".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(driver_alive(&child_dir, "child-1"), Some(true));
+        assert_eq!(driver_alive(&parent_dir, "parent-1"), Some(true));
+    }
+
+    /// Issue #45 finding 10 transitional: child still has parent pid in
+    /// driver.pid (legacy claim) but parent_run is set and parent is live.
+    #[test]
+    fn legacy_child_driver_pid_naming_parent_still_reads_alive_via_parent() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runs = tmp.path().join(".apb/runs");
+        let parent_dir = runs.join("parent-2");
+        let child_dir = runs.join("child-2");
+        std::fs::create_dir_all(&parent_dir).unwrap();
+        std::fs::create_dir_all(&child_dir).unwrap();
+
+        apb_core::fsutil::atomic_write(
+            &crate::driver::driver_pid_path(&parent_dir),
+            std::process::id().to_string().as_bytes(),
+        )
+        .unwrap();
+        // Legacy shape: child driver.pid holds an impossible/stale pid that
+        // fails the own-run argv check. parent_run still saves the verdict.
+        apb_core::fsutil::atomic_write(
+            &crate::driver::driver_pid_path(&child_dir),
+            u32::MAX.to_string().as_bytes(),
+        )
+        .unwrap();
+        crate::run_config::write_run_config(
+            &child_dir,
+            &crate::run_config::RunConfig {
+                parent_run: Some("parent-2".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(driver_alive(&child_dir, "child-2"), Some(true));
     }
 }

@@ -144,6 +144,9 @@ mod profile_run_test;
 mod progress_api_test;
 #[path = "suite/question_channel_test.rs"]
 mod question_channel_test;
+#[cfg(unix)]
+#[path = "suite/rebind_test.rs"]
+mod rebind_test;
 #[path = "suite/report_summary_test.rs"]
 mod report_summary_test;
 #[path = "suite/resume_capture_test.rs"]
@@ -174,6 +177,8 @@ mod subplaybook_run_test;
 mod success_check_test;
 #[path = "suite/supervised_drive_test.rs"]
 mod supervised_drive_test;
+#[path = "suite/supervisor_channel_delivery_test.rs"]
+mod supervisor_channel_delivery_test;
 #[path = "suite/supervisor_commands_test.rs"]
 mod supervisor_commands_test;
 #[path = "suite/wait_test.rs"]

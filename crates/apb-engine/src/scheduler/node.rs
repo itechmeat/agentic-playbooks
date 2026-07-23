@@ -196,7 +196,6 @@ pub(crate) fn execute_node(
             profile,
             max_retries,
             timeout_seconds,
-            success_check,
             isolation,
             interactive,
             question_timeout_seconds,
@@ -220,6 +219,14 @@ pub(crate) fn execute_node(
                 (None, Some(p)) => p.clone(),
                 (None, None) => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
+            // Issue #45 finding 2: deliver every applied supervisor note into
+            // the agent attempt prompt, even when the template never references
+            // `{{run.context}}`. Resume re-invocations carry only the user's
+            // answer (session holds prior context) and skip this. Script nodes
+            // never reach this arm.
+            if resume.is_none() {
+                text = crate::context::with_supervisor_notes(&text, &read_all(run_dir)?);
+            }
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
             // Stall detection (spec 2026-07-21 run-reliability) fires ONLY for a
@@ -266,7 +273,9 @@ pub(crate) fn execute_node(
                     "node `{node_id}` has no execution manifest: this run predates agent profiles and cannot be resumed after the schema 2 upgrade - start a fresh run"
                 ))
             })?;
-            let entry = manifest.for_node(node_id).cloned().ok_or_else(|| {
+            // The EFFECTIVE binding: a mid-run rebind (issue #45 finding 5)
+            // overlays the manifest for future attempts of this node.
+            let entry = effective_for_node(run_dir, &manifest, node_id)?.ok_or_else(|| {
                 EngineError::Invalid(format!(
                     "no manifest entry for node `{node_id}` (no profile bound)"
                 ))
@@ -597,11 +606,12 @@ pub(crate) fn execute_node(
                             *stall_err.borrow_mut() = Some(e);
                             return;
                         }
-                        if let Err(e) = journal.append(EventPayload::WakeRaised {
-                            trigger: crate::event::WakeTrigger::Anomaly,
-                            node: node_id.to_string(),
+                        if let Err(e) = journal.raise_wake(
+                            run_dir,
+                            crate::event::WakeTrigger::Anomaly,
+                            node_id,
                             detail,
-                        }) {
+                        ) {
                             *stall_err.borrow_mut() = Some(e);
                         }
                     };
@@ -745,39 +755,62 @@ pub(crate) fn execute_node(
                                 // journaled so the emptiness is visible in the
                                 // event log, exactly like the stall anomaly.
                                 if report.output.trim().is_empty() {
-                                    journal.append(EventPayload::WakeRaised {
-                                        trigger: crate::event::WakeTrigger::Anomaly,
-                                        node: node_id.to_string(),
-                                        detail: format!(
+                                    journal.raise_wake(
+                                        run_dir,
+                                        crate::event::WakeTrigger::Anomaly,
+                                        node_id,
+                                        format!(
                                             "agent_task node `{node_id}` attempt {cur_attempt} reported success with empty output"
                                         ),
-                                    })?;
-                                }
-                                // A deterministic check on top of the self-report (spec 6.2):
-                                // a non-zero check exit code makes the node Failed regardless
-                                // of the agent's report. We run it in the SAME attempt
-                                // workdir the agent worked in (for an isolated node -
-                                // attempt_workdir, otherwise the shared workdir), otherwise
-                                // the check would validate a directory the agent never wrote to.
-                                if let Some(check) = success_check.as_ref() {
-                                    // success_check runs only AFTER this branch's agent
-                                    // has succeeded (meaning this branch was not
-                                    // cancelled) - we do not propagate cancellation here.
-                                    let r = run_script(
-                                        run_dir,
-                                        &attempt_workdir,
-                                        check,
-                                        "sh",
-                                        None,
-                                        None,
                                     )?;
-                                    if r.status != NodeStatus::Succeeded {
+                                }
+                                // A success_check gates the self-report. It runs only
+                                // AFTER this branch's agent has succeeded (meaning this
+                                // branch was not cancelled) - we do not propagate
+                                // cancellation here. Two shapes:
+                                match node.success_check.as_ref() {
+                                    // Deterministic sh-script check (spec 6.2): a non-zero
+                                    // exit makes the node Failed regardless of the agent's
+                                    // report. We run it in the SAME attempt workdir the
+                                    // agent worked in (for an isolated node - attempt_workdir,
+                                    // otherwise the shared workdir), otherwise the check would
+                                    // validate a directory the agent never wrote to.
+                                    Some(apb_core::schema::SuccessCheck::Script(check)) => {
+                                        let r = run_script(
+                                            run_dir,
+                                            &attempt_workdir,
+                                            check,
+                                            "sh",
+                                            None,
+                                            None,
+                                        )?;
+                                        if r.status != NodeStatus::Succeeded {
+                                            return Ok(AttemptOutcome::Finished {
+                                                status: NodeStatus::Failed,
+                                                output: format!("success_check `{check}` failed"),
+                                                events,
+                                            });
+                                        }
+                                    }
+                                    // Completion-marker check (issue 45 finding 1): the
+                                    // literal marker must appear in the node output, else the
+                                    // reported success is rejected and flows through the
+                                    // normal retry/failure-edge machinery. This defends
+                                    // against a long-running orchestrator that exits early at
+                                    // its first wait phase and records interim text as
+                                    // success.
+                                    Some(apb_core::schema::SuccessCheck::Marker { marker })
+                                        if !report.output.contains(marker.as_str()) =>
+                                    {
                                         return Ok(AttemptOutcome::Finished {
                                             status: NodeStatus::Failed,
-                                            output: format!("success_check `{check}` failed"),
+                                            output: format!(
+                                                "success report rejected: completion marker `{marker}` not found in output"
+                                            ),
                                             events,
                                         });
                                     }
+                                    Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => {}
                                 }
                                 return Ok(AttemptOutcome::Finished {
                                     status: NodeStatus::Succeeded,
@@ -901,7 +934,8 @@ pub(crate) fn execute_finish_answer(
     // every completed node's raw output, which always survives verbatim in the
     // append-only log even after the compaction that repeated resume +
     // patch-migration cycles trigger. See `build_terminal_context`.
-    let context = build_terminal_context(&read_all(run_dir)?, cfg.instruction.as_deref());
+    let events = read_all(run_dir)?;
+    let context = build_terminal_context(&events, cfg.instruction.as_deref());
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -915,6 +949,9 @@ pub(crate) fn execute_finish_answer(
         &hooks,
         &context,
     );
+    // Finish-with-prompt is an agent attempt: same note delivery as agent_task
+    // (issue #45 finding 2).
+    let text = crate::context::with_supervisor_notes(&text, &events);
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)
@@ -924,7 +961,8 @@ pub(crate) fn execute_finish_answer(
     let manifest = crate::manifest::read(run_dir)?.ok_or_else(|| {
         EngineError::Invalid(format!("finish node `{node_id}` has no execution manifest"))
     })?;
-    let entry = manifest.for_node(node_id).cloned().ok_or_else(|| {
+    // The EFFECTIVE binding: honor a mid-run rebind (issue #45 finding 5).
+    let entry = effective_for_node(run_dir, &manifest, node_id)?.ok_or_else(|| {
         EngineError::Invalid(format!("no manifest entry for finish node `{node_id}`"))
     })?;
     if entry.chain.is_empty() {
@@ -1294,6 +1332,8 @@ pub(crate) fn run_playbook_node(
         && !run_is_terminal(root, &existing)?
     {
         let res = resume_inner(root, &existing, None, false, true)?;
+        // Nested resume can also mirror wakes onto the parent log.
+        log.resync_seq()?;
         return Ok(map_child_outcome(root, &existing, res.outcome));
     }
 
@@ -1452,6 +1492,9 @@ pub(crate) fn run_playbook_node(
         RunMode::Autonomous,
         cp.supervisor_expected,
     )?;
+    // Child may have mirrored wakes onto this parent log while we held it open
+    // (issue #45 finding 8). Re-sync next_seq before any further parent appends.
+    log.resync_seq()?;
     Ok(map_child_outcome(root, &child_run_id, res.outcome))
 }
 

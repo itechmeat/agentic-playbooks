@@ -782,29 +782,18 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
     let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
     let state = RunState::fold(&events);
-    // Liveness overlay (Task 9). The fold is pure and replayable; these three
-    // read the machine's process table at request time, which is precisely why
-    // they are applied here rather than folded into `RunState`.
+    // Liveness overlay (Task 9 / issue #45 findings 9 and 10). The pure fold
+    // is replayable from the journal alone; these read the process table (and
+    // parent-drive markers) at request time, which is precisely why they are
+    // applied here rather than folded into `RunState`.
     //
-    // The incident behind them: a crashed attempt kept reporting an in-flight
-    // node for 19 minutes and `run_status` carried no timestamps at all, so
-    // "is it stuck or working?" could not be answered from the API. `lost`
-    // answers the first question, `node_times` the second.
-    let lost = apb_engine::liveness::lost_nodes(&events);
+    // `reported_*` re-promotes a live open attempt from the pure-fold
+    // `interrupted` crash shape back to `running`, and maps a dead attempt
+    // pid to `lost`. `driver_alive` also understands parent-driven children.
     let node_times = apb_engine::liveness::node_times(&events);
     let driver_alive = apb_engine::liveness::driver_alive(&dir, run_id);
-    let nodes: BTreeMap<String, String> = state
-        .nodes
-        .iter()
-        .map(|(k, v)| {
-            let status = if lost.contains(k) {
-                apb_engine::liveness::LOST.to_string()
-            } else {
-                v.as_str().to_string()
-            };
-            (k.clone(), status)
-        })
-        .collect();
+    let nodes = apb_engine::liveness::reported_node_statuses(&events);
+    let run_status = apb_engine::liveness::reported_run_status(&events);
     let progress = apb_engine::progress::from_run_dir(&dir, &events);
     // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
     // nodes, Task 8): callers that only care about the pending question
@@ -818,6 +807,9 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // calls `run_status` is forced to see the pending decision, its options,
     // and how to answer - the gate no longer waits silently forever.
     let pending_review = progress.as_ref().and_then(|p| p.pending_review.clone());
+    // Supervised failure/timeout park (issue #45 finding 4): same first-class
+    // lift so the wake is never only buried under a silent "running" status.
+    let pending_supervisor = progress.as_ref().and_then(|p| p.pending_supervisor.clone());
     let answer = apb_engine::progress::run_answer(&dir, &events);
     let children: Vec<Value> = events
         .iter()
@@ -826,7 +818,11 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
                 let child_dir = dir.parent().map(|p| p.join(run_id));
                 let status = child_dir
                     .and_then(|d| read_all(&d).ok())
-                    .map(|ev| RunState::fold(&ev).run_status.as_str().to_string())
+                    .map(|ev| {
+                        apb_engine::liveness::reported_run_status(&ev)
+                            .as_str()
+                            .to_string()
+                    })
                     .unwrap_or_else(|| "unknown".to_string());
                 Some(json!({ "node_id": node_id, "run_id": run_id, "status": status }))
             }
@@ -839,12 +835,12 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // from run_status instead of grepping events.jsonl by hand. `None` for
     // anything other than a failed run, and for a failed run whose log
     // predates this fix (no `RunError` was ever appended for it).
-    let failure_reason = (state.run_status == RunStatus::Failed)
+    let failure_reason = (run_status == RunStatus::Failed)
         .then(|| state.failure_reason.as_ref().map(FailureReason::display))
         .flatten();
     Ok(json!({
         "run_id": run_id,
-        "run_status": state.run_status.as_str(),
+        "run_status": run_status.as_str(),
         "nodes": nodes,
         "node_times": node_times,
         "driver_alive": driver_alive,
@@ -852,6 +848,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "progress": progress,
         "pending_question": pending_question,
         "pending_review": pending_review,
+        "pending_supervisor": pending_supervisor,
         "answer": answer,
         "children": children,
         "continued_from": cfg.continued_from,
@@ -951,7 +948,12 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     Ok(base)
 }
 
-pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<Value, ToolError> {
+pub fn run_resume(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+) -> Result<Value, ToolError> {
     // Compute the resume decision up front so the ack reports where and why the
     // run resumes. This must run BEFORE the drive: once the run reaches a
     // terminal state, an argument-free `plan_resume` would refuse it.
@@ -967,13 +969,25 @@ pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<
     // successful resume followed by a run that never moved.
     let pending_stop =
         apb_engine::control::pending_stop_seq(&root.join(".apb/runs").join(run_id))?.is_some();
-    apb_engine::resume_detached(root, run_id, from_node)?;
+    // The drift preflight runs inside resume_detached_with: a drift the caller
+    // did not allow is returned as an Err HERE (issue #45 finding 3), instead
+    // of the old detached spawn whose child failed its own check on null stdio
+    // and left this ack reporting `detached: true` for a run that never moved.
+    apb_engine::resume_detached_with(root, run_id, from_node, allow_environment_drift)?;
     let mut ack = json!({
         "run_id": run_id,
         "resumed_from": decision.start_node,
         "reason": decision.reason.as_str(),
         "detached": true,
     });
+    if allow_environment_drift && let Some(obj) = ack.as_object_mut() {
+        obj.insert(
+            "note".into(),
+            json!(
+                "environment drift override accepted: an agent binary changed since run start, and resume is proceeding anyway; the accepted drift is recorded in the run event log"
+            ),
+        );
+    }
     if pending_stop && let Some(obj) = ack.as_object_mut() {
         obj.insert("stops_on_pending_abort".into(), json!(true));
         obj.insert(
@@ -1054,6 +1068,7 @@ pub fn supervisor_wait_event(
         "wake": wake,
         "run_status": status["run_status"],
         "pending_review": status["pending_review"],
+        "pending_supervisor": status["pending_supervisor"],
     }))
 }
 
@@ -1092,6 +1107,36 @@ pub fn run_continue_from(root: &Path, run_id: &str, node: &str) -> Result<Value,
 
 pub fn run_pause(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let seq = post_supervisor_command(root, run_id, Control::Pause)?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
+/// Posts a `Control::Rebind` to switch a node's executor profile mid-run (issue
+/// #45 finding 5). Writes no events - drive journals `profile_rebound` (or
+/// `rebind_rejected`) when it applies the command (single-writer). `bundle` is
+/// the digest the policy gate (`policy::check_rebind`) verified, pinned so drive
+/// re-verifies the re-snapshotted profile against it (anti-TOCTOU). The gate runs
+/// at the server boundary before this call, so an untrusted/unresolved profile
+/// never reaches here.
+pub fn rebind_profile(
+    root: &Path,
+    run_id: &str,
+    node: &str,
+    profile: &str,
+    scope: apb_core::profile::ProfileScope,
+    bundle: &str,
+    reason: Option<String>,
+) -> Result<Value, ToolError> {
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::Rebind {
+            node: node.to_string(),
+            profile: profile.to_string(),
+            scope,
+            bundle: bundle.to_string(),
+            reason,
+        },
+    )?;
     Ok(json!({ "posted_seq": seq }))
 }
 
@@ -1248,7 +1293,7 @@ pub fn supervisor_report(root: &Path, run_id: &str, text: &str) -> Result<Value,
 
 /// Extracts the capability list from `playbook.supervisor.policy.capabilities`.
 /// Distinguishes an absent key (default) from a present one (exact value):
-/// - key absent -> default `["observe", "retry", "patch_playbook"]`
+/// - key absent -> default `["observe", "retry", "rebind", "patch_playbook"]`
 ///   (all implemented capabilities, see spec 9.5: the default is all)
 /// - key present as a sequence -> its strings (empty if empty)
 /// - key present as a scalar string -> a single-element list
@@ -1271,6 +1316,7 @@ pub fn supervisor_capabilities(
         None => vec![
             "observe".to_string(),
             "retry".to_string(),
+            "rebind".to_string(),
             "patch_playbook".to_string(),
         ],
         Some(v) if v.is_sequence() => v

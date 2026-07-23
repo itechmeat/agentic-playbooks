@@ -487,7 +487,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Resume a run, optionally from a given node",
+        description = "Resume a run, optionally from a given node. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn run_resume(
@@ -495,6 +495,7 @@ impl WfMcp {
         Parameters(RunResumeArgs {
             run_id,
             from_node,
+            allow_environment_drift,
             workspace,
         }): Parameters<RunResumeArgs>,
     ) -> CallToolResult {
@@ -502,7 +503,12 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        to_call_tool_result(tools::run_resume(&root, &run_id, from_node.as_deref()))
+        to_call_tool_result(tools::run_resume(
+            &root,
+            &run_id,
+            from_node.as_deref(),
+            allow_environment_drift,
+        ))
     }
 
     #[tool(

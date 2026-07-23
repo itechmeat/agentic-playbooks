@@ -102,17 +102,24 @@ fn active_elapsed(started: Instant, pending_ms: u128) -> Duration {
     started.elapsed().saturating_sub(pending)
 }
 
-/// Terminates the agent's whole process tree and reaps the leader. On Unix
-/// this sends SIGKILL to the group (`kill(-pgid, ...)`, pgid == pid because of
-/// process_group(0) at spawn time) so children are not orphaned; on other
-/// platforms - child.kill().
+/// Terminates the agent's whole process tree and reaps the leader.
+///
+/// Shared by the cancel path and the node-timeout path (`check_cancel_timeout`
+/// and every other early tear-down): both must kill the process GROUP, not only
+/// the direct child, so grandchildren (MCP servers, tool subprocesses, codex
+/// workers) cannot outlive a timed-out or cancelled attempt (issue 45 finding
+/// 11). Shape matches `proc::run_capture`: group kill first, then the leader
+/// through the handle (covers the case where `process_group(0)` did not take),
+/// then a wait to reap. Platform guards match `kill_process_group` (unix group
+/// form; non-unix falls back to `child.kill()` only).
 fn kill_process_tree(child: &mut Child) {
     #[cfg(unix)]
     kill_process_group(child.id());
-    #[cfg(not(unix))]
-    {
-        let _ = child.kill();
-    }
+    // Also the leader through the handle: on non-unix there is no group form,
+    // and on unix this covers a spawn where `process_group(0)` did not take so
+    // the group kill above missed the leader. A second kill on an already-dead
+    // process is a harmless error we ignore.
+    let _ = child.kill();
     // Bounded: the leader has just been SIGKILLed, which no process can catch
     // or ignore, so this reaps a pid that is already dead or dying.
     let _ = child.wait();
