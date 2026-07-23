@@ -1193,12 +1193,13 @@ fn drive_inner(
     mode: RunMode,
     supervisor_expected: bool,
 ) -> Result<RunResult, EngineError> {
-    // Publish which OS process is driving this run, for as long as the drive
-    // lasts (Task 7). Every drive invocation takes one - the CLI's synchronous
-    // run, the in-process background thread, and the detached driver child
-    // alike - and the guard removes the file on every exit path, so
-    // `driver.pid` present means "a process claims to be driving this run".
-    let _driver_pid = crate::driver::DriverPidGuard::claim(run_dir);
+    // Publish who is driving this run, for as long as the drive lasts
+    // (Task 7 / issue #45 finding 10). Top-level runs own `driver.pid`;
+    // sub-playbook children driven in-process by a parent write `driven_by`
+    // instead so doctor/status never treat the parent process as a stale
+    // dedicated driver of the child. The guard removes the claim on every
+    // exit path.
+    let _driver_claim = crate::driver::DriveClaim::claim(run_dir, cfg.parent_run.as_deref());
     let workdir = root.to_path_buf();
     // Adapter env scrubbing (spec 4.3): the union of every env var name
     // referenced by ANY installed connector config (both scopes), computed once
