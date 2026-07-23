@@ -9,7 +9,7 @@ use std::sync::MutexGuard;
 
 use apb_core::registry::init_project;
 use apb_engine::event::{EventPayload, read_all};
-use apb_engine::scheduler::{RunOptions, resume_with, run};
+use apb_engine::scheduler::{RunOptions, resume_detached_with, resume_with, run};
 use apb_engine::state::RunStatus;
 
 use crate::common;
@@ -733,6 +733,146 @@ fn env_drift_stops_resume_unless_allowed() {
     // With permission - it proceeds.
     let ok = resume_with(proj.path(), &res.run_id, Some("t"), true);
     assert!(ok.is_ok(), "resume with allow should succeed: {ok:?}");
+}
+
+#[test]
+fn resume_detached_preflight_returns_drift_error_without_spawning() {
+    // Issue #45 finding 3: a detached resume of a drifted run used to spawn a
+    // child that failed its drift check on null stdio and died silently, so
+    // `run_resume` reported `detached: true` for a run that never moved. The
+    // drift preflight now runs in the parent and returns the error inline.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(proj.path(), "arch", "", "", "role");
+    let stub = make_stub(bin.path(), DUMP_STUB);
+    set_env(&stub, home.path(), cfg.path(), None);
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run ok");
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+
+    // Drift the stub: a different binary fingerprint than the one recorded at
+    // run start.
+    fs::write(
+        &stub,
+        "#!/bin/sh\n# changed binary, different size now\necho done\n",
+    )
+    .unwrap();
+    let mut p = fs::metadata(&stub).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&stub, p).unwrap();
+
+    // The drift refusal comes back as an Err from the detached entry point
+    // itself, instead of an Ok(pid) the caller would ack as `detached: true`.
+    let err = resume_detached_with(proj.path(), &res.run_id, Some("t"), false).unwrap_err();
+    assert!(
+        err.to_string().contains("environment drift"),
+        "expected drift error inline, got: {err}"
+    );
+
+    // No driver was spawned: the preflight returned before spawn, so the pid
+    // file was never published. (A detached spawn that died silently would
+    // also leave no pid file, but it would also have returned Ok - the Err
+    // above is what proves the preflight ran in the parent.)
+    assert!(
+        apb_engine::driver::read_driver_pid(&run_dir).is_none(),
+        "no driver should have been spawned for a refused drift resume"
+    );
+
+    // The run is untouched: no `RunResumed` marker was written, so the run is
+    // still in the same state and remains resumable (here, with the override).
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunResumed { .. })),
+        "a refused detached resume must not journal a RunResumed marker"
+    );
+
+    // The override still threads through the detached path: with allow=true the
+    // preflight passes and a driver is spawned. The detached child re-execs
+    // `current_exe()` (this test binary), which has no `__drive-run` subcommand,
+    // so the child fails fast - but that failure happens AFTER the preflight
+    // returned Ok, which is what we assert here. The synchronous override is
+    // covered by `env_drift_stops_resume_unless_allowed` above.
+    let spawned = resume_detached_with(proj.path(), &res.run_id, Some("t"), true);
+    assert!(
+        spawned.is_ok(),
+        "allow=true must pass the preflight and spawn: {spawned:?}"
+    );
+    if let Ok(pid) = spawned {
+        // Reap the test-binary child so it does not linger; it exits non-zero
+        // immediately because the test harness has no __drive-run subcommand.
+        let _ = std::process::Command::new("kill")
+            .args(["-9", &pid.to_string()])
+            .status();
+    }
+}
+
+#[test]
+fn record_run_error_persists_failure_reason_visible_to_status() {
+    // Issue #45 finding 3: a detached driver whose resume fails at startup must
+    // leave an observable trace. `record_run_error` appends a `RunError` event
+    // that folds into `failure_reason`, so `run_status` and `apb doctor --run`
+    // show why the resume never moved the run.
+    let _l = lock();
+    let _g = EnvGuard;
+    let proj = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    seed_playbook(proj.path(), "");
+    seed_profile(proj.path(), "arch", "", "", "role");
+    set_env(
+        &make_stub(bin.path(), DUMP_STUB),
+        home.path(),
+        cfg.path(),
+        None,
+    );
+
+    let res = run(proj.path(), "p", None, RunOptions::default()).expect("run ok");
+    let run_dir = proj.path().join(".apb/runs").join(&res.run_id);
+
+    apb_engine::record_run_error(
+        proj.path(),
+        &res.run_id,
+        None,
+        "simulated detached startup failure",
+    )
+    .expect("record ok");
+
+    let events = read_all(&run_dir).unwrap();
+    let recorded = events.iter().find_map(|e| {
+        if let EventPayload::RunError { node, reason } = &e.payload {
+            Some((node.clone(), reason.clone()))
+        } else {
+            None
+        }
+    });
+    assert_eq!(
+        recorded,
+        Some((None, "simulated detached startup failure".to_string())),
+        "RunError event must be appended with a run-level (node=None) reason"
+    );
+
+    // The folded state exposes it as failure_reason, which is what run_status
+    // and `apb doctor --run` surface.
+    let state = apb_engine::state::RunState::fold(&events);
+    assert_eq!(
+        state.failure_reason.as_ref().map(|f| f.reason.as_str()),
+        Some("simulated detached startup failure"),
+        "failure_reason must reflect the recorded startup error"
+    );
+    assert_eq!(
+        state.failure_reason.and_then(|f| f.node),
+        None,
+        "a startup failure has no node"
+    );
 }
 
 #[test]

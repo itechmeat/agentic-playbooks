@@ -948,7 +948,12 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     Ok(base)
 }
 
-pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<Value, ToolError> {
+pub fn run_resume(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+) -> Result<Value, ToolError> {
     // Compute the resume decision up front so the ack reports where and why the
     // run resumes. This must run BEFORE the drive: once the run reaches a
     // terminal state, an argument-free `plan_resume` would refuse it.
@@ -964,13 +969,25 @@ pub fn run_resume(root: &Path, run_id: &str, from_node: Option<&str>) -> Result<
     // successful resume followed by a run that never moved.
     let pending_stop =
         apb_engine::control::pending_stop_seq(&root.join(".apb/runs").join(run_id))?.is_some();
-    apb_engine::resume_detached(root, run_id, from_node)?;
+    // The drift preflight runs inside resume_detached_with: a drift the caller
+    // did not allow is returned as an Err HERE (issue #45 finding 3), instead
+    // of the old detached spawn whose child failed its own check on null stdio
+    // and left this ack reporting `detached: true` for a run that never moved.
+    apb_engine::resume_detached_with(root, run_id, from_node, allow_environment_drift)?;
     let mut ack = json!({
         "run_id": run_id,
         "resumed_from": decision.start_node,
         "reason": decision.reason.as_str(),
         "detached": true,
     });
+    if allow_environment_drift && let Some(obj) = ack.as_object_mut() {
+        obj.insert(
+            "note".into(),
+            json!(
+                "environment drift override accepted: an agent binary changed since run start, and resume is proceeding anyway; the accepted drift is recorded in the run event log"
+            ),
+        );
+    }
     if pending_stop && let Some(obj) = ack.as_object_mut() {
         obj.insert("stops_on_pending_abort".into(), json!(true));
         obj.insert(

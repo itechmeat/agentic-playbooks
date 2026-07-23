@@ -11,7 +11,7 @@ use apb_engine::run_config::CacheRunMode;
 use apb_engine::state::RunStatus;
 use apb_engine::{
     ReviewCommand, RunMode, RunOptions, StopOutcome, drive_prepared, list_runs, post_review,
-    post_supervisor_command, prepare_supervised_background, resume, run, stop_run,
+    post_supervisor_command, prepare_supervised_background, resume_with, run, stop_run,
 };
 
 use crate::util::open_registry;
@@ -640,9 +640,10 @@ pub(crate) fn drive_run_child(
     run_id: &str,
     from_node: Option<&str>,
     resume: bool,
+    allow_environment_drift: bool,
 ) -> ExitCode {
     let res = if resume {
-        apb_engine::resume(root, run_id, from_node)
+        apb_engine::resume_with(root, run_id, from_node, allow_environment_drift)
     } else {
         apb_engine::drive_run_from_dir(root, run_id)
     };
@@ -652,7 +653,19 @@ pub(crate) fn drive_run_child(
             _ => ExitCode::from(1),
         },
         Err(e) => {
-            eprintln!("drive of run `{run_id}` failed: {e}");
+            // A detached driver's stdio is nulled by the spawner, so an error
+            // here would vanish with the process. Record it as a RunError event
+            // so `run_status` and `apb doctor --run` show why the resume never
+            // moved the run (issue #45 finding 3). Best effort: a write failure
+            // must not mask the original error we are about to report on stderr.
+            let reason = e.to_string();
+            if let Err(write_err) = apb_engine::record_run_error(root, run_id, None, &reason) {
+                eprintln!(
+                    "drive of run `{run_id}` failed: {e}; could not record startup error to run log: {write_err}"
+                );
+            } else {
+                eprintln!("drive of run `{run_id}` failed: {e}");
+            }
             ExitCode::from(2)
         }
     }
@@ -692,7 +705,12 @@ fn print_waiting_on_question(progress: Option<&apb_engine::ProgressSummary>) {
     }
 }
 
-pub(crate) fn resume_cmd(root: &Path, run_id: &str, from_node: Option<&str>) -> ExitCode {
+pub(crate) fn resume_cmd(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+) -> ExitCode {
     // Read BEFORE the drive: a resume of a run with a pending stop applies that
     // stop before it executes anything and returns immediately, which otherwise
     // looks like a resume that silently did nothing. Best effort - an
@@ -701,7 +719,7 @@ pub(crate) fn resume_cmd(root: &Path, run_id: &str, from_node: Option<&str>) -> 
         .ok()
         .flatten()
         .is_some();
-    match resume(root, run_id, from_node) {
+    match resume_with(root, run_id, from_node, allow_environment_drift) {
         Ok(res) => {
             println!("resume {} finished: {}", res.run_id, res.outcome.as_str());
             if pending_stop && res.outcome == RunStatus::Aborted {

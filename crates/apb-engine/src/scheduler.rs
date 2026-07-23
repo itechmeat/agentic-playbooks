@@ -1030,7 +1030,7 @@ pub fn start_detached_resolved(
 /// the child looks at the lock before that write lands.
 fn hand_to_detached_driver(root: &Path, prepared: PreparedRun) -> Result<String, EngineError> {
     let run_id = prepared.run_id().to_string();
-    let pid = match crate::driver::spawn_detached_driver(root, &run_id, None, false) {
+    let pid = match crate::driver::spawn_detached_driver(root, &run_id, None, false, false) {
         Ok(pid) => pid,
         Err(e) => {
             // No driver was started, so nothing will ever move this run. Close
@@ -1059,23 +1059,56 @@ fn hand_to_detached_driver(root: &Path, prepared: PreparedRun) -> Result<String,
 /// immediately. The caller is expected to have already computed the resume
 /// decision (`plan_resume`) for its acknowledgement: the child re-derives the
 /// same decision from the same journal.
+///
+/// Equivalent to `resume_detached_with(root, run_id, from_node, false)`:
+/// refuses on environment drift.
 pub fn resume_detached(
     root: &Path,
     run_id: &str,
     from_node: Option<&str>,
 ) -> Result<u32, EngineError> {
+    resume_detached_with(root, run_id, from_node, false)
+}
+
+/// Like `resume_detached`, but with explicit permission to continue despite
+/// environment drift (issue #45 finding 3). The drift preflight runs HERE,
+/// before the detached driver is spawned: a drift the caller did not allow is
+/// returned as an `Err` inline, instead of the old behaviour where the spawned
+/// child failed its own drift check on null stdio and died silently, leaving
+/// `run_resume` reporting `detached: true` for a run that never moved. When
+/// drift is allowed, the override flag is forwarded to the child so it writes
+/// the `EnvironmentDriftAccepted` events and skips its own refusal.
+pub fn resume_detached_with(
+    root: &Path,
+    run_id: &str,
+    from_node: Option<&str>,
+    allow_environment_drift: bool,
+) -> Result<u32, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    if !root.join(".apb/runs").join(run_id).is_dir() {
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    let pid = crate::driver::spawn_detached_driver(root, run_id, from_node, true)
-        .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
+    // Synchronous preflight: surface a drift refusal HERE rather than letting
+    // the detached child hit it with null stdio. The child re-runs the same
+    // check (it is the authoritative one and writes the accepted events when
+    // allowed); this parent-side pass exists only so the error reaches the
+    // caller instead of vanishing with the child process.
+    check_environment_drift(&run_dir, allow_environment_drift)?;
+    let pid = crate::driver::spawn_detached_driver(
+        root,
+        run_id,
+        from_node,
+        true,
+        allow_environment_drift,
+    )
+    .map_err(|e| EngineError::Invalid(format!("cannot start the detached run driver: {e}")))?;
     // As in `hand_to_detached_driver`: name the driver before returning, so a
     // stop issued the moment this call comes back sees a live driver instead of
     // finalizing a run the child is about to drive.
-    crate::driver::publish_driver_pid(&root.join(".apb/runs").join(run_id), pid);
+    crate::driver::publish_driver_pid(&run_dir, pid);
     Ok(pid)
 }
 
@@ -3025,6 +3058,33 @@ fn resume_inner(
         RunMode::Autonomous,
         supervisor_expected,
     )
+}
+
+/// Appends a `RunError` event for a detached driver that failed to start
+/// (issue #45 finding 3), so the reason is visible through `run_status`
+/// (`failure_reason`) and `apb doctor --run` instead of dying with the
+/// driver's null stdio. `node` is `None` because a startup failure happens
+/// before any node executes. Best-effort: a write failure here is logged to
+/// stderr and swallowed, never masking the original error the caller holds.
+pub fn record_run_error(
+    root: &Path,
+    run_id: &str,
+    node: Option<&str>,
+    reason: &str,
+) -> Result<(), EngineError> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(EngineError::NotFound(format!("run `{run_id}`")));
+    }
+    let mut log = EventLog::open(&run_dir)?;
+    log.append(EventPayload::RunError {
+        node: node.map(str::to_string),
+        reason: reason.to_string(),
+    })?;
+    Ok(())
 }
 
 #[cfg(test)]
