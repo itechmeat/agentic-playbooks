@@ -768,7 +768,7 @@ pub struct Edge {
     pub max_traversals: Option<u32>,
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EdgeCondition {
     NodeStatus { node: String, equals: StatusEq },

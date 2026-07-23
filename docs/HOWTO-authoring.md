@@ -139,7 +139,13 @@ An edge's `condition` gates traversal on one of three types:
 - `output_match { node, pattern }` - matches when the named node's output
   contains `pattern` as a substring (not a regex).
 
-An edge with no `condition` always matches. A worked example wiring a review
+An edge with no `condition` always matches. Two edges from the same node with
+structurally identical conditions (or two fallbacks) and different targets are
+a V34 validation error: first-match routing would only ever take one of them,
+so the other target is dead or contradictory. Several unconditional edges from
+one node are parallel fan-out and are fine; an unconditional edge combined with
+a conditional one from the same node is also V34, because the unconditional
+edge makes the conditional unreachable. A worked example wiring a review
 gate:
 
 ```yaml
