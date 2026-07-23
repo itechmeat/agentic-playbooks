@@ -9,7 +9,7 @@ The version stays at `0.1.0` (in development) until the full plan functionality 
 ### Added
 - playbook.yaml schema (schema: 1) and validator V01-V15.
 - .apb/ directory structure (playbooks/versions/current/layouts/profiles/runs), atomic writes for control files.
-- CLI: apb init, apb list, apb validate, apb serve, apb run, apb runs, apb resume.
+- CLI: apb init, apb list, apb validate, apb dashboard, apb run, apb runs, apb resume.
 - Web: playbook list, read-only graph (svelte-flow, dagre auto-layout, horizontal layout), live updates from disk (watcher + WebSocket), full-screen layout with a 40px header.
 - serve.lock with a root fingerprint and instance id, lock released on graceful shutdown (SIGINT/SIGTERM).
 - Execution engine (apb-engine): event sourcing, state folding, retry and fallbacks, sh-script, shared context, one-off instruction, enforced max_loops, immutable version snapshot per run, single-writer lock on the working directory.

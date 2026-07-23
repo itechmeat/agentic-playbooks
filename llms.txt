@@ -87,7 +87,7 @@ apb run <id>        run a playbook
 apb runs            list runs
 apb resume <run>    resume a paused or interrupted run
 apb review          decide a pending human_review node
-apb serve           web UI on port 7321
+apb dashboard       web UI on port 7321
 apb mcp             stdio MCP server for coding agents
 apb doctor          diagnose environment
 apb detect          detect installed coding agents

@@ -59,6 +59,11 @@ pub struct Expectation {
     pub headers: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub body_contains: Option<Value>,
+    /// Subset match over the DECODED `body_form` pairs of the rendered
+    /// request, mirroring `body_contains` (spec
+    /// 2026-07-22-official-connectors-wave-3, section 4.1).
+    #[serde(default)]
+    pub body_form_contains: Option<BTreeMap<String, String>>,
     #[serde(default)]
     pub envelope: Option<Envelope>,
     #[serde(default)]
@@ -103,6 +108,7 @@ pub enum ExpectKind<'a> {
         url: &'a str,
         headers: Option<&'a BTreeMap<String, String>>,
         body_contains: Option<&'a Value>,
+        body_form_contains: Option<&'a BTreeMap<String, String>>,
     },
     Smtp(&'a Envelope),
     Mock {
@@ -146,6 +152,7 @@ impl Expectation {
             url,
             headers: self.headers.as_ref(),
             body_contains: self.body_contains.as_ref(),
+            body_form_contains: self.body_form_contains.as_ref(),
         })
     }
 }
@@ -266,6 +273,30 @@ cases:
             }
             _ => panic!("imap expectation must resolve to imap"),
         }
+    }
+
+    // -- body_form_contains (spec 2026-07-22-official-connectors-wave-3, 4.1) --
+
+    #[test]
+    fn body_form_contains_parses_and_resolves_to_http() {
+        let yaml = "cases:\n  - function: send_message\n    account: { base_url: https://chat.example.com }\n    args: { to: general, content: hi }\n    expect:\n      method: POST\n      url: https://chat.example.com/messages\n      body_form_contains: { to: general, content: hi }\n";
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        match doc.cases[0].expect.resolve().unwrap() {
+            ExpectKind::Http {
+                body_form_contains, ..
+            } => {
+                let subset = body_form_contains.expect("body_form_contains must resolve");
+                assert_eq!(subset.get("to"), Some(&"general".to_string()));
+                assert_eq!(subset.get("content"), Some(&"hi".to_string()));
+            }
+            _ => panic!("body_form_contains expectation must resolve to http"),
+        }
+    }
+
+    #[test]
+    fn unknown_expectation_key_still_rejected() {
+        let yaml = "cases:\n  - function: f\n    expect:\n      method: POST\n      url: https://x\n      body_form_bogus: { k: v }\n";
+        assert!(TestsDoc::from_yaml(yaml).is_err());
     }
 
     #[test]

@@ -17,7 +17,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use apb_core::connector::config;
-use apb_core::connector::def::{AuthSpec, ConnectorDoc, FunctionSpec};
+use apb_core::connector::def::{AuthSpec, ConnectorDoc, ErrorWhen, FunctionSpec};
 use apb_core::connector::secrets;
 use apb_core::connector::store;
 use apb_core::connector::template::{
@@ -203,6 +203,11 @@ struct HttpCall {
     /// NOT). This is the URL recorded in the event log.
     pre_auth_url: String,
     rendered_body: Option<Value>,
+    /// Rendered `body_form` pairs, DECODED (spec
+    /// 2026-07-22-official-connectors-wave-3, section 4.1); percent-encoded
+    /// into the wire body by `send_raw`. Mutually exclusive with
+    /// `rendered_body` by validation.
+    rendered_form: Option<Vec<(String, String)>>,
     /// Rendered per-function headers (spec 4.4). Values use `account.*`/`args.*`
     /// only; `secret.*` is forbidden here by `validate_templates`.
     headers: BTreeMap<String, String>,
@@ -210,6 +215,11 @@ struct HttpCall {
     /// function declares none or `--full` bypasses it.
     response_pick: Vec<String>,
     auth: Option<AuthSpec>,
+    /// The connector-level false-success predicate (spec
+    /// 2026-07-22-official-connectors-wave-3, section 4.2), applied by
+    /// `send_raw` after a 2xx maps Ok and after body redaction, BEFORE the
+    /// `response_pick` projection.
+    error_when: Option<ErrorWhen>,
     secrets: BTreeMap<String, String>,
     account_fields: BTreeMap<String, String>,
     timeout_sec: u64,
@@ -360,7 +370,7 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
 
     build_prepared(
         &function,
-        doc.auth.as_ref(),
+        &doc,
         account_name,
         maccount,
         &req.args,
@@ -393,6 +403,13 @@ pub struct RenderedRequest {
     pub method: String,
     pub pre_auth_url: String,
     pub rendered_body: Option<Value>,
+    /// The rendered `body_form` pairs (spec
+    /// 2026-07-22-official-connectors-wave-3, section 4.1), DECODED and in
+    /// manifest (BTreeMap) order; percent-encoding happens at send time so the
+    /// offline runner and the dry-run terminal compare readable values.
+    /// `None` when the function declares no `body_form` (mutually exclusive
+    /// with `rendered_body` by validation).
+    pub rendered_form: Option<Vec<(String, String)>>,
     /// The headers that would be sent: the rendered per-function `headers` with
     /// the default `User-Agent` folded in unless a function header already names
     /// it (case-insensitively). Auth headers are NOT included here (auth is
@@ -442,6 +459,11 @@ pub(crate) fn render_http(
         })?),
         None => None,
     };
+    let rendered_form = if function.body_form.is_empty() {
+        None
+    } else {
+        Some(render_form(function, &ctx)?)
+    };
     let mut headers = BTreeMap::new();
     for (name, template) in &function.headers {
         let value = render_raw(template, &ctx).map_err(|e| {
@@ -461,8 +483,39 @@ pub(crate) fn render_http(
         method,
         pre_auth_url,
         rendered_body,
+        rendered_form,
         headers,
     })
+}
+
+/// Renders the function's `body_form` pairs (spec
+/// 2026-07-22-official-connectors-wave-3, section 4.1) as DECODED key-value
+/// pairs, mirroring `render_query`'s semantics: a value that is exactly one
+/// `{{args.field}}` placeholder drops the whole pair when the arg is absent
+/// or explicitly null, renders the typed arg in canonical string form when
+/// present (string verbatim, number/bool via their JSON text), and turns a
+/// non-scalar into a Config error; mixed-content templates keep string
+/// interpolation where an absent arg is an error.
+fn render_form(
+    function: &FunctionSpec,
+    ctx: &RenderCtx,
+) -> Result<Vec<(String, String)>, CallError> {
+    let mut pairs = Vec::new();
+    for (key, template) in &function.body_form {
+        if let Some(field) = single_args_placeholder(template)
+            && resolve_optional_arg(ctx, field).is_none()
+        {
+            continue;
+        }
+        let value = render_raw(template, ctx).map_err(|e| {
+            CallError::new(
+                CallErrorCode::Config,
+                format!("body_form render failed: {e}"),
+            )
+        })?;
+        pairs.push((key.clone(), value));
+    }
+    Ok(pairs)
 }
 
 /// Shared gate + render logic (pipeline steps 5-8): validates args against the
@@ -475,7 +528,7 @@ pub(crate) fn render_http(
 /// never be duplicated between the two callers.
 fn build_prepared(
     function: &FunctionSpec,
-    auth: Option<&AuthSpec>,
+    doc: &ConnectorDoc,
     account_name: String,
     maccount: &ManifestAccount,
     args: &Value,
@@ -483,6 +536,11 @@ fn build_prepared(
     mode: CallMode,
 ) -> Result<Prepared, CallError> {
     let CallMode { dry_run, full } = mode;
+    // The two connector-level bindings an HTTP call snapshots from the
+    // (snapshot or live) doc: the auth block and the error_when predicate
+    // (spec 2026-07-22-official-connectors-wave-3, section 4.2).
+    let auth = doc.auth.as_ref();
+    let error_when = doc.error_when.as_ref();
     // 5. Validate args against the function schema.
     if let Some(schema) = &function.args_schema {
         validate_args(schema, args)?;
@@ -562,13 +620,24 @@ fn build_prepared(
     let rendered = render_http(function, &account_fields, args, &secrets)?;
 
     if dry_run {
-        return Ok(Prepared::DryRun(json!({
+        let mut out = json!({
             "ok": true,
             "dry_run": true,
             "method": rendered.method,
             "url": rendered.pre_auth_url,
             "body": rendered.rendered_body.unwrap_or(Value::Null),
-        })));
+        });
+        // A form body surfaces its DECODED pairs under `body_form` (with
+        // `body: null`, since the two are mutually exclusive by validation).
+        if let Some(pairs) = &rendered.rendered_form {
+            out["body_form"] = Value::Object(
+                pairs
+                    .iter()
+                    .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+                    .collect(),
+            );
+        }
+        return Ok(Prepared::DryRun(out));
     }
 
     Ok(Prepared::Call(Box::new(PreparedCall::Http(Box::new(
@@ -577,6 +646,7 @@ fn build_prepared(
             method: rendered.method,
             pre_auth_url: rendered.pre_auth_url,
             rendered_body: rendered.rendered_body,
+            rendered_form: rendered.rendered_form,
             headers: rendered.headers,
             // `--full` bypasses the projection (spec 4.5), returning the raw body.
             response_pick: if full {
@@ -585,6 +655,7 @@ fn build_prepared(
                 function.response_pick.clone()
             },
             auth: auth.cloned(),
+            error_when: error_when.cloned(),
             secrets,
             account_fields,
             timeout_sec: function.timeout_sec,
@@ -788,7 +859,7 @@ fn prepare_play_call(
 
     build_prepared(
         &function,
-        loaded.doc.auth.as_ref(),
+        &loaded.doc,
         acct.name.clone(),
         &maccount,
         args,
@@ -1199,30 +1270,42 @@ impl HttpCall {
             Err(e) => return (Err(e), None),
         }
 
-        let response = match &self.rendered_body {
-            Some(body) => {
-                // Mirrors ureq 2's `send_json`: only add the JSON content type
-                // when the function's own headers did not already set one.
+        // The outgoing body payload: a JSON body serializes with the JSON
+        // content type, a form body (spec 2026-07-22-official-connectors-wave-3,
+        // section 4.1) percent-encodes its pairs with the urlencoded content
+        // type. The two are mutually exclusive by validation.
+        let payload = match &self.rendered_body {
+            Some(body) => match serde_json::to_vec(body) {
+                Ok(bytes) => Some((bytes, "application/json")),
+                Err(e) => {
+                    return (
+                        Err(CallError::new(
+                            CallErrorCode::Config,
+                            format!("body serialize failed: {e}"),
+                        )),
+                        None,
+                    );
+                }
+            },
+            None => self.rendered_form.as_ref().map(|pairs| {
+                (
+                    encode_form_body(pairs).into_bytes(),
+                    "application/x-www-form-urlencoded",
+                )
+            }),
+        };
+        let response = match payload {
+            Some((bytes, content_type)) => {
+                // Mirrors ureq 2's `send_json`: only add the default content
+                // type when the function's own headers did not already set one.
                 let has_content_type = self
                     .headers
                     .keys()
                     .any(|k| k.eq_ignore_ascii_case("content-type"));
                 if !has_content_type {
-                    builder = builder.header("content-type", "application/json");
+                    builder = builder.header("content-type", content_type);
                 }
-                let json_bytes = match serde_json::to_vec(body) {
-                    Ok(b) => b,
-                    Err(e) => {
-                        return (
-                            Err(CallError::new(
-                                CallErrorCode::Config,
-                                format!("body serialize failed: {e}"),
-                            )),
-                            None,
-                        );
-                    }
-                };
-                match builder.body(json_bytes) {
+                match builder.body(bytes) {
                     Ok(request) => agent.run(request),
                     Err(e) => {
                         return (
@@ -1282,6 +1365,21 @@ impl HttpCall {
         // 12. Interim literal secret redaction (see the TODO below).
         let body = self.redact(body);
         let mut mapped = map_status(status, body, truncated, retry_after);
+        // error_when reclassification (spec
+        // 2026-07-22-official-connectors-wave-3, section 4.2): a 2xx body
+        // matching the connector's predicate maps to a `service` error
+        // instead of a false success. Runs on the already-redacted body, so
+        // an extracted message is scrubbed like any other body text, and
+        // BEFORE the `response_pick` projection below (a reclassified
+        // response is never projected; the error envelope carries the
+        // extracted message instead). Non-2xx statuses arrive here as Err
+        // and keep the status-table mapping untouched.
+        if let Ok(CallOk::Http { body, .. }) = &mapped
+            && let Some(rule) = &self.error_when
+            && let Some(err) = reclassify_error_when(rule, body, status)
+        {
+            mapped = Err(err);
+        }
         if let Ok(CallOk::Http {
             link: link_slot,
             body: body_slot,
@@ -1470,6 +1568,39 @@ fn map_status(
     Err(err)
 }
 
+/// Evaluates the connector's `error_when` predicate (spec
+/// 2026-07-22-official-connectors-wave-3, section 4.2) against a 2xx response
+/// body: when the value at `path` equals `equals` (JSON equality), returns
+/// the `service` error the call reclassifies to, carrying the real HTTP
+/// status (e.g. 200) and the message extracted at `message_path` - or a
+/// fixed fallback when `message_path` is absent, resolves to nothing, or the
+/// value there is not a string. A `path` that resolves to nothing means no
+/// match (success passes through).
+fn reclassify_error_when(rule: &ErrorWhen, body: &Value, status: u16) -> Option<CallError> {
+    if lookup_path(body, &rule.path) != Some(&rule.equals) {
+        return None;
+    }
+    let message = rule
+        .message_path
+        .as_deref()
+        .and_then(|p| lookup_path(body, p))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .unwrap_or_else(|| "the service reported an error in the response body".to_string());
+    let mut err = CallError::new(CallErrorCode::Service, message);
+    err.http_status = Some(status);
+    Some(err)
+}
+
+/// Resolves a dot-separated field chain over JSON objects (like
+/// `response_pick` paths, spec 4.5, without array semantics). `None` when any
+/// segment is missing or a value midway through the chain is not an object.
+fn lookup_path<'a>(body: &'a Value, path: &str) -> Option<&'a Value> {
+    path.split('.').try_fold(body, |value, segment| {
+        value.as_object().and_then(|map| map.get(segment))
+    })
+}
+
 /// Percent-encodes the top-level string values of an args object so they can
 /// be substituted RAW into a URL template without letting an argument inject
 /// path traversal or extra query structure. Non-string scalars pass through
@@ -1573,6 +1704,18 @@ fn encode_component(s: &str) -> String {
     utf8_percent_encode(s, SET).to_string()
 }
 
+/// Encodes DECODED form pairs into the `application/x-www-form-urlencoded`
+/// wire body, percent-encoding keys and values with the same component set
+/// query rendering uses so encoding stays uniform (spec
+/// 2026-07-22-official-connectors-wave-3, section 4.1).
+fn encode_form_body(pairs: &[(String, String)]) -> String {
+    pairs
+        .iter()
+        .map(|(k, v)| format!("{}={}", encode_component(k), encode_component(v)))
+        .collect::<Vec<_>>()
+        .join("&")
+}
+
 /// Standard RFC 4648 base64 (with padding). Local to keep the engine lean: the
 /// only use is HTTP Basic auth, and pulling a base64 crate for `user:pass`
 /// encoding is not worth the dependency.
@@ -1623,6 +1766,85 @@ fn append_event(req: &CallRequest, meta: &EventMeta) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // -- error_when reclassification (spec
+    // 2026-07-22-official-connectors-wave-3, section 4.2) --
+
+    fn rule(
+        path: &str,
+        equals: Value,
+        message_path: Option<&str>,
+    ) -> apb_core::connector::def::ErrorWhen {
+        apb_core::connector::def::ErrorWhen {
+            path: path.to_string(),
+            equals,
+            message_path: message_path.map(str::to_string),
+        }
+    }
+
+    #[test]
+    fn error_when_match_reclassifies_to_service_with_extracted_message() {
+        let r = rule("ok", json!(false), Some("error"));
+        let body = json!({ "ok": false, "error": "missing_scope" });
+        let err = reclassify_error_when(&r, &body, 200).unwrap();
+        assert_eq!(err.code, CallErrorCode::Service);
+        assert_eq!(err.message, "missing_scope");
+        // The error carries the real HTTP status of the reclassified response.
+        assert_eq!(err.http_status, Some(200));
+    }
+
+    #[test]
+    fn error_when_no_match_passes_through() {
+        let r = rule("ok", json!(false), Some("error"));
+        assert!(reclassify_error_when(&r, &json!({ "ok": true }), 200).is_none());
+    }
+
+    #[test]
+    fn error_when_path_resolving_to_nothing_means_no_match() {
+        let r = rule("ok", json!(false), Some("error"));
+        assert!(reclassify_error_when(&r, &json!({ "status": "fine" }), 200).is_none());
+        // A non-object midway through the chain resolves to nothing too.
+        let nested = rule("a.b", json!(false), None);
+        assert!(reclassify_error_when(&nested, &json!({ "a": 1 }), 200).is_none());
+    }
+
+    #[test]
+    fn error_when_nested_paths_resolve_over_objects() {
+        let r = rule("result.ok", json!(false), Some("result.detail.message"));
+        let body = json!({ "result": { "ok": false, "detail": { "message": "bad" } } });
+        let err = reclassify_error_when(&r, &body, 201).unwrap();
+        assert_eq!(err.message, "bad");
+        assert_eq!(err.http_status, Some(201));
+    }
+
+    #[test]
+    fn error_when_fallback_message_when_message_path_absent_or_not_string() {
+        // No message_path declared at all.
+        let none = rule("ok", json!(false), None);
+        let fallback = reclassify_error_when(&none, &json!({ "ok": false }), 200)
+            .unwrap()
+            .message;
+        assert!(!fallback.is_empty());
+        // message_path resolves to nothing.
+        let r = rule("ok", json!(false), Some("error"));
+        let missing = reclassify_error_when(&r, &json!({ "ok": false }), 200).unwrap();
+        assert_eq!(missing.message, fallback);
+        // message_path resolves to a non-string.
+        let non_string =
+            reclassify_error_when(&r, &json!({ "ok": false, "error": 42 }), 200).unwrap();
+        assert_eq!(non_string.message, fallback);
+    }
+
+    #[test]
+    fn error_when_equals_compares_by_json_equality() {
+        let s = rule("status", json!("error"), None);
+        assert!(reclassify_error_when(&s, &json!({ "status": "error" }), 200).is_some());
+        assert!(reclassify_error_when(&s, &json!({ "status": "fine" }), 200).is_none());
+        // A number does not equal its string form.
+        let n = rule("code", json!(1), None);
+        assert!(reclassify_error_when(&n, &json!({ "code": 1 }), 200).is_some());
+        assert!(reclassify_error_when(&n, &json!({ "code": "1" }), 200).is_none());
+    }
 
     #[test]
     fn render_http_builds_method_url_body_and_headers_offline() {
@@ -1712,6 +1934,113 @@ mod tests {
         let args = json!({ "offset": null, "limit": 50 });
         let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
         assert_eq!(r.pre_auth_url, "https://api.example.com/items?limit=50");
+    }
+
+    // -- body_form rendering (spec 2026-07-22-official-connectors-wave-3, 4.1) --
+
+    /// A POST function whose `body_form` mixes a literal, single placeholders,
+    /// and a mixed-content template.
+    fn form_function(body_form_yaml: &str) -> apb_core::connector::def::ConnectorDoc {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = format!(
+            "name: x\nversion: 0.1.0\nfunctions:\n  - name: send\n    description: d\n    method: POST\n    url: \"https://api.example.com/messages\"\n    body_form:\n{body_form_yaml}    args_schema: {{ type: object }}\n"
+        );
+        ConnectorDoc::from_yaml(&yaml, "x").unwrap()
+    }
+
+    #[test]
+    fn render_http_without_body_form_renders_no_form() {
+        use apb_core::connector::def::ConnectorDoc;
+        let yaml = "name: x\nversion: 0.1.0\nfunctions:\n  - name: g\n    description: d\n    method: GET\n    url: \"https://api.example.com/x\"\n";
+        let doc = ConnectorDoc::from_yaml(yaml, "x").unwrap();
+        let f = doc.function("g").unwrap();
+        let r = render_http(f, &BTreeMap::new(), &json!({}), &BTreeMap::new()).unwrap();
+        assert!(r.rendered_form.is_none());
+    }
+
+    #[test]
+    fn render_form_typed_single_placeholders_render_canonical_strings() {
+        let doc = form_function(
+            "      active: \"{{args.active}}\"\n      limit: \"{{args.limit}}\"\n      name: \"{{args.name}}\"\n",
+        );
+        let f = doc.function("send").unwrap();
+        let args = json!({ "active": true, "limit": 50, "name": "hi" });
+        let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            r.rendered_form,
+            Some(vec![
+                ("active".to_string(), "true".to_string()),
+                ("limit".to_string(), "50".to_string()),
+                ("name".to_string(), "hi".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn render_form_drops_absent_and_null_single_placeholder_pairs() {
+        let doc = form_function(
+            "      content: \"{{args.content}}\"\n      queue_id: \"{{args.queue_id}}\"\n      topic: \"{{args.topic}}\"\n",
+        );
+        let f = doc.function("send").unwrap();
+        // `queue_id` is absent, `topic` is explicitly null: both pairs drop.
+        let args = json!({ "content": "hello", "topic": null });
+        let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            r.rendered_form,
+            Some(vec![("content".to_string(), "hello".to_string())])
+        );
+    }
+
+    #[test]
+    fn render_form_non_scalar_single_placeholder_is_config_error() {
+        let doc = form_function("      content: \"{{args.content}}\"\n");
+        let f = doc.function("send").unwrap();
+        let args = json!({ "content": [1, 2] });
+        match render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()) {
+            Ok(_) => panic!("expected a config error for a non-scalar form arg"),
+            Err(err) => assert_eq!(err.code, CallErrorCode::Config),
+        }
+    }
+
+    #[test]
+    fn render_form_mixed_template_absent_arg_is_config_error() {
+        // Mixed content keeps string interpolation with absent-arg-is-error;
+        // only an exact single placeholder gets the drop rule.
+        let doc = form_function("      content: \"v={{args.gone}}\"\n");
+        let f = doc.function("send").unwrap();
+        match render_http(f, &BTreeMap::new(), &json!({}), &BTreeMap::new()) {
+            Ok(_) => panic!("expected a config error for an absent arg in mixed content"),
+            Err(err) => assert_eq!(err.code, CallErrorCode::Config),
+        }
+    }
+
+    #[test]
+    fn render_form_pairs_are_decoded_and_literals_kept() {
+        // The rendered pairs stay DECODED (encoding happens at send time), and
+        // a literal (placeholder-free) value renders verbatim.
+        let doc = form_function("      content: \"{{args.content}}\"\n      type: stream\n");
+        let f = doc.function("send").unwrap();
+        let args = json!({ "content": "hello world & more" });
+        let r = render_http(f, &BTreeMap::new(), &args, &BTreeMap::new()).unwrap();
+        assert_eq!(
+            r.rendered_form,
+            Some(vec![
+                ("content".to_string(), "hello world & more".to_string()),
+                ("type".to_string(), "stream".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn encode_form_body_percent_encodes_keys_and_values() {
+        let pairs = vec![
+            ("a key".to_string(), "b&c=d".to_string()),
+            ("content".to_string(), "hello world/100%".to_string()),
+        ];
+        assert_eq!(
+            encode_form_body(&pairs),
+            "a%20key=b%26c%3Dd&content=hello%20world%2F100%25"
+        );
     }
 
     #[test]

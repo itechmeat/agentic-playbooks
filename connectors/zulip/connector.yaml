@@ -1,0 +1,121 @@
+name: zulip
+version: 0.1.0
+healthcheck: get_me
+auth:
+  kind: basic
+  username_template: "{{account.email}}"
+  password_template: "{{secret.api_key}}"
+account_fields:
+  - name: api_base
+    required: true
+  - name: email
+    required: true
+  - name: api_key
+    required: true
+    secret: true
+functions:
+  - name: get_me
+    description: Get the authenticated user or bot identity
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [user_id, full_name, email, is_bot]
+
+  - name: list_streams
+    description: List streams the user can access
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/streams"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [streams.stream_id, streams.name, streams.description]
+
+  - name: list_topics
+    description: List recent topics in a stream
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/me/{{args.stream_id}}/topics"
+    args_schema:
+      type: object
+      properties:
+        stream_id: { type: integer, description: "numeric stream id" }
+      required: [stream_id]
+    response_pick: [topics.name, topics.max_id]
+
+  - name: get_messages
+    description: Fetch recent messages with anchor, num_before, and narrow filters
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/messages"
+    query:
+      anchor: "{{args.anchor}}"
+      num_before: "{{args.num_before}}"
+      narrow: "{{args.narrow}}"
+    args_schema:
+      type: object
+      properties:
+        anchor:
+          type: string
+          description: "message id anchor; omit for newest-first, or use a numeric id"
+        num_before:
+          type: integer
+          description: "number of messages before the anchor to return"
+        narrow:
+          type: string
+          description: >
+            Zulip JSON-encoded narrow filter string. The value is a JSON
+            array of operator/operand objects passed verbatim as the
+            narrow query parameter. Example:
+            [{"operator": "channel", "operand": "general"}]
+      required: []
+    examples:
+      - args:
+          num_before: 10
+          narrow: '[{"operator": "channel", "operand": "general"}]'
+        note: "anchor omitted for newest-first; narrow is a JSON-encoded string, not a structured object"
+    response_pick: [messages.id, messages.sender_full_name, messages.subject, messages.content, messages.timestamp]
+
+  - name: send_stream_message
+    description: Post a message to a stream topic
+    method: POST
+    url: "{{account.api_base}}/messages"
+    body_form:
+      type: "stream"
+      to: "{{args.to}}"
+      topic: "{{args.topic}}"
+      content: "{{args.content}}"
+    args_schema:
+      type: object
+      properties:
+        to: { type: string, description: "stream name or numeric stream id" }
+        topic: { type: string, description: "topic name within the stream" }
+        content: { type: string, description: "message body in Zulip markdown" }
+      required: [to, topic, content]
+    examples:
+      - args:
+          to: general
+          topic: release
+          content: "hello world & café=bar"
+        note: "a thread reply is the same call to the same stream and topic; to may be a stream name or id"
+
+  - name: send_direct_message
+    description: Post a direct message to one or more users
+    method: POST
+    url: "{{account.api_base}}/messages"
+    body_form:
+      type: "direct"
+      to: "{{args.to}}"
+      content: "{{args.content}}"
+    args_schema:
+      type: object
+      properties:
+        to:
+          type: string
+          description: "recipient user id, or a JSON-encoded array string of ids for several recipients, e.g. \"[12, 34]\""
+        content: { type: string, description: "message body in Zulip markdown" }
+      required: [to, content]
+    examples:
+      - args:
+          to: "12"
+          content: "ping"
+        note: "to is a single user id or a JSON-encoded array string for multiple recipients"

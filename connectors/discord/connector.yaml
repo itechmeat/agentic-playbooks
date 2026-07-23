@@ -1,0 +1,97 @@
+name: discord
+version: 0.1.0
+healthcheck: get_me
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bot {{secret.token}}"
+account_fields:
+  - name: api_base
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_me
+    description: Verify the bot token and get the bot's own identity
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/users/@me"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [id, username, bot]
+    examples:
+      - args: {}
+        note: "healthcheck; confirms the bot token resolves and reports id, username, and bot."
+
+  - name: list_channels
+    description: List channels in a guild
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/guilds/{{args.guild_id}}/channels"
+    args_schema:
+      type: object
+      properties:
+        guild_id: { type: string, description: "Discord guild (server) snowflake id" }
+      required: [guild_id]
+    response_pick: [id, name, type, parent_id, position]
+    examples:
+      - args: { guild_id: "123456789012345678" }
+        note: "returns every channel the bot can see in the guild, including categories and threads the bot has access to."
+
+  - name: get_messages
+    description: List recent messages in a channel
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/channels/{{args.channel_id}}/messages"
+    query:
+      limit: "{{args.limit}}"
+      before: "{{args.before}}"
+    args_schema:
+      type: object
+      properties:
+        channel_id: { type: string, description: "channel or thread snowflake id" }
+        limit: { type: integer, minimum: 1, maximum: 100, description: "page size; Discord caps at 100" }
+        before: { type: string, description: "message snowflake id; return messages older than this id" }
+      required: [channel_id]
+    response_pick: [id, content, author.username, timestamp]
+    examples:
+      - args: { channel_id: "987654321098765432", limit: 25 }
+        note: "omit before on the first page; pass the oldest message id from the previous page as before to walk history backward."
+
+  - name: send_message
+    description: Send a text message to a channel
+    method: POST
+    url: "{{account.api_base}}/channels/{{args.channel_id}}/messages"
+    body:
+      content: "{{args.content}}"
+    args_schema:
+      type: object
+      properties:
+        channel_id: { type: string, description: "channel or thread snowflake id" }
+        content: { type: string, description: "message text body" }
+      required: [channel_id, content]
+    examples:
+      - args: { channel_id: "987654321098765432", content: "Build finished on main." }
+        note: "posts a top-level message; use reply_to_message to reply to an existing message."
+
+  - name: reply_to_message
+    description: Reply to an existing message in a channel
+    method: POST
+    url: "{{account.api_base}}/channels/{{args.channel_id}}/messages"
+    body:
+      content: "{{args.content}}"
+      message_reference:
+        message_id: "{{args.message_id}}"
+    args_schema:
+      type: object
+      properties:
+        channel_id: { type: string, description: "channel or thread snowflake id" }
+        message_id: { type: string, description: "snowflake id of the message being replied to" }
+        content: { type: string, description: "reply text body" }
+      required: [channel_id, message_id, content]
+    examples:
+      - args:
+          channel_id: "987654321098765432"
+          message_id: "111222333444555666"
+          content: "Acknowledged."
+        note: "message_reference is nested so Discord threads the reply under the original message."

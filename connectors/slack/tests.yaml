@@ -1,0 +1,61 @@
+cases:
+  - function: auth_test
+    account: { api_base: "https://slack.com/api" }
+    args: {}
+    expect:
+      method: POST
+      url: "https://slack.com/api/auth.test"
+
+  - function: list_channels
+    account: { api_base: "https://slack.com/api" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://slack.com/api/conversations.list"
+
+  - function: list_channels
+    account: { api_base: "https://slack.com/api" }
+    args: { types: "public_channel,private_channel", cursor: "dGVhbTpDMDI=", limit: 100 }
+    expect:
+      method: GET
+      url: "https://slack.com/api/conversations.list?cursor=dGVhbTpDMDI%3D&limit=100&types=public_channel%2Cprivate_channel"
+
+  - function: get_messages
+    account: { api_base: "https://slack.com/api" }
+    args: { channel: "C0123456789" }
+    expect:
+      method: GET
+      url: "https://slack.com/api/conversations.history?channel=C0123456789"
+
+  - function: get_messages
+    account: { api_base: "https://slack.com/api" }
+    args: { channel: "C0123456789", cursor: "bmV4dDoxMjM=", limit: 50 }
+    expect:
+      method: GET
+      url: "https://slack.com/api/conversations.history?channel=C0123456789&cursor=bmV4dDoxMjM%3D&limit=50"
+
+  - function: get_thread
+    account: { api_base: "https://slack.com/api" }
+    args: { channel: "C0123456789", ts: "1721745600.000100" }
+    expect:
+      method: GET
+      url: "https://slack.com/api/conversations.replies?channel=C0123456789&ts=1721745600.000100"
+
+  - function: send_message
+    account: { api_base: "https://slack.com/api" }
+    args: { channel: "C0123456789", text: "Release pipeline is green." }
+    expect:
+      method: POST
+      url: "https://slack.com/api/chat.postMessage"
+      body_contains: { channel: "C0123456789", text: "Release pipeline is green." }
+
+  - function: reply_in_thread
+    account: { api_base: "https://slack.com/api" }
+    args: { channel: "C0123456789", thread_ts: "1721745600.000100", text: "Acknowledged." }
+    expect:
+      method: POST
+      url: "https://slack.com/api/chat.postMessage"
+      body_contains:
+        channel: "C0123456789"
+        thread_ts: "1721745600.000100"
+        text: "Acknowledged."

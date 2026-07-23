@@ -73,6 +73,7 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
             url,
             headers,
             body_contains,
+            body_form_contains,
         } => eval_http(
             doc,
             function,
@@ -82,6 +83,7 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
             url,
             headers,
             body_contains,
+            body_form_contains,
         ),
         ExpectKind::Smtp(envelope) => eval_smtp(doc, function, &case.account, &args, envelope),
         ExpectKind::Imap(expected) => eval_imap(doc, function, &case.account, &args, expected),
@@ -120,6 +122,7 @@ fn eval_http(
     url: &str,
     headers: Option<&BTreeMap<String, String>>,
     body_contains: Option<&Value>,
+    body_form_contains: Option<&BTreeMap<String, String>>,
 ) -> Result<(), String> {
     if function.mock.is_some() {
         return Err(format!(
@@ -179,6 +182,33 @@ fn eval_http(
             return Err(format!(
                 "body_contains mismatch: `{subset}` is not a subset of `{body}`"
             ));
+        }
+    }
+    // Subset match over the DECODED form pairs, mirroring `body_contains`
+    // (spec 2026-07-22-official-connectors-wave-3, section 4.1): every
+    // expected key must be present with an exactly-equal decoded value; pairs
+    // not mentioned by the expectation are not asserted.
+    if let Some(subset) = body_form_contains {
+        let pairs = rendered.rendered_form.ok_or_else(|| {
+            format!(
+                "function `{}` declares no `body_form` but the case expects `body_form_contains`",
+                function.name
+            )
+        })?;
+        for (key, want) in subset {
+            match pairs.iter().find(|(k, _)| k == key) {
+                Some((_, got)) if got == want => {}
+                Some((_, got)) => {
+                    return Err(format!(
+                        "body_form mismatch: `{key}` expected `{want}`, rendered `{got}`"
+                    ));
+                }
+                None => {
+                    return Err(format!(
+                        "body_form mismatch: `{key}` expected `{want}`, but no such pair is rendered"
+                    ));
+                }
+            }
         }
     }
     Ok(())
@@ -672,6 +702,89 @@ functions:
         .unwrap();
         let report = run_tests(&smtp_doc(), &tests);
         assert!(report.all_passed(), "{:?}", failing(&report));
+    }
+
+    // -- body_form_contains (spec 2026-07-22-official-connectors-wave-3, 4.1) --
+
+    const FORM_YAML: &str = r#"
+name: chat
+version: 0.1.0
+account_fields:
+  - name: base_url
+    required: true
+functions:
+  - name: send_message
+    description: d
+    method: POST
+    url: "{{account.base_url}}/messages"
+    body_form:
+      type: stream
+      to: "{{args.to}}"
+      content: "{{args.content}}"
+    args_schema: { type: object }
+"#;
+
+    fn form_doc() -> ConnectorDoc {
+        ConnectorDoc::from_yaml(FORM_YAML, "chat").unwrap()
+    }
+
+    #[test]
+    fn body_form_contains_subset_match_passes() {
+        // A subset of the DECODED pairs matches; `type` is not asserted.
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: send_message\n    account: { base_url: https://chat.example.com }\n    args: { to: general, content: hello world }\n    expect:\n      method: POST\n      url: https://chat.example.com/messages\n      body_form_contains: { to: general, content: hello world }\n",
+        )
+        .unwrap();
+        let report = run_tests(&form_doc(), &tests);
+        assert!(report.all_passed(), "{:?}", failing(&report));
+    }
+
+    #[test]
+    fn body_form_contains_mismatch_fails_naming_the_key() {
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: send_message\n    account: { base_url: https://chat.example.com }\n    args: { to: general, content: hello }\n    expect:\n      method: POST\n      url: https://chat.example.com/messages\n      body_form_contains: { to: WRONG }\n",
+        )
+        .unwrap();
+        let report = run_tests(&form_doc(), &tests);
+        assert!(!report.all_passed());
+        assert!(
+            report.results[0].detail.contains("body_form mismatch"),
+            "detail: {}",
+            report.results[0].detail
+        );
+        assert!(report.results[0].detail.contains("to"));
+    }
+
+    #[test]
+    fn body_form_contains_missing_pair_fails_naming_the_key() {
+        // `content` is optional and absent, so its pair was dropped from the
+        // rendered form; asserting it must fail naming the key.
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: send_message\n    account: { base_url: https://chat.example.com }\n    args: { to: general }\n    expect:\n      method: POST\n      url: https://chat.example.com/messages\n      body_form_contains: { content: hello }\n",
+        )
+        .unwrap();
+        let report = run_tests(&form_doc(), &tests);
+        assert!(!report.all_passed());
+        assert!(
+            report.results[0].detail.contains("content"),
+            "detail: {}",
+            report.results[0].detail
+        );
+    }
+
+    #[test]
+    fn body_form_contains_on_function_without_body_form_fails_clearly() {
+        let tests = TestsDoc::from_yaml(
+            "cases:\n  - function: create_item\n    account: { api_base: https://api.example.com }\n    args: { title: Hi }\n    expect:\n      method: POST\n      url: https://api.example.com/items\n      body_form_contains: { title: Hi }\n",
+        )
+        .unwrap();
+        let report = run_tests(&doc(), &tests);
+        assert!(!report.all_passed());
+        assert!(
+            report.results[0].detail.contains("body_form"),
+            "detail: {}",
+            report.results[0].detail
+        );
     }
 
     #[test]

@@ -1,0 +1,93 @@
+cases:
+  - function: get_me
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.youtrack.cloud/api/users/me?fields=id,login,name,email"
+
+  - function: list_projects
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.youtrack.cloud/api/admin/projects?fields=id,name,shortName"
+
+  - function: search_issues
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { query: "state: Fixed", skip: 10, top: 5 }
+    expect:
+      method: GET
+      url: "https://example.youtrack.cloud/api/issues?%24skip=10&%24top=5&fields=idReadable,summary,resolved,project(shortName),reporter(login)&query=state%3A%20Fixed"
+
+  - function: search_issues
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { query: "release" }
+    expect:
+      method: GET
+      url: "https://example.youtrack.cloud/api/issues?fields=idReadable,summary,resolved,project(shortName),reporter(login)&query=release"
+
+  - function: get_issue
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { id: "DEMO-42" }
+    expect:
+      method: GET
+      url: "https://example.youtrack.cloud/api/issues/DEMO-42?fields=idReadable,summary,resolved,project(shortName),reporter(login)"
+
+  - function: create_issue
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { project: "0-0", summary: "Build fails on main", description: "The CI pipeline fails after the last merge." }
+    expect:
+      method: POST
+      url: "https://example.youtrack.cloud/api/issues?fields=idReadable,summary,resolved,project(shortName),reporter(login)"
+      body_contains:
+        project:
+          id: "0-0"
+        summary: "Build fails on main"
+        description: "The CI pipeline fails after the last merge."
+
+  - function: create_issue
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { project: "0-0", summary: "Build fails on main" }
+    expect:
+      method: POST
+      url: "https://example.youtrack.cloud/api/issues?fields=idReadable,summary,resolved,project(shortName),reporter(login)"
+      body_contains:
+        project:
+          id: "0-0"
+        summary: "Build fails on main"
+
+  - function: update_issue
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { id: "DEMO-42", summary: "Build fails on main (updated)" }
+    expect:
+      method: POST
+      url: "https://example.youtrack.cloud/api/issues/DEMO-42?fields=idReadable,summary,resolved,project(shortName),reporter(login)"
+      body_contains:
+        summary: "Build fails on main (updated)"
+
+  - function: list_comments
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { id: "DEMO-42" }
+    expect:
+      method: GET
+      url: "https://example.youtrack.cloud/api/issues/DEMO-42/comments?fields=id,text,author(login),created"
+
+  - function: add_comment
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { id: "DEMO-42", text: "Looks good to me." }
+    expect:
+      method: POST
+      url: "https://example.youtrack.cloud/api/issues/DEMO-42/comments?fields=id,text,author(login),created"
+      body_contains:
+        text: "Looks good to me."
+
+  - function: apply_command
+    account: { api_base: https://example.youtrack.cloud/api }
+    args: { query: "state Fixed", issues: [{idReadable: "DEMO-1"}, {idReadable: "DEMO-2"}] }
+    expect:
+      method: POST
+      url: "https://example.youtrack.cloud/api/commands"
+      body_contains:
+        query: "state Fixed"
+        issues: [{idReadable: "DEMO-1"}, {idReadable: "DEMO-2"}]

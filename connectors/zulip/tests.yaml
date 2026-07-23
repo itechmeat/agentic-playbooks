@@ -1,0 +1,66 @@
+cases:
+  - function: get_me
+    account: { api_base: "https://example.zulipchat.com/api/v1", email: "bot@example.zulipchat.com" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.zulipchat.com/api/v1/users/me"
+
+  - function: list_streams
+    account: { api_base: "https://example.zulipchat.com/api/v1", email: "bot@example.zulipchat.com" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.zulipchat.com/api/v1/streams"
+
+  - function: list_topics
+    account: { api_base: "https://example.zulipchat.com/api/v1", email: "bot@example.zulipchat.com" }
+    args: { stream_id: 42 }
+    expect:
+      method: GET
+      url: "https://example.zulipchat.com/api/v1/users/me/42/topics"
+
+  - function: get_messages
+    account: { api_base: "https://example.zulipchat.com/api/v1", email: "bot@example.zulipchat.com" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.zulipchat.com/api/v1/messages"
+
+  - function: get_messages
+    account: { api_base: "https://example.zulipchat.com/api/v1", email: "bot@example.zulipchat.com" }
+    args:
+      anchor: "100"
+      num_before: 10
+      narrow: '[{"operator": "channel", "operand": "general"}]'
+    expect:
+      method: GET
+      url: "https://example.zulipchat.com/api/v1/messages?anchor=100&narrow=%5B%7B%22operator%22%3A%20%22channel%22%2C%20%22operand%22%3A%20%22general%22%7D%5D&num_before=10"
+
+  - function: send_stream_message
+    account: { api_base: "https://example.zulipchat.com/api/v1", email: "bot@example.zulipchat.com" }
+    args:
+      to: general
+      topic: release
+      content: "hello world & café=bar"
+    expect:
+      method: POST
+      url: "https://example.zulipchat.com/api/v1/messages"
+      body_form_contains:
+        type: "stream"
+        to: "general"
+        topic: "release"
+        content: "hello world & café=bar"
+
+  - function: send_direct_message
+    account: { api_base: "https://example.zulipchat.com/api/v1", email: "bot@example.zulipchat.com" }
+    args:
+      to: "12"
+      content: "ping"
+    expect:
+      method: POST
+      url: "https://example.zulipchat.com/api/v1/messages"
+      body_form_contains:
+        type: "direct"
+        to: "12"
+        content: "ping"

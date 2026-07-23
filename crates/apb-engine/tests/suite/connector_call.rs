@@ -76,6 +76,22 @@ functions:
     method: GET
     url: "{{account.base_url}}/pick"
     response_pick: [number, user.login, labels.name]
+  - name: submit_form
+    description: Send a form-encoded body
+    method: POST
+    url: "{{account.base_url}}/form"
+    body_form:
+      content: "{{args.content}}"
+      to: "{{args.to}}"
+    args_schema: { type: object, properties: { content: { type: string }, to: { type: string } }, required: [content] }
+  - name: submit_form_ctype
+    description: Form body with an explicit content-type header
+    method: POST
+    url: "{{account.base_url}}/form"
+    headers:
+      Content-Type: application/x-www-form-urlencoded; charset=utf-8
+    body_form:
+      content: "{{args.content}}"
   - name: ping
     description: A canned mock, no network
     mock: { status: 200, body: { ok: true } }
@@ -106,6 +122,27 @@ fn seed_run(
     functions: &[&str],
     max_calls: Option<u32>,
 ) {
+    seed_run_yaml(
+        run_dir,
+        accounts,
+        granted_accounts,
+        functions,
+        max_calls,
+        CONNECTOR_YAML,
+    );
+}
+
+/// Like `seed_run`, but with the connector snapshot YAML supplied by the
+/// caller (still named `CONNECTOR`), for tests that need a different manifest
+/// shape (e.g. the `error_when` block).
+fn seed_run_yaml(
+    run_dir: &Path,
+    accounts: Vec<ManifestAccount>,
+    granted_accounts: &[&str],
+    functions: &[&str],
+    max_calls: Option<u32>,
+    yaml: &str,
+) {
     let mut m = RunExecutionManifest::default();
     m.connectors.push(ManifestConnector {
         name: CONNECTOR.to_string(),
@@ -125,7 +162,7 @@ fn seed_run(
 
     let cdir = run_dir.join("connectors");
     std::fs::create_dir_all(&cdir).unwrap();
-    std::fs::write(cdir.join(format!("{CONNECTOR}.yaml")), CONNECTOR_YAML).unwrap();
+    std::fs::write(cdir.join(format!("{CONNECTOR}.yaml")), yaml).unwrap();
 }
 
 /// Writes the project secret so `resolve_var` finds it without touching the
@@ -522,6 +559,84 @@ fn dry_run_resolves_without_secrets_and_records_no_event() {
             .iter()
             .any(|e| matches!(e.payload, EventPayload::ConnectorCall { .. })),
         "dry-run must not append a ConnectorCall event"
+    );
+}
+
+#[test]
+fn body_form_sends_urlencoded_wire_body_and_content_type() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    let server = common::spawn_http(200, "OK", &[], r#"{"id":1}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["submit_form"],
+        None,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "submit_form",
+        None,
+        serde_json::json!({"content": "hello world & more", "to": "general"}),
+        false,
+    );
+    assert!(ok, "expected ok result: {value}");
+
+    // The wire body is the percent-encoded pair list, and the engine set the
+    // form content type (spec 2026-07-22-official-connectors-wave-3, 4.1).
+    let req = server.captured_request().expect("server saw a request");
+    assert!(
+        req.contains("content-type: application/x-www-form-urlencoded"),
+        "form content type missing in request:\n{req}"
+    );
+    assert!(
+        req.ends_with("content=hello%20world%20%26%20more&to=general"),
+        "encoded form body missing/wrong in request:\n{req}"
+    );
+}
+
+#[test]
+fn body_form_drops_absent_pair_and_keeps_explicit_content_type() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    let server = common::spawn_http(200, "OK", &[], r#"{"id":1}"#.to_string());
+    seed_run(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["submit_form_ctype"],
+        None,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "submit_form_ctype",
+        None,
+        serde_json::json!({"content": "hi"}),
+        false,
+    );
+    assert!(ok, "expected ok result: {value}");
+
+    // A function header naming content-type explicitly wins, mirroring the
+    // JSON body behavior.
+    let req = server.captured_request().expect("server saw a request");
+    assert!(
+        req.contains("content-type: application/x-www-form-urlencoded; charset=utf-8"),
+        "explicit content type not preserved in request:\n{req}"
+    );
+    assert!(
+        req.ends_with("content=hi"),
+        "encoded form body missing/wrong in request:\n{req}"
     );
 }
 
@@ -1517,6 +1632,251 @@ fn smtp_dry_run_renders_envelope_and_records_no_event() {
         !events
             .iter()
             .any(|e| matches!(e.payload, EventPayload::ConnectorCall { .. }))
+    );
+}
+
+// -- error_when reclassification (spec
+// 2026-07-22-official-connectors-wave-3, section 4.2) --
+
+/// A connector snapshot named like `CONNECTOR` declaring the connector-level
+/// `error_when` block (envelope-error style: `ok: false` plus an `error`
+/// message), with an HTTP function carrying a `response_pick` and a mock
+/// whose body matches the predicate (a mock ignores the block and must still
+/// return success).
+const EW_YAML: &str = r#"
+name: mock-tracker
+version: 0.1.0
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.token}}"
+error_when:
+  path: ok
+  equals: false
+  message_path: error
+account_fields:
+  - name: base_url
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: list_items
+    description: List items
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/items"
+    response_pick: [items]
+  - name: ping
+    description: A canned mock whose body matches the predicate
+    mock: { status: 200, body: { ok: false, error: "mock_error" } }
+"#;
+
+#[test]
+fn error_when_reclassifies_2xx_false_success_to_service() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    // A real socket answers 200 with the envelope error body.
+    let server = common::spawn_http(
+        200,
+        "OK",
+        &[],
+        r#"{"ok":false,"error":"missing_scope"}"#.to_string(),
+    );
+    seed_run_yaml(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_items"],
+        None,
+        EW_YAML,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_items",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(!ok, "a matching 2xx body must map to an error: {value}");
+    assert_eq!(value["ok"], serde_json::json!(false));
+    assert_eq!(value["error"]["code"], serde_json::json!("service"));
+    // The error carries the real HTTP status of the reclassified response.
+    assert_eq!(value["error"]["http_status"], serde_json::json!(200));
+    let msg = value["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains("missing_scope"),
+        "message should carry the extracted service error: {msg}"
+    );
+    // response_pick is NOT applied to a reclassified response: the error
+    // envelope replaces the body entirely.
+    assert!(value.get("body").is_none(), "no body on an error: {value}");
+
+    // The event log records the service outcome like any other error.
+    let outcome = read_all(run.path())
+        .unwrap()
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::ConnectorCall { outcome, .. } => Some(outcome.clone()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(outcome, "service");
+}
+
+#[test]
+fn error_when_passthrough_applies_response_pick() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    let server = common::spawn_http(
+        200,
+        "OK",
+        &[],
+        r#"{"ok":true,"items":[{"name":"a"}],"noise":1}"#.to_string(),
+    );
+    seed_run_yaml(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_items"],
+        None,
+        EW_YAML,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_items",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok, "a non-matching 2xx body passes through: {value}");
+    assert_eq!(value["status"], serde_json::json!(200));
+    // The normal response_pick projection still applies to a pass-through.
+    assert_eq!(value["picked"], serde_json::json!(true));
+    assert_eq!(
+        value["body"],
+        serde_json::json!({ "items": [{ "name": "a" }] })
+    );
+}
+
+#[test]
+fn error_when_keeps_status_table_for_non_2xx() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    // A 404 whose body would match the predicate still maps via the status
+    // table: error_when only reclassifies false successes.
+    let server = common::spawn_http(
+        404,
+        "Not Found",
+        &[],
+        r#"{"ok":false,"error":"missing_scope"}"#.to_string(),
+    );
+    seed_run_yaml(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_items"],
+        None,
+        EW_YAML,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_items",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(!ok);
+    assert_eq!(value["error"]["code"], serde_json::json!("not_found"));
+    assert_eq!(value["error"]["http_status"], serde_json::json!(404));
+}
+
+#[test]
+fn error_when_is_ignored_for_mock_functions() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    // No secret and no server: a mock with a body matching the predicate
+    // still returns success (spec wave-3 4.2: mocks ignore the block).
+    seed_run_yaml(
+        run.path(),
+        vec![account("https://unused.example")],
+        &["acct1"],
+        &["ping"],
+        None,
+        EW_YAML,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok, "a mock ignores error_when: {value}");
+    assert_eq!(value["status"], serde_json::json!(200));
+    assert_eq!(
+        value["body"],
+        serde_json::json!({ "ok": false, "error": "mock_error" })
+    );
+}
+
+#[test]
+fn error_when_extracted_message_is_redacted() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_secret(root.path());
+
+    // The service echoes the secret inside its error field; reclassification
+    // runs on the already-redacted body, so the extracted message must carry
+    // the redaction marker, never the raw secret.
+    let body = format!(r#"{{"ok":false,"error":"invalid token {SECRET_VALUE}"}}"#);
+    let server = common::spawn_http(200, "OK", &[], body);
+    seed_run_yaml(
+        run.path(),
+        vec![account(&server.base_url)],
+        &["acct1"],
+        &["list_items"],
+        None,
+        EW_YAML,
+    );
+
+    let (value, ok) = call(
+        run.path(),
+        root.path(),
+        "list_items",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(!ok);
+    assert_eq!(value["error"]["code"], serde_json::json!("service"));
+    let msg = value["error"]["message"].as_str().unwrap();
+    assert!(
+        msg.contains(&format!("[redacted:{SECRET_VAR}]")),
+        "extracted message should carry the redaction marker: {msg}"
+    );
+    assert!(
+        !value.to_string().contains(SECRET_VALUE),
+        "the raw secret leaked into the printed result: {value}"
     );
 }
 

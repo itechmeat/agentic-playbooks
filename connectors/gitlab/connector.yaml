@@ -1,0 +1,385 @@
+name: gitlab
+version: 0.1.0
+healthcheck: get_user
+auth:
+  kind: header
+  header: PRIVATE-TOKEN
+  value_template: "{{secret.token}}"
+account_fields:
+  - name: api_base
+    required: true
+  - name: token
+    required: true
+    secret: true
+functions:
+  - name: get_user
+    description: Get the authenticated GitLab user
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/user"
+    args_schema: { type: object, properties: {}, required: [] }
+    response_pick: [id, username, name, web_url]
+
+  - name: list_issues
+    description: List issues in a project, filtered by state, labels, and page
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/issues"
+    query:
+      state: "{{args.state}}"
+      labels: "{{args.labels}}"
+      page: "{{args.page}}"
+      per_page: "{{args.per_page}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        state: { type: string, enum: [opened, closed, all] }
+        labels: { type: string, description: "comma-separated label names" }
+        page: { type: integer, minimum: 1 }
+        per_page: { type: integer, minimum: 1, maximum: 100 }
+      required: [project]
+    examples:
+      - args: { project: "42", state: opened, page: 1, per_page: 20 }
+        note: "page and per_page are optional; omit them for the first page with the server default page size."
+      - args: { project: "group/project" }
+        note: "pass a path-form project as group/project with a literal slash; the engine encodes it to group%2Fproject in the URL."
+    response_pick: [iid, title, state, labels, web_url, author.username]
+
+  - name: get_issue
+    description: Get one issue by project-local iid
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/issues/{{args.iid}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        iid: { type: integer, description: "project-local issue iid, not the global id" }
+      required: [project, iid]
+    response_pick: [iid, title, state, labels, web_url, author.username, description, assignees.username]
+
+  - name: create_issue
+    description: Create an issue in a project
+    method: POST
+    url: "{{account.api_base}}/projects/{{args.project}}/issues"
+    body:
+      title: "{{args.title}}"
+      description: "{{args.description}}"
+      labels: "{{args.labels}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        title: { type: string }
+        description: { type: string }
+        labels: { type: string, description: "comma-separated label names" }
+      required: [project, title]
+    examples:
+      - args: { project: "42", title: "Broken build on main", labels: "bug,ci" }
+        note: "description and labels are optional; an omitted optional field is dropped from the request body rather than sent as null."
+
+  - name: update_issue
+    description: Update an issue's title, description, state, labels, or assignees
+    method: PUT
+    url: "{{account.api_base}}/projects/{{args.project}}/issues/{{args.iid}}"
+    body:
+      title: "{{args.title}}"
+      description: "{{args.description}}"
+      state_event: "{{args.state_event}}"
+      labels: "{{args.labels}}"
+      add_labels: "{{args.add_labels}}"
+      remove_labels: "{{args.remove_labels}}"
+      assignee_ids: "{{args.assignee_ids}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        iid: { type: integer, description: "project-local issue iid, not the global id" }
+        title: { type: string }
+        description: { type: string }
+        state_event: { type: string, enum: [close, reopen] }
+        labels: { type: string, description: "comma-separated label names that replace the current set" }
+        add_labels: { type: string, description: "comma-separated label names to add without removing others" }
+        remove_labels: { type: string, description: "comma-separated label names to remove" }
+        assignee_ids:
+          type: array
+          items: { type: integer }
+          description: "user ids to assign; pass an empty array to unassign all"
+      required: [project, iid]
+    examples:
+      - args: { project: "42", iid: 7, state_event: close }
+        note: "any subset of the optional fields may be set in one call; every field left out is dropped from the body and left unchanged on the issue."
+      - args: { project: "42", iid: 7, add_labels: "needs-triage", remove_labels: "bug" }
+        note: "GitLab native label editing uses add_labels and remove_labels (comma-separated strings), not separate endpoints."
+
+  - name: comment_issue
+    description: Post a note (comment) on an issue
+    method: POST
+    url: "{{account.api_base}}/projects/{{args.project}}/issues/{{args.iid}}/notes"
+    body:
+      body: "{{args.body}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        iid: { type: integer, description: "project-local issue iid, not the global id" }
+        body: { type: string }
+      required: [project, iid, body]
+
+  - name: list_merge_requests
+    description: List merge requests in a project, filtered by state and page
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/merge_requests"
+    query:
+      state: "{{args.state}}"
+      page: "{{args.page}}"
+      per_page: "{{args.per_page}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        state: { type: string, enum: [opened, closed, locked, merged, all] }
+        page: { type: integer, minimum: 1 }
+        per_page: { type: integer, minimum: 1, maximum: 100 }
+      required: [project]
+    response_pick: [iid, title, state, web_url, source_branch, target_branch, author.username]
+
+  - name: get_merge_request
+    description: Get one merge request by project-local iid
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/merge_requests/{{args.iid}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        iid: { type: integer, description: "project-local merge request iid, not the global id" }
+      required: [project, iid]
+    response_pick: [iid, title, state, web_url, source_branch, target_branch, author.username, merge_status, has_conflicts]
+
+  - name: create_merge_request
+    description: Open a merge request
+    method: POST
+    url: "{{account.api_base}}/projects/{{args.project}}/merge_requests"
+    body:
+      source_branch: "{{args.source_branch}}"
+      target_branch: "{{args.target_branch}}"
+      title: "{{args.title}}"
+      description: "{{args.description}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        source_branch: { type: string }
+        target_branch: { type: string }
+        title: { type: string }
+        description: { type: string }
+      required: [project, source_branch, target_branch, title]
+    examples:
+      - args: { project: "42", source_branch: feature, target_branch: main, title: "Add feature" }
+        note: "description is optional; omit it when the MR title is enough."
+
+  - name: merge_merge_request
+    description: Merge an open merge request
+    method: PUT
+    url: "{{account.api_base}}/projects/{{args.project}}/merge_requests/{{args.iid}}/merge"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        iid: { type: integer, description: "project-local merge request iid, not the global id" }
+      required: [project, iid]
+
+  - name: approve_merge_request
+    description: Approve a merge request
+    method: POST
+    url: "{{account.api_base}}/projects/{{args.project}}/merge_requests/{{args.iid}}/approve"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        iid: { type: integer, description: "project-local merge request iid, not the global id" }
+      required: [project, iid]
+
+  - name: comment_merge_request
+    description: Post a note (comment) on a merge request
+    method: POST
+    url: "{{account.api_base}}/projects/{{args.project}}/merge_requests/{{args.iid}}/notes"
+    body:
+      body: "{{args.body}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        iid: { type: integer, description: "project-local merge request iid, not the global id" }
+        body: { type: string }
+      required: [project, iid, body]
+
+  - name: create_release
+    description: Create a project release for a tag
+    method: POST
+    url: "{{account.api_base}}/projects/{{args.project}}/releases"
+    body:
+      tag_name: "{{args.tag_name}}"
+      name: "{{args.name}}"
+      description: "{{args.description}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        tag_name: { type: string }
+        name: { type: string }
+        description: { type: string }
+      required: [project, tag_name]
+    examples:
+      - args: { project: "42", tag_name: v1.4.0, name: "v1.4.0", description: "Ship it" }
+        note: "name and description are optional; the tag must already exist on the project unless create-from-ref is used outside this connector."
+
+  - name: get_release_by_tag
+    description: Get a project release by its tag name
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/releases/{{args.tag_name}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        tag_name: { type: string }
+      required: [project, tag_name]
+    examples:
+      - args: { project: "42", tag_name: v1.2.0 }
+        note: "dots in the tag stay unencoded in the path (v1.2.0)."
+    response_pick: [tag_name, name, description, released_at, _links.self]
+
+  - name: list_pipelines
+    description: List pipelines in a project, filtered by ref, status, and page
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/pipelines"
+    query:
+      ref: "{{args.ref}}"
+      status: "{{args.status}}"
+      page: "{{args.page}}"
+      per_page: "{{args.per_page}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        ref: { type: string, description: "branch or tag name" }
+        status:
+          type: string
+          enum:
+            [
+              created,
+              waiting_for_resource,
+              preparing,
+              pending,
+              running,
+              success,
+              failed,
+              canceled,
+              skipped,
+              manual,
+              scheduled,
+            ]
+        page: { type: integer, minimum: 1 }
+        per_page: { type: integer, minimum: 1, maximum: 100 }
+      required: [project]
+    response_pick: [id, status, ref, sha, web_url]
+
+  - name: get_pipeline
+    description: Get one pipeline by id
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/pipelines/{{args.pipeline_id}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        pipeline_id: { type: integer }
+      required: [project, pipeline_id]
+    response_pick: [id, status, ref, sha, web_url, source, created_at, updated_at]
+
+  - name: list_pipeline_jobs
+    description: List jobs belonging to a pipeline
+    read_only: true
+    method: GET
+    url: "{{account.api_base}}/projects/{{args.project}}/pipelines/{{args.pipeline_id}}/jobs"
+    query:
+      page: "{{args.page}}"
+      per_page: "{{args.per_page}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        pipeline_id: { type: integer }
+        page: { type: integer, minimum: 1 }
+        per_page: { type: integer, minimum: 1, maximum: 100 }
+      required: [project, pipeline_id]
+    response_pick: [id, name, status, stage, web_url]
+
+  - name: trigger_pipeline
+    description: Create a new pipeline on a branch or tag
+    method: POST
+    url: "{{account.api_base}}/projects/{{args.project}}/pipeline"
+    body:
+      ref: "{{args.ref}}"
+      variables: "{{args.variables}}"
+    args_schema:
+      type: object
+      properties:
+        project:
+          type: string
+          description: "numeric project id, or group/project path (pass the path with a literal slash; the engine percent-encodes it)"
+        ref: { type: string, description: "branch or tag name to run the pipeline on" }
+        variables:
+          type: array
+          description: "pipeline variables as GitLab expects them, an array of objects each with key and value string fields"
+          items:
+            type: object
+            properties:
+              key: { type: string }
+              value: { type: string }
+            required: [key, value]
+      required: [project, ref]
+    examples:
+      - args:
+          project: "42"
+          ref: main
+          variables:
+            - { key: DEPLOY_ENV, value: staging }
+        note: "variables is optional; when present it must be an array of {key, value} objects, which is the shape the GitLab API accepts."

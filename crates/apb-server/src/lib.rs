@@ -1397,6 +1397,7 @@ fn connector_public(name: &str) -> Option<(ConnectorPublic, InstallState)> {
                     version: String::new(),
                     healthcheck: None,
                     auth: None,
+                    error_when: None,
                     account_fields: Vec::new(),
                     functions: Vec::new(),
                 },
@@ -2043,12 +2044,12 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     let _watcher = match watch::spawn_global_watcher(state.events.clone()) {
         Ok(h) => Some(h),
         Err(e) => {
-            eprintln!("apb serve: real-time watcher unavailable: {e}");
+            eprintln!("apb dashboard: real-time watcher unavailable: {e}");
             None
         }
     };
     let app = build_router(state);
-    println!("apb serve (global): http://127.0.0.1:{port}");
+    println!("apb dashboard (global): http://127.0.0.1:{port}");
     let result = axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await;
