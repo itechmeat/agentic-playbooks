@@ -916,17 +916,67 @@ fn account_selection_error(
     )
 }
 
+/// Names that are informative context for an account-selection error message
+/// (finding 12 of issue 45), never a source of truth for what is granted.
+///
+/// Prefers grant allowlist names that exist in the connector snapshot (so the
+/// listed names are ones an operator could plausibly grant). When the grant
+/// allowlist is empty but the snapshot still has accounts, falls back to
+/// every snapshotted account name so the error can say what accounts exist
+/// on the connector even though none of them are granted - otherwise the
+/// message is uninformative about how to fix the binding. Callers MUST NOT
+/// use this list to decide what `--account` values are accepted or what gets
+/// auto-selected: that decision is `granted_account_names` alone.
+fn selectable_account_names<'a>(
+    grant: &'a ManifestConnectorGrant,
+    mconn: &'a ManifestConnector,
+) -> Vec<&'a str> {
+    let from_grant: Vec<&str> = grant
+        .accounts
+        .iter()
+        .filter(|name| mconn.accounts.iter().any(|a| a.name == **name))
+        .map(|s| s.as_str())
+        .collect();
+    if !from_grant.is_empty() {
+        return from_grant;
+    }
+    if !grant.accounts.is_empty() {
+        // Grant names missing from the snapshot: still surface them so the
+        // operator can see what the grant recorded.
+        return grant.accounts.iter().map(|s| s.as_str()).collect();
+    }
+    mconn.accounts.iter().map(|a| a.name.as_str()).collect()
+}
+
+/// Names actually granted to this node, the sole basis for `--account`
+/// acceptance and auto-selection. An empty grant allowlist means no account
+/// is accepted and nothing is auto-selected, regardless of what the
+/// connector snapshot has configured.
+fn granted_account_names(grant: &ManifestConnectorGrant) -> Vec<&str> {
+    grant.accounts.iter().map(|s| s.as_str()).collect()
+}
+
+/// Formats a `choices:`-style account name list for an error message.
+fn format_account_choices(names: &[&str]) -> String {
+    names.join(", ")
+}
+
 /// Account selection (spec 6 step 4): an explicit `--account` must be granted;
 /// with none given, the single granted account is used, else the granted
 /// account flagged `default` in the connector snapshot, else a Config error
-/// listing the choices.
+/// listing the choices. An empty grant allowlist grants no account at all:
+/// it is never widened to the connector snapshot's accounts, since that would
+/// let a deny-all binding (`accounts: []`) call the connector with any
+/// configured account.
 fn select_account(
     req: &CallRequest,
     grant: &ManifestConnectorGrant,
     mconn: &ManifestConnector,
 ) -> Result<String, CallError> {
+    let granted = granted_account_names(grant);
+
     if let Some(explicit) = req.account {
-        if grant.accounts.iter().any(|a| a == explicit) {
+        if granted.contains(&explicit) {
             return Ok(explicit.to_string());
         }
         return Err(CallError::new(
@@ -938,17 +988,29 @@ fn select_account(
         ));
     }
 
-    if grant.accounts.len() == 1 {
-        return Ok(grant.accounts[0].clone());
+    if let [only] = granted.as_slice() {
+        return Ok((*only).to_string());
     }
 
-    let defaults: Vec<&String> = grant
-        .accounts
+    let defaults: Vec<&str> = granted
         .iter()
-        .filter(|name| mconn.accounts.iter().any(|a| &a.name == *name && a.default))
+        .copied()
+        .filter(|name| mconn.accounts.iter().any(|a| a.name == *name && a.default))
         .collect();
     if let [only] = defaults.as_slice() {
-        return Ok((*only).clone());
+        return Ok((*only).to_string());
+    }
+
+    if granted.is_empty() {
+        let snapshot_names = selectable_account_names(grant, mconn);
+        return Err(CallError::new(
+            CallErrorCode::Config,
+            format!(
+                "connector `{}` binding grants no accounts; configured accounts: {}",
+                req.connector,
+                format_account_choices(&snapshot_names)
+            ),
+        ));
     }
 
     Err(CallError::new(
@@ -956,7 +1018,7 @@ fn select_account(
         format!(
             "connector `{}` has several granted accounts and no single default; pass --account (choices: {})",
             req.connector,
-            grant.accounts.join(", ")
+            format_account_choices(&granted)
         ),
     ))
 }
@@ -2142,5 +2204,151 @@ mod tests {
             out,
             json!({ "echo": "prefix [redacted:MOCK_TOKEN] suffix", "n": 3, "list": ["[redacted:MOCK_TOKEN]"] })
         );
+    }
+}
+
+#[cfg(test)]
+mod select_account_tests {
+    use super::*;
+    use crate::manifest::{ManifestAccount, ManifestConnector, ManifestConnectorGrant};
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    fn maccount(name: &str, default: bool) -> ManifestAccount {
+        ManifestAccount {
+            name: name.to_string(),
+            default,
+            fields: BTreeMap::new(),
+            env: BTreeMap::new(),
+            cmd: BTreeMap::new(),
+            digest: format!("sha256:{name}"),
+        }
+    }
+
+    fn req<'a>() -> CallRequest<'a> {
+        CallRequest {
+            run_dir: Path::new("/tmp"),
+            root: Path::new("/tmp"),
+            node_id: "n",
+            connector: "github",
+            function: "create_issue",
+            account: None,
+            args: serde_json::json!({}),
+            dry_run: true,
+            full: false,
+        }
+    }
+
+    #[test]
+    fn format_account_choices_joins_names() {
+        assert_eq!(
+            format_account_choices(&["work", "personal"]),
+            "work, personal"
+        );
+        assert_eq!(format_account_choices(&[]), "");
+    }
+
+    #[test]
+    fn ambiguous_grant_lists_account_names_in_error() {
+        let grant = ManifestConnectorGrant {
+            connector: "github".into(),
+            accounts: vec!["work".into(), "personal".into()],
+            functions: vec!["create_issue".into()],
+            max_calls: None,
+        };
+        let mconn = ManifestConnector {
+            name: "github".into(),
+            digest: "sha256:c".into(),
+            accounts: vec![maccount("work", false), maccount("personal", false)],
+        };
+        let err = select_account(&req(), &grant, &mconn).unwrap_err();
+        assert!(
+            err.message.contains("work") && err.message.contains("personal"),
+            "choices must name granted accounts: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("choices: work, personal"),
+            "choices list must be non-empty and ordered: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn empty_grant_accepts_no_account_but_error_still_names_snapshot_accounts() {
+        // Finding 12 (narrowed): grant.accounts empty while the connector
+        // snapshot still carries several accounts. Nothing is auto-selected,
+        // but the error may still name the snapshot accounts as informational
+        // context, not as valid choices.
+        let grant = ManifestConnectorGrant {
+            connector: "github".into(),
+            accounts: vec![],
+            functions: vec!["create_issue".into()],
+            max_calls: None,
+        };
+        let mconn = ManifestConnector {
+            name: "github".into(),
+            digest: "sha256:c".into(),
+            accounts: vec![maccount("work", false), maccount("personal", false)],
+        };
+        let err = select_account(&req(), &grant, &mconn).unwrap_err();
+        assert_eq!(err.code, CallErrorCode::Config);
+        assert!(
+            err.message.contains("grants no accounts"),
+            "empty-grant error must say the binding grants no accounts: {}",
+            err.message
+        );
+        assert!(
+            err.message.contains("work") && err.message.contains("personal"),
+            "error may still name snapshot accounts as context: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn empty_grant_rejects_explicit_account_even_if_snapshot_has_it() {
+        // A deny-all `accounts: []` grant must not let an explicit --account
+        // through just because the connector snapshot configures that
+        // account. This is the authorization gate the narrowing restores.
+        let grant = ManifestConnectorGrant {
+            connector: "github".into(),
+            accounts: vec![],
+            functions: vec!["create_issue".into()],
+            max_calls: None,
+        };
+        let mconn = ManifestConnector {
+            name: "github".into(),
+            digest: "sha256:c".into(),
+            accounts: vec![maccount("work", true), maccount("personal", false)],
+        };
+        let mut request = req();
+        request.account = Some("work");
+        let err = select_account(&request, &grant, &mconn).unwrap_err();
+        assert_eq!(err.code, CallErrorCode::Permission);
+        assert!(
+            err.message.contains("not granted account `work`"),
+            "explicit --account must be rejected for an empty grant: {}",
+            err.message
+        );
+    }
+
+    #[test]
+    fn empty_grant_auto_selects_nothing_even_with_single_snapshot_account() {
+        // Before commit 6639db5's regression, a single snapshot account with
+        // an empty grant must still fail closed rather than auto-select.
+        let grant = ManifestConnectorGrant {
+            connector: "github".into(),
+            accounts: vec![],
+            functions: vec!["create_issue".into()],
+            max_calls: None,
+        };
+        let mconn = ManifestConnector {
+            name: "github".into(),
+            digest: "sha256:c".into(),
+            accounts: vec![maccount("work", true)],
+        };
+        let err = select_account(&req(), &grant, &mconn).unwrap_err();
+        assert_eq!(err.code, CallErrorCode::Config);
+        assert!(err.message.contains("grants no accounts"));
     }
 }
