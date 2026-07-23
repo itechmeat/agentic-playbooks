@@ -46,12 +46,14 @@ mod cache;
 mod node;
 mod patch;
 mod prepare;
+mod rebind;
 mod resume;
 mod supervisor;
 
 use node::*;
 use patch::*;
 use prepare::*;
+use rebind::*;
 pub use resume::{ResumeDecision, ResumeReason, StartMode, plan_resume};
 pub use supervisor::spawn_supervisor_agent;
 use supervisor::*;
@@ -234,6 +236,20 @@ pub fn run_playbook_ref(root: &Path, run_id: &str) -> Result<(String, String), E
             "run `{run_id}` has no RunStarted event"
         ))),
     }
+}
+
+/// The origin (project vs global) a run was started under, from its provenance.
+/// Used by the MCP rebind gate to resolve and trust-check a new profile the same
+/// way run start resolved the run's node profiles (issue #45 finding 5).
+pub fn run_profile_origin(root: &Path, run_id: &str) -> Result<PlaybookOrigin, EngineError> {
+    if !is_safe_segment(run_id) {
+        return Err(EngineError::NotFound(run_id.to_string()));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(EngineError::NotFound(run_id.to_string()));
+    }
+    rebind::run_origin(&run_dir)
 }
 
 #[derive(Debug)]
@@ -535,9 +551,10 @@ fn node_primary_invocation(
     let Some(manifest) = crate::manifest::read(run_dir)? else {
         return Ok(None);
     };
-    Ok(manifest
-        .for_node(node)
-        .and_then(|p| p.chain.first())
+    // The EFFECTIVE binding: a rebound node's interaction ceiling comes from its
+    // new profile (issue #45 finding 5).
+    Ok(effective_for_node(run_dir, &manifest, node)?
+        .and_then(|p| p.chain.first().cloned())
         .map(|ri| (ri.agent_id.clone(), ri.spec.interaction)))
 }
 
@@ -1468,6 +1485,33 @@ fn drive_inner(
                     // terminated the agent. At a boundary there is no attempt to
                     // interrupt, so just consume it and move on - an interrupt
                     // posted with no attempt running is a harmless no-op.
+                    control_cursor = Some(entry.seq);
+                    write_control_cursor(run_dir, entry.seq)?;
+                }
+                Control::Rebind {
+                    node,
+                    profile,
+                    scope,
+                    bundle,
+                    reason,
+                } => {
+                    // Applied in place like ContextAppend: the effect (verify +
+                    // journal + overlay) runs first, the cursor is persisted only
+                    // once it returns Ok, so an I/O fault leaves the entry to
+                    // resurface on the next drive instead of being dropped. Never
+                    // terminal - the scan continues.
+                    apply_rebind(
+                        root,
+                        run_dir,
+                        log,
+                        RebindCommand {
+                            node,
+                            profile,
+                            scope,
+                            bundle,
+                            reason,
+                        },
+                    )?;
                     control_cursor = Some(entry.seq);
                     write_control_cursor(run_dir, entry.seq)?;
                 }
@@ -2781,6 +2825,35 @@ fn drive_inner(
                         // no running attempt to terminate, so it is spent.
                         // Consume it (advance the cursor so await_control does not
                         // hand it back) and keep waiting for a real directive.
+                        control_cursor = Some(seq);
+                        write_control_cursor(run_dir, seq)?;
+                        continue;
+                    }
+                    Control::Rebind {
+                        node,
+                        profile,
+                        scope,
+                        bundle,
+                        reason,
+                    } => {
+                        // Rebinding the wedged node's profile (issue #45 finding
+                        // 5) is exactly the intervention a supervisor makes at a
+                        // wake before retrying. Apply it in place - effect first,
+                        // cursor persisted only on Ok - and keep waiting for the
+                        // retry/continue directive that follows. The next attempt
+                        // resolves the node through the rebind overlay.
+                        apply_rebind(
+                            root,
+                            run_dir,
+                            log,
+                            RebindCommand {
+                                node,
+                                profile,
+                                scope,
+                                bundle,
+                                reason,
+                            },
+                        )?;
                         control_cursor = Some(seq);
                         write_control_cursor(run_dir, seq)?;
                         continue;

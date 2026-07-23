@@ -108,6 +108,11 @@ fn capability_for_tool(name: &str) -> &'static str {
         // belongs with `retry`, the same capability its sibling
         // `supervisor_node_retry` requires.
         | "supervisor_interrupt_attempt" => "retry",
+        // Rebinding a node's executor profile mid-run (issue #45 finding 5) is
+        // its own capability: it re-runs the trust gate for a new bundle and
+        // changes the run's effective binding, a strictly larger act than a
+        // retry, so a policy can grant retry without granting rebind.
+        "supervisor_rebind_profile" => "rebind",
         "supervisor_patch_playbook" => "patch_playbook",
         // An unknown tool name must not pass the gate under any policy.
         _ => "unknown",

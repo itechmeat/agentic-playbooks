@@ -192,6 +192,8 @@ impl RunState {
                 EventPayload::SupervisorLost { .. } => {}
                 EventPayload::PatchApplied { .. }
                 | EventPayload::PatchRejected { .. }
+                | EventPayload::ProfileRebound { .. }
+                | EventPayload::RebindRejected { .. }
                 | EventPayload::RunMigrated { .. }
                 | EventPayload::VersionPromoted { .. } => {}
                 EventPayload::WaitStarted { .. }

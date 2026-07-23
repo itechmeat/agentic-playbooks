@@ -114,6 +114,34 @@ instructing it to relay the question instead. For `answer_by: supervisor`,
 the supervisor may answer directly from its own judgment, and should still
 escalate to the user when unsure rather than guess.
 
+Each supervisor tool requires a capability the run's `supervisor.policy.capabilities`
+grants; the default when the key is absent is all of them
+(`observe`, `retry`, `rebind`, `patch_playbook`). `observe` covers reads
+(`supervisor_wait_event`, `supervisor_run_inspect`, `supervisor_report`);
+`retry` covers in-run control-flow interventions (`supervisor_node_retry`,
+`supervisor_run_continue_from`, `supervisor_run_pause`, `supervisor_run_abort`,
+`supervisor_context_append`, `supervisor_interrupt_attempt`); `patch_playbook`
+gates `supervisor_patch_playbook`.
+
+`rebind` gates `supervisor_rebind_profile { token, node, profile, scope?,
+acknowledge_untrusted?, reason? }`, the sanctioned escape hatch for switching a
+node's executor profile mid-run when its bound agent is wedged (a service that
+hangs on every attempt). Per-node executor bindings are pinned in the immutable
+run manifest, so a playbook patch that only swaps a node's profile does not move
+the running binding; this tool does. It re-runs the trust gate for the NEW
+profile bundle exactly as run start does (an unapproved bundle is refused with
+`untrusted_profile_requires_acknowledge` unless `acknowledge_untrusted: true` is
+set after user confirmation; a missing profile with `profile_unresolved`),
+journals the accepted rebind as a `profile_rebound` event, and changes the
+node's effective binding for future attempts through a journaled overlay while
+leaving the original manifest intact as the record of what the run started with.
+The verified bundle is pinned and re-checked from the run snapshot when the drive
+applies it, so any drift between gate and apply is refused (`rebind_rejected`).
+It is its own capability because it is strictly larger than a retry, so a policy
+can grant `retry` without granting `rebind`. The usual sequence is
+`supervisor_rebind_profile` then `supervisor_node_retry`: the next attempt picks
+up the new profile.
+
 ## Asynchronous run model
 
 A run can take minutes, while some hosts have a short timeout on a single

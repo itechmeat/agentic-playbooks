@@ -679,6 +679,42 @@ pub fn playbook_profile_bundles_for(
     out
 }
 
+/// Trust gate for a single profile bundle a mid-run rebind switches a node to
+/// (issue #45 finding 5). Resolves the profile plus the live content of its
+/// skills, computes the bundle digest, and refuses an unapproved bundle with the
+/// SAME `untrusted_profile_requires_acknowledge` refusal run start uses (unless
+/// the caller acknowledged after user confirmation). On success returns the
+/// verified bundle digest, which the engine re-verifies from the run snapshot at
+/// apply time (anti-TOCTOU pin) - the caller passes it verbatim, never a
+/// separately recomputed one. `origin` must be the run's own origin so `auto`
+/// scope resolves exactly as the run's node profiles did.
+pub fn check_rebind(
+    root: &Path,
+    origin: PlaybookOrigin,
+    name: &str,
+    scope: ProfileScope,
+    acknowledge_untrusted: bool,
+) -> Result<String, Value> {
+    let r = apb_core::profile::QualifiedProfileRef {
+        name: name.to_string(),
+        scope,
+    };
+    match profile_store::compute_bundle(root, origin, &r) {
+        Ok((loaded, _pairs, bundle)) => {
+            let key = format!("{}/{}", profile_store::scope_str(loaded.scope), loaded.name);
+            if !acknowledge_untrusted && !TrustStore::load().is_approved(&bundle) {
+                return Err(json!({
+                    "policy": "untrusted_profile_requires_acknowledge",
+                    "profiles": [key],
+                    "detail": "run again with acknowledge_untrusted: true after user confirmation",
+                }));
+            }
+            Ok(bundle)
+        }
+        Err(e) => Err(json!({ "policy": "profile_unresolved", "detail": e.to_string() })),
+    }
+}
+
 fn check_profile_bundles(
     root: &Path,
     playbook: &Playbook,

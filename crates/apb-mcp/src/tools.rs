@@ -1110,6 +1110,36 @@ pub fn run_pause(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     Ok(json!({ "posted_seq": seq }))
 }
 
+/// Posts a `Control::Rebind` to switch a node's executor profile mid-run (issue
+/// #45 finding 5). Writes no events - drive journals `profile_rebound` (or
+/// `rebind_rejected`) when it applies the command (single-writer). `bundle` is
+/// the digest the policy gate (`policy::check_rebind`) verified, pinned so drive
+/// re-verifies the re-snapshotted profile against it (anti-TOCTOU). The gate runs
+/// at the server boundary before this call, so an untrusted/unresolved profile
+/// never reaches here.
+pub fn rebind_profile(
+    root: &Path,
+    run_id: &str,
+    node: &str,
+    profile: &str,
+    scope: apb_core::profile::ProfileScope,
+    bundle: &str,
+    reason: Option<String>,
+) -> Result<Value, ToolError> {
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::Rebind {
+            node: node.to_string(),
+            profile: profile.to_string(),
+            scope,
+            bundle: bundle.to_string(),
+            reason,
+        },
+    )?;
+    Ok(json!({ "posted_seq": seq }))
+}
+
 pub fn run_abort(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     run_cancel(root, run_id)?;
     Ok(json!({ "ok": true }))
@@ -1263,7 +1293,7 @@ pub fn supervisor_report(root: &Path, run_id: &str, text: &str) -> Result<Value,
 
 /// Extracts the capability list from `playbook.supervisor.policy.capabilities`.
 /// Distinguishes an absent key (default) from a present one (exact value):
-/// - key absent -> default `["observe", "retry", "patch_playbook"]`
+/// - key absent -> default `["observe", "retry", "rebind", "patch_playbook"]`
 ///   (all implemented capabilities, see spec 9.5: the default is all)
 /// - key present as a sequence -> its strings (empty if empty)
 /// - key present as a scalar string -> a single-element list
@@ -1286,6 +1316,7 @@ pub fn supervisor_capabilities(
         None => vec![
             "observe".to_string(),
             "retry".to_string(),
+            "rebind".to_string(),
             "patch_playbook".to_string(),
         ],
         Some(v) if v.is_sequence() => v

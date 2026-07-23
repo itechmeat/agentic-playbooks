@@ -147,6 +147,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "supervisor_context_append",
         "supervisor_interrupt_attempt",
         "supervisor_report",
+        "supervisor_rebind_profile",
         "supervisor_patch_playbook",
     ];
     for name in expected {
@@ -425,6 +426,116 @@ fn interrupt_attempt_rejected_without_capability() {
         .resolve_session(&token, "supervisor_interrupt_attempt")
         .unwrap_err();
     assert!(err.to_string().contains("retry"));
+}
+
+/// Rebinding a node's executor profile mid-run (issue #45 finding 5) is its own
+/// capability: strictly larger than a retry (it re-runs the trust gate for a new
+/// bundle and changes the run's effective binding), so a policy can grant retry
+/// without granting rebind.
+#[test]
+fn rebind_profile_tool_maps_to_rebind_capability() {
+    assert_eq!(capability_for_tool("supervisor_rebind_profile"), "rebind");
+}
+
+#[test]
+fn rebind_profile_rejected_without_the_rebind_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = WfMcp::new(dir.path().to_path_buf());
+    // retry alone does NOT grant rebind.
+    let token = server.mint_token(
+        "run-x".to_string(),
+        vec!["observe".to_string(), "retry".to_string()],
+    );
+    let err = server
+        .resolve_session(&token, "supervisor_rebind_profile")
+        .unwrap_err();
+    assert!(err.to_string().contains("rebind"));
+}
+
+#[test]
+fn rebind_profile_allowed_with_the_rebind_capability() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let token = server.mint_token("run-x".to_string(), vec!["rebind".to_string()]);
+    assert_eq!(
+        server
+            .resolve_session(&token, "supervisor_rebind_profile")
+            .unwrap(),
+        "run-x"
+    );
+}
+
+#[test]
+fn default_supervisor_capabilities_include_rebind() {
+    let dir = seeded_root();
+    let caps = crate::tools::supervisor_capabilities(dir.path(), "implement-task", None).unwrap();
+    assert!(
+        caps.iter().any(|c| c == "rebind"),
+        "the default capability set must include rebind: {caps:?}"
+    );
+}
+
+/// The rebind gate refuses an unapproved profile bundle with the SAME refusal
+/// surface run start uses, and an acknowledge (after user confirmation) lets it
+/// through (issue #45 finding 5).
+#[test]
+fn check_rebind_refuses_untrusted_bundle_then_acknowledges() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    unsafe {
+        // Isolate the trust store so the seeded bundle is unapproved.
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    apb_core::registry::init_project(root.path()).unwrap();
+    let pdir = root.path().join(".apb/profiles/backup");
+    fs::create_dir_all(&pdir).unwrap();
+    fs::write(
+        pdir.join("profile.yaml"),
+        "name: backup\ndescription: d\nexecutor:\n  agent: claude\n  model: haiku\n",
+    )
+    .unwrap();
+    fs::write(pdir.join("SOUL.md"), "role").unwrap();
+
+    let origin = apb_core::profile_store::PlaybookOrigin::Project;
+    let scope = apb_core::profile::ProfileScope::Auto;
+
+    let refusal = crate::policy::check_rebind(root.path(), origin, "backup", scope, false)
+        .expect_err("an unapproved bundle must be refused");
+    assert_eq!(
+        refusal["policy"], "untrusted_profile_requires_acknowledge",
+        "refusal must match run start's surface: {refusal}"
+    );
+
+    // With acknowledge (user confirmed), the same call returns the verified bundle.
+    let bundle = crate::policy::check_rebind(root.path(), origin, "backup", scope, true)
+        .expect("acknowledge_untrusted lets the rebind through");
+    assert!(
+        bundle.starts_with("sha256:"),
+        "a verified bundle digest is returned: {bundle}"
+    );
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+}
+
+#[test]
+fn check_rebind_refuses_unresolved_profile() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    apb_core::registry::init_project(root.path()).unwrap();
+    let origin = apb_core::profile_store::PlaybookOrigin::Project;
+    let scope = apb_core::profile::ProfileScope::Auto;
+    let refusal = crate::policy::check_rebind(root.path(), origin, "ghost", scope, true)
+        .expect_err("a missing profile must be refused even with acknowledge");
+    assert_eq!(refusal["policy"], "profile_unresolved", "{refusal}");
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
 }
 
 #[test]
