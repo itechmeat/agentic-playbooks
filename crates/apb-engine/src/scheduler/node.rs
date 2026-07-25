@@ -328,9 +328,12 @@ pub(crate) fn execute_node(
             let grants = manifest.grants_for(node_id);
             if !grants.is_empty() {
                 let docs =
-                    crate::connector_prompt::load_snapshot_docs(run_dir, &manifest.connectors);
-                let block =
-                    crate::connector_prompt::instruction_block(grants, &manifest.connectors, &docs);
+                    crate::connector::prompt::load_snapshot_docs(run_dir, &manifest.connectors);
+                let block = crate::connector::prompt::instruction_block(
+                    grants,
+                    &manifest.connectors,
+                    &docs,
+                );
                 if !block.is_empty() {
                     text = format!("{text}\n\n{block}");
                 }

@@ -27,8 +27,8 @@ use apb_core::connector::resolve::resolve_playbook;
 use apb_core::connector::store;
 use apb_core::schema::Playbook;
 use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
-use apb_engine::connector_call::{CallRequest, execute, healthcheck};
-use apb_engine::connector_run::snapshot_connectors;
+use apb_engine::connector::call::{CallRequest, execute, healthcheck};
+use apb_engine::connector::run::snapshot_connectors;
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::manifest::{self, RunExecutionManifest};
 

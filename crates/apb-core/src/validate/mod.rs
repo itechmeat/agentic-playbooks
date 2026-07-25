@@ -1,0 +1,701 @@
+//! Playbook validation: the V-coded rules a definition must satisfy before it
+//! can be stored or run.
+//!
+//! [`validate`] is the orchestrator; each rule family lives in its own module
+//! ([`graph`] for graph shape and routing, [`nodes`] for per-node fields,
+//! [`connectors`] for grants, [`templates`] for reference resolution), so a
+//! new rule lands next to the rules it is related to instead of at the end of
+//! one long file.
+
+mod connectors;
+mod graph;
+mod nodes;
+mod templates;
+
+use std::collections::{HashMap, HashSet, VecDeque};
+
+use crate::profile::{ProfileScope, QualifiedProfileRef};
+use crate::profile_store::PlaybookOrigin;
+use crate::schema::{
+    CacheMode, CacheSpec, EdgeCondition, FunctionsAllow, Isolation, NodeKind, Playbook,
+    SuccessCheck,
+};
+
+use connectors::check_connectors;
+use graph::{
+    check_conditions, check_cycles, check_edges, check_edges_exist, check_reachability,
+    check_start_finish, check_unique_ids,
+};
+use nodes::{
+    check_cache, check_expected_duration, check_finish, check_interactive, check_isolation,
+    check_playbook_ref, check_scripts, check_success_check, check_trigger,
+};
+use templates::{check_refs, check_templates};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
+#[derive(Debug, Clone)]
+pub struct Issue {
+    pub code: &'static str,
+    pub severity: Severity,
+    pub message: String,
+    pub node: Option<String>,
+}
+
+/// Renders a validation failure as `validation failed:` followed by one line
+/// per issue: `- <code> <severity> (node \`<id>\`): <message>`, omitting the
+/// `(node ...)` segment when the issue has no node. This is the single
+/// canonical rendering for a `Vec<Issue>` becoming user-facing text:
+/// `VersioningError::Validation`'s `Display` goes through it (so every
+/// transitive wrapper - `BundleError`, `EngineError`, ... - renders the same
+/// lines for free), and the MCP layer delegates to it too, so the format
+/// never drifts between surfaces.
+pub fn render_issues(issues: &[Issue]) -> String {
+    let mut out = String::from("validation failed:");
+    for issue in issues {
+        let severity = match issue.severity {
+            Severity::Error => "error",
+            Severity::Warning => "warning",
+        };
+        out.push_str("\n- ");
+        out.push_str(issue.code);
+        out.push(' ');
+        out.push_str(severity);
+        if let Some(node) = &issue.node {
+            out.push_str(" (node `");
+            out.push_str(node);
+            out.push_str("`)");
+        }
+        out.push_str(": ");
+        out.push_str(&issue.message);
+    }
+    out
+}
+
+#[derive(Debug, Default)]
+pub struct ValidationReport {
+    pub issues: Vec<Issue>,
+}
+
+impl ValidationReport {
+    pub fn is_valid(&self) -> bool {
+        !self.issues.iter().any(|i| i.severity == Severity::Error)
+    }
+    fn error(&mut self, code: &'static str, node: Option<&str>, msg: String) {
+        self.issues.push(Issue {
+            code,
+            severity: Severity::Error,
+            message: msg,
+            node: node.map(String::from),
+        });
+    }
+    fn warn(&mut self, code: &'static str, node: Option<&str>, msg: String) {
+        self.issues.push(Issue {
+            code,
+            severity: Severity::Warning,
+            message: msg,
+            node: node.map(String::from),
+        });
+    }
+}
+
+#[derive(Debug, Default)]
+pub struct ValidationContext {
+    /// Names of the available project profiles (for a structural existence
+    /// check). Full scope-aware resolution happens at run start.
+    pub profiles: Vec<String>,
+    /// Origin of the playbook being checked: a global playbook cannot
+    /// reference a profile with `scope: project` (V14).
+    pub playbook_origin: PlaybookOrigin,
+}
+
+pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationReport {
+    let mut r = ValidationReport::default();
+    check_unique_ids(playbook, &mut r); // V01, V02
+    check_expected_duration(playbook, &mut r); // V19, V20
+    check_finish(playbook, &mut r); // V21
+    check_playbook_ref(playbook, &mut r); // V22
+    check_connectors(playbook, &mut r); // V23, V24, V25, V26
+    check_cache(playbook, &mut r); // V27, V28, V29
+    check_edges(playbook, &mut r); // V30, V34
+    check_interactive(playbook, &mut r); // V31, V32
+    check_success_check(playbook, &mut r); // V33
+    check_start_finish(playbook, &mut r); // V03, V04, V05
+    check_edges_exist(playbook, &mut r); // V06
+    if r.is_valid() {
+        check_reachability(playbook, &mut r); // V07, V08
+        check_conditions(playbook, &mut r); // V09, V10
+        check_cycles(playbook, &mut r); // V11
+        check_scripts(playbook, &mut r); // V12
+        check_templates(playbook, &mut r); // V13
+        check_refs(playbook, ctx, &mut r); // V14, V15
+        check_isolation(playbook, &mut r); // V16
+        check_trigger(playbook, &mut r); // V17
+    }
+    r
+}
+
+/// Compiles glob patterns into a `GlobSet`. Shared by the validator (V29)
+/// and by later cache-fingerprinting tasks, so the compiled matcher and the
+/// error reporting stay identical between validate-time and run-time. On
+/// failure, returns the offending pattern rather than the underlying
+/// `globset` error so callers can report exactly which glob is invalid.
+pub fn build_globset(globs: &[String]) -> Result<globset::GlobSet, String> {
+    let mut builder = globset::GlobSetBuilder::new();
+    for g in globs {
+        builder.add(globset::Glob::new(g).map_err(|_| g.clone())?);
+    }
+    builder.build().map_err(|_| globs.join(","))
+}
+
+#[cfg(test)]
+mod connector_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    fn codes(yaml: &str) -> Vec<&'static str> {
+        let playbook = Playbook::from_yaml(yaml).unwrap();
+        validate(&playbook, &ctx())
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.code)
+            .collect()
+    }
+
+    const GOOD: &str = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: a
+    type: agent_task
+    prompt: hi
+    profile: x
+    connectors:
+      - { name: telegram, accounts: [team-bot], functions: [send_message], max_calls: 50 }
+      - jira
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: done }
+"#;
+
+    #[test]
+    fn valid_connector_bindings_have_no_errors() {
+        let c = codes(GOOD);
+        assert!(c.is_empty(), "expected no errors, got {c:?}");
+    }
+
+    #[test]
+    fn v23_invalid_connector_name_is_rejected() {
+        let bad = GOOD.replace("name: telegram", "name: Telegram");
+        assert!(codes(&bad).contains(&"V23"));
+    }
+
+    #[test]
+    fn v23_invalid_account_entry_is_rejected() {
+        let bad = GOOD.replace("accounts: [team-bot]", "accounts: [Team-Bot]");
+        assert!(codes(&bad).contains(&"V23"));
+    }
+
+    #[test]
+    fn v23_invalid_function_entry_is_rejected() {
+        let bad = GOOD.replace("functions: [send_message]", "functions: [send-message]");
+        assert!(codes(&bad).contains(&"V23"));
+    }
+
+    #[test]
+    fn v24_duplicate_connector_name_is_rejected() {
+        let bad = GOOD.replace("      - jira", "      - jira\n      - jira");
+        assert!(codes(&bad).contains(&"V24"));
+    }
+
+    #[test]
+    fn v25_duplicate_account_entry_is_rejected() {
+        let bad = GOOD.replace("accounts: [team-bot]", "accounts: [team-bot, team-bot]");
+        assert!(codes(&bad).contains(&"V25"));
+    }
+
+    #[test]
+    fn v25_empty_function_entry_is_rejected() {
+        let bad = GOOD.replace("functions: [send_message]", r#"functions: [""]"#);
+        assert!(codes(&bad).contains(&"V25"));
+    }
+
+    #[test]
+    fn v26_max_calls_zero_is_rejected() {
+        let bad = GOOD.replace("max_calls: 50", "max_calls: 0");
+        assert!(codes(&bad).contains(&"V26"));
+    }
+}
+
+#[cfg(test)]
+mod cache_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    /// Wraps a `nodes:`/`edges:` YAML fragment with the schema 2 preamble
+    /// every playbook needs (schema/id/name/version), following the style of
+    /// `connector_tests::GOOD` above.
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    /// All issues (errors and warnings) as `(code, severity)` pairs, so a
+    /// warning-only code like V28 can be asserted without losing severity.
+    fn codes(pb: &Playbook) -> Vec<(&'static str, Severity)> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .map(|i| (i.code, i.severity))
+            .collect()
+    }
+
+    #[test]
+    fn v27_cache_on_uncacheable_kind() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: c, type: condition, cache: auto }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V27", Severity::Error)));
+    }
+
+    #[test]
+    fn v28_ttl_without_auto_mode() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, cache: { mode: off, ttl: 1h } }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V28", Severity::Warning)));
+    }
+
+    #[test]
+    fn v29_invalid_glob() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - id: a
+    type: agent_task
+    prompt: hi
+    cache: auto
+    inputs: { files: ["src/[**"] }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V29", Severity::Error)));
+    }
+}
+
+#[cfg(test)]
+mod interactive_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    /// Wraps a `nodes:`/`edges:` YAML fragment with the schema 2 preamble,
+    /// mirroring `cache_tests::pb_yaml` above.
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    /// All issues as `(code, severity)` pairs, mirroring `cache_tests::codes`.
+    fn codes(pb: &Playbook) -> Vec<(&'static str, Severity)> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .map(|i| (i.code, i.severity))
+            .collect()
+    }
+
+    #[test]
+    fn v31_companion_field_without_interactive_true() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, answer_by: supervisor }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V31", Severity::Error)));
+        let report = validate(&pb, &ctx());
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.code == "V31")
+            .expect("expected a V31 error");
+        assert!(
+            issue.message.contains("interactive: true"),
+            "V31 message must mention `interactive: true`, got: {}",
+            issue.message
+        );
+    }
+
+    #[test]
+    fn v32_default_answer_without_timeout() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, interactive: true, default_answer: "x" }
+edges: []"#,
+        );
+        assert!(codes(&pb).contains(&("V32", Severity::Error)));
+        let report = validate(&pb, &ctx());
+        let issue = report
+            .issues
+            .iter()
+            .find(|i| i.code == "V32")
+            .expect("expected a V32 error");
+        assert!(
+            issue.message.contains("question_timeout_seconds"),
+            "V32 message must mention `question_timeout_seconds`, got: {}",
+            issue.message
+        );
+    }
+
+    #[test]
+    fn well_formed_interactive_node_has_no_v31_or_v32() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, interactive: true, question_timeout_seconds: 60, default_answer: "x" }
+edges: []"#,
+        );
+        let c = codes(&pb);
+        assert!(!c.contains(&("V31", Severity::Error)), "got {c:?}");
+        assert!(!c.contains(&("V32", Severity::Error)), "got {c:?}");
+    }
+}
+
+#[cfg(test)]
+mod success_check_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn error_codes(pb: &Playbook) -> Vec<&'static str> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.code)
+            .collect()
+    }
+
+    #[test]
+    fn v33_success_check_on_non_agent_task_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: sc, type: script, script: "scripts/x.sh", runner: sh, success_check: { marker: "DONE" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: sc }
+  - { from: sc, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V33"), "expected V33");
+    }
+
+    #[test]
+    fn v33_empty_marker_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: { marker: "" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V33"), "expected V33");
+    }
+
+    #[test]
+    fn v33_whitespace_only_marker_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: { marker: "   " } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V33"), "expected V33");
+    }
+
+    #[test]
+    fn valid_marker_on_agent_task_has_no_v33() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: { marker: "WAVE-COMPLETE" } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(!c.contains(&"V33"), "got {c:?}");
+    }
+
+    #[test]
+    fn valid_script_form_on_agent_task_has_no_v33_or_v12() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: "scripts/check.sh" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(!c.contains(&"V33"), "got {c:?}");
+        assert!(!c.contains(&"V12"), "got {c:?}");
+    }
+
+    #[test]
+    fn v12_script_form_outside_scripts_dir_is_rejected() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, success_check: "check.sh" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V12"), "expected V12");
+    }
+}
+
+#[cfg(test)]
+mod duplicate_route_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn ctx() -> ValidationContext {
+        ValidationContext::default()
+    }
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn error_codes(pb: &Playbook) -> Vec<&'static str> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.code)
+            .collect()
+    }
+
+    fn v34_messages(pb: &Playbook) -> Vec<String> {
+        validate(pb, &ctx())
+            .issues
+            .iter()
+            .filter(|i| i.code == "V34")
+            .map(|i| i.message.clone())
+            .collect()
+    }
+
+    /// The issue-45 finding 7 shape: two edges from `finalize` both matching
+    /// `failure`, pointing at different targets. First-match would send a
+    /// failed finalize into the success finish.
+    #[test]
+    fn v34_identical_failure_conditions_different_targets() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: finalize, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: finalize }
+  - { from: finalize, to: done, condition: { type: node_status, node: finalize, equals: failure } }
+  - { from: finalize, to: aborted, condition: { type: node_status, node: finalize, equals: failure } }"#,
+        );
+        assert!(error_codes(&pb).contains(&"V34"), "expected V34");
+        let msgs = v34_messages(&pb);
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("finalize") && m.contains("done") && m.contains("aborted")),
+            "V34 must name the node and both targets, got: {msgs:?}"
+        );
+    }
+
+    /// Success vs failure are different conditions; that is the normal branch shape.
+    #[test]
+    fn different_conditions_to_different_targets_is_ok() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: finalize, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: finalize }
+  - { from: finalize, to: done, condition: { type: node_status, node: finalize, equals: success } }
+  - { from: finalize, to: aborted, condition: { type: node_status, node: finalize, equals: failure } }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(!c.contains(&"V34"), "got {c:?}");
+    }
+
+    /// Identical condition and the same target is redundant, not contradictory.
+    #[test]
+    fn identical_condition_same_target_is_ok() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done, condition: { type: node_status, node: a, equals: success } }
+  - { from: a, to: done, condition: { type: node_status, node: a, equals: success } }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(
+            !c.contains(&"V34"),
+            "same-target duplicates must not be V34, got {c:?}"
+        );
+    }
+
+    /// Several unconditional edges from one node are parallel fan-out, not V34.
+    #[test]
+    fn parallel_unconditional_edges_are_ok() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi }
+  - { id: b, type: agent_task, prompt: hi }
+  - { id: join, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: join, join: all }
+  - { from: b, to: join, join: all }
+  - { from: join, to: done }"#,
+        );
+        let c = error_codes(&pb);
+        assert!(
+            !c.contains(&"V34"),
+            "parallel fan-out must not be V34, got {c:?}"
+        );
+    }
+
+    /// Two fallback edges with different targets: first-match takes only the first.
+    #[test]
+    fn v34_two_fallbacks_different_targets() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done, fallback: true }
+  - { from: a, to: aborted, fallback: true }"#,
+        );
+        assert!(
+            error_codes(&pb).contains(&"V34"),
+            "expected V34 for dual fallbacks"
+        );
+    }
+
+    /// An unconditional edge makes every conditional edge from the same node
+    /// unreachable under first-match routing.
+    #[test]
+    fn v34_unconditional_shadows_conditional() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }
+  - { from: a, to: aborted, condition: { type: node_status, node: a, equals: failure } }"#,
+        );
+        assert!(
+            error_codes(&pb).contains(&"V34"),
+            "expected V34 for shadowing"
+        );
+        let msgs = v34_messages(&pb);
+        assert!(
+            msgs.iter().any(|m| m.contains("unreachable")),
+            "V34 shadowing message must say unreachable, got: {msgs:?}"
+        );
+    }
+}

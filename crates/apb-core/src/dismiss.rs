@@ -7,7 +7,6 @@
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -44,13 +43,6 @@ impl Default for DismissFile {
     }
 }
 
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
-}
-
 fn dismiss_path() -> Option<PathBuf> {
     crate::config::config_dir().map(|d| d.join("dismissed.json"))
 }
@@ -83,7 +75,7 @@ const LOCK_NAME: &str = "dismissed.json.lock";
 /// read-modify-write is serialized by a file lock (shared with record) -
 /// protection against process races.
 pub fn active_patterns() -> Vec<String> {
-    let now = now_ms();
+    let now = crate::clock::now_ms_u64();
     let Some(dir) = crate::config::config_dir() else {
         return Vec::new();
     };
@@ -111,7 +103,7 @@ pub fn record(pattern: &str, ttl_days: Option<u64>) -> std::io::Result<()> {
     file.patterns.insert(
         pattern.to_string(),
         DismissRecord {
-            created_ms: now_ms(),
+            created_ms: crate::clock::now_ms_u64(),
             ttl_days: ttl_days.unwrap_or(DEFAULT_TTL_DAYS),
         },
     );

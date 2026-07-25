@@ -241,13 +241,6 @@ fn cache_path() -> Option<PathBuf> {
     state_dir().map(|d| d.join("agents-detect.json"))
 }
 
-fn now_ms() -> u128 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
 /// File fingerprint for the cache key: "path:size:mtime_ms". Empty if the
 /// file does not exist.
 fn fingerprint(path: &Path) -> String {
@@ -830,7 +823,7 @@ pub fn detect(refresh: bool) -> Vec<AgentInfo> {
 
     if !refresh
         && let Some(cache) = read_cache()
-        && now_ms().saturating_sub(cache.stamped_ms) < CACHE_TTL_MS
+        && crate::clock::now_ms().saturating_sub(cache.stamped_ms) < CACHE_TTL_MS
         && cache.fingerprints == current_fp
     {
         return cache.agents;
@@ -838,7 +831,7 @@ pub fn detect(refresh: bool) -> Vec<AgentInfo> {
 
     let agents: Vec<AgentInfo> = probes.iter().map(probe_one).collect();
     write_cache(&DetectCache {
-        stamped_ms: now_ms(),
+        stamped_ms: crate::clock::now_ms(),
         fingerprints: current_fp,
         agents: agents.clone(),
     });

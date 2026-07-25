@@ -1,7 +1,7 @@
 //! `tests.yaml` schema (spec 2026-07-19-official-connectors, section 4.6): the
 //! declarative offline contract tests shipped inside a connector folder. Parsed
 //! here as pure data (`deny_unknown_fields` at the document and case level);
-//! executed by the engine's offline runner (`apb_engine::connector_test`),
+//! executed by the engine's offline runner (`apb_engine::connector::contract_test`),
 //! which renders each case through the same path a `--dry-run` call uses and
 //! checks the rendered request against the `expect` block.
 //!

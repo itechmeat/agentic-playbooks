@@ -28,7 +28,7 @@ use apb_core::connector::template::{
 use mail_parser::{MessageParser, MimeHeaders};
 use serde_json::{Map, Value, json};
 
-use crate::connector_result::{CallError, CallErrorCode, CallOk, redact_message};
+use crate::connector::result::{CallError, CallErrorCode, CallOk, redact_message};
 
 /// The per-part cap for a fetched message's `text`/`html` body (spec 3.3): a
 /// larger part is cut to this many bytes and the result marked `truncated`.
@@ -80,7 +80,6 @@ enum ImapOpPlan {
 /// A rendered, ready-to-run imap call. Holds the resolved connection parameters
 /// (including the secret password or token, never logged), the typed op plan,
 /// the deadline budget, and the redaction pairs.
-#[derive(Debug)]
 pub struct ImapCall {
     host: String,
     port: u16,
@@ -95,6 +94,24 @@ pub struct ImapCall {
     /// (resolved secret value, redaction label) pairs; every error message is
     /// scrubbed against these before it leaves the process.
     redactions: Vec<(String, String)>,
+}
+
+/// Manual, secret-free: a derived `Debug` would print the resolved password or
+/// token (and the redaction pairs, which hold the same values verbatim), which
+/// is exactly what the redaction machinery exists to prevent.
+impl std::fmt::Debug for ImapCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ImapCall")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("use_tls", &self.use_tls)
+            .field("auth_method", &self.auth_method)
+            .field("username", &self.username)
+            .field("secret", &"[redacted]")
+            .field("plan", &self.plan)
+            .field("timeout_sec", &self.timeout_sec)
+            .finish_non_exhaustive()
+    }
 }
 
 impl ImapCall {

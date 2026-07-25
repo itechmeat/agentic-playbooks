@@ -26,7 +26,7 @@ use std::process::Command;
 
 use serde::Serialize;
 
-use crate::event::{Event, EventPayload, now_millis};
+use crate::event::{Event, EventPayload};
 use crate::state::{NodeStatus, RunState};
 
 // ---------------------------------------------------------------------------
@@ -482,7 +482,7 @@ pub struct NodeTimes {
 /// two reads of a live run - which is the whole point: a caller polling
 /// `run_status` can see progress without any heartbeat mechanism.
 pub fn node_times(events: &[Event]) -> BTreeMap<String, NodeTimes> {
-    let now = now_millis();
+    let now = apb_core::clock::now_ms();
     let mut started: BTreeMap<String, u128> = BTreeMap::new();
     for e in events {
         if let EventPayload::NodeStarted { node, .. } = &e.payload {
@@ -938,7 +938,7 @@ mod tests {
 
     #[test]
     fn node_times_carry_the_last_start_and_a_growing_age() {
-        let now = now_millis();
+        let now = apb_core::clock::now_ms();
         let events = vec![
             ev(
                 0,

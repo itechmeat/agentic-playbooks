@@ -13,7 +13,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -118,13 +117,6 @@ fn default_schema() -> u32 {
     TRUST_SCHEMA
 }
 
-fn now_ms() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
 fn trust_path() -> Option<PathBuf> {
     crate::config::config_dir().map(|d| d.join("trust.json"))
 }
@@ -209,7 +201,7 @@ impl TrustStore {
         let record = TrustRecord {
             id: id.to_string(),
             origin_kind,
-            approved_at_ms: now_ms(),
+            approved_at_ms: crate::clock::now_ms(),
             kind,
         };
         let digest = digest.to_string();

@@ -916,7 +916,7 @@ impl ClaudeAdapter {
         // elapsed since the currently-open question so a human still thinking
         // does not push the node past its `timeout_seconds`.
         if include_open && let Some(asked_ts) = open_question_asked_ts(&scoped, node_id) {
-            total += crate::event::now_millis().saturating_sub(asked_ts);
+            total += apb_core::clock::now_ms().saturating_sub(asked_ts);
         }
         total
     }
@@ -981,7 +981,7 @@ impl ClaudeAdapter {
         // (spec 2026-07-20, Task 11) the single long-lived attempt DOES span the
         // pending window, so it is recomputed each poll tick - AFTER `on_tick`
         // journals the round - and includes the still-open question window.
-        let since = crate::event::now_millis();
+        let since = apb_core::clock::now_ms();
         let mut pending_ms = Self::pending_question_ms(task, since, false);
         let mut stall_watch =
             crate::stall::StallWatch::new(stall.map(|s| s.expected), stall.map(|s| s.on_stall));
@@ -1201,7 +1201,7 @@ impl ClaudeAdapter {
         // Pending-question exclusion: once for a non-live attempt, recomputed
         // each tick (with the open-question window) for a LIVE attempt - see
         // `run_headless` for the rationale.
-        let since = crate::event::now_millis();
+        let since = apb_core::clock::now_ms();
         let mut pending_ms = Self::pending_question_ms(task, since, false);
         let mut stall_watch =
             crate::stall::StallWatch::new(stall.map(|s| s.expected), stall.map(|s| s.on_stall));

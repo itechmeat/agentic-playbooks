@@ -48,10 +48,7 @@ pub(crate) fn migrate_cmd(root: &Path, apply: bool) -> ExitCode {
         );
         return ExitCode::SUCCESS;
     }
-    let ts = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0);
+    let ts = apb_core::clock::now_secs();
     match apb_core::schema_migrate::apply(root, &plan, ts) {
         Ok(()) => {
             println!("\napplied. backup in .apb/backup-{ts}");

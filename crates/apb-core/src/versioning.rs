@@ -12,7 +12,6 @@ use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -882,10 +881,7 @@ fn list_version_dirs(playbook_dir: &Path) -> Result<Vec<String>, VersioningError
 }
 
 fn temp_dir_name(version: &str) -> String {
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let nanos = crate::clock::now_nanos();
     format!(".tmp-{version}-{nanos}")
 }
 

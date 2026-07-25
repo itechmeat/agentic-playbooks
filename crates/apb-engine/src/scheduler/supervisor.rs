@@ -5,7 +5,7 @@ use super::*;
 
 pub(crate) fn next_supervisor_token() -> String {
     let n = SUPERVISOR_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("sv-{}-{n}", now_millis())
+    format!("sv-{}-{n}", apb_core::clock::now_ms())
 }
 
 /// Spawns a background supervisor agent for run `run_id`: mints a
@@ -41,7 +41,7 @@ pub fn spawn_supervisor_agent(
 
     apb_core::fsutil::atomic_write(
         &run_dir.join("supervisor").join("spawned_at"),
-        now_millis().to_string().as_bytes(),
+        apb_core::clock::now_ms().to_string().as_bytes(),
     )?;
 
     // The supervisor profile's SOUL and skills are used in full (completion-plan
@@ -202,6 +202,220 @@ pub(crate) fn rebuild_context_md(run_dir: &Path) -> Result<(), EngineError> {
     let ctx_md = format!("{header}{}", build_context(&read_all(run_dir)?));
     apb_core::fsutil::atomic_write(&run_dir.join("context.md"), ctx_md.as_bytes())?;
     Ok(())
+}
+
+/// Watches an externally-spawned supervisor agent for silence, and respawns it
+/// once if it has gone quiet past the threshold. Only runs that explicitly
+/// expect an external agent call this; a run supervised by its own caller has
+/// no heartbeat to miss.
+///
+/// The respawn happens at most once per drive: after that a repeated loss is a
+/// matter for manual review, not another automatic restart.
+pub(crate) fn monitor_supervisor_heartbeat(
+    root: &Path,
+    run_id: &str,
+    playbook: &Playbook,
+    log: &mut EventLog,
+    supervisor_lost_logged: &mut bool,
+) -> Result<(), EngineError> {
+    // Heartbeat monitoring: only for runs explicitly expecting an external
+    // background agent (`supervisor_expected`). Silence is measured either from
+    // the last heartbeat, or (as long as the agent has never checked in) from the
+    // moment it was spawned - `supervisor_silence_ms` covers both cases.
+    // The threshold is configurable via `APB_SUPERVISOR_HEARTBEAT_MS` (tests
+    // set a tiny value so they don't have to wait a real minute).
+    // A respawn happens at most once for the whole drive loop - repeated
+    // losses within an already-logged one do not respawn again (4c:
+    // one retry attempt, after that it is a matter of manual review).
+    let silence = supervisor_silence_ms(root, run_id)?;
+    let threshold_ms: u128 = std::env::var("APB_SUPERVISOR_HEARTBEAT_MS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(60_000u128);
+    if should_declare_lost(silence, threshold_ms, *supervisor_lost_logged) {
+        log.append(EventPayload::SupervisorLost {
+            detail: "supervisor heartbeat lost".into(),
+        })?;
+        *supervisor_lost_logged = true;
+        let _ = spawn_supervisor_agent(root, run_id, playbook);
+    }
+    Ok(())
+}
+
+/// What a supervised park decided once a command arrived.
+pub(crate) enum WakeOutcome {
+    /// A directive (retry, continue-from, patch) moved the run on; the drive
+    /// loop restarts its iteration from the possibly-changed `current`.
+    Resumed,
+    /// The run ends here with this outcome.
+    Terminal(RunStatus),
+}
+
+/// Raises a wake for a failed or timed-out node and blocks until the
+/// supervisor answers, applying whatever it sends.
+///
+/// In supervised mode the engine never takes a fallback edge on its own: the
+/// decision is the supervisor's. Commands that are not directives (context
+/// notes, progress, a spent interrupt, a rebind) are applied in place and the
+/// park continues, so the run stays parked until a real directive arrives.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn park_for_supervisor(
+    root: &Path,
+    run_dir: &Path,
+    log: &mut EventLog,
+    cfg: &RunConfig,
+    playbook: &mut Playbook,
+    current: &mut String,
+    control_cursor: &mut Option<u64>,
+    prompt_overrides: &mut BTreeMap<String, String>,
+    frontier: &mut Vec<String>,
+    last_applied_patch: &mut Option<AppliedPatch>,
+    status: NodeStatus,
+    output: &str,
+) -> Result<WakeOutcome, EngineError> {
+    let trigger = if status == NodeStatus::TimedOut {
+        WakeTrigger::NodeTimeout
+    } else {
+        WakeTrigger::NodeFailed
+    };
+    crate::event::raise_wake(run_dir, log, trigger, current, output.to_string())?;
+
+    loop {
+        let (cmd, seq) = await_control(run_dir, log, *control_cursor, current)?;
+        // `await_control` applies ContextAppend/Progress in place (and
+        // persists their own cursor internally) before ever returning;
+        // whatever it DOES return (Retry/ContinueFrom/Pause/Abort/Patch)
+        // is applied right here in each arm below. Cursor persistence
+        // happens AFTER the arm's effect (log.append/apply_patch), not
+        // before: those calls can themselves err on ordinary I/O
+        // conditions, and persisting first would permanently drop the
+        // entry (it would never resurface on the next drive) exactly
+        // when its effect failed to happen.
+        match cmd {
+            // await_control applies ContextAppend and Progress in-place
+            // and never returns them (see its implementation above) - these
+            // branches are defensive, in case of future refactoring: we do
+            // not fail the run, just wait for the next command on the same node.
+            Control::ContextAppend { .. } => continue,
+            Control::Progress { .. } => continue,
+            Control::Retry {
+                node,
+                prompt_override,
+            } => {
+                log.append(EventPayload::SupervisorAction {
+                    action: "node_retry".into(),
+                    node: Some(node.clone()),
+                    detail: prompt_override.clone().unwrap_or_default(),
+                })?;
+                *control_cursor = Some(seq);
+                write_control_cursor(run_dir, seq)?;
+                if let Some(p) = prompt_override {
+                    prompt_overrides.insert(node.clone(), p);
+                }
+                *current = node;
+                break;
+            }
+            Control::ContinueFrom { node } => {
+                log.append(EventPayload::SupervisorAction {
+                    action: "run_continue_from".into(),
+                    node: Some(node.clone()),
+                    detail: String::new(),
+                })?;
+                *control_cursor = Some(seq);
+                write_control_cursor(run_dir, seq)?;
+                *current = node;
+                break;
+            }
+            Control::Patch {
+                version,
+                classification,
+                continue_from,
+            } => {
+                let result = apply_patch(
+                    root,
+                    run_dir,
+                    log,
+                    cfg,
+                    playbook,
+                    current,
+                    PatchCommand {
+                        version,
+                        classification,
+                        continue_from,
+                    },
+                )?;
+                *control_cursor = Some(seq);
+                write_control_cursor(run_dir, seq)?;
+                match result {
+                    PatchResult::Applied(applied) => {
+                        *last_applied_patch = Some(*applied);
+                        frontier.clear();
+                        break;
+                    }
+                    PatchResult::Rejected => continue,
+                    PatchResult::Paused => {
+                        return Ok(WakeOutcome::Terminal(RunStatus::Paused));
+                    }
+                }
+            }
+            Control::Pause => {
+                log.append(EventPayload::RunPaused {
+                    reason: "supervisor pause".into(),
+                })?;
+                // The function returns right below, so there is no
+                // further loop iteration to read the in-memory
+                // `control_cursor` back - only the persisted file
+                // matters here (read by the next drive's init).
+                write_control_cursor(run_dir, seq)?;
+                return Ok(WakeOutcome::Terminal(RunStatus::Paused));
+            }
+            Control::Abort { reason } => {
+                log.append(EventPayload::RunAborted { reason })?;
+                write_control_cursor(run_dir, seq)?;
+                return Ok(WakeOutcome::Terminal(RunStatus::Aborted));
+            }
+            Control::Interrupt { .. } => {
+                // An interrupt (finding 7 of issue #42, third item of
+                // issue #40) is a mid-attempt command; at a wake there is
+                // no running attempt to terminate, so it is spent.
+                // Consume it (advance the cursor so await_control does not
+                // hand it back) and keep waiting for a real directive.
+                *control_cursor = Some(seq);
+                write_control_cursor(run_dir, seq)?;
+                continue;
+            }
+            Control::Rebind {
+                node,
+                profile,
+                scope,
+                bundle,
+                reason,
+            } => {
+                // Rebinding the wedged node's profile (issue #45 finding
+                // 5) is exactly the intervention a supervisor makes at a
+                // wake before retrying. Apply it in place - effect first,
+                // cursor persisted only on Ok - and keep waiting for the
+                // retry/continue directive that follows. The next attempt
+                // resolves the node through the rebind overlay.
+                apply_rebind(
+                    root,
+                    run_dir,
+                    log,
+                    RebindCommand {
+                        node,
+                        profile,
+                        scope,
+                        bundle,
+                        reason,
+                    },
+                )?;
+                *control_cursor = Some(seq);
+                write_control_cursor(run_dir, seq)?;
+                continue;
+            }
+        }
+    }
+    Ok(WakeOutcome::Resumed)
 }
 
 #[cfg(test)]

@@ -190,7 +190,7 @@ pub fn ensure_claude_bridge(skills_parent: &Path, claude_parent: &Path) -> Vec<S
                     // A dangling link - this is our own orphaned bridge:
                     // fix it by pointing it back at the canon.
                     let _ = std::fs::remove_file(&link);
-                    if let Err(e) = make_symlink(&target, &link) {
+                    if let Err(e) = crate::fsutil::symlink(&target, &link) {
                         notes.push(format!(
                             "could not repair dangling bridge for skill `{}`: {e}",
                             name.to_string_lossy()
@@ -214,7 +214,7 @@ pub fn ensure_claude_bridge(skills_parent: &Path, claude_parent: &Path) -> Vec<S
             }
             Err(_) => {
                 if let Err(e) = std::fs::create_dir_all(claude_parent)
-                    .and_then(|_| make_symlink(&target, &link))
+                    .and_then(|_| crate::fsutil::symlink(&target, &link))
                 {
                     notes.push(format!(
                         "could not bridge skill `{}`: {e}",
@@ -225,18 +225,6 @@ pub fn ensure_claude_bridge(skills_parent: &Path, claude_parent: &Path) -> Vec<S
         }
     }
     notes
-}
-
-#[cfg(unix)]
-fn make_symlink(target: &Path, link: &Path) -> std::io::Result<()> {
-    std::os::unix::fs::symlink(target, link)
-}
-
-#[cfg(not(unix))]
-fn make_symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
-    Err(std::io::Error::other(
-        "symlink bridge is only supported on unix",
-    ))
 }
 
 #[cfg(test)]

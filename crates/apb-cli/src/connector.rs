@@ -1,6 +1,6 @@
 //! `apb connector` subcommands (spec 2026-07-18-connectors-design section
 //! 10): list/show/call/doctor/env/init over the connector store. `call` is
-//! the thin CLI wrapper `apb_engine::connector_call` documents itself as -
+//! the thin CLI wrapper `apb_engine::connector::call` documents itself as -
 //! run context comes only from `APB_RUN_DIR`/`APB_NODE_ID`, both set by the
 //! engine adapter when a node actually executes a connector call; everything
 //! else here is a read-only or scaffolding convenience for a human or an
@@ -435,7 +435,7 @@ fn call_cmd(
         }
     };
 
-    let req = apb_engine::connector_call::CallRequest {
+    let req = apb_engine::connector::call::CallRequest {
         run_dir: Path::new(&run_dir),
         root,
         node_id: &node_id,
@@ -446,7 +446,7 @@ fn call_cmd(
         dry_run,
         full,
     };
-    let (value, ok) = apb_engine::connector_call::execute(req);
+    let (value, ok) = apb_engine::connector::call::execute(req);
     print_call_result(&value);
     if ok {
         ExitCode::SUCCESS
@@ -833,7 +833,7 @@ fn test_cmd(name: Option<String>, dir: Option<PathBuf>) -> ExitCode {
             return ExitCode::from(2);
         }
     };
-    let report = apb_engine::connector_test::run_tests(&doc, &tests);
+    let report = apb_engine::connector::contract_test::run_tests(&doc, &tests);
     for r in &report.results {
         if r.passed {
             println!("[pass] {}", r.function);

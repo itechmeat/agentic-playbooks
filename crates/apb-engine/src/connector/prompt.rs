@@ -77,13 +77,16 @@ pub fn instruction_block(
             match connector.and_then(|c| c.accounts.iter().find(|a| &a.name == acct_name)) {
                 Some(a) => {
                     let default_mark = if a.default { " (default)" } else { "" };
-                    // Non-secret fields only: any field whose key is an
-                    // env-backed (secret) field is excluded, so no `{{env.*}}`
+                    // Non-secret fields only: a field backed by an env var or
+                    // by a `{{cmd:...}}` reference is a secret field, so no
                     // reference and no resolved secret ever reaches the prompt.
+                    // Same predicate as `call::auth::non_secret_fields`.
                     let fields: Vec<String> = a
                         .fields
                         .iter()
-                        .filter(|(k, _)| !a.env.contains_key(k.as_str()))
+                        .filter(|(k, _)| {
+                            !a.env.contains_key(k.as_str()) && !a.cmd.contains_key(k.as_str())
+                        })
                         .map(|(k, v)| format!("{k}={v}"))
                         .collect();
                     if fields.is_empty() {
@@ -151,9 +154,13 @@ mod tests {
                 fields: BTreeMap::from([
                     ("base_url".to_string(), "https://example.com".to_string()),
                     ("token".to_string(), "{{env.MOCK_TOKEN}}".to_string()),
+                    (
+                        "api_key".to_string(),
+                        "{{cmd:mock-secret-tool}}".to_string(),
+                    ),
                 ]),
                 env: BTreeMap::from([("token".to_string(), "MOCK_TOKEN".to_string())]),
-                cmd: BTreeMap::new(),
+                cmd: BTreeMap::from([("api_key".to_string(), "mock-secret-tool".to_string())]),
                 digest: "sha256:a".to_string(),
             }],
         }
@@ -254,6 +261,10 @@ functions:
         assert!(
             !out.contains("MOCK_TOKEN"),
             "a secret env var name leaked into the prompt: {out}"
+        );
+        assert!(
+            !out.contains("{{cmd:") && !out.contains("mock-secret-tool"),
+            "a command-backed secret reference leaked into the prompt: {out}"
         );
     }
 

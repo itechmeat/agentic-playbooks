@@ -266,7 +266,7 @@ pub(crate) fn build_run_manifest(
                 "connector bindings present but no connector permit".into(),
             ));
         }
-        let (connectors, grants) = crate::connector_run::snapshot_connectors(
+        let (connectors, grants) = crate::connector::run::snapshot_connectors(
             root,
             run_dir,
             playbook,
@@ -431,7 +431,7 @@ pub(crate) fn prepare_run_target(
         None
     };
 
-    let run_id = format!("{id}-{}", now_millis());
+    let run_id = format!("{id}-{}", apb_core::clock::now_ms());
     let run_dir = root.join(".apb/runs").join(&run_id);
     if let Some(ref pred) = opts.continued_from {
         crate::run_lineage::validate_continued_from(root, pred, id)?;

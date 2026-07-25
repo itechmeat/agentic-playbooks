@@ -20,7 +20,7 @@ use std::path::Path;
 use apb_core::connector::config;
 use apb_core::connector::store;
 use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
-use apb_engine::connector_call::healthcheck;
+use apb_engine::connector::call::healthcheck;
 
 use crate::common;
 
