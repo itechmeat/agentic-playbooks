@@ -59,9 +59,9 @@
 
   const DESC_MAX = 200
 
-  let nameInput = $state(name)
-  let scopeInput = $state(scope)
-  let workspaceInput = $state(workspace)
+  let nameInput = $state(untrack(() => name))
+  let scopeInput = $state(untrack(() => scope))
+  let workspaceInput = $state(untrack(() => workspace))
   // The executor chain in walk order: index 0 is the primary executor and is
   // always present; everything after it is a fallback. Order is meaningful and
   // is preserved verbatim on load and on save.

@@ -142,7 +142,7 @@ impl WfMcp {
     /// in-memory path still works for this same process.
     fn mint_token(&self, run_id: String, capabilities: Vec<String>) -> String {
         let n = self.token_counter.fetch_add(1, Ordering::Relaxed);
-        let token = format!("sv-{}-{}", apb_engine::event::now_millis(), n);
+        let token = format!("sv-{}-{}", apb_core::clock::now_ms(), n);
         // best-effort: if the run directory does not exist yet, the write fails - fine,
         // the in-memory path still resolves the token for this same process.
         let _ = apb_engine::write_supervisor_session(&self.root, &run_id, &token, &capabilities);

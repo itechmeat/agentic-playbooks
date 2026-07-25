@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
-use crate::event::{EventPayload, WakeTrigger, now_millis, read_all};
+use crate::event::{EventPayload, WakeTrigger, read_all};
 use crate::state::RunState;
 
 /// A wake event handed to the calling code: the first `WakeRaised` after the cursor.
@@ -321,7 +321,10 @@ pub fn find_session_by_token(
 pub fn touch_heartbeat(root: &Path, run_id: &str) -> Result<(), EngineError> {
     let run_dir = resolve_run_dir(root, run_id)?;
     let heartbeat_path = run_dir.join("supervisor").join("heartbeat");
-    apb_core::fsutil::atomic_write(&heartbeat_path, now_millis().to_string().as_bytes())?;
+    apb_core::fsutil::atomic_write(
+        &heartbeat_path,
+        apb_core::clock::now_ms().to_string().as_bytes(),
+    )?;
     Ok(())
 }
 
@@ -342,7 +345,7 @@ pub fn heartbeat_age_ms(root: &Path, run_id: &str) -> Result<Option<u128>, Engin
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
-    Ok(Some(now_millis().saturating_sub(stored)))
+    Ok(Some(apb_core::clock::now_ms().saturating_sub(stored)))
 }
 
 /// Pure decision function: is it time to declare the supervisor lost.
@@ -376,5 +379,5 @@ pub fn supervisor_silence_ms(root: &Path, run_id: &str) -> Result<Option<u128>, 
         Ok(v) => v,
         Err(_) => return Ok(None),
     };
-    Ok(Some(now_millis().saturating_sub(spawned_at)))
+    Ok(Some(apb_core::clock::now_ms().saturating_sub(spawned_at)))
 }

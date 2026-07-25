@@ -69,10 +69,22 @@ fn claude_adapter_nonzero_exit_is_process_exit() {
     assert!(matches!(err.0, ErrorClass::ProcessExit));
 }
 
+// `adapter_for` consults the process-global `APB_AGENT_CMD` (an override makes
+// any agent id resolvable), and other tests in this binary set it. Without the
+// shared env lock this test reads whatever a concurrent test happened to leave
+// there, and the `borg` rejection fails intermittently.
 #[test]
 fn adapter_for_maps_known_and_rejects_unknown() {
-    assert!(adapter_for("claude-code").is_ok());
-    assert!(adapter_for("borg").is_err());
+    let _guard = common::env_lock();
+    let had = std::env::var("APB_AGENT_CMD").ok();
+    unsafe { std::env::remove_var("APB_AGENT_CMD") };
+    let known = adapter_for("claude-code").is_ok();
+    let unknown_rejected = adapter_for("borg").is_err();
+    if let Some(v) = had {
+        unsafe { std::env::set_var("APB_AGENT_CMD", v) };
+    }
+    assert!(known);
+    assert!(unknown_rejected);
 }
 
 // Each captured argv element is wrapped in delimiters and separated by an

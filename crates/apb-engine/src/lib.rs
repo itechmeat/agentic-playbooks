@@ -1,12 +1,6 @@
 pub mod adapter;
 mod agent_home;
-pub mod connector_call;
-pub mod connector_imap;
-pub mod connector_prompt;
-pub mod connector_result;
-pub mod connector_run;
-pub mod connector_smtp;
-pub mod connector_test;
+pub mod connector;
 pub mod context;
 pub mod control;
 pub mod driver;

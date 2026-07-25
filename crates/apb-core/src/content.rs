@@ -221,7 +221,13 @@ fn walk(
             lp(h, rel.as_bytes());
             lp(h, target_str.as_bytes());
             if let Some(dst) = &dst {
-                make_symlink(&target, dst)?;
+                crate::fsutil::symlink(&target, dst).map_err(|e| {
+                    if e.kind() == std::io::ErrorKind::Unsupported {
+                        ContentError::Unsupported(dst.to_path_buf())
+                    } else {
+                        ContentError::Io(e)
+                    }
+                })?;
             }
         } else if ft.is_dir() {
             h.update(b"D");
@@ -297,17 +303,6 @@ fn copy_and_hash_file(
         o.sync_all()?;
     }
     Ok(hasher.finalize().into())
-}
-
-#[cfg(unix)]
-fn make_symlink(target: &Path, dst: &Path) -> Result<(), ContentError> {
-    std::os::unix::fs::symlink(target, dst)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn make_symlink(_target: &Path, dst: &Path) -> Result<(), ContentError> {
-    Err(ContentError::Unsupported(dst.to_path_buf()))
 }
 
 /// Profile bundle digest (spec 3.1): sha256 of the domain tag, profile_digest,

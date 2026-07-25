@@ -19,8 +19,8 @@ use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
 use apb_core::connector::def::SmtpSpec;
-use apb_engine::connector_call::CallErrorCode;
-use apb_engine::connector_smtp::{SmtpBuild, build};
+use apb_engine::connector::call::CallErrorCode;
+use apb_engine::connector::smtp::{SmtpBuild, build};
 use serde_json::json;
 
 /// What the listener recorded, for assertions.

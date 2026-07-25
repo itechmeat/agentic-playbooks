@@ -481,7 +481,7 @@ pub(crate) fn spawn_detached_supervised(
     let handshake = std::env::temp_dir().join(format!(
         "apb-supervise-handshake-{}-{}.txt",
         std::process::id(),
-        apb_engine::event::now_millis(),
+        apb_core::clock::now_ms(),
     ));
 
     let mut cmd = std::process::Command::new(&exe);

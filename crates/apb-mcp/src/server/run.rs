@@ -96,7 +96,7 @@ impl WfMcp {
             Some(p) => p,
             None => return to_call_tool_result(Ok(json!({ "error": "invalid_plan_token" }))),
         };
-        let now = apb_engine::event::now_millis() as u64;
+        let now = apb_core::clock::now_ms() as u64;
         if now > payload.exp_ms {
             return to_call_tool_result(Ok(json!({ "error": "plan_expired" })));
         }

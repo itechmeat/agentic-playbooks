@@ -11,6 +11,19 @@
 //! env / project dotenv / global dotenv chain (`secrets::resolve_var`), and
 //! they never leave this process except inside the outgoing `auth` block.
 
+mod account;
+mod auth;
+mod encode;
+mod response;
+
+use account::{account_selection_error, select_account, select_live_account};
+use auth::{non_secret_fields, resolve_secrets};
+use encode::{
+    base64_encode, encode_args_for_url, encode_component, encode_form_body, encode_path_segment,
+    project,
+};
+use response::{map_status, read_body, reclassify_error_when, redact_value};
+
 use std::collections::BTreeMap;
 use std::io::Read;
 use std::path::Path;
@@ -63,9 +76,9 @@ pub struct CallRequest<'a> {
 // The result taxonomy (`CallError`, `CallErrorCode`, `CallOk`) and the interim
 // message redaction live in `connector_result`, the shared sink both the HTTP
 // and SMTP call paths point at (keeps the file graph acyclic). Re-exported here
-// so the public path `apb_engine::connector_call::{CallError, ...}` is stable.
-use crate::connector_result::redact_message;
-pub use crate::connector_result::{CallError, CallErrorCode, CallOk};
+// so the public path `apb_engine::connector::call::{CallError, ...}` is stable.
+use crate::connector::result::redact_message;
+pub use crate::connector::result::{CallError, CallErrorCode, CallOk};
 
 /// The metadata a reached call (mock or HTTP, ok or error) records in the
 /// event log. A dry-run or a gate rejection records nothing, so those never
@@ -185,13 +198,13 @@ enum PreparedCall {
     // Boxed for the same reason: `SmtpCall` carries the built message bytes.
     Smtp {
         account: String,
-        call: Box<crate::connector_smtp::SmtpCall>,
+        call: Box<crate::connector::smtp::SmtpCall>,
     },
     // Boxed for the same reason: `ImapCall` carries the resolved connection and
     // typed op plan. An imap call has no HTTP status, like smtp.
     Imap {
         account: String,
-        call: Box<crate::connector_imap::ImapCall>,
+        call: Box<crate::connector::imap::ImapCall>,
     },
 }
 
@@ -569,7 +582,7 @@ fn build_prepared(
     // function has no URL/query/body/header rendering (those are HTTP-only), so
     // this branch is terminal.
     if let Some(smtp) = &function.smtp {
-        return match crate::connector_smtp::build(
+        return match crate::connector::smtp::build(
             smtp,
             &account_fields,
             args,
@@ -578,8 +591,8 @@ fn build_prepared(
             dry_run,
             function.timeout_sec,
         )? {
-            crate::connector_smtp::SmtpBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
-            crate::connector_smtp::SmtpBuild::Call(call) => {
+            crate::connector::smtp::SmtpBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
+            crate::connector::smtp::SmtpBuild::Call(call) => {
                 Ok(Prepared::Call(Box::new(PreparedCall::Smtp {
                     account: account_name,
                     call,
@@ -593,7 +606,7 @@ fn build_prepared(
     // smtp, an imap function has no URL/query/body/header rendering, so this
     // branch is terminal.
     if let Some(imap) = &function.imap {
-        return match crate::connector_imap::build(
+        return match crate::connector::imap::build(
             imap,
             &account_fields,
             args,
@@ -602,8 +615,8 @@ fn build_prepared(
             dry_run,
             function.timeout_sec,
         )? {
-            crate::connector_imap::ImapBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
-            crate::connector_imap::ImapBuild::Call(call) => {
+            crate::connector::imap::ImapBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
+            crate::connector::imap::ImapBuild::Call(call) => {
                 Ok(Prepared::Call(Box::new(PreparedCall::Imap {
                     account: account_name,
                     call,
@@ -872,157 +885,6 @@ fn prepare_play_call(
     )
 }
 
-/// Picks the account for a live probe/playground call: an explicit name
-/// must match one of the LIVE configured accounts; with none given, the
-/// single configured account is used, else the one flagged `default`, else
-/// no selection (ambiguous, reported by the caller via
-/// `account_selection_error`). Mirrors the CLI pipeline's `select_account`
-/// defaulting rule, minus the grant list (a live call has no grants).
-fn select_live_account<'a>(
-    accounts: &'a [config::Account],
-    account: Option<&str>,
-) -> Option<&'a config::Account> {
-    if let Some(explicit) = account {
-        return accounts.iter().find(|a| a.name == explicit);
-    }
-    if let [only] = accounts {
-        return Some(only);
-    }
-    let defaults: Vec<&config::Account> = accounts.iter().filter(|a| a.default).collect();
-    if let [only] = defaults.as_slice() {
-        return Some(only);
-    }
-    None
-}
-
-fn account_selection_error(
-    name: &str,
-    account: Option<&str>,
-    accounts: &[config::Account],
-) -> CallError {
-    if let Some(explicit) = account {
-        return CallError::new(
-            CallErrorCode::Config,
-            format!("connector `{name}` has no account `{explicit}`"),
-        );
-    }
-    let choices: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
-    CallError::new(
-        CallErrorCode::Config,
-        format!(
-            "connector `{name}` has several accounts and no single default; specify an account (choices: {})",
-            choices.join(", ")
-        ),
-    )
-}
-
-/// Names that are informative context for an account-selection error message
-/// (finding 12 of issue 45), never a source of truth for what is granted.
-///
-/// Prefers grant allowlist names that exist in the connector snapshot (so the
-/// listed names are ones an operator could plausibly grant). When the grant
-/// allowlist is empty but the snapshot still has accounts, falls back to
-/// every snapshotted account name so the error can say what accounts exist
-/// on the connector even though none of them are granted - otherwise the
-/// message is uninformative about how to fix the binding. Callers MUST NOT
-/// use this list to decide what `--account` values are accepted or what gets
-/// auto-selected: that decision is `granted_account_names` alone.
-fn selectable_account_names<'a>(
-    grant: &'a ManifestConnectorGrant,
-    mconn: &'a ManifestConnector,
-) -> Vec<&'a str> {
-    let from_grant: Vec<&str> = grant
-        .accounts
-        .iter()
-        .filter(|name| mconn.accounts.iter().any(|a| a.name == **name))
-        .map(|s| s.as_str())
-        .collect();
-    if !from_grant.is_empty() {
-        return from_grant;
-    }
-    if !grant.accounts.is_empty() {
-        // Grant names missing from the snapshot: still surface them so the
-        // operator can see what the grant recorded.
-        return grant.accounts.iter().map(|s| s.as_str()).collect();
-    }
-    mconn.accounts.iter().map(|a| a.name.as_str()).collect()
-}
-
-/// Names actually granted to this node, the sole basis for `--account`
-/// acceptance and auto-selection. An empty grant allowlist means no account
-/// is accepted and nothing is auto-selected, regardless of what the
-/// connector snapshot has configured.
-fn granted_account_names(grant: &ManifestConnectorGrant) -> Vec<&str> {
-    grant.accounts.iter().map(|s| s.as_str()).collect()
-}
-
-/// Formats a `choices:`-style account name list for an error message.
-fn format_account_choices(names: &[&str]) -> String {
-    names.join(", ")
-}
-
-/// Account selection (spec 6 step 4): an explicit `--account` must be granted;
-/// with none given, the single granted account is used, else the granted
-/// account flagged `default` in the connector snapshot, else a Config error
-/// listing the choices. An empty grant allowlist grants no account at all:
-/// it is never widened to the connector snapshot's accounts, since that would
-/// let a deny-all binding (`accounts: []`) call the connector with any
-/// configured account.
-fn select_account(
-    req: &CallRequest,
-    grant: &ManifestConnectorGrant,
-    mconn: &ManifestConnector,
-) -> Result<String, CallError> {
-    let granted = granted_account_names(grant);
-
-    if let Some(explicit) = req.account {
-        if granted.contains(&explicit) {
-            return Ok(explicit.to_string());
-        }
-        return Err(CallError::new(
-            CallErrorCode::Permission,
-            format!(
-                "node `{}` is not granted account `{explicit}` on connector `{}`",
-                req.node_id, req.connector
-            ),
-        ));
-    }
-
-    if let [only] = granted.as_slice() {
-        return Ok((*only).to_string());
-    }
-
-    let defaults: Vec<&str> = granted
-        .iter()
-        .copied()
-        .filter(|name| mconn.accounts.iter().any(|a| a.name == *name && a.default))
-        .collect();
-    if let [only] = defaults.as_slice() {
-        return Ok((*only).to_string());
-    }
-
-    if granted.is_empty() {
-        let snapshot_names = selectable_account_names(grant, mconn);
-        return Err(CallError::new(
-            CallErrorCode::Config,
-            format!(
-                "connector `{}` binding grants no accounts; configured accounts: {}",
-                req.connector,
-                format_account_choices(&snapshot_names)
-            ),
-        ));
-    }
-
-    Err(CallError::new(
-        CallErrorCode::Config,
-        format!(
-            "connector `{}` has several granted accounts and no single default; pass --account (choices: {})",
-            req.connector,
-            format_account_choices(&granted)
-        ),
-    ))
-}
-
 /// Counts prior `ConnectorCall` events for this `(node_id, connector)` grant,
 /// of any outcome (spec 6 step 4 max_calls). Filtering by connector too keeps
 /// each grant's budget independent when one node is granted several connectors.
@@ -1085,93 +947,6 @@ fn validate_args(schema: &Value, args: &Value) -> Result<(), CallError> {
         ));
     }
     Ok(())
-}
-
-/// The non-secret account fields: every field whose key is NOT a secret field
-/// (env-backed or command-backed). Secret fields hold a raw `{{env.VAR}}` /
-/// `{{cmd:...}}` reference in the manifest and must never reach the render
-/// context's `account` map.
-fn non_secret_fields(account: &ManifestAccount) -> BTreeMap<String, String> {
-    account
-        .fields
-        .iter()
-        .filter(|(k, _)| {
-            !account.env.contains_key(k.as_str()) && !account.cmd.contains_key(k.as_str())
-        })
-        .map(|(k, v)| (k.clone(), v.clone()))
-        .collect()
-}
-
-/// The resolved secrets map (field name -> value) plus the redaction pairs
-/// (resolved value, redaction label) the response body is scrubbed against.
-/// The label is the ENV var name for env-sourced secrets and `cmd:<field>`
-/// for command-sourced ones.
-type ResolvedSecrets = (BTreeMap<String, String>, Vec<(String, String)>);
-
-/// Resolves every secret field to its value: env-ref fields via the secrets
-/// resolution chain, cmd-ref fields by executing the command (spec 4.1).
-/// Returns the secrets map keyed by FIELD name (for the render context) and
-/// the redaction pairs (resolved value, redaction label). A var that resolves
-/// nowhere, or a command that fails, is a Config error naming the field.
-fn resolve_secrets(root: &Path, account: &ManifestAccount) -> Result<ResolvedSecrets, CallError> {
-    let mut secrets = BTreeMap::new();
-    let mut redactions = Vec::new();
-    for (field, var) in &account.env {
-        let value = secrets::resolve_var(root, var).ok_or_else(|| {
-            CallError::new(
-                CallErrorCode::Config,
-                format!("secret env var `{var}` (account field `{field}`) is not set"),
-            )
-        })?;
-        // Empty secrets would redact every empty run in the body; skip them.
-        if !value.is_empty() {
-            redactions.push((value.clone(), var.clone()));
-        }
-        secrets.insert(field.clone(), value);
-    }
-    for (field, cmdline) in &account.cmd {
-        let value = secrets::resolve_cmd(cmdline, secrets::CMD_SECRET_TIMEOUT)
-            .map_err(|e| cmd_secret_error(&account.name, field, e))?;
-        // resolve_cmd rejects empty output, so the value is always non-empty
-        // and safe to register for redaction. The label carries no secret.
-        redactions.push((value.clone(), format!("cmd:{field}")));
-        secrets.insert(field.clone(), value);
-    }
-    Ok((secrets, redactions))
-}
-
-/// Maps a `CmdSecretError` to a `config` call error naming the account and
-/// field and, where the helper produced one, a trimmed stderr excerpt. The
-/// resolved secret is never part of any variant, so nothing sensitive can
-/// reach this message.
-fn cmd_secret_error(account: &str, field: &str, err: secrets::CmdSecretError) -> CallError {
-    use secrets::CmdSecretError as E;
-    let detail = match err {
-        E::Parse(m) => format!("command reference is not valid: {m}"),
-        E::Spawn(m) => format!("command could not start: {m}"),
-        E::Timeout => "command timed out after 10s".to_string(),
-        E::NonZero { code, stderr } => {
-            let code = code
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string());
-            if stderr.is_empty() {
-                format!("command exited with status {code}")
-            } else {
-                format!("command exited with status {code}: {stderr}")
-            }
-        }
-        E::Empty { stderr } => {
-            if stderr.is_empty() {
-                "command produced no output".to_string()
-            } else {
-                format!("command produced no output: {stderr}")
-            }
-        }
-    };
-    CallError::new(
-        CallErrorCode::Config,
-        format!("secret for account `{account}` field `{field}`: {detail}"),
-    )
 }
 
 /// Renders the function's query pairs (keys literal, values percent-encoded)
@@ -1525,284 +1300,6 @@ impl HttpCall {
         err.message = redact_message(err.message, &self.redactions);
         err
     }
-}
-
-/// Recursively redacts secret values in a JSON value's string leaves.
-fn redact_value(value: Value, redactions: &[(String, String)]) -> Value {
-    match value {
-        Value::String(mut s) => {
-            for (secret, var) in redactions {
-                if s.contains(secret.as_str()) {
-                    s = s.replace(secret.as_str(), &format!("[redacted:{var}]"));
-                }
-            }
-            Value::String(s)
-        }
-        Value::Array(items) => Value::Array(
-            items
-                .into_iter()
-                .map(|v| redact_value(v, redactions))
-                .collect(),
-        ),
-        Value::Object(map) => Value::Object(
-            map.into_iter()
-                .map(|(k, v)| (k, redact_value(v, redactions)))
-                .collect(),
-        ),
-        other => other,
-    }
-}
-
-/// Reads a response body up to `BODY_CAP` (+1 to detect overflow), returning
-/// the parsed-or-string body and whether it was truncated. A JSON content type
-/// yields a parsed value; anything else yields a lossy-UTF8 string.
-fn read_body(mut response: ureq::http::Response<ureq::Body>) -> (Value, bool) {
-    let is_json = response.body().mime_type() == Some("application/json");
-    let mut buf = Vec::new();
-    // A read error yields whatever was collected so far rather than failing the
-    // whole call after a response was already obtained. `as_reader()` is not
-    // capped by ureq itself, so the `.take(BODY_CAP + 1)` below is what bounds
-    // memory (same as before).
-    let _ = response
-        .body_mut()
-        .as_reader()
-        .take(BODY_CAP as u64 + 1)
-        .read_to_end(&mut buf);
-    let truncated = buf.len() > BODY_CAP;
-    if truncated {
-        buf.truncate(BODY_CAP);
-    }
-    let body = if is_json {
-        serde_json::from_slice(&buf)
-            .unwrap_or_else(|_| Value::String(String::from_utf8_lossy(&buf).into_owned()))
-    } else {
-        Value::String(String::from_utf8_lossy(&buf).into_owned())
-    };
-    (body, truncated)
-}
-
-/// The HTTP-status -> result mapping (spec section 8). 2xx is success; 3xx is a
-/// `service` error (redirects are not followed); 401/403 -> `auth`; 404 ->
-/// `not_found`; 429 -> `rate_limited` (with `retry_after` when the service
-/// gave a `Retry-After`); every other non-2xx -> `service`.
-fn map_status(
-    status: u16,
-    body: Value,
-    truncated: bool,
-    retry_after: Option<u64>,
-) -> Result<CallOk, CallError> {
-    if (200..300).contains(&status) {
-        return Ok(CallOk::Http {
-            status,
-            body,
-            truncated,
-            link: None,
-            picked: false,
-        });
-    }
-    let mut err = match status {
-        300..=399 => CallError::new(
-            CallErrorCode::Service,
-            format!("the service returned a redirect (HTTP {status}); redirects are not followed"),
-        ),
-        401 | 403 => CallError::new(
-            CallErrorCode::Auth,
-            format!("the service rejected the credentials (HTTP {status})"),
-        ),
-        404 => CallError::new(
-            CallErrorCode::NotFound,
-            "the service returned 404 not found".to_string(),
-        ),
-        429 => {
-            let mut e = CallError::new(
-                CallErrorCode::RateLimited,
-                "the service rate-limited the request (HTTP 429)".to_string(),
-            );
-            e.retry_after_sec = retry_after;
-            e
-        }
-        _ => CallError::new(
-            CallErrorCode::Service,
-            format!("the service returned HTTP {status}"),
-        ),
-    };
-    err.http_status = Some(status);
-    Err(err)
-}
-
-/// Evaluates the connector's `error_when` predicate (spec
-/// 2026-07-22-official-connectors-wave-3, section 4.2) against a 2xx response
-/// body: when the value at `path` equals `equals` (JSON equality), returns
-/// the `service` error the call reclassifies to, carrying the real HTTP
-/// status (e.g. 200) and the message extracted at `message_path` - or a
-/// fixed fallback when `message_path` is absent, resolves to nothing, or the
-/// value there is not a string. A `path` that resolves to nothing means no
-/// match (success passes through).
-fn reclassify_error_when(rule: &ErrorWhen, body: &Value, status: u16) -> Option<CallError> {
-    if lookup_path(body, &rule.path) != Some(&rule.equals) {
-        return None;
-    }
-    let message = rule
-        .message_path
-        .as_deref()
-        .and_then(|p| lookup_path(body, p))
-        .and_then(Value::as_str)
-        .map(str::to_string)
-        .unwrap_or_else(|| "the service reported an error in the response body".to_string());
-    let mut err = CallError::new(CallErrorCode::Service, message);
-    err.http_status = Some(status);
-    Some(err)
-}
-
-/// Resolves a dot-separated field chain over JSON objects (like
-/// `response_pick` paths, spec 4.5, without array semantics). `None` when any
-/// segment is missing or a value midway through the chain is not an object.
-fn lookup_path<'a>(body: &'a Value, path: &str) -> Option<&'a Value> {
-    path.split('.').try_fold(body, |value, segment| {
-        value.as_object().and_then(|map| map.get(segment))
-    })
-}
-
-/// Percent-encodes the top-level string values of an args object so they can
-/// be substituted RAW into a URL template without letting an argument inject
-/// path traversal or extra query structure. Non-string scalars pass through
-/// (their `to_string` form carries no reserved bytes); nested values are not
-/// reachable by a URL `{{args.name}}` placeholder (only top-level scalar args
-/// are), so they are left untouched.
-fn encode_args_for_url(args: &Value) -> Value {
-    match args {
-        Value::Object(map) => Value::Object(
-            map.iter()
-                .map(|(k, v)| {
-                    let v = match v {
-                        Value::String(s) => Value::String(encode_component(s)),
-                        other => other.clone(),
-                    };
-                    (k.clone(), v)
-                })
-                .collect(),
-        ),
-        other => other.clone(),
-    }
-}
-
-/// Projects `body` down to the dot-separated field chains in `paths`
-/// (spec 4.5). Objects keep the named field; arrays (top-level or midway
-/// through a chain) map the projection over their elements; a path absent
-/// from the body is silently dropped.
-fn project(body: &Value, paths: &[String]) -> Value {
-    let split: Vec<Vec<&str>> = paths.iter().map(|p| p.split('.').collect()).collect();
-    let refs: Vec<&[&str]> = split.iter().map(Vec::as_slice).collect();
-    project_value(body, &refs)
-}
-
-fn project_value(source: &Value, paths: &[&[&str]]) -> Value {
-    match source {
-        Value::Array(items) => {
-            Value::Array(items.iter().map(|it| project_value(it, paths)).collect())
-        }
-        Value::Object(map) => {
-            let mut out = serde_json::Map::new();
-            for (key, val) in map {
-                let mut sub: Vec<&[&str]> = Vec::new();
-                let mut terminal = false;
-                for p in paths {
-                    if p.first() == Some(&key.as_str()) {
-                        if p.len() == 1 {
-                            terminal = true;
-                        } else {
-                            sub.push(&p[1..]);
-                        }
-                    }
-                }
-                if terminal {
-                    out.insert(key.clone(), val.clone());
-                } else if !sub.is_empty() {
-                    out.insert(key.clone(), project_value(val, &sub));
-                }
-            }
-            Value::Object(out)
-        }
-        other => other.clone(),
-    }
-}
-
-/// Percent-encodes a rendered auth value as one URL path segment per RFC 3986
-/// pchar rules, keeping ':' literal (Telegram tokens embed a colon, spec 4.3).
-/// pchar = unreserved / sub-delims / ':' / '@'.
-fn encode_path_segment(s: &str) -> String {
-    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-    const PCHAR: &AsciiSet = &NON_ALPHANUMERIC
-        .remove(b'-')
-        .remove(b'.')
-        .remove(b'_')
-        .remove(b'~')
-        .remove(b'!')
-        .remove(b'$')
-        .remove(b'&')
-        .remove(b'\'')
-        .remove(b'(')
-        .remove(b')')
-        .remove(b'*')
-        .remove(b'+')
-        .remove(b',')
-        .remove(b';')
-        .remove(b'=')
-        .remove(b':')
-        .remove(b'@');
-    utf8_percent_encode(s, PCHAR).to_string()
-}
-
-/// Percent-encodes a whole string as a single URL component (same set the
-/// renderer uses for substituted values). Applied to literal query keys and
-/// auth param names so a stray reserved byte cannot restructure the URL.
-fn encode_component(s: &str) -> String {
-    use percent_encoding::{AsciiSet, NON_ALPHANUMERIC, utf8_percent_encode};
-    const SET: &AsciiSet = &NON_ALPHANUMERIC
-        .remove(b'-')
-        .remove(b'.')
-        .remove(b'_')
-        .remove(b'~');
-    utf8_percent_encode(s, SET).to_string()
-}
-
-/// Encodes DECODED form pairs into the `application/x-www-form-urlencoded`
-/// wire body, percent-encoding keys and values with the same component set
-/// query rendering uses so encoding stays uniform (spec
-/// 2026-07-22-official-connectors-wave-3, section 4.1).
-fn encode_form_body(pairs: &[(String, String)]) -> String {
-    pairs
-        .iter()
-        .map(|(k, v)| format!("{}={}", encode_component(k), encode_component(v)))
-        .collect::<Vec<_>>()
-        .join("&")
-}
-
-/// Standard RFC 4648 base64 (with padding). Local to keep the engine lean: the
-/// only use is HTTP Basic auth, and pulling a base64 crate for `user:pass`
-/// encoding is not worth the dependency.
-fn base64_encode(input: &[u8]) -> String {
-    const ALPHABET: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(input.len().div_ceil(3) * 4);
-    for chunk in input.chunks(3) {
-        let b0 = chunk[0] as u32;
-        let b1 = *chunk.get(1).unwrap_or(&0) as u32;
-        let b2 = *chunk.get(2).unwrap_or(&0) as u32;
-        let n = (b0 << 16) | (b1 << 8) | b2;
-        out.push(ALPHABET[(n >> 18) as usize & 0x3f] as char);
-        out.push(ALPHABET[(n >> 12) as usize & 0x3f] as char);
-        if chunk.len() > 1 {
-            out.push(ALPHABET[(n >> 6) as usize & 0x3f] as char);
-        } else {
-            out.push('=');
-        }
-        if chunk.len() > 2 {
-            out.push(ALPHABET[n as usize & 0x3f] as char);
-        } else {
-            out.push('=');
-        }
-    }
-    out
 }
 
 /// Appends the `ConnectorCall` event for a reached call. Best-effort: a log
@@ -2237,15 +1734,6 @@ mod select_account_tests {
             dry_run: true,
             full: false,
         }
-    }
-
-    #[test]
-    fn format_account_choices_joins_names() {
-        assert_eq!(
-            format_account_choices(&["work", "personal"]),
-            "work, personal"
-        );
-        assert_eq!(format_account_choices(&[]), "");
     }
 
     #[test]

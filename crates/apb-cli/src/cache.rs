@@ -57,13 +57,6 @@ fn parse_size_str(s: &str) -> Option<u64> {
     num.trim().parse::<u64>().ok()?.checked_mul(mult)
 }
 
-fn unix_now() -> u64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
-        .unwrap_or(0)
-}
-
 pub(crate) fn cache_cmd(root: &Path, cmd: CacheCmd) -> ExitCode {
     if let Err(code) = open_registry(root) {
         return code;
@@ -132,7 +125,7 @@ fn cache_prune(
         },
         None => None,
     };
-    let report = store.prune(older_than_secs, max_bytes, unix_now());
+    let report = store.prune(older_than_secs, max_bytes, apb_core::clock::now_secs());
     println!("removed records: {}", report.removed_records);
     println!("removed objects: {}", report.removed_objects);
     ExitCode::SUCCESS

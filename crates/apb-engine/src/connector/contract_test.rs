@@ -11,7 +11,7 @@ use apb_core::connector::contract::{Envelope, ExpectKind, ImapExpect, TestCase, 
 use apb_core::connector::def::{ConnectorDoc, FunctionSpec};
 use serde_json::Value;
 
-use crate::connector_call::render_http;
+use crate::connector::call::render_http;
 
 /// The fixed value every secret account field resolves to in the offline
 /// runner. A real secret is never read (spec 4.6).
@@ -238,7 +238,7 @@ fn eval_smtp(
         .into_iter()
         .map(|f| (f, SECRET_STUB.to_string()))
         .collect();
-    let built = crate::connector_smtp::build(
+    let built = crate::connector::smtp::build(
         spec,
         account,
         args,
@@ -249,8 +249,8 @@ fn eval_smtp(
     )
     .map_err(|e| format!("render failed: {}", e.message))?;
     let json = match built {
-        crate::connector_smtp::SmtpBuild::DryRun(v) => v,
-        crate::connector_smtp::SmtpBuild::Call(_) => {
+        crate::connector::smtp::SmtpBuild::DryRun(v) => v,
+        crate::connector::smtp::SmtpBuild::Call(_) => {
             return Err("smtp dry-run unexpectedly produced a live call".to_string());
         }
     };
@@ -329,7 +329,7 @@ fn eval_imap(
         .into_iter()
         .map(|f| (f, SECRET_STUB.to_string()))
         .collect();
-    let built = crate::connector_imap::build(
+    let built = crate::connector::imap::build(
         spec,
         account,
         args,
@@ -340,8 +340,8 @@ fn eval_imap(
     )
     .map_err(|e| format!("render failed: {}", e.message))?;
     let json = match built {
-        crate::connector_imap::ImapBuild::DryRun(v) => v,
-        crate::connector_imap::ImapBuild::Call(_) => {
+        crate::connector::imap::ImapBuild::DryRun(v) => v,
+        crate::connector::imap::ImapBuild::Call(_) => {
             return Err("imap dry-run unexpectedly produced a live call".to_string());
         }
     };

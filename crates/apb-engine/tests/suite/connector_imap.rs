@@ -16,8 +16,8 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use apb_core::connector::def::ImapSpec;
-use apb_engine::connector_call::CallErrorCode;
-use apb_engine::connector_imap::{ImapBuild, build};
+use apb_engine::connector::call::CallErrorCode;
+use apb_engine::connector::imap::{ImapBuild, build};
 use serde_json::{Value, json};
 
 /// One canned message for a search-shape `UID FETCH` (FLAGS/ENVELOPE response).
@@ -284,7 +284,7 @@ fn build_call(
     account: &BTreeMap<String, String>,
     args: &Value,
     secrets: &BTreeMap<String, String>,
-) -> Box<apb_engine::connector_imap::ImapCall> {
+) -> Box<apb_engine::connector::imap::ImapCall> {
     match build(spec, account, args, secrets, Vec::new(), false, 15).unwrap() {
         ImapBuild::Call(c) => c,
         _ => panic!("expected a call"),

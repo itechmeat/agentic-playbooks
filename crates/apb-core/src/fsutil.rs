@@ -2,6 +2,27 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// Creates a symbolic link at `link` pointing at `target`.
+///
+/// Symlinks are a unix-only capability in apb (skill bridges, materialized
+/// bundle copies). On every other platform this fails with
+/// [`io::ErrorKind::Unsupported`], which callers map to their own domain
+/// error rather than each re-deciding what an absent symlink API means.
+pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (target, link);
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            "symlinks are only supported on unix",
+        ))
+    }
+}
+
 /// Control files are always written this way: temp + fsync + atomic rename (spec 4.3).
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path

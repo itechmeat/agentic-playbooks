@@ -1,7 +1,6 @@
 use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -396,13 +395,6 @@ pub struct Event {
     pub payload: EventPayload,
 }
 
-pub fn now_millis() -> u128 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis())
-        .unwrap_or(0)
-}
-
 pub struct EventLog {
     /// Absolute path of `events.jsonl` - retained so [`Self::resync_seq`] can
     /// re-read the on-disk high-water mark after another writer (a nested
@@ -450,7 +442,7 @@ impl EventLog {
     pub fn append(&mut self, payload: EventPayload) -> Result<Event, EngineError> {
         let event = Event {
             seq: self.next_seq,
-            ts: now_millis(),
+            ts: apb_core::clock::now_ms(),
             payload,
         };
         let line = serde_json::to_string(&event).map_err(|e| EngineError::Yaml(e.to_string()))?;

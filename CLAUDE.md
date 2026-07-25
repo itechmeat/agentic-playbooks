@@ -21,27 +21,34 @@ with cli and server on top. Do not introduce import cycles (enforced by
 code-ranker, see below).
 
 - `apb-core` - domain layer, no async. Playbook schema (`schema.rs`,
-  `Playbook::from_yaml`), validator (`validate.rs`, codes V01+), profiles
+  `Playbook::from_yaml`), validator (`validate/`, codes V01+, one module per
+  rule family: `graph`, `nodes`, `connectors`, `templates`), profiles
   (`profile.rs` types incl. `ProfileError`, `profile_store.rs` scope resolution
   and bundle trust, `skills.rs`), registry and versioning, schema 1->2 migrator
   (`schema_migrate.rs`), free agent detection (`detect.rs`), curated models table
   (`models_table.rs` + `assets/models.yaml`), content/bundle digests
-  (`content.rs`), trust store (`trust.rs`), atomic state IO and dir locks
-  (`fsutil.rs`).
-- `apb-engine` - execution. The drive loop and node execution (`scheduler.rs`),
+  (`content.rs`), trust store (`trust.rs`), atomic state IO, symlinks and dir
+  locks (`fsutil.rs`), the single wall-clock source (`clock.rs`).
+- `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
+  `scheduler/` (`entry` start and handoff, `control_apply` the control scan,
+  `supervisor` heartbeat and wake park, `node` execution, `journal` event-log
+  folds, `resume`, `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`), the append-only event log
-  (`event.rs`), background supervisor spawn, legacy run-resume shim
-  (`legacy_snapshot.rs`).
-- `apb-mcp` - rmcp stdio MCP server (`server.rs`), the server-side run policy gate
-  (`policy.rs`), and profile/advisory/supervisor tools.
+  (`event.rs`), connector execution (`connector/`, with `call/` split into
+  account selection, auth, encoding and response mapping), background
+  supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`).
+- `apb-mcp` - rmcp stdio MCP server (`server/`), the server-side run policy gate
+  (`policy.rs`), and the tool layer in `tools/` (one module per domain:
+  `playbook`, `run`, `supervisor`, `trial`, `capture`, `meta`).
 - `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
   core/engine/mcp. `apb init` runs a short interactive questionnaire in a
   terminal (feedback-loop consent into CLAUDE.md/AGENTS.md, agent
   subscriptions survey); non-TTY runs skip it. `apb self-update` updates
   installer-based installs in place.
-- `apb-server` - axum web API (`lib.rs`) with the svelte frontend from `web/`
-  embedded via rust-embed (`web/dist`).
+- `apb-server` - axum web API: a thin router in `lib.rs`, one module per
+  resource in `routes/`, shared request state in `state.rs`, and the svelte
+  frontend from `web/` embedded via rust-embed (`assets.rs`, `web/dist`).
 
 ### Concepts that span files
 

@@ -10,7 +10,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
-use apb_engine::connector_call::{CallRequest, execute};
+use apb_engine::connector::call::{CallRequest, execute};
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::manifest::{
     self, ManifestAccount, ManifestConnector, ManifestConnectorGrant, RunExecutionManifest,

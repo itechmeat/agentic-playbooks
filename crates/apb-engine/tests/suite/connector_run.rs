@@ -14,7 +14,7 @@ use apb_core::connector::config::account_digest;
 use apb_core::connector::resolve::resolve_playbook;
 use apb_core::schema::Playbook;
 use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, ConnectorEnvPolicy};
-use apb_engine::connector_run::snapshot_connectors;
+use apb_engine::connector::run::snapshot_connectors;
 use apb_engine::invocation::builtin;
 
 use crate::common;

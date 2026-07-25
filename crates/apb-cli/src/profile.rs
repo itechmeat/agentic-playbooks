@@ -209,10 +209,7 @@ pub(crate) fn profile_edit_cmd(root: &Path, name: &str, scope: &str) -> ExitCode
     // planted in advance in the shared /tmp is rejected (AlreadyExists), so
     // an attacker cannot redirect the write into another directory. The name
     // is unpredictable (pid + nanoseconds), mode 0700.
-    let unique = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
+    let unique = apb_core::clock::now_nanos();
     let tmp = std::env::temp_dir().join(format!(
         "apb-profile-edit-{}-{unique}-{name}",
         std::process::id()

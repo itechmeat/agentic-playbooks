@@ -5,7 +5,6 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
@@ -71,13 +70,6 @@ pub enum ProjectAccessError {
     Unknown(String),
     #[error("workspace `{workspace_id}` is unreachable (path `{path}`)")]
     Unreachable { workspace_id: String, path: String },
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_millis() as u64)
-        .unwrap_or(0)
 }
 
 fn projects_path() -> Option<PathBuf> {
@@ -222,7 +214,7 @@ fn workspace_name(root: &Path) -> String {
 /// `tombstoned`, physically removes `tombstoned` entries older than the
 /// purge threshold. Called inside the lock on every access.
 fn apply_time_transitions(file: &mut ProjectsFile, cfg: &GlobalConfig) {
-    let now = now_ms();
+    let now = crate::clock::now_ms_u64();
     let unreach = unreachable_ms(cfg);
     let purge = purge_ms(cfg);
     let mut to_remove = Vec::new();
@@ -258,7 +250,7 @@ pub fn touch(root: &Path) {
     let name = workspace_name(root);
     let path = root.to_string_lossy().into_owned();
     let count = count_playbooks(root);
-    let now = now_ms();
+    let now = crate::clock::now_ms_u64();
 
     let _ = with_registry(|file| {
         apply_time_transitions(file, &cfg);
@@ -319,7 +311,7 @@ pub fn list_reachable() -> Vec<ProjectEntry> {
 /// Time-based transitions are applied along the way.
 pub fn resolve_root(workspace_id: &str) -> Result<PathBuf, ProjectAccessError> {
     let cfg = GlobalConfig::load().unwrap_or_default();
-    let now = now_ms();
+    let now = crate::clock::now_ms_u64();
     with_registry(|file| {
         apply_time_transitions(file, &cfg);
         let Some(entry) = file.entries.get_mut(workspace_id) else {
@@ -472,7 +464,7 @@ mod tests {
         assert_eq!(list_active().len(), 1, "unreachable still listed");
 
         // Fake since_ms to 15 days ago -> the next access tombstones it.
-        let long_ago = now_ms().saturating_sub(15 * MS_PER_DAY);
+        let long_ago = crate::clock::now_ms_u64().saturating_sub(15 * MS_PER_DAY);
         test_set_unreachable_since(&ws_id, long_ago);
         let listed = list_active();
         assert!(listed.is_empty(), "tombstoned workspace must not be listed");

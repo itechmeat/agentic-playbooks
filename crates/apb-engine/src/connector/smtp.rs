@@ -20,7 +20,7 @@ use lettre::transport::smtp::client::{SmtpConnection, TlsParameters};
 use lettre::transport::smtp::extension::ClientId;
 use serde_json::{Value, json};
 
-use crate::connector_result::{CallError, CallErrorCode, CallOk, redact_message};
+use crate::connector::result::{CallError, CallErrorCode, CallOk, redact_message};
 
 /// The outcome of preparing an smtp call: a terminal dry-run render, or a
 /// ready-to-send call. Public so the offline envelope render (`build` with
@@ -34,7 +34,6 @@ pub enum SmtpBuild {
 /// A rendered, ready-to-send smtp call. Holds resolved connection parameters
 /// (including the secret password, never logged), the built envelope, and the
 /// formatted message bytes. `verify` calls carry no message.
-#[derive(Debug)]
 pub struct SmtpCall {
     host: String,
     port: u16,
@@ -47,6 +46,21 @@ pub struct SmtpCall {
     /// (resolved secret value, redaction label) pairs; every error message is
     /// scrubbed against these before it leaves the process.
     redactions: Vec<(String, String)>,
+}
+
+/// Manual, secret-free: see the note on `ImapCall`'s `Debug`.
+impl std::fmt::Debug for SmtpCall {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SmtpCall")
+            .field("host", &self.host)
+            .field("port", &self.port)
+            .field("use_tls", &self.use_tls)
+            .field("username", &self.username)
+            .field("password", &self.password.as_ref().map(|_| "[redacted]"))
+            .field("timeout_sec", &self.timeout_sec)
+            .field("message", &self.message)
+            .finish_non_exhaustive()
+    }
 }
 
 /// The built email: the from address string, the subject, the per-list

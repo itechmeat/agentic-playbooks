@@ -49,7 +49,7 @@ pub struct PendingQuestion {
     /// matching `QuestionAsked` event's `ts` when drive has journaled it.
     /// `0` before that (the channel entry exists but drive has not yet
     /// observed it); the web treats `0` as "just now" rather than
-    /// synthesizing a non-deterministic `now_millis` here.
+    /// synthesizing a non-deterministic clock reading here.
     pub asked_at: u128,
 }
 
@@ -441,7 +441,7 @@ fn pending_question_for_node(
     // journaled for this node, positionally matching the channel order,
     // since drive journals them in the order it observes new channel
     // entries. `0` when drive has not journaled it yet (the web treats `0`
-    // as "just now" rather than a synthesized now_millis, which would be
+    // as "just now" rather than a synthesized clock reading, which would be
     // non-deterministic at fold time).
     let asked_at = events
         .iter()
@@ -892,13 +892,13 @@ pub fn node_durations_seconds(events: &[Event]) -> BTreeMap<String, u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::event::{Event, EventPayload, now_millis};
+    use crate::event::{Event, EventPayload};
     use apb_core::schema::Playbook;
 
     fn ev(seq: u64, payload: EventPayload) -> Event {
         Event {
             seq,
-            ts: now_millis(),
+            ts: apb_core::clock::now_ms(),
             payload,
         }
     }
@@ -1243,7 +1243,7 @@ edges:
         assert_eq!(pq.options, vec!["left".to_string(), "right".to_string()]);
         assert_eq!(pq.answer_by, "supervisor");
         // No QuestionAsked journaled yet: asked_at falls back to 0 (the web
-        // treats 0 as "just now"), never a non-deterministic now_millis.
+        // treats 0 as "just now"), never a non-deterministic clock reading.
         assert_eq!(pq.asked_at, 0);
 
         crate::question::post_answer(&run_dir, Some("ask"), "left", "supervisor").unwrap();

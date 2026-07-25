@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { untrack } from 'svelte'
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
   import { fetchPlaybook, fetchVersions, promoteVersion, runPlaybook, setFrozen } from '../lib/api'
@@ -23,7 +24,7 @@
 
   let nodes = $state.raw<FlowNode[]>([])
   let edges = $state.raw<FlowEdge[]>([])
-  let name = $state<string>(id)
+  let name = $state<string>(untrack(() => id))
   let version = $state<string>('')
   let validation = $state<
     { code: string; severity: string; message: string; node?: string | null }[]
