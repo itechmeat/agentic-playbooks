@@ -17,14 +17,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
 use crate::schema::{
-    CacheMode, CacheSpec, EdgeCondition, FunctionsAllow, Isolation, NodeKind, Playbook,
-    SuccessCheck,
+    CacheMode, CacheSpec, EdgeCondition, FailurePolicy, FunctionsAllow, Isolation, NodeKind,
+    Playbook, SuccessCheck,
 };
 
 use connectors::check_connectors;
 use graph::{
-    check_conditions, check_cycles, check_edges, check_edges_exist, check_reachability,
-    check_start_finish, check_unique_ids,
+    check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,
+    check_reachability, check_start_finish, check_unique_ids,
 };
 use nodes::{
     check_cache, check_expected_duration, check_finish, check_interactive, check_isolation,
@@ -126,6 +126,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_success_check(playbook, &mut r); // V33
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
+    check_failure_policy(playbook, &mut r); // V35
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

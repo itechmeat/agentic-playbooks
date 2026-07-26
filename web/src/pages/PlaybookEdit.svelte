@@ -18,6 +18,7 @@
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import { takeDraftYaml } from '../lib/playbookdupe'
   import { addEdge, addNode, removeEdge, removeNode, suggestNodeId, updateNode } from '../lib/playbookedit'
+  import { onEscape } from '../lib/hooks/escape.svelte'
   import { docToString, NEW_PLAYBOOK_TEMPLATE, parseDoc, parsePlaybook } from '../lib/playbookyaml'
   import type { PlaybookModel } from '../lib/playbookyaml'
   import type { PlaybookNode as PlaybookNodeType } from '../lib/types'
@@ -30,7 +31,9 @@
   import * as Select from '$lib/components/ui/select'
   import { toast } from 'svelte-sonner'
   import Plus from '@lucide/svelte/icons/plus'
+  import Trash2 from '@lucide/svelte/icons/trash-2'
   import X from '@lucide/svelte/icons/x'
+  import Code from '@lucide/svelte/icons/code'
   import GitCompare from '@lucide/svelte/icons/git-compare'
 
   let { id, workspace = '' }: { id: string; workspace?: string } = $props()
@@ -40,7 +43,9 @@
   let projects = $state<Project[]>([])
   let targetWorkspace = $state('')
 
-  const NODE_KINDS = ['start', 'agent_task', 'script', 'condition', 'finish', 'playbook'] as const
+  // Offered in the order a graph is usually built, with the node that ends a
+  // run last.
+  const NODE_KINDS = ['start', 'agent_task', 'script', 'condition', 'playbook', 'finish'] as const
 
   let yamlText = $state('')
   let idInput = $state('')
@@ -59,6 +64,38 @@
   let selectedNodeId = $state<string | null>(null)
   let selectedEdge = $state<{ from: string; to: string } | null>(null)
   let showDiff = $state(false)
+  // The YAML source is the playbook's ground truth, but it is not what you look
+  // at while wiring a graph: like `diff`, it takes over the canvas on demand
+  // from its topbar button, leaves the topbar reachable, and gives the canvas
+  // back when closed.
+  let showYaml = $state(false)
+  const overlayOpen = $derived(showDiff || showYaml)
+
+  // The two overlays share the canvas, so opening one closes the other.
+  function toggleYaml() {
+    showYaml = !showYaml
+    if (showYaml) showDiff = false
+  }
+
+  function toggleDiff() {
+    showDiff = !showDiff
+    if (showDiff) showYaml = false
+  }
+
+  // Escape closes whatever is on top: an overlay first, then the selection
+  // behind it (a node form opened under the yaml overlay survives one press
+  // and closes on the next).
+  onEscape(() => {
+    if (showYaml) {
+      showYaml = false
+    } else if (showDiff) {
+      showDiff = false
+    } else if (selectedNodeId) {
+      selectedNodeId = null
+    } else if (selectedEdge) {
+      selectedEdge = null
+    }
+  })
   let revision = $state(0)
 
   const nodeTypes = { playbookNode: PlaybookNode }
@@ -138,10 +175,16 @@
     }
   }
 
+  // Reload when the route changes, and ONLY then. `load()` runs untracked
+  // because its synchronous prefix touches the editor's own state: on the
+  // new-playbook path `revision++` reads and writes `revision` before the first
+  // await, which inside a tracking context makes the effect depend on a value
+  // it just wrote. That looped: the page remounted continuously (89 fetches of
+  // /api/projects and counting), so nothing could be typed, clicked or saved.
   $effect(() => {
     id
     workspace
-    load()
+    untrack(() => load())
   })
 
   $effect(() => {
@@ -185,6 +228,18 @@
       selectedEdge = null
     }
   }
+
+  // The add-node selector holds no value: each pick is an action, so it is
+  // cleared as soon as it is handled and the same kind can be added twice in a
+  // row (bits-ui keeps its own value otherwise, and a repeated pick is then
+  // simply not a change).
+  let addKind = $state('')
+  $effect(() => {
+    const kind = addKind
+    if (!kind) return
+    addKind = ''
+    onAddNode(kind as (typeof NODE_KINDS)[number])
+  })
 
   function onNodeClick({ node }: { node: FlowNode }) {
     selectedNodeId = node.id
@@ -290,12 +345,37 @@
         variant={showDiff ? 'default' : 'outline'}
         size="sm"
         class="max-sm:px-2"
-        onclick={() => (showDiff = !showDiff)}
+        onclick={toggleDiff}
       >
         <GitCompare data-icon="inline-start" />
         <span class="max-sm:sr-only">diff</span>
       </Button>
     {/if}
+    <!-- Adding a node is a topbar control, not a stack of buttons parked over
+         the canvas. The trigger keeps its own label rather than showing the
+         last pick: see `addKind`. -->
+    <Select.Root type="single" bind:value={addKind} disabled={!canEditStruct}>
+      <Select.Trigger class="h-8 w-36" aria-label="Add node">
+        <Plus data-icon="inline-start" />
+        Add node
+      </Select.Trigger>
+      <Select.Content>
+        <Select.Group>
+          {#each NODE_KINDS as kind (kind)}
+            <Select.Item value={kind} label={kind}>{kind}</Select.Item>
+          {/each}
+        </Select.Group>
+      </Select.Content>
+    </Select.Root>
+    <Button
+      variant={showYaml ? 'default' : 'outline'}
+      size="sm"
+      class="max-sm:px-2"
+      onclick={toggleYaml}
+    >
+      <Code data-icon="inline-start" />
+      <span class="max-sm:sr-only">yaml</span>
+    </Button>
     {#if parseError}
       <Badge variant="outline" class="text-warning" title={parseError}>parse error</Badge>
     {/if}
@@ -309,9 +389,6 @@
 </Topbar>
 
 <div class="flex min-h-0 flex-1">
-  <div class="flex min-h-0 w-1/2 min-w-0 flex-col border-r border-border">
-    <CodeEditor value={yamlText} onChange={onYamlChange} />
-  </div>
   <div class="relative min-h-0 min-w-0 flex-1">
     {#if parseError && lastValidModel}
       <div
@@ -321,37 +398,49 @@
       </div>
     {/if}
 
-    <div class="absolute left-2 top-2 z-[6] flex flex-col gap-1 rounded-md border border-border bg-background p-1">
-      {#each NODE_KINDS as kind (kind)}
-        <Button
-          variant="ghost"
-          size="sm"
-          class="max-sm:px-2 h-7 justify-start"
-          onclick={() => onAddNode(kind)}
-          disabled={!canEditStruct}
-          title={`Add ${kind} node`}
-          aria-label={`Add ${kind} node`}
-        >
-          <Plus data-icon="inline-start" />
-          <span class="max-sm:sr-only">{kind}</span>
-        </Button>
-      {/each}
-    </div>
-
-    {#if selectedNode}
-      <div
-        class="absolute right-2 top-2 z-[6] max-h-[calc(100%-1rem)] w-60 overflow-auto rounded-md border border-border bg-background p-3 shadow-md"
-      >
-        <NodePanel
-          {id}
-          node={selectedNode as PlaybookNodeType}
-          onChange={onNodePatch}
-          onDelete={onDeleteNode}
-          {revision}
-          workspace={isNew ? targetWorkspace : workspace}
-        />
+    <!-- The node form takes the canvas the way `yaml` and `diff` do: a node has
+         a prompt, a profile, connector grants and their function lists, and none
+         of that is readable in a 240px rail. Hidden (not unmounted) while
+         another overlay is up, so the selection survives a look at the yaml. -->
+    {#if selectedNode && !overlayOpen}
+      <div class="absolute inset-0 z-10 flex flex-col bg-background p-3">
+        <div class="mx-auto mb-2 flex w-full max-w-5xl items-center justify-between gap-2">
+          <div class="flex min-w-0 items-center gap-2">
+            <strong class="truncate font-mono text-sm">{selectedNode.id}</strong>
+            <Badge variant="secondary" class="text-[10px]">{selectedNode.type}</Badge>
+            <Button
+              variant="ghost"
+              size="icon"
+              class="size-7 text-muted-foreground hover:text-destructive"
+              title="Delete node"
+              onclick={onDeleteNode}
+            >
+              <Trash2 />
+            </Button>
+          </div>
+          <Button
+            variant="ghost"
+            size="icon"
+            class="size-7"
+            title="Close"
+            onclick={() => (selectedNodeId = null)}
+          >
+            <X />
+          </Button>
+        </div>
+        <div class="min-h-0 flex-1 overflow-auto">
+          <div class="mx-auto w-full max-w-5xl pb-6">
+            <NodePanel
+              {id}
+              node={selectedNode as PlaybookNodeType}
+              onChange={onNodePatch}
+              {revision}
+              workspace={isNew ? targetWorkspace : workspace}
+            />
+          </div>
+        </div>
       </div>
-    {:else if selectedEdge}
+    {:else if selectedEdge && !overlayOpen}
       <div
         class="absolute right-2 top-2 z-[6] flex w-60 flex-col gap-2 rounded-md border border-border bg-background p-3 text-sm shadow-md"
       >
@@ -365,6 +454,25 @@
         >
           delete
         </Button>
+      </div>
+    {/if}
+
+    {#if showYaml}
+      <div class="absolute inset-0 z-10 flex flex-col bg-background p-3">
+        <div class="mb-2 flex items-center justify-between gap-2">
+          <div class="flex items-center gap-2">
+            <strong class="text-sm">yaml</strong>
+            {#if parseError}
+              <Badge variant="outline" class="text-warning" title={parseError}>parse error</Badge>
+            {/if}
+          </div>
+          <Button variant="ghost" size="icon" class="size-7" onclick={() => (showYaml = false)}>
+            <X />
+          </Button>
+        </div>
+        <div class="flex min-h-0 flex-1 flex-col overflow-hidden rounded-md border border-border">
+          <CodeEditor value={yamlText} onChange={onYamlChange} />
+        </div>
       </div>
     {/if}
 
@@ -385,9 +493,9 @@
       bind:edges
       {nodeTypes}
       fitView
-      nodesDraggable={!showDiff}
-      nodesConnectable={!showDiff && canEditStruct}
-      elementsSelectable={!showDiff}
+      nodesDraggable={!overlayOpen}
+      nodesConnectable={!overlayOpen && canEditStruct}
+      elementsSelectable={!overlayOpen}
       onnodeclick={onNodeClick}
       onedgeclick={onEdgeClick}
       onconnect={onConnect}

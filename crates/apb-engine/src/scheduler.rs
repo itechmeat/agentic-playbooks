@@ -8,7 +8,7 @@ use apb_core::config::{GlobalConfig, Interaction, SoulDelivery};
 use apb_core::migration::validate_migration;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::{Registry, is_safe_segment};
-use apb_core::schema::{Isolation, NodeKind, Outcome, Playbook, WaitFor};
+use apb_core::schema::{FailurePolicy, Isolation, NodeKind, Outcome, Playbook, WaitFor};
 use apb_core::store::ResolvedPlaybook;
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_core::versioning::{promote_policy, promote_version, should_promote};
@@ -92,6 +92,43 @@ fn failure_detail(out: &str) -> String {
     let first_line = trimmed.lines().next().unwrap_or(trimmed);
     let capped: String = first_line.chars().take(200).collect();
     capped
+}
+
+/// Ends the run on a failure the playbook declared fatal (`defaults.on_failure:
+/// stop`, spec 2026-07-26): the node reported a failure and no outgoing edge
+/// takes it.
+///
+/// The reason is the node's own output rather than an engine phrase, which is
+/// the difference between this and the `route` policy's error: the author asked
+/// for this stop, so what the run report has to explain is what the node said,
+/// not that an edge is missing.
+///
+/// Frontier heads that will now never run are journaled as cancelled, the way a
+/// winning `any` join cancels its siblings; otherwise the run report leaves them
+/// looking pending forever.
+fn stop_on_unhandled_failure(
+    log: &mut EventLog,
+    node: &str,
+    output: &str,
+    frontier: &mut Vec<String>,
+) -> Result<RunStatus, EngineError> {
+    for pending in std::mem::take(frontier) {
+        log.append(EventPayload::NodeFinished {
+            node: pending,
+            status: "cancelled".into(),
+            attempt: 1,
+            output: String::new(),
+            artifacts: Vec::new(),
+        })?;
+    }
+    log.append(EventPayload::RunError {
+        node: Some(node.to_string()),
+        reason: failure_detail(output),
+    })?;
+    log.append(EventPayload::RunFinished {
+        outcome: "failed".into(),
+    })?;
+    Ok(RunStatus::Failed)
 }
 
 /// The minimal generated closing message a finish-with-prompt falls back to
@@ -555,7 +592,11 @@ fn drive_inner(
                 // A shared cancel flag: once join:any is ready we set it, and
                 // still-running branches kill their processes (7c-3).
                 let cancel = Arc::new(AtomicBool::new(false));
-                let mut batch_statuses: Vec<NodeStatus> = Vec::new();
+                // Node, terminal status and output per branch. The output is
+                // kept (not just the status) because `defaults.on_failure:
+                // stop` reports the failing node's own words as the run's
+                // failure reason.
+                let mut batch_results: Vec<(String, NodeStatus, String)> = Vec::new();
                 // The batch shares ONE journal (the drive's log behind a Mutex)
                 // so each worker thread appends its own attempt_started at spawn
                 // time and attempt_finished at return, while the collector on this
@@ -625,6 +666,7 @@ fn drive_inner(
                             for ev in evs {
                                 journal.append(ev)?;
                             }
+                            batch_results.push((node.clone(), status, output.clone()));
                             journal.append(EventPayload::NodeFinished {
                                 node: node.clone(),
                                 status: status.as_str().into(),
@@ -634,7 +676,6 @@ fn drive_inner(
                                 // node cache, so it captures no declared artifacts.
                                 artifacts: Vec::new(),
                             })?;
-                            batch_statuses.push(status);
                             // If this branch successfully fed a join:any - cancel the others.
                             if status == NodeStatus::Succeeded {
                                 let state_peek = RunState::fold(&read_all(run_dir)?);
@@ -665,9 +706,9 @@ fn drive_inner(
                 rebuild_context_md(run_dir)?;
                 // unknown/interrupted in any branch - pause the run (as in the
                 // sequential path).
-                if batch_statuses
+                if batch_results
                     .iter()
-                    .any(|s| matches!(s, NodeStatus::Unknown | NodeStatus::Interrupted))
+                    .any(|(_, s, _)| matches!(s, NodeStatus::Unknown | NodeStatus::Interrupted))
                 {
                     log.append(EventPayload::RunPaused {
                         reason: "parallel branch ended with unknown/interrupted status".into(),
@@ -679,6 +720,37 @@ fn drive_inner(
                 }
                 frontier.retain(|n| !batch.contains(n));
                 let state_now = RunState::fold(&read_all(run_dir)?);
+
+                // The declared failure policy (spec 2026-07-26), the batch
+                // counterpart of the sequential check below. Scanned in batch
+                // order, not completion order, so two failing branches always
+                // name the same one.
+                let unhandled: Vec<&(String, NodeStatus, String)> = batch
+                    .iter()
+                    .filter_map(|n| {
+                        batch_results.iter().find(|(bn, s, _)| {
+                            bn == n
+                                && matches!(s, NodeStatus::Failed | NodeStatus::TimedOut)
+                                && parallel::successors(&playbook, bn, &state_now).is_empty()
+                        })
+                    })
+                    .collect();
+                if playbook.defaults.on_failure == FailurePolicy::Stop
+                    && let Some((node, _, out)) = unhandled.first()
+                {
+                    return Ok(RunResult {
+                        run_id,
+                        outcome: stop_on_unhandled_failure(log, node, out, &mut frontier)?,
+                    });
+                }
+                for (node, _, _) in &unhandled {
+                    if let Some(target) = playbook.defaults.on_failure.target_for(node)
+                        && !frontier.iter().any(|n| n == target)
+                    {
+                        frontier.push(target.to_string());
+                    }
+                }
+
                 for node in &batch {
                     advance_frontier(&playbook, node, &state_now, &mut frontier, log)?;
                 }
@@ -1567,6 +1639,30 @@ fn drive_inner(
         }
 
         let state_now = RunState::fold(&read_all(run_dir)?);
+        let routes = !parallel::successors(&playbook, &current, &state_now).is_empty();
+
+        // The declared failure policy (spec 2026-07-26): the node failed and
+        // nothing takes that failure.
+        if !routes && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut) {
+            // A declared stop fires even when another branch is still in the
+            // frontier: a failure the author called fatal must not be outlived
+            // by a sibling and reported as success.
+            if playbook.defaults.on_failure == FailurePolicy::Stop {
+                return Ok(RunResult {
+                    run_id,
+                    outcome: stop_on_unhandled_failure(log, &current, &output, &mut frontier)?,
+                });
+            }
+            if let Some(target) = playbook.defaults.on_failure.target_for(&current)
+                && !frontier.iter().any(|n| n == target)
+            {
+                // A route the author declared once instead of drawing it from
+                // every node: join the frontier exactly as an explicit failure
+                // edge into the same node would have.
+                frontier.push(target.to_string());
+            }
+        }
+
         advance_frontier(&playbook, &current, &state_now, &mut frontier, log)?;
         if frontier.is_empty() {
             // Branch completed with no ready successors and no other active

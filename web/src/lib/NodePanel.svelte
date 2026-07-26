@@ -11,7 +11,9 @@
   } from './successcheck'
   import { parseBinding, serializeBinding, toggleListEntry, type ConnectorBinding } from './connectorbinding'
   import { trustBadge, type ConnectorCard, type ConnectorDetail } from './connectors'
+  import { NODE_FIELDS, type NodeFieldKey } from './nodefields'
   import { fetchInputDraft, saveInputDraft, fetchPlaybooks, fetchConnectors, fetchConnector } from './api'
+  import FieldInfo from '$lib/components/FieldInfo.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import { Textarea } from '$lib/components/ui/textarea'
@@ -25,16 +27,20 @@
     id,
     node,
     onChange,
-    onDelete,
     revision = 0,
     workspace = '',
+    readonly = false,
   }: {
     id: string
     node: PlaybookNode
-    onChange: (patch: Record<string, unknown>) => void
-    onDelete: () => void
+    /// Absent on a read-only panel, which has nothing to report.
+    onChange?: (patch: Record<string, unknown>) => void
     revision?: number
     workspace?: string
+    /// Read-only rendering for the view page: the text fields keep their
+    /// scrollbars and their selection (a prompt has to stay readable), the
+    /// controls that only exist to change something are disabled or gone.
+    readonly?: boolean
   } = $props()
 
   const kind = $derived(node.type)
@@ -176,7 +182,7 @@
 
   function syncConnectors(next: ConnectorBinding[]) {
     connBindings = next
-    onChange({ connectors: next.length ? next.map(serializeBinding) : undefined })
+    onChange?.({ connectors: next.length ? next.map(serializeBinding) : undefined })
   }
   function addConnector(name: string) {
     connectorPickerValue = ''
@@ -322,29 +328,29 @@
 
   function setProfile(raw: string) {
     f.profile = raw
-    onChange({ profile: fieldToProfile(raw) })
+    onChange?.({ profile: fieldToProfile(raw) })
   }
   function setPlaybookRef(raw: string) {
     f.playbook = raw
-    onChange({ playbook: fieldToPlaybookRef(raw) })
+    onChange?.({ playbook: fieldToPlaybookRef(raw) })
   }
   function setSuccessCheck(mode: SuccessCheckMode, raw: string) {
     successMode = mode
     f.success_check = raw
-    onChange({ success_check: fieldsToSuccessCheck(mode, raw) })
+    onChange?.({ success_check: fieldsToSuccessCheck(mode, raw) })
   }
   function setStr(key: string, raw: string) {
     f[key] = raw
-    onChange(raw === '' ? { [key]: undefined } : { [key]: raw })
+    onChange?.(raw === '' ? { [key]: undefined } : { [key]: raw })
   }
   function setNum(key: string, raw: string) {
     f[key] = raw
     if (raw === '') {
-      onChange({ [key]: undefined })
+      onChange?.({ [key]: undefined })
       return
     }
     const n = Number(raw)
-    onChange(Number.isNaN(n) ? { [key]: undefined } : { [key]: n })
+    onChange?.(Number.isNaN(n) ? { [key]: undefined } : { [key]: n })
   }
 
   const isolationLabel = $derived(
@@ -355,21 +361,17 @@
   )
 </script>
 
-<div class="flex flex-col gap-3 text-sm">
-  <div class="flex items-center gap-2 border-b border-border pb-2">
-    <strong class="truncate font-mono">{node.id}</strong>
-    <Badge variant="secondary" class="text-[10px]">{kind}</Badge>
-    <Button
-      variant="ghost"
-      size="icon"
-      class="ml-auto size-7 text-muted-foreground hover:text-destructive"
-      title="Delete node"
-      onclick={onDelete}
-    >
-      <Trash2 />
-    </Button>
+<!-- Every field carries its readable label and, next to it, the "i" that
+     explains what the field actually does - the YAML key alone (max_retries,
+     success_check) says what it is called, not what it is for. -->
+{#snippet fieldHead(key: NodeFieldKey, forId: string | undefined = undefined)}
+  <div class="flex items-center gap-1.5">
+    <Field.FieldLabel for={forId}>{NODE_FIELDS[key].label}</Field.FieldLabel>
+    <FieldInfo label={NODE_FIELDS[key].label} text={NODE_FIELDS[key].hint} />
   </div>
+{/snippet}
 
+<div class="flex flex-col gap-4 text-sm">
   <datalist id="apb-profile-options">
     {#each profiles as p (p.scope + '/' + p.name)}
       <option value={`${p.scope}/${p.name}`}>
@@ -384,18 +386,33 @@
     {/each}
   </datalist>
 
-  <Field.FieldGroup class="gap-3">
+  <!-- Short fields sit two to a row on a wide screen; anything that holds prose
+       (a prompt, an instruction) takes the full width and grows with its
+       content up to 300px, then scrolls, so a long prompt never pushes the rest
+       of the form off screen. -->
+  <Field.FieldGroup class="grid grid-cols-1 gap-4 md:grid-cols-2">
     <Field.Field>
-      <Field.FieldLabel for="np-title">title</Field.FieldLabel>
-      <Input id="np-title" value={f.title} oninput={(e) => setStr('title', e.currentTarget.value)} />
+      {@render fieldHead('title', 'np-title')}
+      <!-- The graph falls back to the node id when there is no title, so the
+           id is the placeholder here: it is what the canvas is showing, and it
+           is not a value (nothing is written until you type). -->
+      <Input
+        id="np-title"
+        {readonly}
+        placeholder={node.id}
+        value={f.title}
+        oninput={(e) => setStr('title', e.currentTarget.value)}
+      />
     </Field.Field>
 
     {#if kind === 'start'}
-      <Field.Field>
-        <Field.FieldLabel for="np-input">input prompt (run draft, not versioned)</Field.FieldLabel>
+      <Field.Field class="md:col-span-2">
+        {@render fieldHead('input_draft', 'np-input')}
         <Textarea
           id="np-input"
           rows={4}
+          class="max-h-[300px] overflow-auto"
+          {readonly}
           value={draft}
           oninput={(e) => onDraftInput(e.currentTarget.value)}
         />
@@ -406,47 +423,33 @@
     {/if}
 
     {#if kind === 'agent_task'}
-      <Field.Field>
-        <Field.FieldLabel for="np-prompt">prompt</Field.FieldLabel>
+      <Field.Field class="md:col-span-2">
+        {@render fieldHead('prompt', 'np-prompt')}
         <Textarea
           id="np-prompt"
-          rows={4}
+          rows={6}
+          class="max-h-[300px] overflow-auto"
+          {readonly}
           value={f.prompt}
           oninput={(e) => setStr('prompt', e.currentTarget.value)}
         />
       </Field.Field>
       <Field.Field>
-        <Field.FieldLabel for="np-profile">profile</Field.FieldLabel>
+        {@render fieldHead('profile', 'np-profile')}
         <Input
           id="np-profile"
           list="apb-profile-options"
           placeholder="name (scope auto) or scope/name"
+          {readonly}
           value={f.profile}
           oninput={(e) => setProfile(e.currentTarget.value)}
         />
       </Field.Field>
       <Field.Field>
-        <Field.FieldLabel for="np-retries">max_retries</Field.FieldLabel>
-        <Input
-          id="np-retries"
-          type="number"
-          value={f.max_retries}
-          oninput={(e) => setNum('max_retries', e.currentTarget.value)}
-        />
-      </Field.Field>
-      <Field.Field>
-        <Field.FieldLabel for="np-timeout">timeout_seconds</Field.FieldLabel>
-        <Input
-          id="np-timeout"
-          type="number"
-          value={f.timeout_seconds}
-          oninput={(e) => setNum('timeout_seconds', e.currentTarget.value)}
-        />
-      </Field.Field>
-      <Field.Field>
-        <Field.FieldLabel>isolation</Field.FieldLabel>
+        {@render fieldHead('isolation')}
         <Select.Root
           type="single"
+          disabled={readonly}
           value={f.isolation}
           onValueChange={(v) => setStr('isolation', v ?? '')}
         >
@@ -461,17 +464,40 @@
         </Select.Root>
       </Field.Field>
       <Field.Field>
-        <Field.FieldLabel>success_check</Field.FieldLabel>
-        <div class="flex flex-col gap-2">
+        {@render fieldHead('max_retries', 'np-retries')}
+        <Input
+          id="np-retries"
+          type="number"
+          {readonly}
+          value={f.max_retries}
+          oninput={(e) => setNum('max_retries', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('timeout_seconds', 'np-timeout')}
+        <Input
+          id="np-timeout"
+          type="number"
+          {readonly}
+          value={f.timeout_seconds}
+          oninput={(e) => setNum('timeout_seconds', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field class="md:col-span-2">
+        {@render fieldHead('success_check', 'np-success')}
+        <!-- Mode and value belong on one line: the mode only says how to read
+             the value next to it. -->
+        <div class="flex flex-col gap-2 sm:flex-row sm:items-center">
           <Select.Root
             type="single"
+            disabled={readonly}
             value={successMode}
             onValueChange={(v) => {
               const mode = isSuccessCheckMode(v) ? v : 'script'
               setSuccessCheck(mode, f.success_check)
             }}
           >
-            <Select.Trigger class="w-full">{successModeLabel}</Select.Trigger>
+            <Select.Trigger class="sm:w-52">{successModeLabel}</Select.Trigger>
             <Select.Content>
               <Select.Group>
                 <Select.Item value="script" label="script path">script path</Select.Item>
@@ -481,15 +507,17 @@
           </Select.Root>
           <Input
             id="np-success"
+            class="sm:flex-1"
             placeholder={successMode === 'marker' ? 'WAVE-COMPLETE' : 'scripts/verify.sh'}
+            {readonly}
             value={f.success_check}
             oninput={(e) => setSuccessCheck(successMode, e.currentTarget.value)}
           />
         </div>
       </Field.Field>
 
-      <Field.Field>
-        <Field.FieldLabel>connectors</Field.FieldLabel>
+      <Field.Field class="md:col-span-2">
+        {@render fieldHead('connectors')}
         <div class="flex flex-col gap-2">
           {#each connBindings as b (b.name)}
             {@const card = connectorCard(b.name)}
@@ -501,15 +529,17 @@
                   {@const badge = trustBadge(card.trust)}
                   <Badge variant="outline" class={badgeClass[badge.tone]}>{badge.label}</Badge>
                 {/if}
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  class="ml-auto size-6 text-muted-foreground hover:text-destructive"
-                  title="Remove connector"
-                  onclick={() => removeConnector(b.name)}
-                >
-                  <Trash2 class="size-3.5" />
-                </Button>
+                {#if !readonly}
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    class="ml-auto size-6 text-muted-foreground hover:text-destructive"
+                    title="Remove connector"
+                    onclick={() => removeConnector(b.name)}
+                  >
+                    <Trash2 class="size-3.5" />
+                  </Button>
+                {/if}
               </div>
 
               {#if detail}
@@ -521,6 +551,7 @@
                         <label class="flex items-center gap-1 text-xs">
                           <input
                             type="checkbox"
+                            disabled={readonly}
                             checked={isAccountChecked(b, a.name)}
                             onchange={() => toggleAccount(b, a.name)}
                           />
@@ -535,20 +566,23 @@
                   <div class="flex flex-col gap-1">
                     <div class="flex items-center gap-2">
                       <span class="text-xs text-muted-foreground">functions (unchecked: not granted)</span>
-                      <Button
-                        variant={b.functions === 'read_only' ? 'secondary' : 'outline'}
-                        size="sm"
-                        class="h-6 px-2 text-xs"
-                        onclick={() => setReadOnlyPreset(b)}
-                      >
-                        read_only
-                      </Button>
+                      {#if !readonly}
+                        <Button
+                          variant={b.functions === 'read_only' ? 'secondary' : 'outline'}
+                          size="sm"
+                          class="h-6 px-2 text-xs"
+                          onclick={() => setReadOnlyPreset(b)}
+                        >
+                          read_only
+                        </Button>
+                      {/if}
                     </div>
                     <div class="flex flex-wrap gap-3">
                       {#each detail.functions as fn (fn.name)}
                         <label class="flex items-center gap-1 text-xs">
                           <input
                             type="checkbox"
+                            disabled={readonly}
                             checked={isFunctionChecked(b, fn.name)}
                             onchange={() => toggleFunction(b, fn.name)}
                           />
@@ -561,12 +595,16 @@
               {/if}
 
               <div class="flex items-center gap-2">
-                <Field.FieldLabel for={`np-conn-max-${b.name}`} class="text-xs">max_calls</Field.FieldLabel>
+                <Field.FieldLabel for={`np-conn-max-${b.name}`} class="text-xs">
+                  {NODE_FIELDS.max_calls.label}
+                </Field.FieldLabel>
+                <FieldInfo label={NODE_FIELDS.max_calls.label} text={NODE_FIELDS.max_calls.hint} />
                 <Input
                   id={`np-conn-max-${b.name}`}
                   type="number"
                   min="1"
                   class="h-7 w-24"
+                  {readonly}
                   value={b.maxCalls ?? ''}
                   oninput={(e) => setMaxCalls(b.name, e.currentTarget.value)}
                 />
@@ -574,83 +612,110 @@
             </div>
           {/each}
 
-          <Combobox
-            bind:value={connectorPickerValue}
-            options={connectorOptions}
-            placeholder="Add connector..."
-            emptyText="No connectors available"
-            allowCustom={false}
-          />
+          {#if !readonly}
+            <Combobox
+              bind:value={connectorPickerValue}
+              options={connectorOptions}
+              placeholder="Add connector..."
+              emptyText="No connectors available"
+              allowCustom={false}
+            />
+          {:else if connBindings.length === 0}
+            <p class="text-xs text-muted-foreground">none</p>
+          {/if}
         </div>
       </Field.Field>
     {:else if kind === 'script'}
       <Field.Field>
-        <Field.FieldLabel for="np-runner">runner</Field.FieldLabel>
-        <Input id="np-runner" value={f.runner} oninput={(e) => setStr('runner', e.currentTarget.value)} />
+        {@render fieldHead('runner', 'np-runner')}
+        <Input
+          id="np-runner"
+          {readonly}
+          value={f.runner}
+          oninput={(e) => setStr('runner', e.currentTarget.value)}
+        />
       </Field.Field>
       <Field.Field>
-        <Field.FieldLabel for="np-script">script</Field.FieldLabel>
-        <Input id="np-script" value={f.script} oninput={(e) => setStr('script', e.currentTarget.value)} />
+        {@render fieldHead('script', 'np-script')}
+        <Input
+          id="np-script"
+          {readonly}
+          value={f.script}
+          oninput={(e) => setStr('script', e.currentTarget.value)}
+        />
       </Field.Field>
       <Field.Field>
-        <Field.FieldLabel for="np-stimeout">timeout_seconds</Field.FieldLabel>
+        {@render fieldHead('timeout_seconds', 'np-stimeout')}
         <Input
           id="np-stimeout"
           type="number"
+          {readonly}
           value={f.timeout_seconds}
           oninput={(e) => setNum('timeout_seconds', e.currentTarget.value)}
         />
       </Field.Field>
     {:else if kind === 'condition'}
       <Field.Field>
-        <Field.FieldLabel for="np-loops">max_loops</Field.FieldLabel>
+        {@render fieldHead('max_loops', 'np-loops')}
         <Input
           id="np-loops"
           type="number"
+          {readonly}
           value={f.max_loops}
           oninput={(e) => setNum('max_loops', e.currentTarget.value)}
         />
       </Field.Field>
     {:else if kind === 'finish'}
       <Field.Field>
-        <Field.FieldLabel for="np-outcome">outcome</Field.FieldLabel>
-        <Input id="np-outcome" value={f.outcome} oninput={(e) => setStr('outcome', e.currentTarget.value)} />
-      </Field.Field>
-      <Field.Field>
-        <Field.FieldLabel for="np-finish-prompt">prompt (compose the run answer; optional)</Field.FieldLabel>
-        <Textarea
-          id="np-finish-prompt"
-          rows={4}
-          value={f.prompt}
-          oninput={(e) => setStr('prompt', e.currentTarget.value)}
+        {@render fieldHead('outcome', 'np-outcome')}
+        <Input
+          id="np-outcome"
+          {readonly}
+          value={f.outcome}
+          oninput={(e) => setStr('outcome', e.currentTarget.value)}
         />
       </Field.Field>
       <Field.Field>
-        <Field.FieldLabel for="np-finish-profile">profile</Field.FieldLabel>
+        {@render fieldHead('profile', 'np-finish-profile')}
         <Input
           id="np-finish-profile"
           list="apb-profile-options"
           placeholder="name (scope auto) or scope/name"
+          {readonly}
           value={f.profile}
           oninput={(e) => setProfile(e.currentTarget.value)}
         />
       </Field.Field>
+      <Field.Field class="md:col-span-2">
+        {@render fieldHead('finish_prompt', 'np-finish-prompt')}
+        <Textarea
+          id="np-finish-prompt"
+          rows={6}
+          class="max-h-[300px] overflow-auto"
+          {readonly}
+          value={f.prompt}
+          oninput={(e) => setStr('prompt', e.currentTarget.value)}
+        />
+      </Field.Field>
     {:else if kind === 'playbook'}
       <Field.Field>
-        <Field.FieldLabel for="np-pb-ref">playbook</Field.FieldLabel>
+        {@render fieldHead('playbook', 'np-pb-ref')}
         <Input
           id="np-pb-ref"
           list="apb-playbook-options"
           placeholder={'id (scope auto) or scope/id, e.g. global/child'}
+          {readonly}
           value={f.playbook}
           oninput={(e) => setPlaybookRef(e.currentTarget.value)}
         />
       </Field.Field>
-      <Field.Field>
-        <Field.FieldLabel for="np-pb-instr">instruction (rendered, becomes the child input)</Field.FieldLabel>
+      <Field.Field class="md:col-span-2">
+        {@render fieldHead('instruction', 'np-pb-instr')}
         <Textarea
           id="np-pb-instr"
-          rows={4}
+          rows={6}
+          class="max-h-[300px] overflow-auto"
+          {readonly}
           value={f.instruction}
           oninput={(e) => setStr('instruction', e.currentTarget.value)}
         />

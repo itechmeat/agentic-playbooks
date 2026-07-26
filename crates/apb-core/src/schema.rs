@@ -307,6 +307,83 @@ pub struct Defaults {
     pub max_retries: Option<u32>,
     #[serde(default)]
     pub timeout_seconds: Option<u64>,
+    /// What an unhandled failure does (spec 2026-07-26). See [`FailurePolicy`].
+    /// Additive to schema 2; no migration, and the default is the behavior
+    /// every existing playbook already has.
+    #[serde(default, skip_serializing_if = "FailurePolicy::is_default")]
+    pub on_failure: FailurePolicy,
+}
+
+/// What happens when a node ends `failed` or `timed_out` and none of its
+/// outgoing edges takes that failure (spec 2026-07-26).
+///
+/// An explicit edge always wins: this policy only decides what a failure with
+/// nowhere to go means, which is why declaring it lets a playbook delete the
+/// pile of `node_status: failure` edges into a negative finish node and keep
+/// only the branches that actually handle something.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum FailurePolicy {
+    /// Today's behavior: an unhandled failure is an engine error, because the
+    /// graph claimed the node had somewhere to go and it did not.
+    #[default]
+    Route,
+    /// An unhandled failure ends the run as failed, with the node's own last
+    /// output as the reason.
+    Stop,
+    /// An unhandled failure goes to this node, exactly as a `node_status:
+    /// failure` edge into it would have. This is what keeps a negative finish
+    /// node that composes a written failure answer working while its incoming
+    /// edges are deleted. The policy never applies to the target itself: a
+    /// failure of the handler has nowhere further to go and stays an engine
+    /// error rather than routing to itself forever.
+    Node(String),
+}
+
+impl FailurePolicy {
+    /// For `skip_serializing_if`: the default (`Route`) is omitted from
+    /// serialized YAML/JSON, matching the schema's minimal-output style.
+    pub fn is_default(&self) -> bool {
+        matches!(self, FailurePolicy::Route)
+    }
+
+    /// The serialized form: `route`, `stop`, or the target node id.
+    pub fn as_str(&self) -> &str {
+        match self {
+            FailurePolicy::Route => "route",
+            FailurePolicy::Stop => "stop",
+            FailurePolicy::Node(id) => id,
+        }
+    }
+
+    /// The node an unhandled failure of `from` routes to, if any. `None` for
+    /// `route` and `stop`, and for the target's own failure (see [`Self::Node`]).
+    pub fn target_for(&self, from: &str) -> Option<&str> {
+        match self {
+            FailurePolicy::Node(id) if id != from => Some(id),
+            _ => None,
+        }
+    }
+}
+
+/// Written as a plain string, so `on_failure: aborted` reads the way an edge
+/// target does. `route` and `stop` are the two reserved words; anything else is
+/// a node id, and a misspelled reserved word therefore surfaces as validator
+/// V35 (`on_failure` names an unknown node) rather than being silently ignored.
+impl<'de> Deserialize<'de> for FailurePolicy {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        let raw = String::deserialize(d)?;
+        Ok(match raw.as_str() {
+            "route" => FailurePolicy::Route,
+            "stop" => FailurePolicy::Stop,
+            _ => FailurePolicy::Node(raw),
+        })
+    }
+}
+
+impl Serialize for FailurePolicy {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1140,6 +1217,55 @@ edges: []
         assert!(!out.contains("question_timeout_seconds"), "got: {out}");
         assert!(!out.contains("default_answer"), "got: {out}");
         assert!(out.contains("interactive: false"), "got: {out}");
+    }
+
+    // Spec 2026-07-26: the policy round-trips, an absent key means today's
+    // behavior, and the default never appears in written YAML (so re-saving an
+    // existing playbook does not sprout `on_failure: route`).
+    #[test]
+    fn on_failure_policy_round_trips_and_defaults_to_route() {
+        let without = r#"schema: 2
+id: p
+name: P
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: f }
+"#;
+        let pb = Playbook::from_yaml(without).unwrap();
+        assert_eq!(pb.defaults.on_failure, FailurePolicy::Route);
+        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        assert!(!out.contains("on_failure"), "got: {out}");
+
+        let with = without.replace("nodes:", "defaults:\n  on_failure: stop\nnodes:");
+        let pb = Playbook::from_yaml(&with).unwrap();
+        assert_eq!(pb.defaults.on_failure, FailurePolicy::Stop);
+        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        assert!(out.contains("on_failure: stop"), "got: {out}");
+
+        // Anything that is not a reserved word is a node id, written back as
+        // the same bare string it was read from.
+        let routed = without.replace("nodes:", "defaults:\n  on_failure: aborted\nnodes:");
+        let pb = Playbook::from_yaml(&routed).unwrap();
+        assert_eq!(
+            pb.defaults.on_failure,
+            FailurePolicy::Node("aborted".into())
+        );
+        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        assert!(out.contains("on_failure: aborted"), "got: {out}");
+    }
+
+    // The policy never sends the handler to itself: a failure of the handler
+    // has nowhere further to go (spec 2026-07-26).
+    #[test]
+    fn a_node_policy_targets_every_node_but_itself() {
+        let policy = FailurePolicy::Node("aborted".into());
+        assert_eq!(policy.target_for("work"), Some("aborted"));
+        assert_eq!(policy.target_for("aborted"), None);
+        assert_eq!(FailurePolicy::Stop.target_for("work"), None);
+        assert_eq!(FailurePolicy::Route.target_for("work"), None);
     }
 
     #[test]

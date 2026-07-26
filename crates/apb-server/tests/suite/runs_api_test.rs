@@ -259,6 +259,39 @@ async fn run_detail_has_statuses_and_events() {
     assert_eq!(json["children"], serde_json::json!([]));
 }
 
+/// A failed run has to say why on the dashboard. The reason is the journal's
+/// last `RunError`, the same value MCP `run_status` reports, and before this it
+/// was reachable only through `apb doctor --run`.
+#[tokio::test]
+async fn run_detail_carries_the_failure_reason_of_a_failed_run() {
+    let dir = seed_with_run();
+    let run_id = apb_engine::list_runs(dir.path()).unwrap()[0].run_id.clone();
+
+    // A succeeded run explains nothing, because nothing went wrong.
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (_, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert_eq!(json["failure_reason"], serde_json::Value::Null);
+
+    // Append the terminal pair an engine failure writes, then read it back.
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let mut log = apb_engine::event::EventLog::open(&run_dir).unwrap();
+    log.append(apb_engine::event::EventPayload::RunError {
+        node: Some("note".into()),
+        reason: "3 failing tests".into(),
+    })
+    .unwrap();
+    log.append(apb_engine::event::EventPayload::RunFinished {
+        outcome: "failed".into(),
+    })
+    .unwrap();
+
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["run_status"], "failed");
+    assert_eq!(json["failure_reason"], "node `note`: 3 failing tests");
+}
+
 #[tokio::test]
 async fn unknown_run_404() {
     let dir = seed_with_run();

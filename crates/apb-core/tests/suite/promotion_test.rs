@@ -56,13 +56,47 @@ fn promote_version_moves_current_and_marks_provenance() {
 }
 
 #[test]
-fn promote_version_keeps_current_when_provenance_is_missing() {
+fn promote_version_keeps_current_when_the_version_has_no_playbook() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
     fs::create_dir_all(dir.path().join(".apb/playbooks/implement-task/1.0.1")).unwrap();
 
     let err = promote_version(dir.path(), "implement-task", "1.0.1").unwrap_err();
     assert!(matches!(err, VersioningError::NotFound(_)));
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".apb/playbooks/implement-task/current"))
+            .unwrap()
+            .trim(),
+        "1.0.0"
+    );
+}
+
+/// An ordinary saved version carries no provenance sidecar (only supervisor
+/// patches do), and it still has to be selectable as the current one.
+#[test]
+fn promote_version_switches_to_a_version_without_provenance() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let version_dir = dir.path().join(".apb/playbooks/implement-task/1.1.0");
+    fs::create_dir_all(version_dir.join("scripts")).unwrap();
+    fs::write(version_dir.join("playbook.yaml"), VALID).unwrap();
+
+    promote_version(dir.path(), "implement-task", "1.1.0").unwrap();
+
+    assert_eq!(
+        fs::read_to_string(dir.path().join(".apb/playbooks/implement-task/current"))
+            .unwrap()
+            .trim(),
+        "1.1.0"
+    );
+    assert!(
+        read_provenance(dir.path(), "implement-task", "1.1.0")
+            .unwrap()
+            .is_none()
+    );
+
+    // And back down to the older one: promotion is not one-directional.
+    promote_version(dir.path(), "implement-task", "1.0.0").unwrap();
     assert_eq!(
         fs::read_to_string(dir.path().join(".apb/playbooks/implement-task/current"))
             .unwrap()

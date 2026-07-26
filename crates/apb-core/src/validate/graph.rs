@@ -79,6 +79,31 @@ pub(crate) fn check_edges_exist(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
+/// V35: `defaults.on_failure`, when it names a node rather than `route` or
+/// `stop`, must name one that exists and can actually receive a failure. This
+/// is also what catches a misspelled reserved word, since anything that is not
+/// `route` or `stop` parses as a node id.
+pub(crate) fn check_failure_policy(playbook: &Playbook, r: &mut ValidationReport) {
+    let FailurePolicy::Node(target) = &playbook.defaults.on_failure else {
+        return;
+    };
+    match playbook.node(target) {
+        None => r.error(
+            "V35",
+            None,
+            format!(
+                "defaults.on_failure names unknown node `{target}` (expected a node id, `route` or `stop`)"
+            ),
+        ),
+        Some(node) if matches!(node.kind, NodeKind::Start) => r.error(
+            "V35",
+            Some(target),
+            "defaults.on_failure must not target the start node".into(),
+        ),
+        Some(_) => {}
+    }
+}
+
 pub(crate) fn check_reachability(playbook: &Playbook, r: &mut ValidationReport) {
     let Some(start) = playbook
         .nodes
@@ -90,6 +115,15 @@ pub(crate) fn check_reachability(playbook: &Playbook, r: &mut ValidationReport) 
     let adj = adjacency(playbook);
     let mut seen = HashSet::new();
     let mut q = VecDeque::from([start.id.as_str()]);
+    // The failure policy is a route like any other, it just has no edge drawn
+    // for it: without this the handler a playbook points every unhandled
+    // failure at would read as unreachable the moment its last incoming edge
+    // is deleted, which is exactly what the policy exists to allow.
+    if let FailurePolicy::Node(target) = &playbook.defaults.on_failure
+        && playbook.node(target).is_some()
+    {
+        q.push_back(target.as_str());
+    }
     while let Some(id) = q.pop_front() {
         if seen.insert(id) {
             for next in adj.get(id).into_iter().flatten() {

@@ -55,7 +55,25 @@ export function parsePlaybook(text: string): { model?: PlaybookModel; error?: st
     })
   }
 
-  return { model: { id, name, nodes, edges } }
+  // Only `on_failure` is read: the editor renders the graph from this model,
+  // and the failure marker depends on it. Everything else under `defaults` is
+  // irrelevant to the canvas and stays untouched in the YAML, which remains
+  // the source of truth on save.
+  const rawDefaults = root.defaults
+  const onFailure =
+    rawDefaults && typeof rawDefaults === 'object' && !Array.isArray(rawDefaults)
+      ? (rawDefaults as Record<string, unknown>).on_failure
+      : undefined
+
+  return {
+    model: {
+      id,
+      name,
+      nodes,
+      edges,
+      defaults: typeof onFailure === 'string' ? { on_failure: onFailure } : undefined,
+    },
+  }
 }
 
 // NOTE (for Task 3, structural edits): this function serializes ONLY

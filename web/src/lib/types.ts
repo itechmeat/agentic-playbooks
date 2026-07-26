@@ -37,7 +37,16 @@ export interface PlaybookDetail {
   id: string
   version: string
   yaml: string
-  playbook: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[] }
+  playbook: {
+    id: string
+    name: string
+    nodes: PlaybookNode[]
+    edges: PlaybookEdge[]
+    // Only the field the graph needs: what an unhandled failure does -
+    // `route`, `stop`, or the id of the node it goes to. Absent (and on any
+    // playbook written before the policy existed) means `route`.
+    defaults?: { on_failure?: string } | null
+  }
   layout: { nodes?: LayoutNode[] } | null
   validation: { code: string; severity: string; message: string; node?: string | null }[]
   frozen: boolean
@@ -144,6 +153,9 @@ export interface RunDetail {
   playbook: string
   version: string
   run_status: string
+  // Why a failed run ended, as folded from the journal's last RunError
+  // (`node \`x\`: reason`). Null unless the run is failed.
+  failure_reason?: string | null
   nodes: Record<string, string>
   outputs: Record<string, string>
   instruction: string | null
