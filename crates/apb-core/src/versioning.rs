@@ -360,13 +360,27 @@ pub fn set_promoted(
     write_provenance(root, id, version, &provenance)
 }
 
+/// Makes `version` the current one. Any stored version qualifies, newer or
+/// older: the provenance sidecar carries the supervisor-patch `promoted` flag
+/// and is updated when it exists, but a version created by an ordinary save
+/// has no sidecar and must still be selectable - requiring one used to make
+/// every hand-authored version unpromotable.
+///
+/// What is required instead is a version that can actually run: the directory
+/// must hold a `playbook.yaml`, so `current` never points at a half-written
+/// or empty version directory.
 pub fn promote_version(root: &Path, id: &str, version: &str) -> Result<(), VersioningError> {
     let playbook_dir = playbook_version_dir(root, id, version)?;
     // Promotion repoints `current`, a definition change - refused while frozen.
     if is_frozen_dir(&playbooks_dir(root).join(id)) {
         return Err(VersioningError::Frozen(id.to_string()));
     }
-    set_promoted(root, id, version, true)?;
+    if !playbook_dir.join(version).join("playbook.yaml").is_file() {
+        return Err(VersioningError::NotFound(format!("{id}@{version}")));
+    }
+    if read_provenance(root, id, version)?.is_some() {
+        set_promoted(root, id, version, true)?;
+    }
     atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
     Ok(())
 }

@@ -195,3 +195,66 @@
     height: 100vh;
   }
 }
+
+/* CodeMirror token colors. The editor is themed through these variables (see
+   lib/CodeEditor.svelte) so it follows light/dark with the rest of the app
+   instead of carrying a second palette. Hues are the only chroma the app's
+   otherwise monochrome scale allows itself, kept muted enough to read as code
+   rather than as decoration. */
+:root {
+  --cm-key: oklch(0.48 0.14 264);
+  --cm-string: oklch(0.5 0.12 145);
+  --cm-number: oklch(0.55 0.15 35);
+  --cm-comment: oklch(0.6 0.02 260);
+  --cm-meta: oklch(0.52 0.11 330);
+  --cm-punct: oklch(0.55 0 0);
+}
+
+.dark {
+  --cm-key: oklch(0.78 0.12 264);
+  --cm-string: oklch(0.8 0.13 145);
+  --cm-number: oklch(0.8 0.12 60);
+  --cm-comment: oklch(0.62 0.02 260);
+  --cm-meta: oklch(0.8 0.11 330);
+  --cm-punct: oklch(0.68 0 0);
+}
+
+/* The editor fills its pane and inherits the app's mono stack; the gutter and
+   the active line borrow the same tokens as every other surface. */
+#app .cm-host .cm-editor {
+  height: 100%;
+  background-color: var(--background);
+  color: var(--foreground);
+  font-size: 13px;
+}
+#app .cm-host .cm-scroller {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  line-height: 1.625;
+}
+#app .cm-host .cm-editor.cm-focused {
+  outline: none;
+}
+#app .cm-host .cm-gutters {
+  background-color: var(--background);
+  border-right: 1px solid var(--border);
+  color: var(--muted-foreground);
+}
+#app .cm-host .cm-activeLine,
+#app .cm-host .cm-activeLineGutter {
+  background-color: var(--muted);
+}
+#app .cm-host .cm-content {
+  caret-color: var(--foreground);
+}
+#app .cm-host .cm-cursor {
+  border-left-color: var(--foreground);
+}
+#app .cm-host .cm-selectionBackground,
+#app .cm-host .cm-editor ::selection {
+  background-color: var(--accent);
+}
+#app .cm-host .cm-matchingBracket {
+  background-color: var(--accent);
+  color: var(--accent-foreground);
+  outline: 1px solid var(--border);
+}

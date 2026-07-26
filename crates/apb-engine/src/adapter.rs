@@ -77,6 +77,27 @@ fn env_duration_ms(key: &str) -> Option<Duration> {
         .map(Duration::from_millis)
 }
 
+/// What a process that died says for itself, for the failure message that
+/// becomes the node's output.
+///
+/// `stderr` used to be the whole of it, which threw away the reply of every
+/// agent that writes its diagnosis to stdout and then exits non-zero: the node
+/// was journaled with nothing but `agent exited with Some(1):`. That mattered
+/// more once `defaults.on_failure: stop` made this text the run's failure
+/// reason (spec 2026-07-26). Both streams are kept, stderr first, because the
+/// short error and the partial reply explain different halves of the failure.
+///
+/// Only the streaming adapter still reports stderr alone: its stdout is a
+/// JSON event stream rather than prose, so replaying the tail would add noise
+/// instead of an explanation.
+fn exit_detail(stderr: &str, stdout: &str) -> String {
+    match (stderr.trim(), stdout.trim()) {
+        ("", out) => out.to_string(),
+        (err, "") => err.to_string(),
+        (err, out) => format!("{err}\n{out}"),
+    }
+}
+
 /// The signal that terminated the process, if any (unix only). A process killed
 /// by a signal is a FAILED attempt regardless of its reported exit code: a
 /// SIGTERM/SIGKILL that a wrapper turned into a `0` exit, or that lost the
@@ -1054,13 +1075,20 @@ impl ClaudeAdapter {
         if let Some(sig) = terminating_signal(&output.status) {
             return Err((
                 ErrorClass::ProcessExit,
-                format!("agent terminated by signal {sig}: {stderr}"),
+                format!(
+                    "agent terminated by signal {sig}: {}",
+                    exit_detail(&stderr, &stdout)
+                ),
             ));
         }
         if !output.status.success() {
             return Err((
                 ErrorClass::ProcessExit,
-                format!("agent exited with {:?}: {stderr}", output.status.code()),
+                format!(
+                    "agent exited with {:?}: {}",
+                    output.status.code(),
+                    exit_detail(&stderr, &stdout)
+                ),
             ));
         }
         // Status comes from the structured report block (spec 6.2); the node
@@ -1573,6 +1601,20 @@ mod tests {
         assert_eq!(default_program("codex"), "codex");
         assert_eq!(default_program("claude"), "claude");
         assert_eq!(default_program("claude-code"), "claude");
+    }
+
+    /// A failing agent explains itself on whichever stream it likes, and the
+    /// explanation is all the node output has to offer. Losing stdout used to
+    /// leave `agent exited with Some(1):` and nothing else.
+    #[test]
+    fn exit_detail_keeps_whatever_the_process_said() {
+        assert_eq!(exit_detail("boom", ""), "boom");
+        assert_eq!(exit_detail("", "3 failing tests"), "3 failing tests");
+        assert_eq!(
+            exit_detail("boom", "3 failing tests"),
+            "boom\n3 failing tests"
+        );
+        assert_eq!(exit_detail("  ", "\n"), "");
     }
 
     #[test]

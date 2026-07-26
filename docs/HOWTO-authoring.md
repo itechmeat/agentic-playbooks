@@ -14,7 +14,7 @@ A playbook is a YAML document with these top-level fields:
 - `description` (string, free text, any language; not used for matching)
 - `version` (string, `X.Y.Z`)
 - `params` (list): each `{ name, type, label?, options?, default? }`
-- `defaults` (profile, retries, timeout)
+- `defaults` (profile, retries, timeout, on_failure)
 - `trigger`, `requires`, `effects` (see below)
 - `nodes` (list) and `edges` (list)
 
@@ -186,6 +186,55 @@ edges:
   - { from: review,  to: publish, condition: { type: review_status, equals: approve } }
   - { from: review,  to: notify,  condition: { type: review_status, equals: reject } }
 ```
+
+## Unhandled failures (defaults.on_failure)
+
+A playbook that draws a `node_status: failure` edge from every node into one
+negative finish node buries its own structure: those edges are most of the
+graph and none of them says anything except "this went wrong".
+`defaults.on_failure` declares once what an unhandled failure does, so they can
+go:
+
+```yaml
+defaults:
+  on_failure: aborted
+```
+
+The value is one of three things:
+
+- `route` (the default, and what every playbook written before this did): a
+  node that ends `failed` or `timed_out` with no edge to take that failure is
+  an engine error. The run ends failed, and the reason says an edge is missing.
+- `stop`: the same situation ends the run as failed on purpose, and the reason
+  is the failing node's own output.
+- a node id: the failure goes to that node, exactly as an edge into it would
+  have. This is what keeps a negative `finish` node that composes a written
+  failure answer working while every edge into it is deleted.
+
+Anything that is not `route` or `stop` is read as a node id, so a misspelled
+reserved word surfaces as validator V35 (`on_failure` names an unknown node)
+instead of being silently ignored. The policy never applies to the target
+itself: a failure of the handler has nowhere further to go and stays an engine
+error rather than routing in a circle.
+
+An explicit edge always wins over the policy, so the branches that actually
+handle something (a review that routes into a fix, a check that routes into a
+retry) stay exactly as they are. Only the edges that led nowhere but the end of
+the run disappear.
+
+The web canvas marks a node whose failure the policy handles with `stop on
+failure` or `on failure: <node>`, so the branch that is no longer drawn is
+still visible.
+
+The policy governs AUTONOMOUS runs. A supervised run (`apb run --supervise`, or
+`playbook_run` with a supervisor) never reaches it: a failed node raises a wake
+and waits for the supervisor to decide (retry, continue from another node, patch
+or abort), which is why deleting the failure edges does not change a supervised
+run either way.
+
+One thing to know before choosing `stop`: a `finish` node with a `prompt` is
+what composes a written closing answer for a failed run. Where that answer
+matters, point the policy at that node rather than stopping.
 
 ## Interactive nodes
 

@@ -1,13 +1,12 @@
 <script lang="ts">
+  // The landing page is imported eagerly: it is what the dashboard opens on,
+  // and it carries none of the heavy dependencies. Every other page is a
+  // dynamic import, so the graph canvas (@xyflow + dagre + d3), the YAML
+  // document model, and the connector screens only reach the browser when a
+  // route actually needs them instead of riding along on first paint.
   import PlaybookList from './pages/PlaybookList.svelte'
-  import PlaybookView from './pages/PlaybookView.svelte'
-  import PlaybookEdit from './pages/PlaybookEdit.svelte'
-  import RunList from './pages/RunList.svelte'
-  import RunView from './pages/RunView.svelte'
-  import ProfileList from './pages/ProfileList.svelte'
-  import ProfileEdit from './pages/ProfileEdit.svelte'
-  import ConnectorList from './pages/ConnectorList.svelte'
-  import ConnectorView from './pages/ConnectorView.svelte'
+  import ChunkError from '$lib/components/ChunkError.svelte'
+  import ChunkPending from '$lib/components/ChunkPending.svelte'
   import { Toaster } from '$lib/components/ui/sonner'
   import { connectorRouteName, decodeSegment } from '$lib/route'
   import { ModeWatcher } from 'mode-watcher'
@@ -18,6 +17,17 @@
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
   })
+
+  // One dynamic import per page. Grouped by component, so a route that shares
+  // a page with another (new/edit, profile-new/profile-edit) shares its chunk.
+  const loadPlaybookView = () => import('./pages/PlaybookView.svelte')
+  const loadPlaybookEdit = () => import('./pages/PlaybookEdit.svelte')
+  const loadRunView = () => import('./pages/RunView.svelte')
+  const loadRunList = () => import('./pages/RunList.svelte')
+  const loadProfileList = () => import('./pages/ProfileList.svelte')
+  const loadProfileEdit = () => import('./pages/ProfileEdit.svelte')
+  const loadConnectorList = () => import('./pages/ConnectorList.svelte')
+  const loadConnectorView = () => import('./pages/ConnectorView.svelte')
 
   const dec = decodeSegment
 
@@ -61,26 +71,71 @@
   })
 </script>
 
+<!-- Each arm awaits its own page chunk. The props stay written out per route,
+     so the compiler still checks them; a spread through one dynamic component
+     would have to be cast to `any` and would check nothing. Every arm carries
+     all three branches: a chunk in flight, and a chunk that never arrives,
+     would otherwise both render nothing and leave the route silently blank. -->
 {#if route.page === 'new'}
-  <PlaybookEdit id="" workspace="" />
+  {#await loadPlaybookEdit()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page id="" workspace="" />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'edit'}
-  <PlaybookEdit id={route.id} workspace={route.workspace} />
+  {#await loadPlaybookEdit()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page id={route.id} workspace={route.workspace} />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'playbook'}
-  <PlaybookView id={route.id} workspace={route.workspace} />
+  {#await loadPlaybookView()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page id={route.id} workspace={route.workspace} />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'run'}
-  <RunView id={route.id} workspace={route.workspace} />
+  {#await loadRunView()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page id={route.id} workspace={route.workspace} />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'runs'}
-  <RunList />
+  {#await loadRunList()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'profiles'}
-  <ProfileList />
+  {#await loadProfileList()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'profile-new'}
-  <ProfileEdit name="" scope="project" workspace="" />
+  {#await loadProfileEdit()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page name="" scope="project" workspace="" />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'profile-edit'}
-  <ProfileEdit name={route.name} scope={route.scope} workspace={route.workspace} />
+  {#await loadProfileEdit()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page name={route.name} scope={route.scope} workspace={route.workspace} />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'connectors'}
-  <ConnectorList />
+  {#await loadConnectorList()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'connector'}
-  <ConnectorView name={route.name} />
+  {#await loadConnectorView()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page name={route.name} />
+  {:catch error}<ChunkError {error} />{/await}
 {:else}
   <PlaybookList />
 {/if}

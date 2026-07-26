@@ -109,11 +109,26 @@ pub(crate) async fn get_run_handler(
         .map(|(k, secret)| (k, apb_engine::hook_path(&id, &secret)))
         .collect();
 
+    // Why the run failed, on the same terms MCP `run_status` reports it: the
+    // last `RunError` folded from the journal. Without this the dashboard shows
+    // a red run and no explanation, and the reason is only reachable through
+    // `apb doctor --run` or an MCP call. Only for a failed run: a reason folded
+    // from an earlier, recovered anomaly is not why the run ended.
+    let failure_reason = (run_state.run_status == apb_engine::state::RunStatus::Failed)
+        .then(|| {
+            run_state
+                .failure_reason
+                .as_ref()
+                .map(apb_engine::state::FailureReason::display)
+        })
+        .flatten();
+
     Json(serde_json::json!({
         "run_id": id,
         "playbook": playbook_id,
         "version": version,
         "run_status": run_state.run_status.as_str(),
+        "failure_reason": failure_reason,
         "nodes": nodes,
         "outputs": run_state.outputs,
         "instruction": cfg.instruction,

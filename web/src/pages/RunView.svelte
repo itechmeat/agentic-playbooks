@@ -21,6 +21,7 @@
   import * as Tabs from '$lib/components/ui/tabs'
   import { runStatusClass } from '../lib/status'
   import { toast } from 'svelte-sonner'
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
 
   let { id, workspace = '' }: { id: string; workspace?: string } = $props()
 
@@ -124,6 +125,19 @@
 {#if detail}
   <div class="border-b border-border px-4 py-2">
     <RunProgress progress={detail.progress} status={detail.run_status} runKey={`${workspace}/${id}`} />
+  </div>
+{/if}
+
+<!-- Why a failed run ended. The answer below is what the playbook composed on
+     purpose; this is what the engine recorded when it could not finish, and
+     until now it was only reachable through `apb doctor --run`. -->
+{#if detail?.failure_reason}
+  <div class="border-b border-destructive/30 bg-destructive/10 px-4 py-2">
+    <div class="flex items-center gap-1.5 text-xs font-semibold text-destructive">
+      <TriangleAlert class="size-3.5" />
+      Failed
+    </div>
+    <pre class="mt-1 whitespace-pre-wrap break-words text-sm">{detail.failure_reason}</pre>
   </div>
 {/if}
 
