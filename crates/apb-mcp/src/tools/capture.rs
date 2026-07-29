@@ -96,7 +96,7 @@ pub fn playbook_capture(
 
     // Dedup: a close trigger among the existing ones (both scopes). An exact
     // match of the normalized when string -> possible_duplicate.
-    let catalog = crate::catalog::build(root, None, None, None, Vec::new());
+    let catalog = crate::catalog::build(root, None, None, None, Vec::new(), Vec::new());
     if let Some(entries) = catalog["entries"].as_array() {
         let new_whens: Vec<String> = synopsis
             .get("trigger")
@@ -155,9 +155,73 @@ pub fn playbook_capture(
     }))
 }
 
-/// Records the user's decline of the suggestion to save a playbook (spec 8.2):
-/// "no, and don't suggest that again". The pattern is an English kebab-slug.
-pub fn suggestion_dismiss(pattern: &str, ttl_days: Option<u64>) -> Result<Value, ToolError> {
-    apb_core::dismiss::record(pattern, ttl_days).map_err(|e| ToolError::Engine(e.to_string()))?;
-    Ok(json!({ "dismissed": pattern }))
+/// One `suggestion_dismiss` call. `kind` and `scope` are the raw strings the
+/// tool received (`None` means the argument was absent, which is the
+/// backward-compatible default: hard, project scope).
+#[derive(Debug, Clone)]
+pub struct DismissRequest<'a> {
+    pub pattern: &'a str,
+    pub synopsis: &'a str,
+    pub kind: Option<&'a str>,
+    pub scope: Option<&'a str>,
+    /// Legacy hard-TTL override in days (v1 argument). Applies to a hard
+    /// dismissal only.
+    pub ttl_days: Option<u64>,
+}
+
+/// Records the user's decline of a save-as-playbook suggestion (spec
+/// 2026-07-29). A soft decline escalates the snooze, a hard one silences the
+/// suggestion for the hard TTL; the response reports the stored record,
+/// including the server-computed `snoozed_until`, so the agent can tell the
+/// user how long the silence lasts. An absent `kind`/`scope` reproduces v1
+/// behavior exactly (hard, project scope).
+pub fn suggestion_dismiss(root: &Path, req: DismissRequest<'_>) -> Result<Value, ToolError> {
+    let kind = match req.kind {
+        None => apb_core::dismiss::DecisionKind::Hard,
+        Some(raw) => apb_core::dismiss::DecisionKind::parse(raw)
+            .ok_or_else(|| ToolError::Engine(format!("unknown kind `{raw}` (soft or hard)")))?,
+    };
+    let scope = match req.scope {
+        None => apb_core::dismiss::DecisionScope::Project,
+        Some(raw) => apb_core::dismiss::DecisionScope::parse(raw).ok_or_else(|| {
+            ToolError::Engine(format!("unknown scope `{raw}` (project or global)"))
+        })?,
+    };
+    // A synopsis is prose the user will see again in `apb suggestions list`;
+    // the same secret-shape net that guards a capture synopsis applies here.
+    if let Some(m) = secret_like(req.synopsis) {
+        return Ok(json!({ "rejected": "secret_like_value", "match": m }));
+    }
+    let outcome = apb_core::dismiss::record_decision(
+        root,
+        apb_core::dismiss::DecisionInput {
+            pattern: req.pattern.to_string(),
+            synopsis: req.synopsis.to_string(),
+            kind,
+            scope,
+            hard_ttl_days_override: req.ttl_days,
+        },
+    )
+    .map_err(|e| ToolError::Engine(e.to_string()))?;
+    let stored = outcome.record;
+    let mut out = json!({
+        // Kept from v1 so an existing client reading `dismissed` still works.
+        "dismissed": stored.pattern,
+        "pattern": stored.pattern,
+        "synopsis": stored.synopsis,
+        "kind": stored.kind.as_str(),
+        "scope": scope.as_str(),
+        "declines": stored.declines,
+        "snoozed_until": apb_core::dismiss::iso_utc(stored.snoozed_until_ms),
+        "snoozed_until_ms": stored.snoozed_until_ms,
+    });
+    // The decision itself was recorded, so this is not an error, but a broken
+    // `suggestions:` config section or a store that had to be moved aside must
+    // reach a human. This is the only place the agent ever sees them, so the
+    // field is present only when there is something to say (an always-empty
+    // array would train the agent to ignore it).
+    if !outcome.diagnostics.is_empty() {
+        out["diagnostics"] = json!(outcome.diagnostics);
+    }
+    Ok(out)
 }

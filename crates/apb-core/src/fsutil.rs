@@ -45,7 +45,7 @@ pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
 
 /// Like `atomic_write`, but the resulting file gets 0600 permissions (owner
 /// read/write) before it appears at the target path. For global state files
-/// (trust.json, projects.json, dismissed.json), which may contain data that is
+/// (trust.json, projects.json, suggestions.json), which may contain data that is
 /// privacy-sensitive. Permissions are left untouched on non-unix.
 pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
@@ -84,7 +84,7 @@ pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// owner token. The guard removes the file only if the token is still ours
 /// (after a force-steal of a stale lock, this protects against cascading
 /// removal of someone else's lock). A shared primitive for serializing
-/// read-modify-write over global state files (trust.json, dismissed.json).
+/// read-modify-write over global state files (trust.json, suggestions.json).
 /// `projects.json` historically carries an equivalent implementation of its own.
 pub struct DirLock {
     path: PathBuf,

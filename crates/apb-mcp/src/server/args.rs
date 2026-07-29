@@ -278,12 +278,30 @@ pub struct PlaybookCaptureArgs {
 
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SuggestionDismissArgs {
-    /// English kebab-slug of the suggestion pattern that should not be
-    /// repeated.
+    /// English kebab-slug identifying the suggestion, lowercase [a-z0-9-]
+    /// starting with a letter or digit, at most 64 chars (anything else is
+    /// rejected: the record has to stay addressable by CLI and dashboard). A
+    /// stable record id, not the matching key: matching is done by the
+    /// synopsis below.
     pub pattern: String,
-    /// TTL in days; defaults to 90.
+    /// Legacy hard-TTL override in days; defaults to 90. Applies to a hard
+    /// dismissal only.
     #[serde(default)]
     pub ttl_days: Option<u64>,
+    /// "soft" for "not now" (the snooze escalates with every repeat) or
+    /// "hard" for an explicit never-again. Absent means hard, so an old-style
+    /// call keeps its old meaning.
+    #[serde(default)]
+    pub kind: Option<String>,
+    /// One English sentence describing the action that was offered. Strongly
+    /// recommended: this is what a future session compares a candidate action
+    /// against, by meaning. Never put secret values here.
+    #[serde(default)]
+    pub synopsis: String,
+    /// "project" (default) or "global". Use global only when the user's own
+    /// wording says everywhere.
+    #[serde(default)]
+    pub scope: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

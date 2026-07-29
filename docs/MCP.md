@@ -53,6 +53,8 @@ resolution errors (in `effective_root` and `playbook_prepare_run`):
 `workspace_unreachable` - the workspace path was removed or is unreachable;
 `workspace_unknown` - the id is not registered in the registry.
 
+`playbook_catalog` returns both `dismissed_patterns` (the slug list, unchanged) and `suppressed_suggestions`: the active suggestion-decision records for the current project, merged from the project store `.apb/suggestions.json` and the global `<config-dir>/suggestions.json`, each with `pattern`, `synopsis`, `kind`, `scope`, `declines` and `snoozed_until`. Matching a candidate action against those records is done by the meaning of the synopsis, on the agent side; the server does no language processing. Both fields fold into `catalog_revision`, so an `unchanged: true` response stays correct after any dismiss write. Timing defaults are `soft_backoff_days: [1, 7, 30, 90]` and `hard_ttl_days: 90`, overridable per key by a `suggestions:` section in the global `config.yaml` and in the project `.apb/config.yaml` (project wins). `apb suggestions list|allow|reset` and the dashboard's silenced-suggestions section manage the same records.
+
 Mutations (destructive):
 
 | Tool | What it does |
@@ -62,7 +64,7 @@ Mutations (destructive):
 | `playbook_trial` | Trial run of a draft against the effects matrix: filesystem writes go into a git worktree with a diff; irreversible effects are forbidden. Accepts an `instruction`, exactly like `playbook_run` |
 | `playbook_approve` | Activation after trial/confirmation: lifecycle active, digest trusted |
 | `playbook_execute_plan` | Phase 2: execute a confirmed cross-workspace plan by `plan_token` |
-| `suggestion_dismiss` | Record the user's decline of a suggestion (do not suggest again) |
+| `suggestion_dismiss` | Record the user's decline of a save-as-playbook suggestion: `kind` `soft` (a not-now decline whose silence escalates along the backoff schedule) or `hard` (an explicit never-again, the default so an old-style call is unchanged), a one-sentence `synopsis` of the action, and `scope` `project` (default) or `global`. The `pattern` must be a lowercase slug (`[a-z0-9][a-z0-9-]*`, at most 64 chars), so the record stays addressable by `apb suggestions` and the dashboard. Returns the stored record with the server-computed `snoozed_until`, plus a `diagnostics` array when the `suggestions:` config section is invalid or a broken store had to be moved aside. A project-scope dismiss on a directory with no `.apb` yet initializes it, since the call only happens on a root the user already connected apb to |
 | `playbook_create` | New playbook or a new minor version (creating via the tool approves the digest) |
 | `playbook_update` | New minor version of an existing playbook |
 | `playbook_delete` | Soft delete to trash |

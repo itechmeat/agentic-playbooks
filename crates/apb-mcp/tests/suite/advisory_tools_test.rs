@@ -232,14 +232,14 @@ fn catalog_revision_independent_of_profile_count() {
     let playbook = "schema: 1\nid: wf1\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
     seed_playbook(&c.root, "wf1", playbook);
 
-    let before = apb_mcp::catalog::build(&c.root, None, None, None, Vec::new());
+    let before = apb_mcp::catalog::build(&c.root, None, None, None, Vec::new(), Vec::new());
     let rev_before = before["catalog_revision"].as_str().unwrap().to_string();
     assert_eq!(before["profiles_hint"]["count"], serde_json::json!(0));
 
     // Add a profile - the catalog revision does not change, the hint grows.
     seed_skill(&c.root, "s1");
     seed_profile(&c.root, "goodp", "claude", "skills:\n  - s1\n");
-    let after = apb_mcp::catalog::build(&c.root, None, None, None, Vec::new());
+    let after = apb_mcp::catalog::build(&c.root, None, None, None, Vec::new(), Vec::new());
     assert_eq!(
         after["catalog_revision"].as_str().unwrap(),
         rev_before,

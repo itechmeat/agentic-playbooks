@@ -34,6 +34,12 @@ impl Drop for EnvGuard {
     }
 }
 
+fn setup(cfg: &Path) {
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg);
+    }
+}
+
 #[test]
 fn catalog_lists_both_scopes_with_trust_aware_shadowing() {
     let _l = lock();
@@ -173,4 +179,105 @@ fn both_approved_is_ambiguous_not_silently_shadowed() {
     assert_eq!(glob_entry["ambiguous"], true);
     assert_eq!(proj_entry["shadowed"], false, "neither silently shadowed");
     assert_eq!(glob_entry["shadowed"], false);
+}
+
+#[test]
+fn catalog_returns_suppressed_suggestions_and_moves_its_revision() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    setup(cfg.path());
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+
+    let before = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let rev0 = before["catalog_revision"].as_str().unwrap().to_string();
+    assert_eq!(
+        before["suppressed_suggestions"].as_array().unwrap().len(),
+        0
+    );
+
+    let req = || apb_mcp::tools::DismissRequest {
+        pattern: "code-review-run",
+        synopsis: "Review a source file for bugs and write findings to a report",
+        kind: Some("soft"),
+        scope: Some("project"),
+        ttl_days: None,
+    };
+    apb_mcp::tools::suggestion_dismiss(proj.path(), req()).unwrap();
+
+    let after = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let rev1 = after["catalog_revision"].as_str().unwrap().to_string();
+    assert_ne!(rev0, rev1, "a dismiss write must move the revision");
+    let suppressed = after["suppressed_suggestions"].as_array().unwrap();
+    assert_eq!(suppressed.len(), 1, "{after}");
+    assert_eq!(suppressed[0]["pattern"], "code-review-run");
+    assert_eq!(
+        suppressed[0]["synopsis"],
+        "Review a source file for bugs and write findings to a report"
+    );
+    assert_eq!(suppressed[0]["kind"], "soft");
+    assert_eq!(suppressed[0]["scope"], "project");
+    assert!(
+        suppressed[0]["snoozed_until"]
+            .as_str()
+            .unwrap()
+            .ends_with('Z')
+    );
+    // Backward compatibility: the slug list is still there.
+    let dismissed = after["dismissed_patterns"].as_array().unwrap();
+    assert!(dismissed.iter().any(|p| p == "code-review-run"));
+
+    // A second soft decline changes only the snooze, and the revision must
+    // still move: otherwise a client holding rev1 would get unchanged: true
+    // and never see the longer silence.
+    apb_mcp::tools::suggestion_dismiss(proj.path(), req()).unwrap();
+    let third = playbook_catalog(proj.path(), None, Some(&rev1), None).unwrap();
+    assert!(
+        third["unchanged"].is_null(),
+        "the revision must not match after a second decline: {third}"
+    );
+
+    // A matching revision still short-circuits.
+    let rev2 = third["catalog_revision"].as_str().unwrap().to_string();
+    let same = playbook_catalog(proj.path(), None, Some(&rev2), None).unwrap();
+    assert_eq!(same["unchanged"], true, "{same}");
+}
+
+#[test]
+fn corrupt_suggestion_store_surfaces_in_catalog_diagnostics_not_dropped() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    setup(cfg.path());
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+
+    // A corrupt project-scope store: `apb_core::dismiss::active` reads this
+    // as an empty suppression list plus a diagnostic, never an error. The
+    // catalog handler must fold that diagnostic into its own `diagnostics`
+    // array rather than drop it on the floor.
+    std::fs::write(
+        proj.path().join(".apb/suggestions.json"),
+        "{ not valid json",
+    )
+    .unwrap();
+
+    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    assert_eq!(
+        cat["suppressed_suggestions"].as_array().unwrap().len(),
+        0,
+        "a corrupt store yields no suppressions, not an error: {cat}"
+    );
+    let diags = cat["diagnostics"].as_array().unwrap();
+    assert!(
+        !diags.is_empty(),
+        "the corrupt suggestion store must surface in catalog diagnostics: {cat}"
+    );
+    assert!(
+        diags.iter().any(|d| d["error"]
+            .as_str()
+            .is_some_and(|e| e.contains("malformed suggestion store"))),
+        "diagnostics: {diags:?}"
+    );
 }

@@ -66,13 +66,14 @@ pub fn playbook_catalog(
     revision: Option<&str>,
     limit: Option<usize>,
 ) -> Result<Value, ToolError> {
-    let dismissed = apb_core::dismiss::active_patterns();
+    let view = apb_core::dismiss::active(root);
     Ok(crate::catalog::build(
         root,
         workspace_id,
         revision,
         limit,
-        dismissed,
+        view.records,
+        view.diagnostics,
     ))
 }
 

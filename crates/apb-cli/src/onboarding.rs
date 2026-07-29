@@ -2,24 +2,66 @@ use std::io;
 use std::io::IsTerminal;
 use std::path::Path;
 
-pub(crate) const FEEDBACK_BLOCK: &str = include_str!("../assets/feedback-loop.md");
-const MARKER: &str = "## apb feedback loop";
+const FEEDBACK_BLOCK: &str = include_str!("../assets/feedback-loop.md");
+const PLAYBOOK_BLOCK: &str = include_str!("../assets/playbook-instructions.md");
 const TARGET_FILES: [&str; 2] = ["CLAUDE.md", "AGENTS.md"];
 
-pub(crate) enum FeedbackAction {
+/// One standing-instruction block the questionnaire can append to the host
+/// project's agent instruction files. Every block shares the same consent,
+/// append and idempotency mechanics, so blocks differ only in this data.
+struct StandingBlock {
+    /// Heading whose presence means the block is already there: the whole
+    /// idempotency of the append rests on it.
+    marker: &'static str,
+    body: &'static str,
+    /// Section name used in the per-file log lines.
+    section: &'static str,
+    /// Sentence subject of the "already configured" line.
+    subject: &'static str,
+    /// Consent question asked before anything is written.
+    question: &'static str,
+    /// Line logged when consent is declined and nothing is written.
+    skip_note: &'static str,
+}
+
+const PLAYBOOKS: StandingBlock = StandingBlock {
+    marker: "## apb playbooks",
+    body: PLAYBOOK_BLOCK,
+    section: "apb playbooks",
+    subject: "Playbook instructions",
+    question: "Add a standing instruction to CLAUDE.md/AGENTS.md so coding agents \
+               discover saved playbooks and offer to save repeatable actions?",
+    skip_note: "Skipped. Nothing written; run apb init again to add it later",
+};
+
+const FEEDBACK: StandingBlock = StandingBlock {
+    marker: "## apb feedback loop",
+    body: FEEDBACK_BLOCK,
+    section: "apb feedback loop",
+    subject: "Feedback loop",
+    question: "Allow coding agents to report apb errors after playbook runs? \
+               Anonymized, consolidated issues are filed transparently at \
+               https://github.com/itechmeat/agentic-playbooks (no secrets, no private prompts)",
+    skip_note: "Skipped. You can add the section later from the README",
+};
+
+enum BlockAction {
     Created,
     Appended,
     AlreadyConfigured,
 }
 
-pub(crate) fn apply_feedback_loop(dir: &Path) -> io::Result<Vec<(String, FeedbackAction)>> {
+/// Appends `block` to every target file, creating a file that does not exist.
+/// Idempotent through the block marker, so several blocks coexist in one file
+/// in any order and a re-run never duplicates one.
+fn apply_block(dir: &Path, block: &StandingBlock) -> io::Result<Vec<(String, BlockAction)>> {
     let mut out = Vec::new();
     for name in TARGET_FILES {
         let path = dir.join(name);
         let action = if path.exists() {
             let text = std::fs::read_to_string(&path)?;
-            if text.contains(MARKER) {
-                FeedbackAction::AlreadyConfigured
+            if text.contains(block.marker) {
+                BlockAction::AlreadyConfigured
             } else {
                 let sep = if text.ends_with("\n\n") {
                     ""
@@ -28,22 +70,22 @@ pub(crate) fn apply_feedback_loop(dir: &Path) -> io::Result<Vec<(String, Feedbac
                 } else {
                     "\n\n"
                 };
-                std::fs::write(&path, format!("{text}{sep}{FEEDBACK_BLOCK}"))?;
-                FeedbackAction::Appended
+                std::fs::write(&path, format!("{text}{sep}{body}", body = block.body))?;
+                BlockAction::Appended
             }
         } else {
-            std::fs::write(&path, FEEDBACK_BLOCK)?;
-            FeedbackAction::Created
+            std::fs::write(&path, block.body)?;
+            BlockAction::Created
         };
         out.push((name.to_string(), action));
     }
     Ok(out)
 }
 
-pub(crate) fn feedback_loop_fully_configured(dir: &Path) -> bool {
+fn block_fully_configured(dir: &Path, block: &StandingBlock) -> bool {
     TARGET_FILES.iter().all(|name| {
         std::fs::read_to_string(dir.join(name))
-            .map(|t| t.contains(MARKER))
+            .map(|t| t.contains(block.marker))
             .unwrap_or(false)
     })
 }
@@ -67,36 +109,46 @@ pub(crate) fn run_init_questionnaire(root: &Path) {
 
 fn questionnaire(root: &Path) -> io::Result<()> {
     cliclack::intro(" apb init ")?;
-    if feedback_loop_fully_configured(root) {
-        cliclack::log::success("Feedback loop already configured in CLAUDE.md and AGENTS.md")?;
-    } else {
-        let consent = cliclack::confirm(
-            "Allow coding agents to report apb errors after playbook runs? \
-             Anonymized, consolidated issues are filed transparently at \
-             https://github.com/itechmeat/agentic-playbooks (no secrets, no private prompts)",
-        )
-        .initial_value(true)
-        .interact()?;
-        if consent {
-            for (name, action) in apply_feedback_loop(root)? {
-                match action {
-                    FeedbackAction::Created => cliclack::log::success(format!(
-                        "{name} created with the apb feedback loop section"
-                    ))?,
-                    FeedbackAction::Appended => cliclack::log::success(format!(
-                        "{name} updated with the apb feedback loop section"
-                    ))?,
-                    FeedbackAction::AlreadyConfigured => {
-                        cliclack::log::info(format!("{name} already configured"))?
-                    }
-                }
-            }
-        } else {
-            cliclack::log::info("Skipped. You can add the section later from the README")?;
-        }
-    }
+    // Behaviour guidance first, error reporting second: how agents work with
+    // playbooks is more fundamental than how they report apb bugs.
+    offer_block(root, &PLAYBOOKS)?;
+    offer_block(root, &FEEDBACK)?;
     subscriptions_survey_step()?;
     cliclack::outro("Project ready. Try: apb --help")?;
+    Ok(())
+}
+
+/// Asks for consent once and, only when it is granted, writes `block` into the
+/// target files. A declined step writes nothing.
+fn offer_block(root: &Path, block: &StandingBlock) -> io::Result<()> {
+    if block_fully_configured(root, block) {
+        cliclack::log::success(format!(
+            "{subject} already configured in CLAUDE.md and AGENTS.md",
+            subject = block.subject
+        ))?;
+        return Ok(());
+    }
+    let consent = cliclack::confirm(block.question)
+        .initial_value(true)
+        .interact()?;
+    if !consent {
+        cliclack::log::info(block.skip_note)?;
+        return Ok(());
+    }
+    for (name, action) in apply_block(root, block)? {
+        let section = block.section;
+        match action {
+            BlockAction::Created => {
+                cliclack::log::success(format!("{name} created with the {section} section"))?
+            }
+            BlockAction::Appended => {
+                cliclack::log::success(format!("{name} updated with the {section} section"))?
+            }
+            BlockAction::AlreadyConfigured => {
+                cliclack::log::info(format!("{name} already configured"))?
+            }
+        }
+    }
     Ok(())
 }
 
@@ -309,10 +361,10 @@ mod tests {
     #[test]
     fn creates_both_files_when_missing() {
         let dir = tmp();
-        let out = apply_feedback_loop(dir.path()).unwrap();
+        let out = apply_block(dir.path(), &FEEDBACK).unwrap();
         assert_eq!(out.len(), 2);
         for (name, action) in &out {
-            assert!(matches!(action, FeedbackAction::Created), "{name}");
+            assert!(matches!(action, BlockAction::Created), "{name}");
             let text = fs::read_to_string(dir.path().join(name)).unwrap();
             assert_eq!(text, FEEDBACK_BLOCK);
         }
@@ -322,9 +374,9 @@ mod tests {
     fn appends_to_existing_file_with_separator() {
         let dir = tmp();
         fs::write(dir.path().join("CLAUDE.md"), "# My project\n").unwrap();
-        let out = apply_feedback_loop(dir.path()).unwrap();
+        let out = apply_block(dir.path(), &FEEDBACK).unwrap();
         let claude = out.iter().find(|(n, _)| n == "CLAUDE.md").unwrap();
-        assert!(matches!(claude.1, FeedbackAction::Appended));
+        assert!(matches!(claude.1, BlockAction::Appended));
         let text = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
         assert!(text.starts_with("# My project\n"));
         assert!(text.contains("\n\n## apb feedback loop (standing instruction)"));
@@ -333,11 +385,11 @@ mod tests {
     #[test]
     fn rerun_is_idempotent() {
         let dir = tmp();
-        apply_feedback_loop(dir.path()).unwrap();
+        apply_block(dir.path(), &FEEDBACK).unwrap();
         let before = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
-        let out = apply_feedback_loop(dir.path()).unwrap();
+        let out = apply_block(dir.path(), &FEEDBACK).unwrap();
         for (_, action) in &out {
-            assert!(matches!(action, FeedbackAction::AlreadyConfigured));
+            assert!(matches!(action, BlockAction::AlreadyConfigured));
         }
         let after = fs::read_to_string(dir.path().join("AGENTS.md")).unwrap();
         assert_eq!(before, after);
@@ -346,9 +398,55 @@ mod tests {
     #[test]
     fn fully_configured_detection() {
         let dir = tmp();
-        assert!(!feedback_loop_fully_configured(dir.path()));
-        apply_feedback_loop(dir.path()).unwrap();
-        assert!(feedback_loop_fully_configured(dir.path()));
+        assert!(!block_fully_configured(dir.path(), &FEEDBACK));
+        apply_block(dir.path(), &FEEDBACK).unwrap();
+        assert!(block_fully_configured(dir.path(), &FEEDBACK));
+    }
+
+    #[test]
+    fn blocks_coexist_in_any_order_and_stay_idempotent() {
+        for order in [[&PLAYBOOKS, &FEEDBACK], [&FEEDBACK, &PLAYBOOKS]] {
+            let dir = tmp();
+            for block in order {
+                apply_block(dir.path(), block).unwrap();
+            }
+            let before = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+            assert!(before.contains(PLAYBOOKS.marker));
+            assert!(before.contains(FEEDBACK.marker));
+            for block in order {
+                apply_block(dir.path(), block).unwrap();
+            }
+            let after = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
+            assert_eq!(before, after);
+        }
+    }
+
+    #[test]
+    fn playbook_block_carries_the_discovery_capture_and_decline_duties() {
+        assert!(PLAYBOOK_BLOCK.starts_with(PLAYBOOKS.marker));
+        for tool in ["playbook_catalog", "playbook_capture", "suggestion_dismiss"] {
+            assert!(
+                PLAYBOOK_BLOCK.contains(tool),
+                "playbook block lost the reference to {tool}"
+            );
+        }
+        for phrase in [
+            "suppressed_suggestions",
+            // Mirrors the tier-0 chit-chat guard: without it the agent calls
+            // the catalog on every conversational turn.
+            "Do not call it for chit-chat or clarifying replies.",
+            "not by slug equality",
+            "kind soft",
+            "kind hard",
+            "global scope only when",
+        ] {
+            assert!(
+                PLAYBOOK_BLOCK.contains(phrase),
+                "playbook block lost the phrase `{phrase}`"
+            );
+        }
+        assert!(!PLAYBOOK_BLOCK.contains('\u{2014}'));
+        assert!(!PLAYBOOK_BLOCK.contains('!'));
     }
 
     #[test]

@@ -107,6 +107,14 @@ pub fn build_router(state: AppState) -> Router {
         .route("/api/agents", get(routes::meta::list_agents_handler))
         .route("/api/models", get(routes::meta::list_models_handler))
         .route("/api/skills", get(routes::profiles::list_skills_handler))
+        .route(
+            "/api/suggestions",
+            get(routes::suggestions::list_suggestions_handler),
+        )
+        .route(
+            "/api/suggestions/{pattern}",
+            axum::routing::delete(routes::suggestions::delete_suggestion_handler),
+        )
         .route("/api/runs", get(routes::runs::list_runs_handler))
         .route("/api/runs/{id}", get(routes::runs::get_run_handler))
         .route(

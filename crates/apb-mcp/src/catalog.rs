@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use apb_core::dismiss::ScopedRecord;
 use apb_core::effects::effective;
 use apb_core::registry::Registry;
 use apb_core::schema::{Effect, Requires, Trigger};
@@ -130,13 +131,32 @@ fn apply_shadowing(entries: &mut [CatalogEntry]) {
     }
 }
 
-/// A stable catalog revision: the digest of a canonical concatenation of all entries
-/// PLUS the dismissed patterns and diagnostics. Including dismissed/diagnostics matters:
-/// otherwise, after `suggestion_dismiss`, a client with the previous revision would get
-/// `unchanged: true` and never see the new state.
+/// The JSON shape of one suppressing record: what the agent needs to decide
+/// "is this the same action" (the synopsis) and how long the silence lasts.
+fn suppressed_json(records: &[ScopedRecord]) -> Vec<Value> {
+    records
+        .iter()
+        .map(|s| {
+            json!({
+                "pattern": s.record.pattern,
+                "synopsis": s.record.synopsis,
+                "kind": s.record.kind.as_str(),
+                "scope": s.scope.as_str(),
+                "declines": s.record.declines,
+                "snoozed_until": apb_core::dismiss::iso_utc(s.record.snoozed_until_ms),
+            })
+        })
+        .collect()
+}
+
+/// A stable catalog revision: the digest of a canonical concatenation of all
+/// entries PLUS the suppressing suggestion records and diagnostics. Folding the
+/// records in (not just their slugs) matters: a second soft decline changes
+/// only the snooze, and a client holding the previous revision must not get
+/// `unchanged: true` and miss the longer silence.
 fn compute_revision(
     entries: &[CatalogEntry],
-    dismissed: &[String],
+    suppressed: &[ScopedRecord],
     diagnostics: &[Value],
 ) -> String {
     let mut lines: Vec<String> = entries
@@ -158,8 +178,19 @@ fn compute_revision(
             )
         })
         .collect();
-    for d in dismissed {
-        lines.push(format!("d|{d}"));
+    for s in suppressed {
+        // The `d|` line keeps the v1 slug contribution; the `s|` line adds the
+        // rest of the record.
+        lines.push(format!("d|{}", s.record.pattern));
+        lines.push(format!(
+            "s|{}|{}|{}|{}|{}|{}",
+            s.scope.as_str(),
+            s.record.pattern,
+            s.record.kind.as_str(),
+            s.record.declines,
+            s.record.snoozed_until_ms,
+            s.record.synopsis
+        ));
     }
     for diag in diagnostics {
         lines.push(format!("x|{diag}"));
@@ -171,16 +202,29 @@ fn compute_revision(
 /// Builds the catalog for the project root `root` plus the global store.
 /// `revision` - if it matches, returns `{ unchanged: true }`. `limit` -
 /// an optional cap on the number of entries (after sorting and shadowing).
+/// `suppressed` - the merged active suggestion-decision records for this
+/// project (`apb_core::dismiss::active`), returned both as the v1
+/// `dismissed_patterns` slug list and as the full `suppressed_suggestions`.
+/// `store_diagnostics` - the diagnostics collected alongside `suppressed` by
+/// that same `apb_core::dismiss::active` call (a corrupt or unreadable
+/// suggestion store), folded into the same `diagnostics` array as broken
+/// playbook definitions rather than dropped: the catalog is the one place an
+/// agent looks for "is anything broken here", so a caller must not have to
+/// separately surface the store's own diagnostics to get the full picture.
 pub fn build(
     root: &Path,
     workspace_id: Option<&str>,
     revision: Option<&str>,
     limit: Option<usize>,
-    dismissed_patterns: Vec<String>,
+    suppressed: Vec<ScopedRecord>,
+    store_diagnostics: Vec<String>,
 ) -> Value {
     let trust = TrustStore::load();
     let mut entries: Vec<CatalogEntry> = Vec::new();
-    let mut diagnostics: Vec<Value> = Vec::new();
+    let mut diagnostics: Vec<Value> = store_diagnostics
+        .into_iter()
+        .map(|d| json!({ "source": "suggestions", "error": d }))
+        .collect();
 
     // Project scope. For a foreign workspace's catalog, stamp its workspace_id
     // so the refs are qualified and usable from the originating session; for
@@ -221,7 +265,7 @@ pub fn build(
     });
     apply_shadowing(&mut entries);
 
-    let catalog_revision = compute_revision(&entries, &dismissed_patterns, &diagnostics);
+    let catalog_revision = compute_revision(&entries, &suppressed, &diagnostics);
     // profiles_hint - a volatile counter outside the revision, so we return it in the
     // unchanged response too: otherwise a client with the previous revision would not learn that
     // the profile count changed (creating a profile intentionally does not move the revision).
@@ -242,11 +286,16 @@ pub fn build(
 
     // profiles_hint - a hint about the profile count, NOT part of the revision (otherwise
     // creating a profile would invalidate the playbook catalog without any change to it).
+    let dismissed_patterns: Vec<String> = suppressed
+        .iter()
+        .map(|s| s.record.pattern.clone())
+        .collect();
     json!({
         "catalog_revision": catalog_revision,
         "entries": entries,
         "diagnostics": diagnostics,
         "dismissed_patterns": dismissed_patterns,
+        "suppressed_suggestions": suppressed_json(&suppressed),
         "profiles_hint": { "count": profiles_count },
     })
 }

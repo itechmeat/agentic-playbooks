@@ -378,6 +378,8 @@ mechanism from the remote feature isn't implemented itself yet (only
 planned), and its single boolean wouldn't fit semantic suppression of
 many different proposals anyway.
 
+Superseded by `docs/superpowers/specs/2026-07-29-suggestion-decisions-design.md`: the dismiss store described here became a two-scope suggestion-decision store with soft and hard declines, an escalating backoff, a stored synopsis for semantic matching, and user-facing management surfaces.
+
 ### 8.3 Creation: `workflow_capture` and the lifecycle
 
 A one-off retelling mistake must not turn into permanent automation, so
@@ -557,7 +559,7 @@ New tools:
 | `workflow_prepare_run` | Resolve + preflight + stateless plan_token; no durable mutations | read-only |
 | `workflow_execute_plan` | Execute a confirmed plan, write the audit record | destructive |
 | `workflow_howto` | Tier 2: authoring, trigger and scope rules | read-only |
-| `suggestion_dismiss` | Record "don't suggest this" with a TTL | destructive |
+| `suggestion_dismiss` | Record a soft (not-now, escalating backoff) or hard (never-again) decline on a suggestion; superseded by `2026-07-29-suggestion-decisions-design.md` | destructive |
 
 Changed:
 

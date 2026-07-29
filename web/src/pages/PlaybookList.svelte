@@ -5,6 +5,7 @@
   import type { PlaybookSummary } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
+  import SuggestionsSection from '$lib/components/SuggestionsSection.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
@@ -97,6 +98,7 @@
 
 <PageScroll>
   <div class="mx-auto w-full max-w-4xl px-4 py-6">
+    <SuggestionsSection />
     {#if !loaded}
       <div class="flex flex-col gap-3">
         {#each Array(3) as _, i (i)}<Skeleton class="h-24 w-full" />{/each}
