@@ -11,6 +11,7 @@ import type {
   PlaybookSummary,
   WriteResult,
 } from '../types'
+import type { RemoveResult, SuggestionRecord } from '../suggestions'
 import { getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
 
 
@@ -210,6 +211,24 @@ export const promoteVersion = (id: string, version: string, workspace = '') =>
   requestJson<{ promoted: string }>(
     `${pb(id)}/versions/${encodeURIComponent(version)}/promote${qs({ workspace })}`,
     { method: 'POST', headers: jsonHeaders, body: JSON.stringify({}) },
+  )
+
+// The whole response, diagnostics included: they are how a corrupt or
+// unreadable store becomes visible instead of looking like an empty list.
+// An omitted `workspace` asks for the global store on its own, which is the
+// only way to reach machine-wide records with zero registered projects.
+export interface SuggestionsResponse {
+  suggestions: SuggestionRecord[]
+  diagnostics?: string[]
+}
+
+export const fetchSuggestions = (workspace = '') =>
+  getJson<SuggestionsResponse>(`/api/suggestions${qs({ workspace })}`)
+
+export const deleteSuggestion = (pattern: string, workspace = '', scope = 'project') =>
+  requestJson<RemoveResult>(
+    `/api/suggestions/${encodeURIComponent(pattern)}${qs({ workspace, scope })}`,
+    { method: 'DELETE' },
   )
 
 // Connectors (design doc section 9). The server wire shape is snake_case; the

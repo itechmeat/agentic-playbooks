@@ -48,5 +48,7 @@ mod run_doctor_cli_test;
 #[cfg(unix)]
 #[path = "suite/stdio_profile_e2e_test.rs"]
 mod stdio_profile_e2e_test;
+#[path = "suite/suggestions_cli_test.rs"]
+mod suggestions_cli_test;
 #[path = "suite/supervise_cli_test.rs"]
 mod supervise_cli_test;

@@ -100,6 +100,24 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         }
     };
 
+    // The `suggestions:` timing section of both config files. `dismiss::timing`
+    // is the only validator of that section, and every production caller keeps
+    // running on the defaults when it is invalid, so without this check an
+    // invalid section is silently ignored everywhere. Reported before the
+    // registry check, which returns early on a broken `.apb`.
+    let (_, suggestion_diagnostics) = crate::dismiss::timing(root);
+    if suggestion_diagnostics.is_empty() {
+        r.push(
+            CheckStatus::Ok,
+            "suggestions config",
+            "valid (absent = defaults)",
+        );
+    } else {
+        for diagnostic in suggestion_diagnostics {
+            r.push(CheckStatus::Fail, "suggestions config", diagnostic);
+        }
+    }
+
     let reg = match Registry::open(root) {
         Ok(reg) => reg,
         Err(e) => {

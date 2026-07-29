@@ -129,6 +129,7 @@ apb migrate         migrate schema 1 playbooks (executors) to schema 2 (profiles
 apb adopt           adoption readiness report for a playbook
 apb doctor          diagnose agents, profiles, runners, playbooks (--run <id> for one run's health)
 apb export/import   move a playbook as a single bundle file
+apb suggestions     list / allow / reset save-as-playbook suggestion declines
 ```
 
 ## Use from a coding agent (MCP)

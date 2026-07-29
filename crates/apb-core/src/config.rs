@@ -1,5 +1,5 @@
 use std::collections::BTreeMap;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -37,6 +37,11 @@ pub struct GlobalConfig {
     /// Days to keep `tombstoned` before physical cleanup (spec 6.4).
     /// `None` -> 90.
     pub registry_purge_days: Option<u64>,
+    /// Timing knobs for the suggestion-decision store (spec
+    /// 2026-07-29-suggestion-decisions-design). Absent keys fall back to the
+    /// named constants in `crate::dismiss`; a project `.apb/config.yaml` may
+    /// override either key for its own project.
+    pub suggestions: SuggestionSettings,
 }
 
 /// Transport used to communicate with the agent (spec 7.2).
@@ -320,4 +325,62 @@ impl GlobalConfig {
             _ => None,
         }
     }
+}
+
+/// Optional `suggestions:` section, in the global config and in the project
+/// `.apb/config.yaml`. Every key is optional so a user who never touches the
+/// section keeps the defaults; a present key overrides only itself.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct SuggestionSettings {
+    /// Escalating snooze for repeated soft declines, in days.
+    pub soft_backoff_days: Option<Vec<u64>>,
+    /// Silence window for a hard dismissal, in days.
+    pub hard_ttl_days: Option<u64>,
+}
+
+impl SuggestionSettings {
+    /// Semantic checks the serde layer cannot express: values are days, so
+    /// positive integers, and an empty schedule is a configuration error
+    /// rather than "never snooze".
+    pub fn validate(&self) -> Result<(), String> {
+        if let Some(days) = &self.soft_backoff_days {
+            if days.is_empty() {
+                return Err("suggestions.soft_backoff_days must not be empty".into());
+            }
+            if days.contains(&0) {
+                return Err(
+                    "suggestions.soft_backoff_days values are days and must be positive".into(),
+                );
+            }
+        }
+        if self.hard_ttl_days == Some(0) {
+            return Err(
+                "suggestions.hard_ttl_days is a number of days and must be positive".into(),
+            );
+        }
+        Ok(())
+    }
+}
+
+/// Partial view of the project `.apb/config.yaml`: only the `suggestions:`
+/// section. Deliberately tolerant of the other keys that file carries
+/// (`skills_dir`, `port`), the same way `crate::skills` reads it.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct ProjectSuggestionsFile {
+    suggestions: SuggestionSettings,
+}
+
+/// The project-level `suggestions:` section. A missing file is an empty
+/// section; a malformed one is an error so a typo is not silently ignored.
+pub fn project_suggestion_settings(root: &Path) -> Result<SuggestionSettings, String> {
+    let path = root.join(".apb/config.yaml");
+    if !path.is_file() {
+        return Ok(SuggestionSettings::default());
+    }
+    let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
+    let parsed: ProjectSuggestionsFile = serde_yaml_ng::from_str(&raw)
+        .map_err(|e| format!("invalid project config `{}`: {e}", path.display()))?;
+    Ok(parsed.suggestions)
 }

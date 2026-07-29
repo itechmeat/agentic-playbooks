@@ -25,3 +25,26 @@ pub(crate) fn resolve_port(flag: Option<u16>) -> u16 {
     })
     .unwrap_or(7321)
 }
+
+/// Prints left-aligned, space-padded columns with a two-space gutter. Rows are
+/// ragged-tolerant: a short row simply has fewer columns. The first row is the
+/// header by convention of the callers.
+pub(crate) fn print_table(rows: &[Vec<String>]) {
+    let cols = rows.iter().map(Vec::len).max().unwrap_or(0);
+    let mut widths = vec![0usize; cols];
+    for row in rows {
+        for (i, cell) in row.iter().enumerate() {
+            widths[i] = widths[i].max(cell.len());
+        }
+    }
+    for row in rows {
+        let mut line = String::new();
+        for (i, cell) in row.iter().enumerate() {
+            if i > 0 {
+                line.push_str("  ");
+            }
+            line.push_str(&format!("{:<width$}", cell, width = widths[i]));
+        }
+        println!("{}", line.trim_end());
+    }
+}

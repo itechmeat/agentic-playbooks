@@ -104,14 +104,29 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Record that the user declined a save-as-playbook suggestion so it is not offered again (with a TTL).",
+        description = "Record the user's decline of a save-as-playbook suggestion. kind soft is a not-now decline whose silence escalates with every repeat, kind hard (the default) is for an explicit never-again and silences the suggestion for one long fixed window rather than forever: the record expires at the returned snoozed_until, and a decline after that renews it. Always pass a one-sentence synopsis of the action: later sessions match against it by meaning. scope defaults to project; use global only when the user says everywhere. Returns the stored record with the computed snoozed_until.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn suggestion_dismiss(
         &self,
-        Parameters(SuggestionDismissArgs { pattern, ttl_days }): Parameters<SuggestionDismissArgs>,
+        Parameters(SuggestionDismissArgs {
+            pattern,
+            ttl_days,
+            kind,
+            synopsis,
+            scope,
+        }): Parameters<SuggestionDismissArgs>,
     ) -> CallToolResult {
-        to_call_tool_result(tools::suggestion_dismiss(&pattern, ttl_days))
+        to_call_tool_result(tools::suggestion_dismiss(
+            &self.root,
+            tools::DismissRequest {
+                pattern: &pattern,
+                synopsis: &synopsis,
+                kind: kind.as_deref(),
+                scope: scope.as_deref(),
+                ttl_days,
+            },
+        ))
     }
 
     #[tool(

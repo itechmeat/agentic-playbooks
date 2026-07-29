@@ -269,3 +269,71 @@ fn global_scope_profile_ref_is_resolved() {
         std::env::remove_var("APB_CONFIG_DIR");
     }
 }
+
+/// The `suggestions:` timing section of both config files has exactly one
+/// validator (`dismiss::timing`), and every production caller silently keeps
+/// the defaults when it is invalid. Doctor is the surface that has to say so,
+/// otherwise a typo in that section is invisible everywhere.
+#[test]
+fn doctor_flags_an_invalid_suggestions_config_in_either_scope() {
+    let _l = env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+
+    // 1. No `suggestions:` section anywhere: the defaults are valid.
+    let proj = tempfile::tempdir().unwrap();
+    init_project(proj.path()).unwrap();
+    let report = diagnose(proj.path());
+    assert!(
+        report
+            .checks
+            .iter()
+            .any(|c| c.name == "suggestions config" && c.status == CheckStatus::Ok),
+        "an absent section is the default and must read as Ok: {:?}",
+        report.checks
+    );
+
+    // 2. A broken PROJECT section.
+    fs::write(
+        proj.path().join(".apb/config.yaml"),
+        "suggestions:\n  hard_ttl_days: 0\n",
+    )
+    .unwrap();
+    let report = diagnose(proj.path());
+    assert!(report.has_failure(), "{:?}", report.checks);
+    let failed = report
+        .checks
+        .iter()
+        .find(|c| c.name == "suggestions config" && c.status == CheckStatus::Fail)
+        .unwrap_or_else(|| panic!("no suggestions-config failure: {:?}", report.checks));
+    assert!(
+        failed.detail.contains("hard_ttl_days"),
+        "the failing key must be named: {}",
+        failed.detail
+    );
+
+    // 3. A broken GLOBAL section is reported the same way.
+    fs::write(proj.path().join(".apb/config.yaml"), "port: 4000\n").unwrap();
+    fs::write(
+        cfg.path().join("config.yaml"),
+        "suggestions:\n  soft_backoff_days: [1, 0, 7]\n",
+    )
+    .unwrap();
+    let report = diagnose(proj.path());
+    let failed = report
+        .checks
+        .iter()
+        .find(|c| c.name == "suggestions config" && c.status == CheckStatus::Fail)
+        .unwrap_or_else(|| panic!("no suggestions-config failure: {:?}", report.checks));
+    assert!(
+        failed.detail.contains("soft_backoff_days"),
+        "the failing key must be named: {}",
+        failed.detail
+    );
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+}

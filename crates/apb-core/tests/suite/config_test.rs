@@ -97,3 +97,77 @@ runners:
     }
     assert!(broken.is_err(), "malformed config must surface an error");
 }
+
+#[test]
+fn suggestions_section_loads_and_validates() {
+    let _lock = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", dir.path());
+    }
+    let yaml = "suggestions:\n  soft_backoff_days: [2, 14]\n  hard_ttl_days: 30\n";
+    std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+    let cfg = apb_core::config::GlobalConfig::load().unwrap();
+    assert_eq!(cfg.suggestions.soft_backoff_days, Some(vec![2, 14]));
+    assert_eq!(cfg.suggestions.hard_ttl_days, Some(30));
+    assert!(cfg.suggestions.validate().is_ok());
+
+    // A config with no section at all keeps the defaults (both None).
+    std::fs::write(dir.path().join("config.yaml"), "port: 7321\n").unwrap();
+    let cfg = apb_core::config::GlobalConfig::load().unwrap();
+    assert_eq!(cfg.suggestions.soft_backoff_days, None);
+    assert_eq!(cfg.suggestions.hard_ttl_days, None);
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+}
+
+#[test]
+fn suggestion_settings_reject_empty_arrays_and_zero_days() {
+    use apb_core::config::SuggestionSettings;
+    let empty = SuggestionSettings {
+        soft_backoff_days: Some(Vec::new()),
+        hard_ttl_days: None,
+    };
+    assert!(
+        empty.validate().unwrap_err().contains("soft_backoff_days"),
+        "an empty schedule must be a validation error"
+    );
+    let zero = SuggestionSettings {
+        soft_backoff_days: Some(vec![1, 0, 7]),
+        hard_ttl_days: None,
+    };
+    assert!(zero.validate().is_err(), "a zero-day step is not positive");
+    let zero_ttl = SuggestionSettings {
+        soft_backoff_days: None,
+        hard_ttl_days: Some(0),
+    };
+    assert!(zero_ttl.validate().unwrap_err().contains("hard_ttl_days"));
+    let ok = SuggestionSettings {
+        soft_backoff_days: Some(vec![1, 7, 30, 90]),
+        hard_ttl_days: Some(90),
+    };
+    assert!(ok.validate().is_ok());
+}
+
+#[test]
+fn project_suggestion_settings_read_the_project_config() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+    // The project config carries unrelated keys too, which must not break the
+    // partial read.
+    std::fs::write(
+        root.path().join(".apb/config.yaml"),
+        "skills_dir: .agents/skills\nsuggestions:\n  hard_ttl_days: 7\n",
+    )
+    .unwrap();
+    let s = apb_core::config::project_suggestion_settings(root.path()).unwrap();
+    assert_eq!(s.hard_ttl_days, Some(7));
+    assert_eq!(s.soft_backoff_days, None);
+
+    // No project config at all is an empty settings block, not an error.
+    let bare = tempfile::tempdir().unwrap();
+    let s = apb_core::config::project_suggestion_settings(bare.path()).unwrap();
+    assert_eq!(s.hard_ttl_days, None);
+}

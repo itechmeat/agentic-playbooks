@@ -2,23 +2,76 @@
 //! `ServerInfo.instructions`. Only our trusted text - no project data
 //! (injection hygiene). The catalog and details are pulled by tools.
 
+/// Byte budget for the instructions field: Claude Code truncates a server's
+/// instructions at 2KB, so the shipped text stays under this cap (pinned by a
+/// unit test, see docs/HOST-INTEGRATION.md).
+pub const TIER0_MAX_BYTES: usize = 1950;
+
 pub const TIER0: &str = "\
-APB playbooks are saved, repeatable processes. You manage them for the user, who should rarely think about them.
+Discovery: call playbook_catalog once per task that names a doable action, before acting. Skip chit-chat. It returns trigger, effects, trust, scope and suppressed_suggestions.
 
-Discovery: call playbook_catalog once per task that describes a doable action, to see if a saved playbook fits. It is cheap and returns trigger, effects, trust and scope. Do not call it for chit-chat or clarifying replies.
+Offering to save: if you just completed a multi-step repeatable action, or the user asks for one recurring by nature, and no playbook matched, you MUST offer once to save it with playbook_capture: one short question offering project or global scope, recommended first (project if project-specific). First compare the action with suppressed_suggestions by synopsis meaning, not slug (empty synopsis: by slug); a covering record means no offer. One offer per session.
 
-Using a playbook: on a confident match to an active, trusted playbook in the current project or global scope, say one short line naming it and run it, no extra questions. On an ambiguous match, ask one short question. If the request targets another project, always confirm first.
+Declines: when the user declines without saying never, call suggestion_dismiss with kind soft, project scope and a one-sentence synopsis; the server escalates the silence. Reserve kind hard for an explicit never-again, global scope for everywhere-wording. Never ask about scope.
 
-Offering to save: when you just did a multi-step, repeatable action that has no matching playbook and the user has not declined a similar suggestion, offer once with a single question: save this as a playbook? Recommend project or global scope (project if it depends on this project's specifics, global if universal), marking the recommended option first.
+Using a match: on a confident match to an active, trusted playbook here or global, name it in one line and run it. One short question if ambiguous; confirm first for another project.
 
-Running policy: the server enforces trust and scope. A draft or untrusted playbook will be refused until trial or explicit acknowledgement. Never assume a run is safe because it matched; effects beyond what the request implies (network, secrets, irreversible, deploys) need explicit user confirmation.
+Running policy: the server refuses drafts and untrusted playbooks until trial or acknowledgement. Effects beyond the request (network, secrets, deploys, irreversible) need confirmation.
 
-Human gates: when a supervised run enters a human_review gate, run_status returns a pending_review block (also on supervisor_wait_event and supervisor_run_inspect). The moment you see it, you MUST relay its instruction to the user in the user's chat language, naming the options and how to decide, and then record their decision with review_decide. The run waits and does nothing until then, so if the gate stays pending across your next checks, repeat the reminder rather than going quiet.
+Human gates: run_status, supervisor_wait_event and supervisor_run_inspect return pending_review at a human_review gate. The moment you see it you MUST relay its instruction in the user's language with the options, then record it with review_decide. Frozen until then; repeat while pending.
 
-Lifecycle: you may update, clone, version and delete playbooks. Pull playbook_howto only when authoring or reworking one.
+Profiles: a node binds its executor only through a profile (agent, model, fallbacks, role prompt, skills). Call profile_list to reuse one, profile_howto for format.
 
-Profiles: a node binds its executor only through a profile (agent, model, fallbacks, role prompt, skills). When working with profiles, call profile_list first to reuse an existing one, and pull profile_howto for the format, the models table and detected agents. Name any profiles you create in your final message to the user.
+Lifecycle: you may update, clone, version and delete playbooks; pull playbook_howto when authoring. Call projects_list for another workspace. Machine fields are English; speak the user's language.";
 
-Other projects: call projects_list to find the user's other workspaces when a task concerns one.
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-Language: author playbook machine fields in English, but speak to the user about playbooks in the language of their recent messages.";
+    /// Claude Code truncates a server's `instructions` at 2KB (measured, July
+    /// 2026, see docs/HOST-INTEGRATION.md), so the text has a hard budget. A
+    /// silent overrun would drop the tail of the text rather than fail, which
+    /// is why this is pinned by a test rather than by a comment.
+    #[test]
+    fn tier0_fits_the_host_budget() {
+        assert!(
+            TIER0.len() <= TIER0_MAX_BYTES,
+            "TIER0 is {} bytes, over the {TIER0_MAX_BYTES} byte cap",
+            TIER0.len()
+        );
+    }
+
+    #[test]
+    fn tier0_keeps_the_load_bearing_rules() {
+        for phrase in [
+            "playbook_catalog",
+            // Without a chit-chat guard the agent burns a catalog call on
+            // every conversational turn, which is what made the rule
+            // load-bearing in the first place.
+            "Skip chit-chat.",
+            "you MUST offer once to save it with playbook_capture",
+            "suppressed_suggestions",
+            "by synopsis meaning, not slug",
+            "suggestion_dismiss",
+            "kind soft",
+            "kind hard",
+            "review_decide",
+            "profile_list",
+            "projects_list",
+        ] {
+            assert!(TIER0.contains(phrase), "TIER0 lost the phrase `{phrase}`");
+        }
+    }
+
+    #[test]
+    fn tier0_follows_the_prose_conventions() {
+        assert!(
+            !TIER0.contains('\u{2014}'),
+            "no em-dashes in user-facing text"
+        );
+        assert!(
+            !TIER0.contains('!'),
+            "no exclamation marks in user-facing text"
+        );
+    }
+}

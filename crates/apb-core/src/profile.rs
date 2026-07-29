@@ -169,20 +169,30 @@ impl ProfileDoc {
 /// collisions are the resolver's job (Task 3); this only validates the name
 /// format itself.
 pub fn validate_profile_name(name: &str) -> Result<(), String> {
-    if name.is_empty() {
-        return Err("profile name is empty".into());
+    validate_slug("profile name", name)
+}
+
+/// The apb slug rule (spec 3.1), shared by every identifier the user types
+/// and apb later joins into a path or a URL segment: `[a-z0-9][a-z0-9-]*`,
+/// at most 64 characters. `label` names the thing being validated so the
+/// message reads naturally on each surface (profile name, suggestion
+/// pattern). Keeping one implementation means a slug accepted by one surface
+/// can never be rejected as unroutable by another.
+pub(crate) fn validate_slug(label: &str, value: &str) -> Result<(), String> {
+    if value.is_empty() {
+        return Err(format!("{label} is empty"));
     }
-    if name.len() > 64 {
-        return Err(format!("profile name `{name}` exceeds 64 chars"));
+    if value.len() > 64 {
+        return Err(format!("{label} `{value}` exceeds 64 chars"));
     }
-    let mut chars = name.chars();
+    let mut chars = value.chars();
     let first = chars.next().unwrap();
     if !first.is_ascii_lowercase() && !first.is_ascii_digit() {
-        return Err(format!("profile name `{name}` must start with [a-z0-9]"));
+        return Err(format!("{label} `{value}` must start with [a-z0-9]"));
     }
     for c in chars {
         if !c.is_ascii_lowercase() && !c.is_ascii_digit() && c != '-' {
-            return Err(format!("profile name `{name}` allows only [a-z0-9-]"));
+            return Err(format!("{label} `{value}` allows only [a-z0-9-]"));
         }
     }
     Ok(())

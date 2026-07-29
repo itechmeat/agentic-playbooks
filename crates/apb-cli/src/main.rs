@@ -6,6 +6,7 @@ mod profile;
 mod run;
 mod selfupdate;
 mod serve;
+mod suggestions;
 mod util;
 
 use std::path::PathBuf;
@@ -26,6 +27,7 @@ use crate::run::{
 };
 use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dashboard, dev_cmd, mcp_cmd};
+use crate::suggestions::{SuggestionsAction, suggestions_cmd};
 use crate::util::resolve_port;
 
 #[derive(Parser)]
@@ -73,6 +75,12 @@ enum Command {
         /// Declare a subscription: agent[:plan[:coverage]] (repeatable)
         #[arg(long = "set", value_name = "AGENT[:PLAN[:COVERAGE]]")]
         set: Vec<String>,
+    },
+    /// Inspect and undo the suggestion decisions the agent recorded
+    /// (spec 2026-07-29)
+    Suggestions {
+        #[command(subcommand)]
+        action: SuggestionsAction,
     },
     /// List playbooks and versions
     List,
@@ -355,6 +363,7 @@ fn main() -> ExitCode {
         Some(Command::Detect { refresh }) => detect_cmd(refresh),
         Some(Command::Adopt { name }) => adopt_cmd(&root, name.as_deref()),
         Some(Command::Subscriptions { decline, set }) => subscriptions_cmd(set, decline),
+        Some(Command::Suggestions { action }) => suggestions_cmd(&root, action),
         Some(Command::DriveSupervised {
             name,
             version,
