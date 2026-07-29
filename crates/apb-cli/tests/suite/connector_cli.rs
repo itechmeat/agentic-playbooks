@@ -73,6 +73,12 @@ fn init_scaffolds_a_connector_that_loads_and_refuses_to_overwrite() {
     let cfg_dir = dir.path().join("cfg/connectors/widget");
     assert!(cfg_dir.join("connector.yaml").is_file());
     assert!(cfg_dir.join("PUBLIC.md").is_file());
+    // The scaffold seeds the two setup documents as well, so a new connector
+    // starts out following the convention instead of being retrofitted later.
+    let readme = std::fs::read_to_string(cfg_dir.join("README.md")).unwrap();
+    let install = std::fs::read_to_string(cfg_dir.join("INSTALL.md")).unwrap();
+    assert!(readme.contains("connectors/widget/INSTALL.md"));
+    assert!(install.contains("apb connector install widget"));
 
     // A second init on the same name must refuse rather than overwrite.
     let out = playbook(dir.path(), &["connector", "init", "widget"]);

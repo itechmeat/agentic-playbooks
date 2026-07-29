@@ -21,11 +21,26 @@ with:
   time (auth block, `account_fields`, and `functions`);
 - `PUBLIC.md` - the storefront (YAML frontmatter plus a markdown body), rendered
   by the dashboard, never read at run time;
+- `README.md` - the human setup page (see below);
+- `INSTALL.md` - the agent setup runbook (see below);
+- `tests.yaml` - the offline contract cases run by `apb connector test <name>`;
 - `skills/` - reserved and covered by the digest, not delivered to prompts yet.
 
 The folder name is the connector name and must pass the same slug rule as
 profiles and skills (`[a-z0-9][a-z0-9-]*`, at most 64 chars). Scaffold a fresh
 one with `apb connector init <name>`.
+
+## README.md and INSTALL.md
+
+Every official connector carries two setup documents, and a new connector is expected to do the same. They exist because configuring a connector by hand is several steps in several places (an account config, a dotenv, two trust approvals, a live probe), and the person doing it should not have to hold that sequence in their head.
+
+`README.md` is for the human, and it opens by saying that the shortest path is to hand the job to an agent, with a ready-to-paste prompt that names the connector and points at `INSTALL.md`. The rest is only what the person has to decide or supply themselves: which credential is needed and how to create it, what the connector can and cannot do, and which functions are irreversible enough to be worth restricting in a grant.
+
+`INSTALL.md` is the runbook an agent follows, written as ordered steps ending in a report. It covers installing the connector, the service-specific settings and credential (with concrete hosts, scopes, and where in the service's UI a token is created), the choice between a global and a project account, the secrets dotenv, both trust approvals, the live healthcheck, and what each common failure actually means. Its standing rules are that a secret is never echoed, logged, or committed, that the user is offered the option of filling the dotenv value in themselves so the credential never enters the transcript, and that a run is never started as part of setup.
+
+Both files ship inside the connector folder, so `apb connector install <name>` materializes them next to the manifest at `<config-dir>/connectors/<name>/INSTALL.md`. That is what makes the README's prompt work: an agent installs the connector, then reads its runbook from disk.
+
+Neither file is read at run time, and neither is used by the dashboard, which renders `PUBLIC.md`. They are covered by the connector's tree digest like every other file in the folder, so editing one drops connector trust until it is approved again.
 
 ## Configuring accounts
 

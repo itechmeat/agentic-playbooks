@@ -20,7 +20,7 @@ use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
 use clap::Subcommand;
 use serde_json::{Value, json};
 
-use crate::util::print_json;
+use crate::util::{print_json, print_table};
 
 #[derive(Subcommand)]
 pub(crate) enum ConnectorAction {
@@ -146,7 +146,7 @@ fn list_cmd(root: &Path) -> ExitCode {
     } else {
         let trust = TrustStore::load();
         let approved_connector_ids = trust.approved_record_ids(Kind::Connector);
-        let mut rows: Vec<[String; 4]> = vec![[
+        let mut rows: Vec<Vec<String>> = vec![vec![
             "NAME".to_string(),
             "VERSION".to_string(),
             "TRUST".to_string(),
@@ -168,7 +168,7 @@ fn list_cmd(root: &Path) -> ExitCode {
             let accounts_count = config::load_merged(root, &s.name)
                 .map(|a| a.len())
                 .unwrap_or(0);
-            rows.push([
+            rows.push(vec![
                 s.name.clone(),
                 s.version.clone(),
                 trust_state.to_string(),
@@ -206,26 +206,6 @@ fn list_cmd(root: &Path) -> ExitCode {
     }
 
     ExitCode::SUCCESS
-}
-
-/// Prints rows as a whitespace-aligned table (first row is the header).
-fn print_table(rows: &[[String; 4]]) {
-    let mut widths = [0usize; 4];
-    for row in rows {
-        for (i, cell) in row.iter().enumerate() {
-            widths[i] = widths[i].max(cell.len());
-        }
-    }
-    for row in rows {
-        let mut line = String::new();
-        for (i, cell) in row.iter().enumerate() {
-            if i > 0 {
-                line.push_str("  ");
-            }
-            line.push_str(&format!("{:<width$}", cell, width = widths[i]));
-        }
-        println!("{}", line.trim_end());
-    }
 }
 
 // --- show -------------------------------------------------------------
@@ -802,10 +782,12 @@ fn init_cmd(name: &str) -> ExitCode {
         return ExitCode::from(2);
     }
     let write_result = std::fs::write(target.join("connector.yaml"), scaffold_yaml(name))
-        .and_then(|_| std::fs::write(target.join("PUBLIC.md"), scaffold_public_md(name)));
+        .and_then(|_| std::fs::write(target.join("PUBLIC.md"), scaffold_public_md(name)))
+        .and_then(|_| std::fs::write(target.join("README.md"), scaffold_readme_md(name)))
+        .and_then(|_| std::fs::write(target.join("INSTALL.md"), scaffold_install_md(name)));
     if let Err(e) = write_result {
         eprintln!("connector error: cannot write scaffold: {e}");
-        return ExitCode::from(2);
+        return failed_init(&target);
     }
 
     // The scaffold must always pass the same load path a real connector
@@ -818,9 +800,28 @@ fn init_cmd(name: &str) -> ExitCode {
         }
         Err(e) => {
             eprintln!("connector error: scaffold failed to validate: {e}");
-            ExitCode::from(2)
+            failed_init(&target)
         }
     }
+}
+
+/// Removes the folder `init_cmd` just created, so a failed scaffold does not
+/// leave a partial connector behind. Without this the next `init` refuses on
+/// "already exists" and the user has to know to delete the folder by hand -
+/// a dead end produced by a failure that was not theirs. `dir` was created by
+/// this same call (an existing path is refused earlier), so removing it cannot
+/// touch a connector someone else installed.
+///
+/// A cleanup failure only adds a line to the report: the exit code stays the
+/// scaffold's own failure, which is what the caller actually needs to know.
+fn failed_init(dir: &Path) -> ExitCode {
+    if let Err(e) = std::fs::remove_dir_all(dir) {
+        eprintln!(
+            "connector error: could not clean up {} after the failure: {e}",
+            dir.display()
+        );
+    }
+    ExitCode::from(2)
 }
 
 // --- test -----------------------------------------------------------------
@@ -1052,8 +1053,16 @@ functions:
 }
 
 fn scaffold_public_md(name: &str) -> String {
-    let display_name = name
-        .split('-')
+    let display_name = display_name_of(name);
+    format!(
+        "---\ndisplay_name: {display_name}\nsummary: Scaffolded connector - edit connector.yaml and this file.\n---\n# {display_name}\n\nDescribe what this connector does and how to configure an account here.\n"
+    )
+}
+
+/// Title-cases a connector slug for the scaffolded documents (`my-tracker` ->
+/// `My Tracker`).
+fn display_name_of(name: &str) -> String {
+    name.split('-')
         .map(|part| {
             let mut chars = part.chars();
             match chars.next() {
@@ -1062,8 +1071,183 @@ fn scaffold_public_md(name: &str) -> String {
             }
         })
         .collect::<Vec<_>>()
-        .join(" ");
+        .join(" ")
+}
+
+/// The human setup page every connector carries (docs/CONNECTORS.md, "README.md
+/// and INSTALL.md"). Scaffolded as a filled-in outline rather than an empty
+/// heading list, so the author edits real sentences instead of inventing the
+/// structure: the agent-install prompt at the top is the part that makes the
+/// convention work and is easy to leave out when starting from a blank file.
+///
+/// Prose is written one paragraph per line - never hard-wrapped at a width.
+fn scaffold_readme_md(name: &str) -> String {
+    let display_name = display_name_of(name);
     format!(
-        "---\ndisplay_name: {display_name}\nsummary: Scaffolded connector - edit connector.yaml and this file.\n---\n# {display_name}\n\nDescribe what this connector does and how to configure an account here.\n"
+        r#"# {name}: setup for humans
+
+## The short way: let an agent do it
+
+Setting this connector up by hand means editing two files, creating a credential, and approving trust. An agent can do all of it for you and will only stop to ask for the credential, which is the one thing it cannot obtain on your behalf.
+
+Paste a prompt like this to a coding agent that has `apb` available:
+
+> Install the apb `{name}` connector, then read `connectors/{name}/INSTALL.md` under the apb config directory (by default `~/.config/apb`) and follow it to the end. Ask me for the credential when you get there.
+
+The agent installs the connector, writes the account config, prepares the secrets file, approves trust, and runs a live healthcheck. What you get back is either a working account or a specific error.
+
+## What you will be asked for
+
+Describe the credential {display_name} needs and exactly where in its interface a person creates one, including any scopes or permissions to select. Say what the credential can reach, especially when the service offers no way to narrow it.
+
+The credential is written to a local file with owner-only permissions, and the account config next to it stores only a reference to it, never the value.
+
+## What this connector can and cannot do
+
+List what the functions cover, then what they deliberately do not. Name the functions that are not read-only or not easily undone, so a reader knows which ones deserve a narrow grant and a `max_calls` cap.
+
+## Doing it by hand
+
+If you would rather not involve an agent, `PUBLIC.md` in this folder has the account fields and a config example, and `docs/CONNECTORS.md` in the apb repository covers accounts, secrets, and trust in general. `INSTALL.md` is written for an agent but the steps read fine as a checklist.
+"#
+    )
+}
+
+/// The agent runbook every connector carries (docs/CONNECTORS.md, "README.md and
+/// INSTALL.md"). Scaffolded with the steps that are identical for every
+/// connector already written out, and service-specific spots marked, so an
+/// author fills in hosts, scopes and failure modes rather than re-deriving the
+/// install, trust and healthcheck sequence.
+///
+/// Prose is written one paragraph per line - never hard-wrapped at a width.
+fn scaffold_install_md(name: &str) -> String {
+    format!(
+        r#"# {name}: installation instructions for an agent
+
+You are setting up the apb `{name}` connector. Work through the steps in order. The only thing you need from the user is a credential, plus one confirmation about where the account should live. Everything else you determine yourself.
+
+Report progress in the user's chat language. Do not print the credential back to them, and do not put it in a commit, a log, a summary, or any file other than the secrets dotenv named below.
+
+## Step 0: check your ground
+
+```sh
+apb --version
+apb connector list
+```
+
+`apb connector list` shows installed connectors and, below them, the embedded ones available to install. If `{name}` already appears in the installed group, skip to step 2 but still verify the account and trust.
+
+Establish the global config directory, since several paths below live in it: `$APB_CONFIG_DIR` when set, else `$XDG_CONFIG_HOME/apb`, else `$HOME/.config/apb`. This document refers to it as `<config-dir>`.
+
+## Step 1: install the connector
+
+```sh
+apb connector install {name} --from-dir <path-to-this-folder>
+```
+
+This is a scaffolded connector, not one embedded in the `apb` binary, so it installs with `--from-dir` rather than by name alone. That path records no trust automatically; step 5 approves it explicitly. It is local either way: no network call, nothing published.
+
+If it refuses because a differing `{name}` is already installed, do not reach for `--force` on your own. Report what is installed and ask the user whether to replace it.
+
+## Step 2: settle the service settings and the credential
+
+Fill this in for the service: the concrete value of every non-secret account field (base URLs and their required suffixes, ids, identities), where in the service's interface the credential is created, and which scopes or permissions to select for the functions the playbooks will actually use. State plainly when the service offers no scope selection, since that cannot be narrowed later.
+
+Do not invent a hostname or an id. Ask the user to read it off their own interface when you are unsure.
+
+## Step 3: decide the scope, then write the account config
+
+Two locations exist, and the difference matters:
+
+- global, `<config-dir>/connector-config/{name}.yaml`: an identity the user wants available from every project.
+- project, `<project>/.apb/connector-config/{name}.yaml`: an identity that belongs to this project.
+
+Ask which one applies. When both exist, the merged list is global plus project, and a project account replaces a global one of the same name.
+
+```yaml
+accounts:
+  - name: default
+    default: true
+    # non-secret fields here
+    token: "{{{{env.{env_key}}}}}"    # example only: rename `token` (here and in connector.yaml) to whatever this service calls its credential, e.g. password or api_key
+```
+
+A secret field must hold exactly one reference, either `{{{{env.VAR}}}}` or `{{{{cmd:<command>}}}}`. A literal secret in this file is a validation error and the call will be refused, so do not put one there even temporarily. This config file is non-secret by design and safe to commit.
+
+If you are editing a file that already has accounts, add yours to the list and leave the others alone. At most one account in the merged list may carry `default: true`.
+
+## Step 4: prepare the secrets file, then ask for the credential
+
+```sh
+apb connector env {name} --write
+```
+
+Run this from the project root. It appends a `KEY=` template line for every unresolved env var to `<project>/.apb/secrets.env`, creates that file with owner-only permissions when it is absent, never duplicates a key that is already there, and makes sure `.gitignore` covers it. Values are left empty on purpose.
+
+Now ask the user for the credential. Prefer that they fill the value in themselves: give them the exact file path and the key name, and wait. That keeps the secret out of the conversation transcript entirely. If they hand it to you in chat instead, write it into that file without echoing it back, and tell them plainly that the transcript now contains it and that the credential can be revoked and reissued at the service if that matters to them.
+
+A global alternative exists at `<config-dir>/secrets.env`, resolved after the project file. Only reach for a project `secrets.env` you created by hand if `apb connector env --write` was not used, and in that case verify `.gitignore` coverage yourself: an uncommitted secret is one `git add -A` away from a public repository.
+
+The resolution order at call time is process environment, then the project dotenv, then the global dotenv.
+
+## Step 5: approve the account
+
+```sh
+apb connector approve {name} --account <name>
+```
+
+Account trust pins the account's non-secret fields, which is what decides where a secret gets sent. It is deliberately separate from connector trust and is never bypassed by a run. The command prints the concrete field values it is approving; check them before confirming.
+
+Then verify the whole picture:
+
+```sh
+apb connector doctor
+```
+
+It reports manifest, config, env resolution, and trust status for every connector and account. Every check for `{name}` should be clean. This command makes no network call, so a clean report is necessary but not sufficient.
+
+## Step 6: verify against the real service
+
+The live probe is this connector's declared healthcheck. Name it here and say what it does and does not touch.
+
+`apb connector call` cannot be used here. It requires a run context (`APB_RUN_DIR` and `APB_NODE_ID`, both set by the engine), and fabricating one is not an acceptable substitute. Use the dashboard's healthcheck endpoint instead, which runs the same execution path outside a run.
+
+Check whether a dashboard is up, and start one if not (the port is 7321 unless overridden by `port` in `<config-dir>/config.yaml`):
+
+```sh
+curl -s http://127.0.0.1:7321/api/health
+apb dashboard --no-open    # only if the health check did not answer
+```
+
+The endpoint identifies the workspace by id, not by path. Read it from the project list, then probe:
+
+```sh
+curl -s http://127.0.0.1:7321/api/projects
+curl -s -X POST "http://127.0.0.1:7321/api/connectors/{name}/healthcheck/<account>?workspace=<workspace-id>"
+```
+
+A 4xx answer means the workspace id or query string is wrong; once the workspace resolves, the answer is HTTP 200 with the outcome in the body's `ok` and `error` fields. A refusal or a failure is reported there, not as an HTTP status, so read the body.
+
+List the failures this service actually produces and what each one points at, so a reader is not left guessing which layer broke. The ones every connector shares:
+
+- `has no account <name>`: the account slug in the URL does not match the config, or you wrote the config into a scope this workspace does not see.
+- unresolved env var: the secrets file has the key but no value, or the key name in the config does not match the one in the dotenv.
+- trust refused: step 5 was skipped, or the account fields changed after approval, which drops it.
+
+Do not paper over a failure. Report the exact message and what it points at.
+
+## Step 7: report
+
+Tell the user, briefly:
+
+- which account name you created and in which scope;
+- which file holds the credential and which key;
+- the healthcheck result;
+- anything the setup still needs from them;
+- which functions are irreversible enough to deserve a narrow grant.
+
+Do not offer to run a playbook, and do not start one. Binding this connector to a node is a separate decision that belongs to the user.
+"#,
+        env_key = name.to_uppercase().replace('-', "_") + "_TOKEN"
     )
 }
