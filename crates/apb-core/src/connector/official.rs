@@ -154,13 +154,22 @@ mod tests {
     /// documents. A connector added without `README.md`/`INSTALL.md` still
     /// installs and runs, which is exactly why the omission would go unnoticed
     /// without this test.
+    ///
+    /// The name set is pinned exactly (sorted, since `list()` sorts by name)
+    /// rather than just counted: a bare `len() >= 11` would not notice one
+    /// official connector silently dropping out while another was added,
+    /// since the count could stay the same or even grow.
     #[test]
     fn every_official_connector_carries_the_full_file_set() {
         let all = list();
-        assert!(
-            all.len() >= 11,
-            "expected the official set, got {}",
-            all.len()
+        let names: Vec<&str> = all.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec![
+                "asana", "discord", "github", "gitlab", "imap", "sentry", "slack", "smtp",
+                "telegram", "youtrack", "zulip",
+            ],
+            "the embedded official connector set changed; update this list deliberately"
         );
         for c in &all {
             for required in [

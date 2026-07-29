@@ -37,6 +37,8 @@ gh auth status
 
 If `gh` is authenticated, prefer `token: "{{cmd:gh auth token}}"`. The token is then resolved at call time from the CLI session, nothing is stored in a file, and the user has nothing to paste. Note that the command string becomes part of the account digest, so changing it later drops account trust and needs a fresh approval.
 
+For GitHub Enterprise Server, `gh auth token` alone resolves against `gh`'s current default host, which is not necessarily the GHES instance: pass the host explicitly, `token: "{{cmd:gh auth token --hostname <host>}}"` (or rely on `GH_HOST` being set in the environment the call runs in), so the token always comes from the GHES session rather than whichever host `gh` happens to default to.
+
 Otherwise the user needs a personal access token, and the required permissions depend on the token type:
 
 - classic token: `repo`, or `public_repo` when only public repositories are in play.
@@ -124,7 +126,7 @@ The endpoint identifies the workspace by id, not by path. Read it from the proje
 
 ```sh
 curl -s http://127.0.0.1:7321/api/projects
-curl -s -X POST "http://127.0.0.1:7321/api/connectors/github/healthcheck/<account>?workspace=<workspace-id>"
+curl -sS -w '\nHTTP %{http_code}\n' -X POST "http://127.0.0.1:7321/api/connectors/github/healthcheck/<account>?workspace=<workspace-id>"
 ```
 
 A 4xx answer means the workspace id or query string is wrong; once the workspace resolves, the answer is HTTP 200 with the outcome in the body's `ok` and `error` fields. A refusal or a failure is reported there, not as an HTTP status, so read the body.

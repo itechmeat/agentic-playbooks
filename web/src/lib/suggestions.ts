@@ -105,11 +105,15 @@ export interface RemoveResult {
 // necessarily bring the offer back: the same pattern can live in the other
 // store too, and the card then reappears on the very next load. The message
 // promises a re-offer only when the server says nothing suppresses the
-// pattern any more.
+// pattern any more. `removed` is checked first: a call that found no record
+// must never be read as a re-enable or as "still silenced" (both would claim
+// something the server never did), so it gets the same "not found" wording
+// the CLI uses.
 export function removeMessage(
   pattern: string,
   result: RemoveResult,
 ): { title: string; description?: string } {
+  if (!result.removed) return { title: `no "${pattern}" record found` }
   if (!result.still_suppressed) return { title: `"${pattern}" can be suggested again` }
   const by = result.still_suppressed_by ?? 'another'
   return {

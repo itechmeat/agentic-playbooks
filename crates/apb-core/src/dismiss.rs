@@ -742,9 +742,15 @@ pub fn record_decision(root: &Path, input: DecisionInput) -> std::io::Result<Dec
         resolved.hard_ttl_days = ttl;
     }
     let build = |previous: Option<&SuggestionRecord>| -> SuggestionRecord {
+        // Hard always zeroes the counter, even when escalating from a
+        // previously soft record: `declines` drives the soft backoff
+        // position (spec: "absent (0) for hard records"), and a hard record
+        // has nothing left to escalate. Carrying a stale count forward would
+        // resurface as the wrong backoff step if the record were ever
+        // re-declined soft after the hard TTL expires.
         let declines = match input.kind {
             DecisionKind::Soft => previous.map(|p| p.declines).unwrap_or(0) + 1,
-            DecisionKind::Hard => previous.map(|p| p.declines).unwrap_or(0),
+            DecisionKind::Hard => 0,
         };
         let synopsis = if input.synopsis.trim().is_empty() {
             previous.map(|p| p.synopsis.clone()).unwrap_or_default()
@@ -1641,6 +1647,49 @@ mod tests {
         let stored = stored_record(proj.path(), "locked-fold", DecisionScope::Project)
             .expect("the record was persisted");
         assert_eq!(stored.declines, 2);
+    }
+
+    /// `declines` drives the soft backoff position and is meaningless once a
+    /// record turns hard. A hard decline on a pattern that already carries a
+    /// soft record with a nonzero `declines` must zero it, not carry the
+    /// stale count forward.
+    #[test]
+    fn a_hard_decline_zeroes_a_carried_over_soft_declines_count() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        let proj = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        }
+        let _g = EnvGuard;
+
+        let soft_input = || DecisionInput {
+            pattern: "escalated".to_string(),
+            synopsis: "Escalating from soft to hard".to_string(),
+            kind: DecisionKind::Soft,
+            scope: DecisionScope::Project,
+            hard_ttl_days_override: None,
+        };
+        record_decision(proj.path(), soft_input()).unwrap();
+        let after_second_soft = record_decision(proj.path(), soft_input()).unwrap().record;
+        assert_eq!(after_second_soft.declines, 2);
+
+        let hard = record_decision(
+            proj.path(),
+            DecisionInput {
+                pattern: "escalated".to_string(),
+                synopsis: "Now never again".to_string(),
+                kind: DecisionKind::Hard,
+                scope: DecisionScope::Project,
+                hard_ttl_days_override: None,
+            },
+        )
+        .unwrap()
+        .record;
+        assert_eq!(
+            hard.declines, 0,
+            "a hard record must not carry the soft counter forward"
+        );
     }
 
     #[test]

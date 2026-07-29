@@ -109,7 +109,7 @@ The endpoint identifies the workspace by id, not by path. Read it from the proje
 
 ```sh
 curl -s http://127.0.0.1:7321/api/projects
-curl -s -X POST "http://127.0.0.1:7321/api/connectors/discord/healthcheck/<account>?workspace=<workspace-id>"
+curl -sS -w '\nHTTP %{http_code}\n' -X POST "http://127.0.0.1:7321/api/connectors/discord/healthcheck/<account>?workspace=<workspace-id>"
 ```
 
 A 4xx answer means the workspace id or query string is wrong; once the workspace resolves, the answer is HTTP 200 with the outcome in the body's `ok` and `error` fields. A refusal or a failure is reported there, not as an HTTP status, so read the body.

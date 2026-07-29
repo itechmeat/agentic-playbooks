@@ -16,6 +16,8 @@ A personal access token, created under Preferences, then Access tokens, in your 
 
 Two scopes matter. `api` grants everything this connector can do. `read_api` is enough if playbooks only read issues, merge requests, and pipelines and never write. The agent will ask which one you want and recommend the narrower option when writing is not needed.
 
+If you are on a self-hosted GitLab rather than gitlab.com, the agent also needs that instance's own API base URL, which you confirm off your own instance rather than the agent guessing it. And it will ask whether the account should live in your global config (available to every project) or in this one project, since that decides who else can use it.
+
 The token is written to a local file with owner-only permissions, and the account config next to it stores only a reference to it, never the value.
 
 ## What this connector can and cannot do

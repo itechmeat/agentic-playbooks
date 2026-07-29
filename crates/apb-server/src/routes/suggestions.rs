@@ -96,6 +96,17 @@ pub(crate) async fn delete_suggestion_handler(
         }))
         .into_response(),
         Ok(_) => (StatusCode::NOT_FOUND, "no such suggestion record").into_response(),
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+        // The store error can carry a filesystem path (e.g. a permission
+        // failure on `.apb/suggestions.json`), which has no business in a
+        // response body; it goes to the server's own stderr instead, same as
+        // the dashboard's other startup diagnostics (see `lib.rs`).
+        Err(e) => {
+            eprintln!("suggestion removal failed for pattern `{pattern}`: {e}");
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to remove suggestion record",
+            )
+                .into_response()
+        }
     }
 }

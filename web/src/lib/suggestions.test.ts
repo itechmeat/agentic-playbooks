@@ -216,7 +216,23 @@ describe('removeMessage', () => {
     expect(msg.description).toContain('global')
   })
 
+  it('names "another" when still_suppressed is true but no scope is given', () => {
+    const msg = removeMessage('p', { removed: true, still_suppressed: true })
+    expect(msg.title).not.toContain('can be suggested again')
+    expect(msg.description).toContain('another')
+  })
+
   it('treats a response without the field as "nothing else suppresses it"', () => {
     expect(removeMessage('p', { removed: true }).title).toBe('"p" can be suggested again')
+  })
+
+  // Checked before still_suppressed: a call that found nothing to remove must
+  // never be read as a re-enable or as "still silenced", since neither ever
+  // happened.
+  it('reports "not found" when nothing was removed, never a re-offer claim', () => {
+    const msg = removeMessage('p', { removed: false })
+    expect(msg.title).not.toContain('can be suggested again')
+    expect(msg.title).not.toContain('silenced')
+    expect(msg.title).toContain('no "p" record found')
   })
 })
