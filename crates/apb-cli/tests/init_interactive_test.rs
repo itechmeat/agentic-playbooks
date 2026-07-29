@@ -158,13 +158,19 @@ fn init_on_tty(project: &std::path::Path, answers: &[(&str, u8)]) -> String {
         ws_xpixel: 0,
         ws_ypixel: 0,
     };
+    // libc::openpty takes `*const winsize` on Linux but `*mut winsize` on
+    // macOS; a `&mut winsize` reference coerces cleanly to either FFI
+    // signature, but clippy's `unnecessary_mut_passed` only fires on the
+    // Linux (`*const`) side. An explicit raw pointer avoids the reference
+    // coercion entirely, so it satisfies both platforms without the lint.
+    let winsize_ptr = std::ptr::addr_of_mut!(winsize);
     let rc = unsafe {
         libc::openpty(
             &mut master,
             &mut slave,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
-            &mut winsize,
+            winsize_ptr,
         )
     };
     assert_eq!(rc, 0, "openpty failed");
