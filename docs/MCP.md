@@ -33,7 +33,7 @@ Reads (read-only):
 | `playbook_catalog` | Compact structural catalog (project + global scope): trigger, effects, trust, shadowing; `catalog_revision` for cheap repeat calls |
 | `projects_list` | User's workspace registry: id, name, path, state |
 | `playbook_howto` | Tier 2: authoring detail (pull only when creating/reworking) |
-| `playbook_get` | Playbook definition by id and (optional) version |
+| `playbook_get` | Playbook definition by id and (optional) version; `detail` selects `summary` (default: interface only, no node prompt bodies) or `full` (complete authoring payload) |
 | `playbook_validate` | Validate a playbook, list of issues |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing) |
 | `runs_list` | List of runs |
