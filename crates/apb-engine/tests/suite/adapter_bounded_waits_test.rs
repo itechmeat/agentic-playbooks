@@ -92,6 +92,7 @@ fn task<'a>(
         interactive: false,
         node: "test",
         agent: "claude",
+        extract: None,
     }
 }
 

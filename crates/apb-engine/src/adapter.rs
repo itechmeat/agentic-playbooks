@@ -305,6 +305,15 @@ pub struct AgentTask<'a> {
     /// so the finished attempt's `session` can feed the `resume` transport.
     /// Internal calls pass the agent they invoke (e.g. `claude-code`).
     pub agent: &'a str,
+    /// Node-output extraction marker (Finding 2 of issue #56), from the node's
+    /// `outputs.extract`. When `Some(tag)`, the engine overrides the persisted
+    /// node output with the inner content of the LAST `<tag>...</tag>` block the
+    /// agent emitted anywhere in its turn(s), instead of the last assistant
+    /// message - so a host Stop-hook / guardrail turn injected after the work
+    /// product cannot pollute the output. `None` keeps today's
+    /// last-message-with-report-block-stripped behavior. Internal, compaction,
+    /// and finish-answer calls always pass `None`.
+    pub extract: Option<&'a str>,
 }
 
 /// The marker a `resume`/`reprompt` agent prints on its own stdout line to ask
@@ -865,6 +874,60 @@ fn last_yaml_block(text: &str) -> Option<String> {
     last_yaml_block_span(text).map(|(_, _, body)| body)
 }
 
+/// Inner content (trimmed) of the LAST `<tag> ... </tag>` block in `text`, or
+/// `None` when the tag is absent or unclosed (Finding 2 of issue #56). The
+/// last-block-wins rule is deliberate: it lets a host Stop-hook / guardrail
+/// turn append anything after the agent's work product without shadowing it, as
+/// long as the work product is the final wrapped block. Content spanning
+/// multiple lines is preserved verbatim between the tags before trimming.
+fn extract_marker(text: &str, tag: &str) -> Option<String> {
+    let open = format!("<{tag}>");
+    let close = format!("</{tag}>");
+    let mut best: Option<String> = None;
+    let mut rest = text;
+    while let Some(start) = rest.find(&open) {
+        let after_open = &rest[start + open.len()..];
+        match after_open.find(&close) {
+            Some(end) => {
+                best = Some(after_open[..end].trim().to_string());
+                rest = &after_open[end + close.len()..];
+            }
+            // Unclosed final open tag: no further complete block can follow.
+            None => break,
+        }
+    }
+    best
+}
+
+/// The ACP stream's assistant prose across ALL turns, joined with newlines in
+/// stream order (Finding 2 of issue #56). Each claude stream-json `assistant`
+/// event carries `message.content[]`, and every `text` part contributes; other
+/// event types (system, result, tool events) are skipped. This is the text the
+/// marker scan runs over so the work product from an EARLY turn survives even
+/// when a later host turn is the terminal `result`.
+fn collect_assistant_text(lines: &[String]) -> String {
+    let mut parts: Vec<String> = Vec::new();
+    for line in lines {
+        let Ok(val) = serde_json::from_str::<serde_json::Value>(line) else {
+            continue;
+        };
+        if val.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+            continue;
+        }
+        let Some(content) = val.pointer("/message/content").and_then(|c| c.as_array()) else {
+            continue;
+        };
+        for part in content {
+            if part.get("type").and_then(|t| t.as_str()) == Some("text")
+                && let Some(text) = part.get("text").and_then(|t| t.as_str())
+            {
+                parts.push(text.to_string());
+            }
+        }
+    }
+    parts.join("\n")
+}
+
 impl ClaudeAdapter {
     pub fn from_env() -> Self {
         let program = std::env::var("APB_AGENT_CMD").unwrap_or_else(|_| "claude".to_string());
@@ -1095,6 +1158,14 @@ impl ClaudeAdapter {
         // output is the reply body with that block stripped, and raw is the full
         // stdout for debugging/streaming.
         let report = interpret_report(&stdout);
+        // Node-output contract (Finding 2 of issue #56): when the node set
+        // `outputs.extract`, the output is the LAST `<tag>...</tag>` block in
+        // stdout, if present. Status/summary/session/question stay as derived
+        // from the report block above - only `output` is overridden.
+        let output = task
+            .extract
+            .and_then(|tag| extract_marker(&stdout, tag))
+            .unwrap_or(report.output);
         // Marker scan (spec 2026-07-20): an interactive node's agent may ask a
         // question instead of finishing. The scan is gated on `task.interactive`
         // and hard-fails on malformed JSON naming the node; a non-interactive
@@ -1107,7 +1178,7 @@ impl ClaudeAdapter {
         let session = capture_session(task.agent, &stdout);
         Ok(AgentReport {
             status: report.status,
-            output: report.output,
+            output,
             summary: report.summary,
             raw: stdout,
             question,
@@ -1457,6 +1528,19 @@ fn parse_stream_result(
         } else {
             report.status
         };
+        // Node-output contract (Finding 2 of issue #56): when the node set
+        // `outputs.extract`, override only `output` with the LAST
+        // `<tag>...</tag>` block. Scan the assistant prose across ALL turns
+        // first (the work product may be in an EARLY turn while the terminal
+        // `result` is a host Stop-hook turn); fall back to the result text,
+        // then to today's report-derived output. Status/summary/session/
+        // question are untouched.
+        let output = match task.extract {
+            Some(tag) => extract_marker(&collect_assistant_text(lines), tag)
+                .or_else(|| extract_marker(&text, tag))
+                .unwrap_or(report.output),
+            None => report.output,
+        };
         // Marker scan over the agent's message text (spec 2026-07-20): in the
         // stream transport the agent's prose is the `result` event's text, so
         // that is where the marker appears (not the surrounding NDJSON). Gated
@@ -1468,7 +1552,7 @@ fn parse_stream_result(
         let session = capture_session(task.agent, &raw);
         return Ok(AgentReport {
             status,
-            output: report.output,
+            output,
             summary: report.summary,
             raw,
             question,
@@ -1787,5 +1871,124 @@ mod tests {
             stdout.lines().any(|l| l == "PAGER=cat"),
             "PAGER=cat missing from child env:\n{stdout}"
         );
+    }
+
+    fn stream_task<'a>(policy: &'a ConnectorEnvPolicy, extract: Option<&'a str>) -> AgentTask<'a> {
+        AgentTask {
+            prompt: "go",
+            model: "haiku",
+            workdir: Path::new("."),
+            timeout: None,
+            stream_log: None,
+            soul: None,
+            grant_autonomy: false,
+            connector_policy: policy,
+            interactive: false,
+            node: "test",
+            agent: "claude",
+            extract,
+        }
+    }
+
+    #[test]
+    fn extract_marker_takes_the_last_block() {
+        // Last-block-wins: a later wrapped block shadows an earlier one, so a
+        // host that appends its own marker cannot resurrect stale content.
+        let text = "<node_output>first</node_output>\nmid\n<node_output>second</node_output>";
+        assert_eq!(
+            extract_marker(text, "node_output").as_deref(),
+            Some("second")
+        );
+    }
+
+    #[test]
+    fn extract_marker_handles_multi_line_and_trims() {
+        let text = "prose\n<node_output>\nline one\nline two\n</node_output>\ntrailing";
+        assert_eq!(
+            extract_marker(text, "node_output").as_deref(),
+            Some("line one\nline two")
+        );
+    }
+
+    #[test]
+    fn extract_marker_absent_or_unclosed_is_none() {
+        assert_eq!(extract_marker("no marker here", "node_output"), None);
+        // An unclosed final open tag yields no complete block.
+        assert_eq!(extract_marker("<node_output>dangling", "node_output"), None);
+    }
+
+    #[test]
+    fn collect_assistant_text_joins_all_turns_in_order() {
+        // Every assistant `text` part contributes, in stream order; non-assistant
+        // events (system, result) are skipped.
+        let lines = vec![
+            r#"{"type":"system","subtype":"init"}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"early"}]}}"#
+                .to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"late"}]}}"#
+                .to_string(),
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"late"}"#.to_string(),
+        ];
+        assert_eq!(collect_assistant_text(&lines), "early\nlate");
+    }
+
+    #[test]
+    fn stream_extract_uses_early_turn_over_hook_polluted_terminal_result() {
+        // THE critical test (Finding 2 of issue #56). An early assistant turn
+        // carries the work product wrapped in <node_output>...</node_output>; a
+        // later assistant turn and the terminal `result` are host Stop-hook
+        // bookkeeping ("Nothing to log."). With outputs.extract set, the node
+        // output must be the work product, NOT the trailing hook message.
+        let lines = vec![
+            r#"{"type":"system","subtype":"init","session_id":"s1"}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"<node_output>the real summary</node_output>"}]},"session_id":"s1"}"#.to_string(),
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"Nothing to log."}]},"session_id":"s1"}"#.to_string(),
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"Nothing to log.","session_id":"s1"}"#.to_string(),
+        ];
+        let policy = ConnectorEnvPolicy::default();
+
+        let with_extract = parse_stream_result(&lines, &stream_task(&policy, Some("node_output")))
+            .expect("a result event");
+        assert_eq!(
+            with_extract.output, "the real summary",
+            "the marker content from the early turn must win over the hook message"
+        );
+        assert_eq!(with_extract.status, NodeStatus::Succeeded);
+
+        // Without the contract, today's behavior stands: the terminal result
+        // text (the hook message) is the output.
+        let without_extract =
+            parse_stream_result(&lines, &stream_task(&policy, None)).expect("a result event");
+        assert_eq!(without_extract.output, "Nothing to log.");
+    }
+
+    #[test]
+    fn stream_extract_falls_back_to_result_text_then_report() {
+        // No marker anywhere: extraction falls through to today's behavior
+        // (the terminal result text with its report block stripped).
+        let lines = vec![
+            r#"{"type":"assistant","message":{"content":[{"type":"text","text":"progress"}]}}"#
+                .to_string(),
+            r#"{"type":"result","subtype":"success","is_error":false,"result":"final answer"}"#
+                .to_string(),
+        ];
+        let policy = ConnectorEnvPolicy::default();
+        let report = parse_stream_result(&lines, &stream_task(&policy, Some("node_output")))
+            .expect("a result event");
+        assert_eq!(report.output, "final answer");
+    }
+
+    #[test]
+    fn headless_report_extracts_marker_from_stdout() {
+        // Headless path: the marker in the single process stdout wins over the
+        // report-derived output; status still comes from the report block.
+        let stdout = "<node_output>headless product</node_output>\n```yaml\nstatus: success\nsummary: ok\n```";
+        let report = interpret_report(stdout);
+        let output = extract_marker(stdout, "node_output").unwrap_or(report.output.clone());
+        assert_eq!(output, "headless product");
+        assert_eq!(report.status, NodeStatus::Succeeded);
+        // Without extract the report body (block stripped) is the output, which
+        // still carries the raw marker tags - the contract is what unwraps them.
+        assert_eq!(report.output, "<node_output>headless product</node_output>");
     }
 }

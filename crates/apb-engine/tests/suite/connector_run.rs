@@ -185,6 +185,7 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
             interactive: false,
             node: "test",
             agent: "claude",
+            extract: None,
         })
         .unwrap();
 

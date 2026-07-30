@@ -40,6 +40,7 @@ fn task<'a>(
         interactive,
         node,
         agent: "claude",
+        extract: None,
     }
 }
 

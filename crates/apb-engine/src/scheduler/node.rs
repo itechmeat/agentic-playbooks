@@ -517,6 +517,11 @@ pub(crate) fn execute_node(
                         interactive: *interactive,
                         node: node_id,
                         agent: &step.agent,
+                        // Node-output contract (Finding 2 of issue #56): honor
+                        // `outputs.extract` so the persisted output is the
+                        // agent's marker-wrapped work product, robust to host
+                        // Stop-hook / guardrail turns injected after the work.
+                        extract: node.outputs.as_ref().and_then(|o| o.extract.as_deref()),
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -1053,6 +1058,8 @@ pub(crate) fn execute_finish_answer(
                 interactive: false,
                 node: node_id,
                 agent: &ri.agent_id,
+                // Finish-answer composition uses today's last-message output.
+                extract: None,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -1647,6 +1654,8 @@ pub(crate) fn maybe_compact_context(
         interactive: false,
         node: "__context_compact",
         agent: "claude-code",
+        // Internal summarizer keeps today's last-message output.
+        extract: None,
     };
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.
