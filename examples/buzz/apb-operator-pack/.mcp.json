@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "apb": {
+      "command": "sh",
+      "args": ["-c", "cd \"$APB_PROJECT_DIR\" && exec apb mcp"],
+      "env": {
+        "APB_PROJECT_DIR": "/absolute/path/to/your/apb/project"
+      }
+    }
+  }
+}

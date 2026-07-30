@@ -1,0 +1,22 @@
+{
+  "$schema": "https://open-plugin-spec.org/schema/v1/plugin.json",
+  "id": "io.github.itechmeat.apb-operator",
+  "name": "APB Operator",
+  "version": "0.1.0",
+  "description": "A single-agent pack that operates apb (agentic-playbooks) from a Buzz channel: starts approved playbook runs, supervises them, relays human-review gates into the channel.",
+  "license": "MIT",
+  "homepage": "https://github.com/itechmeat/agentic-playbooks",
+  "keywords": ["apb", "playbooks", "mcp", "automation"],
+  "personas": [
+    "agents/apb-operator.persona.md"
+  ],
+  "pack_instructions": "instructions.md",
+  "mcp_config": ".mcp.json",
+  "defaults": {
+    "model": "anthropic:claude-sonnet-5",
+    "temperature": 0.3,
+    "triggers": { "mentions": true, "keywords": [], "all_messages": false },
+    "thread_replies": true,
+    "broadcast_replies": false
+  }
+}
