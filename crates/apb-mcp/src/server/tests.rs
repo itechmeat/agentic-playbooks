@@ -1466,3 +1466,36 @@ async fn global_scope_playbook_runs_in_current_project() {
         std::env::remove_var("APB_CONFIG_DIR");
     }
 }
+
+/// Tier-0 must reach an old-revision host through the `initialize` result
+/// `instructions` field and a new-revision host through the stateless-core
+/// `server/discover` channel. rmcp derives `DiscoverResult` from `get_info`,
+/// so the single `get_info` override feeds both; this pins that neither
+/// channel silently drops TIER0.
+#[test]
+fn tier0_reaches_both_the_initialize_and_discover_channels() {
+    use rmcp::model::{DiscoverResult, ProtocolVersion};
+
+    let dir = seeded_root();
+    let server = WfMcp::new(dir.path().to_path_buf());
+
+    // Old-revision channel: the `initialize` result carries the instructions.
+    let info = server.get_info();
+    assert_eq!(
+        info.instructions.as_deref(),
+        Some(crate::instructions::TIER0),
+        "initialize result lost TIER0"
+    );
+
+    // New-revision channel: `server/discover` is derived from `get_info`, the
+    // same derivation rmcp's default `discover` handler performs.
+    let discover = DiscoverResult::from_server_info(
+        ProtocolVersion::KNOWN_VERSIONS.to_vec(),
+        server.get_info(),
+    );
+    assert_eq!(
+        discover.instructions.as_deref(),
+        Some(crate::instructions::TIER0),
+        "server/discover lost TIER0"
+    );
+}
