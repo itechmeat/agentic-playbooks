@@ -105,14 +105,42 @@ pub fn with_supervisor_notes(prompt: &str, events: &[Event]) -> String {
     }
 }
 
+/// Trailing run-instruction block appended to agent attempt prompts (issue #56
+/// finding 4). Mirrors [`supervisor_notes_section`]: an explicit trailing
+/// section, NOT a placeholder substitution, so the run instruction reaches the
+/// executor even when the node template references neither `{{run.context}}`
+/// nor `{{run.instruction}}`. Before this the instruction was delivered only
+/// through those placeholders, so a template that omitted both dropped it
+/// silently. Empty string when the instruction is absent or blank after
+/// trimming (byte-stable no-op). When the template DOES reference
+/// `{{run.context}}` the instruction also appears in that context header; the
+/// duplication is idempotent and accepted, exactly as for supervisor notes.
+pub fn run_instruction_section(instruction: Option<&str>) -> String {
+    match instruction.map(str::trim) {
+        Some(text) if !text.is_empty() => format!("\n\n## run instruction\n\n{text}\n"),
+        _ => String::new(),
+    }
+}
+
+/// Appends [`run_instruction_section`] to `prompt` when a non-empty run
+/// instruction is present.
+pub fn with_run_instruction(prompt: &str, instruction: Option<&str>) -> String {
+    let section = run_instruction_section(instruction);
+    if section.is_empty() {
+        prompt.to_string()
+    } else {
+        format!("{prompt}{section}")
+    }
+}
+
 /// Trailing precedence frame for agent attempt prompts (issue #56 finding 4).
 ///
 /// When a non-empty run instruction and/or any applied supervisor note is
 /// present, returns a short English block that states the on-conflict order:
 /// supervisor notes > run instruction > node template. Empty (byte-stable
 /// no-op) when both the instruction is absent/blank and there are no notes.
-/// Does not re-embed the full instruction text; delivery of the instruction
-/// remains the leading `## run instruction` context header.
+/// Does not re-embed the full instruction text; the instruction body itself is
+/// delivered by [`run_instruction_section`] as a `## run instruction` section.
 pub fn precedence_frame(instruction: Option<&str>, events: &[Event]) -> String {
     let has_instruction = instruction.map(str::trim).is_some_and(|t| !t.is_empty());
     let has_notes = !applied_supervisor_notes(events).is_empty();
@@ -121,11 +149,38 @@ pub fn precedence_frame(instruction: Option<&str>, events: &[Event]) -> String {
     }
     // Short pointer only: names the three sources and the order. Does not
     // re-paste the run instruction body or note text (those are delivered
-    // elsewhere: `## run instruction` header / supervisor notes block).
+    // elsewhere: `## run instruction` section / supervisor notes block). The
+    // wording says the instruction "appears in a `## run instruction` section"
+    // rather than "the leading" one, because `run_instruction_section` now
+    // guarantees that section on every attempt whose run carries an
+    // instruction, regardless of whether the template references
+    // `{{run.context}}` (issue #56 finding 4).
     String::from(
         "\n\n## instruction precedence\n\n\
-On conflict, higher-priority sources override lower ones: supervisor notes override the run instruction, and the run instruction overrides this node template's boilerplate. The run instruction (when present) is delivered as the leading `## run instruction` section; supervisor notes (when present) appear in the trailing supervisor notes block.\n",
+On conflict, higher-priority sources override lower ones: supervisor notes override the run instruction, and the run instruction overrides this node template's boilerplate. The run instruction (when present) appears in a `## run instruction` section; supervisor notes (when present) appear in the trailing supervisor notes block.\n",
     )
+}
+
+/// Assembles the trailing instruction-source blocks appended to an agent
+/// attempt prompt after the rendered template (issue #56 finding 4): the run
+/// instruction, then the applied supervisor notes, then the precedence frame
+/// naming the on-conflict order (supervisor notes > run instruction > node
+/// template). Shared by `execute_node` and `execute_finish_answer` so the two
+/// assembly sites cannot drift. The run instruction and supervisor notes are
+/// appended as explicit trailing sections (not placeholder substitutions), so a
+/// node template that references neither `{{run.context}}` nor
+/// `{{run.instruction}}` still receives both. Byte-stable no-op (returns the
+/// template unchanged) when the instruction is absent/blank and no notes apply,
+/// so note-less, instruction-less prompts and their cache keys do not shift.
+pub fn assemble_agent_prompt(
+    template: &str,
+    instruction: Option<&str>,
+    events: &[Event],
+) -> String {
+    let mut text = with_run_instruction(template, instruction);
+    text = with_supervisor_notes(&text, events);
+    text.push_str(&precedence_frame(instruction, events));
+    text
 }
 
 /// The full context (all sections), the materialized view for context.md and the compaction threshold.
@@ -559,6 +614,114 @@ mod tests {
             frame.len() < 1024,
             "frame should stay a short pointer, got {} bytes",
             frame.len()
+        );
+    }
+
+    #[test]
+    fn run_instruction_section_empty_for_none_and_blank() {
+        assert_eq!(run_instruction_section(None), "");
+        assert_eq!(run_instruction_section(Some("")), "");
+        assert_eq!(run_instruction_section(Some("   ")), "");
+        assert_eq!(run_instruction_section(Some("\n\t \n")), "");
+    }
+
+    #[test]
+    fn run_instruction_section_is_a_trailing_section_with_trimmed_body() {
+        assert_eq!(
+            run_instruction_section(Some("  drop the docs/reviews artifacts  ")),
+            "\n\n## run instruction\n\ndrop the docs/reviews artifacts\n"
+        );
+    }
+
+    #[test]
+    fn with_run_instruction_no_op_without_instruction() {
+        let prompt = "exact template body";
+        assert_eq!(with_run_instruction(prompt, None), prompt);
+        assert_eq!(with_run_instruction(prompt, Some("   ")), prompt);
+    }
+
+    // The core of issue #56 finding 4: a node template that references NEITHER
+    // `{{run.context}}` NOR `{{run.instruction}}` must still receive the run
+    // instruction body. Before the fix, `execute_node`/`execute_finish_answer`
+    // only appended the supervisor notes and the precedence frame, so such a
+    // template dropped the instruction entirely while the frame still claimed a
+    // `## run instruction` section existed. `assemble_agent_prompt` is the exact
+    // shared assembly both call sites now delegate to.
+    #[test]
+    fn assemble_agent_prompt_delivers_instruction_without_placeholder() {
+        let template = "Follow your SOUL and lock the branch scope.";
+        let instruction = "Exclude the docs/reviews artifacts from the branch and the PR.";
+        let assembled = assemble_agent_prompt(template, Some(instruction), &[]);
+
+        assert!(assembled.starts_with(template), "template stays first");
+        assert!(
+            assembled.contains("## run instruction"),
+            "instruction delivered as its own section, got:\n{assembled}"
+        );
+        assert!(
+            assembled.contains(instruction),
+            "run instruction body must be present without any placeholder, got:\n{assembled}"
+        );
+        // The precedence frame's claim must match the assembled prompt: it
+        // points at a `## run instruction` section, which now genuinely exists.
+        assert!(
+            assembled.contains("## instruction precedence"),
+            "precedence frame present, got:\n{assembled}"
+        );
+        let frame_ref_section = assembled.contains("appears in a `## run instruction` section");
+        assert!(
+            frame_ref_section && assembled.contains("## run instruction"),
+            "frame claim (`appears in a ## run instruction section`) must match reality, got:\n{assembled}"
+        );
+    }
+
+    #[test]
+    fn assemble_agent_prompt_orders_instruction_then_notes_then_frame() {
+        let template = "TEMPLATE BODY";
+        let events = vec![ev(
+            0,
+            EventPayload::SupervisorAction {
+                action: "context_append".into(),
+                node: None,
+                detail: "prefer approach B".into(),
+            },
+        )];
+        let assembled = assemble_agent_prompt(template, Some("stay within budget"), &events);
+
+        let tmpl = assembled.find("TEMPLATE BODY").expect("template");
+        let instr = assembled.find("## run instruction").expect("instruction");
+        let notes = assembled
+            .find("Supervisor notes (these override")
+            .expect("notes");
+        let frame = assembled.find("## instruction precedence").expect("frame");
+        assert!(
+            tmpl < instr && instr < notes && notes < frame,
+            "order must be template, run instruction, notes, frame, got:\n{assembled}"
+        );
+        assert!(assembled.contains("stay within budget"));
+        assert!(assembled.contains("- prefer approach B"));
+    }
+
+    #[test]
+    fn assemble_agent_prompt_byte_stable_without_instruction_or_notes() {
+        let template = "exact template body, no placeholders";
+        // No instruction, no notes: assembly must be a pure no-op so cache keys
+        // and byte-for-byte prompt expectations do not shift.
+        assert_eq!(assemble_agent_prompt(template, None, &[]), template);
+        let events = vec![ev(
+            0,
+            EventPayload::NodeFinished {
+                node: "a".into(),
+                status: "succeeded".into(),
+                attempt: 1,
+                output: "ok".into(),
+                artifacts: Vec::new(),
+            },
+        )];
+        assert_eq!(assemble_agent_prompt(template, None, &events), template);
+        assert_eq!(
+            assemble_agent_prompt(template, Some("  "), &events),
+            template
         );
     }
 }

@@ -219,20 +219,22 @@ pub(crate) fn execute_node(
                 (None, Some(p)) => p.clone(),
                 (None, None) => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
-            // Issue #45 finding 2: deliver every applied supervisor note into
-            // the agent attempt prompt, even when the template never references
-            // `{{run.context}}`. Resume re-invocations carry only the user's
+            // Issue #45 finding 2 + issue #56 finding 4: deliver the run
+            // instruction, every applied supervisor note, and the precedence
+            // frame into the agent attempt prompt as trailing sections, even
+            // when the template references neither `{{run.context}}` nor
+            // `{{run.instruction}}`. Resume re-invocations carry only the user's
             // answer (session holds prior context) and skip this. Script nodes
-            // never reach this arm.
-            // Issue #56 finding 4: same boundary for the precedence frame
-            // (outside the cache-key render in `render_node_prompt`).
+            // never reach this arm. Assembled outside the cache-key render in
+            // `render_node_prompt`, so note/instruction/frame text (all fixed
+            // per run) does not shift the cache key.
             if resume.is_none() {
                 let events = read_all(run_dir)?;
-                text = crate::context::with_supervisor_notes(&text, &events);
-                text.push_str(&crate::context::precedence_frame(
+                text = crate::context::assemble_agent_prompt(
+                    &text,
                     cfg.instruction.as_deref(),
                     &events,
-                ));
+                );
             }
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
@@ -964,13 +966,10 @@ pub(crate) fn execute_finish_answer(
         &hooks,
         &context,
     );
-    // Finish-with-prompt is an agent attempt: same note delivery as agent_task
-    // (issue #45 finding 2) and the same precedence frame (issue #56 finding 4).
-    let mut text = crate::context::with_supervisor_notes(&text, &events);
-    text.push_str(&crate::context::precedence_frame(
-        cfg.instruction.as_deref(),
-        &events,
-    ));
+    // Finish-with-prompt is an agent attempt: same trailing assembly as
+    // agent_task - run instruction, supervisor notes, precedence frame (issue
+    // #45 finding 2, issue #56 finding 4).
+    let text = crate::context::assemble_agent_prompt(&text, cfg.instruction.as_deref(), &events);
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)
