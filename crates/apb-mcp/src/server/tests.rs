@@ -249,10 +249,163 @@ async fn playbook_get_missing_id_surfaces_as_tool_error() {
             id: "does-not-exist".to_string(),
             version: None,
             workspace: None,
+            detail: None,
         }))
         .await;
     assert_eq!(result.is_error, Some(true));
     assert_eq!(result.content.len(), 1);
+}
+
+/// Default (no `detail`) returns the compact summary: top-level identity,
+/// params interface, node entries (id/type/title/profile ref), edge
+/// structure, and supervisor interface - but NEVER a node prompt body. The
+/// summary must also be dramatically smaller than the full payload.
+#[tokio::test]
+async fn playbook_get_default_returns_summary_without_prompts() {
+    let dir = seeded_root();
+    let server = WfMcp::new(dir.path().to_path_buf());
+
+    let summary = server
+        .playbook_get(Parameters(PlaybookGetArgs {
+            id: "implement-task".to_string(),
+            version: None,
+            workspace: None,
+            detail: None,
+        }))
+        .await;
+    assert_eq!(
+        summary.is_error,
+        Some(false),
+        "unexpected error: {}",
+        result_text(&summary)
+    );
+    let body = result_text(&summary);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json body");
+
+    // Summary marker and top-level identity.
+    assert_eq!(v["detail"].as_str(), Some("summary"));
+    assert_eq!(v["id"].as_str(), Some("implement-task"));
+    assert_eq!(v["name"].as_str(), Some("Implement Task"));
+    assert_eq!(v["version"].as_str(), Some("1.0.0"));
+    assert_eq!(v["schema"].as_u64(), Some(2));
+
+    // Params interface: name + type present.
+    let params = v["params"].as_array().expect("params array");
+    let task = params
+        .iter()
+        .find(|p| p["name"].as_str() == Some("task"))
+        .expect("task param");
+    assert_eq!(task["type"].as_str(), Some("text"));
+
+    // Nodes: id + type + profile ref when declared. The plan node is an
+    // agent_task with a declared profile (architect).
+    let nodes = v["nodes"].as_array().expect("nodes array");
+    let plan = nodes
+        .iter()
+        .find(|n| n["id"].as_str() == Some("plan"))
+        .expect("plan node");
+    assert_eq!(plan["type"].as_str(), Some("agent_task"));
+    assert_eq!(plan["title"].as_str(), Some("Plan"));
+    assert_eq!(plan["profile"]["name"].as_str(), Some("architect"));
+
+    // A node without a declared profile (fix) must not carry one.
+    let fix = nodes
+        .iter()
+        .find(|n| n["id"].as_str() == Some("fix"))
+        .expect("fix node");
+    assert_eq!(fix["type"].as_str(), Some("agent_task"));
+    assert!(fix.get("profile").is_none() || fix["profile"].is_null());
+
+    // Edges: structural fields, including condition presence.
+    let edges = v["edges"].as_array().expect("edges array");
+    assert!(edges.iter().any(|e| {
+        e["from"].as_str() == Some("check")
+            && e["to"].as_str() == Some("fix")
+            && e["has_condition"].as_bool() == Some(true)
+    }));
+
+    // The whole point: no prompt body leaks into the summary.
+    assert!(
+        !body.contains("Write a plan"),
+        "summary leaked a prompt body: {body}"
+    );
+    assert!(
+        !body.contains("Fix: {{nodes.lint.output}}"),
+        "summary leaked a prompt body: {body}"
+    );
+
+    // And it is dramatically smaller than the full payload.
+    let full = server
+        .playbook_get(Parameters(PlaybookGetArgs {
+            id: "implement-task".to_string(),
+            version: None,
+            workspace: None,
+            detail: Some("full".to_string()),
+        }))
+        .await;
+    let full_body = result_text(&full);
+    assert!(
+        body.len() * 2 < full_body.len(),
+        "summary ({}) not dramatically smaller than full ({}); summary body: {body}",
+        body.len(),
+        full_body.len()
+    );
+}
+
+/// `detail: "full"` returns today's full authoring payload (yaml + full
+/// playbook + layout), unchanged, including prompt bodies.
+#[tokio::test]
+async fn playbook_get_detail_full_returns_full_payload() {
+    let dir = seeded_root();
+    let server = WfMcp::new(dir.path().to_path_buf());
+
+    let result = server
+        .playbook_get(Parameters(PlaybookGetArgs {
+            id: "implement-task".to_string(),
+            version: None,
+            workspace: None,
+            detail: Some("full".to_string()),
+        }))
+        .await;
+    assert_eq!(result.is_error, Some(false));
+    let body = result_text(&result);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json body");
+
+    // Full payload keeps the authoring keys (yaml + full playbook + layout).
+    assert!(v.get("yaml").and_then(|y| y.as_str()).is_some());
+    assert!(v.get("playbook").is_some());
+    assert!(v.get("layout").is_some());
+    // No summary marker on the full payload.
+    assert!(v.get("detail").is_none());
+    // And it carries the prompt bodies the summary omits.
+    assert!(body.contains("Write a plan"));
+}
+
+/// An invalid `detail` value falls back to the compact summary rather than
+/// erroring a read-only get. Policy: a typo must never break discovery.
+#[tokio::test]
+async fn playbook_get_invalid_detail_falls_back_to_summary() {
+    let dir = seeded_root();
+    let server = WfMcp::new(dir.path().to_path_buf());
+
+    let result = server
+        .playbook_get(Parameters(PlaybookGetArgs {
+            id: "implement-task".to_string(),
+            version: None,
+            workspace: None,
+            detail: Some("bogus".to_string()),
+        }))
+        .await;
+    assert_eq!(
+        result.is_error,
+        Some(false),
+        "invalid detail must not error, got: {}",
+        result_text(&result)
+    );
+    let body = result_text(&result);
+    let v: serde_json::Value = serde_json::from_str(&body).expect("json body");
+    assert_eq!(v["detail"].as_str(), Some("summary"));
+    assert!(!body.contains("Write a plan"));
 }
 
 #[tokio::test]

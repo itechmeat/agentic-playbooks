@@ -261,6 +261,26 @@ impl NodeKind {
             _ => &[],
         }
     }
+
+    /// The serde `type` tag of this variant, mirroring
+    /// `#[serde(tag = "type", rename_all = "snake_case")]` on [`NodeKind`].
+    /// Single source of truth for the node-type string a summary or catalog
+    /// emits. The match is exhaustive on purpose: adding a [`NodeKind`]
+    /// variant is a compile error here until its tag is decided, so a derived
+    /// summary can never silently mislabel a new kind.
+    pub fn type_str(&self) -> &'static str {
+        match self {
+            NodeKind::Start => "start",
+            NodeKind::AgentTask { .. } => "agent_task",
+            NodeKind::Script { .. } => "script",
+            NodeKind::Prompt { .. } => "prompt",
+            NodeKind::Condition { .. } => "condition",
+            NodeKind::HumanReview { .. } => "human_review",
+            NodeKind::Wait { .. } => "wait",
+            NodeKind::Finish { .. } => "finish",
+            NodeKind::Playbook { .. } => "playbook",
+        }
+    }
 }
 
 /// Whether the raw YAML has traces of schema-1 executors: a top-level

@@ -147,7 +147,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Get a playbook definition by id and optional version",
+        description = "Get a playbook definition by id and optional version. detail selects the shape: \"summary\" (default) returns the compact interface (id/name/version/schema, params, nodes without prompt bodies, edges, supervisor interface) sized for MCP injection; \"full\" returns the complete authoring payload (yaml + full playbook + layout) for editing. An unknown detail value falls back to summary.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn playbook_get(
@@ -156,13 +156,19 @@ impl WfMcp {
             id,
             version,
             workspace,
+            detail,
         }): Parameters<PlaybookGetArgs>,
     ) -> CallToolResult {
         let root = match self.effective_root(workspace.as_deref()) {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        to_call_tool_result(tools::playbook_get(&root, &id, version.as_deref()))
+        to_call_tool_result(tools::playbook_get(
+            &root,
+            &id,
+            version.as_deref(),
+            tools::DetailMode::from_arg(detail.as_deref()),
+        ))
     }
 
     #[tool(

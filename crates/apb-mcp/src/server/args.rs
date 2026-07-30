@@ -23,6 +23,11 @@ pub struct PlaybookGetArgs {
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
+    /// "summary" (default) returns the compact interface without prompt
+    /// bodies; "full" returns the complete authoring payload (yaml + full
+    /// playbook + layout). Any other value falls back to summary.
+    #[serde(default)]
+    pub detail: Option<String>,
 }
 
 /// An argument with only an optional workspace - for read tools without any

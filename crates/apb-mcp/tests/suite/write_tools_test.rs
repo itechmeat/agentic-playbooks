@@ -2,7 +2,9 @@ use std::fs;
 use std::path::Path;
 
 use apb_core::registry::Registry;
-use apb_mcp::tools::{ToolError, playbook_create, playbook_delete, playbook_get, playbook_update};
+use apb_mcp::tools::{
+    DetailMode, ToolError, playbook_create, playbook_delete, playbook_get, playbook_update,
+};
 
 const VALID: &str = include_str!("../../../apb-core/tests/fixtures/valid.yaml");
 
@@ -26,7 +28,7 @@ fn playbook_create_new_then_load() {
     assert_eq!(v["id"], "brand-new");
     assert_eq!(v["version"], "1.0.0");
 
-    let loaded = playbook_get(dir.path(), "brand-new", None).unwrap();
+    let loaded = playbook_get(dir.path(), "brand-new", None, DetailMode::Full).unwrap();
     assert_eq!(loaded["version"], "1.0.0");
     assert_eq!(loaded["playbook"]["id"], "brand-new");
 }
@@ -41,7 +43,7 @@ fn playbook_update_creates_minor_version() {
     assert_eq!(v["id"], "implement-task");
     assert_eq!(v["version"], "1.1.0");
 
-    let loaded = playbook_get(dir.path(), "implement-task", None).unwrap();
+    let loaded = playbook_get(dir.path(), "implement-task", None, DetailMode::Full).unwrap();
     assert_eq!(loaded["version"], "1.1.0");
     assert_eq!(loaded["playbook"]["name"], "Implement Task v2");
 }
@@ -65,7 +67,7 @@ fn playbook_delete_moves_to_trash() {
     assert!(trashed.contains(".apb/trash/implement-task-"));
     assert!(Path::new(trashed).is_dir());
 
-    let err = playbook_get(dir.path(), "implement-task", None).unwrap_err();
+    let err = playbook_get(dir.path(), "implement-task", None, DetailMode::Full).unwrap_err();
     assert!(matches!(err, ToolError::NotFound(_)), "got {err:?}");
 }
 

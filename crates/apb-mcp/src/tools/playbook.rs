@@ -4,7 +4,9 @@
 use std::path::Path;
 
 use super::{ToolError, open};
-use apb_core::registry::is_safe_segment;
+use apb_core::profile::QualifiedProfileRef;
+use apb_core::registry::{LoadedPlaybook, is_safe_segment};
+use apb_core::schema::NodeKind;
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_core::versioning::{create_version, delete_playbook};
 use serde_json::{Value, json};
@@ -83,16 +85,164 @@ pub fn playbook_howto() -> Result<Value, ToolError> {
     Ok(json!({ "howto": include_str!("../../../../docs/HOWTO-authoring.md") }))
 }
 
-pub fn playbook_get(root: &Path, id: &str, version: Option<&str>) -> Result<Value, ToolError> {
+/// Detail level for [`playbook_get`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DetailMode {
+    /// Compact interface view: top-level identity, params (name/type/label),
+    /// the default profile, node entries (id/type/title/declared profile
+    /// ref), edge structure, and the supervisor interface. Excludes every
+    /// node prompt body. The MCP default.
+    Summary,
+    /// Full authoring payload: yaml + full playbook + layout, byte-identical
+    /// to the pre-summary behavior.
+    Full,
+}
+
+impl DetailMode {
+    /// Parse the MCP `detail` argument. `None` or `"summary"` -> [`Self::Summary`],
+    /// `"full"` -> [`Self::Full`]. Any other value falls back to [`Self::Summary`]:
+    /// a read-only get must not break discovery on a typo.
+    pub fn from_arg(s: Option<&str>) -> Self {
+        match s {
+            Some("full") => DetailMode::Full,
+            _ => DetailMode::Summary,
+        }
+    }
+}
+
+pub fn playbook_get(
+    root: &Path,
+    id: &str,
+    version: Option<&str>,
+    detail: DetailMode,
+) -> Result<Value, ToolError> {
     let reg = open(root)?;
     let loaded = reg.load(id, version)?;
-    Ok(json!({
+    match detail {
+        DetailMode::Full => Ok(json!({
+            "id": id,
+            "version": loaded.version,
+            "yaml": loaded.yaml,
+            "playbook": loaded.playbook,
+            "layout": loaded.layout,
+        })),
+        DetailMode::Summary => Ok(playbook_summary(id, &loaded)),
+    }
+}
+
+/// Builds the compact summary of a playbook: its interface without any node
+/// prompt body. The summary carries enough to match, route, and reason about
+/// a playbook (identity, params, node graph, declared profile bindings,
+/// supervisor interface) while staying small enough for an MCP host to inject.
+fn playbook_summary(id: &str, loaded: &LoadedPlaybook) -> Value {
+    let pb = &loaded.playbook;
+
+    let params: Vec<Value> = pb
+        .params
+        .iter()
+        .map(|p| {
+            let mut o = json!({ "name": p.name, "type": p.kind });
+            if let Some(label) = &p.label {
+                o["label"] = json!(label);
+            }
+            o
+        })
+        .collect();
+
+    let mut defaults = json!({});
+    if let Some(profile) = &pb.defaults.profile {
+        defaults["profile"] = ref_value(profile);
+    }
+    if let Some(retries) = pb.defaults.max_retries {
+        defaults["max_retries"] = json!(retries);
+    }
+    if let Some(timeout) = pb.defaults.timeout_seconds {
+        defaults["timeout_seconds"] = json!(timeout);
+    }
+
+    let nodes: Vec<Value> = pb
+        .nodes
+        .iter()
+        .map(|n| {
+            let mut o = json!({
+                "id": n.id,
+                "type": n.kind.type_str(),
+            });
+            if let Some(title) = &n.title {
+                o["title"] = json!(title);
+            }
+            if let Some(profile) = declared_profile(&n.kind) {
+                o["profile"] = ref_value(profile);
+            }
+            o
+        })
+        .collect();
+
+    let edges: Vec<Value> = pb
+        .edges
+        .iter()
+        .map(|e| {
+            let mut o = json!({
+                "from": e.from,
+                "to": e.to,
+                "has_condition": e.condition.is_some(),
+                "fallback": e.fallback,
+            });
+            if let Some(join) = &e.join {
+                o["join"] = json!(join);
+            }
+            if let Some(max) = e.max_traversals {
+                o["max_traversals"] = json!(max);
+            }
+            o
+        })
+        .collect();
+
+    let supervisor = match &pb.supervisor {
+        Some(s) => {
+            let mut o = json!({ "has_policy": s.policy.is_some() });
+            if let Some(profile) = &s.profile {
+                o["profile"] = ref_value(profile);
+            }
+            o
+        }
+        None => json!(null),
+    };
+
+    json!({
+        "detail": "summary",
         "id": id,
+        "name": pb.name,
+        "description": pb.description,
         "version": loaded.version,
-        "yaml": loaded.yaml,
-        "playbook": loaded.playbook,
-        "layout": loaded.layout,
-    }))
+        "schema": pb.schema,
+        "params": params,
+        "defaults": defaults,
+        "nodes": nodes,
+        "edges": edges,
+        "supervisor": supervisor,
+    })
+}
+
+/// The profile a node declares on itself (not resolved against `defaults`):
+/// `agent_task.profile`, or `finish.profile` when a prompt makes it effective.
+/// `None` for every other kind, so the summary never leaks a dead binding.
+fn declared_profile(kind: &NodeKind) -> Option<&QualifiedProfileRef> {
+    match kind {
+        NodeKind::AgentTask { profile, .. } => profile.as_ref(),
+        NodeKind::Finish {
+            profile,
+            prompt: Some(_),
+            ..
+        } => profile.as_ref(),
+        _ => None,
+    }
+}
+
+/// Serializes a [`QualifiedProfileRef`] as `{ name, scope }`, falling back to
+/// null only if serialization itself fails (it cannot for this type).
+fn ref_value(r: &QualifiedProfileRef) -> Value {
+    serde_json::to_value(r).unwrap_or(Value::Null)
 }
 
 pub fn playbook_validate(root: &Path, id: &str) -> Result<Value, ToolError> {

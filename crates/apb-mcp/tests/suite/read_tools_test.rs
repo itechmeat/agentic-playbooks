@@ -1,4 +1,4 @@
-use apb_mcp::tools::{playbook_get, playbook_list, playbook_validate};
+use apb_mcp::tools::{DetailMode, playbook_get, playbook_list, playbook_validate};
 use std::fs;
 use std::path::Path;
 
@@ -26,7 +26,7 @@ fn list_returns_playbook() {
 fn get_returns_yaml_and_model() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
-    let v = playbook_get(dir.path(), "implement-task", None).unwrap();
+    let v = playbook_get(dir.path(), "implement-task", None, DetailMode::Full).unwrap();
     assert_eq!(v["version"], "1.0.0");
     assert_eq!(v["playbook"]["nodes"][0]["type"], "start");
     assert!(v["yaml"].as_str().unwrap().contains("implement-task"));
@@ -45,7 +45,7 @@ fn validate_reports_ok() {
 fn get_unknown_is_error() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
-    let err = playbook_get(dir.path(), "ghost", None).unwrap_err();
+    let err = playbook_get(dir.path(), "ghost", None, DetailMode::Full).unwrap_err();
     assert!(
         matches!(err, apb_mcp::tools::ToolError::NotFound(_)),
         "expected NotFound, got {err:?}"
