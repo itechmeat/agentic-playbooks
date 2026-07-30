@@ -89,7 +89,7 @@ fn seed_playbook(root: &Path, id: &str, yaml: &str) {
 }
 
 // Finding 2: a context_append applied after the first failed attempt is
-// injected into the retry attempt's prompt under a "Supervisor notes:" block,
+// injected into the retry attempt's prompt under a "Supervisor notes (...):" block,
 // even though the node template is just "do" (no `{{run.context}}`).
 #[test]
 fn context_note_appears_in_retry_agent_prompt() {
@@ -159,8 +159,9 @@ edges:
 
     let dumped = fs::read_to_string(&dump).expect("agent dump");
     assert!(
-        dumped.contains("Supervisor notes:"),
-        "retry prompt must carry the delimited supervisor notes section, got:\n{dumped}"
+        dumped.contains("Supervisor notes")
+            && dumped.contains("override the node template and the run instruction on conflict"),
+        "retry prompt must carry the delimited supervisor notes section with override framing, got:\n{dumped}"
     );
     assert!(
         dumped.contains(note),
@@ -244,7 +245,7 @@ edges:
 
     let dumped = fs::read_to_string(&dump).expect("agent dump for node b");
     assert!(
-        dumped.contains("Supervisor notes:") && dumped.contains(note),
+        dumped.contains("Supervisor notes") && dumped.contains(note),
         "later agent node B must see notes applied after A, got:\n{dumped}"
     );
 }

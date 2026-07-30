@@ -67,6 +67,12 @@ pub fn applied_supervisor_notes(events: &[Event]) -> Vec<String> {
         .collect()
 }
 
+/// Header line for the trailing supervisor-notes block. States that applied
+/// notes override both the node template and the run instruction on conflict
+/// (issue #56 finding 4).
+const SUPERVISOR_NOTES_HEADER: &str =
+    "Supervisor notes (these override the node template and the run instruction on conflict):";
+
 /// Delimited block injected into agent attempt prompts so notes reach the
 /// executor even when the playbook template does not reference
 /// `{{run.context}}`. Empty string when there are no applied notes.
@@ -74,13 +80,15 @@ pub fn applied_supervisor_notes(events: &[Event]) -> Vec<String> {
 /// Delivery scope (also documented on the MCP tool): every NEW agent_task
 /// (and finish-with-prompt) attempt that starts after a note was applied sees
 /// all notes applied so far, most recent last. Notes never enter script nodes
-/// and are never written into the immutable run manifest.
+/// and are never written into the immutable run manifest. The header states
+/// that applied notes override the node template and the run instruction on
+/// conflict (issue #56 finding 4).
 pub fn supervisor_notes_section(events: &[Event]) -> String {
     let notes = applied_supervisor_notes(events);
     if notes.is_empty() {
         return String::new();
     }
-    let mut out = String::from("\n\nSupervisor notes:\n");
+    let mut out = format!("\n\n{SUPERVISOR_NOTES_HEADER}\n");
     for note in &notes {
         let _ = writeln!(out, "- {note}");
     }
@@ -95,6 +103,29 @@ pub fn with_supervisor_notes(prompt: &str, events: &[Event]) -> String {
     } else {
         format!("{prompt}{section}")
     }
+}
+
+/// Trailing precedence frame for agent attempt prompts (issue #56 finding 4).
+///
+/// When a non-empty run instruction and/or any applied supervisor note is
+/// present, returns a short English block that states the on-conflict order:
+/// supervisor notes > run instruction > node template. Empty (byte-stable
+/// no-op) when both the instruction is absent/blank and there are no notes.
+/// Does not re-embed the full instruction text; delivery of the instruction
+/// remains the leading `## run instruction` context header.
+pub fn precedence_frame(instruction: Option<&str>, events: &[Event]) -> String {
+    let has_instruction = instruction.map(str::trim).is_some_and(|t| !t.is_empty());
+    let has_notes = !applied_supervisor_notes(events).is_empty();
+    if !has_instruction && !has_notes {
+        return String::new();
+    }
+    // Short pointer only: names the three sources and the order. Does not
+    // re-paste the run instruction body or note text (those are delivered
+    // elsewhere: `## run instruction` header / supervisor notes block).
+    String::from(
+        "\n\n## instruction precedence\n\n\
+On conflict, higher-priority sources override lower ones: supervisor notes override the run instruction, and the run instruction overrides this node template's boilerplate. The run instruction (when present) is delivered as the leading `## run instruction` section; supervisor notes (when present) appear in the trailing supervisor notes block.\n",
+    )
 }
 
 /// The full context (all sections), the materialized view for context.md and the compaction threshold.
@@ -370,7 +401,9 @@ mod tests {
         ];
         let section = supervisor_notes_section(&events);
         assert!(
-            section.starts_with("\n\nSupervisor notes:\n"),
+            section.starts_with(
+                "\n\nSupervisor notes (these override the node template and the run instruction on conflict):\n"
+            ),
             "got: {section:?}"
         );
         let first = section.find("first note").expect("first note");
@@ -378,10 +411,154 @@ mod tests {
         assert!(first < second, "most recent last: {section}");
         let injected = with_supervisor_notes("do work", &events);
         assert!(
-            injected.starts_with("do work\n\nSupervisor notes:\n"),
+            injected.starts_with(
+                "do work\n\nSupervisor notes (these override the node template and the run instruction on conflict):\n"
+            ),
             "got: {injected}"
         );
         assert!(injected.contains("- first note"));
         assert!(injected.contains("- second note"));
+    }
+
+    // Issue #56 finding 4: when applied notes exist, the section must carry
+    // an explicit on-conflict-override frame (notes beat template AND run
+    // instruction). Header wording is the contract agents read.
+    #[test]
+    fn supervisor_notes_section_frames_override_on_conflict() {
+        let events = vec![ev(
+            0,
+            EventPayload::SupervisorAction {
+                action: "context_append".into(),
+                node: None,
+                detail: "prefer approach B".into(),
+            },
+        )];
+        let section = supervisor_notes_section(&events);
+        assert!(
+            section.contains(
+                "Supervisor notes (these override the node template and the run instruction on conflict):"
+            ),
+            "notes section must state override over template and run instruction, got: {section:?}"
+        );
+        assert!(section.contains("- prefer approach B"));
+        let lower = section.to_ascii_lowercase();
+        assert!(
+            lower.contains("override")
+                && lower.contains("node template")
+                && lower.contains("run instruction"),
+            "override framing must name both lower-priority sources, got: {section:?}"
+        );
+    }
+
+    // Note-less prompts stay byte-stable: cache keys and many tests depend on
+    // with_supervisor_notes being a pure no-op when nothing was applied.
+    #[test]
+    fn with_supervisor_notes_unchanged_without_notes_no_spurious_frame() {
+        let prompt = "exact template body";
+        assert_eq!(with_supervisor_notes(prompt, &[]), prompt);
+        let events = vec![ev(
+            0,
+            EventPayload::NodeFinished {
+                node: "a".into(),
+                status: "succeeded".into(),
+                attempt: 1,
+                output: "ok".into(),
+                artifacts: Vec::new(),
+            },
+        )];
+        assert_eq!(with_supervisor_notes(prompt, &events), prompt);
+        // Precedence frame is a separate helper; notes path must not invent it.
+        assert!(!with_supervisor_notes(prompt, &events).contains("precedence"));
+    }
+
+    #[test]
+    fn precedence_frame_empty_without_instruction_and_without_notes() {
+        assert_eq!(precedence_frame(None, &[]), "");
+        assert_eq!(precedence_frame(Some(""), &[]), "");
+        assert_eq!(precedence_frame(Some("   "), &[]), "");
+        assert_eq!(precedence_frame(Some("\n\t  \n"), &[]), "");
+        let events = vec![ev(
+            0,
+            EventPayload::NodeFinished {
+                node: "a".into(),
+                status: "succeeded".into(),
+                attempt: 1,
+                output: "ok".into(),
+                artifacts: Vec::new(),
+            },
+        )];
+        assert_eq!(precedence_frame(None, &events), "");
+        assert_eq!(precedence_frame(Some("  "), &events), "");
+    }
+
+    #[test]
+    fn precedence_frame_states_order_when_instruction_present() {
+        let frame = precedence_frame(Some("stay within budget"), &[]);
+        assert!(
+            !frame.is_empty(),
+            "non-empty instruction must produce a precedence frame"
+        );
+        let lower = frame.to_ascii_lowercase();
+        assert!(
+            lower.contains("override") || lower.contains("precedence"),
+            "frame must state override/precedence, got: {frame:?}"
+        );
+        assert!(
+            lower.contains("run instruction") && lower.contains("template"),
+            "frame must name run instruction vs template, got: {frame:?}"
+        );
+        assert!(
+            lower.contains("supervisor"),
+            "frame must place supervisor notes in the order, got: {frame:?}"
+        );
+        // Do not re-paste the full instruction body into the frame.
+        assert!(
+            !frame.contains("stay within budget"),
+            "frame must reference precedence without re-embedding the instruction text, got: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn precedence_frame_states_order_when_notes_present_without_instruction() {
+        let events = vec![ev(
+            0,
+            EventPayload::SupervisorAction {
+                action: "context_append".into(),
+                node: None,
+                detail: "use path A".into(),
+            },
+        )];
+        let frame = precedence_frame(None, &events);
+        assert!(
+            !frame.is_empty(),
+            "applied notes alone must still produce a precedence frame"
+        );
+        let lower = frame.to_ascii_lowercase();
+        assert!(
+            lower.contains("supervisor")
+                && (lower.contains("override") || lower.contains("precedence")),
+            "got: {frame:?}"
+        );
+        // Notes body is delivered by supervisor_notes_section, not re-listed here.
+        assert!(
+            !frame.contains("use path A"),
+            "precedence frame must not re-list note bodies, got: {frame:?}"
+        );
+    }
+
+    #[test]
+    fn precedence_frame_does_not_duplicate_multi_kb_instruction() {
+        let long = "x".repeat(4096);
+        let frame = precedence_frame(Some(&long), &[]);
+        assert!(!frame.is_empty());
+        assert!(
+            !frame.contains(&long),
+            "frame must not re-embed multi-KB instruction text"
+        );
+        assert!(
+            frame.len() < 1024,
+            "frame should stay a short pointer, got {} bytes",
+            frame.len()
+        );
     }
 }

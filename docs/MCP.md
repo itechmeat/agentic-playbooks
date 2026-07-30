@@ -144,6 +144,10 @@ can grant `retry` without granting `rebind`. The usual sequence is
 `supervisor_rebind_profile` then `supervisor_node_retry`: the next attempt picks
 up the new profile.
 
+### Instruction source precedence
+
+An `agent_task` (and finish-with-prompt) attempt assembles instructions from three sources: the node template (`prompt` in the playbook), the run-level `instruction` (delivered as the leading `## run instruction` section that `{{run.context}}` resolves to, and also via `{{run.instruction}}`), and applied supervisor notes from `supervisor_context_append` (trailing block on every new attempt after the note was applied). On conflict the engine frames the higher sources as overrides: supervisor notes override the run instruction, and the run instruction overrides the node template's boilerplate. The notes block header and a short trailing `## instruction precedence` section state this order explicitly; neither re-embeds the full instruction text. When both the run instruction is empty and no notes are applied, the prompt is left byte-unchanged (no spurious framing).
+
 ## Asynchronous run model
 
 A run can take minutes, while some hosts have a short timeout on a single

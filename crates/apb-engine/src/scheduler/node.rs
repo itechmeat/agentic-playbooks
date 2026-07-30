@@ -224,8 +224,15 @@ pub(crate) fn execute_node(
             // `{{run.context}}`. Resume re-invocations carry only the user's
             // answer (session holds prior context) and skip this. Script nodes
             // never reach this arm.
+            // Issue #56 finding 4: same boundary for the precedence frame
+            // (outside the cache-key render in `render_node_prompt`).
             if resume.is_none() {
-                text = crate::context::with_supervisor_notes(&text, &read_all(run_dir)?);
+                let events = read_all(run_dir)?;
+                text = crate::context::with_supervisor_notes(&text, &events);
+                text.push_str(&crate::context::precedence_frame(
+                    cfg.instruction.as_deref(),
+                    &events,
+                ));
             }
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
@@ -953,8 +960,12 @@ pub(crate) fn execute_finish_answer(
         &context,
     );
     // Finish-with-prompt is an agent attempt: same note delivery as agent_task
-    // (issue #45 finding 2).
-    let text = crate::context::with_supervisor_notes(&text, &events);
+    // (issue #45 finding 2) and the same precedence frame (issue #56 finding 4).
+    let mut text = crate::context::with_supervisor_notes(&text, &events);
+    text.push_str(&crate::context::precedence_frame(
+        cfg.instruction.as_deref(),
+        &events,
+    ));
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)
