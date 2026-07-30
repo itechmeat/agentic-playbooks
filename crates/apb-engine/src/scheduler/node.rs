@@ -219,13 +219,22 @@ pub(crate) fn execute_node(
                 (None, Some(p)) => p.clone(),
                 (None, None) => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
-            // Issue #45 finding 2: deliver every applied supervisor note into
-            // the agent attempt prompt, even when the template never references
-            // `{{run.context}}`. Resume re-invocations carry only the user's
+            // Issue #45 finding 2 + issue #56 finding 4: deliver the run
+            // instruction, every applied supervisor note, and the precedence
+            // frame into the agent attempt prompt as trailing sections, even
+            // when the template references neither `{{run.context}}` nor
+            // `{{run.instruction}}`. Resume re-invocations carry only the user's
             // answer (session holds prior context) and skip this. Script nodes
-            // never reach this arm.
+            // never reach this arm. Assembled outside the cache-key render in
+            // `render_node_prompt`, so note/instruction/frame text (all fixed
+            // per run) does not shift the cache key.
             if resume.is_none() {
-                text = crate::context::with_supervisor_notes(&text, &read_all(run_dir)?);
+                let events = read_all(run_dir)?;
+                text = crate::context::assemble_agent_prompt(
+                    &text,
+                    cfg.instruction.as_deref(),
+                    &events,
+                );
             }
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             let timeout = timeout_seconds.map(Duration::from_secs);
@@ -510,6 +519,11 @@ pub(crate) fn execute_node(
                         interactive: *interactive,
                         node: node_id,
                         agent: &step.agent,
+                        // Node-output contract (Finding 2 of issue #56): honor
+                        // `outputs.extract` so the persisted output is the
+                        // agent's marker-wrapped work product, robust to host
+                        // Stop-hook / guardrail turns injected after the work.
+                        extract: node.outputs.as_ref().and_then(|o| o.extract.as_deref()),
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -952,9 +966,10 @@ pub(crate) fn execute_finish_answer(
         &hooks,
         &context,
     );
-    // Finish-with-prompt is an agent attempt: same note delivery as agent_task
-    // (issue #45 finding 2).
-    let text = crate::context::with_supervisor_notes(&text, &events);
+    // Finish-with-prompt is an agent attempt: same trailing assembly as
+    // agent_task - run instruction, supervisor notes, precedence frame (issue
+    // #45 finding 2, issue #56 finding 4).
+    let text = crate::context::assemble_agent_prompt(&text, cfg.instruction.as_deref(), &events);
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)
@@ -1042,6 +1057,8 @@ pub(crate) fn execute_finish_answer(
                 interactive: false,
                 node: node_id,
                 agent: &ri.agent_id,
+                // Finish-answer composition uses today's last-message output.
+                extract: None,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -1636,6 +1653,8 @@ pub(crate) fn maybe_compact_context(
         interactive: false,
         node: "__context_compact",
         agent: "claude-code",
+        // Internal summarizer keeps today's last-message output.
+        extract: None,
     };
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.

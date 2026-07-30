@@ -111,6 +111,15 @@ pub struct CacheConfig {
 pub struct NodeFiles {
     #[serde(default)]
     pub files: Vec<String>,
+    /// Node-output extraction marker (Finding 2 of issue #56). When set on an
+    /// agent_task node's `outputs`, the engine takes the content of the LAST
+    /// `<MARKER>...</MARKER>` block the agent emitted anywhere in its turn(s) as
+    /// the node output, instead of the last assistant message. This makes the
+    /// persisted output robust to host Stop-hook / guardrail turns injected
+    /// after the work. Unset -> today's last-message-with-report-block-stripped
+    /// behavior. Honored only on `outputs` of agent_task nodes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub extract: Option<String>,
 }
 
 impl Playbook {
@@ -259,6 +268,26 @@ impl NodeKind {
         match self {
             NodeKind::AgentTask { connectors, .. } => connectors,
             _ => &[],
+        }
+    }
+
+    /// The serde `type` tag of this variant, mirroring
+    /// `#[serde(tag = "type", rename_all = "snake_case")]` on [`NodeKind`].
+    /// Single source of truth for the node-type string a summary or catalog
+    /// emits. The match is exhaustive on purpose: adding a [`NodeKind`]
+    /// variant is a compile error here until its tag is decided, so a derived
+    /// summary can never silently mislabel a new kind.
+    pub fn type_str(&self) -> &'static str {
+        match self {
+            NodeKind::Start => "start",
+            NodeKind::AgentTask { .. } => "agent_task",
+            NodeKind::Script { .. } => "script",
+            NodeKind::Prompt { .. } => "prompt",
+            NodeKind::Condition { .. } => "condition",
+            NodeKind::HumanReview { .. } => "human_review",
+            NodeKind::Wait { .. } => "wait",
+            NodeKind::Finish { .. } => "finish",
+            NodeKind::Playbook { .. } => "playbook",
         }
     }
 }

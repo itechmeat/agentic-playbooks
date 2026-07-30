@@ -24,3 +24,23 @@ The measured delivery contract above is scoped twice over: per host and per MCP 
 The canonical text lives in `crates/apb-cli/assets/playbook-instructions.md` and is what init writes. For a host without `apb init`, or for an agent's global config, paste that file's content verbatim; do not fork the wording, so there is a single text to keep current.
 
 The block intentionally duplicates the proactive duties from tier 0 and nothing else: the catalog check before acting, the offer-to-save after, the semantic check against `suppressed_suggestions` before offering, and how a decline is recorded with `suggestion_dismiss` (kind soft by default, kind hard only for an explicit never-again). Run policy, gates and authoring rules stay in the server instructions, so the memory-file section does not go stale when those evolve.
+
+## Node output and host Stop hooks (`outputs.extract`)
+
+By default the engine persists an `agent_task` node's output as the agent's final message with the trailing yaml report block stripped. On the acp / stream-json transport (claude-code) the final message is the terminal `result` event, and that is the LAST thing the agent said. A host that runs a Stop hook or guardrail (for example an Open Second Brain Stop hook) can inject extra assistant turns AFTER the work is finished, so the final message becomes hook bookkeeping like "Nothing to log." instead of the work product. With last-message-wins output that bookkeeping becomes the node output, and everything downstream that reads it - `{{nodes.X.output}}` templating, `output_match` edge conditions, and run reports - gets the wrong text.
+
+The `outputs.extract` contract makes the persisted output the work product regardless of trailing host turns. Set `outputs.extract: <marker>` on the node and have the node prompt instruct the agent to wrap its final work product in `<marker>...</marker>` (the marker value is a tag name, for example `node_output`, so the agent emits `<node_output>...</node_output>`). The engine then takes the content of the LAST `<marker>...</marker>` block the agent emitted anywhere in its turns as the node output. On the stream transport it scans the assistant prose across all turns first and falls back to the terminal result text; on the headless transport it scans the whole process stdout. When a marker match is used it overrides only the `output` field; node status, the one-line summary, session capture, and interactive question handling still come from the report block exactly as before.
+
+The contract is opt-in: a node without `outputs.extract` keeps the existing last-message-with-report-block-stripped behavior byte-for-byte, and if the marker is set but no `<marker>...</marker>` block is found the engine falls back to that same default. The field is honored only on the `outputs` of `agent_task` nodes.
+
+Example node:
+
+```yaml
+- id: summarize
+  type: agent_task
+  prompt: |
+    Summarize the changes. Wrap ONLY the final summary you want persisted in
+    <node_output> and </node_output> tags, and put nothing else inside them.
+  outputs:
+    extract: node_output
+```

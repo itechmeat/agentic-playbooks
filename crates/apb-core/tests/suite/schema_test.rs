@@ -78,3 +78,59 @@ fn edge_max_traversals_round_trips_and_omits_when_absent() {
     let json = serde_json::to_value(&playbook).unwrap();
     assert!(json["edges"][1].get("max_traversals").is_none());
 }
+
+const EXTRACT_WF: &str = r#"schema: 2
+id: extract
+name: Extract
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - id: work
+    type: agent_task
+    prompt: "do it and wrap the result in <node_output>...</node_output>"
+    outputs:
+      extract: node_output
+  - { id: plain, type: agent_task, prompt: "no contract" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: plain }
+  - { from: plain, to: done }
+"#;
+
+#[test]
+fn outputs_extract_parses_and_round_trips_and_omits_when_absent() {
+    let playbook = Playbook::from_yaml(EXTRACT_WF).unwrap();
+    let work = playbook.node("work").unwrap();
+    assert_eq!(
+        work.outputs.as_ref().and_then(|o| o.extract.as_deref()),
+        Some("node_output")
+    );
+    // A node without the contract carries no extract marker.
+    let plain = playbook.node("plain").unwrap();
+    assert!(
+        plain
+            .outputs
+            .as_ref()
+            .and_then(|o| o.extract.as_deref())
+            .is_none()
+    );
+
+    // Round-trip: the marker survives serialization and is omitted when absent
+    // (skip_serializing_if), so existing playbooks stay byte-identical.
+    let yaml = serde_yaml_ng::to_string(&playbook).unwrap();
+    assert!(
+        yaml.contains("extract: node_output"),
+        "set value must round-trip"
+    );
+    let reparsed = Playbook::from_yaml(&yaml).unwrap();
+    assert_eq!(
+        reparsed
+            .node("work")
+            .unwrap()
+            .outputs
+            .as_ref()
+            .and_then(|o| o.extract.as_deref()),
+        Some("node_output")
+    );
+}

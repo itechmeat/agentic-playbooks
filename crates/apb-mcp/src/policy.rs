@@ -371,16 +371,44 @@ fn check_connectors(
         }
         connectors.insert(name.clone(), digest);
 
-        // Zero-account connector (finding 11 of issue #42): an empty
-        // `expected_connector_accounts` for a bound connector passes the gate
-        // silently today and every node bound to it then fails at call time
-        // (nothing to call). Surface it as a consent-time warning rather than a
-        // hard refusal - a missing account is a configuration gap, not the
-        // secret-egress problem the connector/account trust gate guards.
+        // Zero-account connector (finding 11 of issue #42; enriched by finding 1
+        // of issue #56): an empty `expected_connector_accounts` for a bound
+        // connector passes the gate silently today and every node bound to it
+        // then fails at call time (nothing to call). Surface it as a
+        // consent-time warning rather than a hard refusal - a missing account
+        // is a configuration gap, not the secret-egress problem the
+        // connector/account trust gate guards. Name the binding node ids and
+        // the specific functions those nodes call so a supervisor can see
+        // exactly what would fail.
         if resolved.accounts.is_empty() {
-            warnings.push(format!(
-                "connector `{name}` is bound but has no configured accounts; nodes that call it will fail until an account is added"
-            ));
+            let mut node_ids: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            let mut functions: std::collections::BTreeSet<String> =
+                std::collections::BTreeSet::new();
+            for (node_id, grants) in &resolution.grants {
+                for grant in grants {
+                    if grant.connector == *name {
+                        node_ids.insert(node_id.clone());
+                        for f in &grant.functions {
+                            functions.insert(f.clone());
+                        }
+                    }
+                }
+            }
+            if node_ids.is_empty() {
+                // Defensive fallback: a bound connector should always have at
+                // least one grant, but prefer the connector-only wording over
+                // empty brackets if resolution and grants somehow diverge.
+                warnings.push(format!(
+                    "connector `{name}` is bound but has no configured accounts; nodes that call it will fail until an account is added"
+                ));
+            } else {
+                let nodes = node_ids.into_iter().collect::<Vec<_>>().join(", ");
+                let funcs = functions.into_iter().collect::<Vec<_>>().join(", ");
+                warnings.push(format!(
+                    "connector `{name}` is bound but has no configured accounts; nodes [{nodes}] call functions [{funcs}] and will fail until an account is added"
+                ));
+            }
         }
 
         for account in &resolved.accounts {

@@ -33,7 +33,7 @@ Reads (read-only):
 | `playbook_catalog` | Compact structural catalog (project + global scope): trigger, effects, trust, shadowing; `catalog_revision` for cheap repeat calls |
 | `projects_list` | User's workspace registry: id, name, path, state |
 | `playbook_howto` | Tier 2: authoring detail (pull only when creating/reworking) |
-| `playbook_get` | Playbook definition by id and (optional) version |
+| `playbook_get` | Playbook definition by id and (optional) version; `detail` selects `summary` (default: interface only, no node prompt bodies) or `full` (complete authoring payload) |
 | `playbook_validate` | Validate a playbook, list of issues |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing) |
 | `runs_list` | List of runs |
@@ -143,6 +143,10 @@ It is its own capability because it is strictly larger than a retry, so a policy
 can grant `retry` without granting `rebind`. The usual sequence is
 `supervisor_rebind_profile` then `supervisor_node_retry`: the next attempt picks
 up the new profile.
+
+### Instruction source precedence
+
+An `agent_task` (and finish-with-prompt) attempt assembles instructions from three sources: the node template (`prompt` in the playbook), the run-level `instruction`, and applied supervisor notes from `supervisor_context_append`. The engine appends the run instruction and the supervisor notes to the rendered template as explicit trailing sections on every new attempt, so both reach the executor even when the template references neither `{{run.context}}` nor `{{run.instruction}}`; the run instruction lands in its own `## run instruction` section and the notes in a trailing supervisor notes block. When the template does reference `{{run.context}}`, the instruction and any notes also appear inside that context header, and the duplication is idempotent and intentional. On conflict the engine frames the higher sources as overrides: supervisor notes override the run instruction, and the run instruction overrides the node template's boilerplate. The notes block header and a short trailing `## instruction precedence` section state this order explicitly; neither re-embeds the full instruction text. When both the run instruction is empty and no notes are applied, the prompt is left byte-unchanged (no spurious framing).
 
 ## Asynchronous run model
 

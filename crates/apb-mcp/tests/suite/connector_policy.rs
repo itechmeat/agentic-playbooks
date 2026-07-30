@@ -561,3 +561,76 @@ fn zero_account_connector_warns_but_permits() {
         "zero configured accounts means an empty account permit map"
     );
 }
+
+/// Multi-node zero-account playbook: two agent nodes bind the same connector
+/// with distinct function allowlists so the warning must name both node ids
+/// and the union of functions (sorted, deduped).
+fn zero_account_named_yaml() -> &'static str {
+    r#"schema: 2
+id: conn-zero-named
+name: conn-zero-named
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - id: lock_scope
+    type: agent_task
+    prompt: hi
+    connectors: [{ name: mock-tracker, functions: [list_items] }]
+  - id: pr
+    type: agent_task
+    prompt: hi
+    connectors:
+      - { name: mock-tracker, functions: [create_item, list_items] }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: lock_scope }
+  - { from: lock_scope, to: pr }
+  - { from: pr, to: f }
+"#
+}
+
+const ZERO_NAMED_PB_ID: &str = "conn-zero-named";
+
+fn zero_named_wref() -> PlaybookRef {
+    PlaybookRef {
+        origin: Origin::Project { workspace_id: None },
+        id: ZERO_NAMED_PB_ID.into(),
+        version: None,
+    }
+}
+
+/// Finding 1 of issue #56: the zero-account warning must name the binding
+/// node id(s) and the specific connector function(s) those nodes call, so a
+/// supervisor knows exactly what would fail (not only the connector name).
+#[test]
+fn zero_account_warning_names_binding_nodes_and_functions() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _cfg = set_var("APB_CONFIG_DIR", &cfg.path().to_string_lossy());
+    init_project(root.path()).unwrap();
+    write_fixture_connector(cfg.path());
+    write_pb_named(root.path(), ZERO_NAMED_PB_ID, zero_account_named_yaml());
+    approve_named(ZERO_NAMED_PB_ID, zero_account_named_yaml());
+    approve_connector();
+
+    let permit = check_run(root.path(), &zero_named_wref(), false, false)
+        .expect("a zero-account connector still permits (warning, not hard refusal)");
+
+    let expected = "connector `mock-tracker` is bound but has no configured accounts; \
+nodes [lock_scope, pr] call functions [create_item, list_items] and will fail until an account is added";
+    assert!(
+        permit.warnings.iter().any(|w| w == expected),
+        "warning must name binding nodes and functions (sorted); got: {:?}",
+        permit.warnings
+    );
+    // Still a warning, not silence and not a hard error: gate permitted.
+    assert!(
+        permit.connectors.contains_key(CONNECTOR_NAME),
+        "connector remains pinned on the permit"
+    );
+    assert!(
+        permit.connector_accounts.is_empty(),
+        "zero configured accounts means an empty account permit map"
+    );
+}
