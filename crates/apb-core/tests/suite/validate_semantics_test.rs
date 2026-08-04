@@ -173,6 +173,23 @@ fn v13_template_references_unknown_node() {
 }
 
 #[test]
+fn v13_accepts_nodes_rejected_output_reference() {
+    // `nodes.<id>.rejected_output` is a real downstream template variable: the
+    // engine folds a success_check-rejected report into it (context.rs resolves
+    // the ref, state.rs folds it from AttemptFinished). The save-time validator
+    // must accept it exactly like `.output` / `.report`, otherwise the feature
+    // is unreachable because every playbook that references it fails at save.
+    let good = VALID.replace(
+        "{{nodes.lint.output}}",
+        "{{nodes.lint.output}} {{nodes.lint.rejected_output}}",
+    );
+    assert!(
+        !error_codes(&good).contains(&"V13"),
+        "nodes.<id>.rejected_output must resolve at save time"
+    );
+}
+
+#[test]
 fn v13_message_includes_variable_and_known_namespaces() {
     let bad = VALID.replace("{{params.task}}", "{{outputs.plan}}");
     let playbook = Playbook::from_yaml(&bad).unwrap();
@@ -190,7 +207,8 @@ fn v13_message_includes_variable_and_known_namespaces() {
     assert!(
         issue.message.contains(
             "known namespaces: params.*, nodes.<id>.output, nodes.<id>.report, \
-             nodes.<id>.review_note, run.instruction, run.context, run.hooks.*"
+             nodes.<id>.review_note, nodes.<id>.rejected_output, run.instruction, \
+             run.context, run.hooks.*"
         ),
         "message must carry the exact known-namespaces suffix: {}",
         issue.message
