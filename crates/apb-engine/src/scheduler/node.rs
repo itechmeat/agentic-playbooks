@@ -538,6 +538,13 @@ pub(crate) fn execute_node(
                     let status_dir = run_dir.join("agent-status");
                     std::fs::create_dir_all(&status_dir)?;
                     let status_file = status_dir.join(format!("{node_id}-{attempt}.json"));
+                    // Stale status-file removal (issue #70 item 3): a resume or
+                    // continue_from re-run can restart the attempt counter, so a
+                    // status file from a PRIOR execution may still sit at this
+                    // attempt's path. Drop it before spawning (ok-ignored: a missing
+                    // file is the normal case) so `read_status_file` after the run
+                    // can only ever adopt a file THIS attempt actually wrote.
+                    let _ = std::fs::remove_file(&status_file);
                     let task = AgentTask {
                         prompt: &text,
                         model: &step.model,
@@ -555,6 +562,9 @@ pub(crate) fn execute_node(
                         grant_autonomy,
                         connector_policy: &connector_policy,
                         interactive: *interactive,
+                        // Ordinary agent_task attempts carry the spec 6.2 report
+                        // contract so the agent's self-assessed status routes the node.
+                        report_contract: true,
                         node: node_id,
                         agent: &step.agent,
                         // Node-output contract (Finding 2 of issue #56): honor
@@ -1057,7 +1067,11 @@ pub(crate) fn execute_finish_answer(
     // append-only log even after the compaction that repeated resume +
     // patch-migration cycles trigger. See `build_terminal_context`.
     let events = read_all(run_dir)?;
-    let context = build_terminal_context(&events, cfg.instruction.as_deref());
+    // Issue #70 item 1: the terminal composer must see the run instruction ONLY
+    // as quoted reference context (attached below by `assemble_finish_answer_prompt`),
+    // never as a `## run instruction` directive header. So the auto context here
+    // carries the completed nodes' recorded output but NOT the instruction header.
+    let context = build_terminal_context(&events, None);
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -1072,10 +1086,15 @@ pub(crate) fn execute_finish_answer(
         &hooks,
         &context,
     );
-    // Finish-with-prompt is an agent attempt: same trailing assembly as
-    // agent_task - run instruction, supervisor notes, precedence frame (issue
-    // #45 finding 2, issue #56 finding 4).
-    let text = crate::context::assemble_agent_prompt(&text, cfg.instruction.as_deref(), &events);
+    // Finish-with-prompt scopes its composer prompt (issue #70 item 1): the run
+    // instruction rides along ONLY as quoted reference context and the composer is
+    // told its sole deliverable is a human-readable closing message. Unlike an
+    // ordinary agent_task it gets no precedence frame (which would make it read
+    // the instruction as an overriding order) and, paired with `report_contract:
+    // false` on its task below, no status-verdict protocol. Supervisor notes are
+    // still delivered as steering.
+    let text =
+        crate::context::assemble_finish_answer_prompt(&text, cfg.instruction.as_deref(), &events);
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)
@@ -1161,6 +1180,10 @@ pub(crate) fn execute_finish_answer(
                 // A finish-answer node is never interactive: it composes the
                 // run's terminal answer, it does not ask the user questions.
                 interactive: false,
+                // Issue #70 item 1: the composer's whole reply IS the closing
+                // message, so it gets no status-verdict protocol. Its scoped prompt
+                // (assemble_finish_answer_prompt) already states the deliverable.
+                report_contract: false,
                 node: node_id,
                 agent: &ri.agent_id,
                 // Finish-answer composition uses today's last-message output.
@@ -1764,6 +1787,10 @@ pub(crate) fn maybe_compact_context(
         connector_policy: &connector_policy,
         // Internal summarizer: not a playbook node, never interactive.
         interactive: false,
+        // Preserve the historical report-contract posture for the summarizer; the
+        // report block is harmless (interpret_report strips it) and this keeps its
+        // behavior byte-identical.
+        report_contract: true,
         node: "__context_compact",
         agent: "claude-code",
         // Internal summarizer keeps today's last-message output.

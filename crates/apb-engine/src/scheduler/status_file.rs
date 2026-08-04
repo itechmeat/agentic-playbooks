@@ -25,7 +25,16 @@ pub(crate) const STATUS_FILE_NOTE: &str = concat!(
     "{\"status\": \"success\"|\"failure\", \"outputs\": {}} where outputs is an object ",
     "of the values this step should expose to later steps. The engine reads that file ",
     "first to decide this step's status and outputs, and falls back to your textual ",
-    "report when the file is absent or invalid.",
+    "report when the file is absent or invalid. ",
+    // Issue #70 item 2: only the FINAL result is captured. If a turn ends on an
+    // interim progress note (for example while waiting on a background poll),
+    // that note is what later steps receive. The status-file outputs channel is
+    // the durable fix.
+    "Only your FINAL result is stored: whatever you leave in the status-file outputs ",
+    "(or, as a fallback, your last textual reply) is exactly what later steps receive, ",
+    "so it must be the completed result and never a mid-work progress note. If you resume ",
+    "after a background wake or long wait, overwrite the status file with the final result ",
+    "before your turn ends.",
 );
 
 /// The status-file prompt note for a node, or an empty string when the node has
@@ -143,5 +152,25 @@ mod tests {
     fn note_gated_on_success_check() {
         assert!(status_file_note(true).contains("APB_STATUS_FILE"));
         assert_eq!(status_file_note(false), "");
+    }
+
+    // Issue #70 item 2: the contract text must make explicit that only the FINAL
+    // result is stored, so an agent cannot end a turn on a mid-work progress note
+    // and have that placeholder become the node's durable output.
+    #[test]
+    fn note_states_final_output_contract() {
+        let note = STATUS_FILE_NOTE;
+        assert!(
+            note.contains("FINAL result is stored"),
+            "the note must state only the final result is stored: {note}"
+        );
+        assert!(
+            note.contains("never a mid-work progress note"),
+            "the note must warn against storing an interim progress note: {note}"
+        );
+        assert!(
+            note.contains("overwrite the status file with the final result"),
+            "the note must tell the agent to overwrite with the final result after a wake: {note}"
+        );
     }
 }
