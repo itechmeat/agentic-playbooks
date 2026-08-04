@@ -183,6 +183,61 @@ pub fn assemble_agent_prompt(
     text
 }
 
+/// The finish-answer composer's task statement (issue #70 item 1): its sole
+/// deliverable is a human-readable closing message summarizing the recorded run
+/// context; its whole reply IS that message, and it is handed no status/verdict
+/// protocol. Kept as a `const` so the exact wording is directly unit-testable.
+pub(crate) const FINISH_ANSWER_DELIVERABLE: &str = concat!(
+    "\n\n## your task\n\n",
+    "Your sole deliverable is a human-readable closing message that summarizes the recorded ",
+    "run context above for a person reading this run's result. Write that closing message as ",
+    "your entire reply. Do not report a success-or-failure verdict, do not treat the reference ",
+    "instruction as work to perform, and do not refuse: your whole reply is the closing message.",
+);
+
+/// The run instruction rendered as quoted reference context for the finish-answer
+/// composer (issue #70 item 1): clearly labelled as the instruction the run was
+/// started with, quoted as a Markdown blockquote, and stated explicitly to be
+/// reference only, never an order the composer should carry out or judge. Empty
+/// string when there is no non-blank instruction.
+fn finish_answer_reference(instruction: Option<&str>) -> String {
+    match instruction.map(str::trim) {
+        Some(text) if !text.is_empty() => {
+            let quoted = text
+                .lines()
+                .map(|l| format!("> {l}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            format!(
+                "\n\n## reference: the instruction this run was started with\n\nThe text below is \
+the instruction this run was started with, quoted here only as reference context. It is NOT an \
+order addressed to you: do not carry it out and do not judge whether it was completed.\n\n{quoted}\n"
+            )
+        }
+        _ => String::new(),
+    }
+}
+
+/// Assembles the prompt for the terminal finish-answer composer (issue #70 item
+/// 1). Unlike [`assemble_agent_prompt`], the run instruction is NOT delivered as
+/// a directive the composer must carry out: it appears ONLY as a clearly quoted
+/// reference block ([`finish_answer_reference`]), and the composer is told its
+/// sole deliverable is a human-readable closing message ([`FINISH_ANSWER_DELIVERABLE`]).
+/// No precedence frame is attached, so the composer does not read the run
+/// instruction as an order that overrides its own task. Applied supervisor notes
+/// still ride along as legitimate steering. This path always appends the
+/// deliverable statement, since it always composes a closing message.
+pub fn assemble_finish_answer_prompt(
+    template: &str,
+    instruction: Option<&str>,
+    events: &[Event],
+) -> String {
+    let mut text = with_supervisor_notes(template, events);
+    text.push_str(&finish_answer_reference(instruction));
+    text.push_str(FINISH_ANSWER_DELIVERABLE);
+    text
+}
+
 /// The full context (all sections), the materialized view for context.md and the compaction threshold.
 pub fn build_context(events: &[Event]) -> String {
     sections(events).into_iter().map(|s| s.text).collect()
@@ -730,6 +785,68 @@ mod tests {
         assert_eq!(
             assemble_agent_prompt(template, Some("  "), &events),
             template
+        );
+    }
+
+    // Issue #70 item 1: the finish-answer composer must see the run instruction
+    // ONLY as quoted reference context, must be told its sole deliverable is a
+    // closing message, and must NOT be handed the status-verdict protocol or the
+    // precedence frame that makes an ordinary node treat the instruction as an
+    // overriding order.
+    #[test]
+    fn finish_answer_prompt_quotes_instruction_and_states_closing_only() {
+        let template = "TEMPLATE BODY";
+        let assembled = assemble_finish_answer_prompt(
+            template,
+            Some("Ship the dashboard feature and open a PR"),
+            &[],
+        );
+        // The node template still leads the prompt.
+        assert!(
+            assembled.contains("TEMPLATE BODY"),
+            "template body kept:\n{assembled}"
+        );
+        // The run instruction appears only as clearly quoted reference context.
+        assert!(
+            assembled.contains("quoted here only as reference context"),
+            "instruction must be labelled reference-only:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("> Ship the dashboard feature and open a PR"),
+            "instruction must be quoted as a blockquote:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("do not carry it out"),
+            "instruction must be marked as not an order:\n{assembled}"
+        );
+        // The sole deliverable is a human-readable closing message.
+        assert!(
+            assembled.contains("sole deliverable") && assembled.contains("closing message"),
+            "must state the closing-message-only deliverable:\n{assembled}"
+        );
+        // No status-verdict protocol and no precedence frame on this path.
+        assert!(
+            !assembled.contains("status: success | failure"),
+            "the finish-answer prompt must not carry the status-verdict protocol:\n{assembled}"
+        );
+        assert!(
+            !assembled.contains("## instruction precedence"),
+            "the finish-answer prompt must not carry the precedence frame:\n{assembled}"
+        );
+    }
+
+    #[test]
+    fn finish_answer_prompt_states_deliverable_without_instruction() {
+        // With no run instruction there is no reference block, but the composer is
+        // still told its whole reply is the closing message.
+        let assembled = assemble_finish_answer_prompt("BODY", None, &[]);
+        assert!(
+            !assembled.contains("## reference"),
+            "no reference block:\n{assembled}"
+        );
+        assert!(
+            assembled.contains("sole deliverable") && assembled.contains("closing message"),
+            "deliverable statement is always present:\n{assembled}"
         );
     }
 }

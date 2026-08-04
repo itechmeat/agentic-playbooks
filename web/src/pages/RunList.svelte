@@ -1,10 +1,12 @@
 <script lang="ts">
   import { fetchRuns } from '../lib/api'
+  import { filterByProject, projectFilter } from '../lib/projectfilter'
   import { groupRunsByParent } from '../lib/runlist'
   import { subscribeChanges } from '../lib/ws'
   import type { RunSummary } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
+  import ProjectFilter from '$lib/components/ProjectFilter.svelte'
   import { Badge } from '$lib/components/ui/badge'
   import RunProgress from '$lib/RunProgress.svelte'
   import * as Table from '$lib/components/ui/table'
@@ -16,6 +18,8 @@
 
   let items = $state<RunSummary[]>([])
   let loaded = $state(false)
+
+  const filtered = $derived(filterByProject(items, $projectFilter))
 
   async function load() {
     try {
@@ -43,11 +47,12 @@
 
 <PageScroll>
   <div class="mx-auto w-full max-w-4xl px-4 py-6">
+    <ProjectFilter {items} />
     {#if !loaded}
       <div class="flex flex-col gap-2">
         {#each Array(4) as _, i (i)}<Skeleton class="h-10 w-full" />{/each}
       </div>
-    {:else if items.length === 0}
+    {:else if filtered.length === 0}
       <Empty.Root class="border border-dashed">
         <Empty.Header>
           <Empty.Media variant="icon"><PlayCircle /></Empty.Media>
@@ -68,7 +73,7 @@
             </Table.Row>
           </Table.Header>
           <Table.Body>
-            {#each items as r (`${r.workspace_id}/${r.run_id}`)}
+            {#each filtered as r (`${r.workspace_id}/${r.run_id}`)}
               <Table.Row>
                 <Table.Cell class="font-mono text-xs">
                   <span class={r.parent_run ? 'pl-4' : ''}>

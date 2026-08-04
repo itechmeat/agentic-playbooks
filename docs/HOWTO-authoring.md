@@ -18,6 +18,18 @@ A playbook is a YAML document with these top-level fields:
 - `trigger`, `requires`, `effects` (see below)
 - `nodes` (list) and `edges` (list)
 
+## Visual editor and graph check
+
+The dashboard renders a playbook as a top-to-bottom graph, and the canvas is
+the fastest way to see whether a multi-output node actually reads the way the
+edge declaration intended. After wiring or editing a node with several exits,
+open the playbook in the visual editor and confirm the fan-out branches run
+left-to-right in declaration order and do not cross. When `agent-browser` is
+installed in the workspace, prefer driving that check through it: load the
+graph page and read the rendered branches back, the way a human reviewer
+would. This is advisory only, no code path depends on `agent-browser`; a
+plain manual look is equally valid.
+
 ## Executor binding: profiles
 
 An `agent_task` node binds its executor only through a profile. A profile
@@ -105,6 +117,13 @@ existing marker and text parsing when the file is absent, unreadable, or
 invalid. The prompt builder appends a note describing this contract only when
 the node has a `success_check`; nodes without one keep the report-only
 contract.
+
+When the status file supplies a non-empty `outputs` object, that object
+replaces the node output before the `success_check` runs, so a `marker` check
+then looks for its marker inside the `outputs` JSON rather than in the agent's
+textual report. Put the completion marker in `outputs` when you write one, or
+omit `outputs` and keep the marker in the reply text, so the check can still
+find it.
 
 ### Warning: premature success in long-running orchestrator nodes
 

@@ -59,6 +59,29 @@ edges:
   - { from: w, to: no, fallback: true }
 "#;
 
+// Two linear agent_task nodes: `a` runs first and plants a stale status file at
+// `w`'s attempt-1 path (as a prior execution's leftover would appear on a
+// resume/continue_from re-run); `w` then writes no status file of its own.
+const STALE_PLAYBOOK: &str = r#"
+schema: 1
+id: sfstale
+name: StatusFileStale
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: "a" }
+  - { id: w, type: agent_task, prompt: "w" }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: a }
+  - { from: a, to: w }
+  - { from: w, to: ok, condition: { type: node_status, node: w, equals: success } }
+  - { from: w, to: no, fallback: true }
+"#;
+
 fn seed(root: &Path, id: &str, body: &str) {
     init_project(root).unwrap();
     let dir = root.join(".apb/playbooks").join(id).join("1.0.0");
@@ -161,6 +184,53 @@ fn status_file_outputs_flow_downstream() {
     assert!(
         !out.contains("ignore me"),
         "the textual reply must not survive when the status file carries outputs, got: {out}"
+    );
+}
+
+// 4. Stale status-file removal (issue #70 item 3). Node `a` plants a stale
+//    `w-1.json` (as a prior execution would leave on a resume/continue_from
+//    re-run), then node `w` writes NO status file. The engine must drop the
+//    stale file before spawning `w`, so `read_status_file` sees nothing and
+//    `w`'s textual reply decides the node - the stale outputs must NOT leak into
+//    the node output.
+#[test]
+fn stale_status_file_is_removed_before_spawn() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sfstale", STALE_PLAYBOOK);
+    // `a` plants a stale success+outputs file at `w`'s attempt-1 path; `w` writes
+    // no status file and emits only a textual reply. Branch on the node id that
+    // the engine encodes into the $APB_STATUS_FILE basename.
+    let script = "#!/bin/sh\nd=$(dirname \"$APB_STATUS_FILE\")\n\
+        case \"$APB_STATUS_FILE\" in\n\
+        *a-1.json) printf '%s' '{\"status\":\"success\",\"outputs\":{\"stale\":\"leaked\"}}' \
+        > \"$d/w-1.json\"; printf 'a done\\n' ;;\n\
+        *) printf 'the real w output\\n' ;;\n\
+        esac\n";
+    let prog = stub_agent(dir.path(), script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "sfstale", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "w's textual reply must decide the node, not the stale status file"
+    );
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    let state = RunState::fold(&events);
+    let out = state.outputs.get("w").cloned().unwrap_or_default();
+    assert!(
+        out.contains("the real w output"),
+        "w's output must be its own textual reply, got: {out}"
+    );
+    assert!(
+        !out.contains("leaked"),
+        "the stale status-file outputs must not be adopted as w's output, got: {out}"
     );
 }
 

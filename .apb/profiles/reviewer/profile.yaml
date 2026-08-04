@@ -1,5 +1,6 @@
 name: reviewer
 description: Adversarial code reviewer for apb; judges full branch diff by SOLID/KISS/DRY and verifies gates.
+hermetic: true
 executor:
   agent: claude
   model: claude-opus-4-8

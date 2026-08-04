@@ -38,6 +38,7 @@ fn task<'a>(
         grant_autonomy: false,
         connector_policy: policy,
         interactive,
+        report_contract: true,
         node,
         agent: "claude",
         extract: None,

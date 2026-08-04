@@ -297,6 +297,14 @@ pub struct AgentTask<'a> {
     /// non-interactive node the marker line is ordinary output. Internal,
     /// side-effect-free calls (context compaction, finish answers) set `false`.
     pub interactive: bool,
+    /// Whether the spec 6.2 report contract (the trailing "end your reply with a
+    /// status/summary yaml block" instruction) is appended to this attempt's
+    /// prompt (issue #70 item 1). `true` for ordinary agent_task attempts and the
+    /// internal summarizer, so their self-assessed status can drive node routing.
+    /// `false` for the terminal finish-answer composer, whose whole reply IS the
+    /// run's closing message: it must not be handed a success|failure verdict
+    /// protocol where refusing to implement counts as its deliverable.
+    pub report_contract: bool,
     /// The node id this attempt executes, used to name the node in a
     /// malformed-marker error. Internal calls pass an internal placeholder.
     pub node: &'a str,
@@ -838,6 +846,19 @@ fn with_report_instruction(prompt: &str) -> String {
     format!("{prompt}\n\n{REPORT_INSTRUCTION}")
 }
 
+/// The prompt actually delivered to the transport. Ordinary attempts carry the
+/// spec 6.2 report contract; an attempt that opts out (`report_contract: false`,
+/// the terminal finish-answer composer per issue #70 item 1) sends its prompt
+/// verbatim so the agent treats its whole reply as the deliverable rather than a
+/// status-bearing verdict.
+fn transport_prompt(task: &AgentTask) -> String {
+    if task.report_contract {
+        with_report_instruction(task.prompt)
+    } else {
+        task.prompt.to_string()
+    }
+}
+
 /// The three things the report contract (spec 6.2) yields from an agent's reply.
 #[derive(Debug)]
 struct ReportOutcome {
@@ -1080,7 +1101,7 @@ impl ClaudeAdapter {
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
-        let prompt = with_report_instruction(task.prompt);
+        let prompt = transport_prompt(task);
         let (mut argv, stdin_payload) = build_command(
             &self.spec,
             &prompt,
@@ -1280,7 +1301,7 @@ impl ClaudeAdapter {
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
-        let prompt = with_report_instruction(task.prompt);
+        let prompt = transport_prompt(task);
         // Base argv comes from the invocation form; claude-specific streaming
         // flags (stream-json) are layered on top. In the first iteration,
         // acp = claude.
@@ -1851,6 +1872,7 @@ mod tests {
             grant_autonomy: false,
             connector_policy: policy,
             interactive: false,
+            report_contract: true,
             node: "test",
             agent,
             extract: None,
@@ -2039,12 +2061,36 @@ mod tests {
             grant_autonomy: false,
             connector_policy: policy,
             interactive: false,
+            report_contract: true,
             node: "test",
             agent: "claude",
             extract,
             status_file: None,
             hermetic_settings: None,
         }
+    }
+
+    #[test]
+    fn transport_prompt_gates_report_contract() {
+        let policy = ConnectorEnvPolicy::default();
+        // With the report contract on, the spec 6.2 status/summary block is
+        // appended.
+        let mut t = stream_task(&policy, None);
+        t.prompt = "compose the closing message";
+        t.report_contract = true;
+        let on = transport_prompt(&t);
+        assert!(
+            on.contains("status: success | failure"),
+            "report_contract:true must append the status-verdict block, got:\n{on}"
+        );
+        // With it off (the finish-answer composer, issue #70 item 1), the prompt
+        // is delivered verbatim so the whole reply is the deliverable.
+        t.report_contract = false;
+        let off = transport_prompt(&t);
+        assert_eq!(
+            off, "compose the closing message",
+            "report_contract:false must not append the status-verdict block, got:\n{off}"
+        );
     }
 
     #[test]

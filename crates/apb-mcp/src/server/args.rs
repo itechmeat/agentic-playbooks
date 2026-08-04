@@ -413,6 +413,10 @@ pub struct ProfileWriteArgs {
     /// (optimistic concurrency). Absence means creating a new one.
     #[serde(default)]
     pub expected_digest: Option<String>,
+    /// When true, the executor launches with hermetic isolation (disables
+    /// user-scope plugins and hooks). Default false when absent.
+    #[serde(default)]
+    pub hermetic: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

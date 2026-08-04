@@ -148,6 +148,12 @@ pub(crate) struct ProfileWriteBody {
     soul_requirement: String,
     #[serde(default)]
     expected_digest: Option<String>,
+    /// Hermetic isolation flag. Absent (the current web editor cannot express
+    /// it) means "keep whatever the stored profile has" rather than force
+    /// `false`, so a web-initiated edit cannot silently strip an owner-set
+    /// hermetic profile.
+    #[serde(default)]
+    hermetic: Option<bool>,
 }
 
 #[derive(Deserialize)]
@@ -182,6 +188,20 @@ pub(crate) async fn write_profile(
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
+    // When the body omits `hermetic`, preserve the stored profile's flag (the
+    // web editor cannot yet express it); an explicit value in the body wins.
+    let hermetic = body.hermetic.unwrap_or_else(|| {
+        profile_tools::profile_get(&root, &body.name, &body.scope)
+            .ok()
+            .and_then(|v| {
+                v.get("profile_yaml")
+                    .and_then(|y| y.as_str())
+                    .map(str::to_string)
+            })
+            .and_then(|yaml| apb_core::profile::ProfileDoc::from_yaml(&yaml).ok())
+            .map(|doc| doc.hermetic)
+            .unwrap_or(false)
+    });
     let res = profile_tools::profile_write(
         &root,
         ProfileWrite {
@@ -201,6 +221,7 @@ pub(crate) async fn write_profile(
             },
             expected_digest: body.expected_digest,
             soul_requirement,
+            hermetic,
         },
     );
     match res {

@@ -1,5 +1,5 @@
 import dagre from '@dagrejs/dagre'
-import type { PlaybookDetail } from './types'
+import type { PlaybookDetail, WfLayout } from './types'
 
 export interface FlowNode {
   id: string
@@ -25,7 +25,6 @@ export interface FlowEdge {
 }
 
 type PlaybookModel = PlaybookDetail['playbook']
-type WfLayout = PlaybookDetail['layout']
 type PlaybookEdgeModel = PlaybookModel['edges'][number]
 
 const NODE_W = 200
@@ -222,20 +221,62 @@ export function failureEffect(playbook: PlaybookModel, nodeId: string): FailureE
   return stops ? { kind: 'stop' } : { kind: 'route', node: policy }
 }
 
+/**
+ * True only when the layout was explicitly arranged by hand. The marker is
+ * additive: layouts written before it existed parse as "auto", so existing
+ * call sites keep their behavior.
+ */
+export function isUserArranged(layout: WfLayout | null): boolean {
+  return !!layout?.userArranged
+}
+
+/**
+ * For each source node with several distinct successors, constrain dagre's
+ * order phase so the successors land left-to-right in the order the source's
+ * out-edges are declared (the order `nodeExits` numbers). dagre's balance
+ * phase otherwise flips tied siblings, which made a simple fan-out read
+ * right-to-left and the branch arrows cross (issue #68 item 2). Constraints
+ * only apply between distinct successors of the same source; dagre ignores
+ * a constraint whose endpoints land in different ranks.
+ */
+function fanoutConstraints(playbook: PlaybookModel): { left: string; right: string }[] {
+  const constraints: { left: string; right: string }[] = []
+  for (const node of playbook.nodes) {
+    const seen = new Set<string>()
+    const distinct: string[] = []
+    for (const e of playbook.edges) {
+      if (e.from !== node.id) continue
+      if (seen.has(e.to)) continue
+      seen.add(e.to)
+      distinct.push(e.to)
+    }
+    for (let i = 0; i < distinct.length - 1; i++) {
+      constraints.push({ left: distinct[i], right: distinct[i + 1] })
+    }
+  }
+  return constraints
+}
+
 export function toFlow(
   playbook: PlaybookModel,
-  layout: WfLayout,
+  layout: WfLayout | null,
   statuses?: Record<string, string>,
   cachedIds?: Set<string>,
+  forceAuto?: boolean,
 ): { nodes: FlowNode[]; edges: FlowEdge[] } {
+  // `forceAuto` is the topbar "Re-layout" button: it ignores any stored
+  // arrangement (manual or otherwise) and recomputes from scratch, so the
+  // result is auto again and can be persisted without the userArranged marker.
   const stored = new Map<string, { x: number; y: number }>()
-  for (const n of layout?.nodes ?? []) stored.set(n.id, { x: n.x, y: n.y })
+  if (!forceAuto) {
+    for (const n of layout?.nodes ?? []) stored.set(n.id, { x: n.x, y: n.y })
+  }
 
   const exits = new Map<string, NodeExits | null>(
     playbook.nodes.map((n) => [n.id, nodeExits(playbook, n.id)]),
   )
 
-  const needAuto = playbook.nodes.some((n) => !stored.has(n.id))
+  const needAuto = forceAuto || playbook.nodes.some((n) => !stored.has(n.id))
   const auto = new Map<string, { x: number; y: number }>()
   if (needAuto) {
     const g = new dagre.graphlib.Graph()
@@ -249,7 +290,8 @@ export function toFlow(
       g.setNode(n.id, { width: NODE_W, height: NODE_H + (exits.get(n.id) ? EXIT_ROW_H : 0) })
     }
     for (const e of playbook.edges) g.setEdge(e.from, e.to)
-    dagre.layout(g)
+    const constraints = fanoutConstraints(playbook)
+    dagre.layout(g, constraints.length ? { constraints } : {})
     for (const n of playbook.nodes) {
       const pos = g.node(n.id)
       auto.set(n.id, { x: pos.x - NODE_W / 2, y: pos.y - NODE_H / 2 })

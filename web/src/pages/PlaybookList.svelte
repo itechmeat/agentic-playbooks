@@ -1,10 +1,12 @@
 <script lang="ts">
   import { deletePlaybook, fetchPlaybook, fetchPlaybooks } from '../lib/api'
   import { storeDraftYaml, suggestDuplicateId } from '../lib/playbookdupe'
+  import { filterByProject, projectFilter } from '../lib/projectfilter'
   import { subscribeChanges } from '../lib/ws'
   import type { PlaybookSummary } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
+  import ProjectFilter from '$lib/components/ProjectFilter.svelte'
   import SuggestionsSection from '$lib/components/SuggestionsSection.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
@@ -25,11 +27,13 @@
   let target = $state<PlaybookSummary | null>(null)
   let confirmOpen = $state(false)
 
+  const filtered = $derived(filterByProject(items, $projectFilter))
+
   // Playbooks grouped by their owning project, so the global dashboard shows
   // affiliation instead of one flat mixed list.
   const groups = $derived.by(() => {
     const m = new Map<string, { key: string; project: string; items: PlaybookSummary[] }>()
-    for (const w of items) {
+    for (const w of filtered) {
       const k = w.workspace_id || '_'
       if (!m.has(k)) m.set(k, { key: k, project: w.project || 'this project', items: [] })
       m.get(k)!.items.push(w)
@@ -99,6 +103,7 @@
 <PageScroll>
   <div class="mx-auto w-full max-w-4xl px-4 py-6">
     <SuggestionsSection />
+    <ProjectFilter {items} />
     {#if !loaded}
       <div class="flex flex-col gap-3">
         {#each Array(3) as _, i (i)}<Skeleton class="h-24 w-full" />{/each}
