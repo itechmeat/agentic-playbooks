@@ -118,6 +118,13 @@ invalid. The prompt builder appends a note describing this contract only when
 the node has a `success_check`; nodes without one keep the report-only
 contract.
 
+When the status file supplies a non-empty `outputs` object, that object
+replaces the node output before the `success_check` runs, so a `marker` check
+then looks for its marker inside the `outputs` JSON rather than in the agent's
+textual report. Put the completion marker in `outputs` when you write one, or
+omit `outputs` and keep the marker in the reply text, so the check can still
+find it.
+
 ### Warning: premature success in long-running orchestrator nodes
 
 A single-process agent node that spawns background workers and is expected to
