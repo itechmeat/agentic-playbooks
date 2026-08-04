@@ -33,6 +33,13 @@ export interface PlaybookEdge {
 
 export interface LayoutNode { id: string; x: number; y: number }
 
+// `userArranged` is set by the editor once the user drags a node by hand. It
+// is optional everywhere it is parsed: absent means "auto-laid-out" and keeps
+// every existing call site backward compatible. The server stores and loads
+// the layout as an opaque value, so the field survives the round-trip with no
+// backend change.
+export interface WfLayout { nodes?: LayoutNode[]; userArranged?: boolean }
+
 export interface PlaybookDetail {
   id: string
   version: string
@@ -47,7 +54,7 @@ export interface PlaybookDetail {
     // playbook written before the policy existed) means `route`.
     defaults?: { on_failure?: string } | null
   }
-  layout: { nodes?: LayoutNode[] } | null
+  layout: WfLayout | null
   validation: { code: string; severity: string; message: string; node?: string | null }[]
   frozen: boolean
 }
@@ -162,7 +169,7 @@ export interface RunDetail {
   answer?: string | null
   params: Record<string, string>
   model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[] } | null
-  layout: { nodes?: LayoutNode[] } | null
+  layout: WfLayout | null
   hooks?: Record<string, string>
   events: WfEvent[]
   progress?: ProgressSummary | null
