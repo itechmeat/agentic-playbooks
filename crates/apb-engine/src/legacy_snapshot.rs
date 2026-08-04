@@ -235,6 +235,9 @@ fn manifest_profile_for(
         skills: Vec::new(),
         chain,
         ephemeral: false,
+        // Legacy schema-1 executors predate profiles, hence predate hermetic
+        // isolation: the flag is off on the legacy/ephemeral path.
+        hermetic: false,
     })
 }
 

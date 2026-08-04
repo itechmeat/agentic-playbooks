@@ -315,12 +315,14 @@ pub fn build_terminal_context(events: &[Event], instruction: Option<&str>) -> St
 }
 
 /// Manual scan for `{{ ... }}` without regex; substitutes known references, unknown ones -> "".
+#[allow(clippy::too_many_arguments)]
 pub fn render(
     text: &str,
     params: &BTreeMap<String, String>,
     instruction: Option<&str>,
     outputs: &BTreeMap<String, String>,
     reviews: &BTreeMap<String, ReviewDecision>,
+    rejected_outputs: &BTreeMap<String, String>,
     hooks: &BTreeMap<String, String>,
     context: &str,
 ) -> String {
@@ -337,6 +339,7 @@ pub fn render(
                 instruction,
                 outputs,
                 reviews,
+                rejected_outputs,
                 hooks,
                 context,
             ));
@@ -350,12 +353,14 @@ pub fn render(
     out
 }
 
+#[allow(clippy::too_many_arguments)]
 fn resolve(
     key: &str,
     params: &BTreeMap<String, String>,
     instruction: Option<&str>,
     outputs: &BTreeMap<String, String>,
     reviews: &BTreeMap<String, ReviewDecision>,
+    rejected_outputs: &BTreeMap<String, String>,
     hooks: &BTreeMap<String, String>,
     context: &str,
 ) -> String {
@@ -371,6 +376,9 @@ fn resolve(
         ["nodes", id, "review_note"] => {
             reviews.get(*id).map(|r| r.note.clone()).unwrap_or_default()
         }
+        // The agent report a success_check discarded (spec
+        // field-report-robustness): empty when the node was never rejected.
+        ["nodes", id, "rejected_output"] => rejected_outputs.get(*id).cloned().unwrap_or_default(),
         _ => String::new(),
     }
 }

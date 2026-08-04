@@ -43,6 +43,12 @@ pub struct ManifestProfile {
     /// bundle trust (the executor is ad-hoc, not part of the profile).
     #[serde(default)]
     pub ephemeral: bool,
+    /// The profile's `hermetic` flag (subtask S1), snapshotted so post-start
+    /// reads (retry, fallback, resume) use the run's value, not the live
+    /// profile. Old manifests written before this field parse as `false`
+    /// (serde default), mirroring `ephemeral`.
+    #[serde(default)]
+    pub hermetic: bool,
 }
 
 impl ManifestProfile {
@@ -218,5 +224,28 @@ mod tests {
         let legacy = "name: a\ndefault: false\nfields: {}\nenv: {}\ndigest: sha256:x\n";
         let parsed: ManifestAccount = serde_yaml_ng::from_str(legacy).unwrap();
         assert!(parsed.cmd.is_empty());
+    }
+
+    #[test]
+    fn manifest_profile_hermetic_defaults_false_and_roundtrips() {
+        let mp = ManifestProfile {
+            scope: "project".into(),
+            name: "architect".into(),
+            profile_digest: "sha256:a".into(),
+            bundle_digest: "sha256:b".into(),
+            soul: "role".into(),
+            soul_requirement: SoulRequirement::Any,
+            skills: Vec::new(),
+            chain: Vec::new(),
+            ephemeral: false,
+            hermetic: true,
+        };
+        let yaml = serde_yaml_ng::to_string(&mp).unwrap();
+        let back: ManifestProfile = serde_yaml_ng::from_str(&yaml).unwrap();
+        assert_eq!(back, mp);
+        // An older manifest without `hermetic` still parses (serde default).
+        let legacy = "scope: project\nname: architect\nprofile_digest: sha256:a\nbundle_digest: sha256:b\nsoul: role\nsoul_requirement: any\nskills: []\nchain: []\n";
+        let parsed: ManifestProfile = serde_yaml_ng::from_str(legacy).unwrap();
+        assert!(!parsed.hermetic);
     }
 }

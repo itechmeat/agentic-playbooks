@@ -46,3 +46,35 @@ fn list_runs_skips_unreadable_run_dir_but_keeps_good_ones() {
         "only the good run should survive, got: {runs:?}"
     );
 }
+
+/// A run whose pure fold is `Interrupted` (open attempt, no finish) but whose
+/// attempt pid is still live must list as `running`, not `interrupted`.
+/// Same driver-liveness overlay the doctor and `run_status` use.
+#[test]
+fn list_runs_reports_running_for_live_open_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+
+    let live_pid = std::process::id();
+    let events = format!(
+        r#"{{"seq":0,"ts":1000,"type":"run_started","playbook":"live-pb","version":"1.0.0"}}
+{{"seq":1,"ts":2000,"type":"node_started","node":"a","attempt":1}}
+{{"seq":2,"ts":3000,"type":"attempt_started","node":"a","attempt":1,"agent":"stub","pid":{live_pid}}}
+"#
+    );
+
+    let run_dir = dir.path().join(".apb/runs/live-1");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("events.jsonl"), events).unwrap();
+
+    let runs = list_runs(dir.path()).expect("list_runs must succeed");
+    let live = runs
+        .iter()
+        .find(|r| r.run_id == "live-1")
+        .expect("live-1 must be listed");
+    assert_eq!(
+        live.status, "running",
+        "open attempt with live pid must list as running, got: {live:?}"
+    );
+    assert_eq!(live.playbook, "live-pb");
+}

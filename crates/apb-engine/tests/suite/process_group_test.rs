@@ -75,6 +75,8 @@ fn agent_task<'a>(
         node: "test",
         agent: "claude",
         extract: None,
+        status_file: None,
+        hermetic_settings: None,
     }
 }
 

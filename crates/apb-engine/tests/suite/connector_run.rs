@@ -186,6 +186,8 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap();
 

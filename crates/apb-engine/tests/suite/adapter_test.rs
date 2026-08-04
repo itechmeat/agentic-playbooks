@@ -39,6 +39,8 @@ fn claude_adapter_success_via_stub() {
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap();
     assert_eq!(report.status, NodeStatus::Succeeded);
@@ -66,6 +68,8 @@ fn claude_adapter_nonzero_exit_is_process_exit() {
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::ProcessExit));
@@ -114,6 +118,8 @@ fn hermes_adapter_sends_z_flag_prefixed_soul_and_model_flag() {
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap();
     let argv: Vec<&str> = report

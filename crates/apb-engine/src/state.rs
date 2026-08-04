@@ -133,6 +133,13 @@ pub struct RunState {
     /// resume restores loop progress exactly because the counts come from the
     /// journal.
     pub edge_counts: BTreeMap<(String, String), u32>,
+    /// Per-node agent text discarded when a `success_check` rejected an
+    /// otherwise-succeeded attempt (spec field-report-robustness), folded from
+    /// `AttemptFinished.rejected_output`. Exposed to downstream templates as
+    /// `nodes.<id>.rejected_output`. A later rejected attempt overwrites an
+    /// earlier one; a node that later succeeds keeps its last rejected text
+    /// here (harmless - only a node that references the key reads it).
+    pub rejected_outputs: BTreeMap<String, String>,
     /// The most recent `RunError` folded from the journal, if any (issue #42
     /// finding 3). Set even when the run later succeeds via resume/patch past
     /// the failure - `run_status`/doctor only read it while `run_status` is
@@ -157,8 +164,15 @@ impl RunState {
                     s.attempts.insert(node.clone(), *attempt);
                     open.insert(node.clone());
                 }
-                EventPayload::AttemptFinished { node, .. } => {
+                EventPayload::AttemptFinished {
+                    node,
+                    rejected_output,
+                    ..
+                } => {
                     open.remove(node);
+                    if let Some(text) = rejected_output {
+                        s.rejected_outputs.insert(node.clone(), text.clone());
+                    }
                 }
                 EventPayload::NodeFinished {
                     node,

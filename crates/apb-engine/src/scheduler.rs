@@ -51,6 +51,7 @@ mod patch;
 mod prepare;
 mod rebind;
 mod resume;
+mod status_file;
 mod supervisor;
 
 pub(crate) use control_apply::{ControlScan, scan_control};

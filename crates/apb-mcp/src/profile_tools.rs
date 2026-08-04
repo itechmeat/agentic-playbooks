@@ -173,6 +173,9 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         },
         soul: soul_requirement,
         skills,
+        // The profile_write tool does not surface hermetic isolation yet; a
+        // profile author sets it directly in profile.yaml. Default off.
+        hermetic: false,
     };
     let yaml = serde_yaml_ng::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
 
