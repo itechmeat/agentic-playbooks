@@ -83,6 +83,55 @@ fn seed_playbook(root: &Path, id: &str, profile: &str) -> String {
 }
 
 #[test]
+fn profile_write_persists_hermetic_field() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _h, _c) = setup();
+
+    profile_tools::profile_write(
+        proj.path(),
+        profile_tools::ProfileWrite {
+            name: "herm".into(),
+            scope: "project".into(),
+            description: "desc".into(),
+            soul_md: "role".into(),
+            executor: exec(),
+            hermetic: true,
+            ..Default::default()
+        },
+    )
+    .expect("profile_write ok");
+    let yaml = fs::read_to_string(proj.path().join(".apb/profiles/herm/profile.yaml")).unwrap();
+    assert!(
+        yaml.contains("hermetic: true"),
+        "expected hermetic: true in written profile.yaml, got:\n{yaml}"
+    );
+    let doc = apb_core::profile::ProfileDoc::from_yaml(&yaml).unwrap();
+    assert!(doc.hermetic);
+
+    profile_tools::profile_write(
+        proj.path(),
+        profile_tools::ProfileWrite {
+            name: "plain".into(),
+            scope: "project".into(),
+            description: "desc".into(),
+            soul_md: "role".into(),
+            executor: exec(),
+            hermetic: false,
+            ..Default::default()
+        },
+    )
+    .expect("profile_write ok");
+    let yaml_plain =
+        fs::read_to_string(proj.path().join(".apb/profiles/plain/profile.yaml")).unwrap();
+    let doc_plain = apb_core::profile::ProfileDoc::from_yaml(&yaml_plain).unwrap();
+    assert!(
+        !doc_plain.hermetic,
+        "hermetic: false (or omitted) must parse back as false; yaml:\n{yaml_plain}"
+    );
+}
+
+#[test]
 fn write_create_then_conflict_on_double_create() {
     let _l = lock();
     let _g = EnvGuard;

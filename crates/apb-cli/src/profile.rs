@@ -143,6 +143,7 @@ pub(crate) fn profile_write_cmd(
             },
             expected_digest: args.expected_digest,
             soul_requirement,
+            hermetic: false,
         },
     )
 }
@@ -333,6 +334,7 @@ pub(crate) fn profile_edit_cmd(root: &Path, name: &str, scope: &str) -> ExitCode
             },
             expected_digest: Some(digest_before),
             soul_requirement: doc.soul,
+            hermetic: false,
         },
     );
     match res {

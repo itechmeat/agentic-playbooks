@@ -201,6 +201,7 @@ pub(crate) async fn write_profile(
             },
             expected_digest: body.expected_digest,
             soul_requirement,
+            hermetic: false,
         },
     );
     match res {

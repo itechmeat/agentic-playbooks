@@ -140,6 +140,9 @@ pub struct ProfileWrite {
     /// creates a new profile.
     pub expected_digest: Option<String>,
     pub soul_requirement: SoulRequirement,
+    /// When true, the executor launches with hermetic isolation (disables
+    /// user-scope plugins and hooks). Default false.
+    pub hermetic: bool,
 }
 
 /// Create/update a profile (CAS under a per-profile lock, spec 9.1).
@@ -153,6 +156,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         executor,
         expected_digest,
         soul_requirement,
+        hermetic,
     } = req;
     apb_core::profile::validate_profile_name(&name).map_err(ToolError::Engine)?;
     let scope_enum = parse_scope(&scope)?;
@@ -173,9 +177,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         },
         soul: soul_requirement,
         skills,
-        // The profile_write tool does not surface hermetic isolation yet; a
-        // profile author sets it directly in profile.yaml. Default off.
-        hermetic: false,
+        hermetic,
     };
     let yaml = serde_yaml_ng::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
 
