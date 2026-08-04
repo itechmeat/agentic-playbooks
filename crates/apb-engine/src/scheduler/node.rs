@@ -364,6 +364,15 @@ pub(crate) fn execute_node(
                 text = format!("{text}\n\n{}", marker_contract());
             }
 
+            // Status-file contract (subtask S2): a node with a success_check may
+            // hand its final verdict as JSON via $APB_STATUS_FILE, which the
+            // engine reads before parsing the textual report. Mentioned only when
+            // a success_check exists; a plain node keeps the report-only contract.
+            let status_note = super::status_file::status_file_note(node.success_check.is_some());
+            if !status_note.is_empty() {
+                text = format!("{text}\n\n{status_note}");
+            }
+
             // Connector env isolation (spec 4.3) for every attempt's agent spawn:
             // scrub inherited connector tokens and hand the agent the run-context
             // env that `apb connector call` reads.
@@ -501,6 +510,15 @@ pub(crate) fn execute_node(
                     let stream_log = run_dir
                         .join("agent-stream")
                         .join(format!("{node_id}-{attempt}.jsonl"));
+                    // Per-attempt status file (subtask S2): the agent MAY write
+                    // its final verdict here as JSON; the engine reads it before
+                    // parsing the textual report. Mirrors the agent-stream
+                    // naming. The directory is created once per attempt
+                    // (idempotent); this is set for EVERY attempt, independent of
+                    // any success_check.
+                    let status_dir = run_dir.join("agent-status");
+                    std::fs::create_dir_all(&status_dir)?;
+                    let status_file = status_dir.join(format!("{node_id}-{attempt}.json"));
                     let task = AgentTask {
                         prompt: &text,
                         model: &step.model,
@@ -525,6 +543,9 @@ pub(crate) fn execute_node(
                         // agent's marker-wrapped work product, robust to host
                         // Stop-hook / guardrail turns injected after the work.
                         extract: node.outputs.as_ref().and_then(|o| o.extract.as_deref()),
+                        // Handed to the agent as APB_STATUS_FILE; read back below
+                        // before the success_check gate.
+                        status_file: Some(status_file.clone()),
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -738,7 +759,7 @@ pub(crate) fn execute_node(
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
                     match outcome {
-                        Ok(report) => {
+                        Ok(mut report) => {
                             // Interactive suspension (spec 2026-07-20): the agent
                             // asked a question via the stdout marker instead of
                             // finishing. The attempt genuinely ran, so journal its
@@ -760,6 +781,22 @@ pub(crate) fn execute_node(
                                     question: q.question,
                                     options: q.options,
                                 });
+                            }
+                            // Status-file precedence (subtask S2): before the
+                            // success_check gate, prefer the agent's JSON verdict
+                            // in APB_STATUS_FILE when present and valid. It
+                            // overrides the parsed status and, when it carries a
+                            // non-empty outputs object, the node output; an absent
+                            // or invalid file leaves the textual report intact (the
+                            // fallback). The success_check gate below then runs on
+                            // the effective status/output, so a status-file success
+                            // that success_check rejects still consumes a retry and
+                            // records rejected_output (S3 behavior preserved).
+                            if let Some(sfr) = super::status_file::read_status_file(&status_file) {
+                                report.status = sfr.status;
+                                if let Some(out) = sfr.outputs {
+                                    report.output = out;
+                                }
                             }
                             if report.status == NodeStatus::Succeeded {
                                 // Empty-output anomaly (issue #42, finding 6): an
@@ -1106,6 +1143,8 @@ pub(crate) fn execute_finish_answer(
                 agent: &ri.agent_id,
                 // Finish-answer composition uses today's last-message output.
                 extract: None,
+                // Internal finish-answer composition: no status-file protocol.
+                status_file: None,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -1705,6 +1744,8 @@ pub(crate) fn maybe_compact_context(
         agent: "claude-code",
         // Internal summarizer keeps today's last-message output.
         extract: None,
+        // Internal summarizer: no status-file protocol.
+        status_file: None,
     };
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.

@@ -314,6 +314,13 @@ pub struct AgentTask<'a> {
     /// last-message-with-report-block-stripped behavior. Internal, compaction,
     /// and finish-answer calls always pass `None`.
     pub extract: Option<&'a str>,
+    /// Per-attempt status file (subtask S2). When `Some`, the engine hands the
+    /// agent its path via the `APB_STATUS_FILE` env var at spawn; the agent MAY
+    /// write its final verdict there as JSON, which the engine reads before
+    /// parsing the textual report. `None` for internal, side-effect-free calls
+    /// (compaction, finish answers) that have no status file. Owned rather than
+    /// borrowed because it is computed fresh per attempt in the retry loop.
+    pub status_file: Option<std::path::PathBuf>,
 }
 
 /// The marker a `resume`/`reprompt` agent prints on its own stdout line to ask
@@ -1041,6 +1048,11 @@ impl ClaudeAdapter {
         // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
         // spawned codex cannot inherit the user's interactive MCP config.
         apply_agent_home(&mut cmd, task)?;
+        // Per-attempt status file (subtask S2): the agent may write its final
+        // verdict as JSON here, which the engine reads before the textual report.
+        if let Some(sf) = &task.status_file {
+            cmd.env("APB_STATUS_FILE", sf);
+        }
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -1237,6 +1249,11 @@ impl ClaudeAdapter {
         // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
         // spawned codex cannot inherit the user's interactive MCP config.
         apply_agent_home(&mut cmd, task)?;
+        // Per-attempt status file (subtask S2): the agent may write its final
+        // verdict as JSON here, which the engine reads before the textual report.
+        if let Some(sf) = &task.status_file {
+            cmd.env("APB_STATUS_FILE", sf);
+        }
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -1887,6 +1904,7 @@ mod tests {
             node: "test",
             agent: "claude",
             extract,
+            status_file: None,
         }
     }
 

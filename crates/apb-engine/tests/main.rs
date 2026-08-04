@@ -172,6 +172,9 @@ mod script_node_test;
 mod script_test;
 #[path = "suite/state_test.rs"]
 mod state_test;
+#[cfg(unix)]
+#[path = "suite/status_file_test.rs"]
+mod status_file_test;
 #[path = "suite/stop_run_test.rs"]
 mod stop_run_test;
 #[path = "suite/subplaybook_run_test.rs"]
