@@ -94,6 +94,16 @@ pub enum EventPayload {
         /// attempt did not finish through a report. Additive.
         #[serde(default)]
         summary: Option<String>,
+        /// The agent's raw report text that a `success_check` rejected
+        /// (spec field-report-robustness). A rejected success report is
+        /// recorded as a `failed` attempt - it consumes a retry and advances
+        /// the fallback chain like any other failure - but the discarded text
+        /// is preserved here and folded into `RunState.rejected_outputs`, so a
+        /// downstream node can read it via `nodes.<id>.rejected_output`.
+        /// `None` for every attempt not rejected by a success_check, and for
+        /// old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        rejected_output: Option<String>,
     },
     NodeFinished {
         node: String,
@@ -662,6 +672,40 @@ mod tests {
     }
 
     #[test]
+    fn attempt_finished_without_rejected_output_deserializes_to_none() {
+        // An old log line, written before `rejected_output` existed.
+        let line = r#"{"type":"attempt_finished","node":"a","attempt":1,"status":"failed"}"#;
+        let back: EventPayload = serde_json::from_str(line).unwrap();
+        match back {
+            EventPayload::AttemptFinished {
+                rejected_output, ..
+            } => assert_eq!(rejected_output, None),
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attempt_finished_with_rejected_output_round_trips() {
+        let payload = EventPayload::AttemptFinished {
+            node: "a".into(),
+            attempt: 1,
+            status: "failed".into(),
+            duration_ms: Some(42),
+            session: None,
+            summary: None,
+            rejected_output: Some("interim progress only".into()),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::AttemptFinished {
+                rejected_output, ..
+            } => assert_eq!(rejected_output.as_deref(), Some("interim progress only")),
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
     fn attempt_finished_with_session_round_trips() {
         let payload = EventPayload::AttemptFinished {
             node: "a".into(),
@@ -670,6 +714,7 @@ mod tests {
             duration_ms: Some(42),
             session: Some("abc".into()),
             summary: Some("did the thing".into()),
+            rejected_output: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();

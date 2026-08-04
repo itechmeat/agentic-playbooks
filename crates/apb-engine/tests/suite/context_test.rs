@@ -57,21 +57,24 @@ fn renders_all_template_refs() {
             note: "lgtm".into(),
         },
     );
+    let mut rejected_outputs = BTreeMap::new();
+    rejected_outputs.insert("lint".to_string(), "interim only".to_string());
     let mut hooks = BTreeMap::new();
     hooks.insert("ci".to_string(), "/api/hooks/run-1/secret-xyz".to_string());
-    let text = "T: {{params.task}} | I: {{run.instruction}} | O: {{nodes.lint.output}} | R: {{nodes.lint.report}} | RN: {{nodes.gate.review_note}} | H: {{run.hooks.ci}} | ctx: {{run.context}}";
+    let text = "T: {{params.task}} | I: {{run.instruction}} | O: {{nodes.lint.output}} | R: {{nodes.lint.report}} | RN: {{nodes.gate.review_note}} | RO: {{nodes.lint.rejected_output}} | H: {{run.hooks.ci}} | ctx: {{run.context}}";
     let out = render(
         text,
         &params,
         Some("be careful"),
         &outputs,
         &reviews,
+        &rejected_outputs,
         &hooks,
         "CTXBODY",
     );
     assert_eq!(
         out,
-        "T: ship it | I: be careful | O: 2 errors | R: 2 errors | RN: lgtm | H: /api/hooks/run-1/secret-xyz | ctx: CTXBODY"
+        "T: ship it | I: be careful | O: 2 errors | R: 2 errors | RN: lgtm | RO: interim only | H: /api/hooks/run-1/secret-xyz | ctx: CTXBODY"
     );
 }
 
@@ -124,6 +127,7 @@ fn unknown_refs_become_empty() {
         "[{{params.ghost}}]",
         &BTreeMap::new(),
         None,
+        &BTreeMap::new(),
         &BTreeMap::new(),
         &BTreeMap::new(),
         &BTreeMap::new(),

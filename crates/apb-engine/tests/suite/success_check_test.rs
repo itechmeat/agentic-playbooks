@@ -3,8 +3,9 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apb_core::registry::init_project;
+use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, run};
-use apb_engine::state::RunStatus;
+use apb_engine::state::{RunState, RunStatus};
 
 use crate::common;
 
@@ -132,6 +133,77 @@ fn success_check_marker_requires_completion_marker() {
         res2.outcome,
         RunStatus::Succeeded,
         "a success report containing the completion marker must succeed"
+    );
+}
+
+// A marker playbook with a retry budget: a rejected success report must behave
+// like any other attempt failure - consume a retry (max_retries honored) and
+// fail terminally only after the budget is spent.
+const MARKER_RETRY_PLAYBOOK: &str = r#"
+schema: 1
+id: scmr
+name: SuccessCheckMarkerRetry
+version: 1.0.0
+defaults:
+  profile: main
+  max_retries: 1
+nodes:
+  - { id: start, type: start }
+  - { id: w, type: agent_task, prompt: "do", success_check: { marker: "WAVE-COMPLETE" } }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: w }
+  - { from: w, to: ok, condition: { type: node_status, node: w, equals: success } }
+  - { from: w, to: no, fallback: true }
+"#;
+
+fn seed_marker_retry(root: &Path) {
+    init_project(root).unwrap();
+    let dir = root.join(".apb/playbooks/scmr/1.0.0");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(dir.join("playbook.yaml"), MARKER_RETRY_PLAYBOOK).unwrap();
+    fs::write(root.join(".apb/playbooks/scmr/current"), "1.0.0").unwrap();
+    common::seed_main(root);
+}
+
+// A rejected success report consumes a retry (max_retries=1 -> a RetryStarted
+// event before the node ends Failed) AND its discarded agent text is exposed to
+// downstream templates as `nodes.<id>.rejected_output` (via the RunState fold).
+#[test]
+fn success_check_rejection_consumes_retry_and_exposes_rejected_output() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed_marker_retry(dir.path());
+    // Every attempt reports success but omits the marker -> rejected each time.
+    let agent_text = "ST6 dispatched. interim progress only, wave not closed";
+    let prog = echo_agent(dir.path(), agent_text);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "scmr", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Failed,
+        "a success report rejected on every attempt must end the node Failed"
+    );
+
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RetryStarted { .. })),
+        "a rejected success report must consume a retry (max_retries=1) - expected a retry_started event"
+    );
+    let s = RunState::fold(&events);
+    assert_eq!(
+        s.rejected_outputs.get("w").map(|t| t.trim()),
+        Some(agent_text),
+        "the discarded agent report text must be exposed as nodes.w.rejected_output"
     );
 }
 
