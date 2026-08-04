@@ -86,6 +86,26 @@ interim text is rejected with `success report rejected: completion marker
 `agent_task`, or a marker that is empty, is a V33 validation error; a script
 path outside `scripts/` is a V12 error.
 
+A rejected success report consumes a retry like any other failure, so
+`max_retries` is honored: the attempt is spent, and the node retries or takes
+its failure edge as configured. The discarded report text is preserved on the
+attempt and exposed to downstream templates as
+`{{nodes.<id>.rejected_output}}`, so a fix or review node can read exactly what
+the rejected attempt claimed.
+
+### Status file (APB_STATUS_FILE)
+
+When a node carries a `success_check`, each attempt is handed an
+`APB_STATUS_FILE` environment variable pointing at a per-attempt JSON file in
+the run directory. The agent MAY write its final verdict there as
+`{"status": "success"|"failure", "outputs": { ... }}`, where `outputs` is an
+object of values the step should expose to later steps. The engine reads that
+file first to decide the attempt's status and outputs, and falls back to the
+existing marker and text parsing when the file is absent, unreadable, or
+invalid. The prompt builder appends a note describing this contract only when
+the node has a `success_check`; nodes without one keep the report-only
+contract.
+
 ### Warning: premature success in long-running orchestrator nodes
 
 A single-process agent node that spawns background workers and is expected to
@@ -133,6 +153,9 @@ a V13 validation error:
   resolve identically).
 - `nodes.<id>.review_note` - the reviewer's note from a `human_review` node's
   decision.
+- `nodes.<id>.rejected_output` - the agent report text a `success_check`
+  discarded on the node's last rejected attempt (see Success checks). Empty when
+  the node was never rejected; a later rejection overwrites an earlier one.
 - `run.instruction` - the run's input prompt (see below).
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
@@ -360,11 +383,13 @@ gracefully.
 ## expected_duration (progress estimates)
 
 Every node may carry an optional `expected_duration`: the estimated wall time
-of ONE execution. Give it as integer seconds (`90`) or a single unit suffix
-(`30s`, `5m`, `2h`). For a node inside a loop this is the per-iteration time.
-Use a whole number of the units above: an invalid value such as a bare decimal
-(`1.5`), a negative number, or a boolean still lets the playbook load but the
-validator flags it as a V20 error.
+of ONE execution. Give it as integer seconds (`90`), a single unit suffix
+(`30s`, `5m`, `2h`), or a compound with units in descending order (`1h30m`,
+`2h15m30s`). For a node inside a loop this is the per-iteration time. Use whole
+numbers of the units above: an invalid value such as a bare decimal (`1.5`), a
+negative number, a boolean, or a compound whose units are out of order or
+repeated (`30m1h`, `1h1h`) still lets the playbook load but the validator flags
+it as a V20 error.
 
 When creating or editing a playbook, estimate `expected_duration` for every
 `agent_task` and `script` node. A rough guess is fine; the trial and run

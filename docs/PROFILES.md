@@ -24,6 +24,7 @@ with two files:
     fallbacks:               # optional ordered chain; same role, different executor
       - { agent: codex, model: gpt-5.2-codex }
   soul: any                  # any | native_required (does the role need a native system-prompt channel)
+  hermetic: false            # optional; default false. See "Hermetic isolation" below
   skills:                    # names (scope auto) or { name, scope }
     - coding-standards
     - { name: writing-plans, scope: global }
@@ -35,6 +36,19 @@ with two files:
 
 Names must match `[a-z0-9][a-z0-9-]*`, at most 64 chars, and equal the
 directory name. Case-fold collisions are rejected.
+
+## Hermetic isolation
+
+`hermetic` is an optional boolean, default `false`. When `true`, an executor
+that supports settings isolation is launched with an apb-owned minimal settings
+profile that disables user-scope plugins and hooks, so a run does not inherit
+the operator's local agent configuration. Only `claude` and `claude-code`
+support this today (via their `--settings` flag); any other agent ignores the
+flag with a warning rather than failing the run. The flag is snapshotted into
+the run manifest at start, so a retry, fallback, or resume uses the value the
+run began with. Because `profile_digest` hashes the raw `profile.yaml`, setting
+`hermetic` changes the digest and therefore the bundle trust just like any
+other profile edit.
 
 ## Scopes and resolution
 
