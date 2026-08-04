@@ -467,6 +467,25 @@ pub(crate) fn execute_node(
                     }
                     None => adapter_for(&step.agent)?,
                 };
+                // Hermetic isolation (subtask S1): when the bound profile sets
+                // `hermetic: true`, claude/claude-code get an apb-owned minimal
+                // settings file (user plugins and hooks off) handed over via
+                // `--settings`. Any other agent has no such mechanism, so we warn
+                // and proceed without isolation rather than failing the run. The
+                // file content is fixed, so writing it once per step is enough.
+                let hermetic_settings: Option<PathBuf> = if entry.hermetic {
+                    if crate::adapter::agent_supports_hermetic(&step.agent) {
+                        Some(crate::adapter::write_hermetic_settings(run_dir)?)
+                    } else {
+                        eprintln!(
+                            "apb: warning: node `{node_id}` profile requests hermetic isolation but agent `{}` has no isolation mechanism; running without it",
+                            step.agent
+                        );
+                        None
+                    }
+                } else {
+                    None
+                };
                 for try_i in 0..=retries {
                     // Cancellation (this branch lost a join:any) - exit with status
                     // Cancelled, not counting this as a failure.
@@ -546,6 +565,9 @@ pub(crate) fn execute_node(
                         // Handed to the agent as APB_STATUS_FILE; read back below
                         // before the success_check gate.
                         status_file: Some(status_file.clone()),
+                        // Hermetic isolation (subtask S1): Some only for a
+                        // hermetic profile on an isolation-capable agent.
+                        hermetic_settings: hermetic_settings.clone(),
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -1145,6 +1167,8 @@ pub(crate) fn execute_finish_answer(
                 extract: None,
                 // Internal finish-answer composition: no status-file protocol.
                 status_file: None,
+                // Internal finish-answer composition: no hermetic isolation.
+                hermetic_settings: None,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -1746,6 +1770,8 @@ pub(crate) fn maybe_compact_context(
         extract: None,
         // Internal summarizer: no status-file protocol.
         status_file: None,
+        // Internal summarizer: no hermetic isolation.
+        hermetic_settings: None,
     };
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.

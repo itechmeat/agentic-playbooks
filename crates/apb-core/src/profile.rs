@@ -156,6 +156,13 @@ pub struct ProfileDoc {
     pub soul: SoulRequirement,
     #[serde(default)]
     pub skills: Vec<SkillRef>,
+    /// When `true`, the executor is launched with an apb-owned minimal settings
+    /// profile that disables user-scope plugins and hooks (hermetic isolation).
+    /// Default `false`; a profile.yaml written before this field simply omits
+    /// the key. Only agents with an isolation mechanism (claude/claude-code)
+    /// honor it; any other adapter ignores it with a warning (see the engine).
+    #[serde(default)]
+    pub hermetic: bool,
 }
 
 impl ProfileDoc {
@@ -258,6 +265,23 @@ mod tests {
         assert_eq!(d1, profile_digest(P, "role text"));
         assert_ne!(d1, profile_digest(P, "other soul"));
         assert_ne!(d1, profile_digest(P, ""));
+    }
+
+    #[test]
+    fn hermetic_defaults_false_and_parses_true() {
+        let p = ProfileDoc::from_yaml(P).unwrap();
+        assert!(!p.hermetic, "hermetic must default to false when absent");
+        let with = format!("{P}hermetic: true\n");
+        let ph = ProfileDoc::from_yaml(&with).unwrap();
+        assert!(ph.hermetic, "hermetic: true must parse as true");
+    }
+
+    #[test]
+    fn hermetic_changes_profile_digest() {
+        // The digest hashes the raw profile.yaml text, so a profile that sets
+        // hermetic must not collide with one that omits it.
+        let with = format!("{P}hermetic: true\n");
+        assert_ne!(profile_digest(P, "role"), profile_digest(&with, "role"));
     }
 
     #[test]
