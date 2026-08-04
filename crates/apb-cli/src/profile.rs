@@ -334,7 +334,7 @@ pub(crate) fn profile_edit_cmd(root: &Path, name: &str, scope: &str) -> ExitCode
             },
             expected_digest: Some(digest_before),
             soul_requirement: doc.soul,
-            hermetic: false,
+            hermetic: doc.hermetic,
         },
     );
     match res {
