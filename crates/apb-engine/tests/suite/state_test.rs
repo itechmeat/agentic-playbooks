@@ -60,6 +60,34 @@ fn folds_finished_run() {
     assert_eq!(s.last_node.as_deref(), Some("ping"));
 }
 
+// A success report a success_check rejected is folded into `rejected_outputs`
+// so a downstream node can read the discarded text via
+// `nodes.<id>.rejected_output` (spec field-report-robustness).
+#[test]
+fn attempt_finished_rejected_output_populates_rejected_outputs() {
+    let events = vec![
+        ev(0, run_started("w")),
+        ev(
+            1,
+            EventPayload::AttemptFinished {
+                node: "a".into(),
+                attempt: 1,
+                status: "failed".into(),
+                duration_ms: None,
+                session: None,
+                summary: None,
+                rejected_output: Some("interim progress only".into()),
+            },
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(
+        s.rejected_outputs.get("a").map(String::as_str),
+        Some("interim progress only"),
+        "a rejected attempt's discarded text must fold into rejected_outputs"
+    );
+}
+
 #[test]
 fn open_attempt_marks_interrupted() {
     // Crash-shape simulation (Task 2 fold test): a real mid-attempt crash now
@@ -173,6 +201,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 duration_ms: Some(1200),
                 session: None,
                 summary: None,
+                rejected_output: None,
             },
         ),
         ev(

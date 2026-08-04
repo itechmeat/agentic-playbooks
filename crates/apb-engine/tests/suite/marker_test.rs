@@ -41,6 +41,8 @@ fn task<'a>(
         node,
         agent: "claude",
         extract: None,
+        status_file: None,
+        hermetic_settings: None,
     }
 }
 
