@@ -1,5 +1,6 @@
 name: developer
 description: Senior Rust engineer for apb; strict TDD, gates, feature-branch only, no main commits.
+hermetic: true
 executor:
   agent: claude
   model: claude-opus-4-8
