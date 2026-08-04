@@ -183,9 +183,12 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
             grant_autonomy: false,
             connector_policy: &policy,
             interactive: false,
+            report_contract: true,
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap();
 

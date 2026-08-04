@@ -53,6 +53,31 @@ edges:
     );
 }
 
+#[test]
+fn v20_accepts_descending_compound_expected_duration() {
+    let yaml = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, expected_duration: "1h30m" }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: f }
+"#;
+    let pb = Playbook::from_yaml(yaml).unwrap();
+    let r = validate(&pb, &ValidationContext::default());
+    assert!(
+        !r.issues.iter().any(|i| i.code == "V20"),
+        "1h30m must not produce a V20 error: {:?}",
+        r.issues
+    );
+}
+
 /// An invalid scalar `expected_duration` (float, negative, boolean, ...) loads
 /// into the catch-all `ExpectedDuration::Invalid` variant, so the playbook
 /// parses and the validator emits a clean V20 instead of failing at load.

@@ -47,9 +47,12 @@ fn acp_success_extracts_result_and_streams_to_log() {
             grant_autonomy: false,
             connector_policy: &Default::default(),
             interactive: false,
+            report_contract: true,
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap();
 
@@ -83,9 +86,12 @@ fn acp_result_is_error_maps_to_failed_status() {
             grant_autonomy: false,
             connector_policy: &Default::default(),
             interactive: false,
+            report_contract: true,
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap();
     // agent_reported_failure: the report is valid, status failure - NOT a transport error.
@@ -109,9 +115,12 @@ fn acp_no_result_event_is_structured_output_missing() {
             grant_autonomy: false,
             connector_policy: &Default::default(),
             interactive: false,
+            report_contract: true,
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap_err();
     assert!(
@@ -136,9 +145,12 @@ fn acp_nonzero_exit_is_process_exit() {
             grant_autonomy: false,
             connector_policy: &Default::default(),
             interactive: false,
+            report_contract: true,
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::ProcessExit), "got: {err:?}");
@@ -165,9 +177,12 @@ fn acp_stream_result_marker_parses_into_question() {
             grant_autonomy: false,
             connector_policy: &Default::default(),
             interactive: true,
+            report_contract: true,
             node: "ask",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap();
     let q = report
@@ -196,9 +211,12 @@ fn acp_stream_marker_malformed_json_fails_naming_the_node() {
             grant_autonomy: false,
             connector_policy: &Default::default(),
             interactive: true,
+            report_contract: true,
             node: "ask",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::Transport), "got: {err:?}");
@@ -227,9 +245,12 @@ fn acp_stream_marker_ignored_on_non_interactive_node() {
             grant_autonomy: false,
             connector_policy: &Default::default(),
             interactive: false,
+            report_contract: true,
             node: "plain",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap();
     assert!(
@@ -255,9 +276,12 @@ fn acp_timeout_kills_streaming_agent() {
             grant_autonomy: false,
             connector_policy: &Default::default(),
             interactive: false,
+            report_contract: true,
             node: "test",
             agent: "claude",
             extract: None,
+            status_file: None,
+            hermetic_settings: None,
         })
         .unwrap_err();
     let elapsed = started.elapsed();
@@ -288,9 +312,12 @@ fn acp_cancel_stops_streaming_agent() {
                 grant_autonomy: false,
                 connector_policy: &Default::default(),
                 interactive: false,
+                report_contract: true,
                 node: "test",
                 agent: "claude",
                 extract: None,
+                status_file: None,
+                hermetic_settings: None,
             },
             &cancel,
             None,

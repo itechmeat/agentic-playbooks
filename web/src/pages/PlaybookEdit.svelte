@@ -13,7 +13,7 @@
   import type { Project } from '../lib/types'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import DiffView from '../lib/DiffView.svelte'
-  import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
+  import { toFlow, isUserArranged, type FlowEdge, type FlowNode } from '../lib/graph'
   import NodePanel from '../lib/NodePanel.svelte'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import { takeDraftYaml } from '../lib/playbookdupe'
@@ -21,7 +21,7 @@
   import { onEscape } from '../lib/hooks/escape.svelte'
   import { docToString, NEW_PLAYBOOK_TEMPLATE, parseDoc, parsePlaybook } from '../lib/playbookyaml'
   import type { PlaybookModel } from '../lib/playbookyaml'
-  import type { PlaybookNode as PlaybookNodeType } from '../lib/types'
+  import type { PlaybookNode as PlaybookNodeType, WfLayout } from '../lib/types'
   import type { Document } from 'yaml'
   import Topbar from '$lib/components/Topbar.svelte'
   import { Button } from '$lib/components/ui/button'
@@ -35,6 +35,7 @@
   import X from '@lucide/svelte/icons/x'
   import Code from '@lucide/svelte/icons/code'
   import GitCompare from '@lucide/svelte/icons/git-compare'
+  import LayoutGrid from '@lucide/svelte/icons/layout-grid'
 
   let { id, workspace = '' }: { id: string; workspace?: string } = $props()
 
@@ -59,7 +60,7 @@
 
   let loadedVersion = $state('')
   let versions = $state<string[]>([])
-  let storedLayout = $state<{ nodes?: { id: string; x: number; y: number }[] } | null>(null)
+  let storedLayout = $state<WfLayout | null>(null)
 
   let selectedNodeId = $state<string | null>(null)
   let selectedEdge = $state<{ from: string; to: string } | null>(null)
@@ -193,12 +194,23 @@
     if (model) {
       lastValidModel = model
       parseError = null
-      const prev = untrack(() => nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y })))
+      // When the user has arranged nodes by hand, the marker is the explicit
+      // guard that stops automatic reflow (this effect, fired on every YAML
+      // edit) from clobbering their layout. Stored positions win and only the
+      // genuinely new nodes get auto-laid-out by `toFlow`.
       const stored = (storedLayout?.nodes ?? []).map((n) => ({ id: n.id, x: n.x, y: n.y }))
-      const merged = new Map<string, { id: string; x: number; y: number }>()
-      for (const n of stored) merged.set(n.id, n)
-      for (const n of prev) merged.set(n.id, n)
-      const flow = toFlow(model, { nodes: [...merged.values()] })
+      const layoutInput: WfLayout = isUserArranged(storedLayout)
+        ? { nodes: stored, userArranged: true }
+        : (() => {
+            const prev = untrack(() =>
+              nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y })),
+            )
+            const merged = new Map<string, { id: string; x: number; y: number }>()
+            for (const n of stored) merged.set(n.id, n)
+            for (const n of prev) merged.set(n.id, n)
+            return { nodes: [...merged.values()] }
+          })()
+      const flow = toFlow(model, layoutInput)
       nodes = flow.nodes
       edges = flow.edges
     } else if (error) {
@@ -282,7 +294,38 @@
         nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y })),
       )
       try {
+        // The user moved a node by hand: from now on this layout is their
+        // arrangement, and automatic reflow must respect it (see the parse
+        // effect guard above). The marker is the only thing that flips that
+        // switch, and the only thing allowed to clear it is "Re-layout".
+        await saveLayout(id, loadedVersion, { nodes: positions, userArranged: true }, workspace)
+      } catch {
+        // saving the layout isn't critical, ignore silently
+      }
+    }, 500)
+  }
+
+  // The topbar "Re-layout" button is the SOLE override of the userArranged
+  // marker: it discards the stored arrangement, recomputes the auto layout,
+  // and persists the result WITHOUT the marker so it is auto again. The
+  // button is only available in the loaded-version editor (not the new-
+  // playbook path, which has nothing to discard).
+  function onRelayout() {
+    if (!lastValidModel) return
+    const flow = toFlow(lastValidModel, null, undefined, undefined, true)
+    nodes = flow.nodes
+    edges = flow.edges
+    if (isNew || !loadedVersion) return
+    clearTimeout(layoutTimer)
+    layoutTimer = setTimeout(async () => {
+      const positions = untrack(() =>
+        nodes.map((n) => ({ id: n.id, x: n.position.x, y: n.position.y })),
+      )
+      try {
         await saveLayout(id, loadedVersion, { nodes: positions }, workspace)
+        // Reflect the cleared marker locally too, so a subsequent YAML edit
+        // in the same session takes the auto path again immediately.
+        storedLayout = { nodes: positions }
       } catch {
         // saving the layout isn't critical, ignore silently
       }
@@ -349,6 +392,16 @@
       >
         <GitCompare data-icon="inline-start" />
         <span class="max-sm:sr-only">diff</span>
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        class="max-sm:px-2"
+        title="Recompute the automatic layout, discarding any manual arrangement"
+        onclick={onRelayout}
+      >
+        <LayoutGrid data-icon="inline-start" />
+        <span class="max-sm:sr-only">re-layout</span>
       </Button>
     {/if}
     <!-- Adding a node is a topbar control, not a stack of buttons parked over

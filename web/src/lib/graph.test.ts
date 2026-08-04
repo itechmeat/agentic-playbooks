@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { failureEffect, nodeExits, toFlow } from './graph'
+import { failureEffect, isUserArranged, nodeExits, toFlow } from './graph'
 
 const playbook = {
   id: 'demo',
@@ -323,5 +323,115 @@ describe('nodeExits', () => {
     const { edges } = toFlow(pb([status('success', 'a')]), null)
     expect(edges[0].sourceHandle).toBeUndefined()
     expect(edges[0].label).toBe('work: success')
+  })
+})
+
+// A fan-out from one source to several distinct successors has to read in the
+// order the source's exits are declared. dagre on its own (issue #68 item 2)
+// was reversing siblings whose barycenters tied, so the branch arrows crossed;
+// the algorithm now feeds dagre order constraints so each source's distinct
+// successors keep their declaration order, left to right.
+const fanOutPlaybook = {
+  id: 'fanout',
+  name: 'Fanout',
+  nodes: [
+    { id: 'start', type: 'start', title: 'Start' },
+    { id: 'a', type: 'agent_task', title: 'A' },
+    { id: 'b', type: 'agent_task', title: 'B' },
+    { id: 'c', type: 'agent_task', title: 'C' },
+    { id: 'done', type: 'finish', title: 'Done' },
+  ],
+  edges: [
+    { from: 'start', to: 'a' },
+    { from: 'start', to: 'b' },
+    { from: 'start', to: 'c' },
+    { from: 'a', to: 'done' },
+    { from: 'b', to: 'done' },
+    { from: 'c', to: 'done' },
+  ],
+} as Parameters<typeof toFlow>[0]
+
+describe('toFlow fan-out ordering', () => {
+  it('places distinct successors left-to-right in declaration order', () => {
+    const { nodes } = toFlow(fanOutPlaybook, null)
+    const x = (id: string) => nodes.find((n) => n.id === id)!.position.x
+    // Compare relative order, not absolute pixel values: dagre's spacing is
+    // its own, what matters is that A is left of B is left of C.
+    expect(x('a')).toBeLessThan(x('b'))
+    expect(x('b')).toBeLessThan(x('c'))
+  })
+
+  it('keeps the order when successors are conditional (one-of) exits', () => {
+    const pb = {
+      id: 'cond',
+      name: 'Cond',
+      nodes: [
+        { id: 'start', type: 'start', title: 'Start' },
+        { id: 'work', type: 'agent_task', title: 'Work' },
+        { id: 'a', type: 'agent_task', title: 'A' },
+        { id: 'b', type: 'agent_task', title: 'B' },
+        { id: 'c', type: 'agent_task', title: 'C' },
+        { id: 'done', type: 'finish', title: 'Done' },
+      ],
+      edges: [
+        { from: 'start', to: 'work' },
+        { from: 'work', to: 'a', condition: { type: 'node_status', node: 'work', equals: 'success' } },
+        { from: 'work', to: 'b', condition: { type: 'node_status', node: 'work', equals: 'failure' } },
+        { from: 'work', to: 'c', fallback: true },
+        { from: 'a', to: 'done' },
+        { from: 'b', to: 'done' },
+        { from: 'c', to: 'done' },
+      ],
+    } as Parameters<typeof toFlow>[0]
+    const { nodes } = toFlow(pb, null)
+    const x = (id: string) => nodes.find((n) => n.id === id)!.position.x
+    expect(x('a')).toBeLessThan(x('b'))
+    expect(x('b')).toBeLessThan(x('c'))
+  })
+})
+
+// A layout may be marked `userArranged: true` once the user has dragged nodes
+// by hand. The marker is additive: absent means "not user-arranged" and keeps
+// every existing call site unchanged.
+describe('isUserArranged', () => {
+  it('returns false for null', () => {
+    expect(isUserArranged(null)).toBe(false)
+  })
+  it('returns false for a layout without the marker', () => {
+    expect(isUserArranged({ nodes: [{ id: 'a', x: 1, y: 2 }] })).toBe(false)
+  })
+  it('returns false when the marker is explicitly false', () => {
+    expect(isUserArranged({ nodes: [], userArranged: false })).toBe(false)
+  })
+  it('returns true only when the marker is true', () => {
+    expect(isUserArranged({ nodes: [], userArranged: true })).toBe(true)
+  })
+})
+
+// Re-layout (the topbar button) ignores any stored arrangement and recomputes
+// from the auto pass, so the result is then auto again and can be persisted
+// without the userArranged marker.
+describe('toFlow forceAuto', () => {
+  it('ignores stored coordinates when forceAuto is set', () => {
+    const stored = {
+      nodes: [
+        { id: 'start', x: 9999, y: 9999 },
+        { id: 'a', x: 9999, y: 9999 },
+        { id: 'b', x: 9999, y: 9999 },
+        { id: 'c', x: 9999, y: 9999 },
+        { id: 'done', x: 9999, y: 9999 },
+      ],
+    }
+    const { nodes } = toFlow(fanOutPlaybook, stored, undefined, undefined, true)
+    // Every position must come from the auto pass, so none of the sentinel
+    // 9999 stored values should leak through.
+    for (const n of nodes) {
+      expect(n.position.x).not.toBe(9999)
+      expect(n.position.y).not.toBe(9999)
+    }
+    // The auto pass still respects the fan-out order.
+    const x = (id: string) => nodes.find((nd) => nd.id === id)!.position.x
+    expect(x('a')).toBeLessThan(x('b'))
+    expect(x('b')).toBeLessThan(x('c'))
   })
 })

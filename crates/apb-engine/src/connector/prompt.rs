@@ -73,33 +73,42 @@ pub fn instruction_block(
         out.push_str(&format!("\n### {}\n", grant.connector));
 
         out.push_str("\nAccounts:\n");
-        for acct_name in &grant.accounts {
-            match connector.and_then(|c| c.accounts.iter().find(|a| &a.name == acct_name)) {
-                Some(a) => {
-                    let default_mark = if a.default { " (default)" } else { "" };
-                    // Non-secret fields only: a field backed by an env var or
-                    // by a `{{cmd:...}}` reference is a secret field, so no
-                    // reference and no resolved secret ever reaches the prompt.
-                    // Same predicate as `call::auth::non_secret_fields`.
-                    let fields: Vec<String> = a
-                        .fields
-                        .iter()
-                        .filter(|(k, _)| {
-                            !a.env.contains_key(k.as_str()) && !a.cmd.contains_key(k.as_str())
-                        })
-                        .map(|(k, v)| format!("{k}={v}"))
-                        .collect();
-                    if fields.is_empty() {
-                        out.push_str(&format!("- {}{default_mark}\n", a.name));
-                    } else {
-                        out.push_str(&format!(
-                            "- {}{default_mark}: {}\n",
-                            a.name,
-                            fields.join(", ")
-                        ));
+        if grant.accounts.is_empty() {
+            // Empty allowlist fails every call at select_account (Config
+            // error). Tell the agent this binding is not callable so it uses
+            // a fallback path instead of retrying doomed calls.
+            out.push_str(
+                "- no accounts configured; calls to this connector will fail until an account is added, use the fallback path\n",
+            );
+        } else {
+            for acct_name in &grant.accounts {
+                match connector.and_then(|c| c.accounts.iter().find(|a| &a.name == acct_name)) {
+                    Some(a) => {
+                        let default_mark = if a.default { " (default)" } else { "" };
+                        // Non-secret fields only: a field backed by an env var or
+                        // by a `{{cmd:...}}` reference is a secret field, so no
+                        // reference and no resolved secret ever reaches the prompt.
+                        // Same predicate as `call::auth::non_secret_fields`.
+                        let fields: Vec<String> = a
+                            .fields
+                            .iter()
+                            .filter(|(k, _)| {
+                                !a.env.contains_key(k.as_str()) && !a.cmd.contains_key(k.as_str())
+                            })
+                            .map(|(k, v)| format!("{k}={v}"))
+                            .collect();
+                        if fields.is_empty() {
+                            out.push_str(&format!("- {}{default_mark}\n", a.name));
+                        } else {
+                            out.push_str(&format!(
+                                "- {}{default_mark}: {}\n",
+                                a.name,
+                                fields.join(", ")
+                            ));
+                        }
                     }
+                    None => out.push_str(&format!("- {acct_name}\n")),
                 }
-                None => out.push_str(&format!("- {acct_name}\n")),
             }
         }
 
@@ -308,6 +317,29 @@ functions:
         assert!(
             out.contains(r#"args: {"#) && out.contains(r#""type":"object""#),
             "compact args schema missing: {out}"
+        );
+    }
+
+    #[test]
+    fn zero_account_binding_marked_not_callable_but_lists_functions() {
+        let mut g = grant(&["list_items", "create_item"]);
+        g.accounts = vec![];
+        let out = instruction_block(&[g], &[sample_connector()], &sample_docs());
+        assert!(
+            out.contains("no accounts configured"),
+            "zero-account binding must be marked not callable: {out}"
+        );
+        assert!(
+            out.contains("calls to this connector will fail"),
+            "zero-account notice must say calls will fail: {out}"
+        );
+        assert!(
+            out.contains("list_items"),
+            "granted function must still be listed: {out}"
+        );
+        assert!(
+            out.contains("create_item"),
+            "granted function must still be listed: {out}"
         );
     }
 }

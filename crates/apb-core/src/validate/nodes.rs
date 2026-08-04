@@ -80,7 +80,7 @@ pub(crate) fn check_expected_duration(playbook: &Playbook, r: &mut ValidationRep
                     "V20",
                     Some(&n.id),
                     format!(
-                        "node `{}` has an unparsable expected_duration; use seconds like `90` or a single unit like `30s`, `5m`, `2h`",
+                        "node `{}` has an unparsable expected_duration; use seconds like `90`, a single unit like `30s`, `5m`, `2h`, or a descending compound like `1h30m`",
                         n.id
                     ),
                 );

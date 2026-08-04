@@ -41,7 +41,6 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         if events.is_empty() {
             continue;
         }
-        let state = RunState::fold(&events);
         let (playbook, started_ts) = events
             .iter()
             .find_map(|e| match &e.payload {
@@ -57,7 +56,9 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         out.push(RunSummary {
             run_id,
             playbook,
-            status: state.run_status.as_str().into(),
+            status: crate::liveness::reported_run_status(&events)
+                .as_str()
+                .into(),
             started_ts,
             progress,
             parent_run,

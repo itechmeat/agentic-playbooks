@@ -905,6 +905,7 @@ mod tests {
                     duration_ms: None,
                     session: None,
                     summary: None,
+                    rejected_output: None,
                 },
             ),
         ];
@@ -1091,6 +1092,7 @@ mod tests {
                     duration_ms: None,
                     session: None,
                     summary: None,
+                    rejected_output: None,
                 },
             ),
             // Fresh retry shares the stall action's millisecond.

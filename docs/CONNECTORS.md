@@ -134,6 +134,12 @@ against a looping agent, not a rate limiter; exceeding it returns a `permission`
 error. The binding is part of the playbook YAML and is covered by the playbook
 digest, so grants need no separate approval.
 
+A binding whose `accounts` allowlist is empty has no account to select, so every
+call fails at account selection. The connectors block in the agent's prompt
+marks such a binding as not callable (no accounts configured, calls will fail
+until an account is added, use the fallback path) while still listing its
+functions, so the agent routes around it instead of retrying doomed calls.
+
 ## The `apb connector` CLI
 
 ```text

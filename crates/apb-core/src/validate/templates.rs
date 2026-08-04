@@ -23,7 +23,11 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
             let parts: Vec<&str> = cap.split('.').collect();
             let ok = match parts.as_slice() {
                 ["params", p] => params.contains(p),
-                ["nodes", nid, "output" | "report" | "review_note"] => nodes.contains(nid),
+                [
+                    "nodes",
+                    nid,
+                    "output" | "report" | "review_note" | "rejected_output",
+                ] => nodes.contains(nid),
                 ["run", "instruction" | "context"] => true,
                 ["run", "hooks", key] => hooks.contains(key),
                 _ => false,
@@ -60,7 +64,8 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
 /// hitting an unresolved template sees the full set of valid forms, not just
 /// the one they got wrong.
 pub(crate) const V13_KNOWN_NAMESPACES: &str = "; known namespaces: params.*, nodes.<id>.output, \
-    nodes.<id>.report, nodes.<id>.review_note, run.instruction, run.context, run.hooks.*";
+    nodes.<id>.report, nodes.<id>.review_note, nodes.<id>.rejected_output, run.instruction, \
+    run.context, run.hooks.*";
 
 pub(crate) fn template_refs(text: &str) -> Vec<String> {
     // no regex dependency: manual scan for {{ ... }}

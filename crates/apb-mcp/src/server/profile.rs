@@ -71,6 +71,7 @@ impl WfMcp {
             fallbacks,
             soul,
             expected_digest,
+            hermetic,
         }): Parameters<ProfileWriteArgs>,
     ) -> CallToolResult {
         let executor = crate::profile_tools::ExecutorInput {
@@ -93,6 +94,7 @@ impl WfMcp {
                 executor,
                 expected_digest,
                 soul_requirement,
+                hermetic: hermetic.unwrap_or(false),
             },
         ))
     }

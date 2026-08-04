@@ -30,6 +30,7 @@ pub(crate) fn render_node_prompt(
         cfg.instruction.as_deref(),
         &state.outputs,
         &state.reviews,
+        &state.rejected_outputs,
         &hooks,
         &context,
     ))
@@ -363,6 +364,15 @@ pub(crate) fn execute_node(
                 text = format!("{text}\n\n{}", marker_contract());
             }
 
+            // Status-file contract (subtask S2): a node with a success_check may
+            // hand its final verdict as JSON via $APB_STATUS_FILE, which the
+            // engine reads before parsing the textual report. Mentioned only when
+            // a success_check exists; a plain node keeps the report-only contract.
+            let status_note = super::status_file::status_file_note(node.success_check.is_some());
+            if !status_note.is_empty() {
+                text = format!("{text}\n\n{status_note}");
+            }
+
             // Connector env isolation (spec 4.3) for every attempt's agent spawn:
             // scrub inherited connector tokens and hand the agent the run-context
             // env that `apb connector call` reads.
@@ -457,6 +467,25 @@ pub(crate) fn execute_node(
                     }
                     None => adapter_for(&step.agent)?,
                 };
+                // Hermetic isolation (subtask S1): when the bound profile sets
+                // `hermetic: true`, claude/claude-code get an apb-owned minimal
+                // settings file (user plugins and hooks off) handed over via
+                // `--settings`. Any other agent has no such mechanism, so we warn
+                // and proceed without isolation rather than failing the run. The
+                // file content is fixed, so writing it once per step is enough.
+                let hermetic_settings: Option<PathBuf> = if entry.hermetic {
+                    if crate::adapter::agent_supports_hermetic(&step.agent) {
+                        Some(crate::adapter::write_hermetic_settings(run_dir)?)
+                    } else {
+                        eprintln!(
+                            "apb: warning: node `{node_id}` profile requests hermetic isolation but agent `{}` has no isolation mechanism; running without it",
+                            step.agent
+                        );
+                        None
+                    }
+                } else {
+                    None
+                };
                 for try_i in 0..=retries {
                     // Cancellation (this branch lost a join:any) - exit with status
                     // Cancelled, not counting this as a failure.
@@ -500,6 +529,22 @@ pub(crate) fn execute_node(
                     let stream_log = run_dir
                         .join("agent-stream")
                         .join(format!("{node_id}-{attempt}.jsonl"));
+                    // Per-attempt status file (subtask S2): the agent MAY write
+                    // its final verdict here as JSON; the engine reads it before
+                    // parsing the textual report. Mirrors the agent-stream
+                    // naming. The directory is created once per attempt
+                    // (idempotent); this is set for EVERY attempt, independent of
+                    // any success_check.
+                    let status_dir = run_dir.join("agent-status");
+                    std::fs::create_dir_all(&status_dir)?;
+                    let status_file = status_dir.join(format!("{node_id}-{attempt}.json"));
+                    // Stale status-file removal (issue #70 item 3): a resume or
+                    // continue_from re-run can restart the attempt counter, so a
+                    // status file from a PRIOR execution may still sit at this
+                    // attempt's path. Drop it before spawning (ok-ignored: a missing
+                    // file is the normal case) so `read_status_file` after the run
+                    // can only ever adopt a file THIS attempt actually wrote.
+                    let _ = std::fs::remove_file(&status_file);
                     let task = AgentTask {
                         prompt: &text,
                         model: &step.model,
@@ -517,6 +562,9 @@ pub(crate) fn execute_node(
                         grant_autonomy,
                         connector_policy: &connector_policy,
                         interactive: *interactive,
+                        // Ordinary agent_task attempts carry the spec 6.2 report
+                        // contract so the agent's self-assessed status routes the node.
+                        report_contract: true,
                         node: node_id,
                         agent: &step.agent,
                         // Node-output contract (Finding 2 of issue #56): honor
@@ -524,6 +572,12 @@ pub(crate) fn execute_node(
                         // agent's marker-wrapped work product, robust to host
                         // Stop-hook / guardrail turns injected after the work.
                         extract: node.outputs.as_ref().and_then(|o| o.extract.as_deref()),
+                        // Handed to the agent as APB_STATUS_FILE; read back below
+                        // before the success_check gate.
+                        status_file: Some(status_file.clone()),
+                        // Hermetic isolation (subtask S1): Some only for a
+                        // hermetic profile on an isolation-capable agent.
+                        hermetic_settings: hermetic_settings.clone(),
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -713,6 +767,7 @@ pub(crate) fn execute_node(
                             duration_ms,
                             session: None,
                             summary: None,
+                            rejected_output: None,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -736,32 +791,44 @@ pub(crate) fn execute_node(
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
                     match outcome {
-                        Ok(report) => {
-                            journal.append(EventPayload::AttemptFinished {
-                                node: node_id.into(),
-                                attempt,
-                                status: report.status.as_str().into(),
-                                duration_ms,
-                                // Session id captured from this attempt (spec
-                                // 2026-07-20, Task 7); the drive loop reads it
-                                // back to resume the agent on the answer round.
-                                session: report.session.clone(),
-                                // Display-only summary (issue #42 finding 1):
-                                // kept for humans, never used as node output.
-                                summary: Some(report.summary.clone()),
-                            })?;
+                        Ok(mut report) => {
                             // Interactive suspension (spec 2026-07-20): the agent
                             // asked a question via the stdout marker instead of
-                            // finishing. The attempt genuinely ran (its
-                            // attempt_started/attempt_finished are journaled
-                            // above); we hand drive a suspension to park on rather
-                            // than composing a NodeFinished. The marker is honored
-                            // only on interactive nodes.
+                            // finishing. The attempt genuinely ran, so journal its
+                            // paired `attempt_finished`, then hand drive a
+                            // suspension to park on rather than composing a
+                            // NodeFinished. The marker is honored only on
+                            // interactive nodes.
                             if *interactive && let Some(q) = report.question {
+                                journal.append(EventPayload::AttemptFinished {
+                                    node: node_id.into(),
+                                    attempt,
+                                    status: report.status.as_str().into(),
+                                    duration_ms,
+                                    session: report.session.clone(),
+                                    summary: Some(report.summary.clone()),
+                                    rejected_output: None,
+                                })?;
                                 return Ok(AttemptOutcome::Suspended {
                                     question: q.question,
                                     options: q.options,
                                 });
+                            }
+                            // Status-file precedence (subtask S2): before the
+                            // success_check gate, prefer the agent's JSON verdict
+                            // in APB_STATUS_FILE when present and valid. It
+                            // overrides the parsed status and, when it carries a
+                            // non-empty outputs object, the node output; an absent
+                            // or invalid file leaves the textual report intact (the
+                            // fallback). The success_check gate below then runs on
+                            // the effective status/output, so a status-file success
+                            // that success_check rejects still consumes a retry and
+                            // records rejected_output (S3 behavior preserved).
+                            if let Some(sfr) = super::status_file::read_status_file(&status_file) {
+                                report.status = sfr.status;
+                                if let Some(out) = sfr.outputs {
+                                    report.output = out;
+                                }
                             }
                             if report.status == NodeStatus::Succeeded {
                                 // Empty-output anomaly (issue #42, finding 6): an
@@ -785,13 +852,14 @@ pub(crate) fn execute_node(
                                 // AFTER this branch's agent has succeeded (meaning this
                                 // branch was not cancelled) - we do not propagate
                                 // cancellation here. Two shapes:
-                                match node.success_check.as_ref() {
+                                let rejection: Option<String> = match node.success_check.as_ref() {
                                     // Deterministic sh-script check (spec 6.2): a non-zero
-                                    // exit makes the node Failed regardless of the agent's
-                                    // report. We run it in the SAME attempt workdir the
-                                    // agent worked in (for an isolated node - attempt_workdir,
-                                    // otherwise the shared workdir), otherwise the check would
-                                    // validate a directory the agent never wrote to.
+                                    // exit rejects the report regardless of the agent's
+                                    // self-assessment. We run it in the SAME attempt workdir
+                                    // the agent worked in (for an isolated node -
+                                    // attempt_workdir, otherwise the shared workdir),
+                                    // otherwise the check would validate a directory the
+                                    // agent never wrote to.
                                     Some(apb_core::schema::SuccessCheck::Script(check)) => {
                                         let r = run_script(
                                             run_dir,
@@ -801,46 +869,92 @@ pub(crate) fn execute_node(
                                             None,
                                             None,
                                         )?;
-                                        if r.status != NodeStatus::Succeeded {
-                                            return Ok(AttemptOutcome::Finished {
-                                                status: NodeStatus::Failed,
-                                                output: format!("success_check `{check}` failed"),
-                                                events,
-                                            });
-                                        }
+                                        (r.status != NodeStatus::Succeeded)
+                                            .then(|| format!("success_check `{check}` failed"))
                                     }
                                     // Completion-marker check (issue 45 finding 1): the
                                     // literal marker must appear in the node output, else the
-                                    // reported success is rejected and flows through the
-                                    // normal retry/failure-edge machinery. This defends
-                                    // against a long-running orchestrator that exits early at
-                                    // its first wait phase and records interim text as
-                                    // success.
+                                    // reported success is rejected. This defends against a
+                                    // long-running orchestrator that exits early at its first
+                                    // wait phase and records interim text as success.
                                     Some(apb_core::schema::SuccessCheck::Marker { marker })
                                         if !report.output.contains(marker.as_str()) =>
                                     {
+                                        Some(format!(
+                                            "success report rejected: completion marker `{marker}` not found in output"
+                                        ))
+                                    }
+                                    Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => {
+                                        None
+                                    }
+                                };
+                                match rejection {
+                                    // Rejected: this is an attempt FAILURE, not a
+                                    // terminal node failure. Journal it as `failed`
+                                    // carrying the discarded report text
+                                    // (`rejected_output`), then fall through so the
+                                    // retry loop iterates and, once exhausted, the
+                                    // fallback chain advances - honoring max_retries
+                                    // and fallbacks exactly like an ordinary failure.
+                                    // The raw agent text is preserved for the
+                                    // downstream `nodes.<id>.rejected_output`.
+                                    Some(reason) => {
+                                        journal.append(EventPayload::AttemptFinished {
+                                            node: node_id.into(),
+                                            attempt,
+                                            status: "failed".into(),
+                                            duration_ms,
+                                            session: report.session.clone(),
+                                            summary: Some(report.summary.clone()),
+                                            rejected_output: Some(report.output.clone()),
+                                        })?;
+                                        // Keep the human-readable reason on the
+                                        // terminal failure message while the raw
+                                        // agent text lives in `rejected_output`.
+                                        last_msg = format!("{reason}: {}", report.output);
+                                        last_timed_out = false;
+                                    }
+                                    None => {
+                                        journal.append(EventPayload::AttemptFinished {
+                                            node: node_id.into(),
+                                            attempt,
+                                            status: report.status.as_str().into(),
+                                            // Session id captured from this attempt
+                                            // (spec 2026-07-20, Task 7); the drive
+                                            // loop reads it back to resume the agent
+                                            // on the answer round.
+                                            duration_ms,
+                                            session: report.session.clone(),
+                                            // Display-only summary (issue #42 finding
+                                            // 1): kept for humans, never node output.
+                                            summary: Some(report.summary.clone()),
+                                            rejected_output: None,
+                                        })?;
                                         return Ok(AttemptOutcome::Finished {
-                                            status: NodeStatus::Failed,
-                                            output: format!(
-                                                "success report rejected: completion marker `{marker}` not found in output"
-                                            ),
+                                            status: NodeStatus::Succeeded,
+                                            // Node output is the agent's reply body
+                                            // (report block stripped), NOT the
+                                            // one-line summary (issue #42 finding 1):
+                                            // templating, output_match, and
+                                            // run_report all read this.
+                                            output: report.output,
                                             events,
                                         });
                                     }
-                                    Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => {}
                                 }
-                                return Ok(AttemptOutcome::Finished {
-                                    status: NodeStatus::Succeeded,
-                                    // Node output is the agent's reply body (with
-                                    // the report block stripped), NOT the one-line
-                                    // summary (issue #42 finding 1): templating,
-                                    // output_match, and run_report all read this.
-                                    output: report.output,
-                                    events,
-                                });
+                            } else {
+                                journal.append(EventPayload::AttemptFinished {
+                                    node: node_id.into(),
+                                    attempt,
+                                    status: report.status.as_str().into(),
+                                    duration_ms,
+                                    session: report.session.clone(),
+                                    summary: Some(report.summary.clone()),
+                                    rejected_output: None,
+                                })?;
+                                last_msg = report.output;
+                                last_timed_out = false;
                             }
-                            last_msg = report.output;
-                            last_timed_out = false;
                         }
                         Err((class, msg)) => {
                             // Cancellation mid-adapter-work: kill returned Transport,
@@ -865,6 +979,7 @@ pub(crate) fn execute_node(
                                 duration_ms,
                                 session: None,
                                 summary: None,
+                                rejected_output: None,
                             })?;
                             last_msg = msg;
                             // A transport error and a timeout break the retry loop for this
@@ -952,7 +1067,11 @@ pub(crate) fn execute_finish_answer(
     // append-only log even after the compaction that repeated resume +
     // patch-migration cycles trigger. See `build_terminal_context`.
     let events = read_all(run_dir)?;
-    let context = build_terminal_context(&events, cfg.instruction.as_deref());
+    // Issue #70 item 1: the terminal composer must see the run instruction ONLY
+    // as quoted reference context (attached below by `assemble_finish_answer_prompt`),
+    // never as a `## run instruction` directive header. So the auto context here
+    // carries the completed nodes' recorded output but NOT the instruction header.
+    let context = build_terminal_context(&events, None);
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -963,13 +1082,19 @@ pub(crate) fn execute_finish_answer(
         cfg.instruction.as_deref(),
         &state.outputs,
         &state.reviews,
+        &state.rejected_outputs,
         &hooks,
         &context,
     );
-    // Finish-with-prompt is an agent attempt: same trailing assembly as
-    // agent_task - run instruction, supervisor notes, precedence frame (issue
-    // #45 finding 2, issue #56 finding 4).
-    let text = crate::context::assemble_agent_prompt(&text, cfg.instruction.as_deref(), &events);
+    // Finish-with-prompt scopes its composer prompt (issue #70 item 1): the run
+    // instruction rides along ONLY as quoted reference context and the composer is
+    // told its sole deliverable is a human-readable closing message. Unlike an
+    // ordinary agent_task it gets no precedence frame (which would make it read
+    // the instruction as an overriding order) and, paired with `report_contract:
+    // false` on its task below, no status-verdict protocol. Supervisor notes are
+    // still delivered as steering.
+    let text =
+        crate::context::assemble_finish_answer_prompt(&text, cfg.instruction.as_deref(), &events);
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)
@@ -1055,10 +1180,18 @@ pub(crate) fn execute_finish_answer(
                 // A finish-answer node is never interactive: it composes the
                 // run's terminal answer, it does not ask the user questions.
                 interactive: false,
+                // Issue #70 item 1: the composer's whole reply IS the closing
+                // message, so it gets no status-verdict protocol. Its scoped prompt
+                // (assemble_finish_answer_prompt) already states the deliverable.
+                report_contract: false,
                 node: node_id,
                 agent: &ri.agent_id,
                 // Finish-answer composition uses today's last-message output.
                 extract: None,
+                // Internal finish-answer composition: no status-file protocol.
+                status_file: None,
+                // Internal finish-answer composition: no hermetic isolation.
+                hermetic_settings: None,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -1114,6 +1247,7 @@ pub(crate) fn execute_finish_answer(
                         duration_ms,
                         session: report.session.clone(),
                         summary: Some(report.summary.clone()),
+                        rejected_output: None,
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         // The composed finish answer is the agent's reply body,
@@ -1137,6 +1271,7 @@ pub(crate) fn execute_finish_answer(
                         duration_ms,
                         session: None,
                         summary: None,
+                        rejected_output: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {
@@ -1374,6 +1509,7 @@ pub(crate) fn run_playbook_node(
                 cfg.instruction.as_deref(),
                 &state.outputs,
                 &state.reviews,
+                &state.rejected_outputs,
                 &hooks,
                 &context,
             ))
@@ -1651,10 +1787,18 @@ pub(crate) fn maybe_compact_context(
         connector_policy: &connector_policy,
         // Internal summarizer: not a playbook node, never interactive.
         interactive: false,
+        // Preserve the historical report-contract posture for the summarizer; the
+        // report block is harmless (interpret_report strips it) and this keeps its
+        // behavior byte-identical.
+        report_contract: true,
         node: "__context_compact",
         agent: "claude-code",
         // Internal summarizer keeps today's last-message output.
         extract: None,
+        // Internal summarizer: no status-file protocol.
+        status_file: None,
+        // Internal summarizer: no hermetic isolation.
+        hermetic_settings: None,
     };
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.

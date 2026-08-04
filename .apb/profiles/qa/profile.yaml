@@ -1,5 +1,6 @@
 name: qa
 description: QA engineer for apb; executed-evidence-only verdicts across Rust and web gates.
+hermetic: true
 executor:
   agent: claude
   model: claude-opus-4-8

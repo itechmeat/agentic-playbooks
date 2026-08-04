@@ -297,6 +297,14 @@ pub struct AgentTask<'a> {
     /// non-interactive node the marker line is ordinary output. Internal,
     /// side-effect-free calls (context compaction, finish answers) set `false`.
     pub interactive: bool,
+    /// Whether the spec 6.2 report contract (the trailing "end your reply with a
+    /// status/summary yaml block" instruction) is appended to this attempt's
+    /// prompt (issue #70 item 1). `true` for ordinary agent_task attempts and the
+    /// internal summarizer, so their self-assessed status can drive node routing.
+    /// `false` for the terminal finish-answer composer, whose whole reply IS the
+    /// run's closing message: it must not be handed a success|failure verdict
+    /// protocol where refusing to implement counts as its deliverable.
+    pub report_contract: bool,
     /// The node id this attempt executes, used to name the node in a
     /// malformed-marker error. Internal calls pass an internal placeholder.
     pub node: &'a str,
@@ -314,6 +322,56 @@ pub struct AgentTask<'a> {
     /// last-message-with-report-block-stripped behavior. Internal, compaction,
     /// and finish-answer calls always pass `None`.
     pub extract: Option<&'a str>,
+    /// Per-attempt status file (subtask S2). When `Some`, the engine hands the
+    /// agent its path via the `APB_STATUS_FILE` env var at spawn; the agent MAY
+    /// write its final verdict there as JSON, which the engine reads before
+    /// parsing the textual report. `None` for internal, side-effect-free calls
+    /// (compaction, finish answers) that have no status file. Owned rather than
+    /// borrowed because it is computed fresh per attempt in the retry loop.
+    pub status_file: Option<std::path::PathBuf>,
+    /// Hermetic isolation (subtask S1). When the bound profile sets
+    /// `hermetic: true` AND the executor supports settings isolation
+    /// (claude/claude-code, see [`agent_supports_hermetic`]), the engine writes
+    /// an apb-owned minimal settings file (user plugins and hooks disabled) and
+    /// puts its path here; [`inject_hermetic_settings`] then adds claude's
+    /// `--settings <path>` flag. `None` for a non-hermetic profile, for an agent
+    /// without an isolation mechanism (the engine warns instead), and for
+    /// internal side-effect-free calls (compaction, finish answers).
+    pub hermetic_settings: Option<std::path::PathBuf>,
+}
+
+/// Whether an agent exposes a settings-isolation mechanism apb can drive for a
+/// hermetic profile. Only claude/claude-code do (via the `--settings` flag);
+/// every other adapter has no such mechanism, so the engine ignores the
+/// `hermetic` flag for it with a warning rather than failing the run.
+pub(crate) fn agent_supports_hermetic(agent: &str) -> bool {
+    matches!(agent, "claude" | "claude-code")
+}
+
+/// The apb-owned minimal claude settings written for a hermetic run. It is the
+/// highest-precedence settings source handed to claude via `--settings`, and it
+/// disables the user-scope surfaces that would otherwise leak into the run:
+/// - `hooks: {}` - no user Stop/PreToolUse/etc. hooks fire;
+/// - `enabledPlugins: {}` - no user plugins load;
+/// - `enableAllProjectMcpServers: false` - project MCP servers are not
+///   auto-enabled.
+///
+/// Kept intentionally small and apb-owned; extend deliberately.
+pub(crate) const HERMETIC_SETTINGS_JSON: &str =
+    "{\n  \"hooks\": {},\n  \"enabledPlugins\": {},\n  \"enableAllProjectMcpServers\": false\n}\n";
+
+/// The run-dir path of the apb-owned hermetic settings file.
+pub(crate) fn hermetic_settings_path(run_dir: &Path) -> std::path::PathBuf {
+    run_dir.join("hermetic-settings.json")
+}
+
+/// Writes the apb-owned minimal settings file into the run dir (once; the
+/// content is fixed, so a repeat write is idempotent) and returns its path.
+/// Written atomically via `apb_core::fsutil`.
+pub(crate) fn write_hermetic_settings(run_dir: &Path) -> std::io::Result<std::path::PathBuf> {
+    let path = hermetic_settings_path(run_dir);
+    apb_core::fsutil::atomic_write(&path, HERMETIC_SETTINGS_JSON.as_bytes())?;
+    Ok(path)
 }
 
 /// The marker a `resume`/`reprompt` agent prints on its own stdout line to ask
@@ -763,6 +821,20 @@ fn inject_ask_server(argv: &mut Vec<String>, task: &AgentTask, live: Option<&Liv
     }
 }
 
+/// Appends claude's `--settings <path>` flag when a hermetic profile bound this
+/// attempt (subtask S1). Guarded to claude/claude-code the same way
+/// `inject_ask_server` guards its claude-only flag: a non-claude argv must never
+/// gain a claude-only flag. The engine only sets `hermetic_settings` for an
+/// agent that [`agent_supports_hermetic`], so the guard here is belt-and-braces.
+fn inject_hermetic_settings(argv: &mut Vec<String>, task: &AgentTask) {
+    if let Some(path) = &task.hermetic_settings
+        && agent_supports_hermetic(task.agent)
+    {
+        argv.push("--settings".to_string());
+        argv.push(path.to_string_lossy().into_owned());
+    }
+}
+
 /// Tail appended to the prompt: asks the agent to end its reply with a
 /// structured report block (spec 6.2 contract). Agents that follow the
 /// contract get their self-assessed status reflected in node_status;
@@ -772,6 +844,19 @@ const REPORT_INSTRUCTION: &str = "When you are done, end your reply with a fence
 
 fn with_report_instruction(prompt: &str) -> String {
     format!("{prompt}\n\n{REPORT_INSTRUCTION}")
+}
+
+/// The prompt actually delivered to the transport. Ordinary attempts carry the
+/// spec 6.2 report contract; an attempt that opts out (`report_contract: false`,
+/// the terminal finish-answer composer per issue #70 item 1) sends its prompt
+/// verbatim so the agent treats its whole reply as the deliverable rather than a
+/// status-bearing verdict.
+fn transport_prompt(task: &AgentTask) -> String {
+    if task.report_contract {
+        with_report_instruction(task.prompt)
+    } else {
+        task.prompt.to_string()
+    }
 }
 
 /// The three things the report contract (spec 6.2) yields from an agent's reply.
@@ -1016,7 +1101,7 @@ impl ClaudeAdapter {
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
-        let prompt = with_report_instruction(task.prompt);
+        let prompt = transport_prompt(task);
         let (mut argv, stdin_payload) = build_command(
             &self.spec,
             &prompt,
@@ -1025,6 +1110,7 @@ impl ClaudeAdapter {
             task.grant_autonomy,
         );
         inject_ask_server(&mut argv, task, live);
+        inject_hermetic_settings(&mut argv, task);
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(task.workdir)
@@ -1041,6 +1127,11 @@ impl ClaudeAdapter {
         // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
         // spawned codex cannot inherit the user's interactive MCP config.
         apply_agent_home(&mut cmd, task)?;
+        // Per-attempt status file (subtask S2): the agent may write its final
+        // verdict as JSON here, which the engine reads before the textual report.
+        if let Some(sf) = &task.status_file {
+            cmd.env("APB_STATUS_FILE", sf);
+        }
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -1210,7 +1301,7 @@ impl ClaudeAdapter {
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
-        let prompt = with_report_instruction(task.prompt);
+        let prompt = transport_prompt(task);
         // Base argv comes from the invocation form; claude-specific streaming
         // flags (stream-json) are layered on top. In the first iteration,
         // acp = claude.
@@ -1222,6 +1313,7 @@ impl ClaudeAdapter {
             task.grant_autonomy,
         );
         inject_ask_server(&mut argv, task, live);
+        inject_hermetic_settings(&mut argv, task);
         argv.push("--output-format".to_string());
         argv.push("stream-json".to_string());
         argv.push("--verbose".to_string());
@@ -1237,6 +1329,11 @@ impl ClaudeAdapter {
         // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
         // spawned codex cannot inherit the user's interactive MCP config.
         apply_agent_home(&mut cmd, task)?;
+        // Per-attempt status file (subtask S2): the agent may write its final
+        // verdict as JSON here, which the engine reads before the textual report.
+        if let Some(sf) = &task.status_file {
+            cmd.env("APB_STATUS_FILE", sf);
+        }
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -1752,6 +1849,86 @@ mod tests {
     }
 
     #[test]
+    fn agent_supports_hermetic_only_for_claude() {
+        assert!(agent_supports_hermetic("claude"));
+        assert!(agent_supports_hermetic("claude-code"));
+        assert!(!agent_supports_hermetic("codex"));
+        assert!(!agent_supports_hermetic("opencode"));
+        assert!(!agent_supports_hermetic(""));
+    }
+
+    fn hermetic_task<'a>(
+        policy: &'a ConnectorEnvPolicy,
+        agent: &'a str,
+        settings: Option<std::path::PathBuf>,
+    ) -> AgentTask<'a> {
+        AgentTask {
+            prompt: "go",
+            model: "haiku",
+            workdir: Path::new("."),
+            timeout: None,
+            stream_log: None,
+            soul: None,
+            grant_autonomy: false,
+            connector_policy: policy,
+            interactive: false,
+            report_contract: true,
+            node: "test",
+            agent,
+            extract: None,
+            status_file: None,
+            hermetic_settings: settings,
+        }
+    }
+
+    #[test]
+    fn hermetic_settings_flag_injected_for_claude_and_absent_otherwise() {
+        let policy = ConnectorEnvPolicy::default();
+        let path = std::path::PathBuf::from("/run/hermetic-settings.json");
+        // Claude with a hermetic settings file -> argv gains `--settings <path>`.
+        let claude = hermetic_task(&policy, "claude", Some(path.clone()));
+        let mut argv = vec!["-p".to_string()];
+        inject_hermetic_settings(&mut argv, &claude);
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--settings" && w[1] == path.to_string_lossy()),
+            "expected --settings <path> for a hermetic claude step, got {argv:?}"
+        );
+        // No hermetic settings -> no flag.
+        let plain = hermetic_task(&policy, "claude", None);
+        let mut argv = vec!["-p".to_string()];
+        inject_hermetic_settings(&mut argv, &plain);
+        assert!(!argv.iter().any(|a| a == "--settings"), "got {argv:?}");
+        // A non-claude agent must never gain the claude-only flag, even if a
+        // settings path was (wrongly) attached.
+        let other = hermetic_task(&policy, "codex", Some(path.clone()));
+        let mut argv = vec!["-p".to_string()];
+        inject_hermetic_settings(&mut argv, &other);
+        assert!(!argv.iter().any(|a| a == "--settings"), "got {argv:?}");
+    }
+
+    #[test]
+    fn hermetic_settings_file_disables_hooks_and_plugins() {
+        let dir = std::env::temp_dir().join(format!("apb-hermetic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = write_hermetic_settings(&dir).unwrap();
+        let json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(json["hooks"], serde_json::json!({}), "hooks must be empty");
+        assert_eq!(
+            json["enabledPlugins"],
+            serde_json::json!({}),
+            "plugins must be empty"
+        );
+        assert_eq!(
+            json["enableAllProjectMcpServers"],
+            serde_json::json!(false),
+            "project MCP auto-enable must be off"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn interpret_report_reads_success_block() {
         let text = "```yaml\nstatus: success\nsummary: done\n```";
         let outcome = interpret_report(text);
@@ -1884,10 +2061,36 @@ mod tests {
             grant_autonomy: false,
             connector_policy: policy,
             interactive: false,
+            report_contract: true,
             node: "test",
             agent: "claude",
             extract,
+            status_file: None,
+            hermetic_settings: None,
         }
+    }
+
+    #[test]
+    fn transport_prompt_gates_report_contract() {
+        let policy = ConnectorEnvPolicy::default();
+        // With the report contract on, the spec 6.2 status/summary block is
+        // appended.
+        let mut t = stream_task(&policy, None);
+        t.prompt = "compose the closing message";
+        t.report_contract = true;
+        let on = transport_prompt(&t);
+        assert!(
+            on.contains("status: success | failure"),
+            "report_contract:true must append the status-verdict block, got:\n{on}"
+        );
+        // With it off (the finish-answer composer, issue #70 item 1), the prompt
+        // is delivered verbatim so the whole reply is the deliverable.
+        t.report_contract = false;
+        let off = transport_prompt(&t);
+        assert_eq!(
+            off, "compose the closing message",
+            "report_contract:false must not append the status-verdict block, got:\n{off}"
+        );
     }
 
     #[test]
