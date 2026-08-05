@@ -154,6 +154,93 @@ fn fallback_recovers_when_primary_fails() {
     );
 }
 
+// require_verdict (spec 2.2, #71 item 1): a node that requires a verdict and
+// whose agent keeps exiting 0 on a mid-work message. Each verdict-less attempt is
+// INTERRUPTED and consumes a retry exactly like a failure, so the budget is
+// exhausted and the node fails - the mid-work text is never recorded as a success.
+const WF_VERDICT: &str = r#"
+schema: 1
+id: verdictflow
+name: Verdict
+version: 1.0.0
+defaults:
+  profile: main
+  max_retries: 1
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "do", require_verdict: true }
+  - { id: done, type: finish, outcome: success }
+  - { id: failed, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done, condition: { type: node_status, node: work, equals: success } }
+  - { from: work, to: failed, condition: { type: node_status, node: work, equals: failure } }
+"#;
+
+#[test]
+fn require_verdict_interrupted_attempts_consume_retries_and_fail_the_node() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let vdir = dir.path().join(".apb/playbooks/verdictflow/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), WF_VERDICT).unwrap();
+    fs::write(
+        dir.path().join(".apb/playbooks/verdictflow/current"),
+        "1.0.0",
+    )
+    .unwrap();
+    common::seed_main(dir.path());
+
+    let path = dir.path().join("midwork.sh");
+    common::write_sync(&path, "#!/bin/sh\necho 'still investigating'\nexit 0\n");
+    let mut p = fs::metadata(&path).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&path, p).unwrap();
+    let prog = path.to_string_lossy().to_string();
+
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "verdictflow", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(
+        res.outcome,
+        RunStatus::Failed,
+        "a node that never records a verdict must not be recorded as succeeded"
+    );
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    let interrupted = events
+        .iter()
+        .filter(|e| {
+            matches!(&e.payload, EventPayload::AttemptFinished { node, status, .. }
+                if node == "work" && status == "interrupted")
+        })
+        .count();
+    assert_eq!(
+        interrupted, 2,
+        "both attempts must be journaled interrupted (max_retries: 1)"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(&e.payload, EventPayload::RetryStarted { node, .. } if node == "work")
+        ),
+        "an interrupted attempt must consume a retry"
+    );
+    assert!(
+        events.iter().any(
+            |e| matches!(&e.payload, EventPayload::NodeFinished { node, status, output, .. }
+            if node == "work" && status == "failed" && output.contains("still investigating"))
+        ),
+        "the partial mid-work output must be preserved as the failed node's output"
+    );
+}
+
 // A stub that always fails - to check exhaustion of the whole executor chain.
 fn always_fail_agent(dir: &std::path::Path) -> String {
     let path = dir.join("always_fail.sh");

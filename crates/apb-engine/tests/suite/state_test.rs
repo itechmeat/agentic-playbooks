@@ -77,6 +77,7 @@ fn attempt_finished_rejected_output_populates_rejected_outputs() {
                 session: None,
                 summary: None,
                 rejected_output: Some("interim progress only".into()),
+                partial_output: None,
             },
         ),
     ];
@@ -202,6 +203,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 session: None,
                 summary: None,
                 rejected_output: None,
+                partial_output: None,
             },
         ),
         ev(

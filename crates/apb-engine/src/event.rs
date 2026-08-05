@@ -104,6 +104,16 @@ pub enum EventPayload {
         /// old logs. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rejected_output: Option<String>,
+        /// Whatever the attempt produced before it ended without recording a
+        /// verdict (spec 2026-08-05 section 2.2): the agent's mid-work text on
+        /// an `interrupted` attempt, or the adapter's failure detail when the
+        /// process died. Kept so an interruption is observable and the work is
+        /// not silently dropped; the next attempt is told to look for work
+        /// already done rather than being handed this text. `None` for every
+        /// attempt that recorded a verdict or a report, and for old logs.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial_output: Option<String>,
     },
     NodeFinished {
         node: String,
@@ -694,6 +704,7 @@ mod tests {
             session: None,
             summary: None,
             rejected_output: Some("interim progress only".into()),
+            partial_output: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
@@ -715,6 +726,7 @@ mod tests {
             session: Some("abc".into()),
             summary: Some("did the thing".into()),
             rejected_output: None,
+            partial_output: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();

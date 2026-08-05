@@ -12,7 +12,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apb_core::registry::init_project;
-use apb_engine::event::read_all;
+use apb_engine::event::{EventPayload, WakeTrigger, read_all};
 use apb_engine::scheduler::{RunOptions, run};
 use apb_engine::state::{RunState, RunStatus};
 
@@ -78,6 +78,49 @@ nodes:
 edges:
   - { from: start, to: a }
   - { from: a, to: w }
+  - { from: w, to: ok, condition: { type: node_status, node: w, equals: success } }
+  - { from: w, to: no, fallback: true }
+"#;
+
+// A node that REQUIRES a verdict (spec 2.2): an attempt whose process ends
+// without a valid status file is interrupted, not succeeded. One retry is
+// allowed, so a second attempt can finish the work.
+const VERDICT_PLAYBOOK: &str = r#"
+schema: 1
+id: sfv
+name: StatusFileVerdict
+version: 1.0.0
+defaults:
+  profile: main
+  max_retries: 1
+nodes:
+  - { id: start, type: start }
+  - { id: w, type: agent_task, prompt: "do", require_verdict: true }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: w }
+  - { from: w, to: ok, condition: { type: node_status, node: w, equals: success } }
+  - { from: w, to: no, fallback: true }
+"#;
+
+// Same shape, but the requirement comes from `defaults.require_verdict` and the
+// node has a 1 s timeout: used for the "timeout after a written verdict" case.
+const TIMEOUT_VERDICT_PLAYBOOK: &str = r#"
+schema: 1
+id: sft
+name: StatusFileTimeout
+version: 1.0.0
+defaults:
+  profile: main
+  require_verdict: true
+nodes:
+  - { id: start, type: start }
+  - { id: w, type: agent_task, prompt: "do", timeout_seconds: 1 }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: w }
   - { from: w, to: ok, condition: { type: node_status, node: w, equals: success } }
   - { from: w, to: no, fallback: true }
 "#;
@@ -283,4 +326,310 @@ fn prompt_mentions_status_file_only_with_success_check() {
         !without_prompt.contains("APB_STATUS_FILE"),
         "a node without a success_check must not mention APB_STATUS_FILE in its prompt"
     );
+}
+
+// --- The verdict outlives the process exit (#74 finding 1, spec 2.1) ---
+
+/// Every `attempt_finished` status for a node, in journal order.
+fn attempt_statuses(events: &[apb_engine::event::Event], node: &str) -> Vec<String> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::AttemptFinished {
+                node: n, status, ..
+            } if n == node => Some(status.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Whether an anomaly wake for `node` was journaled whose detail matches.
+fn has_anomaly(events: &[apb_engine::event::Event], node: &str, needle: &str) -> bool {
+    events.iter().any(|e| {
+        matches!(
+            &e.payload,
+            EventPayload::WakeRaised { trigger: WakeTrigger::Anomaly, node: n, detail }
+                if n == node && detail.contains(needle)
+        )
+    })
+}
+
+// 6. A tail crash after the deliverable was already written: the agent writes a
+//    success verdict with outputs and THEN exits non-zero. The verdict is the
+//    explicit completion signal, so the attempt succeeds with those outputs and
+//    the abnormal exit is journaled as an anomaly instead of throwing the
+//    deliverable away.
+#[test]
+fn status_file_success_survives_a_nonzero_exit() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sf", PLAYBOOK);
+    let script = "#!/bin/sh\nprintf '%s' '{\"status\":\"success\",\"outputs\":{\"key\":\"val\"}}' \
+        > \"$APB_STATUS_FILE\"\nprintf 'work is done\\n'\necho 'tail crash' 1>&2\nexit 1\n";
+    let prog = stub_agent(dir.path(), script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "sf", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "a written success verdict must outlive a non-zero exit"
+    );
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    let out = RunState::fold(&events)
+        .outputs
+        .get("w")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        out.contains("key") && out.contains("val"),
+        "the status-file outputs must become the node output despite the exit, got: {out}"
+    );
+    assert_eq!(
+        attempt_statuses(&events, "w"),
+        vec!["succeeded".to_string()],
+        "the attempt must be journaled succeeded"
+    );
+    assert!(
+        has_anomaly(&events, "w", "verdict"),
+        "the tail exit must be journaled as an anomaly naming the written verdict"
+    );
+}
+
+// 7. The same shape with a FAILURE verdict: the attempt stays failed, but the
+//    agent's own outputs are preserved as the attempt output instead of the raw
+//    CLI error text.
+#[test]
+fn status_file_failure_on_a_nonzero_exit_preserves_agent_outputs() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sf", PLAYBOOK);
+    let script = "#!/bin/sh\nprintf '%s' '{\"status\":\"failure\",\"outputs\":{\"reason\":\"schema drift\"}}' \
+        > \"$APB_STATUS_FILE\"\necho 'agent internal error' 1>&2\nexit 2\n";
+    let prog = stub_agent(dir.path(), script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "sf", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Failed,
+        "a failure verdict keeps the attempt failed"
+    );
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    let out = RunState::fold(&events)
+        .outputs
+        .get("w")
+        .cloned()
+        .unwrap_or_default();
+    assert!(
+        out.contains("schema drift"),
+        "the agent's own outputs must survive as the failed node's output, got: {out}"
+    );
+    assert!(
+        !out.contains("agent exited with"),
+        "the raw CLI error text must not replace the agent's outputs, got: {out}"
+    );
+    assert_eq!(
+        attempt_statuses(&events, "w"),
+        vec!["failed".to_string()],
+        "a failure verdict must not be upgraded"
+    );
+}
+
+// 8. A MALFORMED status file on a non-zero exit changes nothing: there is no
+//    valid verdict, so the attempt keeps today's failure semantics.
+#[test]
+fn malformed_status_file_on_a_nonzero_exit_stays_failed() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sf", PLAYBOOK);
+    let script = "#!/bin/sh\nprintf 'not json {' > \"$APB_STATUS_FILE\"\n\
+        echo 'boom' 1>&2\nexit 1\n";
+    let prog = stub_agent(dir.path(), script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "sf", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(attempt_statuses(&events, "w"), vec!["failed".to_string()]);
+    assert!(
+        !has_anomaly(&events, "w", "verdict"),
+        "a malformed file is no verdict, so no verdict anomaly may be journaled"
+    );
+}
+
+// 9. A timeout after a written success verdict: the deadline kill is transport
+//    noise once the verdict exists, so the attempt succeeds with its outputs.
+#[test]
+fn timeout_after_a_written_success_verdict_succeeds() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sft", TIMEOUT_VERDICT_PLAYBOOK);
+    let script = "#!/bin/sh\nprintf '%s' '{\"status\":\"success\",\"outputs\":{\"key\":\"val\"}}' \
+        > \"$APB_STATUS_FILE\"\nsleep 5\n";
+    let prog = stub_agent(dir.path(), script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let started = std::time::Instant::now();
+    let res = run(dir.path(), "sft", None, RunOptions::default()).unwrap();
+    let elapsed = started.elapsed();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "a verdict written before the deadline must decide the attempt"
+    );
+    assert!(
+        elapsed.as_millis() < 4000,
+        "the agent must still be killed on timeout: took {elapsed:?}"
+    );
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    let out = RunState::fold(&events)
+        .outputs
+        .get("w")
+        .cloned()
+        .unwrap_or_default();
+    assert!(out.contains("val"), "outputs must survive, got: {out}");
+}
+
+// --- require_verdict (#71 items 1, 3, 5-context; spec 2.2) ---
+
+// 10. A require_verdict node whose agent prints a mid-work message and exits 0
+//     without writing a verdict: the attempt is INTERRUPTED (not succeeded), a
+//     retry fires carrying the interruption note in its prompt, and the second
+//     attempt's verdict finishes the node.
+#[test]
+fn require_verdict_turns_a_missing_verdict_into_an_interrupted_retry() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sfv", VERDICT_PLAYBOOK);
+    let dump = dir.path().join("prompts");
+    fs::create_dir_all(&dump).unwrap();
+    let marker = dir.path().join("first.marker");
+    // One prompt dump per attempt, keyed by the attempt's status-file basename
+    // (`w-1`, `w-2`), so the note can be asserted per attempt.
+    let script = format!(
+        "#!/bin/sh\nb=$(basename \"$APB_STATUS_FILE\" .json)\n\
+        printf '%s\\n' \"$@\" > \"{d}/$b.txt\"\n\
+        if [ -f '{m}' ]; then\n\
+        printf '%s' '{{\"status\":\"success\",\"outputs\":{{\"done\":\"yes\"}}}}' > \"$APB_STATUS_FILE\"\n\
+        printf 'finished the work\\n'\n\
+        else\n\
+        touch '{m}'\n\
+        printf 'still working on it, will continue after the wait\\n'\n\
+        fi\nexit 0\n",
+        d = dump.display(),
+        m = marker.display()
+    );
+    let prog = stub_agent(dir.path(), &script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "sfv", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "the retry after an interrupted attempt must finish the node"
+    );
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        attempt_statuses(&events, "w"),
+        vec!["interrupted".to_string(), "succeeded".to_string()],
+        "the verdict-less attempt must be journaled interrupted, the second succeeded"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RetryStarted { node, .. } if node == "w")),
+        "an interrupted attempt must consume a retry"
+    );
+    let state = RunState::fold(&events);
+    let out = state.outputs.get("w").cloned().unwrap_or_default();
+    assert!(
+        out.contains("done") && out.contains("yes"),
+        "the second attempt's verdict outputs must become the node output, got: {out}"
+    );
+    let first = fs::read_to_string(dump.join("w-1.txt")).unwrap();
+    let second = fs::read_to_string(dump.join("w-2.txt")).unwrap();
+    assert!(
+        second.contains("cut off mid-work"),
+        "the retry prompt must carry the interruption note, got: {second}"
+    );
+    assert!(
+        !first.contains("cut off mid-work"),
+        "the first attempt has nothing to recover, so it must carry no interruption note"
+    );
+    assert!(
+        first.contains("APB_STATUS_FILE"),
+        "a require_verdict node must always be told the status-file contract"
+    );
+    // The partial mid-work text is preserved on the interrupted attempt event so
+    // the work is observable rather than silently dropped.
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::AttemptFinished { node, status, partial_output: Some(p), .. }
+                if node == "w" && status == "interrupted" && p.contains("still working on it")
+        )),
+        "the interrupted attempt must preserve its partial output"
+    );
+}
+
+// 11. Without require_verdict nothing changes: an exit 0 with no verdict and no
+//     report block stays a success carrying the agent's text (the documented
+//     default every existing playbook relies on).
+#[test]
+fn without_require_verdict_a_missing_verdict_stays_succeeded() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sf", PLAYBOOK);
+    let script = "#!/bin/sh\nprintf 'a plain reply with no verdict\\n'\n";
+    let prog = stub_agent(dir.path(), script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "sf", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "the default text-report contract must be preserved byte for byte"
+    );
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        attempt_statuses(&events, "w"),
+        vec!["succeeded".to_string()]
+    );
+    let out = RunState::fold(&events)
+        .outputs
+        .get("w")
+        .cloned()
+        .unwrap_or_default();
+    assert!(out.contains("a plain reply with no verdict"), "got: {out}");
 }

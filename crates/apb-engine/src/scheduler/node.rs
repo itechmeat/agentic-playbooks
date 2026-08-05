@@ -150,6 +150,75 @@ fn observe_control(
     Ok((cursor, interrupt))
 }
 
+/// Runs a node's `success_check` against an attempt's effective output and
+/// returns the human-readable rejection reason, or `None` when the report is
+/// accepted (including a node with no check at all).
+///
+/// Shared by the two paths that can produce a successful attempt: the ordinary
+/// report path, and a success verdict recovered from the status file after the
+/// agent process died (spec 2026-08-05 section 2.1). A recovered verdict
+/// therefore does NOT bypass the gate.
+fn success_check_rejection(
+    check: Option<&apb_core::schema::SuccessCheck>,
+    run_dir: &Path,
+    attempt_workdir: &Path,
+    output: &str,
+) -> Result<Option<String>, EngineError> {
+    match check {
+        // Deterministic sh-script check (spec 6.2): a non-zero exit rejects the
+        // report regardless of the agent's self-assessment. Run in the SAME
+        // attempt workdir the agent worked in (for an isolated node its
+        // per-attempt directory, otherwise the shared workdir), otherwise the
+        // check would validate a directory the agent never wrote to.
+        Some(apb_core::schema::SuccessCheck::Script(check)) => {
+            let r = run_script(run_dir, attempt_workdir, check, "sh", None, None)?;
+            Ok((r.status != NodeStatus::Succeeded)
+                .then(|| format!("success_check `{check}` failed")))
+        }
+        // Completion-marker check (issue 45 finding 1): the literal marker must
+        // appear in the node output, else the reported success is rejected. This
+        // defends against a long-running orchestrator that exits early at its
+        // first wait phase and records interim text as success.
+        Some(apb_core::schema::SuccessCheck::Marker { marker })
+            if !output.contains(marker.as_str()) =>
+        {
+            Ok(Some(format!(
+                "success report rejected: completion marker `{marker}` not found in output"
+            )))
+        }
+        Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => Ok(None),
+    }
+}
+
+/// Journals an attempt that ended without recording a REQUIRED verdict as
+/// `interrupted`, preserving whatever it produced (spec 2026-08-05 section 2.2,
+/// issue #71 item 1).
+///
+/// An interrupted attempt is a failure for scheduling: it consumes a retry
+/// exactly like any other, and the node's status still comes from its eventual
+/// `node_finished`. `RunState::fold` reads only the PRESENCE of an
+/// `attempt_finished` (to close the open attempt), never its status label, so
+/// the new label cannot confuse the run state machine.
+fn journal_interrupted_attempt(
+    journal: &Journal,
+    node_id: &str,
+    attempt: u32,
+    duration_ms: Option<u64>,
+    session: Option<String>,
+    partial: &str,
+) -> Result<(), EngineError> {
+    journal.append(EventPayload::AttemptFinished {
+        node: node_id.into(),
+        attempt,
+        status: NodeStatus::Interrupted.as_str().into(),
+        duration_ms,
+        session,
+        summary: None,
+        rejected_output: None,
+        partial_output: (!partial.trim().is_empty()).then(|| partial.to_string()),
+    })
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -201,6 +270,7 @@ pub(crate) fn execute_node(
             interactive,
             question_timeout_seconds,
             default_answer,
+            require_verdict,
             ..
         } => {
             // Live question-timeout enforcement inputs (spec 2026-07-20, Task 11
@@ -238,6 +308,12 @@ pub(crate) fn execute_node(
                 );
             }
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
+            // Required verdict (spec 2026-08-05 section 2.2). The node field is a
+            // plain bool, so it can only turn the requirement ON; a playbook-wide
+            // `defaults.require_verdict` turns it on for every agent_task. Same
+            // node-then-defaults direction as `max_retries` above.
+            let require_verdict =
+                *require_verdict || playbook.defaults.require_verdict.unwrap_or(false);
             let timeout = timeout_seconds.map(Duration::from_secs);
             // Stall detection (spec 2026-07-21 run-reliability) fires ONLY for a
             // node whose author set an explicit `expected_duration`, never off
@@ -366,9 +442,12 @@ pub(crate) fn execute_node(
 
             // Status-file contract (subtask S2): a node with a success_check may
             // hand its final verdict as JSON via $APB_STATUS_FILE, which the
-            // engine reads before parsing the textual report. Mentioned only when
-            // a success_check exists; a plain node keeps the report-only contract.
-            let status_note = super::status_file::status_file_note(node.success_check.is_some());
+            // engine reads before parsing the textual report. Mentioned when a
+            // success_check exists, and - in its stronger form - whenever a
+            // verdict is REQUIRED (spec 2026-08-05 section 2.2); a plain node
+            // keeps the report-only contract.
+            let status_note =
+                super::status_file::status_file_note(node.success_check.is_some(), require_verdict);
             if !status_note.is_empty() {
                 text = format!("{text}\n\n{status_note}");
             }
@@ -407,6 +486,11 @@ pub(crate) fn execute_node(
 
             let mut attempt: u32 = 0;
             let mut last_msg = String::new();
+            // Set once an attempt of this node ended without recording a required
+            // verdict (spec 2026-08-05 section 2.2): every later attempt's prompt
+            // then carries the interruption note, so the fresh agent looks for the
+            // work already done instead of blindly redoing it (#71 items 3 and 5).
+            let mut was_interrupted = false;
             // The node's final status once all attempts are exhausted: TimedOut if
             // the last attempt was interrupted by a timeout, otherwise Failed.
             let mut last_timed_out = false;
@@ -545,8 +629,21 @@ pub(crate) fn execute_node(
                     // file is the normal case) so `read_status_file` after the run
                     // can only ever adopt a file THIS attempt actually wrote.
                     let _ = std::fs::remove_file(&status_file);
+                    // This attempt's prompt: the assembled node prompt, plus the
+                    // interruption note when a previous attempt of this node was
+                    // cut off mid-work. Appended here rather than inside
+                    // `render_node_prompt`, so the recovery note (fixed text) does
+                    // not shift the node's cache key.
+                    let attempt_prompt: std::borrow::Cow<'_, str> = if was_interrupted {
+                        std::borrow::Cow::Owned(format!(
+                            "{text}\n\n{}",
+                            super::status_file::INTERRUPTION_NOTE
+                        ))
+                    } else {
+                        std::borrow::Cow::Borrowed(text.as_str())
+                    };
                     let task = AgentTask {
-                        prompt: &text,
+                        prompt: attempt_prompt.as_ref(),
                         model: &step.model,
                         workdir: &attempt_workdir,
                         timeout,
@@ -768,6 +865,7 @@ pub(crate) fn execute_node(
                             session: None,
                             summary: None,
                             rejected_output: None,
+                            partial_output: None,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -790,6 +888,13 @@ pub(crate) fn execute_node(
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
+                    // The attempt's verdict, read ONCE for both branches (spec
+                    // 2026-08-05 section 2.1). The status file is the agent's
+                    // explicit completion signal, so it decides the attempt even
+                    // when the process then exited non-zero, was signalled, or was
+                    // killed on the timeout: that exit is transport-level noise
+                    // once the verdict exists (issue #74 finding 1).
+                    let verdict = super::status_file::read_status_file(&status_file);
                     match outcome {
                         Ok(mut report) => {
                             // Interactive suspension (spec 2026-07-20): the agent
@@ -808,6 +913,7 @@ pub(crate) fn execute_node(
                                     session: report.session.clone(),
                                     summary: Some(report.summary.clone()),
                                     rejected_output: None,
+                                    partial_output: None,
                                 })?;
                                 return Ok(AttemptOutcome::Suspended {
                                     question: q.question,
@@ -824,13 +930,34 @@ pub(crate) fn execute_node(
                             // the effective status/output, so a status-file success
                             // that success_check rejects still consumes a retry and
                             // records rejected_output (S3 behavior preserved).
-                            if let Some(sfr) = super::status_file::read_status_file(&status_file) {
+                            if let Some(sfr) = &verdict {
                                 report.status = sfr.status;
-                                if let Some(out) = sfr.outputs {
-                                    report.output = out;
+                                if let Some(out) = &sfr.outputs {
+                                    report.output = out.clone();
                                 }
                             }
-                            if report.status == NodeStatus::Succeeded {
+                            if require_verdict && verdict.is_none() {
+                                // Required verdict (spec 2026-08-05 section 2.2,
+                                // issue #71 item 1): the process ended normally but
+                                // recorded NO verdict, so whatever it printed is a
+                                // mid-work message rather than a result - which is
+                                // exactly how a cut-off session used to be recorded
+                                // as a success. Classify the attempt interrupted,
+                                // preserve the partial text, consume a retry, and
+                                // tell the next attempt to look for work already
+                                // done.
+                                journal_interrupted_attempt(
+                                    journal,
+                                    node_id,
+                                    attempt,
+                                    duration_ms,
+                                    report.session.clone(),
+                                    &report.output,
+                                )?;
+                                last_msg = report.output;
+                                last_timed_out = false;
+                                was_interrupted = true;
+                            } else if report.status == NodeStatus::Succeeded {
                                 // Empty-output anomaly (issue #42, finding 6): an
                                 // attempt that reports success but produced no
                                 // output at all is almost always a lost/truncated
@@ -851,43 +978,13 @@ pub(crate) fn execute_node(
                                 // A success_check gates the self-report. It runs only
                                 // AFTER this branch's agent has succeeded (meaning this
                                 // branch was not cancelled) - we do not propagate
-                                // cancellation here. Two shapes:
-                                let rejection: Option<String> = match node.success_check.as_ref() {
-                                    // Deterministic sh-script check (spec 6.2): a non-zero
-                                    // exit rejects the report regardless of the agent's
-                                    // self-assessment. We run it in the SAME attempt workdir
-                                    // the agent worked in (for an isolated node -
-                                    // attempt_workdir, otherwise the shared workdir),
-                                    // otherwise the check would validate a directory the
-                                    // agent never wrote to.
-                                    Some(apb_core::schema::SuccessCheck::Script(check)) => {
-                                        let r = run_script(
-                                            run_dir,
-                                            &attempt_workdir,
-                                            check,
-                                            "sh",
-                                            None,
-                                            None,
-                                        )?;
-                                        (r.status != NodeStatus::Succeeded)
-                                            .then(|| format!("success_check `{check}` failed"))
-                                    }
-                                    // Completion-marker check (issue 45 finding 1): the
-                                    // literal marker must appear in the node output, else the
-                                    // reported success is rejected. This defends against a
-                                    // long-running orchestrator that exits early at its first
-                                    // wait phase and records interim text as success.
-                                    Some(apb_core::schema::SuccessCheck::Marker { marker })
-                                        if !report.output.contains(marker.as_str()) =>
-                                    {
-                                        Some(format!(
-                                            "success report rejected: completion marker `{marker}` not found in output"
-                                        ))
-                                    }
-                                    Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => {
-                                        None
-                                    }
-                                };
+                                // cancellation here.
+                                let rejection = success_check_rejection(
+                                    node.success_check.as_ref(),
+                                    run_dir,
+                                    &attempt_workdir,
+                                    &report.output,
+                                )?;
                                 match rejection {
                                     // Rejected: this is an attempt FAILURE, not a
                                     // terminal node failure. Journal it as `failed`
@@ -907,6 +1004,7 @@ pub(crate) fn execute_node(
                                             session: report.session.clone(),
                                             summary: Some(report.summary.clone()),
                                             rejected_output: Some(report.output.clone()),
+                                            partial_output: None,
                                         })?;
                                         // Keep the human-readable reason on the
                                         // terminal failure message while the raw
@@ -929,6 +1027,7 @@ pub(crate) fn execute_node(
                                             // 1): kept for humans, never node output.
                                             summary: Some(report.summary.clone()),
                                             rejected_output: None,
+                                            partial_output: None,
                                         })?;
                                         return Ok(AttemptOutcome::Finished {
                                             status: NodeStatus::Succeeded,
@@ -951,6 +1050,7 @@ pub(crate) fn execute_node(
                                     session: report.session.clone(),
                                     summary: Some(report.summary.clone()),
                                     rejected_output: None,
+                                    partial_output: None,
                                 })?;
                                 last_msg = report.output;
                                 last_timed_out = false;
@@ -972,18 +1072,127 @@ pub(crate) fn execute_node(
                             } else {
                                 "failed"
                             };
-                            journal.append(EventPayload::AttemptFinished {
-                                node: node_id.into(),
-                                attempt,
-                                status: attempt_status.into(),
-                                duration_ms,
-                                session: None,
-                                summary: None,
-                                rejected_output: None,
-                            })?;
-                            last_msg = msg;
+                            // The verdict decides the attempt even here (spec
+                            // 2026-08-05 section 2.1): the process exit, the signal,
+                            // or the deadline kill is transport-level noise once the
+                            // agent has written its explicit completion signal.
+                            match &verdict {
+                                // SUCCESS was recorded before the process died
+                                // (issue #74 finding 1: a tail crash used to discard
+                                // the finished deliverable). The attempt succeeds
+                                // with the outputs the agent wrote, and the abnormal
+                                // exit is journaled as an anomaly so it stays
+                                // visible. Without a written outputs object the
+                                // adapter's failure detail is kept as the output: it
+                                // carries the agent's own stderr/stdout tail, which
+                                // beats handing downstream nodes nothing.
+                                Some(sfr) if sfr.status == NodeStatus::Succeeded => {
+                                    journal.raise_wake(
+                                        run_dir,
+                                        crate::event::WakeTrigger::Anomaly,
+                                        node_id,
+                                        format!(
+                                            "agent_task node `{node_id}` attempt {cur_attempt} recorded a success verdict in its status file, then its process ended abnormally: {msg}"
+                                        ),
+                                    )?;
+                                    let output = sfr.outputs.clone().unwrap_or_else(|| msg.clone());
+                                    // The recovered verdict does not bypass the
+                                    // gate: a success_check still runs on it,
+                                    // exactly as on the Ok branch, and a rejection
+                                    // consumes a retry with the discarded text
+                                    // preserved (S3 behavior).
+                                    match success_check_rejection(
+                                        node.success_check.as_ref(),
+                                        run_dir,
+                                        &attempt_workdir,
+                                        &output,
+                                    )? {
+                                        None => {
+                                            journal.append(EventPayload::AttemptFinished {
+                                                node: node_id.into(),
+                                                attempt,
+                                                status: NodeStatus::Succeeded.as_str().into(),
+                                                duration_ms,
+                                                session: None,
+                                                summary: None,
+                                                rejected_output: None,
+                                                partial_output: None,
+                                            })?;
+                                            return Ok(AttemptOutcome::Finished {
+                                                status: NodeStatus::Succeeded,
+                                                output,
+                                                events,
+                                            });
+                                        }
+                                        Some(reason) => {
+                                            journal.append(EventPayload::AttemptFinished {
+                                                node: node_id.into(),
+                                                attempt,
+                                                status: "failed".into(),
+                                                duration_ms,
+                                                session: None,
+                                                summary: None,
+                                                rejected_output: Some(output.clone()),
+                                                partial_output: None,
+                                            })?;
+                                            last_msg = format!("{reason}: {output}");
+                                            last_timed_out = false;
+                                        }
+                                    }
+                                }
+                                // FAILURE was recorded: the attempt stays failed (a
+                                // timeout stays timed out), but the agent's own
+                                // outputs become the attempt output instead of the
+                                // raw CLI error text.
+                                Some(sfr) => {
+                                    journal.append(EventPayload::AttemptFinished {
+                                        node: node_id.into(),
+                                        attempt,
+                                        status: attempt_status.into(),
+                                        duration_ms,
+                                        session: None,
+                                        summary: None,
+                                        rejected_output: None,
+                                        partial_output: None,
+                                    })?;
+                                    last_msg = sfr.outputs.clone().unwrap_or_else(|| msg.clone());
+                                }
+                                // No verdict: today's failure semantics, except that
+                                // a require_verdict node labels the exit an
+                                // interruption (spec section 2.2) and preserves what
+                                // the process produced. Either label consumes the
+                                // same retry; the label plus `partial_output` say
+                                // which of the two it was.
+                                None => {
+                                    if require_verdict {
+                                        journal_interrupted_attempt(
+                                            journal,
+                                            node_id,
+                                            attempt,
+                                            duration_ms,
+                                            None,
+                                            &msg,
+                                        )?;
+                                        was_interrupted = true;
+                                    } else {
+                                        journal.append(EventPayload::AttemptFinished {
+                                            node: node_id.into(),
+                                            attempt,
+                                            status: attempt_status.into(),
+                                            duration_ms,
+                                            session: None,
+                                            summary: None,
+                                            rejected_output: None,
+                                            partial_output: None,
+                                        })?;
+                                    }
+                                    last_msg = msg;
+                                }
+                            }
                             // A transport error and a timeout break the retry loop for this
-                            // executor and go to fallback.
+                            // executor and go to fallback. Unchanged by the verdict
+                            // handling above: a step that cannot be re-run usefully is
+                            // still abandoned in favor of the next executor.
                             if class == ErrorClass::Transport || class == ErrorClass::Timeout {
                                 break;
                             }
@@ -1248,6 +1457,7 @@ pub(crate) fn execute_finish_answer(
                         session: report.session.clone(),
                         summary: Some(report.summary.clone()),
                         rejected_output: None,
+                        partial_output: None,
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         // The composed finish answer is the agent's reply body,
@@ -1272,6 +1482,7 @@ pub(crate) fn execute_finish_answer(
                         session: None,
                         summary: None,
                         rejected_output: None,
+                        partial_output: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {

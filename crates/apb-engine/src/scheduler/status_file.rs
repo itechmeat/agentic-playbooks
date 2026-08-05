@@ -37,13 +37,36 @@ pub(crate) const STATUS_FILE_NOTE: &str = concat!(
     "before your turn ends.",
 );
 
-/// The status-file prompt note for a node, or an empty string when the node has
-/// no `success_check`.
-pub(crate) fn status_file_note(has_success_check: bool) -> &'static str {
-    if has_success_check {
-        STATUS_FILE_NOTE
-    } else {
-        ""
+/// The sentence appended to [`STATUS_FILE_NOTE`] for a `require_verdict` node:
+/// there the verdict is not optional, and an exit without one is retried as an
+/// interruption (spec 2026-08-05 section 2.2).
+pub(crate) const VERDICT_REQUIRED_NOTE: &str = concat!(
+    "This step REQUIRES the verdict: if your process ends without a valid status file, ",
+    "the attempt is recorded as interrupted and retried, so write the file before your ",
+    "turn ends even when the result is a failure.",
+);
+
+/// The note handed to a fresh attempt after a previous one ended without
+/// recording a verdict (spec 2026-08-05 section 2.2, issue #71 items 3 and 5):
+/// the work may be partly done already, so the new attempt is pointed at the
+/// places to look before redoing anything.
+pub(crate) const INTERRUPTION_NOTE: &str = concat!(
+    "Interruption note: a previous attempt at this step was cut off mid-work before it ",
+    "recorded a verdict. Check for work already done - commits, branches, worktrees, ",
+    "written files, running background jobs - before redoing any of it, then continue ",
+    "from there and record your final verdict in the status file.",
+);
+
+/// The status-file prompt note for a node, empty when the node is told nothing
+/// about the file. A `success_check` node has been told the contract since the
+/// file was introduced; a `require_verdict` node is told the stronger form (the
+/// verdict is mandatory, [`VERDICT_REQUIRED_NOTE`]). A plain node keeps the
+/// historical report-only contract.
+pub(crate) fn status_file_note(has_success_check: bool, require_verdict: bool) -> String {
+    match (require_verdict, has_success_check) {
+        (true, _) => format!("{STATUS_FILE_NOTE} {VERDICT_REQUIRED_NOTE}"),
+        (false, true) => STATUS_FILE_NOTE.to_string(),
+        (false, false) => String::new(),
     }
 }
 
@@ -150,8 +173,37 @@ mod tests {
 
     #[test]
     fn note_gated_on_success_check() {
-        assert!(status_file_note(true).contains("APB_STATUS_FILE"));
-        assert_eq!(status_file_note(false), "");
+        assert!(status_file_note(true, false).contains("APB_STATUS_FILE"));
+        assert_eq!(status_file_note(false, false), "");
+    }
+
+    // Spec 2026-08-05 section 2.2: `require_verdict` alone (no success_check)
+    // must still deliver the contract, and in its stronger form.
+    #[test]
+    fn require_verdict_delivers_the_stronger_note_without_a_success_check() {
+        let note = status_file_note(false, true);
+        assert!(note.contains("APB_STATUS_FILE"), "got: {note}");
+        assert!(note.contains("REQUIRES the verdict"), "got: {note}");
+        assert!(
+            note.contains("recorded as interrupted and retried"),
+            "the note must state the consequence of ending without a verdict: {note}"
+        );
+        // The stronger note is additive: the base contract is still in there.
+        assert!(note.starts_with(STATUS_FILE_NOTE), "got: {note}");
+        // A success_check does not change what a require_verdict node is told.
+        assert_eq!(note, status_file_note(true, true));
+    }
+
+    // The fresh attempt after an interruption is told to look for existing work
+    // before redoing it (issue #71 items 3 and 5).
+    #[test]
+    fn interruption_note_points_at_work_already_done() {
+        let note = INTERRUPTION_NOTE;
+        assert!(note.contains("cut off mid-work"), "got: {note}");
+        assert!(
+            note.contains("commits") && note.contains("worktrees") && note.contains("files"),
+            "the note must name the places to check for existing work: {note}"
+        );
     }
 
     // Issue #70 item 2: the contract text must make explicit that only the FINAL
