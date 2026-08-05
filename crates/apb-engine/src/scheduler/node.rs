@@ -1963,6 +1963,24 @@ pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
     )
 }
 
+/// Whether a node may run as a MEMBER of the concurrent batch: slow external
+/// work, not interactive, and not a join.
+///
+/// Joins are excluded because a join's readiness verdict is the sequential
+/// path's business. A join whose input already failed is `ReadyFailure` and is
+/// deliberately pushed into the frontier so the drive loop can journal it
+/// `failed` with the barrier's own reason and, in supervised mode, raise a wake
+/// on it. The batch has no such arm: it would simply execute the node and carry
+/// the run past a failure the supervisor never saw (review finding I1 of
+/// 2026-08-05 Task 3). A `ReadySuccess` join runs sequentially right after
+/// instead, which is semantically identical - and most joins are `prompt` nodes,
+/// which never batched anyway.
+pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
+    is_agent_or_script(playbook, node)
+        && !is_interactive(playbook, node)
+        && !parallel::is_join(playbook, node)
+}
+
 /// Context compaction (spec 8.5): if enabled (cfg.context_max_bytes) and the
 /// full context exceeds the threshold, old sections are compacted by a cheap model
 /// into context_compact.md, and a ContextCompacted event is returned, which drive

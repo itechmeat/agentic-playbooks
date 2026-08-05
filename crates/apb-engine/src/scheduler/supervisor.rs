@@ -259,7 +259,8 @@ pub(crate) enum BatchWake {
     Terminal(RunStatus),
     /// The supervisor named what runs next. `next` becomes `current`; `also`
     /// carries the further directives (one per additional failed member) for the
-    /// frontier. Non-empty by construction.
+    /// frontier, and is empty whenever exactly one member failed - there is
+    /// always at least `next`.
     Resumed { next: String, also: Vec<String> },
 }
 

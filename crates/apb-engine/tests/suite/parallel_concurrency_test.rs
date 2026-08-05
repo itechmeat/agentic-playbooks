@@ -257,6 +257,49 @@ fn run_options_max_parallel_is_persisted_and_serializes_the_fan_out() {
     );
 }
 
+// A fan-out whose FIRST branch (in edge order, so the one that becomes
+// `current`) cannot batch, while the two behind it can. The batch must not run
+// the pair and leave `current` behind: it is not re-queued, so it would be
+// skipped silently while the merge below writes it off as dead and the run still
+// reports success.
+const NON_BATCHABLE_HEAD: &str = r#"
+schema: 1
+id: mixedpb
+name: Mixed head
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: note, type: prompt, prompt: "not batchable" }
+  - { id: a, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: note }
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: note, to: done }
+  - { from: a, to: done }
+  - { from: b, to: done }
+"#;
+
+#[test]
+fn a_non_batchable_head_is_not_dropped_by_a_batch_of_its_siblings() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_nap(dir.path(), "mixedpb", NON_BATCHABLE_HEAD);
+    let res = run(dir.path(), "mixedpb", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    for n in ["note", "a", "b"] {
+        assert!(
+            events.iter().any(
+                |e| matches!(&e.payload, EventPayload::NodeFinished { node, .. } if node == n)
+            ),
+            "branch {n} must execute, not be skipped by the batch of its siblings"
+        );
+    }
+}
+
 // Three branches, two slots: admission is chunked in batch order, so the third
 // branch waits for the first chunk to drain.
 const CAPPED_FANOUT: &str = r#"

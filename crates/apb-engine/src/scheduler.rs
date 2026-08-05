@@ -603,33 +603,31 @@ fn drive_inner(
         }
 
         // Concurrent fast path (every run mode, spec 2026-08-05 section 1.3): if,
-        // together with current, the frontier has >= 2 ready slow nodes
-        // (agent_task/script), execute them CONCURRENTLY on threads. drive
-        // remains the sole writer of events: execute_node never touches the log,
-        // it returns events instead; drive writes them as threads finish
-        // (order = finish order, spec 8.5). human_review/wait/condition do not
-        // enter here (they are not slow and/or they wait).
-        // An interactive `current` never enters the concurrent path: it may park
-        // on a question, and the concurrent batch (which runs on worker threads
-        // that cannot write events or park) has no place to do that. It runs
-        // through the sequential park path below instead. Interactive frontier
-        // nodes are likewise excluded from any batch and picked up as `current`
-        // on a later iteration.
+        // together with current, the frontier has >= 2 ready batchable nodes
+        // (`is_batchable`: agent_task/script, non-interactive, non-join), execute
+        // them CONCURRENTLY on threads. drive remains the sole writer of events:
+        // execute_node never touches the log, it returns events instead; drive
+        // writes them as threads finish (order = finish order, spec 8.5).
+        // human_review/wait/condition do not enter here (they are not slow and/or
+        // they wait). An interactive node may park on a question and a join needs
+        // its readiness verdict weighed, and the batch - running on worker threads
+        // that cannot write events, park, or fail a barrier - can do neither; both
+        // go through the sequential path below instead.
+        //
+        // `current` must be a batch member itself for the batch to form. A batch
+        // of the FRONTIER heads alone would leave `current` neither executed nor
+        // re-queued (the tail takes the next head), silently skipping it. So a
+        // non-batchable `current` runs sequentially now and its siblings batch on
+        // a later iteration.
         //
         // A supervised run batches exactly like an autonomous one; what stays
         // sequential is the SUPERVISION: every member runs to completion and the
         // failures then park one at a time, in batch order, at the batch tail
         // below (per-branch live parking is out of scope, spec 1.3).
-        if !is_interactive(&playbook, &current) {
-            let mut batch: Vec<String> = Vec::new();
-            if is_agent_or_script(&playbook, &current) {
-                batch.push(current.clone());
-            }
+        if is_batchable(&playbook, &current) {
+            let mut batch: Vec<String> = vec![current.clone()];
             for n in &frontier {
-                if is_agent_or_script(&playbook, n)
-                    && !is_interactive(&playbook, n)
-                    && !batch.contains(n)
-                {
+                if is_batchable(&playbook, n) && !batch.contains(n) {
                     batch.push(n.clone());
                 }
             }
