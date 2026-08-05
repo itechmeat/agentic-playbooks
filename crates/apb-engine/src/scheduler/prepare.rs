@@ -517,6 +517,8 @@ pub(crate) fn prepare_run_target(
         // Persisted so a detached driver process, which learns everything it
         // knows from `runs/<id>`, drives the run in the mode it was started in.
         mode: opts.mode,
+        // Same reason as `mode`: the concurrency cap must survive a re-drive.
+        max_parallel: opts.max_parallel,
     };
     prep_try(&mut log, write_run_config(&run_dir, &cfg))?;
 

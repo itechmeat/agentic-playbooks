@@ -58,6 +58,12 @@ pub struct RunOptions {
     /// Node-cache policy for the run (spec 2026-07-19). `Auto` by default via
     /// `RunConfig`; the CLI maps `--no-cache`/`--refresh-cache` onto it.
     pub cache: CacheRunMode,
+    /// How many ready branches this run may execute at the same time (spec
+    /// 2026-08-05 section 1.3). Copied verbatim into `RunConfig`, which is what
+    /// a detached driver reads back; `Playbook.defaults.max_parallel` still wins
+    /// over it, and with neither set the engine uses
+    /// [`crate::scheduler::DEFAULT_MAX_PARALLEL`].
+    pub max_parallel: Option<usize>,
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry

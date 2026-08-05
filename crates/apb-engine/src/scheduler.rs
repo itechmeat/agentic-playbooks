@@ -150,6 +150,32 @@ fn fallback_finish_answer(node: &str) -> String {
 /// would exceed this depth fails its parent node.
 pub const MAX_SUBPLAYBOOK_DEPTH: usize = 5;
 
+/// How many batch members the drive loop runs at once when neither the playbook
+/// nor the run declares a cap (spec 2026-08-05 section 1.3). Wide enough that a
+/// fan-out is worth batching, small enough that a fan-out of twenty nodes cannot
+/// spawn twenty agent processes at once.
+pub const DEFAULT_MAX_PARALLEL: usize = 4;
+
+/// The concurrency cap in force for this run.
+///
+/// Precedence follows the `max_retries` chain (`node.rs`: the authored value
+/// first, then a default, then a constant): `Playbook.defaults.max_parallel`,
+/// then the run's own cap, then [`DEFAULT_MAX_PARALLEL`]. `RunOptions` and
+/// `RunConfig` are ONE slot here - `prepare` copies the invocation value into the
+/// persisted run config, which is what a detached driver reads back, so the cap
+/// survives a re-drive.
+///
+/// A declared `0` reads as `1` (serialize) rather than as "admit nothing", which
+/// would wedge the batch.
+fn resolved_max_parallel(playbook: &Playbook, cfg: &RunConfig) -> usize {
+    playbook
+        .defaults
+        .max_parallel
+        .or(cfg.max_parallel)
+        .map(|n| n.max(1))
+        .unwrap_or(DEFAULT_MAX_PARALLEL)
+}
+
 /// Counter for generating unique supervisor tokens within a single engine
 /// process (in addition to the timestamp in the token itself - in case of
 /// several spawns within the same millisecond).
@@ -576,20 +602,25 @@ fn drive_inner(
             log.append(ev)?;
         }
 
-        // Concurrent fast path (autonomous only): if, together with current, the
-        // frontier has >= 2 ready slow nodes (agent_task/script), execute
-        // them CONCURRENTLY on threads. drive remains the sole writer of
-        // events: execute_node never touches the log, it returns events instead; drive
-        // writes them as threads finish (order = finish order,
-        // spec 8.5). Supervised mode never enters here (wake/await is per single
-        // node), and neither do human_review/wait/condition (they are not slow and/or they wait).
+        // Concurrent fast path (every run mode, spec 2026-08-05 section 1.3): if,
+        // together with current, the frontier has >= 2 ready slow nodes
+        // (agent_task/script), execute them CONCURRENTLY on threads. drive
+        // remains the sole writer of events: execute_node never touches the log,
+        // it returns events instead; drive writes them as threads finish
+        // (order = finish order, spec 8.5). human_review/wait/condition do not
+        // enter here (they are not slow and/or they wait).
         // An interactive `current` never enters the concurrent path: it may park
         // on a question, and the concurrent batch (which runs on worker threads
         // that cannot write events or park) has no place to do that. It runs
         // through the sequential park path below instead. Interactive frontier
         // nodes are likewise excluded from any batch and picked up as `current`
         // on a later iteration.
-        if mode == RunMode::Autonomous && !is_interactive(&playbook, &current) {
+        //
+        // A supervised run batches exactly like an autonomous one; what stays
+        // sequential is the SUPERVISION: every member runs to completion and the
+        // failures then park one at a time, in batch order, at the batch tail
+        // below (per-branch live parking is out of scope, spec 1.3).
+        if !is_interactive(&playbook, &current) {
             let mut batch: Vec<String> = Vec::new();
             if is_agent_or_script(&playbook, &current) {
                 batch.push(current.clone());
@@ -602,14 +633,16 @@ fn drive_inner(
                     batch.push(n.clone());
                 }
             }
-            if batch.len() >= 2 {
+            // Resolved per iteration, because a supervisor patch can replace the
+            // playbook (and with it `defaults.max_parallel`) mid-run.
+            let max_parallel = resolved_max_parallel(&playbook, cfg);
+            // A cap of 1 means "no concurrency at all", so the batch is not
+            // formed: `current` runs through the sequential path below and the
+            // frontier heads are picked up on the following iterations. That is
+            // both the honest reading of the cap and the arm with full per-node
+            // parity (cache, artifacts, progress attribution).
+            if batch.len() >= 2 && max_parallel >= 2 {
                 steps += batch.len();
-                for n in &batch {
-                    log.append(EventPayload::NodeStarted {
-                        node: n.clone(),
-                        attempt: 1,
-                    })?;
-                }
                 // A shared cancel flag: once join:any is ready we set it, and
                 // still-running branches kill their processes (7c-3).
                 let cancel = Arc::new(AtomicBool::new(false));
@@ -618,20 +651,58 @@ fn drive_inner(
                 // stop` reports the failing node's own words as the run's
                 // failure reason.
                 let mut batch_results: Vec<(String, NodeStatus, String)> = Vec::new();
-                // The batch shares ONE journal (the drive's log behind a Mutex)
-                // so each worker thread appends its own attempt_started at spawn
-                // time and attempt_finished at return, while the collector on this
-                // thread appends the returned RetryStarted/FallbackTriggered and
-                // the per-node NodeFinished through the same journal. Scoped
-                // threads let the workers borrow `&Journal` without a 'static
-                // bound; the block scopes the borrow so `log` is free again for
-                // the frontier writes below. Each append is one atomic line
-                // write, so the shared lock is uncontended in practice.
-                {
+                // Admission in deterministic batch order, at most `max_parallel`
+                // members in flight at a time. `batch` is NEVER narrowed to the
+                // chunk in hand: every join-liveness question below
+                // (`feeds_ready_any`, `advance_frontier`) is asked against the
+                // WHOLE logical batch, admitted plus still queued, because a
+                // member waiting for a slot is still going to run and a join fed
+                // by it must not be judged dead and fired early.
+                for chunk in batch.chunks(max_parallel) {
+                    // Admission-time re-check: a join:any that an earlier chunk
+                    // already satisfied cancels the batch. Members that were
+                    // running when that happened are SIGKILLed through `cancel`;
+                    // members not yet admitted are simply never started and are
+                    // journaled with the same `cancelled` status their killed
+                    // siblings get, so no batch member is left looking pending
+                    // forever. Deciding this per queued node (only skip when its
+                    // own any-join is ready) would be finer-grained than the kill
+                    // itself, which stops every running member regardless of
+                    // which join it feeds; one rule for both is the point.
+                    if cancel.load(Ordering::Relaxed) {
+                        for n in chunk {
+                            log.append(EventPayload::NodeFinished {
+                                node: n.clone(),
+                                status: NodeStatus::Cancelled.as_str().into(),
+                                attempt: 1,
+                                output: String::new(),
+                                artifacts: Vec::new(),
+                            })?;
+                            batch_results.push((n.clone(), NodeStatus::Cancelled, String::new()));
+                        }
+                        continue;
+                    }
+                    for n in chunk {
+                        log.append(EventPayload::NodeStarted {
+                            node: n.clone(),
+                            attempt: 1,
+                        })?;
+                    }
+                    // The chunk shares ONE journal (the drive's log behind a
+                    // Mutex) so each worker thread appends its own
+                    // attempt_started at spawn time and attempt_finished at
+                    // return, while the collector on this thread appends the
+                    // returned RetryStarted/FallbackTriggered and the per-node
+                    // NodeFinished through the same journal. Scoped threads let
+                    // the workers borrow `&Journal` without a 'static bound; the
+                    // block scopes the borrow so `log` is free again for the next
+                    // chunk's writes and the frontier writes below. Each append
+                    // is one atomic line write, so the shared lock is
+                    // uncontended in practice.
                     let journal = Journal::new(&mut *log);
                     let (tx, rx) = mpsc::channel();
                     std::thread::scope(|scope| -> Result<(), EngineError> {
-                        for n in &batch {
+                        for n in chunk {
                             let playbook_c = playbook.clone();
                             let rd = run_dir.to_path_buf();
                             let wd = workdir.clone();
@@ -745,6 +816,54 @@ fn drive_inner(
                     });
                 }
                 frontier.retain(|n| !batch.contains(n));
+
+                // A supervised run never takes a failure decision itself: each
+                // failed member raises its wake and waits, in batch order, AFTER
+                // the whole batch completed - exactly as a sequential node parks
+                // right after its own NodeFinished, and before any of the
+                // autonomous failure policy below (which the sequential path also
+                // skips by continuing out of the park).
+                if mode == RunMode::Supervised {
+                    let failed: Vec<(String, NodeStatus, String)> = batch
+                        .iter()
+                        .filter_map(|n| batch_results.iter().find(|(bn, _, _)| bn == n))
+                        .filter(|(_, s, _)| matches!(s, NodeStatus::Failed | NodeStatus::TimedOut))
+                        .cloned()
+                        .collect();
+                    match park_for_batch_failures(
+                        root,
+                        run_dir,
+                        log,
+                        cfg,
+                        &mut playbook,
+                        &mut control_cursor,
+                        &mut prompt_overrides,
+                        &mut frontier,
+                        &mut last_applied_patch,
+                        &failed,
+                    )? {
+                        BatchWake::NoFailures => {}
+                        BatchWake::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
+                        BatchWake::Resumed { next, also } => {
+                            // The supervisor's directives lead. This iteration
+                            // never advances the batch's own successors, so the
+                            // heads the SUCCEEDED members would have produced are
+                            // rebuilt from the journal - the same contract a
+                            // resume uses, and the reason a park that clears the
+                            // frontier does not lose the other branches.
+                            current = next;
+                            for t in also {
+                                if !frontier.contains(&t) {
+                                    frontier.push(t);
+                                }
+                            }
+                            let after = RunState::fold(&read_all(run_dir)?);
+                            restore_frontier(&playbook, &after, &current, &mut frontier);
+                            continue;
+                        }
+                    }
+                }
+
                 let state_now = RunState::fold(&read_all(run_dir)?);
 
                 // The declared failure policy (spec 2026-07-26), the batch
@@ -1705,6 +1824,60 @@ fn drive_inner(
         // Take the next active head (FIFO - deterministic order
         // by edge declaration).
         current = frontier.remove(0);
+    }
+}
+
+#[cfg(test)]
+mod max_parallel_tests {
+    use super::*;
+
+    fn playbook(defaults: &str) -> Playbook {
+        Playbook::from_yaml(&format!(
+            "schema: 1\nid: mp\nname: MP\nversion: 1.0.0\n{defaults}\
+             nodes:\n  - {{ id: start, type: start }}\n  \
+             - {{ id: done, type: finish, outcome: success }}\nedges:\n  \
+             - {{ from: start, to: done }}\n"
+        ))
+        .expect("fixture playbook parses")
+    }
+
+    fn cfg(max_parallel: Option<usize>) -> RunConfig {
+        RunConfig {
+            max_parallel,
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn neither_playbook_nor_run_declares_a_cap() {
+        assert_eq!(
+            resolved_max_parallel(&playbook(""), &cfg(None)),
+            DEFAULT_MAX_PARALLEL
+        );
+    }
+
+    #[test]
+    fn the_run_cap_applies_when_the_playbook_is_silent() {
+        // The RunOptions value arrives here through the persisted RunConfig,
+        // which is what a detached driver reads back.
+        assert_eq!(resolved_max_parallel(&playbook(""), &cfg(Some(2))), 2);
+    }
+
+    #[test]
+    fn the_authored_cap_wins_over_the_run_cap() {
+        let pb = playbook("defaults:\n  max_parallel: 3\n");
+        assert_eq!(resolved_max_parallel(&pb, &cfg(Some(8))), 3);
+        assert_eq!(resolved_max_parallel(&pb, &cfg(None)), 3);
+    }
+
+    #[test]
+    fn a_declared_zero_serializes_instead_of_admitting_nothing() {
+        // 0 must never mean "no slots at all", which would wedge every batch.
+        assert_eq!(
+            resolved_max_parallel(&playbook("defaults:\n  max_parallel: 0\n"), &cfg(None)),
+            1
+        );
+        assert_eq!(resolved_max_parallel(&playbook(""), &cfg(Some(0))), 1);
     }
 }
 

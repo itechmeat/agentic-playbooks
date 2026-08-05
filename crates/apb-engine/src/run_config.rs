@@ -135,6 +135,14 @@ pub struct RunConfig {
     /// existing on-disk configs without the field read unchanged.
     #[serde(default)]
     pub mode: RunMode,
+    /// Concurrency cap for the drive loop's parallel batch (spec 2026-08-05
+    /// section 1.3). Persisted for the same reason `mode` is: a detached driver
+    /// learns everything it knows from `runs/<id>`, so the cap a run was started
+    /// with must survive a re-drive. `None` (including every config written
+    /// before this field existed) leaves the decision to
+    /// `Playbook.defaults.max_parallel` and then the engine default.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<usize>,
 }
 
 pub fn write_run_config(run_dir: &Path, cfg: &RunConfig) -> Result<(), EngineError> {

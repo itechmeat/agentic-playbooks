@@ -347,6 +347,12 @@ pub struct Defaults {
     /// agent_task of the playbook.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub require_verdict: Option<bool>,
+    /// How many ready branches this playbook may execute at the same time (spec
+    /// 2026-08-05 section 1.3). The authoring end of the precedence chain
+    /// `defaults.max_parallel -> RunOptions/RunConfig.max_parallel -> engine
+    /// default`; `1` serializes every fan-out. Absent means the run decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<usize>,
 }
 
 /// For `skip_serializing_if` on additive boolean flags: a `false` value is
