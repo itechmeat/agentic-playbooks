@@ -3,7 +3,7 @@ use std::path::Path;
 
 use apb_core::registry::init_project;
 use apb_engine::event::{EventPayload, read_all};
-use apb_engine::scheduler::{RunOptions, run};
+use apb_engine::scheduler::{RunOptions, resume, run};
 use apb_engine::state::RunStatus;
 
 // Diamond: start forks into a and b, they converge in join:all -> j -> finish.
@@ -94,6 +94,56 @@ edges:
   - { from: m, to: done }
 "#;
 
+// A linear chain where every step routes its own failure into ONE shared
+// failure finish node. The most common failure topology in real playbooks (this
+// repo's own `apb-task-*` playbooks all have it): `aborted` has an incoming
+// edge per upstream step, so it is a barrier-less fan-in whose inputs are, by
+// construction, mutually exclusive.
+const SHARED_FAILURE_SINK: &str = r#"
+schema: 1
+id: par
+name: Par
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: w1, type: script, script: "scripts/fail.sh", runner: sh }
+  - { id: w2, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: start, to: w1 }
+  - { from: w1, to: w2, condition: { type: node_status, node: w1, equals: success } }
+  - { from: w1, to: aborted, condition: { type: node_status, node: w1, equals: failure } }
+  - { from: w2, to: done, condition: { type: node_status, node: w2, equals: success } }
+  - { from: w2, to: aborted, condition: { type: node_status, node: w2, equals: failure } }
+"#;
+
+// A fork whose two branches each declare a success route and a failure route
+// into the SAME pair of nodes: a shared error handler and a shared success
+// finish. `a` fails, `b` succeeds, so the handler must run (a failure edge
+// exists precisely to deliver a failure into a node that handles it).
+const SHARED_HANDLER: &str = r#"
+schema: 1
+id: par
+name: Par
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/fail.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: handler, type: prompt, prompt: "recover" }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: done, condition: { type: node_status, node: a, equals: success } }
+  - { from: a, to: handler, condition: { type: node_status, node: a, equals: failure } }
+  - { from: b, to: done, condition: { type: node_status, node: b, equals: success } }
+  - { from: b, to: handler, condition: { type: node_status, node: b, equals: failure } }
+  - { from: handler, to: aborted }
+"#;
+
 // A fork where one branch reaches finish - the run completes, the other does not execute.
 const FORK_FINISH: &str = r#"
 schema: 1
@@ -119,6 +169,18 @@ fn seed(root: &Path, yaml: &str) {
     fs::write(root.join(".apb/playbooks/par/current"), "1.0.0").unwrap();
 }
 
+/// Seeds a playbook that has `script` nodes, plus the two scripts the failure
+/// fixtures reference. A script is the cheapest node that can actually FAIL
+/// (a `prompt` always succeeds and an `agent_task` would need a stub agent and
+/// the process-global `APB_AGENT_CMD`).
+fn seed_with_scripts(root: &Path, yaml: &str) {
+    seed(root, yaml);
+    let scripts = root.join(".apb/playbooks/par/1.0.0/scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("fail.sh"), "echo boom 1>&2\nexit 1\n").unwrap();
+    fs::write(scripts.join("ok.sh"), "echo fine\n").unwrap();
+}
+
 fn started(events: &[apb_engine::event::Event], node: &str) -> usize {
     events
         .iter()
@@ -132,6 +194,19 @@ fn position_of_start(events: &[apb_engine::event::Event], node: &str) -> usize {
         .iter()
         .position(|e| matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node))
         .unwrap_or_else(|| panic!("node `{node}` never started"))
+}
+
+/// The status on a node's `node_finished`, for "did it really execute" checks.
+fn finish_status(events: &[apb_engine::event::Event], node: &str) -> String {
+    events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::NodeFinished {
+                node: n, status, ..
+            } if n == node => Some(status.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("node `{node}` never finished"))
 }
 
 /// Position of a node's `node_finished` in the journal.
@@ -198,6 +273,99 @@ fn either_or_merge_reaches_finish_without_deadlock() {
         1,
         "the merge runs instead of waiting for a branch that can never arrive"
     );
+}
+
+/// A shared failure finish node is a barrier-less fan-in whose inputs are
+/// mutually exclusive: the step that failed routed into it, and every other step
+/// is on the success path that was abandoned. The barrier must let it through.
+#[test]
+fn shared_failure_sink_receives_the_failure_instead_of_deadlocking() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_with_scripts(dir.path(), SHARED_FAILURE_SINK);
+    let res = run(dir.path(), "par", None, RunOptions::default())
+        .expect("a failure route into a shared sink must not dead-end the drive loop");
+    assert_eq!(res.outcome, RunStatus::Failed, "the run ends at `aborted`");
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    // A finish node journals no `node_started`, so reaching it is proved by its
+    // `node_finished` plus the absence of a dead-end `run_error`.
+    assert_eq!(
+        finish_status(&events, "aborted"),
+        "succeeded",
+        "the failure sink executes"
+    );
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RunError { .. })),
+        "the drive loop must not dead-end on the barrier"
+    );
+    assert_eq!(
+        started(&events, "w2"),
+        0,
+        "the abandoned success path never runs"
+    );
+}
+
+/// A shared error handler reached over a declared failure edge must EXECUTE.
+/// Failing it from the barrier skipped the whole recovery path while the run
+/// still reported success.
+#[test]
+fn shared_error_handler_executes_instead_of_being_failed_by_the_barrier() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_with_scripts(dir.path(), SHARED_HANDLER);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(started(&events, "handler"), 1, "the handler executes once");
+    assert_eq!(
+        finish_status(&events, "handler"),
+        "succeeded",
+        "the handler must not be failed by the barrier it is behind"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(&e.payload,
+            EventPayload::NodeFinished { node, output, .. }
+                if node == "handler" && output.contains("upstream branch failed"))),
+        "an implicit barrier must never fail the node it guards"
+    );
+}
+
+/// A resume rebuilds the frontier from the journal. A sibling branch that never
+/// started must still count as active, otherwise the join fires without it and
+/// the run silently completes with a branch missing.
+#[test]
+fn resume_after_a_finished_branch_still_waits_for_the_unstarted_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), DIAMOND_ALL);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+
+    // Synthesize a driver that died right after branch `a` finished: drop every
+    // event from branch `b`'s first onwards, so `b` is Pending (never started,
+    // so not `interrupted` either) and `a` is the last finished node.
+    let journal = run_dir.join("events.jsonl");
+    let kept: Vec<String> = fs::read_to_string(&journal)
+        .unwrap()
+        .lines()
+        .take_while(|l| !l.contains("\"node\":\"b\""))
+        .map(str::to_string)
+        .collect();
+    assert!(
+        kept.iter().any(|l| l.contains("\"node\":\"a\"")),
+        "branch a must have finished before the synthesized death"
+    );
+    fs::write(&journal, format!("{}\n", kept.join("\n"))).unwrap();
+
+    let err = resume(dir.path(), &res.run_id, None)
+        .expect_err("resuming past `a` must not fire the join without branch `b`");
+    assert!(
+        err.to_string().contains("no pending successor"),
+        "expected the pointless-resume refusal, got: {err}"
+    );
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(started(&events, "j"), 0, "the join must not have executed");
 }
 
 #[test]

@@ -343,7 +343,19 @@ fn drive_inner(
         // start from the first ready successor.
         StartMode::After => {
             let state = RunState::fold(&read_all(run_dir)?);
-            advance_frontier(&playbook, &start_node, &state, &mut frontier, &[], log)?;
+            // The in-memory frontier died with the previous driver, so the
+            // branch heads the run still has outstanding are rebuilt from the
+            // journal. Without them a sibling branch that never started is not
+            // active, counts as dead, and a join fires without it.
+            let outstanding = parallel::pending_heads(&playbook, &state);
+            advance_frontier(
+                &playbook,
+                &start_node,
+                &state,
+                &mut frontier,
+                &outstanding,
+                log,
+            )?;
             if frontier.is_empty() {
                 // A pointless resume: the start node already finished and has no
                 // pending successor to advance into. `resume_inner` already

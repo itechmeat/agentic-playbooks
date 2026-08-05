@@ -124,17 +124,6 @@ pub fn sccs(playbook: &Playbook) -> Vec<Vec<String>> {
     out
 }
 
-/// The strongly connected component `node` belongs to, `node` included. An
-/// unknown node yields an empty set. A node whose component is just itself is
-/// on no cycle unless it carries a self-loop edge.
-pub fn component_of(playbook: &Playbook, node: &str) -> BTreeSet<String> {
-    sccs(playbook)
-        .into_iter()
-        .find(|comp| comp.iter().any(|id| id == node))
-        .map(|comp| comp.into_iter().collect())
-        .unwrap_or_default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -179,9 +168,18 @@ edges:
 
     #[test]
     fn the_cycle_forms_one_component_and_the_rest_are_trivial() {
-        assert_eq!(component_of(&playbook(), "j"), set(&["j", "check"]));
-        assert_eq!(component_of(&playbook(), "a"), set(&["a"]));
-        assert_eq!(component_of(&playbook(), "missing"), set(&[]));
+        let comps = sccs(&playbook());
+        let of = |node: &str| -> BTreeSet<String> {
+            comps
+                .iter()
+                .find(|c| c.iter().any(|id| id == node))
+                .cloned()
+                .map(|c| c.into_iter().collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(of("j"), set(&["j", "check"]));
+        assert_eq!(of("a"), set(&["a"]));
+        assert_eq!(of("missing"), set(&[]));
     }
 
     #[test]

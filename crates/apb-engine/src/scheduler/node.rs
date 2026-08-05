@@ -1850,14 +1850,18 @@ pub(crate) fn seed_successors(
 }
 
 /// The nodes the run can still execute at the moment a frontier is advanced or
-/// a join is weighed: the node in hand, the other branch heads, and the members
-/// of a concurrent batch that may still be running. Join readiness treats an
-/// input source outside this set's forward-reachable region as dead, so the set
-/// must never under-count - an over-wide set only falls back to today's
-/// wait-until-terminal behavior.
-pub(crate) fn active_set(node: &str, frontier: &[String], batch: &[String]) -> Vec<String> {
+/// a join is weighed: the node in hand, the other branch heads, and whatever
+/// `also_active` adds - the members of a concurrent batch that may still be
+/// running, or on a resume the [`parallel::pending_heads`] rebuilt from the
+/// journal because the in-memory frontier was lost.
+///
+/// Join readiness treats an input source outside the region reachable from this
+/// set as dead, so the set must never under-count: an over-wide set only falls
+/// back to the plain wait-until-terminal behavior, while a too-narrow one lets a
+/// join fire without a branch that was still going to arrive.
+pub(crate) fn active_set(node: &str, frontier: &[String], also_active: &[String]) -> Vec<String> {
     let mut active = vec![node.to_string()];
-    for n in frontier.iter().chain(batch) {
+    for n in frontier.iter().chain(also_active) {
         if !active.contains(n) {
             active.push(n.clone());
         }
@@ -1870,10 +1874,10 @@ pub(crate) fn advance_frontier(
     node: &str,
     state: &RunState,
     frontier: &mut Vec<String>,
-    batch: &[String],
+    also_active: &[String],
     log: &mut EventLog,
 ) -> Result<(), EngineError> {
-    let active = active_set(node, frontier, batch);
+    let active = active_set(node, frontier, also_active);
     let mut runnable: Vec<String> = seed_successors(playbook, node, state, &active)
         .into_iter()
         .filter(|s| !frontier.contains(s))
@@ -1881,20 +1885,29 @@ pub(crate) fn advance_frontier(
     if let Some(join) = runnable
         .iter()
         .find(|s| {
-            parallel::is_join(playbook, s)
-                && parallel::join_mode(playbook, s) == parallel::JoinMode::Any
+            matches!(
+                parallel::join_kind(playbook, s),
+                Some(parallel::JoinKind::Explicit(parallel::JoinMode::Any))
+            )
         })
         .cloned()
     {
         for other in std::mem::take(frontier) {
-            if !parallel::is_join(playbook, &other) {
-                log.append(EventPayload::NodeFinished {
-                    node: other,
-                    status: "cancelled".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                })?;
+            match parallel::is_join(playbook, &other) {
+                // A pending join elsewhere in the graph is not part of this
+                // race: it keeps waiting for its own inputs instead of being
+                // cancelled. It has to be put back explicitly - the frontier was
+                // taken whole, so anything not re-pushed here is simply lost.
+                true => frontier.push(other),
+                false => {
+                    log.append(EventPayload::NodeFinished {
+                        node: other,
+                        status: "cancelled".into(),
+                        attempt: 1,
+                        output: String::new(),
+                        artifacts: Vec::new(),
+                    })?;
+                }
             }
         }
         runnable.retain(|s| s == &join);

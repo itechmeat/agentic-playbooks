@@ -4,7 +4,7 @@
 //! join-node readiness. Kept separate so fork/join semantics can be tested
 //! in isolation before being wired into the execution loop.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, VecDeque};
 
 use apb_core::schema::{Edge, EdgeCondition, Playbook, StatusEq};
 
@@ -151,28 +151,52 @@ fn incoming<'a>(playbook: &'a Playbook, node: &str) -> Vec<&'a Edge> {
     playbook.edges.iter().filter(|e| e.to == node).collect()
 }
 
-/// A join node (synchronizing) - several incoming edges, and either
+/// Why a node synchronizes at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinKind {
+    /// The author declared a `join` on an incoming edge (spec 8.4): the full
+    /// contract, including failing the node when a delivered input failed.
+    Explicit(JoinMode),
+    /// Inferred from an acyclic fan-in. It ONLY synchronizes: it waits for its
+    /// inputs and then executes. It never fails the node, because a fan-in the
+    /// author drew without a `join` is very often a shared failure sink or error
+    /// handler, and a failure edge into such a node exists precisely to deliver
+    /// a failure into something that must run.
+    Implicit,
+}
+
+/// Why `node` synchronizes, or `None` when it does not.
 ///
-///   * at least one of them carries a `join` field (an explicit join, spec
-///     8.4), or
-///   * every one of them originates outside the node's own strongly connected
-///     component: the fan-in is acyclic, so the node is an IMPLICIT all-join
-///     and waits for its inputs.
+/// Several incoming edges are needed either way, plus either an explicit `join`
+/// field, or a fan-in where no source lies inside the node's own strongly
+/// connected component (the fan-in is acyclic).
 ///
 /// A merge point INSIDE its own cycle (`... -> check -> tick -> check`, where
 /// tick has two inputs and one of them is the back edge) keeps first-arrival
 /// semantics: a wait-for-all barrier there would never fire, because the back
 /// edge's source has not run in this pass.
-pub fn is_join(playbook: &Playbook, node: &str) -> bool {
+///
+/// The same-component test is one forward walk rather than a full SCC pass:
+/// there is already an edge `source -> node`, so the two share a component
+/// exactly when `source` is reachable from `node`.
+pub fn join_kind(playbook: &Playbook, node: &str) -> Option<JoinKind> {
     let inc = incoming(playbook, node);
     if inc.len() < 2 {
-        return false;
+        return None;
     }
     if inc.iter().any(|e| e.join.is_some()) {
-        return true;
+        return Some(JoinKind::Explicit(join_mode(playbook, node)));
     }
-    let component = apb_core::graphutil::component_of(playbook, node);
-    inc.iter().all(|e| !component.contains(&e.from))
+    let downstream = apb_core::graphutil::reachable(playbook, &[node]);
+    match inc.iter().all(|e| !downstream.contains(&e.from)) {
+        true => Some(JoinKind::Implicit),
+        false => None,
+    }
+}
+
+/// Whether `node` synchronizes (see [`join_kind`]).
+pub fn is_join(playbook: &Playbook, node: &str) -> bool {
+    join_kind(playbook, node).is_some()
 }
 
 /// The node's join mode: the first `join` set among its incoming edges (default All).
@@ -196,8 +220,75 @@ enum Arrival {
     Dead,
 }
 
-/// How one incoming edge's source stands. `live` is the forward-reachable
-/// region of the active node set (see [`join_readiness`]).
+fn status_of(state: &RunState, node: &str) -> NodeStatus {
+    state
+        .nodes
+        .get(node)
+        .copied()
+        .unwrap_or(NodeStatus::Pending)
+}
+
+/// The nodes a run can still execute, walked forward from `active` over the
+/// RESIDUAL graph: out of a node that has already finished only the edges its
+/// own routing selected are followed, because the edges it did not take can
+/// never be traversed now. Out of a node that has not finished, every outgoing
+/// edge is followed - any of them could still be taken.
+///
+/// Walking the STRUCTURAL graph instead would keep whole branches "live" that
+/// the run has already routed away from, which is what makes a shared failure
+/// sink (`w1 -> aborted` taken, `w1 -> w2 -> aborted` abandoned) wait forever
+/// for an input that can no longer arrive.
+fn live_nodes(playbook: &Playbook, state: &RunState, active: &[String]) -> BTreeSet<String> {
+    let mut live: BTreeSet<String> = BTreeSet::new();
+    let mut queue: VecDeque<String> = VecDeque::new();
+    for n in active {
+        if live.insert(n.clone()) {
+            queue.push_back(n.clone());
+        }
+    }
+    while let Some(id) = queue.pop_front() {
+        let next: Vec<String> = match is_terminal(status_of(state, &id)) {
+            true => successors(playbook, &id, state),
+            false => playbook
+                .edges
+                .iter()
+                .filter(|e| e.from == id)
+                .map(|e| e.to.clone())
+                .collect(),
+        };
+        for n in next {
+            if live.insert(n.clone()) {
+                queue.push_back(n);
+            }
+        }
+    }
+    live
+}
+
+/// The branch heads a run still has outstanding, rebuilt from the journal fold
+/// alone: every target a finished node routed into that has not finished itself.
+///
+/// The drive loop keeps this set in memory as the frontier. A resume starts with
+/// an empty frontier and has to rebuild it, otherwise a sibling branch that
+/// never started is not in the active set, gets written off as dead, and a join
+/// fires without it - silently completing a run with a branch missing.
+pub fn pending_heads(playbook: &Playbook, state: &RunState) -> Vec<String> {
+    let mut heads: BTreeSet<String> = BTreeSet::new();
+    for (node, status) in &state.nodes {
+        if !is_terminal(*status) {
+            continue;
+        }
+        for s in successors(playbook, node, state) {
+            if !is_terminal(status_of(state, &s)) {
+                heads.insert(s);
+            }
+        }
+    }
+    heads.into_iter().collect()
+}
+
+/// How one incoming edge's source stands. `live` is the residual-reachable
+/// region of the active node set (see [`live_nodes`]).
 fn arrival(
     playbook: &Playbook,
     node: &str,
@@ -205,11 +296,7 @@ fn arrival(
     state: &RunState,
     live: &BTreeSet<String>,
 ) -> Arrival {
-    let status = state
-        .nodes
-        .get(source)
-        .copied()
-        .unwrap_or(NodeStatus::Pending);
+    let status = status_of(state, source);
     if !is_terminal(status) {
         // Still to run, or dead: nothing that can still execute leads here.
         return match live.contains(source) {
@@ -217,39 +304,55 @@ fn arrival(
             false => Arrival::Dead,
         };
     }
-    // The source is done. It only delivered into this join if its own routing
-    // actually selected the edge; an unmatched condition or an exhausted
-    // bounded edge means this input never arrives (an either-or merge has one
-    // such source by construction).
-    match successors(playbook, source, state)
+    // The source is done, so it either delivered into this join or routed
+    // elsewhere (an unmatched condition; an either-or merge has one such source
+    // by construction). A journaled traversal is proof of delivery on its own:
+    // a bounded edge that has reached its `max_traversals` cap no longer shows
+    // up in `successors`, and without this an arrival could flip back to `Dead`
+    // later in the run and pass the join vacuously.
+    let delivered = successors(playbook, source, state)
         .iter()
         .any(|s| s == node)
-    {
+        || traversal_count(state, source, node) > 0;
+    match delivered {
         true => Arrival::Delivered(status),
         false => Arrival::Dead,
     }
 }
 
-/// Readiness of a join node based on the statuses of its incoming edges'
-/// source nodes.
-/// All: wait until every source has arrived or died; success if every arrival
-/// succeeded, otherwise failure.
-/// Any: success as soon as one source arrives succeeded; failure once no source
-/// can still arrive and none succeeded.
+fn traversal_count(state: &RunState, from: &str, to: &str) -> u32 {
+    state
+        .edge_counts
+        .get(&(from.to_string(), to.to_string()))
+        .copied()
+        .unwrap_or(0)
+}
+
+/// Readiness of a join node, from what each of its incoming branches delivered.
+///
+/// Explicit `all`: wait until every input has arrived or died, then succeed if
+/// every arrival succeeded and fail otherwise. Explicit `any`: succeed on the
+/// first succeeded arrival, fail once nothing can still arrive and none did.
+/// Implicit: wait until nothing can still arrive, then ALWAYS execute - the node
+/// is only being synchronized, and failure propagation stays with the node's own
+/// failure handling and the author's failure edges.
 ///
 /// `active` is the set of nodes the run can still execute (the node being
-/// advanced past, the other frontier heads, and the members of a running
-/// batch). A source outside its forward-reachable region can never arrive and
-/// is treated as satisfied, which is what keeps an either-or conditional merge
-/// from waiting forever under wait-for-all.
+/// advanced past, the other frontier heads, the members of a running batch, and
+/// on a resume the rebuilt [`pending_heads`]). A source outside the residual
+/// region reachable from it can never arrive and is treated as satisfied, which
+/// is what keeps a conditional merge from waiting forever under wait-for-all.
 pub fn join_readiness(
     playbook: &Playbook,
     node: &str,
     state: &RunState,
     active: &[String],
 ) -> JoinReadiness {
-    let seeds: Vec<&str> = active.iter().map(String::as_str).collect();
-    let live = apb_core::graphutil::reachable(playbook, &seeds);
+    let Some(kind) = join_kind(playbook, node) else {
+        // Not a synchronizing node: first arrival runs it.
+        return JoinReadiness::ReadySuccess;
+    };
+    let live = live_nodes(playbook, state, active);
     let arrivals: Vec<Arrival> = incoming(playbook, node)
         .iter()
         .map(|e| arrival(playbook, node, &e.from, state, &live))
@@ -261,8 +364,20 @@ pub fn join_readiness(
             _ => None,
         })
     };
-    match join_mode(playbook, node) {
-        JoinMode::All => {
+    // Nothing arrived at all, so there is nothing to judge the node by. This is
+    // reachable through `defaults.on_failure: <node>`, which pushes a handler
+    // onto the frontier without consulting any edge. The node executes rather
+    // than being failed by a barrier with no input to fail on - stated here for
+    // both modes so the arms below cannot drift apart on it.
+    if delivered().next().is_none() && !waiting {
+        return JoinReadiness::ReadySuccess;
+    }
+    match kind {
+        JoinKind::Implicit => match waiting {
+            true => JoinReadiness::NotReady,
+            false => JoinReadiness::ReadySuccess,
+        },
+        JoinKind::Explicit(JoinMode::All) => {
             if waiting {
                 JoinReadiness::NotReady
             } else if delivered().all(succeeded) {
@@ -271,7 +386,7 @@ pub fn join_readiness(
                 JoinReadiness::ReadyFailure
             }
         }
-        JoinMode::Any => {
+        JoinKind::Explicit(JoinMode::Any) => {
             if delivered().any(succeeded) {
                 JoinReadiness::ReadySuccess
             } else if waiting {
@@ -367,6 +482,49 @@ edges:
   - { from: a, to: m }
   - { from: b, to: m }
   - { from: m, to: done }
+"#;
+
+    /// A linear chain whose every step routes its own failure into one shared
+    /// failure finish node - the most common failure topology in real playbooks.
+    const SHARED_FAILURE_SINK: &str = r#"
+schema: 1
+id: d
+name: D
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: w1, type: prompt, prompt: "w1" }
+  - { id: w2, type: prompt, prompt: "w2" }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: start, to: w1 }
+  - { from: w1, to: w2, condition: { type: node_status, node: w1, equals: success } }
+  - { from: w1, to: aborted, condition: { type: node_status, node: w1, equals: failure } }
+  - { from: w2, to: done, condition: { type: node_status, node: w2, equals: success } }
+  - { from: w2, to: aborted, condition: { type: node_status, node: w2, equals: failure } }
+"#;
+
+    /// An explicit `join: all` whose `a` input arrives over a bounded edge: once
+    /// that edge reaches its cap it stops showing up in `successors`, but it did
+    /// deliver.
+    const BOUNDED_INPUT_JOIN: &str = r#"
+schema: 1
+id: d
+name: D
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: j, join: all, max_traversals: 1 }
+  - { from: b, to: j, join: all }
+  - { from: j, to: done }
 "#;
 
     fn playbook() -> Playbook {
@@ -472,6 +630,104 @@ edges:
         ]);
         assert_eq!(
             join_readiness(&pb, "m", &s, &active(&["a", "b"])),
+            JoinReadiness::NotReady
+        );
+    }
+
+    #[test]
+    fn liveness_follows_only_the_edges_a_finished_node_selected() {
+        // `w1` failed and routed into the shared failure sink. `w2` sits on the
+        // success path `w1` did NOT take, so it can never arrive - even though
+        // the structural graph still has an edge from `w1` towards it.
+        let pb = Playbook::from_yaml(SHARED_FAILURE_SINK).unwrap();
+        let s = state_with(&[("start", NodeStatus::Succeeded), ("w1", NodeStatus::Failed)]);
+        let live = live_nodes(&pb, &s, &active(&["w1"]));
+        assert!(live.contains("aborted"), "the selected route stays live");
+        assert!(
+            !live.contains("w2"),
+            "a route a finished node did not select is not live"
+        );
+    }
+
+    #[test]
+    fn an_implicit_join_never_fails_the_node_on_a_failed_input() {
+        // A failure edge into a shared sink or handler exists precisely to
+        // deliver a failure into a node that must run. An implicit barrier only
+        // synchronizes; it must not fail the node it is guarding.
+        let pb = Playbook::from_yaml(SHARED_FAILURE_SINK).unwrap();
+        let s = state_with(&[("start", NodeStatus::Succeeded), ("w1", NodeStatus::Failed)]);
+        assert_eq!(
+            join_readiness(&pb, "aborted", &s, &active(&["w1"])),
+            JoinReadiness::ReadySuccess
+        );
+    }
+
+    #[test]
+    fn an_explicit_join_still_fails_the_node_on_a_failed_input() {
+        // The `join:` contract is unchanged: a delivered failure fails the join.
+        let pb = Playbook::from_yaml(DIAMOND).unwrap();
+        let s = state_with(&[("a", NodeStatus::Succeeded), ("b", NodeStatus::Failed)]);
+        assert_eq!(
+            join_readiness(&pb, "j", &s, &active(&["a", "b"])),
+            JoinReadiness::ReadyFailure
+        );
+    }
+
+    #[test]
+    fn a_delivered_input_survives_its_bounded_edge_reaching_the_cap() {
+        // `a -> j` delivered once and thereby hit its cap, so `successors(a)`
+        // no longer offers it. The journaled traversal count is proof it did
+        // arrive, so the join must still see the failure rather than treat the
+        // input as dead and pass vacuously.
+        let pb = Playbook::from_yaml(BOUNDED_INPUT_JOIN).unwrap();
+        let mut s = state_with(&[("a", NodeStatus::Failed), ("b", NodeStatus::Succeeded)]);
+        s.edge_counts.insert(("a".into(), "j".into()), 1);
+        assert_eq!(
+            join_readiness(&pb, "j", &s, &active(&["a", "b"])),
+            JoinReadiness::ReadyFailure
+        );
+    }
+
+    #[test]
+    fn a_join_with_no_arrivals_at_all_executes() {
+        // Reachable through `defaults.on_failure`, which pushes a handler onto
+        // the frontier without consulting any edge. Nothing arrived, so there is
+        // nothing to fail on: the node runs. Stated for both modes so the
+        // All/Any arms cannot drift apart.
+        let pb = Playbook::from_yaml(SHARED_FAILURE_SINK).unwrap();
+        let s = state_with(&[("start", NodeStatus::Succeeded)]);
+        assert_eq!(
+            join_readiness(&pb, "aborted", &s, &active(&["aborted"])),
+            JoinReadiness::ReadySuccess
+        );
+        let any = Playbook::from_yaml(&SHARED_FAILURE_SINK.replace(
+            "{ from: w1, to: aborted, condition: { type: node_status, node: w1, equals: failure } }",
+            "{ from: w1, to: aborted, join: any, condition: { type: node_status, node: w1, equals: failure } }",
+        ))
+        .unwrap();
+        assert_eq!(join_mode(&any, "aborted"), JoinMode::Any);
+        assert_eq!(
+            join_readiness(&any, "aborted", &s, &active(&["aborted"])),
+            JoinReadiness::ReadySuccess
+        );
+    }
+
+    #[test]
+    fn pending_heads_rebuilds_the_branch_heads_a_resume_lost() {
+        // A resume starts with an empty frontier. Without rebuilding the heads
+        // the run has outstanding, an unstarted sibling branch would be judged
+        // dead and the join would fire without it.
+        let pb = playbook();
+        let s = state_with(&[
+            ("start", NodeStatus::Succeeded),
+            ("a", NodeStatus::Succeeded),
+        ]);
+        assert_eq!(
+            pending_heads(&pb, &s),
+            vec!["b".to_string(), "j".to_string()]
+        );
+        assert_eq!(
+            join_readiness(&pb, "j", &s, &active(&["a", "b", "j"])),
             JoinReadiness::NotReady
         );
     }
