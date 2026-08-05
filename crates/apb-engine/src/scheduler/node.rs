@@ -1072,11 +1072,49 @@ pub(crate) fn execute_node(
                             } else {
                                 "failed"
                             };
+                            // A supervisor-issued interrupt is a CONTROL decision,
+                            // not transport noise (spec 2026-08-05 section 2.2
+                            // addendum): a verdict written before the kill does not
+                            // override it, so `supervisor_interrupt_attempt` keeps
+                            // its documented contract (the attempt is journaled
+                            // failed and ordinary retry/fallback/patch proceeds).
+                            // Distinct from the run-level `cancel` above, which
+                            // returns `Cancelled` instead of failing the attempt.
+                            let interrupted_by_supervisor = interrupt.load(Ordering::Relaxed);
                             // The verdict decides the attempt even here (spec
                             // 2026-08-05 section 2.1): the process exit, the signal,
                             // or the deadline kill is transport-level noise once the
                             // agent has written its explicit completion signal.
                             match &verdict {
+                                // Overruled by the supervisor. The verdict is not
+                                // thrown away silently: it rides the anomaly wake
+                                // (and `partial_output`) so the supervisor can see
+                                // the work existed and accept it explicitly, for
+                                // instance by re-running from the next node.
+                                Some(sfr) if interrupted_by_supervisor => {
+                                    let recorded =
+                                        sfr.outputs.clone().unwrap_or_else(|| msg.clone());
+                                    journal.raise_wake(
+                                        run_dir,
+                                        crate::event::WakeTrigger::Anomaly,
+                                        node_id,
+                                        format!(
+                                            "agent_task node `{node_id}` attempt {cur_attempt} recorded a `{}` verdict in its status file, but a supervisor interrupt overrules it and the attempt stays {attempt_status}: {recorded}",
+                                            sfr.status.as_str()
+                                        ),
+                                    )?;
+                                    journal.append(EventPayload::AttemptFinished {
+                                        node: node_id.into(),
+                                        attempt,
+                                        status: attempt_status.into(),
+                                        duration_ms,
+                                        session: None,
+                                        summary: None,
+                                        rejected_output: None,
+                                        partial_output: Some(recorded),
+                                    })?;
+                                    last_msg = msg;
+                                }
                                 // SUCCESS was recorded before the process died
                                 // (issue #74 finding 1: a tail crash used to discard
                                 // the finished deliverable). The attempt succeeds

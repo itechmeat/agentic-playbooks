@@ -10,10 +10,14 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
+use std::sync::mpsc;
+use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
+use apb_engine::control::{Control, post_control};
+use apb_engine::error::EngineError;
 use apb_engine::event::{EventPayload, WakeTrigger, read_all};
-use apb_engine::scheduler::{RunOptions, run};
+use apb_engine::scheduler::{RunOptions, RunResult, run};
 use apb_engine::state::{RunState, RunStatus};
 
 use crate::common;
@@ -96,6 +100,49 @@ defaults:
 nodes:
   - { id: start, type: start }
   - { id: w, type: agent_task, prompt: "do", require_verdict: true }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: w }
+  - { from: w, to: ok, condition: { type: node_status, node: w, equals: success } }
+  - { from: w, to: no, fallback: true }
+"#;
+
+// A `success_check` node with one retry: used for the Err-branch + recovered
+// verdict + rejecting success_check shape (review decision-table row 8).
+const CHECK_RETRY_PLAYBOOK: &str = r#"
+schema: 1
+id: sfcr
+name: StatusFileCheckRetry
+version: 1.0.0
+defaults:
+  profile: main
+  max_retries: 1
+nodes:
+  - { id: start, type: start }
+  - { id: w, type: agent_task, prompt: "do", success_check: { marker: "ALL DONE" } }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: w }
+  - { from: w, to: ok, condition: { type: node_status, node: w, equals: success } }
+  - { from: w, to: no, fallback: true }
+"#;
+
+// The requirement comes ONLY from `defaults.require_verdict`; the node itself
+// says nothing (review M4: the defaults arm needs its own engine-level pin).
+const DEFAULTS_VERDICT_PLAYBOOK: &str = r#"
+schema: 1
+id: sfd
+name: StatusFileDefaults
+version: 1.0.0
+defaults:
+  profile: main
+  max_retries: 1
+  require_verdict: true
+nodes:
+  - { id: start, type: start }
+  - { id: w, type: agent_task, prompt: "do" }
   - { id: ok, type: finish, outcome: success }
   - { id: no, type: finish, outcome: failure }
 edges:
@@ -632,4 +679,251 @@ fn without_require_verdict_a_missing_verdict_stays_succeeded() {
         .cloned()
         .unwrap_or_default();
     assert!(out.contains("a plain reply with no verdict"), "got: {out}");
+}
+
+// --- Fix round 1: review decision-table rows 8, 11, 19 and the defaults arm ---
+
+const POLL_DEADLINE: Duration = Duration::from_secs(10);
+const POLL_STEP: Duration = Duration::from_millis(20);
+
+fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
+    let start = Instant::now();
+    loop {
+        if let Some(v) = f() {
+            return v;
+        }
+        if start.elapsed() > POLL_DEADLINE {
+            panic!("timed out after {POLL_DEADLINE:?} waiting for: {what}");
+        }
+        std::thread::sleep(POLL_STEP);
+    }
+}
+
+fn find_run_id(root: &Path, prefix: &str) -> String {
+    poll_until(&format!("a run dir with prefix `{prefix}`"), || {
+        let runs_dir = root.join(".apb/runs");
+        if !runs_dir.is_dir() {
+            return None;
+        }
+        fs::read_dir(&runs_dir)
+            .ok()?
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .find(|n| n.starts_with(prefix))
+    })
+}
+
+// 12. Row 8: the process exits non-zero AFTER writing a success verdict, and the
+//     node's success_check rejects the recovered output. The verdict does not
+//     bypass the gate: the attempt is failed with the recovered output preserved
+//     as `rejected_output`, a retry is consumed, and the tail-exit anomaly is
+//     still journaled.
+#[test]
+fn a_rejected_recovered_verdict_consumes_a_retry_and_exposes_rejected_output() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sfcr", CHECK_RETRY_PLAYBOOK);
+    // The recovered output is the verdict's outputs object, which does NOT carry
+    // the completion marker the node demands.
+    let script = "#!/bin/sh\nprintf '%s' '{\"status\":\"success\",\"outputs\":{\"state\":\"half way\"}}' \
+        > \"$APB_STATUS_FILE\"\necho 'died in the tail' 1>&2\nexit 1\n";
+    let prog = stub_agent(dir.path(), script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "sfcr", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Failed,
+        "a recovered verdict the success_check rejects must not succeed the node"
+    );
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        attempt_statuses(&events, "w"),
+        vec!["failed".to_string(), "failed".to_string()],
+        "both attempts must be journaled failed by the gate"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RetryStarted { node, .. } if node == "w")),
+        "a gate rejection on the Err branch must still consume a retry"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::AttemptFinished { node, rejected_output: Some(r), .. }
+                if node == "w" && r.contains("half way")
+        )),
+        "the recovered verdict output must be preserved as rejected_output"
+    );
+    assert!(
+        has_anomaly(&events, "w", "verdict"),
+        "the tail exit must still be journaled as an anomaly even when the gate rejects"
+    );
+    let state = RunState::fold(&events);
+    assert!(
+        state
+            .rejected_outputs
+            .get("w")
+            .is_some_and(|r| r.contains("half way")),
+        "the rejected output must reach downstream templates"
+    );
+}
+
+// 13. Row 11: a require_verdict node whose process exits NON-ZERO without a
+//     verdict. The exit is classified interrupted (not merely failed), the
+//     adapter detail is preserved as the partial output, and the retry is
+//     consumed exactly as on the exit-0 shape.
+#[test]
+fn require_verdict_on_a_nonzero_exit_is_interrupted_and_consumes_a_retry() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sfv", VERDICT_PLAYBOOK);
+    let script = "#!/bin/sh\necho 'got half way and blew up' 1>&2\nexit 1\n";
+    let prog = stub_agent(dir.path(), script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "sfv", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        attempt_statuses(&events, "w"),
+        vec!["interrupted".to_string(), "interrupted".to_string()],
+        "a verdict-less non-zero exit must be interrupted, not plain failed"
+    );
+    assert!(
+        events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RetryStarted { node, .. } if node == "w")),
+        "the interrupted attempt must consume a retry on the Err branch too"
+    );
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::AttemptFinished { node, status, partial_output: Some(p), .. }
+                if node == "w" && status == "interrupted" && p.contains("got half way and blew up")
+        )),
+        "the adapter's failure detail must be preserved as the partial output"
+    );
+}
+
+// 14. The requirement can come from `defaults.require_verdict` alone: a node
+//     that says nothing still has its verdict-less exit classified interrupted,
+//     and its prompt still carries the status-file contract.
+#[test]
+fn defaults_require_verdict_interrupts_a_verdictless_attempt() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sfd", DEFAULTS_VERDICT_PLAYBOOK);
+    let dump = dir.path().join("argv-dump.txt");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nprintf 'mid-work, nothing recorded\\n'\n",
+        dump.display()
+    );
+    let prog = stub_agent(dir.path(), &script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "sfd", None, RunOptions::default()).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Failed,
+        "defaults.require_verdict must apply to a node that declares nothing"
+    );
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        attempt_statuses(&events, "w"),
+        vec!["interrupted".to_string(), "interrupted".to_string()],
+        "the defaults arm must reach the same interruption path as the node arm"
+    );
+    let prompt = fs::read_to_string(&dump).unwrap();
+    assert!(
+        prompt.contains("APB_STATUS_FILE") && prompt.contains("REQUIRES the verdict"),
+        "a node required to record a verdict via defaults must be told the contract"
+    );
+}
+
+// 15. Row 19 (owner decision, spec 2.2 addendum): a supervisor-issued interrupt
+//     is a CONTROL decision, not transport noise. An agent that records a
+//     success verdict and then wedges must still see its attempt journaled
+//     failed when the supervisor interrupts it - otherwise
+//     `supervisor_interrupt_attempt` silently loses its contract. The verdict is
+//     not thrown away silently: it rides the journaled anomaly so the supervisor
+//     can accept the work explicitly.
+#[test]
+fn a_supervisor_interrupt_beats_a_written_success_verdict() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "sf", PLAYBOOK);
+    // Record the verdict, announce it via a marker, then wedge for far longer
+    // than this test is willing to wait.
+    let marker = dir.path().join("verdict-written.marker");
+    let script = format!(
+        "#!/bin/sh\nprintf '%s' '{{\"status\":\"success\",\"outputs\":{{\"key\":\"val\"}}}}' \
+        > \"$APB_STATUS_FILE\"\ntouch '{m}'\nsleep 30\n",
+        m = marker.display()
+    );
+    let prog = stub_agent(dir.path(), &script);
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "sf", None, RunOptions::default()));
+    });
+    let run_id = find_run_id(dir.path(), "sf-");
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    poll_until("the stub agent to record its verdict", || {
+        marker.is_file().then_some(())
+    });
+    post_control(
+        &run_dir,
+        Control::Interrupt {
+            reason: "attempt is wedged after writing its verdict".into(),
+        },
+    )
+    .unwrap();
+
+    let res = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("the drive must return well under the agent's 30s wedge")
+        .unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(
+        res.outcome,
+        RunStatus::Failed,
+        "a supervisor interrupt must not be overridden by a written verdict"
+    );
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        attempt_statuses(&events, "w"),
+        vec!["failed".to_string()],
+        "the interrupted attempt must stay failed, as before the verdict-over-exit change"
+    );
+    assert!(
+        has_anomaly(&events, "w", "supervisor interrupt"),
+        "the anomaly must name the interrupt that overruled the verdict"
+    );
+    assert!(
+        has_anomaly(&events, "w", "val"),
+        "the anomaly must carry the verdict text so the supervisor can see the work existed"
+    );
 }
