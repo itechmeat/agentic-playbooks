@@ -153,6 +153,9 @@ mod progress_api_test;
 #[path = "suite/question_channel_test.rs"]
 mod question_channel_test;
 #[cfg(unix)]
+#[path = "suite/reap_test.rs"]
+mod reap_test;
+#[cfg(unix)]
 #[path = "suite/rebind_test.rs"]
 mod rebind_test;
 #[path = "suite/report_summary_test.rs"]

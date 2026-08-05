@@ -205,7 +205,12 @@ fn success_check_rejection(
 /// `failure_kind` is the spec-2.3 classification of the failure detail, or
 /// `None` when nothing was classified (an exit-0 attempt that simply recorded no
 /// verdict has no failure detail to classify).
-fn journal_interrupted_attempt(
+///
+/// Shared with the drive-entry reaper (`entry::reap_dead_attempts`, spec
+/// section 2.4): an attempt whose process died with its driver ended without
+/// recording a verdict too, so it earns the same label through the same writer
+/// rather than a second hand-built event.
+pub(super) fn journal_interrupted_attempt(
     journal: &Journal,
     node_id: &str,
     attempt: u32,

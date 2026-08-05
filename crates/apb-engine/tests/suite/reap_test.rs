@@ -1,0 +1,341 @@
+//! Drive-entry reaping of dead open attempts (issue #71 item 4, spec
+//! 2026-08-05 section 2.4).
+//!
+//! The shape under test is a run whose DRIVER died mid-attempt: the journal
+//! ends at an `attempt_started` whose agent process is gone, and nothing ever
+//! wrote the matching `attempt_finished`. Before drive-entry reaping the run
+//! read as forever in-flight (`lost` at the status surface) and the stale
+//! attempt was never closed; the node only ever re-ran because `plan_resume`
+//! restarts interrupted work, leaving an attempt open in the journal for good.
+//!
+//! Every test builds that shape out of a REAL run - run once with a stub agent,
+//! then rewrite the journal - so the run dir keeps its snapshot, config and
+//! manifest and stays genuinely drivable. The single-branch tests cut the
+//! journal back to the `attempt_started`; the fork test replaces it wholesale,
+//! because two concurrent branches make the cut point a race. The dead pid is a
+//! spawned-and-reaped child's (plausible but absent, per
+//! `docs/TESTING-GUIDELINES.md`), never `u32::MAX`, which takes the
+//! impossible-pid path in both `kill(2)` and `ps` instead.
+//!
+//! Against the pre-reaping engine, two of the three fail on the missing
+//! `interrupted` closure; `resume_does_not_reap_an_attempt_without_a_pid` passes
+//! both ways by design - it pins a boundary that must not move.
+
+use apb_engine::event::{Event, EventPayload, read_all};
+use apb_engine::scheduler::{RunOptions, resume, run};
+use apb_engine::state::RunStatus;
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::Path;
+
+use crate::common;
+
+const PLAYBOOK: &str = r#"
+schema: 1
+id: reapflow
+name: Reap
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "do" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done }
+"#;
+
+/// A fan-out whose two agent branches meet at an implicit join: the shape where
+/// a driver death leaves TWO open attempts, and the resume plan falls back to
+/// the last finished node instead of restarting one interrupted node.
+const FORK_PLAYBOOK: &str = r#"
+schema: 1
+id: reapfork
+name: ReapFork
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: b, type: agent_task, prompt: "left" }
+  - { id: c, type: agent_task, prompt: "right" }
+  - { id: j, type: prompt, prompt: "merge" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: b }
+  - { from: start, to: c }
+  - { from: b, to: j }
+  - { from: c, to: j }
+  - { from: j, to: done }
+"#;
+
+/// A real pid that is reliably absent: a child spawned, waited for and reaped,
+/// so the number was genuinely valid and is now free. Deliberately not
+/// `u32::MAX` - an impossible pid exercises the invalid-pid rejection rather
+/// than the stale-holder property this fixture is about.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .expect("spawn a throwaway child to borrow a pid from");
+    let pid = child.id();
+    // Bounded by construction: `exit 0` cannot fail to exit.
+    child.wait().expect("reap the throwaway child");
+    pid
+}
+
+/// Seeds a project with `PLAYBOOK`, profile `main`, and a stub agent that
+/// records each invocation by appending one byte to a tally file.
+fn seed(root: &Path) -> (String, std::path::PathBuf) {
+    seed_named(root, "reapflow", PLAYBOOK)
+}
+
+fn seed_named(root: &Path, id: &str, yaml: &str) -> (String, std::path::PathBuf) {
+    apb_core::registry::init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks").join(id).join("1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    fs::write(
+        root.join(".apb/playbooks").join(id).join("current"),
+        "1.0.0",
+    )
+    .unwrap();
+    common::seed_main(root);
+
+    let tally = root.join("invocations");
+    let prog = root.join("stub.sh");
+    common::write_sync(
+        &prog,
+        &format!(
+            "#!/bin/sh\nprintf x >> '{t}'\necho done\n",
+            t = tally.display()
+        ),
+    );
+    let mut p = fs::metadata(&prog).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&prog, p).unwrap();
+    (prog.to_string_lossy().into_owned(), tally)
+}
+
+fn invocations(tally: &Path) -> usize {
+    fs::read(tally).map(|b| b.len()).unwrap_or(0)
+}
+
+/// Cuts the journal back to `node`'s `attempt_started` (inclusive) and rewrites
+/// that event's pid: the exact on-disk shape a driver death leaves behind.
+fn cut_at_open_attempt(run_dir: &Path, node: &str, pid: Option<u32>) {
+    let events = read_all(run_dir).unwrap();
+    let cut = events
+        .iter()
+        .position(
+            |e| matches!(&e.payload, EventPayload::AttemptStarted { node: n, .. } if n == node),
+        )
+        .expect("the run journaled an attempt_started for the node");
+    let mut kept: Vec<Event> = events[..=cut].to_vec();
+    if let EventPayload::AttemptStarted { pid: p, .. } = &mut kept[cut].payload {
+        *p = pid;
+    }
+    let mut buf = String::new();
+    for e in &kept {
+        buf.push_str(&serde_json::to_string(e).unwrap());
+        buf.push('\n');
+    }
+    fs::write(run_dir.join("events.jsonl"), buf).unwrap();
+}
+
+/// Replaces a run's journal with `payloads`, numbering seq from 0. The rest of
+/// the run dir (playbook snapshot, config, manifest) is left intact, so the run
+/// is still drivable.
+fn write_journal(run_dir: &Path, payloads: &[EventPayload]) {
+    let mut buf = String::new();
+    for (seq, p) in payloads.iter().enumerate() {
+        let e = Event {
+            seq: seq as u64,
+            ts: 1_000 + seq as u128,
+            payload: p.clone(),
+        };
+        buf.push_str(&serde_json::to_string(&e).unwrap());
+        buf.push('\n');
+    }
+    fs::write(run_dir.join("events.jsonl"), buf).unwrap();
+}
+
+fn node_started(node: &str) -> EventPayload {
+    EventPayload::NodeStarted {
+        node: node.into(),
+        attempt: 1,
+    }
+}
+
+fn attempt_started(node: &str, pid: Option<u32>) -> EventPayload {
+    EventPayload::AttemptStarted {
+        node: node.into(),
+        attempt: 1,
+        agent: "claude-code".into(),
+        soul_delivery: None,
+        skills_mode: None,
+        pid,
+    }
+}
+
+fn attempt_statuses(run_dir: &Path, node: &str) -> Vec<String> {
+    read_all(run_dir)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.payload {
+            EventPayload::AttemptFinished {
+                node: n, status, ..
+            } if n == node => Some(status),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Step 1: a resume over a run whose driver died mid-attempt closes the open
+/// attempt as `interrupted` and re-executes the node to success, instead of
+/// leaving the attempt open forever and reporting the node only as `lost`.
+#[test]
+fn resume_reaps_a_dead_open_attempt_and_reruns_the_node() {
+    let dir = tempfile::tempdir().unwrap();
+    let (prog, tally) = seed(dir.path());
+
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "reapflow", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert_eq!(invocations(&tally), 1, "the first pass ran the agent once");
+
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    cut_at_open_attempt(&run_dir, "work", Some(dead_pid()));
+
+    let again = resume(dir.path(), &res.run_id, None);
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    let again = again.unwrap();
+    assert_eq!(again.outcome, RunStatus::Succeeded);
+    assert_eq!(
+        invocations(&tally),
+        2,
+        "the reaped node must re-execute through the agent"
+    );
+    assert_eq!(
+        attempt_statuses(&run_dir, "work"),
+        vec!["interrupted".to_string(), "succeeded".to_string()],
+        "the dead attempt must be journaled closed as interrupted BEFORE the fresh attempt runs"
+    );
+    // The closure carries no partial output: the mid-work text died with the
+    // process, and the journal never held it.
+    let reaped_partial = read_all(&run_dir)
+        .unwrap()
+        .into_iter()
+        .find_map(|e| match e.payload {
+            EventPayload::AttemptFinished {
+                status,
+                partial_output,
+                ..
+            } if status == "interrupted" => Some(partial_output),
+            _ => None,
+        })
+        .expect("an interrupted attempt_finished");
+    assert_eq!(reaped_partial, None);
+}
+
+/// Several dead attempts at once, on a run the resume plan cannot pin to a
+/// single interrupted node: BOTH branches are reaped in one entry pass and both
+/// re-execute, which is what "the node re-enters scheduling" has to mean for a
+/// fork. Also the composition check: the reap changes no status the frontier
+/// reconstruction keys on (`interrupted` and `running` are both non-terminal),
+/// so nothing has to reconstruct anything a second time.
+#[test]
+fn a_fork_with_two_dead_attempts_reaps_both_and_finishes() {
+    let dir = tempfile::tempdir().unwrap();
+    let (prog, tally) = seed_named(dir.path(), "reapfork", FORK_PLAYBOOK);
+
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "reapfork", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert_eq!(invocations(&tally), 2, "both branches ran once");
+
+    // Rewrite the journal into the two-open-attempts crash shape. Hand-built
+    // rather than truncated: the two branches run concurrently, so where a real
+    // journal happens to be cut is a race, and this test is about the shape, not
+    // about which branch won.
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    write_journal(
+        &run_dir,
+        &[
+            EventPayload::RunStarted {
+                playbook: "reapfork".into(),
+                version: "1.0.0".into(),
+            },
+            EventPayload::NodeFinished {
+                node: "start".into(),
+                status: "succeeded".into(),
+                attempt: 1,
+                output: String::new(),
+                artifacts: Vec::new(),
+            },
+            node_started("b"),
+            attempt_started("b", Some(dead_pid())),
+            node_started("c"),
+            attempt_started("c", Some(dead_pid())),
+        ],
+    );
+
+    let again = resume(dir.path(), &res.run_id, None);
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(again.unwrap().outcome, RunStatus::Succeeded);
+    assert_eq!(
+        invocations(&tally),
+        4,
+        "both reaped branches must re-execute through the agent"
+    );
+    assert_eq!(attempt_statuses(&run_dir, "b")[0], "interrupted");
+    assert_eq!(attempt_statuses(&run_dir, "c")[0], "interrupted");
+}
+
+/// The non-reap boundary at the e2e level: an open attempt with NO journaled
+/// pid cannot be proven dead, so it is left open. The run still recovers (the
+/// resume plan restarts interrupted work either way), which is what makes the
+/// conservative rule affordable.
+#[test]
+fn resume_does_not_reap_an_attempt_without_a_pid() {
+    let dir = tempfile::tempdir().unwrap();
+    let (prog, tally) = seed(dir.path());
+
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "reapflow", None, RunOptions::default()).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    cut_at_open_attempt(&run_dir, "work", None);
+
+    let again = resume(dir.path(), &res.run_id, None);
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(again.unwrap().outcome, RunStatus::Succeeded);
+    assert_eq!(invocations(&tally), 2);
+    assert_eq!(
+        attempt_statuses(&run_dir, "work"),
+        vec!["succeeded".to_string()],
+        "an attempt with no pid must not be journaled interrupted: unknown is not dead"
+    );
+}

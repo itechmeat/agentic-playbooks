@@ -453,6 +453,62 @@ pub(crate) fn hand_to_detached_driver(
     Ok(run_id)
 }
 
+/// Closes every open attempt whose process is provably gone, as a drive starts
+/// over an existing run dir (spec 2026-08-05 section 2.4, issue #71 item 4).
+/// Returns the nodes it reaped, in journal order.
+///
+/// The gap this fills: an attempt whose DRIVER died leaves an `attempt_started`
+/// that nothing will ever close, because the only process that could write the
+/// matching `attempt_finished` is gone. `liveness::lost_nodes` could see it, but
+/// only as a read-time report - so the run read as forever in-flight, and
+/// recovering the node needed a human to notice and rerun. Writing the
+/// process-table judgment into the journal once, here, makes it a replayable
+/// fact and lets the node re-enter scheduling like any other unfinished work.
+///
+/// Why this is the whole implementation, with no second frontier
+/// reconstruction: the node's own re-entry is already covered twice over.
+/// `plan_resume` treats a node whose journal ends mid-attempt as interrupted
+/// work and restarts it (its filter is `Running | Interrupted`, and closing the
+/// attempt moves the fold from the second to the first - the same decision), and
+/// a node reached on some OTHER branch comes back through
+/// `node::restore_frontier`, whose `pending_heads` reconstruction keys on
+/// non-terminal status, which an `interrupted` closure does not change. So the
+/// reap adds the missing journal record and changes no routing.
+///
+/// Boundaries, all of them deliberate:
+///
+///   * only a PROVABLY dead pid is reaped ([`crate::liveness::dead_open_attempts`]
+///     carries the module's bias): an attempt with no journaled pid stays open,
+///     because unknown is not dead, and a live pid is left to the driver claim
+///     and the workdir lock, which are what decide run ownership;
+///   * this runs at drive ENTRY only. A live drive waits on its own child and
+///     cannot miss its exit, so there is no watchdog and no mid-drive reaping;
+///   * a driverless run is not reaped until someone drives it again. Autonomous
+///     reaping of an abandoned run is out of scope (an external watchdog), and
+///     `apb doctor --run` plus `run_status` remain how such a run is seen.
+///
+/// `duration_ms` is `None` rather than the attempt's age: the journal records
+/// when the attempt STARTED, and nothing on disk says when its process died, so
+/// any number here would be invented. `partial_output` is `None` for the same
+/// honest reason - the mid-work text died with the process and was never
+/// journaled.
+pub(super) fn reap_dead_attempts(
+    events: &[Event],
+    log: &mut EventLog,
+) -> Result<Vec<String>, EngineError> {
+    let dead = crate::liveness::dead_open_attempts(events);
+    if dead.is_empty() {
+        return Ok(Vec::new());
+    }
+    let journal = Journal::new(log);
+    let mut reaped = Vec::with_capacity(dead.len());
+    for a in dead {
+        journal_interrupted_attempt(&journal, &a.node, a.attempt, None, None, "", None)?;
+        reaped.push(a.node);
+    }
+    Ok(reaped)
+}
+
 /// Posts a cancel command to control.jsonl of an already-running (or already
 /// finished) run. Does not wait for an actual stop - `drive` will see the Abort at
 /// the nearest iteration boundary. Idempotent: a repeated call just appends

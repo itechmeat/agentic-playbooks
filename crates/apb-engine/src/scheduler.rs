@@ -56,6 +56,7 @@ mod supervisor;
 
 pub(crate) use control_apply::{ControlScan, scan_control};
 pub(crate) use entry::Prepared;
+use entry::reap_dead_attempts;
 pub use entry::{
     PreparedRun, RunOptions, drive_prepared, drive_run_from_dir, post_supervisor_command,
     prepare_supervised_background, run, run_background, run_background_resolved, run_cancel,
@@ -380,11 +381,23 @@ fn drive_inner(
     // (several unconditional outgoing edges) puts the extra targets here; when the
     // `current` branch runs into a not-yet-ready join or a dead end, we take the next one.
     let mut frontier: Vec<String> = Vec::new();
+    // Reap before folding (spec 2026-08-05 section 2.4): an attempt whose driver
+    // died is still journaled open, and nothing else will ever close it. Closing
+    // it as `interrupted` HERE - before this drive reads its own starting state -
+    // is what turns "the node reads as lost forever" into ordinary unfinished
+    // work that the resume plan and the frontier reconstruction below pick up.
+    // The second read happens only when something was actually reaped, so the
+    // common case (a fresh run, or a resume with nothing dead) pays one read as
+    // before. See `entry::reap_dead_attempts` for the boundaries.
+    let mut entry_events = read_all(run_dir)?;
+    if !reap_dead_attempts(&entry_events, log)?.is_empty() {
+        entry_events = read_all(run_dir)?;
+    }
     // The journal as this drive starts. A fresh run has barely one event; a drive
     // over an existing run dir (a resume) needs it twice: the `After` seed
     // evaluates the finished node's edges against it, and both modes rebuild from
     // it the branch heads the dead driver's in-memory frontier took with it.
-    let entry_state = RunState::fold(&read_all(run_dir)?);
+    let entry_state = RunState::fold(&entry_events);
     let mut current = match start_mode {
         // Restart interrupted work, or an explicit `--from-node` re-run: the
         // start node is executed by the loop below.
