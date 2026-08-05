@@ -141,17 +141,156 @@ edges:
   - { from: work, to: done }
 "#;
 
+/// Two concurrent agent branches meeting at a barrier: the shape a targeted
+/// interrupt exists for (spec 2026-08-05 section 1.6). Both branches are
+/// batchable (non-interactive `agent_task`, neither is a join), so the drive runs
+/// them at the same time and one control entry is visible to both observers. One
+/// retry each, so an interrupted branch recovers on its own.
+const FORK_WF: &str = r#"
+schema: 1
+id: PLAYBOOK_ID
+name: Targeted Interrupt
+version: 1.0.0
+defaults:
+  profile: main
+  max_retries: 1
+nodes:
+  - { id: start, type: start }
+  - { id: alpha, type: agent_task, prompt: "BRANCH_ALPHA work" }
+  - { id: beta, type: agent_task, prompt: "BRANCH_BETA work" }
+  - { id: merged, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: alpha }
+  - { from: start, to: beta }
+  - { from: alpha, to: merged, join: all }
+  - { from: beta, to: merged, join: all }
+  - { from: merged, to: done }
+"#;
+
 fn seed(root: &Path, id: &str) {
+    seed_yaml(root, id, WF);
+}
+
+fn seed_yaml(root: &Path, id: &str, yaml: &str) {
     init_project(root).unwrap();
     let vdir = root.join(".apb/playbooks").join(id).join("1.0.0");
     fs::create_dir_all(&vdir).unwrap();
-    fs::write(vdir.join("playbook.yaml"), WF.replace("PLAYBOOK_ID", id)).unwrap();
+    fs::write(vdir.join("playbook.yaml"), yaml.replace("PLAYBOOK_ID", id)).unwrap();
     fs::write(
         root.join(".apb/playbooks").join(id).join("current"),
         "1.0.0",
     )
     .unwrap();
     common::seed_main(root);
+}
+
+/// The branch token this invocation's prompt carries (`$2` is the prompt: the
+/// adapter's argv is `-p <prompt> --model <model>`), as a shell prelude every
+/// fork stub below shares.
+const BRANCH_OF_PROMPT: &str = "case \"$2\" in\n\
+     *BRANCH_ALPHA*) n=alpha ;;\n\
+     *BRANCH_BETA*) n=beta ;;\n\
+     *) n=other ;;\n\
+     esac\n";
+
+/// A fork stub whose branches are ASYMMETRIC, so a targeted interrupt has
+/// something to spare: `alpha` hangs on its first invocation (the wedged branch)
+/// and succeeds on every one after, while `beta` publishes its start marker and
+/// then waits - bounded - for the test to release it, so it is genuinely in
+/// flight when the interrupt lands and completes normally afterwards.
+fn fork_agent(dir: &Path) -> String {
+    let d = dir.display();
+    let path = dir.join("fork_agent.sh");
+    let body = format!(
+        "#!/bin/sh\n{branch}\
+         touch '{d}/running_'\"$n\"\n\
+         if [ \"$n\" = alpha ]; then\n\
+         \x20 if [ -f '{d}/seen_alpha' ]; then echo ok; exit 0; fi\n\
+         \x20 touch '{d}/seen_alpha'\n\
+         \x20 sleep {sleep}\n\
+         \x20 echo late\n\
+         \x20 exit 0\n\
+         fi\n\
+         i=0\n\
+         while [ ! -f '{d}/release_beta' ]; do\n\
+         \x20 i=$((i + 1))\n\
+         \x20 if [ \"$i\" -gt 400 ]; then echo 'beta was never released'; exit 0; fi\n\
+         \x20 sleep 0.05\n\
+         done\n\
+         echo ok\n",
+        branch = BRANCH_OF_PROMPT,
+        sleep = AGENT_SLEEP_SECS,
+    );
+    fs::write(&path, body).unwrap();
+    set_executable(&path);
+    path.to_string_lossy().to_string()
+}
+
+/// The SYMMETRIC fork stub: every branch hangs on its first invocation and
+/// succeeds on every one after. A broadcast interrupt has to kill both, and both
+/// then recover through their own retry.
+fn symmetric_fork_agent(dir: &Path) -> String {
+    let d = dir.display();
+    let path = dir.join("symmetric_fork_agent.sh");
+    let body = format!(
+        "#!/bin/sh\n{branch}\
+         touch '{d}/running_'\"$n\"\n\
+         if [ -f '{d}/seen_'\"$n\" ]; then echo ok; exit 0; fi\n\
+         touch '{d}/seen_'\"$n\"\n\
+         sleep {sleep}\n\
+         echo late\n",
+        branch = BRANCH_OF_PROMPT,
+        sleep = AGENT_SLEEP_SECS,
+    );
+    fs::write(&path, body).unwrap();
+    set_executable(&path);
+    path.to_string_lossy().to_string()
+}
+
+/// Every `attempt_interrupted` supervisor action journaled for `node`.
+fn interrupted_actions(run_dir: &Path, node: &str) -> Vec<String> {
+    read_all(run_dir)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.payload {
+            EventPayload::SupervisorAction {
+                action,
+                node: Some(n),
+                detail,
+            } if action == "attempt_interrupted" && n == node => Some(detail),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Every `control_received` acknowledgment journaled for `node`.
+fn control_acks(run_dir: &Path, node: &str) -> Vec<String> {
+    read_all(run_dir)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.payload {
+            EventPayload::SupervisorAction {
+                action,
+                node: Some(n),
+                detail,
+            } if action == "control_received" && n == node => Some(detail),
+            _ => None,
+        })
+        .collect()
+}
+
+fn attempt_statuses(run_dir: &Path, node: &str) -> Vec<String> {
+    read_all(run_dir)
+        .unwrap()
+        .into_iter()
+        .filter_map(|e| match e.payload {
+            EventPayload::AttemptFinished {
+                node: n, status, ..
+            } if n == node => Some(status),
+            _ => None,
+        })
+        .collect()
 }
 
 /// (a) A control message posted while the agent is mid-flight must be
@@ -272,6 +411,7 @@ fn an_interrupt_terminates_a_hung_attempt_and_a_queued_patch_then_applies() {
         &run_dir,
         Control::Interrupt {
             reason: "attempt is wedged".into(),
+            node: None,
         },
     )
     .unwrap();
@@ -320,4 +460,140 @@ fn an_interrupt_terminates_a_hung_attempt_and_a_queued_patch_then_applies() {
             .any(|e| matches!(&e.payload, EventPayload::PatchApplied { .. })),
         "the queued patch must apply at the forced attempt boundary"
     );
+}
+
+/// (c) Targeted interrupt (spec 2026-08-05 section 1.6): with two branches in
+/// flight at once, an interrupt naming ONE node kills only that node's attempt.
+/// The sibling never even sees the message - it is not acknowledged, not
+/// journaled, and not consumed on its behalf - and completes normally.
+#[cfg(unix)]
+#[test]
+fn a_node_targeted_interrupt_kills_only_the_named_branch() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_yaml(dir.path(), "targetflow", FORK_WF);
+    let prog = fork_agent(dir.path());
+    let _env = AgentEnv::set(&prog);
+
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "targetflow", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "targetflow-");
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    // Both branches are genuinely in flight: alpha is mid-hang and beta is
+    // waiting on its release, so ONE control entry is visible to both observers.
+    for branch in ["alpha", "beta"] {
+        let marker = dir.path().join(format!("running_{branch}"));
+        poll_until(&format!("branch {branch} to start"), || {
+            marker.is_file().then_some(())
+        });
+    }
+
+    post_control(
+        &run_dir,
+        Control::Interrupt {
+            reason: "alpha is wedged".into(),
+            node: Some("alpha".into()),
+        },
+    )
+    .unwrap();
+
+    // Only the named branch dies. Waiting for its interruption first is what makes
+    // the sibling assertions below meaningful: by the time beta is released, the
+    // targeted entry has been on disk long enough for beta's own poll loop to have
+    // read it many times over.
+    poll_until("alpha's attempt to be interrupted", || {
+        (!interrupted_actions(&run_dir, "alpha").is_empty()).then_some(())
+    });
+    assert!(
+        interrupted_actions(&run_dir, "beta").is_empty(),
+        "a targeted interrupt must not kill the sibling branch"
+    );
+    assert!(
+        control_acks(&run_dir, "beta").is_empty(),
+        "an interrupt naming another node must not even be acknowledged by the sibling: {:?}",
+        control_acks(&run_dir, "beta")
+    );
+
+    fs::write(dir.path().join("release_beta"), "go").unwrap();
+    let res = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("the drive must return well under the agent's 30s hang")
+        .unwrap();
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "the untouched branch and the retried one must both complete"
+    );
+
+    assert_eq!(
+        attempt_statuses(&run_dir, "alpha"),
+        vec!["failed".to_string(), "succeeded".to_string()],
+        "the targeted branch's killed attempt must fail and its retry succeed"
+    );
+    assert_eq!(
+        attempt_statuses(&run_dir, "beta"),
+        vec!["succeeded".to_string()],
+        "the sibling must complete on its first attempt, untouched by the interrupt"
+    );
+    assert!(
+        interrupted_actions(&run_dir, "beta").is_empty(),
+        "the sibling must never be journaled interrupted"
+    );
+}
+
+/// (d) The broadcast boundary that must not move: an interrupt with NO node keeps
+/// today's documented semantics byte for byte - every attempt running in the run
+/// observes it, dies, and recovers through its own retry.
+#[cfg(unix)]
+#[test]
+fn an_interrupt_without_a_node_still_kills_every_running_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_yaml(dir.path(), "broadcastflow", FORK_WF);
+    let prog = symmetric_fork_agent(dir.path());
+    let _env = AgentEnv::set(&prog);
+
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "broadcastflow", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "broadcastflow-");
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    for branch in ["alpha", "beta"] {
+        let marker = dir.path().join(format!("running_{branch}"));
+        poll_until(&format!("branch {branch} to hang"), || {
+            marker.is_file().then_some(())
+        });
+    }
+
+    post_control(
+        &run_dir,
+        Control::Interrupt {
+            reason: "both branches are wedged".into(),
+            node: None,
+        },
+    )
+    .unwrap();
+
+    let res = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("the drive must return well under the agent's 30s hang")
+        .unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    for branch in ["alpha", "beta"] {
+        assert!(
+            !interrupted_actions(&run_dir, branch).is_empty(),
+            "a broadcast interrupt must kill branch {branch} too"
+        );
+        assert_eq!(
+            attempt_statuses(&run_dir, branch),
+            vec!["failed".to_string(), "succeeded".to_string()],
+            "branch {branch} must recover through its own retry after the broadcast"
+        );
+    }
 }

@@ -121,6 +121,17 @@ fn control_summary(cmd: &crate::control::Control, seq: u64) -> String {
 /// Runs on the drive thread through the shared `Journal`, so the single-writer
 /// invariant holds. Returns the highest seq acknowledged (the new baseline) and
 /// whether an interrupt was requested.
+///
+/// An interrupt naming a DIFFERENT node is invisible here (spec 2026-08-05
+/// section 1.6): the entry is not acknowledged, not journaled, and not consumed,
+/// because this observer runs once per ATTEMPT and every concurrent branch reads
+/// the same channel - acknowledging another branch's interrupt would put an
+/// `attempt_interrupted` for this node in the journal and kill it. Leaving it
+/// unconsumed is also what makes the entry still available to the attempt it
+/// names, and (when that node is not running) to the drive loop's own scan, which
+/// consumes a spent interrupt at the next node boundary. An interrupt with no
+/// `node` keeps the documented BROADCAST semantics byte for byte: every running
+/// attempt observes it and dies.
 fn observe_control(
     run_dir: &Path,
     node_id: &str,
@@ -131,12 +142,19 @@ fn observe_control(
     let mut cursor = seen;
     let mut interrupt = false;
     for entry in crate::control::read_control_after(run_dir, seen)? {
+        if let crate::control::Control::Interrupt {
+            node: Some(target), ..
+        } = &entry.cmd
+            && target != node_id
+        {
+            continue;
+        }
         journal.append(EventPayload::SupervisorAction {
             action: "control_received".into(),
             node: Some(node_id.to_string()),
             detail: control_summary(&entry.cmd, entry.seq),
         })?;
-        if let crate::control::Control::Interrupt { reason } = &entry.cmd {
+        if let crate::control::Control::Interrupt { reason, .. } = &entry.cmd {
             journal.append(EventPayload::SupervisorAction {
                 action: "attempt_interrupted".into(),
                 node: Some(node_id.to_string()),
@@ -2561,6 +2579,7 @@ mod tests {
             dir.path(),
             Control::Interrupt {
                 reason: "already spent".into(),
+                node: None,
             },
         )
         .unwrap();
@@ -2599,6 +2618,7 @@ mod tests {
             dir.path(),
             Control::Interrupt {
                 reason: "stale".into(),
+                node: None,
             },
         )
         .unwrap();
@@ -2626,6 +2646,7 @@ mod tests {
             dir.path(),
             Control::Interrupt {
                 reason: "stale".into(),
+                node: None,
             },
         )
         .unwrap();
@@ -2635,6 +2656,66 @@ mod tests {
             interrupt,
             "None baseline replays the channel; latest_control_seq must not degrade to None on error"
         );
+    }
+
+    /// A targeted interrupt (spec 2026-08-05 section 1.6) is invisible to every
+    /// other node: not acknowledged, not journaled, and not consumed - the entry
+    /// stays in the channel for the attempt it names.
+    #[test]
+    fn observe_control_ignores_an_interrupt_targeting_another_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        let journal = Journal::new(&mut log);
+        post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "the other branch is wedged".into(),
+                node: Some("n2".into()),
+            },
+        )
+        .unwrap();
+
+        let (seen, interrupt) = observe_control(dir.path(), "n1", 1, &journal, None).unwrap();
+        assert!(
+            !interrupt,
+            "an interrupt naming another node must not kill this attempt"
+        );
+        assert_eq!(
+            seen, None,
+            "the entry must not be consumed on another node's behalf"
+        );
+        let actions: Vec<String> = crate::event::read_all(dir.path())
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::SupervisorAction { action, .. } => Some(action),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            actions.is_empty(),
+            "another node's interrupt must not be journaled here, got {actions:?}"
+        );
+    }
+
+    /// The same entry addressed to THIS node is honored exactly like a broadcast.
+    #[test]
+    fn observe_control_honors_an_interrupt_targeting_this_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        let journal = Journal::new(&mut log);
+        let seq = post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "this branch is wedged".into(),
+                node: Some("n1".into()),
+            },
+        )
+        .unwrap();
+
+        let (seen, interrupt) = observe_control(dir.path(), "n1", 1, &journal, None).unwrap();
+        assert!(interrupt, "the named node's attempt must be interrupted");
+        assert_eq!(seen, Some(seq));
     }
 
     /// A gated child spawn threads the pin's verified connector permit maps into

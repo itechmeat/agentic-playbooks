@@ -896,6 +896,7 @@ fn a_supervisor_interrupt_beats_a_written_success_verdict() {
         &run_dir,
         Control::Interrupt {
             reason: "attempt is wedged after writing its verdict".into(),
+            node: None,
         },
     )
     .unwrap();

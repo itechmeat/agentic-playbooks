@@ -138,16 +138,23 @@ pub fn context_append(root: &Path, run_id: &str, note: &str) -> Result<Value, To
 /// `posted_seq`; the resulting `control_received`/`attempt_interrupted` events
 /// are visible via `supervisor_run_inspect` and `run_events`, so a supervisor
 /// can confirm the message was received live.
+///
+/// `node` makes the interrupt TARGETED (spec 2026-08-05 section 1.6): only that
+/// node's running attempt observes the entry and dies, so a wedged branch of a
+/// concurrent fan-out can be broken without touching its healthy siblings. Omit
+/// it for the historical broadcast: every attempt running in the run dies.
 pub fn interrupt_attempt(
     root: &Path,
     run_id: &str,
     reason: Option<&str>,
+    node: Option<&str>,
 ) -> Result<Value, ToolError> {
     let seq = post_supervisor_command(
         root,
         run_id,
         Control::Interrupt {
             reason: reason.unwrap_or("supervisor interrupt").to_string(),
+            node: node.map(str::to_string),
         },
     )?;
     Ok(json!({ "posted_seq": seq }))

@@ -213,6 +213,10 @@ pub struct SupervisorInterruptArgs {
     /// journaled `attempt_interrupted` event. Defaults to a generic reason.
     #[serde(default)]
     pub reason: Option<String>,
+    /// The node whose running attempt to interrupt. Omit to interrupt EVERY
+    /// attempt currently running in the run (the historical broadcast).
+    #[serde(default)]
+    pub node: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
