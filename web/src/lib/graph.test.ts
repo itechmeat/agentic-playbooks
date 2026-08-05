@@ -294,6 +294,21 @@ describe('nodeExits', () => {
     expect(exits?.list[0].title).toContain('needs_brainstorm: yes')
   })
 
+  // Without its own arm an `output_field` exit fell through to the raw type
+  // name, so both branches of a status-file verdict read `output_field`.
+  it('names an output_field exit by the field and the value it routes on', () => {
+    const exits = nodeExits(
+      pb([
+        { from: 'work', to: 'a', condition: { type: 'output_field', node: 'work', field: 'verdict', equals: 'failed' } },
+        { from: 'work', to: 'b', condition: { type: 'output_field', node: 'lint', field: 'verdict', equals: 'ok' } },
+      ]),
+      'work',
+    )
+    expect(exits?.list.map((e) => e.label)).toEqual(['1 verdic…failed', '2 verdict: ok'])
+    expect(exits?.list[0].title).toContain(`this node's output is a JSON object whose "verdict" equals "failed"`)
+    expect(exits?.list[1].title).toContain('node lint')
+  })
+
   it('truncates in the middle, so a shared prefix does not collapse two exits', () => {
     const exits = nodeExits(
       pb(
