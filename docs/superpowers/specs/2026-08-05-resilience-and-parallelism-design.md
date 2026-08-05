@@ -227,7 +227,10 @@ it: a new `EdgeCondition::OutputField { node, field, equals }` parses the
 source node's output as JSON and compares one top-level field as a string.
 Authors route on a verdict by having the agent write
 `{"status":"success","outputs":{"verdict":"failed", ...}}` and the edge
-declare `output_field: { node: verify, field: verdict, equals: failed }`.
+declare, in the internally tagged form the sibling conditions already use,
+`condition: { type: output_field, node: verify, field: verdict, equals: failed }`
+(the nested `output_field: { ... }` form written in the first draft of this
+decision was never shipped).
 A validator extension covers the new variant (source-node existence and
 happens-before, beside V09/V10). Alternative rejected: a parallel
 `verdicts` map folded from new event fields - more wire surface for the same

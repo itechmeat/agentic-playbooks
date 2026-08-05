@@ -50,6 +50,33 @@ run began with. Because `profile_digest` hashes the raw `profile.yaml`, setting
 `hermetic` changes the digest and therefore the bundle trust just like any
 other profile edit.
 
+### Guidance: turn it on for production profiles
+
+Set `hermetic: true` on every profile a run actually depends on, and leave it off
+only for local throwaway experimentation. A node agent is a batch worker: it runs
+once, reports, and exits. It has no business inheriting the operator's personal
+plugins and hooks, and a globally installed hook (a `Stop` hook that demands one
+more reply, a plugin that injects unrelated context) can silently change what the
+node reports or make its completion signal fire later than the agent itself
+intended. A profile without `hermetic` is a profile that trusts whatever happens
+to be installed on the machine running it, which is rarely something a playbook
+author reviewed.
+
+What it does not do: it is not a sandbox. It does not isolate the filesystem, the
+network, or the project's working tree. A node that needs isolation from other
+concurrent branches touching the same files still needs the node's own `isolation`
+setting (`full`, `best_effort`, or `none`), which is an orthogonal concern.
+`hermetic` suppresses the operator's personal, machine-local agent configuration
+and says nothing about what the node's own prompt, skills, or connectors may do.
+
+Pair it with `outputs.extract` on the node (a marker name on the node's `outputs`
+block, sibling to `outputs.files`; see HOWTO-authoring.md) as the other half of
+output hygiene. `hermetic` stops local hooks from appending extra turns to an
+agent's session in the first place; `outputs.extract` is the fallback when a host
+injects one anyway, or when the bound executor ignores the flag, because it scopes
+the node's recorded output to the agent's own marked block rather than to whatever
+an unrelated appended turn added on top.
+
 ## Scopes and resolution
 
 A node references a profile by name (`profile: architect`, scope `auto`) or by
