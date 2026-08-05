@@ -144,6 +144,88 @@ edges:
   - { from: handler, to: aborted }
 "#;
 
+// The `join: all` diamond plus a SIDE BRANCH out of `a`, so advancing past `a`
+// always has something runnable (`k`) even while the join waits for `b`. A
+// resume therefore passes the pointless-resume guard and has to carry the
+// outstanding branch heads into the live frontier, not just into one liveness
+// query.
+const DIAMOND_WITH_SIDE_BRANCH: &str = r#"
+schema: 1
+id: par
+name: Par
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: k, type: prompt, prompt: "k" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: j, join: all }
+  - { from: b, to: j, join: all }
+  - { from: a, to: k }
+  - { from: k, to: done }
+  - { from: j, to: done }
+"#;
+
+// A fork out of `x` where one leg is a BOUNDED edge. Once `x -> y` has been
+// traversed its cap is reached, so `y` stops showing up in `x`'s routing even
+// though the journal records that the edge was taken. A resume must read the
+// journaled traversal, otherwise `y` disappears from both the rebuilt heads and
+// from liveness and the merge fires without it.
+const CAPPED_FORK: &str = r#"
+schema: 1
+id: par
+name: Par
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: x, type: prompt, prompt: "x" }
+  - { id: y, type: prompt, prompt: "y" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: x }
+  - { from: x, to: y, max_traversals: 1 }
+  - { from: x, to: j }
+  - { from: y, to: j }
+  - { from: j, to: done }
+"#;
+
+// Two independent merges: `m` is a barrier-less (implicit) join of p1/p2, `w` is
+// an explicit `join: any` of fa/fb. The edge order makes `m` reach the frontier
+// BEFORE the `any` race is won, so the win has to leave the pending join alone.
+const ANY_WIN_WITH_PENDING_JOIN: &str = r#"
+schema: 1
+id: par
+name: Par
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: p1, type: prompt, prompt: "p1" }
+  - { id: p2, type: prompt, prompt: "p2" }
+  - { id: m, type: prompt, prompt: "m" }
+  - { id: fa, type: prompt, prompt: "fa" }
+  - { id: fb, type: prompt, prompt: "fb" }
+  - { id: w, type: prompt, prompt: "w" }
+  - { id: mdone, type: finish, outcome: success }
+  - { id: wdone, type: finish, outcome: success }
+edges:
+  - { from: start, to: p1 }
+  - { from: start, to: p2 }
+  - { from: start, to: fa }
+  - { from: start, to: fb }
+  - { from: p1, to: m }
+  - { from: p2, to: m }
+  - { from: fa, to: w, join: any }
+  - { from: fb, to: w, join: any }
+  - { from: m, to: mdone }
+  - { from: w, to: wdone }
+"#;
+
 // A fork where one branch reaches finish - the run completes, the other does not execute.
 const FORK_FINISH: &str = r#"
 schema: 1
@@ -194,6 +276,35 @@ fn position_of_start(events: &[apb_engine::event::Event], node: &str) -> usize {
         .iter()
         .position(|e| matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node))
         .unwrap_or_else(|| panic!("node `{node}` never started"))
+}
+
+/// Synthesizes a driver that died at a chosen point: keeps only the journal
+/// lines before the first event `cut_at` accepts, and returns how many were
+/// kept. One event is one line (`EventLog::append` uses a single `writeln!`), so
+/// the parsed index and the line index agree.
+fn truncate_journal_before<F>(run_dir: &Path, cut_at: F) -> usize
+where
+    F: Fn(&EventPayload) -> bool,
+{
+    let events = read_all(run_dir).unwrap();
+    let cut = events
+        .iter()
+        .position(|e| cut_at(&e.payload))
+        .expect("no journal event matched the cut point");
+    let journal = run_dir.join("events.jsonl");
+    let kept: Vec<String> = fs::read_to_string(&journal)
+        .unwrap()
+        .lines()
+        .take(cut)
+        .map(str::to_string)
+        .collect();
+    fs::write(&journal, format!("{}\n", kept.join("\n"))).unwrap();
+    cut
+}
+
+/// [`finish_status`] read straight off a run dir.
+fn finish_status_of(run_dir: &Path, node: &str) -> String {
+    finish_status(&read_all(run_dir).unwrap(), node)
 }
 
 /// The status on a node's `node_finished`, for "did it really execute" checks.
@@ -342,21 +453,17 @@ fn resume_after_a_finished_branch_still_waits_for_the_unstarted_sibling() {
     assert_eq!(res.outcome, RunStatus::Succeeded);
     let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
 
-    // Synthesize a driver that died right after branch `a` finished: drop every
-    // event from branch `b`'s first onwards, so `b` is Pending (never started,
-    // so not `interrupted` either) and `a` is the last finished node.
-    let journal = run_dir.join("events.jsonl");
-    let kept: Vec<String> = fs::read_to_string(&journal)
-        .unwrap()
-        .lines()
-        .take_while(|l| !l.contains("\"node\":\"b\""))
-        .map(str::to_string)
-        .collect();
+    // Synthesize a driver that died right after branch `a` finished, so `b` is
+    // Pending (never started, so not `interrupted` either) and `a` is the last
+    // finished node.
+    let cut = truncate_journal_before(
+        &run_dir,
+        |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "b"),
+    );
     assert!(
-        kept.iter().any(|l| l.contains("\"node\":\"a\"")),
+        read_all(&run_dir).unwrap().len() == cut && finish_status_of(&run_dir, "a") == "succeeded",
         "branch a must have finished before the synthesized death"
     );
-    fs::write(&journal, format!("{}\n", kept.join("\n"))).unwrap();
 
     let err = resume(dir.path(), &res.run_id, None)
         .expect_err("resuming past `a` must not fire the join without branch `b`");
@@ -366,6 +473,122 @@ fn resume_after_a_finished_branch_still_waits_for_the_unstarted_sibling() {
     );
     let events = read_all(&run_dir).unwrap();
     assert_eq!(started(&events, "j"), 0, "the join must not have executed");
+}
+
+/// A resume whose start node has another runnable successor passes the
+/// pointless-resume guard, so the guard is no safety net: the outstanding branch
+/// heads have to be installed into the live frontier, or the next advance sees
+/// only the side branch, flips the unstarted sibling to dead, and fires the
+/// joins without it.
+#[test]
+fn resume_installs_the_lost_branch_heads_into_the_frontier() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), DIAMOND_WITH_SIDE_BRANCH);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    truncate_journal_before(
+        &run_dir,
+        |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "b"),
+    );
+
+    let res = resume(dir.path(), &res.run_id, None)
+        .expect("the side branch `k` is runnable, so the resume must proceed");
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    for node in ["k", "b", "j"] {
+        assert_eq!(
+            started(&events, node),
+            1,
+            "`{node}` must run on the resumed drive"
+        );
+    }
+}
+
+/// The same reconstruction is needed on the `Rerun` path: the interrupted node is
+/// re-executed, and the advance past it must still see the sibling branch that
+/// never started.
+#[test]
+fn resume_of_an_interrupted_node_still_waits_for_the_unstarted_sibling() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), DIAMOND_ALL);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    // Died mid-`a`: its `node_started` stays, its `node_finished` is gone, so `a`
+    // folds to Running and `plan_resume` restarts it (`StartMode::Rerun`).
+    truncate_journal_before(
+        &run_dir,
+        |p| matches!(p, EventPayload::NodeFinished { node, .. } if node == "a"),
+    );
+
+    let res = resume(dir.path(), &res.run_id, None).expect("an interrupted node is re-runnable");
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(started(&events, "a"), 2, "`a` runs again after the death");
+    assert_eq!(
+        started(&events, "b"),
+        1,
+        "the sibling branch must still run"
+    );
+    assert_eq!(started(&events, "j"), 1, "the join runs once, after both");
+}
+
+/// A branch reached over a bounded edge that has hit its cap is still a branch:
+/// the journaled traversal is the only remaining evidence that it was routed to,
+/// and dropping that evidence turns a safe refusal into a silent branch skip.
+#[test]
+fn resume_reads_journaled_traversals_when_rebuilding_branch_heads() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), CAPPED_FORK);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    // Died after the bounded edge was traversed but before `y` started.
+    truncate_journal_before(
+        &run_dir,
+        |p| matches!(p, EventPayload::NodeStarted { node, .. } if node == "y"),
+    );
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(&e.payload,
+            EventPayload::EdgeTraversed { from, to } if from == "x" && to == "y")),
+        "the traversal that proves `y` was routed to must survive the cut"
+    );
+
+    let err = resume(dir.path(), &res.run_id, None)
+        .expect_err("the merge must not fire without the branch behind the capped edge");
+    assert!(
+        err.to_string().contains("no pending successor"),
+        "expected the pointless-resume refusal, got: {err}"
+    );
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(started(&events, "y"), 0, "`y` never started");
+    assert_eq!(started(&events, "j"), 0, "the merge must not have executed");
+}
+
+/// A `join: any` win cancels the losing branches, but a pending join elsewhere in
+/// the graph is not part of that race and must survive it.
+#[test]
+fn an_any_win_does_not_drop_a_pending_join_elsewhere() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), ANY_WIN_WITH_PENDING_JOIN);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(started(&events, "w"), 1, "the any-join wins and runs");
+    assert_eq!(
+        started(&events, "m"),
+        1,
+        "a join waiting in the frontier must not be dropped by an any-win"
+    );
+    assert!(
+        events.iter().any(|e| matches!(&e.payload,
+            EventPayload::NodeFinished { node, status, .. }
+                if node == "fb" && status == "cancelled")),
+        "the losing branch of the race is still cancelled"
+    );
 }
 
 #[test]

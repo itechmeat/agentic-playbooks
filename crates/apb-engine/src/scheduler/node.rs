@@ -1869,6 +1869,30 @@ pub(crate) fn active_set(node: &str, frontier: &[String], also_active: &[String]
     active
 }
 
+/// Re-installs the branch heads a previous driver lost. The frontier lives only
+/// in the driver's memory, so a drive over an existing run dir has to rebuild it
+/// from the journal ([`parallel::pending_heads`]); a fresh run has no finished
+/// node yet and so gets nothing. Without this the heads inform a single liveness
+/// query and are then forgotten, and the next advance - which computes liveness
+/// from the frontier alone - writes the unstarted branches off as dead.
+///
+/// A head that is a JOIN is deliberately left out: nothing re-gates readiness
+/// once a join becomes `current`, so a not-yet-ready join sitting in the frontier
+/// would execute early. Joins re-enter through [`advance_frontier`] as soon as an
+/// input actually lands, which is the one path that checks readiness.
+pub(crate) fn restore_frontier(
+    playbook: &Playbook,
+    state: &RunState,
+    current: &str,
+    frontier: &mut Vec<String>,
+) {
+    for head in parallel::pending_heads(playbook, state) {
+        if head != current && !frontier.contains(&head) && !parallel::is_join(playbook, &head) {
+            frontier.push(head);
+        }
+    }
+}
+
 pub(crate) fn advance_frontier(
     playbook: &Playbook,
     node: &str,

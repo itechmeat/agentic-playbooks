@@ -247,8 +247,8 @@ fn live_nodes(playbook: &Playbook, state: &RunState, active: &[String]) -> BTree
         }
     }
     while let Some(id) = queue.pop_front() {
-        let next: Vec<String> = match is_terminal(status_of(state, &id)) {
-            true => successors(playbook, &id, state),
+        let next: BTreeSet<String> = match is_terminal(status_of(state, &id)) {
+            true => routed_targets(playbook, &id, state),
             false => playbook
                 .edges
                 .iter()
@@ -265,20 +265,46 @@ fn live_nodes(playbook: &Playbook, state: &RunState, active: &[String]) -> BTree
     live
 }
 
+/// The targets a node that has already finished actually routed into: the edges
+/// its routing selects against the current state, PLUS every edge out of it with
+/// a journaled traversal.
+///
+/// The journal half is not redundant. A bounded edge that has reached its
+/// `max_traversals` cap stops being selectable, so re-deriving the routing alone
+/// forgets a branch it demonstrably took - the target would vanish from
+/// liveness, from the rebuilt [`pending_heads`], and from an [`arrival`]'s
+/// delivery proof, and a join would fire without it. This is the single
+/// definition of "which way did this node actually go", shared by all three.
+fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet<String> {
+    let mut targets: BTreeSet<String> = successors(playbook, node, state).into_iter().collect();
+    for ((from, to), count) in &state.edge_counts {
+        if from == node && *count > 0 {
+            targets.insert(to.clone());
+        }
+    }
+    targets
+}
+
 /// The branch heads a run still has outstanding, rebuilt from the journal fold
 /// alone: every target a finished node routed into that has not finished itself.
 ///
-/// The drive loop keeps this set in memory as the frontier. A resume starts with
-/// an empty frontier and has to rebuild it, otherwise a sibling branch that
-/// never started is not in the active set, gets written off as dead, and a join
-/// fires without it - silently completing a run with a branch missing.
+/// The drive loop keeps this set in memory as the frontier, so it dies with its
+/// driver. Any drive over an existing run dir rebuilds it from here, otherwise a
+/// sibling branch that never started is not in the active set, gets written off
+/// as dead, and a join fires without it - silently completing a run with a branch
+/// missing.
+///
+/// Known gap: a handler the `defaults.on_failure` policy routes to is pushed
+/// onto the frontier without traversing any declared edge, so nothing in the
+/// journal records that route and this reconstruction cannot see it. See the
+/// Task 4 handover notes.
 pub fn pending_heads(playbook: &Playbook, state: &RunState) -> Vec<String> {
     let mut heads: BTreeSet<String> = BTreeSet::new();
     for (node, status) in &state.nodes {
         if !is_terminal(*status) {
             continue;
         }
-        for s in successors(playbook, node, state) {
+        for s in routed_targets(playbook, node, state) {
             if !is_terminal(status_of(state, &s)) {
                 heads.insert(s);
             }
@@ -306,26 +332,11 @@ fn arrival(
     }
     // The source is done, so it either delivered into this join or routed
     // elsewhere (an unmatched condition; an either-or merge has one such source
-    // by construction). A journaled traversal is proof of delivery on its own:
-    // a bounded edge that has reached its `max_traversals` cap no longer shows
-    // up in `successors`, and without this an arrival could flip back to `Dead`
-    // later in the run and pass the join vacuously.
-    let delivered = successors(playbook, source, state)
-        .iter()
-        .any(|s| s == node)
-        || traversal_count(state, source, node) > 0;
-    match delivered {
+    // by construction).
+    match routed_targets(playbook, source, state).contains(node) {
         true => Arrival::Delivered(status),
         false => Arrival::Dead,
     }
-}
-
-fn traversal_count(state: &RunState, from: &str, to: &str) -> u32 {
-    state
-        .edge_counts
-        .get(&(from.to_string(), to.to_string()))
-        .copied()
-        .unwrap_or(0)
 }
 
 /// Readiness of a join node, from what each of its incoming branches delivered.
@@ -692,20 +703,39 @@ edges:
     fn a_join_with_no_arrivals_at_all_executes() {
         // Reachable through `defaults.on_failure`, which pushes a handler onto
         // the frontier without consulting any edge. Nothing arrived, so there is
-        // nothing to fail on: the node runs. Stated for both modes so the
-        // All/Any arms cannot drift apart.
-        let pb = Playbook::from_yaml(SHARED_FAILURE_SINK).unwrap();
+        // nothing to fail on: the node runs. Stated for EVERY kind so the arms
+        // cannot drift apart.
         let s = state_with(&[("start", NodeStatus::Succeeded)]);
+        let with_join = |value: &str| {
+            let yaml = SHARED_FAILURE_SINK.replace(
+                "{ from: w1, to: aborted, condition:",
+                &format!("{{ from: w1, to: aborted, join: {value}, condition:"),
+            );
+            Playbook::from_yaml(&yaml).unwrap()
+        };
+
+        let implicit = Playbook::from_yaml(SHARED_FAILURE_SINK).unwrap();
+        assert_eq!(join_kind(&implicit, "aborted"), Some(JoinKind::Implicit));
         assert_eq!(
-            join_readiness(&pb, "aborted", &s, &active(&["aborted"])),
+            join_readiness(&implicit, "aborted", &s, &active(&["aborted"])),
             JoinReadiness::ReadySuccess
         );
-        let any = Playbook::from_yaml(&SHARED_FAILURE_SINK.replace(
-            "{ from: w1, to: aborted, condition: { type: node_status, node: w1, equals: failure } }",
-            "{ from: w1, to: aborted, join: any, condition: { type: node_status, node: w1, equals: failure } }",
-        ))
-        .unwrap();
-        assert_eq!(join_mode(&any, "aborted"), JoinMode::Any);
+
+        let all = with_join("all");
+        assert_eq!(
+            join_kind(&all, "aborted"),
+            Some(JoinKind::Explicit(JoinMode::All))
+        );
+        assert_eq!(
+            join_readiness(&all, "aborted", &s, &active(&["aborted"])),
+            JoinReadiness::ReadySuccess
+        );
+
+        let any = with_join("any");
+        assert_eq!(
+            join_kind(&any, "aborted"),
+            Some(JoinKind::Explicit(JoinMode::Any))
+        );
         assert_eq!(
             join_readiness(&any, "aborted", &s, &active(&["aborted"])),
             JoinReadiness::ReadySuccess

@@ -333,6 +333,11 @@ fn drive_inner(
     // (several unconditional outgoing edges) puts the extra targets here; when the
     // `current` branch runs into a not-yet-ready join or a dead end, we take the next one.
     let mut frontier: Vec<String> = Vec::new();
+    // The journal as this drive starts. A fresh run has barely one event; a drive
+    // over an existing run dir (a resume) needs it twice: the `After` seed
+    // evaluates the finished node's edges against it, and both modes rebuild from
+    // it the branch heads the dead driver's in-memory frontier took with it.
+    let entry_state = RunState::fold(&read_all(run_dir)?);
     let mut current = match start_mode {
         // Restart interrupted work, or an explicit `--from-node` re-run: the
         // start node is executed by the loop below.
@@ -342,16 +347,14 @@ fn drive_inner(
         // status and outputs (exactly the normal post-node advancement), then
         // start from the first ready successor.
         StartMode::After => {
-            let state = RunState::fold(&read_all(run_dir)?);
-            // The in-memory frontier died with the previous driver, so the
-            // branch heads the run still has outstanding are rebuilt from the
-            // journal. Without them a sibling branch that never started is not
-            // active, counts as dead, and a join fires without it.
-            let outstanding = parallel::pending_heads(&playbook, &state);
+            // The outstanding heads are handed in as extra active nodes so a
+            // sibling branch that never started blocks a join here instead of
+            // being written off as dead.
+            let outstanding = parallel::pending_heads(&playbook, &entry_state);
             advance_frontier(
                 &playbook,
                 &start_node,
-                &state,
+                &entry_state,
                 &mut frontier,
                 &outstanding,
                 log,
@@ -368,6 +371,11 @@ fn drive_inner(
             frontier.remove(0)
         }
     };
+    // Put the lost branch heads back into the LIVE frontier, so this drive
+    // actually executes them. Informing the seed above is not enough: every later
+    // advance derives liveness from the frontier, so a head that is not in it
+    // flips to dead at the next step and its joins fire without it.
+    restore_frontier(&playbook, &entry_state, &current, &mut frontier);
     let max_steps = 10_000usize;
     // A counter of condition-node executions for the runtime max_loops check:
     // the validator (V11) only requires that a loop pass through such a node,
