@@ -169,6 +169,19 @@ break every existing playbook that relies on the documented text-report
 default (`interpret_report`, `adapter.rs:889-918`). Playbooks that orchestrate
 long work opt in per node or via `defaults`.
 
+Two boundary rulings recorded after the Task 5 review:
+
+- A supervisor-issued interrupt is a control decision, not transport noise: a
+  written success verdict does not override it. The interrupted attempt stays
+  failed (the pre-existing `supervisor_interrupt_attempt` contract), and the
+  journaled anomaly carries the verdict so the supervisor can accept the work
+  explicitly if it chooses.
+- For `ErrorClass::Timeout | Transport` with `require_verdict` in force, the
+  attempt is labeled interrupted but keeps the pre-existing break-to-fallback
+  behavior (no same-executor retry consumed in Task 5). The retry semantics
+  for infrastructure failures belong to the classification work in 2.3, which
+  must give this shape the bounded Transient retry treatment.
+
 ### 2.3 Decision: infrastructure failure classification with bounded backoff (#71 item 2, #74 finding 2)
 
 A new curated classifier (a pattern table module in `apb-engine`, same spirit
