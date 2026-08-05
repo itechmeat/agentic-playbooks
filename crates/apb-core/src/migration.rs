@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::HashMap;
 
 use crate::schema::{Node, Playbook};
 
@@ -43,9 +43,12 @@ pub fn validate_migration(
     // The set of nodes the migration re-executes: forward-reachable from
     // `continue_from` in the patched graph (structural reachability, following
     // every edge regardless of its condition - a conditional edge could route
-    // through the node on the migrated run). `continue_from` itself is included.
-    // Any executed node OUTSIDE this set stays in the preserved prefix.
-    let rerun = reachable_from(patched, continue_from);
+    // through the node on the migrated run). `continue_from` itself is included,
+    // even when the patch removed it (the dedicated error below reports that).
+    // Any executed node OUTSIDE this set stays in the preserved prefix. It must
+    // not under-count: a node the migration could re-run stays mutable, while a
+    // node in the preserved prefix does not.
+    let rerun = crate::graphutil::reachable(patched, &[continue_from]);
 
     for id in executed_node_ids {
         let Some(base_node) = base.node(id) else {
@@ -66,27 +69,6 @@ pub fn validate_migration(
     }
 
     Ok(())
-}
-
-/// Nodes forward-reachable from `start` over the playbook's edges, `start`
-/// included. Edges are followed unconditionally: this is the set of nodes whose
-/// re-execution the migration could imply, so it must not under-count (a
-/// conditional edge that only fires for some state still keeps the target
-/// mutable). Mirrors the drive loop, which clears the frontier and re-drives
-/// forward from `continue_from` on the patched playbook.
-fn reachable_from(playbook: &Playbook, start: &str) -> HashSet<String> {
-    let mut seen: HashSet<String> = HashSet::new();
-    let mut queue: VecDeque<String> = VecDeque::new();
-    seen.insert(start.to_string());
-    queue.push_back(start.to_string());
-    while let Some(node) = queue.pop_front() {
-        for edge in &playbook.edges {
-            if edge.from == node && seen.insert(edge.to.clone()) {
-                queue.push_back(edge.to.clone());
-            }
-        }
-    }
-    seen
 }
 
 fn nodes_differ(base: &Node, patched: &Node) -> bool {

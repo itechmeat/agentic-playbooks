@@ -415,7 +415,8 @@ pub(crate) fn resume_inner(
     // the run to running forever and appending another marker on every retry.
     if decision.mode == StartMode::After {
         let state = RunState::fold(&read_all(&run_dir)?);
-        if seed_successors(&playbook, &decision.start_node, &state).is_empty() {
+        let active = active_set(&decision.start_node, &[], &[]);
+        if seed_successors(&playbook, &decision.start_node, &state, &active).is_empty() {
             return Err(EngineError::Invalid(format!(
                 "node `{}` already finished with no pending successor to resume into - pass --from-node to re-run from a specific node",
                 decision.start_node

@@ -343,7 +343,7 @@ fn drive_inner(
         // start from the first ready successor.
         StartMode::After => {
             let state = RunState::fold(&read_all(run_dir)?);
-            advance_frontier(&playbook, &start_node, &state, &mut frontier, log)?;
+            advance_frontier(&playbook, &start_node, &state, &mut frontier, &[], log)?;
             if frontier.is_empty() {
                 // A pointless resume: the start node already finished and has no
                 // pending successor to advance into. `resume_inner` already
@@ -680,6 +680,10 @@ fn drive_inner(
                             // If this branch successfully fed a join:any - cancel the others.
                             if status == NodeStatus::Succeeded {
                                 let state_peek = RunState::fold(&read_all(run_dir)?);
+                                // Every batch member counts as active: the
+                                // siblings may still be running, so nothing they
+                                // can still reach may be written off as dead.
+                                let active = active_set(&node, &frontier, &batch);
                                 let feeds_ready_any =
                                     parallel::successors(&playbook, &node, &state_peek)
                                         .into_iter()
@@ -691,7 +695,8 @@ fn drive_inner(
                                                     parallel::join_readiness(
                                                         &playbook,
                                                         &s,
-                                                        &state_peek
+                                                        &state_peek,
+                                                        &active
                                                     ),
                                                     JoinReadiness::ReadySuccess
                                                 )
@@ -753,7 +758,7 @@ fn drive_inner(
                 }
 
                 for node in &batch {
-                    advance_frontier(&playbook, node, &state_now, &mut frontier, log)?;
+                    advance_frontier(&playbook, node, &state_now, &mut frontier, &batch, log)?;
                 }
                 match frontier.is_empty() {
                     true => {
@@ -877,7 +882,12 @@ fn drive_inner(
             }
         } else if parallel::is_join(&playbook, &current)
             && matches!(
-                parallel::join_readiness(&playbook, &current, &state),
+                parallel::join_readiness(
+                    &playbook,
+                    &current,
+                    &state,
+                    &active_set(&current, &frontier, &[])
+                ),
                 JoinReadiness::ReadyFailure
             )
         {
@@ -1664,7 +1674,7 @@ fn drive_inner(
             }
         }
 
-        advance_frontier(&playbook, &current, &state_now, &mut frontier, log)?;
+        advance_frontier(&playbook, &current, &state_now, &mut frontier, &[], log)?;
         if frontier.is_empty() {
             // Branch completed with no ready successors and no other active
             // branches: dead-end (or unready join with no chance) - not finish.

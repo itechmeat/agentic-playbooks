@@ -1826,12 +1826,17 @@ pub(crate) fn maybe_compact_context(
 /// can ask "would advancing past this node have anything to run" WITHOUT any
 /// journal side effect. `advance_frontier` layers the join:any cancellation and
 /// the frontier writes on top of this.
-pub(crate) fn seed_successors(playbook: &Playbook, node: &str, state: &RunState) -> Vec<String> {
+pub(crate) fn seed_successors(
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    active: &[String],
+) -> Vec<String> {
     let mut runnable: Vec<String> = Vec::new();
     for s in parallel::successors(playbook, node, state) {
         let ready = if parallel::is_join(playbook, &s) {
             !matches!(
-                parallel::join_readiness(playbook, &s, state),
+                parallel::join_readiness(playbook, &s, state, active),
                 JoinReadiness::NotReady
             )
         } else {
@@ -1844,14 +1849,32 @@ pub(crate) fn seed_successors(playbook: &Playbook, node: &str, state: &RunState)
     runnable
 }
 
+/// The nodes the run can still execute at the moment a frontier is advanced or
+/// a join is weighed: the node in hand, the other branch heads, and the members
+/// of a concurrent batch that may still be running. Join readiness treats an
+/// input source outside this set's forward-reachable region as dead, so the set
+/// must never under-count - an over-wide set only falls back to today's
+/// wait-until-terminal behavior.
+pub(crate) fn active_set(node: &str, frontier: &[String], batch: &[String]) -> Vec<String> {
+    let mut active = vec![node.to_string()];
+    for n in frontier.iter().chain(batch) {
+        if !active.contains(n) {
+            active.push(n.clone());
+        }
+    }
+    active
+}
+
 pub(crate) fn advance_frontier(
     playbook: &Playbook,
     node: &str,
     state: &RunState,
     frontier: &mut Vec<String>,
+    batch: &[String],
     log: &mut EventLog,
 ) -> Result<(), EngineError> {
-    let mut runnable: Vec<String> = seed_successors(playbook, node, state)
+    let active = active_set(node, frontier, batch);
+    let mut runnable: Vec<String> = seed_successors(playbook, node, state, &active)
         .into_iter()
         .filter(|s| !frontier.contains(s))
         .collect();

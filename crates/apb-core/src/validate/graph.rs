@@ -3,17 +3,7 @@
 //! routing rules a set of outgoing edges has to satisfy.
 
 use super::*;
-
-pub(crate) fn adjacency(playbook: &Playbook) -> HashMap<&str, Vec<&str>> {
-    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-    for n in &playbook.nodes {
-        adj.entry(n.id.as_str()).or_default();
-    }
-    for e in &playbook.edges {
-        adj.entry(e.from.as_str()).or_default().push(e.to.as_str());
-    }
-    adj
-}
+use crate::graphutil::{adjacency, reachable_from, sccs};
 
 pub(crate) fn check_unique_ids(playbook: &Playbook, r: &mut ValidationReport) {
     let mut seen = HashSet::new();
@@ -175,22 +165,6 @@ pub(crate) fn check_reachability(playbook: &Playbook, r: &mut ValidationReport) 
     }
 }
 
-pub(crate) fn reachable_from<'a>(
-    adj: &HashMap<&'a str, Vec<&'a str>>,
-    from: &'a str,
-) -> HashSet<&'a str> {
-    let mut seen = HashSet::new();
-    let mut q = VecDeque::from([from]);
-    while let Some(id) = q.pop_front() {
-        if seen.insert(id) {
-            for next in adj.get(id).into_iter().flatten() {
-                q.push_back(next);
-            }
-        }
-    }
-    seen
-}
-
 pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
     let adj = adjacency(playbook);
     for n in &playbook.nodes {
@@ -244,85 +218,28 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
 
 pub(crate) fn check_cycles(playbook: &Playbook, r: &mut ValidationReport) {
     // Every cycle must pass through a condition node with max_loops.
-    // It's enough to check the SCCs: a component with a cycle must contain such a node.
-    let ids: Vec<&str> = playbook.nodes.iter().map(|n| n.id.as_str()).collect();
-    let adj = adjacency(playbook);
-    // iterative Tarjan
-    let index_of: HashMap<&str, usize> = ids.iter().enumerate().map(|(i, s)| (*s, i)).collect();
-    let n = ids.len();
-    let mut index = vec![usize::MAX; n];
-    let mut low = vec![0usize; n];
-    let mut on_stack = vec![false; n];
-    let mut stack: Vec<usize> = Vec::new();
-    let mut counter = 0usize;
-    let mut sccs: Vec<Vec<usize>> = Vec::new();
-
-    for root in 0..n {
-        if index[root] != usize::MAX {
-            continue;
-        }
-        let mut call: Vec<(usize, usize)> = vec![(root, 0)];
-        while let Some(&(v, ei)) = call.last() {
-            if ei == 0 {
-                index[v] = counter;
-                low[v] = counter;
-                counter += 1;
-                stack.push(v);
-                on_stack[v] = true;
-            }
-            let neigh: Vec<usize> = adj
-                .get(ids[v])
-                .into_iter()
-                .flatten()
-                .filter_map(|t| index_of.get(t).copied())
-                .collect();
-            if ei < neigh.len() {
-                call.last_mut().expect("frame exists").1 += 1;
-                let w = neigh[ei];
-                if index[w] == usize::MAX {
-                    call.push((w, 0));
-                } else if on_stack[w] {
-                    low[v] = low[v].min(index[w]);
-                }
-            } else {
-                if low[v] == index[v] {
-                    let mut comp = Vec::new();
-                    while let Some(w) = stack.pop() {
-                        on_stack[w] = false;
-                        comp.push(w);
-                        if w == v {
-                            break;
-                        }
-                    }
-                    sccs.push(comp);
-                }
-                call.pop();
-                if let Some(&(parent, _)) = call.last() {
-                    low[parent] = low[parent].min(low[v]);
-                }
-            }
-        }
-    }
-
+    // It's enough to check the SCCs: a component with a cycle must contain such
+    // a node. The components come from the shared `graphutil` pass, the same one
+    // the engine consults to tell an acyclic fan-in from a cycle merge point.
     let self_loop: HashSet<&str> = playbook
         .edges
         .iter()
         .filter(|e| e.from == e.to)
         .map(|e| e.from.as_str())
         .collect();
-    for comp in sccs {
-        let cyclic = comp.len() > 1 || self_loop.contains(ids[comp[0]]);
+    for comp in sccs(playbook) {
+        let cyclic = comp.len() > 1 || self_loop.contains(comp[0].as_str());
         if !cyclic {
             continue;
         }
-        let members: HashSet<&str> = comp.iter().map(|&i| ids[i]).collect();
+        let members: HashSet<&str> = comp.iter().map(String::as_str).collect();
         // A cycle is bounded when it passes through a condition node with
         // max_loops OR contains at least one edge (both endpoints inside the
         // component) carrying max_traversals. Either guard makes the loop
         // terminate, so V11 only fires when neither is present.
-        let has_max_loops = comp.iter().any(|&i| {
+        let has_max_loops = comp.iter().any(|id| {
             matches!(
-                playbook.node(ids[i]).map(|n| &n.kind),
+                playbook.node(id).map(|n| &n.kind),
                 Some(NodeKind::Condition { max_loops: Some(_) })
             )
         });
@@ -332,13 +249,12 @@ pub(crate) fn check_cycles(playbook: &Playbook, r: &mut ValidationReport) {
                 && members.contains(e.to.as_str())
         });
         if !has_max_loops && !has_bounded_edge {
-            let member_list: Vec<&str> = comp.iter().map(|&i| ids[i]).collect();
             r.error(
                 "V11",
-                Some(member_list[0]),
+                Some(&comp[0]),
                 format!(
                     "cycle [{}] must contain an edge with max_traversals or pass through a condition node with max_loops",
-                    member_list.join(", ")
+                    comp.join(", ")
                 ),
             );
         }
