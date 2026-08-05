@@ -261,6 +261,174 @@ pub(crate) fn check_cycles(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
+/// V36 (error): an `Edge.join` value other than `all` or `any`. The engine
+/// parses the field leniently (anything that is not `any` means `all`, see
+/// `apb_engine::parallel::JoinMode::parse`), so without this rule a typo like
+/// `join: al` silently becomes a wait-for-all barrier. Parsing stays lenient on
+/// purpose: a stored run snapshot with a legacy value must keep loading, so the
+/// value space is guarded at validation time rather than at deserialization.
+///
+/// V37 (warning): the incoming edges of one node disagree on the join mode. The
+/// engine takes the first `join` in file order and ignores the rest
+/// (`apb_engine::parallel::join_mode`), so a mixed fan-in means the author's
+/// intent for the later edges is silently dropped.
+pub(crate) fn check_joins(playbook: &Playbook, r: &mut ValidationReport) {
+    for e in &playbook.edges {
+        if let Some(join) = &e.join
+            && !matches!(join.as_str(), "all" | "any")
+        {
+            r.error(
+                "V36",
+                Some(&e.to),
+                format!(
+                    "edge `{}` -> `{}` has join `{join}`, expected `all` or `any`",
+                    e.from, e.to
+                ),
+            );
+        }
+    }
+    // Declared modes per target node, in file order. Only well-formed values
+    // take part: a value V36 already rejected must not also read as a mix.
+    let mut by_target: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in &playbook.edges {
+        if let Some(join) = e.join.as_deref()
+            && matches!(join, "all" | "any")
+        {
+            by_target.entry(e.to.as_str()).or_default().push(join);
+        }
+    }
+    // Sorted so the report order is stable regardless of hash iteration order.
+    let mut targets: Vec<(&str, Vec<&str>)> = by_target.into_iter().collect();
+    targets.sort_unstable_by_key(|(id, _)| *id);
+    for (target, modes) in targets {
+        let mut distinct = modes.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        if distinct.len() < 2 {
+            continue;
+        }
+        let winner = modes.first().copied().unwrap_or("all");
+        r.warn(
+            "V37",
+            Some(target),
+            format!(
+                "incoming edges of `{target}` mix join modes [{}]; the engine takes the first one in file order (`{winner}`) and ignores the rest",
+                distinct.join(", ")
+            ),
+        );
+    }
+}
+
+/// Whether `node` waits for EVERY incoming branch before it executes, mirroring
+/// `apb_engine::parallel::join_kind` plus `join_mode`: an explicit `join` that is
+/// not `any` is a wait-for-all barrier, and a fan-in with no `join` at all is the
+/// implicit barrier an acyclic fan-in forms. A merge point inside its own cycle
+/// (a back edge among its inputs) keeps first-arrival semantics, so it does not
+/// wait; neither does a `join: any`.
+fn waits_for_all_inputs<'a>(
+    node: &'a str,
+    adj: &HashMap<&'a str, Vec<&'a str>>,
+    incoming: &[&crate::schema::Edge],
+) -> bool {
+    if incoming.len() < 2 {
+        return false;
+    }
+    if let Some(mode) = incoming.iter().find_map(|e| e.join.as_deref()) {
+        // Lenient exactly like the engine: only `any` is first-arrival.
+        return mode != "any";
+    }
+    let downstream = reachable_from(adj, node);
+    incoming
+        .iter()
+        .all(|e| !downstream.contains(e.from.as_str()))
+}
+
+/// For every node, the nodes the graph GUARANTEES have finished before it runs.
+///
+/// A must-analysis over the node graph:
+///
+/// * a node with a single incoming edge inherits its source's set plus the
+///   source itself (a linear chain accumulates);
+/// * a node that waits for every input ([`waits_for_all_inputs`]) takes the
+///   UNION over its inputs, since all of them have to land before it starts;
+/// * any other multi-input node (a `join: any`, or a cycle merge point) takes
+///   the INTERSECTION, since first arrival is enough to start it.
+///
+/// Entry nodes (no incoming edge) start from the empty set, every other node
+/// from the full node set, and the iteration shrinks to a fixed point: the
+/// standard maximal-fixed-point form of a must-analysis over a graph with
+/// cycles. Values only ever shrink, so stopping the iteration early can only
+/// leave an over-approximation, which keeps the rules built on this answer
+/// conservative (a missed warning, never a false one).
+///
+/// Note that the union at a wait-for-all barrier is deliberately optimistic
+/// about conditional routing: after an either-or fork only the taken branch
+/// really ran (the join fires because the other one is dead, see
+/// `apb_engine::parallel::arrival`), yet both count as finished here. That is
+/// what keeps the common either-or merge reading both branches out of V38.
+pub(crate) fn must_have_finished(playbook: &Playbook) -> HashMap<&str, HashSet<&str>> {
+    let ids: Vec<&str> = playbook.nodes.iter().map(|n| n.id.as_str()).collect();
+    let known: HashSet<&str> = ids.iter().copied().collect();
+    let adj = adjacency(playbook);
+    let mut incoming: HashMap<&str, Vec<&crate::schema::Edge>> = HashMap::new();
+    for e in &playbook.edges {
+        incoming.entry(e.to.as_str()).or_default().push(e);
+    }
+    let waits: HashSet<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            waits_for_all_inputs(id, &adj, incoming.get(id).map(Vec::as_slice).unwrap_or(&[]))
+        })
+        .collect();
+    let mut done: HashMap<&str, HashSet<&str>> = ids
+        .iter()
+        .copied()
+        .map(|id| {
+            let seed = match incoming.get(id).is_some_and(|v| !v.is_empty()) {
+                true => known.clone(),
+                false => HashSet::new(),
+            };
+            (id, seed)
+        })
+        .collect();
+    // Values shrink monotonically, so the fixed point is reached in at most one
+    // pass per node; the cap is a guard, not the termination argument.
+    for _ in 0..ids.len() + 2 {
+        let mut changed = false;
+        for id in &ids {
+            let Some(inc) = incoming.get(id).filter(|v| !v.is_empty()) else {
+                continue;
+            };
+            let union = waits.contains(id);
+            let mut next: Option<HashSet<&str>> = None;
+            for e in inc {
+                let source = e.from.as_str();
+                let mut arrived: HashSet<&str> = done.get(source).cloned().unwrap_or_default();
+                if known.contains(source) {
+                    arrived.insert(source);
+                }
+                next = Some(match next {
+                    None => arrived,
+                    Some(acc) => match union {
+                        true => acc.union(&arrived).copied().collect(),
+                        false => acc.intersection(&arrived).copied().collect(),
+                    },
+                });
+            }
+            let Some(next) = next else { continue };
+            if done.get(id) != Some(&next) {
+                done.insert(id, next);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    done
+}
+
 /// V30 (error): a `max_traversals` of 0 on an edge. A bounded edge that can
 /// never be traversed is an authoring mistake; the minimum useful cap is 1.
 ///
