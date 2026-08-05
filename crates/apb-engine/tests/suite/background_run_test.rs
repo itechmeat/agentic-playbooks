@@ -10,7 +10,15 @@ use apb_engine::scheduler::{RunOptions, run_background, run_cancel};
 use apb_engine::state::{RunState, RunStatus};
 use apb_engine::workdir::acquire;
 
-const POLL_DEADLINE: Duration = Duration::from_secs(5);
+/// Anti-hang ceiling for the polls below, not a performance budget: nothing here
+/// asserts that the background driver is FAST, only that it gets there. Widened
+/// from 5s after two observed spurious failures on a clean tree, where a 1s
+/// script node took longer than that to finish because every fresh `sh` stub and
+/// the detached driver binary pay a per-launch macOS security scan
+/// (BUILD-OPTIMIZATION rule 8; the same scan measured 3.9s to 53.5s of spawn
+/// stall in the timeout suites). A genuine hang is still caught: 30s is well
+/// inside nextest's 60s SLOW period, so a wedged poll fails by name.
+const POLL_DEADLINE: Duration = Duration::from_secs(30);
 const POLL_STEP: Duration = Duration::from_millis(20);
 
 /// Polls `f` until it returns Some(..) or the deadline elapses; otherwise panics

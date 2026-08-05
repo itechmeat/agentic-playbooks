@@ -1,5 +1,64 @@
 use std::process::Command;
 
+/// Anti-hang ceiling for the pty waits below, not a performance budget: every
+/// assertion here is about what the questionnaire printed and that the process
+/// exited, never about how quickly. Widened from 15s and 20s alongside
+/// [`warm_binary`], which is what actually removes the one-time cost these waits
+/// used to charge to themselves. Warm, all seven tests in this file finish in
+/// 2.25s together (measured), so 30s is a wide margin; it also stays inside
+/// nextest's 60s SLOW period, so a genuine block on a prompt fails by name.
+#[cfg(unix)]
+const PTY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Pays the FIRST-exec cost of a freshly linked `apb` binary once, serially,
+/// before any deadline-bounded wait starts.
+///
+/// On macOS the first exec of a new binary pays a system security scan
+/// (BUILD-OPTIMIZATION rule 8), and for a debug `apb` it is tens of seconds. It is
+/// charged once per binary, not once per exec, but the five pty tests here exec it
+/// concurrently, so every one of them used to wait out that single scan inside its
+/// own deadline. Measured: on the first `cargo test` after a rebuild, 5 of the 7
+/// tests failed even at a 45s deadline, then all 7 passed in 2.25s on the very
+/// next run with nothing changed but a warm binary.
+///
+/// `get_or_init` blocks the other threads until this exec returns, so the cost is
+/// paid exactly once and outside every `PTY_DEADLINE`. The bound here is
+/// deliberately generous, because it covers a platform cost rather than any
+/// behavior of `apb`, but it is still a bound: a wedged binary fails by name
+/// instead of hanging the binary's whole test run.
+#[cfg(unix)]
+fn warm_binary() {
+    use std::sync::OnceLock;
+    use std::time::{Duration, Instant};
+
+    static WARM: OnceLock<()> = OnceLock::new();
+    WARM.get_or_init(|| {
+        let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+            .arg("--version")
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("spawn `apb --version` to warm the binary");
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            if child
+                .try_wait()
+                .expect("wait on `apb --version`")
+                .is_some()
+            {
+                return;
+            }
+            if Instant::now() > deadline {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("`apb --version` did not return within 180s: the binary is wedged, not merely being scanned");
+            }
+            std::thread::sleep(Duration::from_millis(50));
+        }
+    });
+}
+
 // Regression guard: with stdin a terminal but stdout piped (e.g.
 // `apb subscriptions | tool`), the interactive survey must NOT launch a
 // blocking prompt. It has to fall through to the plain hint and exit
@@ -13,6 +72,8 @@ fn survey_offer_does_not_block_when_stdout_is_piped() {
     use std::io::Read;
     use std::os::fd::{FromRawFd, OwnedFd};
     use std::time::{Duration, Instant};
+
+    warm_binary();
 
     let mut master: libc::c_int = 0;
     let mut slave: libc::c_int = 0;
@@ -46,7 +107,7 @@ fn survey_offer_does_not_block_when_stdout_is_piped() {
         .spawn()
         .unwrap();
 
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + PTY_DEADLINE;
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
             break s;
@@ -140,6 +201,8 @@ fn init_on_tty(project: &std::path::Path, answers: &[(&str, u8)]) -> String {
     use std::sync::{Arc, Mutex};
     use std::time::{Duration, Instant};
 
+    warm_binary();
+
     let cfg = tempfile::tempdir().unwrap();
     std::fs::create_dir_all(cfg.path().join("state")).unwrap();
     std::fs::write(
@@ -211,7 +274,7 @@ fn init_on_tty(project: &std::path::Path, answers: &[(&str, u8)]) -> String {
     let mut writer = std::fs::File::from(master.try_clone().unwrap());
     let mut consumed = 0usize;
     for (fragment, key) in answers {
-        let deadline = Instant::now() + Duration::from_secs(20);
+        let deadline = Instant::now() + PTY_DEADLINE;
         loop {
             let text = seen.lock().unwrap().clone();
             if let Some(at) = text[consumed..].find(fragment) {
@@ -229,7 +292,7 @@ fn init_on_tty(project: &std::path::Path, answers: &[(&str, u8)]) -> String {
         writer.flush().unwrap();
     }
 
-    let deadline = Instant::now() + Duration::from_secs(20);
+    let deadline = Instant::now() + PTY_DEADLINE;
     let status = loop {
         if let Some(s) = child.try_wait().unwrap() {
             break s;

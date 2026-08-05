@@ -30,7 +30,15 @@ use apb_engine::state::RunStatus;
 
 use crate::common;
 
-const POLL_DEADLINE: Duration = Duration::from_secs(10);
+/// Anti-hang ceiling for the polls and the channel receives below, not a
+/// performance budget: the tests wait for a question, an answer, or a run to
+/// arrive, never for any of it to arrive quickly. Widened from 10s after one
+/// observed spurious failure on a clean tree; a reprompt re-invokes the stub
+/// agent from scratch, so one test can pay the per-launch macOS security scan
+/// several times over (BUILD-OPTIMIZATION rule 8; measured at 3.9s to 53.5s of
+/// spawn stall in the timeout suites). 30s stays inside nextest's 60s SLOW
+/// period, so a genuine hang still fails by name.
+const POLL_DEADLINE: Duration = Duration::from_secs(30);
 const POLL_STEP: Duration = Duration::from_millis(10);
 
 fn lock() -> MutexGuard<'static, ()> {

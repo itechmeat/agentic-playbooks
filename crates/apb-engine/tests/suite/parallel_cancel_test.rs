@@ -1,7 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::time::Instant;
 
 use apb_core::registry::init_project;
 use apb_engine::event::{EventPayload, read_all};
@@ -34,12 +33,25 @@ edges:
   - { from: j, to: done }
 "#;
 
-fn write_mock_agent(root: &Path) -> String {
+/// The slow branch's stub leaves a marker on the line past its sleep, so the
+/// marker's ABSENCE is the proof that the branch was killed rather than waited
+/// out.
+///
+/// This replaces an earlier wall-clock assertion (`run()` had to return in under
+/// 3s while the slow branch slept 5s). That bound measured the machine, not the
+/// engine: on this project's macOS machines the per-launch security scan of a
+/// freshly written `sh` stub (BUILD-OPTIMIZATION rule 8) measured 3.9s to 53.5s
+/// of pure spawn and kill stall on an otherwise idle tree, failing the 3s budget
+/// in 5 of 8 isolated runs while the cancel path worked every time.
+fn write_mock_agent(root: &Path, marker: &Path) -> String {
     // Adapter arguments: -p <prompt> --model <model>. $2 = the prompt.
     let path = root.join("mock-agent.sh");
     fs::write(
         &path,
-        "#!/bin/sh\ncase \"$2\" in *slow*) sleep 5 ;; esac\necho done\n",
+        format!(
+            "#!/bin/sh\ncase \"$2\" in *slow*) sleep 5; : > {} ;; esac\necho done\n",
+            marker.to_string_lossy()
+        ),
     )
     .unwrap();
     let mut p = fs::metadata(&path).unwrap().permissions();
@@ -62,24 +74,24 @@ fn join_any_kills_slower_branch() {
     let _env = common::env_lock();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
-    let prog = write_mock_agent(dir.path());
+    let marker = dir.path().join("slow-branch-ran-to-completion");
+    let prog = write_mock_agent(dir.path(), &marker);
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }
 
-    let started = Instant::now();
     let res = run(dir.path(), "cancel", None, RunOptions::default()).unwrap();
-    let elapsed = started.elapsed();
 
     unsafe {
         std::env::remove_var("APB_AGENT_CMD");
     }
 
     assert_eq!(res.outcome, RunStatus::Succeeded);
-    // If the slow branch had not been killed, the run would have taken >= 5s. Threshold with margin.
+    // Killed, not waited out: the slow stub never reached the line past its sleep.
     assert!(
-        elapsed.as_millis() < 3000,
-        "slow branch not killed: run took {elapsed:?}"
+        !marker.exists(),
+        "slow branch not killed: it ran past its sleep and wrote {}",
+        marker.display()
     );
 
     let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
