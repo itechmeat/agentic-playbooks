@@ -265,8 +265,7 @@ fn prompt_template(kind: &NodeKind) -> Option<&str> {
 }
 
 /// Journals a missing-input anomaly for every `nodes.<id>.output|report` a node's
-/// template reads without a SUCCESSFUL record behind it (spec 2026-08-05 section
-/// 1.5).
+/// template reads that ACTUALLY renders empty (spec 2026-08-05 section 1.5).
 ///
 /// The read still renders as an empty string, byte for byte: an agent-task cache
 /// key is derived from the rendered prompt, so changing the rendering would move
@@ -274,9 +273,17 @@ fn prompt_template(kind: &NodeKind) -> Option<&str> {
 /// legitimately reference both branches. What was missing was any trace at all -
 /// an agent got a prompt with a hole in it and nothing said so.
 ///
-/// One anomaly per node execution (not per attempt), listing every unfilled
-/// reference with the status behind it, journaled through the same
-/// `WakeRaised { Anomaly }` mechanism as the empty-output anomaly.
+/// The criterion is emptiness of the RENDERED value, not the source's status,
+/// which is what makes the event's claim true by construction. `resolve` reads
+/// `state.outputs` unconditionally and the fold records an output for every
+/// terminal status, so a `defaults.on_failure` handler reading its failed
+/// source - the canonical handler pattern - receives real text and is no anomaly,
+/// while a source that finished with an empty output is one whatever its status
+/// was.
+///
+/// One anomaly per node execution (not per attempt), listing every hole with the
+/// reason it is one, journaled through the same `WakeRaised { Anomaly }`
+/// mechanism as the empty-output anomaly.
 fn journal_missing_inputs(
     journal: &Journal,
     run_dir: &Path,
@@ -286,13 +293,17 @@ fn journal_missing_inputs(
 ) -> Result<(), EngineError> {
     let missing: Vec<String> = crate::context::node_output_refs(template)
         .into_iter()
-        .filter(|(_, id)| state.nodes.get(id) != Some(&NodeStatus::Succeeded))
-        .map(|(reference, id)| {
-            let status = match state.nodes.get(&id) {
-                Some(st) => st.as_str(),
-                None => "never ran",
+        .filter_map(|(reference, id)| {
+            let rendered = state.outputs.get(&id);
+            if rendered.is_some_and(|text| !text.is_empty()) {
+                return None;
+            }
+            let why = match (state.nodes.get(&id), rendered.is_some()) {
+                (None, _) => "never ran".to_string(),
+                (Some(st), false) => st.as_str().to_string(),
+                (Some(st), true) => format!("{} with empty output", st.as_str()),
             };
-            format!("`{reference}` ({status})")
+            Some(format!("`{reference}` ({why})"))
         })
         .collect();
     if missing.is_empty() {
@@ -303,7 +314,7 @@ fn journal_missing_inputs(
         crate::event::WakeTrigger::Anomaly,
         node_id,
         format!(
-            "node `{node_id}` reads {} with no successful result; the reference renders empty",
+            "node `{node_id}` reads {}, so the reference renders empty",
             missing.join(", ")
         ),
     )
@@ -2412,10 +2423,13 @@ pub(crate) fn restore_frontier(
 /// showed the skipped branch pending forever while the join reported success.
 /// Contrast the `join: any` sibling cancel, which journals `cancelled`.
 ///
-/// One event per join push, naming every source written off, so a join with two
-/// dead inputs does not read as a looping supervisor to `run_doctor`'s repeated-
-/// action check. A wake is deliberately NOT raised: this is routine graph
-/// bookkeeping, not an anomaly that needs a supervisor's attention.
+/// One event per decision, listing every source written off for it, on the
+/// dedicated [`EventPayload::JoinInputDead`] variant: the same decision is
+/// legitimately journaled twice (a resume re-advancing through this function, a
+/// loop re-entering an either-or fork), which is honest on its own variant and
+/// would be a false "looping supervisor" on `SupervisorAction`. A wake is
+/// deliberately NOT raised either: this is routine graph bookkeeping, not an
+/// anomaly that needs a supervisor's attention.
 fn journal_dead_inputs(
     log: &mut EventLog,
     playbook: &Playbook,
@@ -2423,21 +2437,13 @@ fn journal_dead_inputs(
     state: &RunState,
     active: &[String],
 ) -> Result<(), EngineError> {
-    let dead = parallel::dead_inputs(playbook, node, state, active);
-    if dead.is_empty() {
+    let sources = parallel::dead_inputs(playbook, node, state, active);
+    if sources.is_empty() {
         return Ok(());
     }
-    let named = dead
-        .iter()
-        .map(|s| format!("`{s}`"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    log.append(EventPayload::SupervisorAction {
-        action: "join_input_dead".into(),
-        node: Some(node.to_string()),
-        detail: format!(
-            "join `{node}` proceeds without input from {named}: no active branch can still reach it"
-        ),
+    log.append(EventPayload::JoinInputDead {
+        node: node.to_string(),
+        sources,
     })?;
     Ok(())
 }

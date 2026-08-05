@@ -639,14 +639,10 @@ fn a_dead_join_input_is_journaled_as_a_write_off() {
     assert_eq!(res.outcome, RunStatus::Succeeded);
     let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
 
-    let write_offs: Vec<(Option<String>, String)> = events
+    let write_offs: Vec<(String, Vec<String>)> = events
         .iter()
         .filter_map(|e| match &e.payload {
-            EventPayload::SupervisorAction {
-                action,
-                node,
-                detail,
-            } if action == "join_input_dead" => Some((node.clone(), detail.clone())),
+            EventPayload::JoinInputDead { node, sources } => Some((node.clone(), sources.clone())),
             _ => None,
         })
         .collect();
@@ -655,14 +651,22 @@ fn a_dead_join_input_is_journaled_as_a_write_off() {
         1,
         "the merge writes off exactly one input, got: {write_offs:?}"
     );
-    let (node, detail) = &write_offs[0];
+    let (node, sources) = &write_offs[0];
+    assert_eq!(node, "m", "the event names the join that proceeded");
     assert_eq!(
-        node.as_deref(),
-        Some("m"),
-        "the event names the join that proceeded"
+        sources,
+        &vec!["b".to_string()],
+        "the event names the dead source"
     );
+    // The write-off is its own variant, not a `SupervisorAction`: a repeat (a
+    // resume re-advance, a loop re-entering an either-or fork) must not read as a
+    // looping supervisor to `run_doctor`'s repeated-action check, and no consumer
+    // of `SupervisorAction` should see engine bookkeeping as a supervisor acting.
     assert!(
-        detail.contains("`b`"),
-        "the event names the dead source, got: {detail}"
+        !events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::SupervisorAction { action, .. } if action == "join_input_dead"
+        )),
+        "the write-off must not ride the supervisor-action variant"
     );
 }

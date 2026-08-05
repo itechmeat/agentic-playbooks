@@ -408,6 +408,25 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "is_false")]
         via_policy: bool,
     },
+    /// A join proceeded WITHOUT one or more of its declared inputs, because no
+    /// node the run can still execute reaches them (spec 2026-08-05, Task 4).
+    /// Written by drive at the moment it acts on the readiness verdict, listing
+    /// every source written off for that decision.
+    ///
+    /// Its own variant rather than a `SupervisorAction`, for two reasons. It is
+    /// engine bookkeeping, so a consumer that reads `SupervisorAction` as "a
+    /// supervisor acted" (the dashboard's intervention journal does) would report
+    /// a false class. And the same decision is legitimately journaled twice - a
+    /// resume re-advancing through `advance_frontier`, or a loop re-entering an
+    /// either-or fork - which `run_doctor`'s repeated-action check would read as a
+    /// looping supervisor. Fields default per the additive convention; old logs
+    /// never carry the variant at all.
+    JoinInputDead {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        sources: Vec<String>,
+    },
     /// An interactive node's agent asked the user a question (spec
     /// 2026-07-20-interactive-nodes). Written by drive when it observes a new
     /// `questions.jsonl` entry for the node (single-writer, like

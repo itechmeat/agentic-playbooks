@@ -243,6 +243,10 @@ impl RunState {
                 | EventPayload::NodeCacheMiss { .. }
                 | EventPayload::NodeCacheStored { .. }
                 | EventPayload::NodeCacheRejected { .. } => {}
+                // A join write-off is an observability record of a readiness
+                // verdict (spec 2026-08-05, Task 4): the run-state effect is the
+                // join's own execution, journaled right after it.
+                EventPayload::JoinInputDead { .. } => {}
                 // A bounded loop edge traversal: count it per (from, to) so
                 // edge selection can cap the loop and a resume restores progress.
                 // A policy route (`defaults.on_failure`) is recorded as the hop
