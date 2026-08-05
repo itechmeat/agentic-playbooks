@@ -434,12 +434,18 @@ pub(crate) fn execute_node(
             // never reach this arm. Assembled outside the cache-key render in
             // `render_node_prompt`, so note/instruction/frame text (all fixed
             // per run) does not shift the cache key.
-            if resume.is_none() {
-                let events = read_all(run_dir)?;
+            // One journal read serves both the assembly here and the
+            // interruption-note seed below.
+            let journaled: Option<Vec<Event>> = if resume.is_none() {
+                Some(read_all(run_dir)?)
+            } else {
+                None
+            };
+            if let Some(events) = &journaled {
                 text = crate::context::assemble_agent_prompt(
                     &text,
                     cfg.instruction.as_deref(),
-                    &events,
+                    events,
                 );
             }
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
@@ -625,7 +631,28 @@ pub(crate) fn execute_node(
             // verdict (spec 2026-08-05 section 2.2): every later attempt's prompt
             // then carries the interruption note, so the fresh agent looks for the
             // work already done instead of blindly redoing it (#71 items 3 and 5).
-            let mut was_interrupted = false;
+            //
+            // SEEDED from the journal, because this flag would otherwise only ever
+            // see interruptions of THIS execution. A node whose attempt was closed
+            // `interrupted` by a different execution - the drive-entry reaper after
+            // a driver death (spec 2.4), a supervisor retry, a `--from-node` re-run
+            // - would start its fresh attempt with no note at all, and the reaped
+            // case is the one where the note matters most: the process died with
+            // its mid-work text, so the journal preserved no partial output either
+            // and the prompt is the only channel left.
+            //
+            // Gated on `require_verdict`: the note closes by telling the agent to
+            // record its final verdict in the status file, which is only truthful
+            // when the status-file contract is in the prompt. A plain node keeps
+            // the report-only contract, so extending the note there needs a text
+            // split, not this flag.
+            let mut was_interrupted = require_verdict
+                && match &journaled {
+                    Some(events) => super::journal::last_attempt_interrupted(events, node_id),
+                    // A resume re-invocation skipped the read above; pay for one
+                    // rather than silently drop the note.
+                    None => super::journal::last_attempt_interrupted(&read_all(run_dir)?, node_id),
+                };
             // The node's final status once all attempts are exhausted: TimedOut if
             // the last attempt was interrupted by a timeout, otherwise Failed.
             let mut last_timed_out = false;

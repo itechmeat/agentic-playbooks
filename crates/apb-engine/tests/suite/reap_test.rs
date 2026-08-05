@@ -70,6 +70,26 @@ edges:
   - { from: j, to: done }
 "#;
 
+/// The reaped shape on a node that REQUIRES a verdict: the one where the fresh
+/// attempt is supposed to be told that work may already exist (spec 2026-08-05
+/// section 2.2 composed with 2.4).
+const VERDICT_PLAYBOOK: &str = r#"
+schema: 1
+id: reapverdict
+name: ReapVerdict
+version: 1.0.0
+defaults:
+  profile: main
+  max_retries: 1
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "do", require_verdict: true }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done }
+"#;
+
 /// A real pid that is reliably absent: a child spawned, waited for and reaped,
 /// so the number was genuinely valid and is now free. Deliberately not
 /// `u32::MAX` - an impossible pid exercises the invalid-pid rejection rather
@@ -92,7 +112,10 @@ fn seed(root: &Path) -> (String, std::path::PathBuf) {
     seed_named(root, "reapflow", PLAYBOOK)
 }
 
-fn seed_named(root: &Path, id: &str, yaml: &str) -> (String, std::path::PathBuf) {
+/// The project half of every seed below: registry, the playbook version, and
+/// profile `main`. The stub agent is the caller's, so each test picks the one
+/// whose observable side effect it needs.
+fn seed_project(root: &Path, id: &str, yaml: &str) {
     apb_core::registry::init_project(root).unwrap();
     let vdir = root.join(".apb/playbooks").join(id).join("1.0.0");
     fs::create_dir_all(&vdir).unwrap();
@@ -103,20 +126,49 @@ fn seed_named(root: &Path, id: &str, yaml: &str) -> (String, std::path::PathBuf)
     )
     .unwrap();
     common::seed_main(root);
+}
 
+fn executable_stub(root: &Path, name: &str, body: &str) -> String {
+    let prog = root.join(name);
+    common::write_sync(&prog, body);
+    let mut p = fs::metadata(&prog).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&prog, p).unwrap();
+    prog.to_string_lossy().into_owned()
+}
+
+fn seed_named(root: &Path, id: &str, yaml: &str) -> (String, std::path::PathBuf) {
+    seed_project(root, id, yaml);
     let tally = root.join("invocations");
-    let prog = root.join("stub.sh");
-    common::write_sync(
-        &prog,
+    let prog = executable_stub(
+        root,
+        "stub.sh",
         &format!(
             "#!/bin/sh\nprintf x >> '{t}'\necho done\n",
             t = tally.display()
         ),
     );
-    let mut p = fs::metadata(&prog).unwrap().permissions();
-    p.set_mode(0o755);
-    fs::set_permissions(&prog, p).unwrap();
-    (prog.to_string_lossy().into_owned(), tally)
+    (prog, tally)
+}
+
+/// Seeds a project whose stub agent APPENDS every invocation's argv to `dump` and
+/// records a success verdict in `$APB_STATUS_FILE`. The prompt is delivered via
+/// argv (`-p <prompt> --model <model>`), so dumping `"$@"` is how a test sees what
+/// an attempt was actually told; the verdict is what lets a `require_verdict` node
+/// complete at all.
+fn seed_dumping(root: &Path, id: &str, yaml: &str, dump: &Path) -> String {
+    seed_project(root, id, yaml);
+    executable_stub(
+        root,
+        "dumping-stub.sh",
+        &format!(
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" >> '{d}'\n\
+             if [ -n \"$APB_STATUS_FILE\" ]; then \
+             printf '%s' '{{\"status\":\"success\"}}' > \"$APB_STATUS_FILE\"; fi\n\
+             echo done\n",
+            d = dump.display()
+        ),
+    )
 }
 
 fn invocations(tally: &Path) -> usize {
@@ -337,5 +389,102 @@ fn resume_does_not_reap_an_attempt_without_a_pid() {
         attempt_statuses(&run_dir, "work"),
         vec!["succeeded".to_string()],
         "an attempt with no pid must not be journaled interrupted: unknown is not dead"
+    );
+}
+
+/// The Task 7 review's required follow-up: Task 5's interruption note is delivered
+/// through `was_interrupted`, an in-memory flag local to ONE `execute_node` call,
+/// so the FRESH attempt of a REAPED node - a different execution entirely - used to
+/// carry no note at all. That is the worst place to lose it: the driver died, so
+/// the journal preserved no partial output either (`partial_output: None` by honest
+/// design), and the new agent has nothing but the prompt to tell it work may
+/// already exist. The note must therefore be seeded from the journal's own
+/// `interrupted` closure, which is exactly what the reap writes.
+#[test]
+fn a_reaped_require_verdict_node_carries_the_interruption_note_into_its_fresh_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("argv-dump.txt");
+    let prog = seed_dumping(dir.path(), "reapverdict", VERDICT_PLAYBOOK, &dump);
+
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "reapverdict", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    cut_at_open_attempt(&run_dir, "work", Some(dead_pid()));
+    // Only the FRESH attempt's prompt is the subject; the first pass's would
+    // otherwise be indistinguishable from it in the same file.
+    fs::remove_file(&dump).unwrap();
+
+    let again = resume(dir.path(), &res.run_id, None);
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(again.unwrap().outcome, RunStatus::Succeeded);
+    assert_eq!(
+        attempt_statuses(&run_dir, "work")[0],
+        "interrupted",
+        "the premise: the reap closed the dead attempt as interrupted"
+    );
+    let prompt = fs::read_to_string(&dump).unwrap();
+    assert!(
+        prompt.contains("cut off mid-work"),
+        "the fresh attempt of a reaped require_verdict node must carry the interruption note, got:\n{prompt}"
+    );
+    assert!(
+        prompt.contains("APB_STATUS_FILE"),
+        "and the status-file contract the note's closing clause refers to, got:\n{prompt}"
+    );
+}
+
+/// The gate the review asked for, pinned: WITHOUT `require_verdict` the note stays
+/// away. Its closing clause tells the agent to record its verdict in the status
+/// file, and a plain node is never told that contract in the first place, so the
+/// note would be advice about a mechanism the prompt never mentioned. Extending it
+/// to plain nodes is a separate design decision needing a text split.
+#[test]
+fn a_reaped_plain_node_gets_no_interruption_note() {
+    let dir = tempfile::tempdir().unwrap();
+    let dump = dir.path().join("argv-dump.txt");
+    let prog = seed_dumping(dir.path(), "reapflow", PLAYBOOK, &dump);
+
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "reapflow", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    cut_at_open_attempt(&run_dir, "work", Some(dead_pid()));
+    fs::remove_file(&dump).unwrap();
+
+    let again = resume(dir.path(), &res.run_id, None);
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(again.unwrap().outcome, RunStatus::Succeeded);
+    // Same premise as the test above - the reap is not gated on require_verdict -
+    // so the difference in the prompt is the gate and nothing else.
+    assert_eq!(
+        attempt_statuses(&run_dir, "work")[0],
+        "interrupted",
+        "the reap closes a dead attempt whatever the node requires"
+    );
+    let prompt = fs::read_to_string(&dump).unwrap();
+    assert!(
+        !prompt.contains("cut off mid-work"),
+        "a plain node must not be handed a note that closes on the status-file contract, got:\n{prompt}"
+    );
+    assert!(
+        !prompt.contains("APB_STATUS_FILE"),
+        "the premise of the gate: a plain node is never told the status-file contract, got:\n{prompt}"
     );
 }
