@@ -121,6 +121,16 @@ pub enum EventPayload {
         /// Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         partial_output: Option<String>,
+        /// How the attempt's failure was classified (spec 2026-08-05 section
+        /// 2.3): `transient` (infrastructure, retried on the same executor
+        /// after a backoff), `auth`, `budget` (both non-transient: no further
+        /// retry on this step, same-agent fallback steps suppressed), or
+        /// `agent`. `None` for a successful attempt, for a failure the agent
+        /// itself reported through a verdict or a report block (a written
+        /// verdict decides the attempt, so nothing is classified), for an
+        /// attempt a supervisor interrupted, and for old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_kind: Option<String>,
     },
     NodeFinished {
         node: String,
@@ -144,6 +154,15 @@ pub enum EventPayload {
         /// The node's profile (`<scope>/<name>`) within which the fallback occurred.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
+        /// Model of the chain step that just failed, and model of the step taken
+        /// instead (spec 2026-08-05 section 2.3, issue #74 finding 2). Without
+        /// them a claude -> claude fallback that only changed the model reads
+        /// like a pointless retry of the identical binding in the journal.
+        /// `None` only for old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_model: Option<String>,
     },
     RunPaused {
         reason: String,
@@ -726,6 +745,7 @@ mod tests {
             summary: None,
             rejected_output: Some("interim progress only".into()),
             partial_output: None,
+            failure_kind: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
@@ -734,6 +754,85 @@ mod tests {
                 rejected_output, ..
             } => assert_eq!(rejected_output.as_deref(), Some("interim progress only")),
             other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    /// An old journal line, written before `failure_kind` existed, still parses
+    /// (spec 2026-08-05 section 2.3: every new payload field is additive).
+    #[test]
+    fn attempt_finished_without_failure_kind_deserializes_to_none() {
+        let line = r#"{"type":"attempt_finished","node":"a","attempt":1,"status":"failed"}"#;
+        let back: EventPayload = serde_json::from_str(line).unwrap();
+        match back {
+            EventPayload::AttemptFinished { failure_kind, .. } => assert_eq!(failure_kind, None),
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attempt_finished_with_failure_kind_round_trips() {
+        let payload = EventPayload::AttemptFinished {
+            node: "a".into(),
+            attempt: 1,
+            status: "failed".into(),
+            duration_ms: Some(42),
+            session: None,
+            summary: None,
+            rejected_output: None,
+            partial_output: None,
+            failure_kind: Some("transient".into()),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::AttemptFinished { failure_kind, .. } => {
+                assert_eq!(failure_kind.as_deref(), Some("transient"));
+            }
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    /// Old `fallback_triggered` lines carry agent ids only; the models are
+    /// additive and default to `None`.
+    #[test]
+    fn fallback_triggered_without_models_deserializes_to_none() {
+        let line = r#"{"type":"fallback_triggered","node":"a","from":"claude","to":"claude-code"}"#;
+        let back: EventPayload = serde_json::from_str(line).unwrap();
+        match back {
+            EventPayload::FallbackTriggered {
+                from_model,
+                to_model,
+                ..
+            } => {
+                assert_eq!(from_model, None);
+                assert_eq!(to_model, None);
+            }
+            other => panic!("expected FallbackTriggered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fallback_triggered_with_models_round_trips() {
+        let payload = EventPayload::FallbackTriggered {
+            node: "a".into(),
+            from: "claude".into(),
+            to: "claude".into(),
+            profile: Some("project/main".into()),
+            from_model: Some("haiku".into()),
+            to_model: Some("opus".into()),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::FallbackTriggered {
+                from_model,
+                to_model,
+                ..
+            } => {
+                assert_eq!(from_model.as_deref(), Some("haiku"));
+                assert_eq!(to_model.as_deref(), Some("opus"));
+            }
+            other => panic!("expected FallbackTriggered, got {other:?}"),
         }
     }
 
@@ -748,6 +847,7 @@ mod tests {
             summary: Some("did the thing".into()),
             rejected_output: None,
             partial_output: None,
+            failure_kind: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();

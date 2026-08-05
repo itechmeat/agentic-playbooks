@@ -3,6 +3,8 @@
 
 use super::*;
 
+use crate::failure_class::{FailureKind, INFRA_RETRY_ACTION};
+
 /// Renders a node's prompt template with the full standard context (compaction
 /// summary + uncompacted tail if drive recorded ContextCompacted, otherwise the
 /// full context), run hooks, params, prior outputs, and reviews. This is the
@@ -199,6 +201,10 @@ fn success_check_rejection(
 /// `node_finished`. `RunState::fold` reads only the PRESENCE of an
 /// `attempt_finished` (to close the open attempt), never its status label, so
 /// the new label cannot confuse the run state machine.
+///
+/// `failure_kind` is the spec-2.3 classification of the failure detail, or
+/// `None` when nothing was classified (an exit-0 attempt that simply recorded no
+/// verdict has no failure detail to classify).
 fn journal_interrupted_attempt(
     journal: &Journal,
     node_id: &str,
@@ -206,6 +212,7 @@ fn journal_interrupted_attempt(
     duration_ms: Option<u64>,
     session: Option<String>,
     partial: &str,
+    failure_kind: Option<FailureKind>,
 ) -> Result<(), EngineError> {
     journal.append(EventPayload::AttemptFinished {
         node: node_id.into(),
@@ -216,7 +223,33 @@ fn journal_interrupted_attempt(
         summary: None,
         rejected_output: None,
         partial_output: (!partial.trim().is_empty()).then(|| partial.to_string()),
+        failure_kind: failure_kind.map(|k| k.as_str().to_string()),
     })
+}
+
+/// The failure kind an attempt's adapter error is treated as (spec 2026-08-05
+/// section 2.3), i.e. the curated classification of the detail string plus one
+/// structural override.
+///
+/// The override implements the boundary ruling recorded in the section 2.2
+/// addendum: with `require_verdict` in force, an attempt killed on its deadline
+/// or lost to a transport error recorded no verdict, so it is an INFRASTRUCTURE
+/// interruption and earns the same bounded same-executor retry as any other
+/// transient failure. Before this, that shape broke straight to the fallback
+/// chain without ever retrying the executor the author had chosen (and, with no
+/// fallback chain at all, failed the node after a single attempt).
+///
+/// Without `require_verdict` a deadline kill keeps its pre-existing meaning
+/// (advance the chain), so no existing playbook's timeout behavior moves.
+fn effective_failure_kind(detail: &str, class: ErrorClass, require_verdict: bool) -> FailureKind {
+    let kind = crate::failure_class::classify(detail);
+    if kind == FailureKind::Agent
+        && require_verdict
+        && matches!(class, ErrorClass::Timeout | ErrorClass::Transport)
+    {
+        return FailureKind::Transient;
+    }
+    kind
 }
 
 /// The template text a node renders for its own execution, or `None` for a kind
@@ -571,6 +604,18 @@ pub(crate) fn execute_node(
             // likely doomed by the same external cause - e.g. a token lacking
             // permission - not by the agent or model).
             let mut last_tried: Option<(String, String)> = None;
+            // Agents whose attempt failed non-transiently (spec 2026-08-05
+            // section 2.3): an expired credential or an exhausted spend limit is
+            // a property of the AGENT and its account, not of the model or the
+            // prompt, so every later chain step on that agent is doomed the same
+            // way and is skipped without a `fallback_triggered`. This sits
+            // beside the `(agent, model)` sameness guard above rather than
+            // inside it: that guard only collapses an identical binding, and the
+            // gap issue #74 finding 2 describes is exactly a SAME-AGENT,
+            // different-model step being walked into after a spend limit.
+            // A different agent may well have its own working credential and
+            // budget, so cross-agent fallback stays allowed.
+            let mut blocked_agents: BTreeSet<String> = BTreeSet::new();
             // A resume re-invocation runs the primary step only (see above);
             // an ordinary attempt walks the whole fallback chain.
             let step_count = if resume.is_some() { 1 } else { steps.len() };
@@ -579,7 +624,7 @@ pub(crate) fn execute_node(
                     let same_binding = last_tried
                         .as_ref()
                         .is_some_and(|(agent, model)| *agent == step.agent && *model == step.model);
-                    if same_binding {
+                    if same_binding || blocked_agents.contains(&step.agent) {
                         continue;
                     }
                     events.push(EventPayload::FallbackTriggered {
@@ -590,6 +635,16 @@ pub(crate) fn execute_node(
                             .unwrap_or_else(|| steps[idx - 1].agent.clone()),
                         to: step.agent.clone(),
                         profile: profile_key.clone(),
+                        // Both models, so a claude -> claude fallback that only
+                        // changed the model is finally legible in the journal
+                        // (issue #74 finding 2).
+                        from_model: Some(
+                            last_tried
+                                .as_ref()
+                                .map(|(_, model)| model.clone())
+                                .unwrap_or_else(|| steps[idx - 1].model.clone()),
+                        ),
+                        to_model: Some(step.model.clone()),
                     });
                 }
                 last_tried = Some((step.agent.clone(), step.model.clone()));
@@ -638,7 +693,21 @@ pub(crate) fn execute_node(
                 } else {
                     None
                 };
-                for try_i in 0..=retries {
+                // The node's own retry budget is walked by `try_i`; an
+                // INFRASTRUCTURE retry (spec 2026-08-05 section 2.3) does not
+                // advance it, which is why this is a while loop and not
+                // `for try_i in 0..=retries`. `infra_used` counts the separate
+                // infrastructure budget, whose size IS the length of the backoff
+                // schedule (default two: 5 s, then 30 s).
+                let mut try_i: u32 = 0;
+                let mut infra_used: usize = 0;
+                let backoff = crate::failure_class::backoff_schedule();
+                while try_i <= retries {
+                    // Set by the failure handling below when it spent an
+                    // infrastructure retry instead of a node retry: the same
+                    // executor is attempted again after a backoff, and `try_i`
+                    // stays where it is.
+                    let mut infra_retry = false;
                     // Cancellation (this branch lost a join:any) - exit with status
                     // Cancelled, not counting this as a failure.
                     if cancel.load(Ordering::Relaxed) {
@@ -934,6 +1003,7 @@ pub(crate) fn execute_node(
                             summary: None,
                             rejected_output: None,
                             partial_output: None,
+                            failure_kind: None,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -982,6 +1052,7 @@ pub(crate) fn execute_node(
                                     summary: Some(report.summary.clone()),
                                     rejected_output: None,
                                     partial_output: None,
+                                    failure_kind: None,
                                 })?;
                                 return Ok(AttemptOutcome::Suspended {
                                     question: q.question,
@@ -1021,6 +1092,11 @@ pub(crate) fn execute_node(
                                     duration_ms,
                                     report.session.clone(),
                                     &report.output,
+                                    // The process exited NORMALLY, there is no
+                                    // failure detail to classify: what the agent
+                                    // printed is mid-work text, not an error
+                                    // message from the transport.
+                                    None,
                                 )?;
                                 last_msg = report.output;
                                 last_timed_out = false;
@@ -1073,6 +1149,7 @@ pub(crate) fn execute_node(
                                             summary: Some(report.summary.clone()),
                                             rejected_output: Some(report.output.clone()),
                                             partial_output: None,
+                                            failure_kind: None,
                                         })?;
                                         // Keep the human-readable reason on the
                                         // terminal failure message while the raw
@@ -1096,6 +1173,7 @@ pub(crate) fn execute_node(
                                             summary: Some(report.summary.clone()),
                                             rejected_output: None,
                                             partial_output: None,
+                                            failure_kind: None,
                                         })?;
                                         return Ok(AttemptOutcome::Finished {
                                             status: NodeStatus::Succeeded,
@@ -1119,6 +1197,7 @@ pub(crate) fn execute_node(
                                     summary: Some(report.summary.clone()),
                                     rejected_output: None,
                                     partial_output: None,
+                                    failure_kind: None,
                                 })?;
                                 last_msg = report.output;
                                 last_timed_out = false;
@@ -1149,6 +1228,15 @@ pub(crate) fn execute_node(
                             // Distinct from the run-level `cancel` above, which
                             // returns `Cancelled` instead of failing the attempt.
                             let interrupted_by_supervisor = interrupt.load(Ordering::Relaxed);
+                            // The spec-2.3 classification of THIS failure, set
+                            // only where it applies: no verdict was written and no
+                            // supervisor interrupt overruled the attempt. A
+                            // written verdict already decided the attempt (a
+                            // failure the agent reported about its own work is not
+                            // infrastructure), and a supervisor kill is a control
+                            // decision, so neither is classified and neither earns
+                            // an infrastructure retry.
+                            let mut failure_kind: Option<FailureKind> = None;
                             // The verdict decides the attempt even here (spec
                             // 2026-08-05 section 2.1): the process exit, the signal,
                             // or the deadline kill is transport-level noise once the
@@ -1180,6 +1268,10 @@ pub(crate) fn execute_node(
                                         summary: None,
                                         rejected_output: None,
                                         partial_output: Some(recorded),
+                                        // A supervisor interrupt is a control
+                                        // decision, not an infrastructure
+                                        // failure: nothing is classified.
+                                        failure_kind: None,
                                     })?;
                                     last_msg = msg;
                                 }
@@ -1223,6 +1315,7 @@ pub(crate) fn execute_node(
                                                 summary: None,
                                                 rejected_output: None,
                                                 partial_output: None,
+                                                failure_kind: None,
                                             })?;
                                             return Ok(AttemptOutcome::Finished {
                                                 status: NodeStatus::Succeeded,
@@ -1240,6 +1333,7 @@ pub(crate) fn execute_node(
                                                 summary: None,
                                                 rejected_output: Some(output.clone()),
                                                 partial_output: None,
+                                                failure_kind: None,
                                             })?;
                                             last_msg = format!("{reason}: {output}");
                                             last_timed_out = false;
@@ -1260,6 +1354,7 @@ pub(crate) fn execute_node(
                                         summary: None,
                                         rejected_output: None,
                                         partial_output: None,
+                                        failure_kind: None,
                                     })?;
                                     last_msg = sfr.outputs.clone().unwrap_or_else(|| msg.clone());
                                 }
@@ -1270,6 +1365,17 @@ pub(crate) fn execute_node(
                                 // same retry; the label plus `partial_output` say
                                 // which of the two it was.
                                 None => {
+                                    // This is the one shape a curated classifier
+                                    // can say something useful about: the process
+                                    // died and left only the adapter's detail
+                                    // string behind (spec section 2.3).
+                                    if !interrupted_by_supervisor {
+                                        failure_kind = Some(effective_failure_kind(
+                                            &msg,
+                                            class,
+                                            require_verdict,
+                                        ));
+                                    }
                                     if require_verdict {
                                         journal_interrupted_attempt(
                                             journal,
@@ -1278,6 +1384,7 @@ pub(crate) fn execute_node(
                                             duration_ms,
                                             None,
                                             &msg,
+                                            failure_kind,
                                         )?;
                                         was_interrupted = true;
                                     } else {
@@ -1290,19 +1397,74 @@ pub(crate) fn execute_node(
                                             summary: None,
                                             rejected_output: None,
                                             partial_output: None,
+                                            failure_kind: failure_kind
+                                                .map(|k| k.as_str().to_string()),
                                         })?;
                                     }
                                     last_msg = msg;
                                 }
                             }
-                            // A transport error and a timeout break the retry loop for this
-                            // executor and go to fallback. Unchanged by the verdict
-                            // handling above: a step that cannot be re-run usefully is
-                            // still abandoned in favor of the next executor.
-                            if class == ErrorClass::Transport || class == ErrorClass::Timeout {
+                            // Bounded infrastructure retry (spec 2026-08-05
+                            // section 2.3): a transient failure is the
+                            // infrastructure's fault, so the SAME executor is
+                            // attempted again out of its own budget - the node's
+                            // `max_retries` belongs to the agent's own mistakes -
+                            // after a backoff. This also resolves the section 2.2
+                            // addendum ruling: a `require_verdict` attempt lost to
+                            // a deadline kill or a transport error is classified
+                            // transient by `effective_failure_kind`, so it now
+                            // retries the chosen executor instead of breaking
+                            // straight to fallback, while keeping its
+                            // `interrupted` label and its partial output.
+                            if failure_kind == Some(FailureKind::Transient)
+                                && infra_used < backoff.len()
+                            {
+                                let wait = backoff[infra_used];
+                                infra_used += 1;
+                                // Cheapest observable form: a supervisor-action
+                                // marker in the attempt timeline, right between
+                                // the failed attempt and its infrastructure retry.
+                                // No new event type, so old readers are unaffected.
+                                journal.append(EventPayload::SupervisorAction {
+                                    action: INFRA_RETRY_ACTION.to_string(),
+                                    node: Some(node_id.to_string()),
+                                    detail: format!(
+                                        "agent_task node `{node_id}` attempt {cur_attempt} failed with a transient infrastructure error; waiting {} ms before infrastructure retry {infra_used} of {} on the same executor `{}`",
+                                        wait.as_millis(),
+                                        backoff.len(),
+                                        step.agent,
+                                    ),
+                                })?;
+                                // Tick-polled, so an abort posted during a 30 s
+                                // backoff lands within a tick. A cancelled wait
+                                // returns here and the loop's own cancellation
+                                // check (top of the next iteration) owns the
+                                // decision, exactly as it does for a cancel that
+                                // arrives between attempts.
+                                crate::failure_class::wait_backoff(wait, cancel);
+                                infra_retry = true;
+                            } else if failure_kind.is_some_and(FailureKind::is_non_transient) {
+                                // Non-transient (auth, budget): no further attempt
+                                // on this step can succeed, so the remaining node
+                                // retries are skipped, and the chain loop above
+                                // will skip every later step on this same agent.
+                                blocked_agents.insert(step.agent.clone());
+                                break;
+                            } else if class == ErrorClass::Transport || class == ErrorClass::Timeout
+                            {
+                                // A transport error and a timeout break the retry loop for this
+                                // executor and go to fallback. Unchanged by the verdict
+                                // handling above: a step that cannot be re-run usefully is
+                                // still abandoned in favor of the next executor.
                                 break;
                             }
                         }
+                    }
+                    // An infrastructure retry re-attempts the same executor
+                    // without spending a node retry, so the node's budget only
+                    // advances here.
+                    if !infra_retry {
+                        try_i += 1;
                     }
                 }
             }
@@ -1465,6 +1627,17 @@ pub(crate) fn execute_finish_answer(
                     .unwrap_or_else(|| entry.chain[idx - 1].agent_id.clone()),
                 to: ri.agent_id.clone(),
                 profile: Some(entry.key()),
+                // Models, as in the agent_task chain above. The finish-answer
+                // composer does not classify failures (spec 2.3 targets the
+                // agent_task attempt lifecycle), so it gets the observability
+                // half only.
+                from_model: Some(
+                    last_tried
+                        .as_ref()
+                        .map(|(_, model)| model.clone())
+                        .unwrap_or_else(|| entry.chain[idx - 1].model.clone()),
+                ),
+                to_model: Some(ri.model.clone()),
             });
         }
         last_tried = Some((ri.agent_id.clone(), ri.model.clone()));
@@ -1564,6 +1737,7 @@ pub(crate) fn execute_finish_answer(
                         summary: Some(report.summary.clone()),
                         rejected_output: None,
                         partial_output: None,
+                        failure_kind: None,
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         // The composed finish answer is the agent's reply body,
@@ -1589,6 +1763,7 @@ pub(crate) fn execute_finish_answer(
                         summary: None,
                         rejected_output: None,
                         partial_output: None,
+                        failure_kind: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {

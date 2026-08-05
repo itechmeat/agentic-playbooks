@@ -907,6 +907,7 @@ mod tests {
                     summary: None,
                     rejected_output: None,
                     partial_output: None,
+                    failure_kind: None,
                 },
             ),
         ];
@@ -1095,6 +1096,7 @@ mod tests {
                     summary: None,
                     rejected_output: None,
                     partial_output: None,
+                    failure_kind: None,
                 },
             ),
             // Fresh retry shares the stall action's millisecond.

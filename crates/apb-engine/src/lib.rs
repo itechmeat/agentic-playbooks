@@ -6,6 +6,7 @@ pub mod control;
 pub mod driver;
 pub mod error;
 pub mod event;
+pub mod failure_class;
 pub mod hooks;
 pub mod inspect;
 pub mod invocation;
