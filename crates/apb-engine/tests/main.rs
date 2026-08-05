@@ -134,6 +134,9 @@ mod max_loops_test;
 mod migrate_test;
 #[path = "suite/missing_input_test.rs"]
 mod missing_input_test;
+#[cfg(unix)]
+#[path = "suite/output_field_test.rs"]
+mod output_field_test;
 #[path = "suite/overrides_run_test.rs"]
 mod overrides_run_test;
 #[path = "suite/parallel_cancel_test.rs"]

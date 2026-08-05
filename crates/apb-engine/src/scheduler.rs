@@ -846,7 +846,7 @@ fn drive_inner(
                             // workspace fingerprint comparison and the store
                             // write stay single-threaded and the artifacts are in
                             // hand for the member's NodeFinished below.
-                            let (artifacts, admission) = cache::settle(
+                            let (artifacts, settle_events) = cache::settle(
                                 ctxs.get(node.as_str()),
                                 &playbook,
                                 run_dir,
@@ -856,7 +856,7 @@ fn drive_inner(
                                 status,
                                 &output,
                             );
-                            if let Some(ev) = admission {
+                            for ev in settle_events {
                                 journal.append(ev)?;
                             }
                             batch_results.push((node.clone(), status, output.clone()));
@@ -1711,7 +1711,7 @@ fn drive_inner(
                 }
                 // Declared-artifact capture and cache admission, the same unit
                 // the batch path uses.
-                let (captured, admission) = cache::settle(
+                let (captured, settle_events) = cache::settle(
                     cache_ctx.as_ref(),
                     &playbook,
                     run_dir,
@@ -1722,7 +1722,7 @@ fn drive_inner(
                     &out,
                 );
                 node_artifacts = captured;
-                if let Some(ev) = admission {
+                for ev in settle_events {
                     log.append(ev)?;
                 }
                 (st, out)

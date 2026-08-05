@@ -59,6 +59,29 @@ fn status_matches(node_status: NodeStatus, equals: StatusEq) -> bool {
     }
 }
 
+/// One top-level field of a node output that parses as a JSON object, as the
+/// string an `output_field` condition compares against (spec 2026-08-05 section
+/// 2.5). `None` for every shape that cannot be read as one unambiguous string:
+/// output that is not JSON, JSON that is not an object, an absent field, and a
+/// value that is null, an array or an object. A string is taken verbatim; a bool
+/// and a number take their JSON textual form (`true`, `3`, `3.5`).
+///
+/// Total by construction, because a routing decision must never panic on
+/// whatever an agent happened to print: an unreadable output simply means the
+/// edge does not apply, and the graph's fallback (or the no-edge behavior)
+/// decides, exactly as it does for a node with no output at all.
+fn output_field_value(output: &str, field: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
+    match parsed.as_object()?.get(field)? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            None
+        }
+    }
+}
+
 /// Whether the edge's condition matches the current run state.
 /// `from` is the edge's source node (for review_status).
 pub fn edge_matches(edge: &Edge, from: &str, state: &RunState) -> bool {
@@ -79,6 +102,15 @@ pub fn edge_matches(edge: &Edge, from: &str, state: &RunState) -> bool {
             .get(node)
             .map(|o| o.contains(pattern))
             .unwrap_or(false),
+        Some(EdgeCondition::OutputField {
+            node,
+            field,
+            equals,
+        }) => state
+            .outputs
+            .get(node)
+            .and_then(|o| output_field_value(o, field))
+            .is_some_and(|value| value == *equals),
     }
 }
 
@@ -911,5 +943,101 @@ edges:
             join_readiness(&playbook, "j", &s, &active(&["a", "b"])),
             JoinReadiness::ReadySuccess
         );
+    }
+
+    // --- output_field (spec 2026-08-05 section 2.5) ---
+    //
+    // The condition reads ONE top-level field of a source output that parses as
+    // a JSON object. Every shape it cannot read is a NON-match, never a panic:
+    // routing must degrade to "this edge does not apply" so the graph's fallback
+    // (or the no-edge behavior) decides, exactly as an unset output does.
+
+    /// An `output_field` edge from `w` reading `verdict`, against an output.
+    fn output_field_matches(output: Option<&str>, equals: &str) -> bool {
+        let edge = Edge {
+            from: "w".into(),
+            to: "next".into(),
+            condition: Some(EdgeCondition::OutputField {
+                node: "w".into(),
+                field: "verdict".into(),
+                equals: equals.into(),
+            }),
+            fallback: false,
+            join: None,
+            max_traversals: None,
+        };
+        let mut state = RunState::default();
+        if let Some(text) = output {
+            state.outputs.insert("w".into(), text.to_string());
+        }
+        edge_matches(&edge, "w", &state)
+    }
+
+    #[test]
+    fn output_field_matches_a_top_level_string_field() {
+        assert!(output_field_matches(
+            Some(r#"{"verdict":"failed","note":"x"}"#),
+            "failed"
+        ));
+        assert!(!output_field_matches(Some(r#"{"verdict":"ok"}"#), "failed"));
+    }
+
+    #[test]
+    fn output_field_stringifies_a_bool_or_number_field() {
+        assert!(output_field_matches(Some(r#"{"verdict":true}"#), "true"));
+        assert!(output_field_matches(Some(r#"{"verdict":3}"#), "3"));
+        assert!(!output_field_matches(Some(r#"{"verdict":3}"#), "3.0"));
+    }
+
+    #[test]
+    fn output_field_never_matches_what_it_cannot_read() {
+        // No output recorded at all.
+        assert!(!output_field_matches(None, "failed"));
+        // Output that is not JSON.
+        assert!(!output_field_matches(Some("all checks failed"), "failed"));
+        // Valid JSON that is not an object.
+        assert!(!output_field_matches(Some(r#"["failed"]"#), "failed"));
+        assert!(!output_field_matches(Some(r#""failed""#), "failed"));
+        // An object without the field.
+        assert!(!output_field_matches(
+            Some(r#"{"other":"failed"}"#),
+            "failed"
+        ));
+        // A field whose value has no unambiguous string form.
+        assert!(!output_field_matches(Some(r#"{"verdict":null}"#), "null"));
+        assert!(!output_field_matches(
+            Some(r#"{"verdict":["failed"]}"#),
+            "failed"
+        ));
+        assert!(!output_field_matches(
+            Some(r#"{"verdict":{"v":"failed"}}"#),
+            "failed"
+        ));
+        // Empty output.
+        assert!(!output_field_matches(Some(""), "failed"));
+    }
+
+    #[test]
+    fn output_field_comparison_is_exact() {
+        // Not a substring test (that is what output_match is for), and not
+        // case-insensitive.
+        assert!(!output_field_matches(
+            Some(r#"{"verdict":"failed"}"#),
+            "fail"
+        ));
+        assert!(!output_field_matches(
+            Some(r#"{"verdict":"FAILED"}"#),
+            "failed"
+        ));
+        // Surrounding whitespace in the OUTPUT is JSON insignificance, so it is
+        // tolerated; whitespace inside the compared value is not.
+        assert!(output_field_matches(
+            Some("  {\"verdict\":\"failed\"}\n"),
+            "failed"
+        ));
+        assert!(!output_field_matches(
+            Some(r#"{"verdict":" failed"}"#),
+            "failed"
+        ));
     }
 }

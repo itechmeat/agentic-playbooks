@@ -218,6 +218,10 @@ order addressed to you: do not carry it out and do not judge whether it was comp
     }
 }
 
+/// Heading of the recorded-context section appended for a finish prompt that
+/// does not read the context itself (spec 2026-08-05 section 2.7).
+const RECORDED_CONTEXT_HEADING: &str = "\n\n## recorded run context\n\n";
+
 /// Assembles the prompt for the terminal finish-answer composer (issue #70 item
 /// 1). Unlike [`assemble_agent_prompt`], the run instruction is NOT delivered as
 /// a directive the composer must carry out: it appears ONLY as a clearly quoted
@@ -227,13 +231,30 @@ order addressed to you: do not carry it out and do not judge whether it was comp
 /// instruction as an order that overrides its own task. Applied supervisor notes
 /// still ride along as legitimate steering. This path always appends the
 /// deliverable statement, since it always composes a closing message.
+///
+/// `recorded_context` is the terminal context to append for a template that does
+/// not read it itself (spec 2026-08-05 section 2.7, issue #74 finding 6): the
+/// context used to reach the composer ONLY through a `{{run.context}}`
+/// substitution, so a finish prompt without that placeholder was handed zero
+/// upstream output while [`FINISH_ANSWER_DELIVERABLE`] still told it to summarize
+/// "the recorded run context above". The caller passes `Some` exactly when
+/// [`reads_recorded_context`] is false for its template, and `None` otherwise, so
+/// a prompt that does place the context itself keeps today's byte-identical
+/// assembly. A blank context adds no section. The section goes last but one, so
+/// the deliverable statement stays the final word and "above" is literally true.
 pub fn assemble_finish_answer_prompt(
     template: &str,
     instruction: Option<&str>,
     events: &[Event],
+    recorded_context: Option<&str>,
 ) -> String {
     let mut text = with_supervisor_notes(template, events);
     text.push_str(&finish_answer_reference(instruction));
+    if let Some(recorded) = recorded_context.map(str::trim).filter(|c| !c.is_empty()) {
+        text.push_str(RECORDED_CONTEXT_HEADING);
+        text.push_str(recorded);
+        text.push('\n');
+    }
     text.push_str(FINISH_ANSWER_DELIVERABLE);
     text
 }
@@ -408,6 +429,43 @@ pub fn render(
     out
 }
 
+/// Every `{{ ... }}` reference key in `text`, trimmed, in order of appearance.
+///
+/// The ONE scanner for the runtime template syntax that the static checks share
+/// with [`render`]: a placeholder form can therefore never be understood
+/// differently by the renderer and by a check that reasons about what a template
+/// reads. Whitespace inside the braces is trimmed exactly as `render` trims it,
+/// and an unterminated `{{` ends the scan (it is not a reference - `render`
+/// copies it through verbatim).
+fn template_refs(text: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        out.push(after[..close].trim());
+        rest = &after[close + 2..];
+    }
+    out
+}
+
+/// Whether `text` places recorded run context itself: it reads `{{run.context}}`
+/// or ANY `{{nodes.<id>.<field>}}` reference (spec 2026-08-05 section 2.7).
+///
+/// Used by the finish composer to decide whether the terminal context has to be
+/// appended for it (see [`assemble_finish_answer_prompt`]). Every `nodes.*` field
+/// counts, not just `output`/`report`: a template that deliberately quotes one
+/// node's review note or rejected output has chosen what the composer should see,
+/// and appending the whole run on top of that would override the author's choice.
+pub(crate) fn reads_recorded_context(text: &str) -> bool {
+    template_refs(text).into_iter().any(|key| {
+        matches!(
+            key.split('.').collect::<Vec<&str>>().as_slice(),
+            ["run", "context"] | ["nodes", _, ..]
+        )
+    })
+}
+
 /// Every `nodes.<id>.output` / `nodes.<id>.report` reference in `text`, as
 /// `(reference, node id)` pairs in the order they appear, deduplicated.
 ///
@@ -419,14 +477,10 @@ pub fn render(
 /// rendering for a missing input would move every key.
 ///
 /// Kept beside `render`/`resolve` so the runtime template syntax is understood in
-/// exactly one place.
+/// exactly one place (through the shared [`template_refs`] scanner).
 pub(crate) fn node_output_refs(text: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
-    let mut rest = text;
-    while let Some(open) = rest.find("{{") {
-        let after = &rest[open + 2..];
-        let Some(close) = after.find("}}") else { break };
-        let key = after[..close].trim();
+    for key in template_refs(text) {
         if let ["nodes", id, "output" | "report"] = key.split('.').collect::<Vec<&str>>().as_slice()
         {
             let pair = (key.to_string(), (*id).to_string());
@@ -434,7 +488,6 @@ pub(crate) fn node_output_refs(text: &str) -> Vec<(String, String)> {
                 out.push(pair);
             }
         }
-        rest = &after[close + 2..];
     }
     out
 }
@@ -831,6 +884,7 @@ mod tests {
             template,
             Some("Ship the dashboard feature and open a PR"),
             &[],
+            None,
         );
         // The node template still leads the prompt.
         assert!(
@@ -866,11 +920,79 @@ mod tests {
         );
     }
 
+    // Spec 2026-08-05 section 2.7: which finish prompts need the recorded
+    // context appended. A template that reads `{{run.context}}` or ANY
+    // `{{nodes.*}}` field already places upstream output itself and keeps
+    // today's byte-identical assembly; everything else gets nothing today.
+    #[test]
+    fn reads_recorded_context_sees_every_context_bearing_reference() {
+        assert!(reads_recorded_context("close: {{run.context}}"));
+        // Whitespace inside the braces is trimmed by the same scanner `render`
+        // uses, so it must not change the verdict.
+        assert!(reads_recorded_context("close: {{  run.context  }}"));
+        assert!(reads_recorded_context("summarize {{nodes.a.output}}"));
+        assert!(reads_recorded_context("summarize {{nodes.a.report}}"));
+        assert!(reads_recorded_context("mention {{nodes.gate.review_note}}"));
+        assert!(reads_recorded_context(
+            "mention {{nodes.a.rejected_output}}"
+        ));
+    }
+
+    #[test]
+    fn reads_recorded_context_is_false_for_a_context_free_template() {
+        assert!(!reads_recorded_context("compose the closing answer"));
+        assert!(!reads_recorded_context("close for {{params.customer}}"));
+        assert!(!reads_recorded_context("close: {{run.instruction}}"));
+        // An unterminated placeholder is not a read.
+        assert!(!reads_recorded_context("close: {{run.context"));
+    }
+
+    #[test]
+    fn finish_answer_prompt_appends_the_recorded_context_before_the_deliverable() {
+        let assembled = assemble_finish_answer_prompt(
+            "compose the closing answer",
+            None,
+            &[],
+            Some("## a (succeeded, attempt 1)\n\nshipped it\n\n"),
+        );
+        assert!(
+            assembled.contains("shipped it"),
+            "the recorded context must reach the composer:\n{assembled}"
+        );
+        let ctx_at = assembled.find("shipped it").unwrap();
+        let task_at = assembled.find("## your task").unwrap();
+        assert!(
+            ctx_at < task_at,
+            "the context must precede the deliverable statement:\n{assembled}"
+        );
+    }
+
+    #[test]
+    fn finish_answer_prompt_is_byte_identical_without_an_auto_context() {
+        // A prompt that reads context itself (auto context None) and an empty
+        // recorded context must both leave the assembly exactly as it was.
+        let baseline = assemble_finish_answer_prompt("BODY", None, &[], None);
+        assert!(
+            !baseline.contains("## recorded run context"),
+            "no section without an auto context:\n{baseline}"
+        );
+        assert_eq!(
+            assemble_finish_answer_prompt("BODY", None, &[], Some("")),
+            baseline,
+            "an empty context must not add an empty section"
+        );
+        assert_eq!(
+            assemble_finish_answer_prompt("BODY", None, &[], Some("  \n ")),
+            baseline,
+            "a blank context must not add an empty section"
+        );
+    }
+
     #[test]
     fn finish_answer_prompt_states_deliverable_without_instruction() {
         // With no run instruction there is no reference block, but the composer is
         // still told its whole reply is the closing message.
-        let assembled = assemble_finish_answer_prompt("BODY", None, &[]);
+        let assembled = assemble_finish_answer_prompt("BODY", None, &[], None);
         assert!(
             !assembled.contains("## reference"),
             "no reference block:\n{assembled}"

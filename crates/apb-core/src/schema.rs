@@ -905,9 +905,34 @@ pub struct Edge {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EdgeCondition {
-    NodeStatus { node: String, equals: StatusEq },
-    ReviewStatus { equals: String },
-    OutputMatch { node: String, pattern: String },
+    NodeStatus {
+        node: String,
+        equals: StatusEq,
+    },
+    ReviewStatus {
+        equals: String,
+    },
+    OutputMatch {
+        node: String,
+        pattern: String,
+    },
+    /// Structured-verdict routing (spec 2026-08-05 section 2.5): the source
+    /// node's output is parsed as JSON and ONE top-level field is compared to
+    /// `equals` as a string. The intended producer is an agent's status file
+    /// (`APB_STATUS_FILE`), whose `outputs` object becomes the node output as
+    /// compact JSON, so a route can read a verdict the agent wrote deliberately
+    /// instead of substring-matching prose.
+    ///
+    /// Every shape the condition cannot read is a NON-match, never an error: an
+    /// output that is not JSON or not a JSON object, an absent field, and a value
+    /// with no unambiguous string form (null, array, object). Strings, booleans
+    /// and numbers compare by their JSON textual form, exactly (no substring, no
+    /// case folding - that is what `OutputMatch` is for).
+    OutputField {
+        node: String,
+        field: String,
+        equals: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]

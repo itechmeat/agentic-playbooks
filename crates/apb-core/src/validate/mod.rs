@@ -1018,3 +1018,85 @@ edges:
         );
     }
 }
+
+/// The `output_field` condition variant (spec 2026-08-05 section 2.5): it names
+/// a source node exactly like `node_status` and `output_match` do, so it must be
+/// covered by the same V10 source checks (existence and happens-before) and take
+/// part in V34 first-match duplicate detection.
+#[cfg(test)]
+mod output_field_condition_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn error_codes(pb: &Playbook) -> Vec<&'static str> {
+        validate(pb, &ValidationContext::default())
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.code)
+            .collect()
+    }
+
+    /// `check` routes on one field of `verify`'s structured output. `SOURCE` is
+    /// the node the two conditions read, `SECOND` the second edge's `equals`.
+    fn graph(source: &str, second: &str) -> Playbook {
+        pb_yaml(&format!(
+            r#"
+defaults: {{ profile: x }}
+nodes:
+  - {{ id: s, type: start }}
+  - {{ id: verify, type: agent_task, prompt: hi }}
+  - {{ id: check, type: condition }}
+  - {{ id: fix, type: agent_task, prompt: hi }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: s, to: verify }}
+  - {{ from: verify, to: check }}
+  - {{ from: check, to: fix, condition: {{ type: output_field, node: {source}, field: verdict, equals: failed }} }}
+  - {{ from: check, to: done, condition: {{ type: output_field, node: {source}, field: verdict, equals: {second} }} }}
+  - {{ from: fix, to: done }}"#
+        ))
+    }
+
+    #[test]
+    fn a_valid_output_field_route_raises_nothing() {
+        let c = error_codes(&graph("verify", "ok"));
+        assert!(c.is_empty(), "expected a clean playbook, got {c:?}");
+    }
+
+    #[test]
+    fn v10_output_field_referencing_an_unknown_node() {
+        let c = error_codes(&graph("nope", "ok"));
+        assert!(
+            c.contains(&"V10"),
+            "an output_field condition on an unknown node must be V10, got {c:?}"
+        );
+    }
+
+    #[test]
+    fn v10_output_field_referencing_a_node_that_cannot_run_first() {
+        // `fix` only runs AFTER `check` routes to it, so its output can never be
+        // available to `check`'s own routing decision.
+        let c = error_codes(&graph("fix", "ok"));
+        assert!(
+            c.contains(&"V10"),
+            "an output_field condition on a downstream node must be V10, got {c:?}"
+        );
+    }
+
+    #[test]
+    fn v34_two_identical_output_field_conditions_to_different_targets() {
+        // Same node, field AND value: first-match takes only the first edge, so
+        // the second target is unreachable.
+        let c = error_codes(&graph("verify", "failed"));
+        assert!(
+            c.contains(&"V34"),
+            "identical output_field routes to different targets must be V34, got {c:?}"
+        );
+    }
+}

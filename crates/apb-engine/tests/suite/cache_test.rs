@@ -917,3 +917,110 @@ fn batched_member_hits_the_cache_and_is_never_spawned() {
         "the hit's NodeFinished replays the stored artifacts"
     );
 }
+
+// --- Declared deliverables, with NO cache configuration (spec 2026-08-05
+// section 2.6, issue #74 finding 4) ---
+//
+// Artifact capture used to be reachable only through cache admission, so a node
+// that declared `outputs.files` without `cache: auto` had its declaration
+// silently ignored: nothing was captured and a glob that matched nothing was
+// invisible. Capture is now its own per-node step, and a declaration that
+// matched zero files journals an explicit warning. These runs need no git
+// fixture and no cache mode, which is exactly the point.
+
+const DELIVERABLE_PLAYBOOK: &str = r#"
+schema: 1
+id: delivwf
+name: Deliverable Playbook
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gen, type: script, script: "scripts/gen.sh", runner: sh, outputs: { files: ["report-*.md"] } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gen }
+  - { from: gen, to: done }
+"#;
+
+fn seed_deliverable(root: &Path, script_body: &str) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/delivwf/1.0.0");
+    std::fs::create_dir_all(vdir.join("scripts")).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), DELIVERABLE_PLAYBOOK).unwrap();
+    common::write_sync(&vdir.join("scripts/gen.sh"), script_body);
+    std::fs::write(root.join(".apb/playbooks/delivwf/current"), "1.0.0").unwrap();
+}
+
+/// Drives the deliverable playbook once with no cache mode at all.
+fn run_deliverable(root: &Path) -> Vec<Event> {
+    let res = run(root, "delivwf", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded, "run should succeed");
+    read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap()
+}
+
+fn missing_deliverables(events: &[Event], node: &str) -> Vec<Vec<String>> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::DeliverableMissing { node: n, globs, .. } if n == node => {
+                Some(globs.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_declared_deliverable_matching_nothing_journals_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // The script succeeds but writes no file matching the declared glob.
+    seed_deliverable(root, "echo generated\n");
+    let events = run_deliverable(root);
+
+    // Not a failure: the node succeeded and the run succeeded (asserted in the
+    // helper), the drift is merely visible.
+    let warned = missing_deliverables(&events, "gen");
+    assert_eq!(
+        warned.len(),
+        1,
+        "exactly one deliverable warning, got: {warned:?}"
+    );
+    assert_eq!(
+        warned[0],
+        vec!["report-*.md".to_string()],
+        "the warning must name the declared globs"
+    );
+    assert!(
+        node_artifacts(&events, "gen").is_empty(),
+        "nothing matched, so nothing is recorded"
+    );
+}
+
+#[test]
+fn a_declared_deliverable_is_captured_without_any_cache_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_deliverable(root, "printf 'findings\\n' > report-1.md\necho generated\n");
+    let events = run_deliverable(root);
+
+    let arts = node_artifacts(&events, "gen");
+    assert_eq!(
+        arts.len(),
+        1,
+        "the declared deliverable must be captured, got: {arts:?}"
+    );
+    assert_eq!(arts[0].name, "report-1.md");
+    assert_eq!(arts[0].path, "report-1.md");
+    assert_eq!(arts[0].scope, ArtifactScope::Workspace);
+    assert_eq!(arts[0].digest, sha256_hex(b"findings\n"));
+    assert!(
+        missing_deliverables(&events, "gen").is_empty(),
+        "a matched declaration must not warn"
+    );
+    // No cache configuration was involved: capture is decoupled from admission.
+    assert!(
+        !has_stored(&events, "gen") && !has_miss(&events, "gen"),
+        "capture must not imply any cache activity"
+    );
+}

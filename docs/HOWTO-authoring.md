@@ -198,7 +198,7 @@ A `human_review` node pauses the run for a human decision:
 `review_decide` records one of them as the node's decision, plus a free-form
 note (available downstream as `{{nodes.review.review_note}}`).
 
-An edge's `condition` gates traversal on one of three types:
+An edge's `condition` gates traversal on one of four types:
 
 - `node_status { node, equals: success|failure }` - matches when the named
   node's status is `success` or `failure` (which also covers a timeout).
@@ -207,6 +207,22 @@ An edge's `condition` gates traversal on one of three types:
   option string.
 - `output_match { node, pattern }` - matches when the named node's output
   contains `pattern` as a substring (not a regex).
+- `output_field { node, field, equals }` - matches when the named node's
+  output parses as a JSON object whose top-level `field` equals `equals` as a
+  string. This is the way to route on a verdict the agent wrote deliberately:
+  an `agent_task` writes `{"status":"success","outputs":{"verdict":"failed"}}`
+  to `$APB_STATUS_FILE`, the `outputs` object becomes the node output as
+  compact JSON, and the edge reads one field of it. The comparison is exact
+  (no substring, no case folding). Anything unreadable is simply a non-match:
+  output that is not a JSON object, a missing field, or a value that is null,
+  an array or an object. Booleans and numbers compare by their JSON text
+  (`true`, `3`).
+
+```yaml
+edges:
+  - { from: verify, to: fix,  condition: { type: output_field, node: verify, field: verdict, equals: failed } }
+  - { from: verify, to: done, condition: { type: output_field, node: verify, field: verdict, equals: ok } }
+```
 
 An edge with no `condition` always matches. Two edges from the same node with
 structurally identical conditions (or two fallbacks) and different targets are

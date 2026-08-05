@@ -247,6 +247,11 @@ impl RunState {
                 // verdict (spec 2026-08-05, Task 4): the run-state effect is the
                 // join's own execution, journaled right after it.
                 EventPayload::JoinInputDead { .. } => {}
+                // A declared deliverable that was not captured is a warning about
+                // the workspace, not a run-state transition: the node succeeded
+                // and its `NodeFinished` (with whatever WAS captured) carries the
+                // state effect.
+                EventPayload::DeliverableMissing { .. } => {}
                 // A bounded loop edge traversal: count it per (from, to) so
                 // edge selection can cap the loop and a resume restores progress.
                 // A policy route (`defaults.on_failure`) is recorded as the hop

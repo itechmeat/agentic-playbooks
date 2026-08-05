@@ -1586,8 +1586,26 @@ pub(crate) fn execute_finish_answer(
     // the instruction as an overriding order) and, paired with `report_contract:
     // false` on its task below, no status-verdict protocol. Supervisor notes are
     // still delivered as steering.
-    let text =
-        crate::context::assemble_finish_answer_prompt(&text, cfg.instruction.as_deref(), &events);
+    // Spec 2026-08-05 section 2.7 (issue #74 finding 6): the context above
+    // reaches the composer ONLY through a `{{run.context}}` substitution, so a
+    // finish prompt that places no context reference of its own used to be handed
+    // zero upstream output while the deliverable statement still told it to
+    // summarize "the recorded run context above". Such a template gets the
+    // terminal context appended; one that reads the context itself (through
+    // `{{run.context}}` or an explicit `{{nodes.*}}` field) keeps the byte-identical
+    // assembly it has today, since its author already chose what the composer sees.
+    let auto_context =
+        (!crate::context::reads_recorded_context(prompt)).then_some(context.as_str());
+    // A finish prompt reading `{{nodes.X.output}}` is subject to the same
+    // missing-input hole as any node template, and it does not pass through
+    // `execute_node` where that check lives (Task 4 handover note 5).
+    journal_missing_inputs(journal, run_dir, node_id, prompt, state)?;
+    let text = crate::context::assemble_finish_answer_prompt(
+        &text,
+        cfg.instruction.as_deref(),
+        &events,
+        auto_context,
+    );
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)

@@ -383,6 +383,28 @@ pub enum EventPayload {
         node: String,
         reason: String,
     },
+    /// A node succeeded but a deliverable it DECLARED in `outputs.files` was not
+    /// captured (spec 2026-08-05 section 2.6, issue #74 finding 4).
+    ///
+    /// A warning, never a failure: prompt-driven drift (the agent wrote
+    /// `findings.md` where the playbook declared `report-*.md`) must be visible,
+    /// but hard-failing a node on a glob is too brittle - the declaration is a
+    /// statement of intent, not a contract the engine can verify semantically.
+    /// `globs` carries the declaration verbatim so the journal shows what was
+    /// expected without a reader having to fetch the playbook version.
+    ///
+    /// `detail` is `None` for the ordinary case (the globs matched no file) and
+    /// carries the reason when capture itself failed (an unreadable match, a path
+    /// escaping its scope root). Fields default per the additive convention; old
+    /// logs never carry the variant at all.
+    DeliverableMissing {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        globs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     /// A bounded loop edge (one carrying `max_traversals`) was traversed (spec
     /// 2026-07-20-run-reliability). Journaled ONLY for edges that carry
     /// `max_traversals`, so the journal stays lean: `RunState::fold` counts

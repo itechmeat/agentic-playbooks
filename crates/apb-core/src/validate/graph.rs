@@ -196,6 +196,9 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
             let referenced = match &e.condition {
                 Some(EdgeCondition::NodeStatus { node, .. }) => Some(node),
                 Some(EdgeCondition::OutputMatch { node, .. }) => Some(node),
+                // Reads one field of the source node's output, so it needs the
+                // same source node to exist and to be able to run first.
+                Some(EdgeCondition::OutputField { node, .. }) => Some(node),
                 _ => None,
             };
             if let Some(dep) = referenced {
@@ -487,6 +490,16 @@ pub(crate) fn describe_route_key(key: &RouteKey<'_>) -> String {
         }
         RouteKey::Conditional(EdgeCondition::OutputMatch { node, pattern }) => {
             format!("output_match node=`{node}` pattern=`{pattern}`")
+        }
+        // The field is part of the routing key: two edges reading DIFFERENT
+        // fields of the same node are distinct routes, so only an identical
+        // node/field/value triple is a duplicate.
+        RouteKey::Conditional(EdgeCondition::OutputField {
+            node,
+            field,
+            equals,
+        }) => {
+            format!("output_field node=`{node}` field=`{field}` equals=`{equals}`")
         }
     }
 }

@@ -425,17 +425,23 @@ pub(crate) fn probe(
 }
 
 /// The post-execution half of the per-node unit: captures the node's declared
-/// output artifacts and decides admission.
+/// output artifacts, checks the declaration, and decides cache admission.
 ///
-/// Returns the artifacts to record on the node's `NodeFinished` plus the
-/// admission event to journal (`NodeCacheStored` or `NodeCacheRejected`), or
-/// nothing at all for a node with no cache context or an unsuccessful result. A
-/// capture error rejects admission outright rather than storing a record that
-/// references artifacts we could not read; it never fails the run.
+/// Returns the artifacts to record on the node's `NodeFinished` plus the events
+/// to journal before it, in order: a `DeliverableMissing` warning when the node
+/// declared `outputs.files` and nothing was captured, then the admission event
+/// (`NodeCacheStored` or `NodeCacheRejected`) for a cache-eligible node.
 ///
-/// [`capture_artifacts`] is deliberately a separate step from `ctx.admit`, so
-/// decoupling capture from the cache entirely (deliverable checking, spec section
-/// 2.6) is a change to this gate rather than to the capture itself.
+/// Capture runs for EVERY successful node that declares `outputs.files` (spec
+/// 2026-08-05 section 2.6, issue #74 finding 4), with or without a cache
+/// configuration: the declaration is what the playbook promises to produce, and
+/// tying its capture to caching meant an author who wrote `outputs.files` without
+/// `cache: auto` silently got nothing. Admission stays gated on `ctx`. A capture
+/// error still rejects admission rather than storing a record that references
+/// artifacts we could not read, and never fails the run.
+///
+/// An unsuccessful result captures nothing: a declared deliverable of a failed
+/// node is not drift, and a partially written file is not a deliverable.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn settle(
     ctx: Option<&NodeCacheCtx>,
@@ -446,31 +452,64 @@ pub(crate) fn settle(
     node_id: &str,
     status: NodeStatus,
     output: &str,
-) -> (Vec<ArtifactRef>, Option<EventPayload>) {
-    let Some(ctx) = ctx.filter(|_| status == NodeStatus::Succeeded) else {
-        return (Vec::new(), None);
-    };
+) -> (Vec<ArtifactRef>, Vec<EventPayload>) {
+    if status != NodeStatus::Succeeded {
+        return (Vec::new(), Vec::new());
+    }
     let Some(node) = playbook.node(node_id) else {
-        return (Vec::new(), None);
+        return (Vec::new(), Vec::new());
     };
-    // Scan the run log for this node's connector calls (written out of band by
-    // the connector-call subprocess) and verify each against the read_only set
-    // in the run's connector snapshot. A script node makes none.
-    let (calls_ok, had_calls) = verify_connector_calls(run_dir, node_id);
+    // The declaration verbatim. Read from the node rather than inferred from an
+    // empty capture, because `capture_artifacts` returns an empty vector both for
+    // "nothing declared" and for "declared, matched nothing" - and only the
+    // second is drift worth reporting.
+    let declared: Vec<String> = node
+        .outputs
+        .as_ref()
+        .map(|o| o.files.clone())
+        .unwrap_or_default();
+    if declared.is_empty() && ctx.is_none() {
+        return (Vec::new(), Vec::new());
+    }
+    let mut events = Vec::new();
     match capture_artifacts(node, run_dir, workdir) {
-        Ok(captured) => (
-            captured.iter().map(|(a, _)| a.clone()).collect(),
-            Some(ctx.admit(
-                workdir, run_id, playbook, output, calls_ok, had_calls, &captured,
-            )),
-        ),
-        Err(reason) => (
-            Vec::new(),
-            Some(EventPayload::NodeCacheRejected {
-                node: node_id.to_string(),
-                reason: format!("artifact capture failed: {reason}"),
-            }),
-        ),
+        Ok(captured) => {
+            if !declared.is_empty() && captured.is_empty() {
+                events.push(EventPayload::DeliverableMissing {
+                    node: node_id.to_string(),
+                    globs: declared,
+                    detail: None,
+                });
+            }
+            let artifacts = captured.iter().map(|(a, _)| a.clone()).collect();
+            if let Some(ctx) = ctx {
+                // Scan the run log for this node's connector calls (written out
+                // of band by the connector-call subprocess) and verify each
+                // against the read_only set in the run's connector snapshot. A
+                // script node makes none.
+                let (calls_ok, had_calls) = verify_connector_calls(run_dir, node_id);
+                events.push(ctx.admit(
+                    workdir, run_id, playbook, output, calls_ok, had_calls, &captured,
+                ));
+            }
+            (artifacts, events)
+        }
+        Err(reason) => {
+            if !declared.is_empty() {
+                events.push(EventPayload::DeliverableMissing {
+                    node: node_id.to_string(),
+                    globs: declared,
+                    detail: Some(reason.clone()),
+                });
+            }
+            if ctx.is_some() {
+                events.push(EventPayload::NodeCacheRejected {
+                    node: node_id.to_string(),
+                    reason: format!("artifact capture failed: {reason}"),
+                });
+            }
+            (Vec::new(), events)
+        }
     }
 }
 
