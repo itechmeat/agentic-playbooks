@@ -266,19 +266,34 @@ fn live_nodes(playbook: &Playbook, state: &RunState, active: &[String]) -> BTree
 }
 
 /// The targets a node that has already finished actually routed into: the edges
-/// its routing selects against the current state, PLUS every edge out of it with
-/// a journaled traversal.
+/// its routing selects against the current state, PLUS every hop out of it the
+/// journal records (a counted edge traversal, or a `defaults.on_failure` policy
+/// route).
 ///
 /// The journal half is not redundant. A bounded edge that has reached its
 /// `max_traversals` cap stops being selectable, so re-deriving the routing alone
 /// forgets a branch it demonstrably took - the target would vanish from
 /// liveness, from the rebuilt [`pending_heads`], and from an [`arrival`]'s
-/// delivery proof, and a join would fire without it. This is the single
+/// delivery proof, and a join would fire without it. The policy route is the
+/// same problem for a hop that never had an edge at all. This is the single
 /// definition of "which way did this node actually go", shared by all three.
+///
+/// The journal half is filtered against the nodes the CURRENT playbook declares:
+/// a supervisor patch can delete a node the journal still carries a hop into,
+/// and re-offering it would hand the drive loop a node it cannot resolve. The
+/// filter is deliberately on the target NODE, not on a declared edge - a policy
+/// route is a real hop with no declared edge, and a hop the run demonstrably
+/// took is still outstanding work when a patch merely removes its edge.
 fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet<String> {
     let mut targets: BTreeSet<String> = successors(playbook, node, state).into_iter().collect();
-    for ((from, to), count) in &state.edge_counts {
-        if from == node && *count > 0 {
+    let journaled = state
+        .edge_counts
+        .iter()
+        .filter(|(_, count)| **count > 0)
+        .map(|((from, to), _)| (from, to))
+        .chain(state.policy_routes.iter().map(|(from, to)| (from, to)));
+    for (from, to) in journaled {
+        if from == node && playbook.node(to).is_some() {
             targets.insert(to.clone());
         }
     }
@@ -294,10 +309,10 @@ fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet
 /// as dead, and a join fires without it - silently completing a run with a branch
 /// missing.
 ///
-/// Known gap: a handler the `defaults.on_failure` policy routes to is pushed
-/// onto the frontier without traversing any declared edge, so nothing in the
-/// journal records that route and this reconstruction cannot see it. See the
-/// Task 4 handover notes.
+/// A handler the `defaults.on_failure` policy routes to is included: the drive
+/// journals that route as `EdgeTraversed { via_policy: true }` when it takes it,
+/// so [`routed_targets`] sees it without this function re-deriving the
+/// failure-policy predicate (which must not drift from the drive loop's copy).
 pub fn pending_heads(playbook: &Playbook, state: &RunState) -> Vec<String> {
     let mut heads: BTreeSet<String> = BTreeSet::new();
     for (node, status) in &state.nodes {
@@ -407,6 +422,37 @@ pub fn join_readiness(
             }
         }
     }
+}
+
+/// The incoming sources of `node` that can never arrive, in incoming-edge order:
+/// the inputs a join readiness verdict wrote off (see [`arrival`]'s `Dead`).
+///
+/// Empty for a node that does not synchronize, and empty for a join every input
+/// of which either arrived or can still arrive. [`join_readiness`] computes the
+/// same arrivals; this function exists so the scheduler can JOURNAL the write-off
+/// at the point it acts on the verdict, without a journal handle reaching into
+/// this pure module. Both answers come from one implementation, so the event and
+/// the verdict can never disagree.
+pub fn dead_inputs(
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    active: &[String],
+) -> Vec<String> {
+    if join_kind(playbook, node).is_none() {
+        return Vec::new();
+    }
+    let live = live_nodes(playbook, state, active);
+    incoming(playbook, node)
+        .iter()
+        .filter(|e| {
+            matches!(
+                arrival(playbook, node, &e.from, state, &live),
+                Arrival::Dead
+            )
+        })
+        .map(|e| e.from.clone())
+        .collect()
 }
 
 #[cfg(test)]
@@ -759,6 +805,82 @@ edges:
         assert_eq!(
             join_readiness(&pb, "j", &s, &active(&["a", "b", "j"])),
             JoinReadiness::NotReady
+        );
+    }
+
+    /// A handler reached through `defaults.on_failure` traverses no declared
+    /// edge, so before the drive journaled the route this reconstruction could
+    /// not see it and a driver death lost the handler entirely (Task 1 handover
+    /// note 3).
+    #[test]
+    fn a_policy_routed_handler_shows_up_as_a_pending_head() {
+        const POLICY_HANDLER: &str = r#"
+schema: 1
+id: d
+name: D
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: prompt, prompt: "work" }
+  - { id: handler, type: prompt, prompt: "recover" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done, condition: { type: node_status, node: work, equals: success } }
+  - { from: handler, to: done }
+"#;
+        let pb = Playbook::from_yaml(POLICY_HANDLER).unwrap();
+        let mut s = state_with(&[
+            ("start", NodeStatus::Succeeded),
+            ("work", NodeStatus::Failed),
+        ]);
+        // What the drive journals when it takes the policy route.
+        s.policy_routes
+            .insert(("work".to_string(), "handler".to_string()));
+        assert_eq!(pending_heads(&pb, &s), vec!["handler".to_string()]);
+    }
+
+    /// Patch resurrection: a supervisor patch can delete a node the journal
+    /// still carries a traversal into. Re-offering it would hand the drive loop
+    /// a node the current playbook does not declare.
+    #[test]
+    fn a_traversal_into_a_node_the_playbook_dropped_is_not_resurrected() {
+        let pb = playbook();
+        let mut s = state_with(&[
+            ("start", NodeStatus::Succeeded),
+            ("a", NodeStatus::Succeeded),
+        ]);
+        s.edge_counts.insert(("a".into(), "ghost".into()), 1);
+        s.policy_routes
+            .insert(("a".to_string(), "phantom".to_string()));
+        let heads = pending_heads(&pb, &s);
+        assert!(
+            !heads.contains(&"ghost".to_string()) && !heads.contains(&"phantom".to_string()),
+            "a head the playbook no longer declares must be dropped, got: {heads:?}"
+        );
+        assert!(
+            heads.contains(&"b".to_string()),
+            "the real outstanding head survives the filter, got: {heads:?}"
+        );
+    }
+
+    /// The write-off the scheduler journals is computed here, so the pure
+    /// readiness verdict and the observable event can never disagree.
+    #[test]
+    fn dead_inputs_names_the_source_that_can_never_arrive() {
+        let pb = Playbook::from_yaml(EITHER_OR).unwrap();
+        let s = state_with(&[
+            ("start", NodeStatus::Succeeded),
+            ("a", NodeStatus::Succeeded),
+        ]);
+        assert_eq!(dead_inputs(&pb, "m", &s, &active(&["a"])), vec!["b"]);
+        assert!(
+            dead_inputs(&pb, "m", &s, &active(&["a", "b"])).is_empty(),
+            "a source that can still arrive is not written off"
+        );
+        assert!(
+            dead_inputs(&pb, "a", &s, &active(&["a"])).is_empty(),
+            "a node that is not a join writes nothing off"
         );
     }
 

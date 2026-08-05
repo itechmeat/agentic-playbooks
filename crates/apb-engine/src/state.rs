@@ -133,6 +133,14 @@ pub struct RunState {
     /// resume restores loop progress exactly because the counts come from the
     /// journal.
     pub edge_counts: BTreeMap<(String, String), u32>,
+    /// The `(from, to)` hops the `defaults.on_failure` policy routed, folded
+    /// from `EdgeTraversed { via_policy: true }` (spec 2026-08-05, Task 4).
+    /// Deliberately NOT part of `edge_counts`: the policy traverses no declared
+    /// edge, so counting it there would spend a bounded edge's `max_traversals`
+    /// budget on a hop that never used the edge. `parallel::routed_targets`
+    /// unions both, so "which way did this node actually go" includes a handler
+    /// the policy reached.
+    pub policy_routes: BTreeSet<(String, String)>,
     /// Per-node agent text discarded when a `success_check` rejected an
     /// otherwise-succeeded attempt (spec field-report-robustness), folded from
     /// `AttemptFinished.rejected_output`. Exposed to downstream templates as
@@ -237,9 +245,21 @@ impl RunState {
                 | EventPayload::NodeCacheRejected { .. } => {}
                 // A bounded loop edge traversal: count it per (from, to) so
                 // edge selection can cap the loop and a resume restores progress.
-                EventPayload::EdgeTraversed { from, to } => {
-                    *s.edge_counts.entry((from.clone(), to.clone())).or_insert(0) += 1;
-                }
+                // A policy route (`defaults.on_failure`) is recorded as the hop
+                // it is, but separately: it traversed no declared edge, so it
+                // must not consume a bounded edge's traversal budget.
+                EventPayload::EdgeTraversed {
+                    from,
+                    to,
+                    via_policy,
+                } => match via_policy {
+                    true => {
+                        s.policy_routes.insert((from.clone(), to.clone()));
+                    }
+                    false => {
+                        *s.edge_counts.entry((from.clone(), to.clone())).or_insert(0) += 1;
+                    }
+                },
                 // The explanatory record for an abnormal termination (issue
                 // #42 finding 3): does not itself change node/run status
                 // (the terminal `run_finished`/`node_finished` right next to

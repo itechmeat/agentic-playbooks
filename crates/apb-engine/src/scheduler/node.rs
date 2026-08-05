@@ -219,6 +219,63 @@ fn journal_interrupted_attempt(
     })
 }
 
+/// The template text a node renders for its own execution, or `None` for a kind
+/// that renders none. Scripts, conditions, waits and reviews have no template;
+/// a finish-with-prompt composes through `execute_finish_answer` and a
+/// sub-playbook instruction through `run_playbook_node`, neither of which passes
+/// through [`execute_node`].
+fn prompt_template(kind: &NodeKind) -> Option<&str> {
+    match kind {
+        NodeKind::AgentTask { prompt, .. } | NodeKind::Prompt { prompt } => Some(prompt.as_str()),
+        _ => None,
+    }
+}
+
+/// Journals a missing-input anomaly for every `nodes.<id>.output|report` a node's
+/// template reads without a SUCCESSFUL record behind it (spec 2026-08-05 section
+/// 1.5).
+///
+/// The read still renders as an empty string, byte for byte: an agent-task cache
+/// key is derived from the rendered prompt, so changing the rendering would move
+/// every key, and failing the node would break the either-or merges that
+/// legitimately reference both branches. What was missing was any trace at all -
+/// an agent got a prompt with a hole in it and nothing said so.
+///
+/// One anomaly per node execution (not per attempt), listing every unfilled
+/// reference with the status behind it, journaled through the same
+/// `WakeRaised { Anomaly }` mechanism as the empty-output anomaly.
+fn journal_missing_inputs(
+    journal: &Journal,
+    run_dir: &Path,
+    node_id: &str,
+    template: &str,
+    state: &RunState,
+) -> Result<(), EngineError> {
+    let missing: Vec<String> = crate::context::node_output_refs(template)
+        .into_iter()
+        .filter(|(_, id)| state.nodes.get(id) != Some(&NodeStatus::Succeeded))
+        .map(|(reference, id)| {
+            let status = match state.nodes.get(&id) {
+                Some(st) => st.as_str(),
+                None => "never ran",
+            };
+            format!("`{reference}` ({status})")
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    journal.raise_wake(
+        run_dir,
+        crate::event::WakeTrigger::Anomaly,
+        node_id,
+        format!(
+            "node `{node_id}` reads {} with no successful result; the reference renders empty",
+            missing.join(", ")
+        ),
+    )
+}
+
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -238,6 +295,17 @@ pub(crate) fn execute_node(
     let node = playbook
         .node(node_id)
         .ok_or_else(|| EngineError::NotFound(node_id.into()))?;
+    // Missing-input observability (spec 2026-08-05 section 1.5). Here rather
+    // than in the drive loop because this is the ONE site both arms and the
+    // interactive path share, and it fires once per execution. Skipped when the
+    // node's own template is not what runs: a prompt override replaces it
+    // wholesale, and a resume re-invocation carries only the user's answer.
+    if override_prompt.is_none()
+        && resume.is_none()
+        && let Some(template) = prompt_template(&node.kind)
+    {
+        journal_missing_inputs(journal, run_dir, node_id, template, state)?;
+    }
     let mut events: Vec<EventPayload> = Vec::new();
     match &node.kind {
         NodeKind::Start => Ok(AttemptOutcome::Finished {
@@ -2160,6 +2228,45 @@ pub(crate) fn restore_frontier(
     }
 }
 
+/// Journals the branch inputs a join is about to proceed WITHOUT, at the moment
+/// the engine acts on the readiness verdict (Task 4; Task 1 handover note 1).
+///
+/// A dead input is a legitimate and common outcome (an either-or merge has one by
+/// construction, and the implicit barrier widened how many nodes can have one),
+/// but writing it off inside a pure function left no trace at all: a run report
+/// showed the skipped branch pending forever while the join reported success.
+/// Contrast the `join: any` sibling cancel, which journals `cancelled`.
+///
+/// One event per join push, naming every source written off, so a join with two
+/// dead inputs does not read as a looping supervisor to `run_doctor`'s repeated-
+/// action check. A wake is deliberately NOT raised: this is routine graph
+/// bookkeeping, not an anomaly that needs a supervisor's attention.
+fn journal_dead_inputs(
+    log: &mut EventLog,
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    active: &[String],
+) -> Result<(), EngineError> {
+    let dead = parallel::dead_inputs(playbook, node, state, active);
+    if dead.is_empty() {
+        return Ok(());
+    }
+    let named = dead
+        .iter()
+        .map(|s| format!("`{s}`"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    log.append(EventPayload::SupervisorAction {
+        action: "join_input_dead".into(),
+        node: Some(node.to_string()),
+        detail: format!(
+            "join `{node}` proceeds without input from {named}: no active branch can still reach it"
+        ),
+    })?;
+    Ok(())
+}
+
 pub(crate) fn advance_frontier(
     playbook: &Playbook,
     node: &str,
@@ -2209,6 +2316,7 @@ pub(crate) fn advance_frontier(
     let selected = parallel::selected_edges(playbook, node, state);
     for s in runnable {
         if !frontier.contains(&s) {
+            journal_dead_inputs(log, playbook, &s, state, &active)?;
             // Journal a traversal ONLY when the edge taken carries
             // max_traversals (keeps the journal lean). The cap check itself
             // already happened in the pure `selected_edges`/`seed_successors`
@@ -2223,6 +2331,7 @@ pub(crate) fn advance_frontier(
                 log.append(EventPayload::EdgeTraversed {
                     from: node.to_string(),
                     to: s.clone(),
+                    via_policy: false,
                 })?;
             }
             frontier.push(s);

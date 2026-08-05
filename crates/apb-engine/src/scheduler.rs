@@ -95,6 +95,27 @@ fn failure_detail(out: &str) -> String {
     capped
 }
 
+/// Journals the hop `defaults.on_failure: <node>` just took, as the traversal it
+/// is (spec 2026-08-05, Task 4).
+///
+/// The policy pushes its handler onto the frontier without consulting any
+/// declared edge, so before this the journal recorded nothing: a driver that died
+/// right after taking the route rebuilt a frontier
+/// ([`parallel::pending_heads`]) that had forgotten the handler entirely. The
+/// alternative was to re-derive the failure-policy predicate inside that pure
+/// reconstruction, which would duplicate a rule that must not drift. Journaling
+/// the route makes it visible to the ONE definition of "which way did this node
+/// go" (`parallel::routed_targets`) for free, and `via_policy` keeps the record
+/// honest about there being no such edge.
+fn journal_policy_route(log: &mut EventLog, from: &str, to: &str) -> Result<(), EngineError> {
+    log.append(EventPayload::EdgeTraversed {
+        from: from.to_string(),
+        to: to.to_string(),
+        via_policy: true,
+    })?;
+    Ok(())
+}
+
 /// Ends the run on a failure the playbook declared fatal (`defaults.on_failure:
 /// stop`, spec 2026-07-26): the node reported a failure and no outgoing edge
 /// takes it.
@@ -680,11 +701,61 @@ fn drive_inner(
                         }
                         continue;
                     }
+                    // Per-member cache probe, on the drive thread and in chunk
+                    // order, through the same unit the sequential arm uses (spec
+                    // 2026-08-05 section 1.4). A member that HITS is finished
+                    // right here and never spawned, so it consumes no slot; the
+                    // lookup, the artifact restore and the store all stay on one
+                    // thread. A member that misses is journaled started, then
+                    // spawned with its cache context kept here for `settle`.
+                    //
+                    // A hit does NOT get the in-batch any-join cancel treatment
+                    // its executed siblings get: cancelling here would mean
+                    // journaling members of this very chunk as cancelled after
+                    // having started them. The batch-tail `advance_frontier`
+                    // still resolves the join, so the in-batch kill remains what
+                    // it always was - an optimization, not the semantics.
+                    let mut spawn: Vec<&String> = Vec::new();
+                    let mut ctxs: BTreeMap<String, cache::NodeCacheCtx> = BTreeMap::new();
                     for n in chunk {
+                        // Started before the lookup, exactly as in the sequential
+                        // arm: a hit is a node that ran, it just ran once before.
                         log.append(EventPayload::NodeStarted {
                             node: n.clone(),
                             attempt: 1,
                         })?;
+                        let probe =
+                            cache::probe(&playbook, n, run_dir, &workdir, &run_id, &state, cfg)?;
+                        let (events, hit) = match probe {
+                            cache::CacheProbe::Hit {
+                                output,
+                                artifacts,
+                                events,
+                            } => (events, Some((output, artifacts))),
+                            cache::CacheProbe::Miss { ctx, events } => {
+                                if let Some(c) = ctx {
+                                    ctxs.insert(n.clone(), c);
+                                }
+                                spawn.push(n);
+                                (events, None)
+                            }
+                        };
+                        for ev in events {
+                            log.append(ev)?;
+                        }
+                        if let Some((output, artifacts)) = hit {
+                            log.append(EventPayload::NodeFinished {
+                                node: n.clone(),
+                                status: NodeStatus::Succeeded.as_str().into(),
+                                attempt: 1,
+                                output: output.clone(),
+                                artifacts,
+                            })?;
+                            batch_results.push((n.clone(), NodeStatus::Succeeded, output));
+                        }
+                    }
+                    if spawn.is_empty() {
+                        continue;
                     }
                     // The chunk shares ONE journal (the drive's log behind a
                     // Mutex) so each worker thread appends its own
@@ -700,7 +771,7 @@ fn drive_inner(
                     let journal = Journal::new(&mut *log);
                     let (tx, rx) = mpsc::channel();
                     std::thread::scope(|scope| -> Result<(), EngineError> {
-                        for n in chunk {
+                        for &n in &spawn {
                             let playbook_c = playbook.clone();
                             let rd = run_dir.to_path_buf();
                             let wd = workdir.clone();
@@ -708,7 +779,7 @@ fn drive_inner(
                             let st = state.clone();
                             let cfg_c = cfg.clone();
                             let node = n.clone();
-                            let op = prompt_overrides.remove(n);
+                            let op = prompt_overrides.remove(n.as_str());
                             let tx = tx.clone();
                             let cancel_c = Arc::clone(&cancel);
                             let scrub_c = env_scrub.clone();
@@ -756,15 +827,32 @@ fn drive_inner(
                             for ev in evs {
                                 journal.append(ev)?;
                             }
+                            // Declared-artifact capture and cache admission, the
+                            // same unit the sequential arm uses. It runs on THIS
+                            // (the drive) thread as each member returns, so the
+                            // workspace fingerprint comparison and the store
+                            // write stay single-threaded and the artifacts are in
+                            // hand for the member's NodeFinished below.
+                            let (artifacts, admission) = cache::settle(
+                                ctxs.get(node.as_str()),
+                                &playbook,
+                                run_dir,
+                                &workdir,
+                                &run_id,
+                                &node,
+                                status,
+                                &output,
+                            );
+                            if let Some(ev) = admission {
+                                journal.append(ev)?;
+                            }
                             batch_results.push((node.clone(), status, output.clone()));
                             journal.append(EventPayload::NodeFinished {
                                 node: node.clone(),
                                 status: status.as_str().into(),
                                 attempt: 1,
                                 output,
-                                // The concurrent batch path does not run through the
-                                // node cache, so it captures no declared artifacts.
-                                artifacts: Vec::new(),
+                                artifacts,
                             })?;
                             // If this branch successfully fed a join:any - cancel the others.
                             if status == NodeStatus::Succeeded {
@@ -890,6 +978,7 @@ fn drive_inner(
                     if let Some(target) = playbook.defaults.on_failure.target_for(node)
                         && !frontier.iter().any(|n| n == target)
                     {
+                        journal_policy_route(log, node, target)?;
                         frontier.push(target.to_string());
                     }
                 }
@@ -1537,84 +1626,35 @@ fn drive_inner(
                 node: current.clone(),
                 attempt: 1,
             })?;
-            // Node cache (spec 2026-07-19). `prepare` returns `None` for any
+            // Node cache (spec 2026-07-19), through the per-node unit both drive
+            // arms share (`cache::probe` / `cache::settle`, spec 2026-08-05
+            // section 1.4). `probe` returns a plain `Miss { ctx: None }` for any
             // non-cacheable node, in which case this collapses to the plain
             // execute path. On a hit we skip execution entirely; on a miss we
-            // execute and then let `admit` decide whether the result is stored.
-            //
-            // Agent-task key parts come from the run's own immutable manifest
-            // snapshot (bundle digest + primary agent/model + the node's
-            // connector digests), and the prompt is rendered via the same
-            // shared helper `execute_node` uses so the key can never drift from
-            // what the agent receives. A script node leaves all of these empty
-            // (Task 5 behavior, unchanged).
-            let mut rendered_prompt: Option<String> = None;
-            let mut bundle_digest: Option<String> = None;
-            let mut agent_model: Option<(String, String)> = None;
-            let mut connector_digests: Vec<String> = Vec::new();
-            if let NodeKind::AgentTask { prompt, .. } = &node_kind
-                && let Some((bundle, agent, model, digests)) =
-                    cache::agent_key_parts(run_dir, &current)
-            {
-                rendered_prompt = Some(render_node_prompt(run_dir, &run_id, &state, cfg, prompt)?);
-                bundle_digest = Some(bundle);
-                agent_model = Some((agent, model));
-                connector_digests = digests;
-            }
-            let cache_ctx = cache::prepare(
-                &playbook,
-                &current,
-                &workdir,
-                run_dir,
-                cfg,
-                rendered_prompt.as_deref(),
-                bundle_digest.as_deref(),
-                agent_model.as_ref().map(|(a, m)| (a.as_str(), m.as_str())),
-                connector_digests,
-            );
-            // A hit is only taken once its declared artifacts are restored to
-            // the workspace. If restore fails (a missing or tampered artifact
-            // object), we drop the hit entirely and fall through to the miss
-            // path, so a failed hit never leaves a `NodeCacheHit` without the
-            // files it promised (no partial event pair).
-            // A node that already finished once in this run (a loop
-            // re-execution) must NOT replay a cached verdict: skip the lookup so
-            // each iteration runs the node again. The store side is unchanged -
-            // a fresh execution still admits/stores below. Detected from the
-            // folded state (`state` predates this iteration's NodeStarted, so a
-            // terminal status means a prior NodeFinished for this node).
-            let already_finished = state.nodes.get(&current).is_some_and(|st| st.is_finished());
-            let lookup = if already_finished {
-                None
-            } else {
-                cache_ctx.as_ref().and_then(|c| c.lookup(cfg))
-            };
-            let hit = match lookup {
-                Some(entry) => {
-                    let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
-                    match cache::restore_artifacts(&entry, ctx.store(), run_dir, &workdir) {
-                        Ok(()) => Some(entry),
-                        Err(_) => None,
+            // execute and then let `settle` decide whether the result is stored.
+            let (cache_ctx, hit) =
+                match cache::probe(&playbook, &current, run_dir, &workdir, &run_id, &state, cfg)? {
+                    cache::CacheProbe::Hit {
+                        output,
+                        artifacts,
+                        events,
+                    } => {
+                        for ev in events {
+                            log.append(ev)?;
+                        }
+                        node_artifacts = artifacts;
+                        (None, Some((NodeStatus::Succeeded, output)))
                     }
-                }
-                None => None,
-            };
-            if let Some(entry) = hit {
-                let ctx = cache_ctx.as_ref().expect("a hit implies a cache ctx");
-                log.append(EventPayload::NodeCacheHit {
-                    node: current.clone(),
-                    key: ctx.key.clone(),
-                    source_run: entry.record.provenance.run_id.clone(),
-                })?;
-                node_artifacts = entry.record.artifacts.clone();
-                (NodeStatus::Succeeded, entry.output)
+                    cache::CacheProbe::Miss { ctx, events } => {
+                        for ev in events {
+                            log.append(ev)?;
+                        }
+                        (ctx, None)
+                    }
+                };
+            if let Some(hit) = hit {
+                hit
             } else {
-                if let Some(ctx) = &cache_ctx {
-                    log.append(EventPayload::NodeCacheMiss {
-                        node: current.clone(),
-                        key: ctx.key.clone(),
-                    })?;
-                }
                 let override_prompt = prompt_overrides.remove(&current);
                 // The journal borrows `log` for the duration of execute_node so the
                 // node can append attempt_started at spawn time; the block scopes
@@ -1656,35 +1696,21 @@ fn drive_inner(
                 for ev in evs {
                     log.append(ev)?;
                 }
-                if let Some(ctx) = &cache_ctx
-                    && st == NodeStatus::Succeeded
-                {
-                    // Scan the run log for this node's connector calls (written
-                    // out of band by the connector-call subprocess) and verify
-                    // each against the read_only set in the run's connector
-                    // snapshot. A script node makes none, so this is (true,
-                    // false) - identical to Task 5's admission.
-                    let (calls_ok, had_calls) = cache::verify_connector_calls(run_dir, &current);
-                    let node = playbook.node(&current).expect("a cache ctx implies a node");
-                    // Capture the node's declared output artifacts. A capture
-                    // error (an unreadable matched file or a path escaping its
-                    // scope root) rejects admission outright: storing a record
-                    // that references artifacts we could not read would be a
-                    // lie. It never fails the run.
-                    match cache::capture_artifacts(node, run_dir, &workdir) {
-                        Ok(captured) => {
-                            node_artifacts = captured.iter().map(|(a, _)| a.clone()).collect();
-                            log.append(ctx.admit(
-                                &workdir, &run_id, &playbook, &out, calls_ok, had_calls, &captured,
-                            ))?;
-                        }
-                        Err(reason) => {
-                            log.append(EventPayload::NodeCacheRejected {
-                                node: current.clone(),
-                                reason: format!("artifact capture failed: {reason}"),
-                            })?;
-                        }
-                    }
+                // Declared-artifact capture and cache admission, the same unit
+                // the batch path uses.
+                let (captured, admission) = cache::settle(
+                    cache_ctx.as_ref(),
+                    &playbook,
+                    run_dir,
+                    &workdir,
+                    &run_id,
+                    &current,
+                    st,
+                    &out,
+                );
+                node_artifacts = captured;
+                if let Some(ev) = admission {
+                    log.append(ev)?;
                 }
                 (st, out)
             }
@@ -1806,7 +1832,8 @@ fn drive_inner(
             {
                 // A route the author declared once instead of drawing it from
                 // every node: join the frontier exactly as an explicit failure
-                // edge into the same node would have.
+                // edge into the same node would have - and be journaled like one.
+                journal_policy_route(log, &current, target)?;
                 frontier.push(target.to_string());
             }
         }

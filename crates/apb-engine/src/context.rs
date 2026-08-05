@@ -408,6 +408,37 @@ pub fn render(
     out
 }
 
+/// Every `nodes.<id>.output` / `nodes.<id>.report` reference in `text`, as
+/// `(reference, node id)` pairs in the order they appear, deduplicated.
+///
+/// [`resolve`] is total: an unknown node renders as an empty string, which is
+/// what keeps a legitimate either-or read from failing a node - and also what
+/// makes a genuine mistake invisible (spec 2026-08-05 section 1.5). The engine
+/// reports those reads separately instead of changing what renders: an
+/// agent-task cache key is derived from the RENDERED prompt, so a different
+/// rendering for a missing input would move every key.
+///
+/// Kept beside `render`/`resolve` so the runtime template syntax is understood in
+/// exactly one place.
+pub(crate) fn node_output_refs(text: &str) -> Vec<(String, String)> {
+    let mut out: Vec<(String, String)> = Vec::new();
+    let mut rest = text;
+    while let Some(open) = rest.find("{{") {
+        let after = &rest[open + 2..];
+        let Some(close) = after.find("}}") else { break };
+        let key = after[..close].trim();
+        if let ["nodes", id, "output" | "report"] = key.split('.').collect::<Vec<&str>>().as_slice()
+        {
+            let pair = (key.to_string(), (*id).to_string());
+            if !out.contains(&pair) {
+                out.push(pair);
+            }
+        }
+        rest = &after[close + 2..];
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn resolve(
     key: &str,

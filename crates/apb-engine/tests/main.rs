@@ -129,6 +129,8 @@ mod marker_test;
 mod max_loops_test;
 #[path = "suite/migrate_test.rs"]
 mod migrate_test;
+#[path = "suite/missing_input_test.rs"]
+mod missing_input_test;
 #[path = "suite/overrides_run_test.rs"]
 mod overrides_run_test;
 #[path = "suite/parallel_cancel_test.rs"]

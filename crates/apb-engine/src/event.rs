@@ -14,6 +14,13 @@ pub enum WakeTrigger {
     Anomaly,
 }
 
+/// `skip_serializing_if` helper for additive `bool` payload fields: a false
+/// flag stays off the wire, so an event that does not use it serializes exactly
+/// as it did before the field existed.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// Fingerprint of the profile used, for run provenance (spec 6.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileProvenance {
@@ -367,6 +374,20 @@ pub enum EventPayload {
     EdgeTraversed {
         from: String,
         to: String,
+        /// True when the hop was taken by the `defaults.on_failure` policy
+        /// rather than by a declared edge (spec 2026-08-05 section 1.5 /
+        /// Task 4). The policy pushes its handler onto the frontier without
+        /// consulting any edge, so nothing in the journal used to record where
+        /// the run went and no reconstruction from the journal could see the
+        /// handler (`parallel::pending_heads`). Recording it as a traversal
+        /// makes it visible to that one reconstruction rather than duplicating
+        /// the failure-policy predicate in a second place; the flag keeps the
+        /// record honest about there being no such edge, and keeps the fold
+        /// from spending a bounded edge's `max_traversals` budget on it.
+        /// Additive: absent in every log written before, and omitted from the
+        /// wire whenever false.
+        #[serde(default, skip_serializing_if = "is_false")]
+        via_policy: bool,
     },
     /// An interactive node's agent asked the user a question (spec
     /// 2026-07-20-interactive-nodes). Written by drive when it observes a new

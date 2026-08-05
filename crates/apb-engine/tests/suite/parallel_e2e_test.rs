@@ -552,7 +552,7 @@ fn resume_reads_journaled_traversals_when_rebuilding_branch_heads() {
     let events = read_all(&run_dir).unwrap();
     assert!(
         events.iter().any(|e| matches!(&e.payload,
-            EventPayload::EdgeTraversed { from, to } if from == "x" && to == "y")),
+            EventPayload::EdgeTraversed { from, to, .. } if from == "x" && to == "y")),
         "the traversal that proves `y` was routed to must survive the cut"
     );
 
@@ -624,4 +624,45 @@ fn finish_in_one_branch_cancels_the_other() {
     assert!(events.iter().any(
         |e| matches!(&e.payload, EventPayload::RunFinished { outcome } if outcome == "succeeded")
     ));
+}
+
+/// A join that proceeds because one of its inputs can never arrive must SAY so
+/// (Task 4, Task 1 handover note 1). Before this, the branch was written off in
+/// a pure function with no journal handle, so a run report showed the skipped
+/// node pending forever while the merge reported success - and the implicit
+/// barrier widened how many nodes that can happen to.
+#[test]
+fn a_dead_join_input_is_journaled_as_a_write_off() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), EITHER_OR);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+
+    let write_offs: Vec<(Option<String>, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::SupervisorAction {
+                action,
+                node,
+                detail,
+            } if action == "join_input_dead" => Some((node.clone(), detail.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        write_offs.len(),
+        1,
+        "the merge writes off exactly one input, got: {write_offs:?}"
+    );
+    let (node, detail) = &write_offs[0];
+    assert_eq!(
+        node.as_deref(),
+        Some("m"),
+        "the event names the join that proceeded"
+    );
+    assert!(
+        detail.contains("`b`"),
+        "the event names the dead source, got: {detail}"
+    );
 }

@@ -290,3 +290,47 @@ fn no_run_error_means_no_failure_reason() {
     let s = RunState::fold(&events);
     assert!(s.failure_reason.is_none());
 }
+
+/// A `defaults.on_failure` route is journaled as a traversal so the journal
+/// records where the run actually went (Task 4). It is NOT a declared edge, so
+/// it must not spend a bounded edge's `max_traversals` budget: it folds into its
+/// own set instead of `edge_counts`.
+#[test]
+fn a_policy_route_folds_separately_from_a_declared_edge_traversal() {
+    let events = vec![
+        ev(0, run_started("w")),
+        ev(
+            1,
+            EventPayload::EdgeTraversed {
+                from: "check".into(),
+                to: "tick".into(),
+                via_policy: false,
+            },
+        ),
+        ev(
+            2,
+            EventPayload::EdgeTraversed {
+                from: "work".into(),
+                to: "handler".into(),
+                via_policy: true,
+            },
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(
+        s.edge_counts
+            .get(&("check".to_string(), "tick".to_string())),
+        Some(&1),
+        "a declared edge traversal still counts"
+    );
+    assert!(
+        !s.edge_counts
+            .contains_key(&("work".to_string(), "handler".to_string())),
+        "a policy route must not consume an edge budget"
+    );
+    assert!(
+        s.policy_routes
+            .contains(&("work".to_string(), "handler".to_string())),
+        "the policy route is recorded as one"
+    );
+}

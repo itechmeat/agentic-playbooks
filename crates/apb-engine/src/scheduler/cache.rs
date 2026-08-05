@@ -315,6 +315,165 @@ impl NodeCacheCtx {
     }
 }
 
+/// The pre-execution cache step for ONE node, resolved on the drive thread.
+///
+/// Both drive arms go through [`probe`] and [`settle`], so the cache flow exists
+/// once: the sequential path and the concurrent batch cannot drift, and a batch
+/// member that hits is never spawned (spec 2026-08-05 section 1.4).
+pub(crate) enum CacheProbe {
+    /// A valid cached result whose declared artifacts are already restored to
+    /// the workspace. The node must NOT be executed; the caller journals the
+    /// events, then finishes the node as succeeded with this output and these
+    /// artifacts.
+    Hit {
+        output: String,
+        artifacts: Vec<ArtifactRef>,
+        events: Vec<EventPayload>,
+    },
+    /// No usable cached result: execute the node. `ctx` is `Some` only when the
+    /// node is cache-eligible, and is what [`settle`] then admits through.
+    Miss {
+        ctx: Option<NodeCacheCtx>,
+        events: Vec<EventPayload>,
+    },
+}
+
+/// Looks one node up in the cache before it runs: builds its cache context
+/// (rendering the agent prompt through the very helper `execute_node` uses, so
+/// the key can never drift from what the agent receives), probes the store, and
+/// restores a hit's declared artifacts.
+///
+/// A hit is only reported once its artifacts are back in the workspace: a failed
+/// restore (a missing or tampered object) degrades to a miss, so a
+/// `NodeCacheHit` never appears without the files it promised. A node that has
+/// already finished once in this run (a loop re-execution) skips the lookup so
+/// each pass runs the node again; the store side is unaffected.
+///
+/// The returned `events` are the caller's to append, in order, before anything
+/// else it writes for this node. Every failure here degrades to a miss, never a
+/// run error.
+pub(crate) fn probe(
+    playbook: &Playbook,
+    node_id: &str,
+    run_dir: &Path,
+    workdir: &Path,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+) -> Result<CacheProbe, EngineError> {
+    // Agent-task key parts come from the run's own immutable manifest snapshot
+    // (bundle digest + primary agent/model + the node's connector digests). A
+    // script node leaves all of these empty.
+    let mut rendered_prompt: Option<String> = None;
+    let mut bundle_digest: Option<String> = None;
+    let mut agent_model: Option<(String, String)> = None;
+    let mut connector_digests: Vec<String> = Vec::new();
+    if let Some(NodeKind::AgentTask { prompt, .. }) = playbook.node(node_id).map(|n| &n.kind)
+        && let Some((bundle, agent, model, digests)) = agent_key_parts(run_dir, node_id)
+    {
+        rendered_prompt = Some(render_node_prompt(run_dir, run_id, state, cfg, prompt)?);
+        bundle_digest = Some(bundle);
+        agent_model = Some((agent, model));
+        connector_digests = digests;
+    }
+    let ctx = prepare(
+        playbook,
+        node_id,
+        workdir,
+        run_dir,
+        cfg,
+        rendered_prompt.as_deref(),
+        bundle_digest.as_deref(),
+        agent_model.as_ref().map(|(a, m)| (a.as_str(), m.as_str())),
+        connector_digests,
+    );
+    let already_finished = state.nodes.get(node_id).is_some_and(|st| st.is_finished());
+    let entry = match already_finished {
+        true => None,
+        false => ctx.as_ref().and_then(|c| c.lookup(cfg)),
+    };
+    let hit = entry.filter(|entry| {
+        let c = ctx.as_ref().expect("a lookup implies a cache ctx");
+        restore_artifacts(entry, c.store(), run_dir, workdir).is_ok()
+    });
+    match hit {
+        Some(entry) => {
+            let c = ctx.as_ref().expect("a hit implies a cache ctx");
+            Ok(CacheProbe::Hit {
+                artifacts: entry.record.artifacts.clone(),
+                events: vec![EventPayload::NodeCacheHit {
+                    node: node_id.to_string(),
+                    key: c.key.clone(),
+                    source_run: entry.record.provenance.run_id.clone(),
+                }],
+                output: entry.output,
+            })
+        }
+        None => {
+            let events = ctx
+                .as_ref()
+                .map(|c| {
+                    vec![EventPayload::NodeCacheMiss {
+                        node: node_id.to_string(),
+                        key: c.key.clone(),
+                    }]
+                })
+                .unwrap_or_default();
+            Ok(CacheProbe::Miss { ctx, events })
+        }
+    }
+}
+
+/// The post-execution half of the per-node unit: captures the node's declared
+/// output artifacts and decides admission.
+///
+/// Returns the artifacts to record on the node's `NodeFinished` plus the
+/// admission event to journal (`NodeCacheStored` or `NodeCacheRejected`), or
+/// nothing at all for a node with no cache context or an unsuccessful result. A
+/// capture error rejects admission outright rather than storing a record that
+/// references artifacts we could not read; it never fails the run.
+///
+/// [`capture_artifacts`] is deliberately a separate step from `ctx.admit`, so
+/// decoupling capture from the cache entirely (deliverable checking, spec section
+/// 2.6) is a change to this gate rather than to the capture itself.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn settle(
+    ctx: Option<&NodeCacheCtx>,
+    playbook: &Playbook,
+    run_dir: &Path,
+    workdir: &Path,
+    run_id: &str,
+    node_id: &str,
+    status: NodeStatus,
+    output: &str,
+) -> (Vec<ArtifactRef>, Option<EventPayload>) {
+    let Some(ctx) = ctx.filter(|_| status == NodeStatus::Succeeded) else {
+        return (Vec::new(), None);
+    };
+    let Some(node) = playbook.node(node_id) else {
+        return (Vec::new(), None);
+    };
+    // Scan the run log for this node's connector calls (written out of band by
+    // the connector-call subprocess) and verify each against the read_only set
+    // in the run's connector snapshot. A script node makes none.
+    let (calls_ok, had_calls) = verify_connector_calls(run_dir, node_id);
+    match capture_artifacts(node, run_dir, workdir) {
+        Ok(captured) => (
+            captured.iter().map(|(a, _)| a.clone()).collect(),
+            Some(ctx.admit(
+                workdir, run_id, playbook, output, calls_ok, had_calls, &captured,
+            )),
+        ),
+        Err(reason) => (
+            Vec::new(),
+            Some(EventPayload::NodeCacheRejected {
+                node: node_id.to_string(),
+                reason: format!("artifact capture failed: {reason}"),
+            }),
+        ),
+    }
+}
+
 /// Captures a node's declared output artifacts after a successful execution.
 ///
 /// For every glob in `outputs.files` this matches files under `workdir`
