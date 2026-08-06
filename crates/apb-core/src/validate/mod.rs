@@ -1272,8 +1272,8 @@ mod widened_condition_checks_tests {
 defaults: {{ profile: x }}
 nodes:
   - {{ id: s, type: start }}
-  - {{ id: verify, type: agent_task, prompt: hi }}
-  - {{ id: fix, type: agent_task, prompt: hi }}
+  - {{ id: verify, type: agent_task, prompt: hi, expected_duration: 5m }}
+  - {{ id: fix, type: agent_task, prompt: hi, expected_duration: 5m }}
   - {{ id: done, type: finish, outcome: success }}
 edges:
   - {{ from: s, to: verify }}
@@ -1372,7 +1372,7 @@ edges:
 defaults: { profile: x }
 nodes:
   - { id: s, type: start }
-  - { id: a, type: agent_task, prompt: hi }
+  - { id: a, type: agent_task, prompt: hi, expected_duration: 5m }
   - { id: done, type: finish, outcome: success }
 edges:
   - { from: s, to: a }

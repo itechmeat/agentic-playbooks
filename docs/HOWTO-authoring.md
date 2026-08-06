@@ -375,6 +375,16 @@ edges:
   - { from: verify, to: done, condition: { type: output_field, node: verify, field: verdict, equals: ok } }
 ```
 
+Two rules guard conditional edges. On a `condition` node they are hard errors:
+**V09** if `node_status` branches cover only one of success and failure with no
+`fallback` edge, and **V10** if a condition references a node that cannot
+execute before the owner (an unknown node, or one that only runs after it). The
+same two mistakes are possible on conditional edges hung off any other node
+kind, for example an `output_field` route off an `agent_task`, and there they
+are reported as warnings **V39** and **V40** with the same meaning. Warnings do
+not block a save or a run, so an existing playbook keeps working, but they are
+pointing at a route that can never be taken.
+
 An edge with no `condition` always matches. Two edges from the same node with
 structurally identical conditions (or two fallbacks) and different targets are
 a V34 validation error: first-match routing would only ever take one of them,
