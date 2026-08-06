@@ -683,6 +683,18 @@ fn drive_inner(
                 // stop` reports the failing node's own words as the run's
                 // failure reason.
                 let mut batch_results: Vec<(String, NodeStatus, String)> = Vec::new();
+                // Every member's own pre-execution fingerprint, taken against
+                // the tree as it stands before the FIRST chunk runs. Without
+                // this a member's cache key silently depends on `max_parallel`,
+                // because a later chunk fingerprints a tree earlier chunks have
+                // already written into. The eligibility gate keeps this cheap:
+                // a playbook without `cache: auto` computes nothing.
+                let pre_fps: BTreeMap<String, String> = batch
+                    .iter()
+                    .filter_map(|n| {
+                        cache::pre_fingerprint(&playbook, n, &workdir, cfg).map(|f| (n.clone(), f))
+                    })
+                    .collect();
                 // Admission in deterministic batch order, at most `max_parallel`
                 // members in flight at a time. `batch` is NEVER narrowed to the
                 // chunk in hand: every join-liveness question below
@@ -750,8 +762,19 @@ fn drive_inner(
                             node: n.clone(),
                             attempt: 1,
                         })?;
-                        let probe =
-                            cache::probe(&playbook, n, run_dir, &workdir, &run_id, &state, cfg)?;
+                        let probe = cache::probe(
+                            &playbook,
+                            n,
+                            run_dir,
+                            &workdir,
+                            &run_id,
+                            &state,
+                            cfg,
+                            cache::ProbeContext {
+                                pre_fingerprint: pre_fps.get(n.as_str()).map(String::as_str),
+                                batch_member: true,
+                            },
+                        )?;
                         let (events, hit) = match probe {
                             cache::CacheProbe::Hit {
                                 output,
@@ -1658,26 +1681,34 @@ fn drive_inner(
             // non-cacheable node, in which case this collapses to the plain
             // execute path. On a hit we skip execution entirely; on a miss we
             // execute and then let `settle` decide whether the result is stored.
-            let (cache_ctx, hit) =
-                match cache::probe(&playbook, &current, run_dir, &workdir, &run_id, &state, cfg)? {
-                    cache::CacheProbe::Hit {
-                        output,
-                        artifacts,
-                        events,
-                    } => {
-                        for ev in events {
-                            log.append(ev)?;
-                        }
-                        node_artifacts = artifacts;
-                        (None, Some((NodeStatus::Succeeded, output)))
+            let (cache_ctx, hit) = match cache::probe(
+                &playbook,
+                &current,
+                run_dir,
+                &workdir,
+                &run_id,
+                &state,
+                cfg,
+                cache::ProbeContext::default(),
+            )? {
+                cache::CacheProbe::Hit {
+                    output,
+                    artifacts,
+                    events,
+                } => {
+                    for ev in events {
+                        log.append(ev)?;
                     }
-                    cache::CacheProbe::Miss { ctx, events } => {
-                        for ev in events {
-                            log.append(ev)?;
-                        }
-                        (ctx, None)
+                    node_artifacts = artifacts;
+                    (None, Some((NodeStatus::Succeeded, output)))
+                }
+                cache::CacheProbe::Miss { ctx, events } => {
+                    for ev in events {
+                        log.append(ev)?;
                     }
-                };
+                    (ctx, None)
+                }
+            };
             if let Some(hit) = hit {
                 hit
             } else {

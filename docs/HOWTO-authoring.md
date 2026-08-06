@@ -511,6 +511,15 @@ at the batch tail. A `join: any` satisfied by an earlier group cancels the
 branches still waiting for a slot, and those are journaled cancelled like any
 other cancelled branch.
 
+One consequence for `cache: auto` nodes: a node executed as a batch member
+usually fails cache admission, because batch siblings share one workspace and
+any sibling write changes the post-execution fingerprint. Caching pays off on the
+sequential path and on re-runs, not within a wave. The rejection is journaled
+with its own reason, `workspace shared with concurrent batch siblings`, so it can
+be told apart from a node that really did dirty the tree. Every member's cache
+key is taken against the tree as it stood before the wave started, so the key
+does not change when `max_parallel` does.
+
 ## Unhandled failures (defaults.on_failure)
 
 A playbook that draws a `node_status: failure` edge from every node into one
