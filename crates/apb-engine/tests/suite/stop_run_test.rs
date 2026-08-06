@@ -1,14 +1,23 @@
-//! Task 8: a stop that interrupts in-flight work.
+//! Task 8/9: a stop that interrupts in-flight work, including inside a
+//! concurrent batch.
 //!
-//! Four properties, all bounded in wall-clock so a regression fails fast
-//! instead of hanging the suite:
+//! Properties pinned here, all bounded in wall-clock so a regression fails
+//! fast instead of hanging the suite:
 //!   (a) a `stop_run` against a live drive interrupts the agent MID-NODE (the
 //!       drive returns far sooner than the stub agent's own sleep) and the
 //!       journal ends with `RunAborted`;
 //!   (b) a run whose driver is gone is finalized by `stop_run` itself;
 //!   (c) an already terminal run is left completely untouched;
-//!   (d) a stop posted while a CONCURRENT batch is running stops the batch from
-//!       admitting the groups still queued behind it.
+//!   (d) a stop posted while a CONCURRENT batch is running stops the batch
+//!       from admitting the groups still queued behind it, and (Task 9)
+//!       - an abort also kills the members already in flight, not only
+//!         admission;
+//!       - a pause stops admission but writes NOTHING off, since `Cancelled`
+//!         is terminal and the resume still has to run the deferred members;
+//!       - a resume of a paused batch actually runs those deferred members;
+//!       - every cancelled member, killed or queued, gets one journal shape:
+//!         a paired `NodeStarted` and a `NodeFinished` with output
+//!         `"cancelled"`.
 
 use crate::common;
 use std::fs;
@@ -546,21 +555,26 @@ fn a_stop_during_a_batch_does_not_admit_the_queued_chunks() {
     for n in ["c", "d"] {
         // A queued member now gets a paired NodeStarted (the unified cancelled
         // journal shape), so `!NodeStarted` is no longer the honest property.
-        // What actually matters, and still holds, is that it was never
-        // SPAWNED: no `AttemptStarted`, and (checked once for both above via
-        // `chunk2_ran`) its script body never ran.
+        // `c`/`d` are Script nodes, and `NodeKind::Script` never emits
+        // `AttemptStarted` at all (only the agent_task paths do), so asserting
+        // its absence would hold vacuously and prove nothing about whether the
+        // member was actually admitted - `chunk2_ran`'s absence, already
+        // pinned once for both members above, is what proves "never spawned".
+        // What this loop pins instead is the pairing itself: the queued
+        // member's `NodeStarted` is immediately followed - nothing
+        // interleaved - by its own cancelled `NodeFinished`, the exact
+        // adjacency the unified shape promises.
+        let started_at = events
+            .iter()
+            .position(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == n))
+            .unwrap_or_else(|| panic!("queued member {n} has no NodeStarted"));
         assert!(
-            !events.iter().any(
-                |e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == n)
+            matches!(
+                events.get(started_at + 1).map(|e| &e.payload),
+                Some(EventPayload::NodeFinished { node, status, .. }) if node == n && status == "cancelled"
             ),
-            "queued member {n} must never be spawned once the run is cancelled"
-        );
-        assert!(
-            events.iter().any(|e| matches!(
-                &e.payload,
-                EventPayload::NodeFinished { node, status, .. } if node == n && status == "cancelled"
-            )),
-            "queued member {n} must be journaled cancelled, not left pending"
+            "queued member {n}'s NodeStarted must be immediately followed by its own cancelled NodeFinished, got {:?}",
+            events.get(started_at + 1).map(|e| &e.payload)
         );
     }
     assert!(

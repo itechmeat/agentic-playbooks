@@ -751,6 +751,23 @@ fn drive_inner(
                 // member waiting for a slot is still going to run and a join fed
                 // by it must not be judged dead and fired early.
                 for chunk in batch.chunks(max_parallel) {
+                    // `cancel` is snapshotted BEFORE `run_cancel` is tested,
+                    // even though `run_cancel` is checked first below: both
+                    // flags are registered with the same fanout, and
+                    // `fire()` (Task 8) stores `run_cancel` before this
+                    // batch's `cancel` (registration order - `run_cancel` was
+                    // registered at watcher construction, `cancel` only when
+                    // this batch formed). Reading `run_cancel` first would let
+                    // a `fire()` landing between the two reads slip through
+                    // unnoticed: `run_cancel.load()` returns false (fire
+                    // has not stored it yet from this reader's perspective),
+                    // then `cancel.load()` returns true (fire's later store
+                    // already landed) - taking the legacy join:any shape for
+                    // a write-off that was really the abort, and leaving
+                    // `stopped` unset. Snapshotting `cancel` first closes the
+                    // window: `run_cancel`, checked after, still wins below
+                    // whenever it is - or has become - true.
+                    let cancel_now = cancel.load(Ordering::Relaxed);
                     // Admission-time re-check, against BOTH stop signals, kept
                     // as separate cases even though both write a queued member
                     // off as cancelled: `run_cancel` (a run-level Abort) gets
@@ -819,7 +836,7 @@ fn drive_inner(
                     // sibling cancel and `stop_on_unhandled_failure`'s frontier
                     // cancel, both for nodes that never entered a batch at
                     // all) are left alone the same way.
-                    if cancel.load(Ordering::Relaxed) {
+                    if cancel_now {
                         for n in chunk {
                             log.append(EventPayload::NodeFinished {
                                 node: n.clone(),
