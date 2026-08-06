@@ -45,6 +45,50 @@ fn read_missing_control_is_empty() {
     assert!(read_control_after(dir.path(), None).unwrap().is_empty());
 }
 
+// Wire compatibility of the targeted-interrupt change (spec 2026-08-05 section
+// 1.6): `Control::Interrupt.node` is `#[serde(default)]`, so a control.jsonl line
+// written by an older apb - reason only, no `node` key at all - still parses, and
+// parses as the BROADCAST shape whose semantics that line was written under.
+#[test]
+fn a_legacy_interrupt_line_without_a_node_parses_as_broadcast() {
+    let dir = tempfile::tempdir().unwrap();
+    std::fs::write(
+        dir.path().join("control.jsonl"),
+        "{\"seq\":0,\"cmd\":\"interrupt\",\"reason\":\"attempt is wedged\"}\n",
+    )
+    .unwrap();
+
+    let all = read_control_after(dir.path(), None).unwrap();
+    assert_eq!(all.len(), 1, "the legacy line must parse, got: {all:?}");
+    assert!(
+        matches!(
+            &all[0].cmd,
+            Control::Interrupt { reason, node: None } if reason == "attempt is wedged"
+        ),
+        "a legacy interrupt must deserialize with no target, got: {:?}",
+        all[0].cmd
+    );
+}
+
+// The other direction of the same compatibility promise: a targeted interrupt
+// serializes its node under the same flattened `cmd` envelope, so an older reader
+// sees a line it can still parse (it ignores the unknown `node` key).
+#[test]
+fn a_targeted_interrupt_serializes_its_node() {
+    let dir = tempfile::tempdir().unwrap();
+    post_control(
+        dir.path(),
+        Control::Interrupt {
+            reason: "branch is wedged".into(),
+            node: Some("impl".into()),
+        },
+    )
+    .unwrap();
+    let raw = std::fs::read_to_string(dir.path().join("control.jsonl")).unwrap();
+    assert!(raw.contains("\"cmd\":\"interrupt\""), "got {raw}");
+    assert!(raw.contains("\"node\":\"impl\""), "got {raw}");
+}
+
 #[test]
 fn progress_control_serializes_with_cmd_tag() {
     use apb_engine::control::Control;

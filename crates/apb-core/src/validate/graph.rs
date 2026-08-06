@@ -3,17 +3,7 @@
 //! routing rules a set of outgoing edges has to satisfy.
 
 use super::*;
-
-pub(crate) fn adjacency(playbook: &Playbook) -> HashMap<&str, Vec<&str>> {
-    let mut adj: HashMap<&str, Vec<&str>> = HashMap::new();
-    for n in &playbook.nodes {
-        adj.entry(n.id.as_str()).or_default();
-    }
-    for e in &playbook.edges {
-        adj.entry(e.from.as_str()).or_default().push(e.to.as_str());
-    }
-    adj
-}
+use crate::graphutil::{adjacency, reachable_from, sccs};
 
 pub(crate) fn check_unique_ids(playbook: &Playbook, r: &mut ValidationReport) {
     let mut seen = HashSet::new();
@@ -175,22 +165,6 @@ pub(crate) fn check_reachability(playbook: &Playbook, r: &mut ValidationReport) 
     }
 }
 
-pub(crate) fn reachable_from<'a>(
-    adj: &HashMap<&'a str, Vec<&'a str>>,
-    from: &'a str,
-) -> HashSet<&'a str> {
-    let mut seen = HashSet::new();
-    let mut q = VecDeque::from([from]);
-    while let Some(id) = q.pop_front() {
-        if seen.insert(id) {
-            for next in adj.get(id).into_iter().flatten() {
-                q.push_back(next);
-            }
-        }
-    }
-    seen
-}
-
 pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
     let adj = adjacency(playbook);
     for n in &playbook.nodes {
@@ -222,6 +196,9 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
             let referenced = match &e.condition {
                 Some(EdgeCondition::NodeStatus { node, .. }) => Some(node),
                 Some(EdgeCondition::OutputMatch { node, .. }) => Some(node),
+                // Reads one field of the source node's output, so it needs the
+                // same source node to exist and to be able to run first.
+                Some(EdgeCondition::OutputField { node, .. }) => Some(node),
                 _ => None,
             };
             if let Some(dep) = referenced {
@@ -244,85 +221,28 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
 
 pub(crate) fn check_cycles(playbook: &Playbook, r: &mut ValidationReport) {
     // Every cycle must pass through a condition node with max_loops.
-    // It's enough to check the SCCs: a component with a cycle must contain such a node.
-    let ids: Vec<&str> = playbook.nodes.iter().map(|n| n.id.as_str()).collect();
-    let adj = adjacency(playbook);
-    // iterative Tarjan
-    let index_of: HashMap<&str, usize> = ids.iter().enumerate().map(|(i, s)| (*s, i)).collect();
-    let n = ids.len();
-    let mut index = vec![usize::MAX; n];
-    let mut low = vec![0usize; n];
-    let mut on_stack = vec![false; n];
-    let mut stack: Vec<usize> = Vec::new();
-    let mut counter = 0usize;
-    let mut sccs: Vec<Vec<usize>> = Vec::new();
-
-    for root in 0..n {
-        if index[root] != usize::MAX {
-            continue;
-        }
-        let mut call: Vec<(usize, usize)> = vec![(root, 0)];
-        while let Some(&(v, ei)) = call.last() {
-            if ei == 0 {
-                index[v] = counter;
-                low[v] = counter;
-                counter += 1;
-                stack.push(v);
-                on_stack[v] = true;
-            }
-            let neigh: Vec<usize> = adj
-                .get(ids[v])
-                .into_iter()
-                .flatten()
-                .filter_map(|t| index_of.get(t).copied())
-                .collect();
-            if ei < neigh.len() {
-                call.last_mut().expect("frame exists").1 += 1;
-                let w = neigh[ei];
-                if index[w] == usize::MAX {
-                    call.push((w, 0));
-                } else if on_stack[w] {
-                    low[v] = low[v].min(index[w]);
-                }
-            } else {
-                if low[v] == index[v] {
-                    let mut comp = Vec::new();
-                    while let Some(w) = stack.pop() {
-                        on_stack[w] = false;
-                        comp.push(w);
-                        if w == v {
-                            break;
-                        }
-                    }
-                    sccs.push(comp);
-                }
-                call.pop();
-                if let Some(&(parent, _)) = call.last() {
-                    low[parent] = low[parent].min(low[v]);
-                }
-            }
-        }
-    }
-
+    // It's enough to check the SCCs: a component with a cycle must contain such
+    // a node. The components come from the shared `graphutil` pass, the same one
+    // the engine consults to tell an acyclic fan-in from a cycle merge point.
     let self_loop: HashSet<&str> = playbook
         .edges
         .iter()
         .filter(|e| e.from == e.to)
         .map(|e| e.from.as_str())
         .collect();
-    for comp in sccs {
-        let cyclic = comp.len() > 1 || self_loop.contains(ids[comp[0]]);
+    for comp in sccs(playbook) {
+        let cyclic = comp.len() > 1 || self_loop.contains(comp[0].as_str());
         if !cyclic {
             continue;
         }
-        let members: HashSet<&str> = comp.iter().map(|&i| ids[i]).collect();
+        let members: HashSet<&str> = comp.iter().map(String::as_str).collect();
         // A cycle is bounded when it passes through a condition node with
         // max_loops OR contains at least one edge (both endpoints inside the
         // component) carrying max_traversals. Either guard makes the loop
         // terminate, so V11 only fires when neither is present.
-        let has_max_loops = comp.iter().any(|&i| {
+        let has_max_loops = comp.iter().any(|id| {
             matches!(
-                playbook.node(ids[i]).map(|n| &n.kind),
+                playbook.node(id).map(|n| &n.kind),
                 Some(NodeKind::Condition { max_loops: Some(_) })
             )
         });
@@ -332,17 +252,184 @@ pub(crate) fn check_cycles(playbook: &Playbook, r: &mut ValidationReport) {
                 && members.contains(e.to.as_str())
         });
         if !has_max_loops && !has_bounded_edge {
-            let member_list: Vec<&str> = comp.iter().map(|&i| ids[i]).collect();
             r.error(
                 "V11",
-                Some(member_list[0]),
+                Some(&comp[0]),
                 format!(
                     "cycle [{}] must contain an edge with max_traversals or pass through a condition node with max_loops",
-                    member_list.join(", ")
+                    comp.join(", ")
                 ),
             );
         }
     }
+}
+
+/// V36 (error): an `Edge.join` value other than `all` or `any`. The engine
+/// parses the field leniently (anything that is not `any` means `all`, see
+/// `apb_engine::parallel::JoinMode::parse`), so without this rule a typo like
+/// `join: al` silently becomes a wait-for-all barrier. Parsing stays lenient on
+/// purpose: a stored run snapshot with a legacy value must keep loading, so the
+/// value space is guarded at validation time rather than at deserialization.
+///
+/// V37 (warning): the incoming edges of one node disagree on the join mode. The
+/// engine takes the first `join` in file order and ignores the rest
+/// (`apb_engine::parallel::join_mode`), so a mixed fan-in means the author's
+/// intent for the later edges is silently dropped.
+pub(crate) fn check_joins(playbook: &Playbook, r: &mut ValidationReport) {
+    for e in &playbook.edges {
+        if let Some(join) = &e.join
+            && !matches!(join.as_str(), "all" | "any")
+        {
+            r.error(
+                "V36",
+                Some(&e.to),
+                format!(
+                    "edge `{}` -> `{}` has join `{join}`, expected `all` or `any`",
+                    e.from, e.to
+                ),
+            );
+        }
+    }
+    // Declared modes per target node, in file order. Only well-formed values
+    // take part: a value V36 already rejected must not also read as a mix.
+    let mut by_target: HashMap<&str, Vec<&str>> = HashMap::new();
+    for e in &playbook.edges {
+        if let Some(join) = e.join.as_deref()
+            && matches!(join, "all" | "any")
+        {
+            by_target.entry(e.to.as_str()).or_default().push(join);
+        }
+    }
+    // Sorted so the report order is stable regardless of hash iteration order.
+    let mut targets: Vec<(&str, Vec<&str>)> = by_target.into_iter().collect();
+    targets.sort_unstable_by_key(|(id, _)| *id);
+    for (target, modes) in targets {
+        let mut distinct = modes.clone();
+        distinct.sort_unstable();
+        distinct.dedup();
+        if distinct.len() < 2 {
+            continue;
+        }
+        let winner = modes.first().copied().unwrap_or("all");
+        r.warn(
+            "V37",
+            Some(target),
+            format!(
+                "incoming edges of `{target}` mix join modes [{}]; the engine takes the first one in file order (`{winner}`) and ignores the rest",
+                distinct.join(", ")
+            ),
+        );
+    }
+}
+
+/// Whether `node` waits for EVERY incoming branch before it executes, mirroring
+/// `apb_engine::parallel::join_kind` plus `join_mode`: an explicit `join` that is
+/// not `any` is a wait-for-all barrier, and a fan-in with no `join` at all is the
+/// implicit barrier an acyclic fan-in forms. A merge point inside its own cycle
+/// (a back edge among its inputs) keeps first-arrival semantics, so it does not
+/// wait; neither does a `join: any`.
+fn waits_for_all_inputs<'a>(
+    node: &'a str,
+    adj: &HashMap<&'a str, Vec<&'a str>>,
+    incoming: &[&crate::schema::Edge],
+) -> bool {
+    if incoming.len() < 2 {
+        return false;
+    }
+    if let Some(mode) = incoming.iter().find_map(|e| e.join.as_deref()) {
+        // Lenient exactly like the engine: only `any` is first-arrival.
+        return mode != "any";
+    }
+    let downstream = reachable_from(adj, node);
+    incoming
+        .iter()
+        .all(|e| !downstream.contains(e.from.as_str()))
+}
+
+/// For every node, the nodes the graph GUARANTEES have finished before it runs.
+///
+/// A must-analysis over the node graph:
+///
+/// * a node with a single incoming edge inherits its source's set plus the
+///   source itself (a linear chain accumulates);
+/// * a node that waits for every input ([`waits_for_all_inputs`]) takes the
+///   UNION over its inputs, since all of them have to land before it starts;
+/// * any other multi-input node (a `join: any`, or a cycle merge point) takes
+///   the INTERSECTION, since first arrival is enough to start it.
+///
+/// Entry nodes (no incoming edge) start from the empty set, every other node
+/// from the full node set, and the iteration shrinks to a fixed point: the
+/// standard maximal-fixed-point form of a must-analysis over a graph with
+/// cycles. Values only ever shrink, so stopping the iteration early can only
+/// leave an over-approximation, which keeps the rules built on this answer
+/// conservative (a missed warning, never a false one).
+///
+/// Note that the union at a wait-for-all barrier is deliberately optimistic
+/// about conditional routing: after an either-or fork only the taken branch
+/// really ran (the join fires because the other one is dead, see
+/// `apb_engine::parallel::arrival`), yet both count as finished here. That is
+/// what keeps the common either-or merge reading both branches out of V38.
+pub(crate) fn must_have_finished(playbook: &Playbook) -> HashMap<&str, HashSet<&str>> {
+    let ids: Vec<&str> = playbook.nodes.iter().map(|n| n.id.as_str()).collect();
+    let known: HashSet<&str> = ids.iter().copied().collect();
+    let adj = adjacency(playbook);
+    let mut incoming: HashMap<&str, Vec<&crate::schema::Edge>> = HashMap::new();
+    for e in &playbook.edges {
+        incoming.entry(e.to.as_str()).or_default().push(e);
+    }
+    let waits: HashSet<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| {
+            waits_for_all_inputs(id, &adj, incoming.get(id).map(Vec::as_slice).unwrap_or(&[]))
+        })
+        .collect();
+    let mut done: HashMap<&str, HashSet<&str>> = ids
+        .iter()
+        .copied()
+        .map(|id| {
+            let seed = match incoming.get(id).is_some_and(|v| !v.is_empty()) {
+                true => known.clone(),
+                false => HashSet::new(),
+            };
+            (id, seed)
+        })
+        .collect();
+    // Values shrink monotonically, so the fixed point is reached in at most one
+    // pass per node; the cap is a guard, not the termination argument.
+    for _ in 0..ids.len() + 2 {
+        let mut changed = false;
+        for id in &ids {
+            let Some(inc) = incoming.get(id).filter(|v| !v.is_empty()) else {
+                continue;
+            };
+            let union = waits.contains(id);
+            let mut next: Option<HashSet<&str>> = None;
+            for e in inc {
+                let source = e.from.as_str();
+                let mut arrived: HashSet<&str> = done.get(source).cloned().unwrap_or_default();
+                if known.contains(source) {
+                    arrived.insert(source);
+                }
+                next = Some(match next {
+                    None => arrived,
+                    Some(acc) => match union {
+                        true => acc.union(&arrived).copied().collect(),
+                        false => acc.intersection(&arrived).copied().collect(),
+                    },
+                });
+            }
+            let Some(next) = next else { continue };
+            if done.get(id) != Some(&next) {
+                done.insert(id, next);
+                changed = true;
+            }
+        }
+        if !changed {
+            break;
+        }
+    }
+    done
 }
 
 /// V30 (error): a `max_traversals` of 0 on an edge. A bounded edge that can
@@ -403,6 +490,16 @@ pub(crate) fn describe_route_key(key: &RouteKey<'_>) -> String {
         }
         RouteKey::Conditional(EdgeCondition::OutputMatch { node, pattern }) => {
             format!("output_match node=`{node}` pattern=`{pattern}`")
+        }
+        // The field is part of the routing key: two edges reading DIFFERENT
+        // fields of the same node are distinct routes, so only an identical
+        // node/field/value triple is a duplicate.
+        RouteKey::Conditional(EdgeCondition::OutputField {
+            node,
+            field,
+            equals,
+        }) => {
+            format!("output_field node=`{node}` field=`{field}` equals=`{equals}`")
         }
     }
 }

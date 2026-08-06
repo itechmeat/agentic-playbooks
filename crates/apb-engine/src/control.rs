@@ -45,8 +45,17 @@ pub enum Control {
     /// `Abort`'s job) and it never applies a patch itself - it only forces the
     /// attempt boundary to happen. An interrupt with no attempt running is a
     /// no-op, consumed at the next node boundary.
+    ///
+    /// `node` targets ONE node's running attempt (spec 2026-08-05 section 1.6):
+    /// with concurrent branches in flight, only the named node's attempt observes
+    /// it and dies, and its siblings run on untouched. `None` - the historical
+    /// shape, and what an older `control.jsonl` line deserializes to through
+    /// `#[serde(default)]` - keeps the documented BROADCAST semantics: every
+    /// attempt currently running in the run observes the same entry and dies.
     Interrupt {
         reason: String,
+        #[serde(default)]
+        node: Option<String>,
     },
     /// Rebind a node's executor profile to a new one mid-run (issue #45 finding
     /// 5). Posted by a supervisor holding the `rebind` capability once the policy

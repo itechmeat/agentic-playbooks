@@ -88,6 +88,9 @@ mod detached_driver_test;
 mod digest_binding_test;
 #[path = "suite/event_test.rs"]
 mod event_test;
+#[cfg(unix)]
+#[path = "suite/failure_class_test.rs"]
+mod failure_class_test;
 #[path = "suite/failure_reason_test.rs"]
 mod failure_reason_test;
 #[path = "suite/failure_stop_test.rs"]
@@ -129,6 +132,11 @@ mod marker_test;
 mod max_loops_test;
 #[path = "suite/migrate_test.rs"]
 mod migrate_test;
+#[path = "suite/missing_input_test.rs"]
+mod missing_input_test;
+#[cfg(unix)]
+#[path = "suite/output_field_test.rs"]
+mod output_field_test;
 #[path = "suite/overrides_run_test.rs"]
 mod overrides_run_test;
 #[path = "suite/parallel_cancel_test.rs"]
@@ -147,6 +155,9 @@ mod profile_run_test;
 mod progress_api_test;
 #[path = "suite/question_channel_test.rs"]
 mod question_channel_test;
+#[cfg(unix)]
+#[path = "suite/reap_test.rs"]
+mod reap_test;
 #[cfg(unix)]
 #[path = "suite/rebind_test.rs"]
 mod rebind_test;

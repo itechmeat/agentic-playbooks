@@ -140,12 +140,16 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Interrupt the RUNNING attempt of a supervised run: SIGKILL the wedged agent so the attempt is journaled failed and ordinary retry/fallback/patch proceeds at the next attempt boundary. Use after a stall anomaly to break a hang rather than wait it out; unlike supervisor_run_abort it does NOT stop the run. A no-op when no attempt is running. The interrupt terminates every currently running attempt in the run, not a single node; parallel branches recover via their normal retry and fallback paths. Requires the `retry` capability",
+        description = "Interrupt a RUNNING attempt of a supervised run: SIGKILL the wedged agent so the attempt is journaled failed and ordinary retry/fallback/patch proceeds at the next attempt boundary. Use after a stall anomaly to break a hang rather than wait it out; unlike supervisor_run_abort it does NOT stop the run. A no-op when no attempt is running. Pass `node` to interrupt ONLY that node's attempt, which is what a wedged branch of a concurrent fan-out needs: its healthy siblings keep running. With `node` omitted the interrupt terminates every currently running attempt in the run, not a single node; every interrupted branch recovers via its normal retry and fallback paths. Requires the `retry` capability",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn supervisor_interrupt_attempt(
         &self,
-        Parameters(SupervisorInterruptArgs { token, reason }): Parameters<SupervisorInterruptArgs>,
+        Parameters(SupervisorInterruptArgs {
+            token,
+            reason,
+            node,
+        }): Parameters<SupervisorInterruptArgs>,
     ) -> CallToolResult {
         let run_id = match self.resolve_session(&token, "supervisor_interrupt_attempt") {
             Ok(r) => r,
@@ -155,6 +159,7 @@ impl WfMcp {
             &self.root,
             &run_id,
             reason.as_deref(),
+            node.as_deref(),
         ))
     }
 

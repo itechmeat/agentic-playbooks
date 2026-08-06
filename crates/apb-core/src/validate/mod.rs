@@ -24,13 +24,13 @@ use crate::schema::{
 use connectors::check_connectors;
 use graph::{
     check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,
-    check_reachability, check_start_finish, check_unique_ids,
+    check_joins, check_reachability, check_start_finish, check_unique_ids,
 };
 use nodes::{
     check_cache, check_expected_duration, check_finish, check_interactive, check_isolation,
     check_playbook_ref, check_scripts, check_success_check, check_trigger,
 };
-use templates::{check_refs, check_templates};
+use templates::{check_cross_branch_reads, check_refs, check_templates};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -131,8 +131,10 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10
         check_cycles(playbook, &mut r); // V11
+        check_joins(playbook, &mut r); // V36, V37
         check_scripts(playbook, &mut r); // V12
         check_templates(playbook, &mut r); // V13
+        check_cross_branch_reads(playbook, &mut r); // V38
         check_refs(playbook, ctx, &mut r); // V14, V15
         check_isolation(playbook, &mut r); // V16
         check_trigger(playbook, &mut r); // V17
@@ -524,6 +526,322 @@ edges:
 }
 
 #[cfg(test)]
+mod join_value_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn issues(pb: &Playbook) -> Vec<(&'static str, Severity)> {
+        validate(pb, &ValidationContext::default())
+            .issues
+            .iter()
+            .map(|i| (i.code, i.severity))
+            .collect()
+    }
+
+    fn messages(pb: &Playbook, code: &str) -> Vec<String> {
+        validate(pb, &ValidationContext::default())
+            .issues
+            .iter()
+            .filter(|i| i.code == code)
+            .map(|i| i.message.clone())
+            .collect()
+    }
+
+    /// The classic diamond, with each merge edge's `join` suffix supplied by the
+    /// caller (`", join: all"`, or `""` for a barrier-less fan-in).
+    fn diamond(join_a: &str, join_b: &str) -> Playbook {
+        pb_yaml(&format!(
+            r#"
+nodes:
+  - {{ id: s, type: start }}
+  - {{ id: a, type: prompt, prompt: "a" }}
+  - {{ id: b, type: prompt, prompt: "b" }}
+  - {{ id: j, type: prompt, prompt: "j" }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: s, to: a }}
+  - {{ from: s, to: b }}
+  - {{ from: a, to: j{join_a} }}
+  - {{ from: b, to: j{join_b} }}
+  - {{ from: j, to: done }}"#
+        ))
+    }
+
+    #[test]
+    fn v36_unknown_join_value_is_an_error() {
+        let pb = diamond(", join: al", ", join: all");
+        assert!(
+            issues(&pb).contains(&("V36", Severity::Error)),
+            "expected V36 for `join: al`, got {:?}",
+            issues(&pb)
+        );
+        let msgs = messages(&pb, "V36");
+        assert!(
+            msgs.iter().any(|m| m.contains("al") && m.contains("all")),
+            "V36 must name the bad value and the expected ones, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn valid_join_values_have_no_join_issues() {
+        for pb in [diamond(", join: all", ", join: all"), diamond("", "")] {
+            let c = issues(&pb);
+            assert!(!c.iter().any(|(code, _)| *code == "V36"), "got {c:?}");
+            assert!(!c.iter().any(|(code, _)| *code == "V37"), "got {c:?}");
+        }
+    }
+
+    #[test]
+    fn v37_mixed_join_modes_on_one_node_warn() {
+        let pb = diamond(", join: all", ", join: any");
+        let c = issues(&pb);
+        assert!(
+            c.contains(&("V37", Severity::Warning)),
+            "expected V37 for mixed all/any, got {c:?}"
+        );
+        assert!(
+            !c.iter().any(|(code, _)| *code == "V36"),
+            "valid values must not be V36, got {c:?}"
+        );
+        let msgs = messages(&pb, "V37");
+        assert!(
+            msgs.iter()
+                .any(|m| m.contains("j") && m.contains("all") && m.contains("any")),
+            "V37 must name the node and both modes, got: {msgs:?}"
+        );
+    }
+
+    #[test]
+    fn v37_does_not_fire_across_different_nodes() {
+        // `join: all` into one node and `join: any` into another is not a mix.
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: j1, type: prompt, prompt: "j1" }
+  - { id: j2, type: prompt, prompt: "j2" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: j1, join: all }
+  - { from: b, to: j1, join: all }
+  - { from: a, to: j2, join: any }
+  - { from: b, to: j2, join: any }
+  - { from: j1, to: done }
+  - { from: j2, to: done }"#,
+        );
+        let c = issues(&pb);
+        assert!(!c.iter().any(|(code, _)| *code == "V37"), "got {c:?}");
+    }
+}
+
+#[cfg(test)]
+mod cross_branch_read_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn issues(pb: &Playbook) -> Vec<(&'static str, Severity)> {
+        validate(pb, &ValidationContext::default())
+            .issues
+            .iter()
+            .map(|i| (i.code, i.severity))
+            .collect()
+    }
+
+    fn v38(pb: &Playbook) -> Vec<(Option<String>, String)> {
+        validate(pb, &ValidationContext::default())
+            .issues
+            .iter()
+            .filter(|i| i.code == "V38")
+            .map(|i| (i.node.clone(), i.message.clone()))
+            .collect()
+    }
+
+    fn assert_no_v38(pb: &Playbook) {
+        let found = v38(pb);
+        assert!(found.is_empty(), "expected no V38, got {found:?}");
+    }
+
+    /// Two parallel branches with no barrier between them: `b` reading `a` is a
+    /// race, the two run concurrently.
+    #[test]
+    fn v38_read_of_a_parallel_sibling_warns() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b needs {{nodes.a.output}}" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: j }
+  - { from: b, to: j }
+  - { from: j, to: done }"#,
+        );
+        let found = v38(&pb);
+        assert_eq!(found.len(), 1, "expected exactly one V38, got {found:?}");
+        assert_eq!(found[0].0.as_deref(), Some("b"), "V38 owner is the reader");
+        assert!(
+            found[0].1.contains("nodes.a.output") && found[0].1.contains('b'),
+            "V38 must name the reference and the reader, got: {found:?}"
+        );
+        assert!(
+            issues(&pb).contains(&("V38", Severity::Warning)),
+            "V38 is a warning, not an error"
+        );
+    }
+
+    /// The barrier-less diamond's merge point is an implicit all-join (Task 1),
+    /// so it waits for both branches: reading both is safe.
+    #[test]
+    fn read_at_an_implicit_join_is_clean() {
+        assert_no_v38(&pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: j, type: prompt, prompt: "{{nodes.a.output}} + {{nodes.b.report}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: j }
+  - { from: b, to: j }
+  - { from: j, to: done }"#,
+        ));
+    }
+
+    /// Behind an explicit `join: all` the read is safe even one hop further
+    /// downstream of the barrier.
+    #[test]
+    fn read_behind_an_explicit_join_is_clean() {
+        assert_no_v38(&pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: after, type: prompt, prompt: "{{nodes.a.output}} and {{nodes.b.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: j, join: all }
+  - { from: b, to: j, join: all }
+  - { from: j, to: after }
+  - { from: after, to: done }"#,
+        ));
+    }
+
+    /// `join: any` fires on first arrival, so the other branch may still be
+    /// running when the join node reads it.
+    #[test]
+    fn v38_read_at_an_any_join_warns() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: j, type: prompt, prompt: "{{nodes.a.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: j, join: any }
+  - { from: b, to: j, join: any }
+  - { from: j, to: done }"#,
+        );
+        let found = v38(&pb);
+        assert_eq!(
+            found.len(),
+            1,
+            "expected one V38 at an any-join, got {found:?}"
+        );
+        assert_eq!(found[0].0.as_deref(), Some("j"));
+    }
+
+    /// A linear chain guarantees every upstream node finished.
+    #[test]
+    fn linear_chain_read_is_clean() {
+        assert_no_v38(&pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b saw {{nodes.a.output}}" }
+  - { id: done, type: finish, outcome: success, prompt: "sum of {{nodes.a.output}} and {{nodes.b.output}}" }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: b }
+  - { from: b, to: done }"#,
+        ));
+    }
+
+    /// An either-or conditional fork merging back: the merge legitimately
+    /// references both branches even though only one of them ran.
+    #[test]
+    fn either_or_conditional_merge_reading_both_branches_is_clean() {
+        assert_no_v38(&pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: gate, type: condition }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: m, type: prompt, prompt: "{{nodes.a.output}} or {{nodes.b.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: gate }
+  - { from: gate, to: a, condition: { type: node_status, node: gate, equals: success } }
+  - { from: gate, to: b, condition: { type: node_status, node: gate, equals: failure } }
+  - { from: a, to: m }
+  - { from: b, to: m }
+  - { from: m, to: done }"#,
+        ));
+    }
+
+    /// A loop-carried read (reader and source inside one cycle) keeps
+    /// first-arrival semantics on purpose and is an authoring idiom, not a race.
+    #[test]
+    fn loop_carried_read_is_clean() {
+        assert_no_v38(&pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: work, type: prompt, prompt: "improve on {{nodes.review.output}}" }
+  - { id: review, type: prompt, prompt: "review" }
+  - { id: gate, type: condition, max_loops: 3 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: work }
+  - { from: work, to: review }
+  - { from: review, to: gate }
+  - { from: gate, to: work, condition: { type: node_status, node: gate, equals: failure } }
+  - { from: gate, to: done, condition: { type: node_status, node: gate, equals: success } }"#,
+        ));
+    }
+}
+
+#[cfg(test)]
 mod duplicate_route_tests {
     use super::*;
     use crate::schema::Playbook;
@@ -697,6 +1015,88 @@ edges:
         assert!(
             msgs.iter().any(|m| m.contains("unreachable")),
             "V34 shadowing message must say unreachable, got: {msgs:?}"
+        );
+    }
+}
+
+/// The `output_field` condition variant (spec 2026-08-05 section 2.5): it names
+/// a source node exactly like `node_status` and `output_match` do, so it must be
+/// covered by the same V10 source checks (existence and happens-before) and take
+/// part in V34 first-match duplicate detection.
+#[cfg(test)]
+mod output_field_condition_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn error_codes(pb: &Playbook) -> Vec<&'static str> {
+        validate(pb, &ValidationContext::default())
+            .issues
+            .iter()
+            .filter(|i| i.severity == Severity::Error)
+            .map(|i| i.code)
+            .collect()
+    }
+
+    /// `check` routes on one field of `verify`'s structured output. `SOURCE` is
+    /// the node the two conditions read, `SECOND` the second edge's `equals`.
+    fn graph(source: &str, second: &str) -> Playbook {
+        pb_yaml(&format!(
+            r#"
+defaults: {{ profile: x }}
+nodes:
+  - {{ id: s, type: start }}
+  - {{ id: verify, type: agent_task, prompt: hi }}
+  - {{ id: check, type: condition }}
+  - {{ id: fix, type: agent_task, prompt: hi }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: s, to: verify }}
+  - {{ from: verify, to: check }}
+  - {{ from: check, to: fix, condition: {{ type: output_field, node: {source}, field: verdict, equals: failed }} }}
+  - {{ from: check, to: done, condition: {{ type: output_field, node: {source}, field: verdict, equals: {second} }} }}
+  - {{ from: fix, to: done }}"#
+        ))
+    }
+
+    #[test]
+    fn a_valid_output_field_route_raises_nothing() {
+        let c = error_codes(&graph("verify", "ok"));
+        assert!(c.is_empty(), "expected a clean playbook, got {c:?}");
+    }
+
+    #[test]
+    fn v10_output_field_referencing_an_unknown_node() {
+        let c = error_codes(&graph("nope", "ok"));
+        assert!(
+            c.contains(&"V10"),
+            "an output_field condition on an unknown node must be V10, got {c:?}"
+        );
+    }
+
+    #[test]
+    fn v10_output_field_referencing_a_node_that_cannot_run_first() {
+        // `fix` only runs AFTER `check` routes to it, so its output can never be
+        // available to `check`'s own routing decision.
+        let c = error_codes(&graph("fix", "ok"));
+        assert!(
+            c.contains(&"V10"),
+            "an output_field condition on a downstream node must be V10, got {c:?}"
+        );
+    }
+
+    #[test]
+    fn v34_two_identical_output_field_conditions_to_different_targets() {
+        // Same node, field AND value: first-match takes only the first edge, so
+        // the second target is unreachable.
+        let c = error_codes(&graph("verify", "failed"));
+        assert!(
+            c.contains(&"V34"),
+            "identical output_field routes to different targets must be V34, got {c:?}"
         );
     }
 }

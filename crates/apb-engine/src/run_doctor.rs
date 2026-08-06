@@ -443,6 +443,31 @@ mod tests {
         assert!(!has_failure(&checks));
     }
 
+    /// A join write-off is engine bookkeeping, not a supervisor acting: two of
+    /// them for one join (a resume re-advance, or a loop re-entering an either-or
+    /// fork) must not read as a looping supervisor. This pins the reason it is its
+    /// own event variant rather than a `SupervisorAction`.
+    #[test]
+    fn repeated_join_write_offs_are_not_a_repeated_supervisor_action() {
+        let journal = concat!(
+            r#"{"seq":0,"ts":1000,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":2000,"type":"join_input_dead","node":"m","sources":["b"]}"#,
+            "\n",
+            r#"{"seq":2,"ts":3000,"type":"join_input_dead","node":"m","sources":["b"]}"#,
+            "\n",
+            r#"{"seq":3,"ts":4000,"type":"run_finished","outcome":"succeeded"}"#,
+            "\n",
+        );
+        let (tmp, _) = run_root(journal);
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        assert_eq!(
+            find(&checks, "supervisor actions").status,
+            OK,
+            "an engine write-off must not count as a supervisor action: {checks:?}"
+        );
+    }
+
     #[test]
     fn an_unknown_run_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();

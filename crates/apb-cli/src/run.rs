@@ -437,6 +437,7 @@ pub(crate) fn run_cmd(
         expected_connectors,
         expected_connector_accounts,
         cache,
+        max_parallel: None,
     };
     match run(root, name, version, opts) {
         Ok(res) => {
@@ -603,6 +604,7 @@ pub(crate) fn drive_supervised_child(
         expected_connectors,
         expected_connector_accounts,
         cache: Default::default(),
+        max_parallel: None,
     };
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,

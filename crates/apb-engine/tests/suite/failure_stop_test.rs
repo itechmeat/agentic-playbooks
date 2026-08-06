@@ -406,3 +406,34 @@ fn a_node_policy_does_not_route_the_handler_to_itself() {
         run_error(&events).unwrap_or_else(|| panic!("expected a RunError, got {events:?}"));
     assert!(reason.contains("no outgoing edge"), "got: {reason}");
 }
+
+/// The policy route is journaled as the traversal it is (Task 4, Task 1
+/// handover note 3). Without the event nothing in the log says the run went to
+/// the handler, so a driver that dies right after taking the route rebuilds a
+/// frontier that has forgotten it.
+#[test]
+fn the_policy_route_is_journaled_as_a_traversal() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "routeflow", ROUTE_TO_NODE_PB);
+    let prog = failing_agent(dir.path(), MESSAGE);
+
+    let _env = common::env_lock();
+    unsafe { std::env::set_var("APB_AGENT_CMD", &prog) };
+    let res = run(dir.path(), "routeflow", None, RunOptions::default()).unwrap();
+    unsafe { std::env::remove_var("APB_AGENT_CMD") };
+    drop(_env);
+
+    let events = read_all(&run_dir_of(dir.path(), &res.run_id)).unwrap();
+    let routes: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::EdgeTraversed { from, to, .. } => Some((from.clone(), to.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        routes,
+        vec![("work".to_string(), "aborted".to_string())],
+        "the on_failure route must be journaled exactly once: {events:?}"
+    );
+}

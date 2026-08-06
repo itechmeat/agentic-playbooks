@@ -773,3 +773,254 @@ fn corrupt_artifact_object_degrades_hit_to_miss() {
         FINDINGS
     );
 }
+
+// --- batch parity: cache and artifacts in the concurrent batch -------------
+// (Task 4, spec 2026-08-05 section 1.4)
+//
+// The `a`/`b` fan-out is a two-member concurrent batch (both are `script`
+// nodes, so both are batchable). Only `a` declares `cache: auto` and a declared
+// output. The batch path must look `a` up BEFORE spawning it, take the hit
+// without running the script at all, restore the declared artifact, and record
+// the artifacts on `a`'s `NodeFinished` - all of which the batch path skipped
+// entirely before this task.
+
+const BATCH_PLAYBOOK: &str = r#"
+schema: 1
+id: batchwf
+name: Batch Cache Playbook
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/gen.sh", runner: sh, cache: auto, outputs: { files: ["findings.json"] } }
+  - { id: b, type: script, script: "scripts/side.sh", runner: sh }
+  - { id: m, type: prompt, prompt: "merge" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: m }
+  - { from: b, to: m }
+  - { from: m, to: done }
+"#;
+
+/// The side branch's marker file, counted like `run_count` counts `a`'s.
+fn side_count(root: &Path) -> usize {
+    std::fs::read_to_string(root.join(".apb/marker_b.txt"))
+        .map(|s| s.lines().filter(|l| !l.is_empty()).count())
+        .unwrap_or(0)
+}
+
+fn seed_batch(root: &Path) {
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/work.txt"), "hello\n").unwrap();
+    std::fs::write(root.join(".gitignore"), ".apb/\n").unwrap();
+
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/batchwf/1.0.0");
+    std::fs::create_dir_all(vdir.join("scripts")).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), BATCH_PLAYBOOK).unwrap();
+    common::write_sync(&vdir.join("scripts/gen.sh"), &gen_script());
+    common::write_sync(
+        &vdir.join("scripts/side.sh"),
+        "echo ran >> .apb/marker_b.txt\necho side\n",
+    );
+    std::fs::write(root.join(".apb/playbooks/batchwf/current"), "1.0.0").unwrap();
+
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@t"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "c1"]);
+}
+
+fn run_batch(root: &Path) -> (String, Vec<Event>) {
+    let opts = RunOptions {
+        cache: CacheRunMode::Auto,
+        ..Default::default()
+    };
+    let res = run(root, "batchwf", None, opts).unwrap();
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "batch run should succeed"
+    );
+    let run_dir = root.join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    (res.run_id, events)
+}
+
+/// Journal position of a node's `node_started` / `node_finished`, for the
+/// ordering assertion that proves the two branches really did batch.
+fn pos_started(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .position(|e| matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node))
+        .unwrap_or_else(|| panic!("node `{node}` never started"))
+}
+
+fn pos_finished(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .position(|e| matches!(&e.payload, EventPayload::NodeFinished { node: n, .. } if n == node))
+        .unwrap_or_else(|| panic!("node `{node}` never finished"))
+}
+
+#[test]
+fn batched_member_hits_the_cache_and_is_never_spawned() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_batch(root);
+
+    // Run 1: the two branches batch (b starts before a has finished), and the
+    // cached member misses, stores, and records its declared artifact.
+    let (run1, ev1) = run_batch(root);
+    assert!(
+        pos_started(&ev1, "b") < pos_finished(&ev1, "a"),
+        "the two script branches must run as one concurrent batch"
+    );
+    assert!(has_miss(&ev1, "a"), "run 1 misses");
+    assert!(has_stored(&ev1, "a"), "run 1 stores from the batch path");
+    let arts = node_artifacts(&ev1, "a");
+    assert_eq!(arts.len(), 1, "the batch path captures declared artifacts");
+    assert_eq!(arts[0].path, "findings.json");
+    assert_eq!(arts[0].digest, sha256_hex(FINDINGS.as_bytes()));
+    assert_eq!(run_count(root), 1, "the cached script ran once");
+    assert_eq!(side_count(root), 1, "the side branch ran once");
+
+    // Delete the produced file so only a restore can bring it back.
+    std::fs::remove_file(root.join("findings.json")).unwrap();
+
+    // Run 2: `a` hits inside the batch - its script is never spawned (the
+    // marker file is the load-bearing proof), its artifact is restored, and its
+    // NodeFinished replays the record's artifacts instead of an empty list.
+    let (_run2, ev2) = run_batch(root);
+    assert_eq!(
+        hit_source(&ev2, "a").as_deref(),
+        Some(run1.as_str()),
+        "run 2 must hit inside the batch with run 1 as source"
+    );
+    assert!(!has_miss(&ev2, "a"), "run 2 must not miss");
+    assert_eq!(
+        run_count(root),
+        1,
+        "a batched cache hit must not spawn the node"
+    );
+    assert_eq!(side_count(root), 2, "the uncached side branch runs again");
+    assert_eq!(
+        std::fs::read_to_string(root.join("findings.json")).unwrap(),
+        FINDINGS,
+        "the batch path restores the hit's declared artifact"
+    );
+    assert_eq!(
+        node_artifacts(&ev2, "a"),
+        arts,
+        "the hit's NodeFinished replays the stored artifacts"
+    );
+}
+
+// --- Declared deliverables, with NO cache configuration (spec 2026-08-05
+// section 2.6, issue #74 finding 4) ---
+//
+// Artifact capture used to be reachable only through cache admission, so a node
+// that declared `outputs.files` without `cache: auto` had its declaration
+// silently ignored: nothing was captured and a glob that matched nothing was
+// invisible. Capture is now its own per-node step, and a declaration that
+// matched zero files journals an explicit warning. These runs need no git
+// fixture and no cache mode, which is exactly the point.
+
+const DELIVERABLE_PLAYBOOK: &str = r#"
+schema: 1
+id: delivwf
+name: Deliverable Playbook
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gen, type: script, script: "scripts/gen.sh", runner: sh, outputs: { files: ["report-*.md"] } }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gen }
+  - { from: gen, to: done }
+"#;
+
+fn seed_deliverable(root: &Path, script_body: &str) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/delivwf/1.0.0");
+    std::fs::create_dir_all(vdir.join("scripts")).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), DELIVERABLE_PLAYBOOK).unwrap();
+    common::write_sync(&vdir.join("scripts/gen.sh"), script_body);
+    std::fs::write(root.join(".apb/playbooks/delivwf/current"), "1.0.0").unwrap();
+}
+
+/// Drives the deliverable playbook once with no cache mode at all.
+fn run_deliverable(root: &Path) -> Vec<Event> {
+    let res = run(root, "delivwf", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded, "run should succeed");
+    read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap()
+}
+
+fn missing_deliverables(events: &[Event], node: &str) -> Vec<Vec<String>> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::DeliverableMissing { node: n, globs, .. } if n == node => {
+                Some(globs.clone())
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_declared_deliverable_matching_nothing_journals_a_warning() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    // The script succeeds but writes no file matching the declared glob.
+    seed_deliverable(root, "echo generated\n");
+    let events = run_deliverable(root);
+
+    // Not a failure: the node succeeded and the run succeeded (asserted in the
+    // helper), the drift is merely visible.
+    let warned = missing_deliverables(&events, "gen");
+    assert_eq!(
+        warned.len(),
+        1,
+        "exactly one deliverable warning, got: {warned:?}"
+    );
+    assert_eq!(
+        warned[0],
+        vec!["report-*.md".to_string()],
+        "the warning must name the declared globs"
+    );
+    assert!(
+        node_artifacts(&events, "gen").is_empty(),
+        "nothing matched, so nothing is recorded"
+    );
+}
+
+#[test]
+fn a_declared_deliverable_is_captured_without_any_cache_config() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_deliverable(root, "printf 'findings\\n' > report-1.md\necho generated\n");
+    let events = run_deliverable(root);
+
+    let arts = node_artifacts(&events, "gen");
+    assert_eq!(
+        arts.len(),
+        1,
+        "the declared deliverable must be captured, got: {arts:?}"
+    );
+    assert_eq!(arts[0].name, "report-1.md");
+    assert_eq!(arts[0].path, "report-1.md");
+    assert_eq!(arts[0].scope, ArtifactScope::Workspace);
+    assert_eq!(arts[0].digest, sha256_hex(b"findings\n"));
+    assert!(
+        missing_deliverables(&events, "gen").is_empty(),
+        "a matched declaration must not warn"
+    );
+    // No cache configuration was involved: capture is decoupled from admission.
+    assert!(
+        !has_stored(&events, "gen") && !has_miss(&events, "gen"),
+        "capture must not imply any cache activity"
+    );
+}

@@ -37,13 +37,48 @@ pub(crate) const STATUS_FILE_NOTE: &str = concat!(
     "before your turn ends.",
 );
 
-/// The status-file prompt note for a node, or an empty string when the node has
-/// no `success_check`.
-pub(crate) fn status_file_note(has_success_check: bool) -> &'static str {
-    if has_success_check {
-        STATUS_FILE_NOTE
-    } else {
-        ""
+/// The sentence appended to [`STATUS_FILE_NOTE`] for a `require_verdict` node:
+/// there the verdict is not optional, and an exit without one is classified as
+/// an interruption (spec 2026-08-05 section 2.2).
+///
+/// The recovery route is deliberately stated as "retry or fallback" rather than
+/// a promised retry: an interrupted attempt consumes a retry on the ordinary
+/// exit shapes, while a deadline kill or a transport failure advances the
+/// fallback chain instead (spec 2.2 addendum).
+pub(crate) const VERDICT_REQUIRED_NOTE: &str = concat!(
+    "This step REQUIRES the verdict: if your process ends without a valid status file, ",
+    "the attempt is recorded as interrupted and the engine recovers by retrying this step ",
+    "or falling back to another executor, so write the file before your turn ends even when ",
+    "the result is a failure.",
+);
+
+/// The note handed to a fresh attempt after a previous one ended without
+/// recording a verdict (spec 2026-08-05 section 2.2, issue #71 items 3 and 5):
+/// work may be partly done already, so the new attempt is pointed at the places
+/// to look before redoing anything.
+///
+/// The wording hedges on purpose. The note also rides attempts on the NEXT
+/// executor of the fallback chain, where the previous attempt may have produced
+/// nothing at all (a transport failure can end an attempt that never really
+/// started), so it must not assert that work exists.
+pub(crate) const INTERRUPTION_NOTE: &str = concat!(
+    "Interruption note: a previous attempt at this step ended without recording a verdict, ",
+    "so it was probably cut off mid-work. Part of the work may already be done, or none of it. ",
+    "Check for work already done - commits, branches, worktrees, written files, running ",
+    "background jobs - before redoing any of it, then continue from there and record your ",
+    "final verdict in the status file.",
+);
+
+/// The status-file prompt note for a node, empty when the node is told nothing
+/// about the file. A `success_check` node has been told the contract since the
+/// file was introduced; a `require_verdict` node is told the stronger form (the
+/// verdict is mandatory, [`VERDICT_REQUIRED_NOTE`]). A plain node keeps the
+/// historical report-only contract.
+pub(crate) fn status_file_note(has_success_check: bool, require_verdict: bool) -> String {
+    match (require_verdict, has_success_check) {
+        (true, _) => format!("{STATUS_FILE_NOTE} {VERDICT_REQUIRED_NOTE}"),
+        (false, true) => STATUS_FILE_NOTE.to_string(),
+        (false, false) => String::new(),
     }
 }
 
@@ -150,8 +185,60 @@ mod tests {
 
     #[test]
     fn note_gated_on_success_check() {
-        assert!(status_file_note(true).contains("APB_STATUS_FILE"));
-        assert_eq!(status_file_note(false), "");
+        assert!(status_file_note(true, false).contains("APB_STATUS_FILE"));
+        assert_eq!(status_file_note(false, false), "");
+    }
+
+    // Spec 2026-08-05 section 2.2: `require_verdict` alone (no success_check)
+    // must still deliver the contract, and in its stronger form.
+    #[test]
+    fn require_verdict_delivers_the_stronger_note_without_a_success_check() {
+        let note = status_file_note(false, true);
+        assert!(note.contains("APB_STATUS_FILE"), "got: {note}");
+        assert!(note.contains("REQUIRES the verdict"), "got: {note}");
+        // M2 of the Task 5 review: the note must not promise a same-executor
+        // retry for every shape - a Timeout or Transport kill is recovered by
+        // advancing the fallback chain instead (spec 2.2 addendum).
+        assert!(
+            note.contains("recorded as interrupted"),
+            "the note must state the consequence of ending without a verdict: {note}"
+        );
+        assert!(
+            !note.contains("interrupted and retried"),
+            "the note must not promise a retry for every shape: {note}"
+        );
+        assert!(
+            note.contains("retrying this step or falling back"),
+            "the note must name both recovery routes: {note}"
+        );
+        // The stronger note is additive: the base contract is still in there.
+        assert!(note.starts_with(STATUS_FILE_NOTE), "got: {note}");
+        // A success_check does not change what a require_verdict node is told.
+        assert_eq!(note, status_file_note(true, true));
+    }
+
+    // The fresh attempt after an interruption is told to look for existing work
+    // before redoing it (issue #71 items 3 and 5).
+    #[test]
+    fn interruption_note_points_at_work_already_done() {
+        let note = INTERRUPTION_NOTE;
+        assert!(note.contains("cut off mid-work"), "got: {note}");
+        assert!(
+            note.contains("commits") && note.contains("worktrees") && note.contains("files"),
+            "the note must name the places to check for existing work: {note}"
+        );
+        // M6 of the Task 5 review: the note also rides attempts on the NEXT
+        // executor of the chain, where the previous attempt may never have
+        // produced anything. It must therefore hedge rather than assert that
+        // work was done.
+        assert!(
+            note.contains("may already be done, or none of it"),
+            "the note must not assert that work exists: {note}"
+        );
+        assert!(
+            !note.contains("was cut off mid-work before it recorded"),
+            "the old unconditional wording must be gone: {note}"
+        );
     }
 
     // Issue #70 item 2: the contract text must make explicit that only the FINAL

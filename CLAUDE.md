@@ -26,13 +26,16 @@ code-ranker, see below).
   (`profile.rs` types incl. `ProfileError`, `profile_store.rs` scope resolution
   and bundle trust, `skills.rs`), registry and versioning, schema 1->2 migrator
   (`schema_migrate.rs`), free agent detection (`detect.rs`), curated models table
-  (`models_table.rs` + `assets/models.yaml`), content/bundle digests
+  (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
+  shared by the validator and the engine (`graphutil.rs`), content/bundle digests
   (`content.rs`), trust store (`trust.rs`), atomic state IO, symlinks and dir
   locks (`fsutil.rs`), the single wall-clock source (`clock.rs`).
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
-  `scheduler/` (`entry` start and handoff, `control_apply` the control scan,
-  `supervisor` heartbeat and wake park, `node` execution, `journal` event-log
-  folds, `resume`, `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`),
+  `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
+  the control scan, `supervisor` heartbeat and wake park, `node` execution,
+  `journal` event-log folds, `status_file` the attempt verdict contract, `resume`,
+  `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`), attempt failure
+  classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`), the append-only event log
   (`event.rs`), connector execution (`connector/`, with `call/` split into
@@ -69,7 +72,13 @@ code-ranker, see below).
   through profiles. `apb migrate` converts legacy schema 1 playbooks.
 - The supervisor is an optional agent that watches a run and intervenes via the
   `supervisor_*` MCP tools; its binding exists in the manifest only when the run
-  is actually externally supervised.
+  is actually externally supervised. `supervisor_interrupt_attempt` takes an
+  optional `node`: targeted at one attempt, or a whole-run broadcast when omitted.
+- Fan-in is a **join**: an explicit `join: all|any` on an incoming edge, or an
+  implicit wait-for-all when an acyclic fan-in carries no `join` at all (a fan-in
+  inside its own cycle stays first-arrival, else loops deadlock). An unreachable
+  source counts as satisfied. Concurrency is capped by `max_parallel`
+  (`defaults.max_parallel`, then the run config, then the engine default 4).
 
 ## Commands
 

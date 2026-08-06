@@ -251,6 +251,88 @@ pub(crate) enum WakeOutcome {
     Terminal(RunStatus),
 }
 
+/// What presenting a completed batch's failures to the supervisor decided.
+pub(crate) enum BatchWake {
+    /// No member failed: the batch tail proceeds normally.
+    NoFailures,
+    /// The run ends here with this outcome.
+    Terminal(RunStatus),
+    /// The supervisor named what runs next. `next` becomes `current`; `also`
+    /// carries the further directives (one per additional failed member) for the
+    /// frontier, and is empty whenever exactly one member failed - there is
+    /// always at least `next`.
+    Resumed { next: String, also: Vec<String> },
+}
+
+/// Raises one wake per failed batch member, in batch order, and blocks on each
+/// until the supervisor answers: the batch counterpart of
+/// [`park_for_supervisor`].
+///
+/// Sequential, and only after the whole batch finished, for two reasons. The
+/// drive loop owns the run between batches (a park rewrites `current`, the
+/// frontier and even the playbook), and `pending_question`/`pending_review`/
+/// `pending_supervisor` are singular for the whole run, so at most one wake may
+/// be outstanding at a time. Per-branch live parking - a supervisor intervening
+/// in branch A while branch B keeps running - is deliberately out of scope (spec
+/// 2026-08-05 section 1.3); the deterministic batch order is what replaces it.
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn park_for_batch_failures(
+    root: &Path,
+    run_dir: &Path,
+    log: &mut EventLog,
+    cfg: &RunConfig,
+    playbook: &mut Playbook,
+    control_cursor: &mut Option<u64>,
+    prompt_overrides: &mut BTreeMap<String, String>,
+    frontier: &mut Vec<String>,
+    last_applied_patch: &mut Option<AppliedPatch>,
+    failed: &[(String, NodeStatus, String)],
+) -> Result<BatchWake, EngineError> {
+    let mut targets: Vec<String> = Vec::new();
+    for (node, status, output) in failed {
+        // An earlier park in this same batch may have applied a patch that
+        // dropped this node; there is nothing left to intervene on, and raising a
+        // wake for a node the playbook no longer has would only confuse the
+        // supervisor.
+        if playbook.node(node).is_none() {
+            continue;
+        }
+        // `park_for_supervisor` takes the parked node by `&mut` because a
+        // directive renames it (Retry/ContinueFrom); the batch keeps its own copy
+        // per member instead of moving the loop's `current` around.
+        let mut parked = node.clone();
+        match park_for_supervisor(
+            root,
+            run_dir,
+            log,
+            cfg,
+            playbook,
+            &mut parked,
+            control_cursor,
+            prompt_overrides,
+            frontier,
+            last_applied_patch,
+            *status,
+            output,
+        )? {
+            WakeOutcome::Terminal(outcome) => return Ok(BatchWake::Terminal(outcome)),
+            WakeOutcome::Resumed => {
+                if !targets.contains(&parked) {
+                    targets.push(parked);
+                }
+            }
+        }
+    }
+    let mut it = targets.into_iter();
+    match it.next() {
+        Some(next) => Ok(BatchWake::Resumed {
+            next,
+            also: it.collect(),
+        }),
+        None => Ok(BatchWake::NoFailures),
+    }
+}
+
 /// Raises a wake for a failed or timed-out node and blocks until the
 /// supervisor answers, applying whatever it sends.
 ///

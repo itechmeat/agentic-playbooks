@@ -220,6 +220,30 @@ pub(crate) fn last_attempt_session(events: &[Event], node: &str) -> Option<Strin
         .flatten()
 }
 
+/// Whether `node`'s MOST RECENT finished attempt was journaled `interrupted`
+/// (spec 2026-08-05 section 2.2 composed with 2.4), i.e. ended without recording
+/// a required verdict.
+///
+/// Exists because the in-attempt flag that delivers the interruption note lives
+/// in ONE `execute_node` call: an attempt closed as interrupted by a DIFFERENT
+/// execution - the drive-entry reaper after a driver death, a supervisor retry, a
+/// `--from-node` re-run - is invisible to it. The journal is the only thing those
+/// paths share, so the note is seeded from this fold instead. Keyed on the LATEST
+/// attempt, exactly like [`last_attempt_session`]: a later attempt that finished
+/// some other way has already recovered, and a note about it would be stale.
+pub(crate) fn last_attempt_interrupted(events: &[Event], node: &str) -> bool {
+    events
+        .iter()
+        .rev()
+        .find_map(|e| match &e.payload {
+            EventPayload::AttemptFinished {
+                node: n, status, ..
+            } if n == node => Some(status.as_str() == NodeStatus::Interrupted.as_str()),
+            _ => None,
+        })
+        .unwrap_or(false)
+}
+
 /// The primary executor's `(agent_id, interaction)` for a node, read from the
 /// run's immutable manifest snapshot (spec 2026-07-20, Task 7). `None` when the
 /// run has no manifest or the node has no bound profile chain - the caller then
@@ -281,4 +305,57 @@ pub(crate) fn questions_answered_before_seq(events: &[Event], node: &str, seq: u
                 && matches!(&e.payload, EventPayload::QuestionAnswered { node: n, .. } if n == node)
         })
         .count()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn finished(seq: u64, node: &str, status: &str) -> Event {
+        Event {
+            seq,
+            ts: 1_000 + seq as u128,
+            payload: EventPayload::AttemptFinished {
+                node: node.into(),
+                attempt: 1,
+                status: status.into(),
+                duration_ms: None,
+                session: None,
+                summary: None,
+                rejected_output: None,
+                partial_output: None,
+                failure_kind: None,
+            },
+        }
+    }
+
+    #[test]
+    fn a_node_with_no_finished_attempt_is_not_interrupted() {
+        assert!(!last_attempt_interrupted(&[], "work"));
+        assert!(!last_attempt_interrupted(
+            &[finished(0, "other", "interrupted")],
+            "work"
+        ));
+    }
+
+    #[test]
+    fn the_latest_interrupted_attempt_is_reported() {
+        let events = vec![
+            finished(0, "work", "failed"),
+            finished(1, "work", "interrupted"),
+        ];
+        assert!(last_attempt_interrupted(&events, "work"));
+    }
+
+    /// Keyed on the LATEST attempt, not on any interrupted one in history: a node
+    /// that went on to finish some other way has already recovered, and a note
+    /// about the older interruption would be stale.
+    #[test]
+    fn an_interruption_followed_by_another_outcome_is_not_reported() {
+        let events = vec![
+            finished(0, "work", "interrupted"),
+            finished(1, "work", "succeeded"),
+        ];
+        assert!(!last_attempt_interrupted(&events, "work"));
+    }
 }

@@ -40,6 +40,7 @@ function edgeLabel(e: PlaybookEdgeModel): string | undefined {
   if (c.type === 'node_status') return `${c.node}: ${c.equals}`
   if (c.type === 'review_status') return `review: ${c.equals}`
   if (c.type === 'output_match') return `match: ${c.pattern}`
+  if (c.type === 'output_field') return `${c.field}: ${c.equals}`
   return c.type
 }
 
@@ -131,6 +132,21 @@ function exitCaption(
       tone: 'default',
     }
   }
+  if (c.type === 'output_field') {
+    const own = c.node === nodeId
+    const field = String(c.field)
+    const equals = String(c.equals)
+    // Sibling exits normally read the SAME field and differ only in the value,
+    // so the value has to survive truncation; the field name leads because it
+    // is what says which verdict is being routed on.
+    return {
+      label: `${field}: ${equals}`,
+      title: own
+        ? `taken when this node's output is a JSON object whose "${field}" equals "${equals}", goes to ${e.to}`
+        : `taken when node ${c.node}'s output is a JSON object whose "${field}" equals "${equals}", goes to ${e.to}`,
+      tone: 'default',
+    }
+  }
   return { label: String(c.type), title: `${c.type}, goes to ${e.to}`, tone: 'default' }
 }
 
@@ -187,8 +203,8 @@ export type FailureEffect = { kind: 'stop' } | { kind: 'route'; node: string }
  * Deliberately conservative: only an edge conditioned on THIS node succeeding
  * is known to be unable to carry its failure. An unconditional edge is taken
  * whatever the status, a `fallback` edge exists to catch exactly this, an
- * `output_match` may still match a failed node's output, and a condition on
- * another node's status says nothing about this one. Anything the frontend
+ * `output_match` or `output_field` may still match a failed node's output, and
+ * a condition on another node's status says nothing about this one. Anything the frontend
  * cannot decide statically stays unmarked, so the marker never claims more
  * than it knows.
  *

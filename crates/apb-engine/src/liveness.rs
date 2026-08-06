@@ -547,19 +547,38 @@ fn clamp_ms(ms: u128) -> u64 {
 /// Deliberately not a `NodeStatus` variant: the fold is pure and replayable
 /// from the journal alone, while this verdict depends on the machine's process
 /// table at read time and would not survive a replay.
+///
+/// The reaper is how that verdict becomes replayable when it matters: a drive
+/// starting over a run dir writes the process-table judgment into the journal
+/// once, as an `attempt_finished { status: "interrupted" }`, and from then on
+/// every reader folds the same fact without probing anything (spec 2026-08-05
+/// section 2.4). `lost` remains what a run that nobody is driving reports.
 pub const LOST: &str = "lost";
 
-/// Nodes whose journaled attempt pid is dead while the node has not reported a
-/// verdict: work that no process is doing any more, however the journal reads.
+/// Every open attempt whose process is provably gone while its node has not
+/// reported a verdict: the work no process is doing any more, however the
+/// journal reads.
 ///
-/// This is what the production incident needed and did not have. An attempt
-/// that crashes without writing `attempt_finished` leaves the node reading as
-/// in-flight forever, and the only way to tell that apart from a long-running
-/// agent was `ps` and transcript forensics.
+/// This is the ONE rule behind two answers. [`lost_nodes`] reports it (which
+/// nodes are lost), and the drive's entry reaper acts on it (which attempts to
+/// journal closed as interrupted, spec 2026-08-05 section 2.4), which needs the
+/// attempt NUMBER as well as the node. Two copies of the predicate would be two
+/// places for the module's bias to drift, and the reaper is the consumer that
+/// writes to the journal - the one that must never be more eager than the
+/// reporter.
 ///
-/// An attempt with no journaled pid is never reported lost: unknown is not
-/// dead. Neither is one whose pid the probe cannot resolve.
-pub fn lost_nodes(events: &[Event]) -> BTreeSet<String> {
+/// The three ways an attempt escapes this set, in the module's bias order:
+///
+///   * its node already reported a verdict - a finished node is not lost or
+///     reapable whatever its old pids are doing;
+///   * it carries NO pid (`pid: None`) - old journals and paths that do not
+///     journal the spawn, where death is simply unknowable, and unknown is not
+///     dead;
+///   * its pid reads live, including every "the probe could not tell us"
+///     answer (see [`pid_is_live`]). A live agent pid also means another driver
+///     may still own this run, so the reaper must leave it alone and let the
+///     workdir lock and the driver claim decide ownership.
+pub fn dead_open_attempts(events: &[Event]) -> Vec<OpenAttempt> {
     let state = RunState::fold(events);
     open_attempts(events)
         .into_iter()
@@ -574,6 +593,23 @@ pub fn lost_nodes(events: &[Event]) -> BTreeSet<String> {
                 .is_finished()
         })
         .filter(|a| a.pid.is_some_and(|pid| !pid_is_live(pid)))
+        .collect()
+}
+
+/// Nodes whose journaled attempt pid is dead while the node has not reported a
+/// verdict: work that no process is doing any more, however the journal reads.
+///
+/// This is what the production incident needed and did not have. An attempt
+/// that crashes without writing `attempt_finished` leaves the node reading as
+/// in-flight forever, and the only way to tell that apart from a long-running
+/// agent was `ps` and transcript forensics.
+///
+/// An attempt with no journaled pid is never reported lost: unknown is not
+/// dead. Neither is one whose pid the probe cannot resolve. See
+/// [`dead_open_attempts`] for the full rule.
+pub fn lost_nodes(events: &[Event]) -> BTreeSet<String> {
+    dead_open_attempts(events)
+        .into_iter()
         .map(|a| a.node)
         .collect()
 }
@@ -906,6 +942,8 @@ mod tests {
                     session: None,
                     summary: None,
                     rejected_output: None,
+                    partial_output: None,
+                    failure_kind: None,
                 },
             ),
         ];
@@ -1019,6 +1057,65 @@ mod tests {
         assert!(lost_nodes(&events).is_empty());
     }
 
+    /// A pid that was genuinely valid and is now free: spawn, wait, reap, and
+    /// use that number (`docs/TESTING-GUIDELINES.md`). The impossible values
+    /// used by the tests above exercise the range rejection instead, which is a
+    /// different code path in both `kill(2)` and `ps`.
+    fn reaped_child_pid() -> u32 {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn a throwaway child to borrow a pid from");
+        let pid = child.id();
+        // Bounded by construction: `exit 0` cannot fail to exit.
+        child.wait().expect("reap the throwaway child");
+        pid
+    }
+
+    /// The reap decision, on the three boundaries that matter (spec 2026-08-05
+    /// section 2.4). Only a plausible-but-absent pid is reapable; the two
+    /// unprovable cases are left alone, and the reapable answer carries the
+    /// attempt NUMBER the reaper needs to close it.
+    #[test]
+    fn only_a_provably_dead_attempt_is_reapable() {
+        let started = |node: &str, pid: Option<u32>| {
+            vec![
+                ev(
+                    0,
+                    1_000,
+                    EventPayload::NodeStarted {
+                        node: node.into(),
+                        attempt: 3,
+                    },
+                ),
+                ev(1, 2_000, attempt_started(node, 3, pid)),
+            ]
+        };
+
+        // Dead pid: reapable, with the attempt number carried through.
+        let dead = started("a", Some(reaped_child_pid()));
+        let reapable = dead_open_attempts(&dead);
+        assert_eq!(reapable.len(), 1);
+        assert_eq!(reapable[0].node, "a");
+        assert_eq!(reapable[0].attempt, 3);
+
+        // No pid: death cannot be proven, so the attempt stays open.
+        assert!(dead_open_attempts(&started("a", None)).is_empty());
+
+        // A live pid: never reaped - another driver may still own this run.
+        assert!(
+            dead_open_attempts(&started("a", Some(std::process::id()))).is_empty(),
+            "a live attempt pid must never be reaped"
+        );
+
+        // The reporter and the reaper answer the same question.
+        assert_eq!(
+            lost_nodes(&dead).into_iter().collect::<Vec<_>>(),
+            vec!["a".to_string()]
+        );
+    }
+
     #[test]
     fn a_live_attempt_pid_is_never_lost() {
         let events = vec![
@@ -1093,6 +1190,8 @@ mod tests {
                     session: None,
                     summary: None,
                     rejected_output: None,
+                    partial_output: None,
+                    failure_kind: None,
                 },
             ),
             // Fresh retry shares the stall action's millisecond.

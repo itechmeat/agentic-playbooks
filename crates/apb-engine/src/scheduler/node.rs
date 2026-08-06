@@ -3,6 +3,8 @@
 
 use super::*;
 
+use crate::failure_class::{FailureKind, INFRA_RETRY_ACTION};
+
 /// Renders a node's prompt template with the full standard context (compaction
 /// summary + uncompacted tail if drive recorded ContextCompacted, otherwise the
 /// full context), run hooks, params, prior outputs, and reviews. This is the
@@ -119,6 +121,17 @@ fn control_summary(cmd: &crate::control::Control, seq: u64) -> String {
 /// Runs on the drive thread through the shared `Journal`, so the single-writer
 /// invariant holds. Returns the highest seq acknowledged (the new baseline) and
 /// whether an interrupt was requested.
+///
+/// An interrupt naming a DIFFERENT node is invisible here (spec 2026-08-05
+/// section 1.6): the entry is not acknowledged, not journaled, and not consumed,
+/// because this observer runs once per ATTEMPT and every concurrent branch reads
+/// the same channel - acknowledging another branch's interrupt would put an
+/// `attempt_interrupted` for this node in the journal and kill it. Leaving it
+/// unconsumed is also what makes the entry still available to the attempt it
+/// names, and (when that node is not running) to the drive loop's own scan, which
+/// consumes a spent interrupt at the next node boundary. An interrupt with no
+/// `node` keeps the documented BROADCAST semantics byte for byte: every running
+/// attempt observes it and dies.
 fn observe_control(
     run_dir: &Path,
     node_id: &str,
@@ -129,12 +142,19 @@ fn observe_control(
     let mut cursor = seen;
     let mut interrupt = false;
     for entry in crate::control::read_control_after(run_dir, seen)? {
+        if let crate::control::Control::Interrupt {
+            node: Some(target), ..
+        } = &entry.cmd
+            && target != node_id
+        {
+            continue;
+        }
         journal.append(EventPayload::SupervisorAction {
             action: "control_received".into(),
             node: Some(node_id.to_string()),
             detail: control_summary(&entry.cmd, entry.seq),
         })?;
-        if let crate::control::Control::Interrupt { reason } = &entry.cmd {
+        if let crate::control::Control::Interrupt { reason, .. } = &entry.cmd {
             journal.append(EventPayload::SupervisorAction {
                 action: "attempt_interrupted".into(),
                 node: Some(node_id.to_string()),
@@ -148,6 +168,179 @@ fn observe_control(
         cursor = Some(entry.seq);
     }
     Ok((cursor, interrupt))
+}
+
+/// Runs a node's `success_check` against an attempt's effective output and
+/// returns the human-readable rejection reason, or `None` when the report is
+/// accepted (including a node with no check at all).
+///
+/// Shared by the two paths that can produce a successful attempt: the ordinary
+/// report path, and a success verdict recovered from the status file after the
+/// agent process died (spec 2026-08-05 section 2.1). A recovered verdict
+/// therefore does NOT bypass the gate.
+fn success_check_rejection(
+    check: Option<&apb_core::schema::SuccessCheck>,
+    run_dir: &Path,
+    attempt_workdir: &Path,
+    output: &str,
+) -> Result<Option<String>, EngineError> {
+    match check {
+        // Deterministic sh-script check (spec 6.2): a non-zero exit rejects the
+        // report regardless of the agent's self-assessment. Run in the SAME
+        // attempt workdir the agent worked in (for an isolated node its
+        // per-attempt directory, otherwise the shared workdir), otherwise the
+        // check would validate a directory the agent never wrote to.
+        Some(apb_core::schema::SuccessCheck::Script(check)) => {
+            let r = run_script(run_dir, attempt_workdir, check, "sh", None, None)?;
+            Ok((r.status != NodeStatus::Succeeded)
+                .then(|| format!("success_check `{check}` failed")))
+        }
+        // Completion-marker check (issue 45 finding 1): the literal marker must
+        // appear in the node output, else the reported success is rejected. This
+        // defends against a long-running orchestrator that exits early at its
+        // first wait phase and records interim text as success.
+        Some(apb_core::schema::SuccessCheck::Marker { marker })
+            if !output.contains(marker.as_str()) =>
+        {
+            Ok(Some(format!(
+                "success report rejected: completion marker `{marker}` not found in output"
+            )))
+        }
+        Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => Ok(None),
+    }
+}
+
+/// Journals an attempt that ended without recording a REQUIRED verdict as
+/// `interrupted`, preserving whatever it produced (spec 2026-08-05 section 2.2,
+/// issue #71 item 1).
+///
+/// An interrupted attempt is a failure for scheduling: it consumes a retry
+/// exactly like any other, and the node's status still comes from its eventual
+/// `node_finished`. `RunState::fold` reads only the PRESENCE of an
+/// `attempt_finished` (to close the open attempt), never its status label, so
+/// the new label cannot confuse the run state machine.
+///
+/// `failure_kind` is the spec-2.3 classification of the failure detail, or
+/// `None` when nothing was classified (an exit-0 attempt that simply recorded no
+/// verdict has no failure detail to classify).
+///
+/// Shared with the drive-entry reaper (`entry::reap_dead_attempts`, spec
+/// section 2.4): an attempt whose process died with its driver ended without
+/// recording a verdict too, so it earns the same label through the same writer
+/// rather than a second hand-built event.
+pub(super) fn journal_interrupted_attempt(
+    journal: &Journal,
+    node_id: &str,
+    attempt: u32,
+    duration_ms: Option<u64>,
+    session: Option<String>,
+    partial: &str,
+    failure_kind: Option<FailureKind>,
+) -> Result<(), EngineError> {
+    journal.append(EventPayload::AttemptFinished {
+        node: node_id.into(),
+        attempt,
+        status: NodeStatus::Interrupted.as_str().into(),
+        duration_ms,
+        session,
+        summary: None,
+        rejected_output: None,
+        partial_output: (!partial.trim().is_empty()).then(|| partial.to_string()),
+        failure_kind: failure_kind.map(|k| k.as_str().to_string()),
+    })
+}
+
+/// The failure kind an attempt's adapter error is treated as (spec 2026-08-05
+/// section 2.3), i.e. the curated classification of the detail string plus one
+/// structural override.
+///
+/// The override implements the boundary ruling recorded in the section 2.2
+/// addendum: with `require_verdict` in force, an attempt killed on its deadline
+/// or lost to a transport error recorded no verdict, so it is an INFRASTRUCTURE
+/// interruption and earns the same bounded same-executor retry as any other
+/// transient failure. Before this, that shape broke straight to the fallback
+/// chain without ever retrying the executor the author had chosen (and, with no
+/// fallback chain at all, failed the node after a single attempt).
+///
+/// Without `require_verdict` a deadline kill keeps its pre-existing meaning
+/// (advance the chain), so no existing playbook's timeout behavior moves.
+fn effective_failure_kind(detail: &str, class: ErrorClass, require_verdict: bool) -> FailureKind {
+    let kind = crate::failure_class::classify(detail);
+    if kind == FailureKind::Agent
+        && require_verdict
+        && matches!(class, ErrorClass::Timeout | ErrorClass::Transport)
+    {
+        return FailureKind::Transient;
+    }
+    kind
+}
+
+/// The template text a node renders for its own execution, or `None` for a kind
+/// that renders none. Scripts, conditions, waits and reviews have no template;
+/// a finish-with-prompt composes through `execute_finish_answer` and a
+/// sub-playbook instruction through `run_playbook_node`, neither of which passes
+/// through [`execute_node`].
+fn prompt_template(kind: &NodeKind) -> Option<&str> {
+    match kind {
+        NodeKind::AgentTask { prompt, .. } | NodeKind::Prompt { prompt } => Some(prompt.as_str()),
+        _ => None,
+    }
+}
+
+/// Journals a missing-input anomaly for every `nodes.<id>.output|report` a node's
+/// template reads that ACTUALLY renders empty (spec 2026-08-05 section 1.5).
+///
+/// The read still renders as an empty string, byte for byte: an agent-task cache
+/// key is derived from the rendered prompt, so changing the rendering would move
+/// every key, and failing the node would break the either-or merges that
+/// legitimately reference both branches. What was missing was any trace at all -
+/// an agent got a prompt with a hole in it and nothing said so.
+///
+/// The criterion is emptiness of the RENDERED value, not the source's status,
+/// which is what makes the event's claim true by construction. `resolve` reads
+/// `state.outputs` unconditionally and the fold records an output for every
+/// terminal status, so a `defaults.on_failure` handler reading its failed
+/// source - the canonical handler pattern - receives real text and is no anomaly,
+/// while a source that finished with an empty output is one whatever its status
+/// was.
+///
+/// One anomaly per node execution (not per attempt), listing every hole with the
+/// reason it is one, journaled through the same `WakeRaised { Anomaly }`
+/// mechanism as the empty-output anomaly.
+fn journal_missing_inputs(
+    journal: &Journal,
+    run_dir: &Path,
+    node_id: &str,
+    template: &str,
+    state: &RunState,
+) -> Result<(), EngineError> {
+    let missing: Vec<String> = crate::context::node_output_refs(template)
+        .into_iter()
+        .filter_map(|(reference, id)| {
+            let rendered = state.outputs.get(&id);
+            if rendered.is_some_and(|text| !text.is_empty()) {
+                return None;
+            }
+            let why = match (state.nodes.get(&id), rendered.is_some()) {
+                (None, _) => "never ran".to_string(),
+                (Some(st), false) => st.as_str().to_string(),
+                (Some(st), true) => format!("{} with empty output", st.as_str()),
+            };
+            Some(format!("`{reference}` ({why})"))
+        })
+        .collect();
+    if missing.is_empty() {
+        return Ok(());
+    }
+    journal.raise_wake(
+        run_dir,
+        crate::event::WakeTrigger::Anomaly,
+        node_id,
+        format!(
+            "node `{node_id}` reads {}, so the reference renders empty",
+            missing.join(", ")
+        ),
+    )
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -169,6 +362,17 @@ pub(crate) fn execute_node(
     let node = playbook
         .node(node_id)
         .ok_or_else(|| EngineError::NotFound(node_id.into()))?;
+    // Missing-input observability (spec 2026-08-05 section 1.5). Here rather
+    // than in the drive loop because this is the ONE site both arms and the
+    // interactive path share, and it fires once per execution. Skipped when the
+    // node's own template is not what runs: a prompt override replaces it
+    // wholesale, and a resume re-invocation carries only the user's answer.
+    if override_prompt.is_none()
+        && resume.is_none()
+        && let Some(template) = prompt_template(&node.kind)
+    {
+        journal_missing_inputs(journal, run_dir, node_id, template, state)?;
+    }
     let mut events: Vec<EventPayload> = Vec::new();
     match &node.kind {
         NodeKind::Start => Ok(AttemptOutcome::Finished {
@@ -201,6 +405,7 @@ pub(crate) fn execute_node(
             interactive,
             question_timeout_seconds,
             default_answer,
+            require_verdict,
             ..
         } => {
             // Live question-timeout enforcement inputs (spec 2026-07-20, Task 11
@@ -229,15 +434,27 @@ pub(crate) fn execute_node(
             // never reach this arm. Assembled outside the cache-key render in
             // `render_node_prompt`, so note/instruction/frame text (all fixed
             // per run) does not shift the cache key.
-            if resume.is_none() {
-                let events = read_all(run_dir)?;
+            // One journal read serves both the assembly here and the
+            // interruption-note seed below.
+            let journaled: Option<Vec<Event>> = if resume.is_none() {
+                Some(read_all(run_dir)?)
+            } else {
+                None
+            };
+            if let Some(events) = &journaled {
                 text = crate::context::assemble_agent_prompt(
                     &text,
                     cfg.instruction.as_deref(),
-                    &events,
+                    events,
                 );
             }
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
+            // Required verdict (spec 2026-08-05 section 2.2). The node field is a
+            // plain bool, so it can only turn the requirement ON; a playbook-wide
+            // `defaults.require_verdict` turns it on for every agent_task. Same
+            // node-then-defaults direction as `max_retries` above.
+            let require_verdict =
+                *require_verdict || playbook.defaults.require_verdict.unwrap_or(false);
             let timeout = timeout_seconds.map(Duration::from_secs);
             // Stall detection (spec 2026-07-21 run-reliability) fires ONLY for a
             // node whose author set an explicit `expected_duration`, never off
@@ -366,9 +583,12 @@ pub(crate) fn execute_node(
 
             // Status-file contract (subtask S2): a node with a success_check may
             // hand its final verdict as JSON via $APB_STATUS_FILE, which the
-            // engine reads before parsing the textual report. Mentioned only when
-            // a success_check exists; a plain node keeps the report-only contract.
-            let status_note = super::status_file::status_file_note(node.success_check.is_some());
+            // engine reads before parsing the textual report. Mentioned when a
+            // success_check exists, and - in its stronger form - whenever a
+            // verdict is REQUIRED (spec 2026-08-05 section 2.2); a plain node
+            // keeps the report-only contract.
+            let status_note =
+                super::status_file::status_file_note(node.success_check.is_some(), require_verdict);
             if !status_note.is_empty() {
                 text = format!("{text}\n\n{status_note}");
             }
@@ -407,6 +627,32 @@ pub(crate) fn execute_node(
 
             let mut attempt: u32 = 0;
             let mut last_msg = String::new();
+            // Set once an attempt of this node ended without recording a required
+            // verdict (spec 2026-08-05 section 2.2): every later attempt's prompt
+            // then carries the interruption note, so the fresh agent looks for the
+            // work already done instead of blindly redoing it (#71 items 3 and 5).
+            //
+            // SEEDED from the journal, because this flag would otherwise only ever
+            // see interruptions of THIS execution. A node whose attempt was closed
+            // `interrupted` by a different execution - the drive-entry reaper after
+            // a driver death (spec 2.4), a supervisor retry, a `--from-node` re-run
+            // - would start its fresh attempt with no note at all, and the reaped
+            // case is the one where the note matters most: the process died with
+            // its mid-work text, so the journal preserved no partial output either
+            // and the prompt is the only channel left.
+            //
+            // Gated on `require_verdict`: the note closes by telling the agent to
+            // record its final verdict in the status file, which is only truthful
+            // when the status-file contract is in the prompt. A plain node keeps
+            // the report-only contract, so extending the note there needs a text
+            // split, not this flag.
+            let mut was_interrupted = require_verdict
+                && match &journaled {
+                    Some(events) => super::journal::last_attempt_interrupted(events, node_id),
+                    // A resume re-invocation skipped the read above; pay for one
+                    // rather than silently drop the note.
+                    None => super::journal::last_attempt_interrupted(&read_all(run_dir)?, node_id),
+                };
             // The node's final status once all attempts are exhausted: TimedOut if
             // the last attempt was interrupted by a timeout, otherwise Failed.
             let mut last_timed_out = false;
@@ -419,6 +665,18 @@ pub(crate) fn execute_node(
             // likely doomed by the same external cause - e.g. a token lacking
             // permission - not by the agent or model).
             let mut last_tried: Option<(String, String)> = None;
+            // Agents whose attempt failed non-transiently (spec 2026-08-05
+            // section 2.3): an expired credential or an exhausted spend limit is
+            // a property of the AGENT and its account, not of the model or the
+            // prompt, so every later chain step on that agent is doomed the same
+            // way and is skipped without a `fallback_triggered`. This sits
+            // beside the `(agent, model)` sameness guard above rather than
+            // inside it: that guard only collapses an identical binding, and the
+            // gap issue #74 finding 2 describes is exactly a SAME-AGENT,
+            // different-model step being walked into after a spend limit.
+            // A different agent may well have its own working credential and
+            // budget, so cross-agent fallback stays allowed.
+            let mut blocked_agents: BTreeSet<String> = BTreeSet::new();
             // A resume re-invocation runs the primary step only (see above);
             // an ordinary attempt walks the whole fallback chain.
             let step_count = if resume.is_some() { 1 } else { steps.len() };
@@ -427,7 +685,7 @@ pub(crate) fn execute_node(
                     let same_binding = last_tried
                         .as_ref()
                         .is_some_and(|(agent, model)| *agent == step.agent && *model == step.model);
-                    if same_binding {
+                    if same_binding || blocked_agents.contains(&step.agent) {
                         continue;
                     }
                     events.push(EventPayload::FallbackTriggered {
@@ -438,6 +696,16 @@ pub(crate) fn execute_node(
                             .unwrap_or_else(|| steps[idx - 1].agent.clone()),
                         to: step.agent.clone(),
                         profile: profile_key.clone(),
+                        // Both models, so a claude -> claude fallback that only
+                        // changed the model is finally legible in the journal
+                        // (issue #74 finding 2).
+                        from_model: Some(
+                            last_tried
+                                .as_ref()
+                                .map(|(_, model)| model.clone())
+                                .unwrap_or_else(|| steps[idx - 1].model.clone()),
+                        ),
+                        to_model: Some(step.model.clone()),
                     });
                 }
                 last_tried = Some((step.agent.clone(), step.model.clone()));
@@ -486,7 +754,21 @@ pub(crate) fn execute_node(
                 } else {
                     None
                 };
-                for try_i in 0..=retries {
+                // The node's own retry budget is walked by `try_i`; an
+                // INFRASTRUCTURE retry (spec 2026-08-05 section 2.3) does not
+                // advance it, which is why this is a while loop and not
+                // `for try_i in 0..=retries`. `infra_used` counts the separate
+                // infrastructure budget, whose size IS the length of the backoff
+                // schedule (default two: 5 s, then 30 s).
+                let mut try_i: u32 = 0;
+                let mut infra_used: usize = 0;
+                let backoff = crate::failure_class::backoff_schedule();
+                while try_i <= retries {
+                    // Set by the failure handling below when it spent an
+                    // infrastructure retry instead of a node retry: the same
+                    // executor is attempted again after a backoff, and `try_i`
+                    // stays where it is.
+                    let mut infra_retry = false;
                     // Cancellation (this branch lost a join:any) - exit with status
                     // Cancelled, not counting this as a failure.
                     if cancel.load(Ordering::Relaxed) {
@@ -545,8 +827,21 @@ pub(crate) fn execute_node(
                     // file is the normal case) so `read_status_file` after the run
                     // can only ever adopt a file THIS attempt actually wrote.
                     let _ = std::fs::remove_file(&status_file);
+                    // This attempt's prompt: the assembled node prompt, plus the
+                    // interruption note when a previous attempt of this node was
+                    // cut off mid-work. Appended here rather than inside
+                    // `render_node_prompt`, so the recovery note (fixed text) does
+                    // not shift the node's cache key.
+                    let attempt_prompt: std::borrow::Cow<'_, str> = if was_interrupted {
+                        std::borrow::Cow::Owned(format!(
+                            "{text}\n\n{}",
+                            super::status_file::INTERRUPTION_NOTE
+                        ))
+                    } else {
+                        std::borrow::Cow::Borrowed(text.as_str())
+                    };
                     let task = AgentTask {
-                        prompt: &text,
+                        prompt: attempt_prompt.as_ref(),
                         model: &step.model,
                         workdir: &attempt_workdir,
                         timeout,
@@ -768,6 +1063,8 @@ pub(crate) fn execute_node(
                             session: None,
                             summary: None,
                             rejected_output: None,
+                            partial_output: None,
+                            failure_kind: None,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -790,6 +1087,13 @@ pub(crate) fn execute_node(
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
+                    // The attempt's verdict, read ONCE for both branches (spec
+                    // 2026-08-05 section 2.1). The status file is the agent's
+                    // explicit completion signal, so it decides the attempt even
+                    // when the process then exited non-zero, was signalled, or was
+                    // killed on the timeout: that exit is transport-level noise
+                    // once the verdict exists (issue #74 finding 1).
+                    let verdict = super::status_file::read_status_file(&status_file);
                     match outcome {
                         Ok(mut report) => {
                             // Interactive suspension (spec 2026-07-20): the agent
@@ -808,6 +1112,8 @@ pub(crate) fn execute_node(
                                     session: report.session.clone(),
                                     summary: Some(report.summary.clone()),
                                     rejected_output: None,
+                                    partial_output: None,
+                                    failure_kind: None,
                                 })?;
                                 return Ok(AttemptOutcome::Suspended {
                                     question: q.question,
@@ -824,13 +1130,39 @@ pub(crate) fn execute_node(
                             // the effective status/output, so a status-file success
                             // that success_check rejects still consumes a retry and
                             // records rejected_output (S3 behavior preserved).
-                            if let Some(sfr) = super::status_file::read_status_file(&status_file) {
+                            if let Some(sfr) = &verdict {
                                 report.status = sfr.status;
-                                if let Some(out) = sfr.outputs {
-                                    report.output = out;
+                                if let Some(out) = &sfr.outputs {
+                                    report.output = out.clone();
                                 }
                             }
-                            if report.status == NodeStatus::Succeeded {
+                            if require_verdict && verdict.is_none() {
+                                // Required verdict (spec 2026-08-05 section 2.2,
+                                // issue #71 item 1): the process ended normally but
+                                // recorded NO verdict, so whatever it printed is a
+                                // mid-work message rather than a result - which is
+                                // exactly how a cut-off session used to be recorded
+                                // as a success. Classify the attempt interrupted,
+                                // preserve the partial text, consume a retry, and
+                                // tell the next attempt to look for work already
+                                // done.
+                                journal_interrupted_attempt(
+                                    journal,
+                                    node_id,
+                                    attempt,
+                                    duration_ms,
+                                    report.session.clone(),
+                                    &report.output,
+                                    // The process exited NORMALLY, there is no
+                                    // failure detail to classify: what the agent
+                                    // printed is mid-work text, not an error
+                                    // message from the transport.
+                                    None,
+                                )?;
+                                last_msg = report.output;
+                                last_timed_out = false;
+                                was_interrupted = true;
+                            } else if report.status == NodeStatus::Succeeded {
                                 // Empty-output anomaly (issue #42, finding 6): an
                                 // attempt that reports success but produced no
                                 // output at all is almost always a lost/truncated
@@ -851,43 +1183,13 @@ pub(crate) fn execute_node(
                                 // A success_check gates the self-report. It runs only
                                 // AFTER this branch's agent has succeeded (meaning this
                                 // branch was not cancelled) - we do not propagate
-                                // cancellation here. Two shapes:
-                                let rejection: Option<String> = match node.success_check.as_ref() {
-                                    // Deterministic sh-script check (spec 6.2): a non-zero
-                                    // exit rejects the report regardless of the agent's
-                                    // self-assessment. We run it in the SAME attempt workdir
-                                    // the agent worked in (for an isolated node -
-                                    // attempt_workdir, otherwise the shared workdir),
-                                    // otherwise the check would validate a directory the
-                                    // agent never wrote to.
-                                    Some(apb_core::schema::SuccessCheck::Script(check)) => {
-                                        let r = run_script(
-                                            run_dir,
-                                            &attempt_workdir,
-                                            check,
-                                            "sh",
-                                            None,
-                                            None,
-                                        )?;
-                                        (r.status != NodeStatus::Succeeded)
-                                            .then(|| format!("success_check `{check}` failed"))
-                                    }
-                                    // Completion-marker check (issue 45 finding 1): the
-                                    // literal marker must appear in the node output, else the
-                                    // reported success is rejected. This defends against a
-                                    // long-running orchestrator that exits early at its first
-                                    // wait phase and records interim text as success.
-                                    Some(apb_core::schema::SuccessCheck::Marker { marker })
-                                        if !report.output.contains(marker.as_str()) =>
-                                    {
-                                        Some(format!(
-                                            "success report rejected: completion marker `{marker}` not found in output"
-                                        ))
-                                    }
-                                    Some(apb_core::schema::SuccessCheck::Marker { .. }) | None => {
-                                        None
-                                    }
-                                };
+                                // cancellation here.
+                                let rejection = success_check_rejection(
+                                    node.success_check.as_ref(),
+                                    run_dir,
+                                    &attempt_workdir,
+                                    &report.output,
+                                )?;
                                 match rejection {
                                     // Rejected: this is an attempt FAILURE, not a
                                     // terminal node failure. Journal it as `failed`
@@ -907,6 +1209,8 @@ pub(crate) fn execute_node(
                                             session: report.session.clone(),
                                             summary: Some(report.summary.clone()),
                                             rejected_output: Some(report.output.clone()),
+                                            partial_output: None,
+                                            failure_kind: None,
                                         })?;
                                         // Keep the human-readable reason on the
                                         // terminal failure message while the raw
@@ -929,6 +1233,8 @@ pub(crate) fn execute_node(
                                             // 1): kept for humans, never node output.
                                             summary: Some(report.summary.clone()),
                                             rejected_output: None,
+                                            partial_output: None,
+                                            failure_kind: None,
                                         })?;
                                         return Ok(AttemptOutcome::Finished {
                                             status: NodeStatus::Succeeded,
@@ -951,6 +1257,8 @@ pub(crate) fn execute_node(
                                     session: report.session.clone(),
                                     summary: Some(report.summary.clone()),
                                     rejected_output: None,
+                                    partial_output: None,
+                                    failure_kind: None,
                                 })?;
                                 last_msg = report.output;
                                 last_timed_out = false;
@@ -972,22 +1280,252 @@ pub(crate) fn execute_node(
                             } else {
                                 "failed"
                             };
-                            journal.append(EventPayload::AttemptFinished {
-                                node: node_id.into(),
-                                attempt,
-                                status: attempt_status.into(),
-                                duration_ms,
-                                session: None,
-                                summary: None,
-                                rejected_output: None,
-                            })?;
-                            last_msg = msg;
-                            // A transport error and a timeout break the retry loop for this
-                            // executor and go to fallback.
-                            if class == ErrorClass::Transport || class == ErrorClass::Timeout {
+                            // A supervisor-issued interrupt is a CONTROL decision,
+                            // not transport noise (spec 2026-08-05 section 2.2
+                            // addendum): a verdict written before the kill does not
+                            // override it, so `supervisor_interrupt_attempt` keeps
+                            // its documented contract (the attempt is journaled
+                            // failed and ordinary retry/fallback/patch proceeds).
+                            // Distinct from the run-level `cancel` above, which
+                            // returns `Cancelled` instead of failing the attempt.
+                            let interrupted_by_supervisor = interrupt.load(Ordering::Relaxed);
+                            // The spec-2.3 classification of THIS failure, set
+                            // only where it applies: no verdict was written and no
+                            // supervisor interrupt overruled the attempt. A
+                            // written verdict already decided the attempt (a
+                            // failure the agent reported about its own work is not
+                            // infrastructure), and a supervisor kill is a control
+                            // decision, so neither is classified and neither earns
+                            // an infrastructure retry.
+                            let mut failure_kind: Option<FailureKind> = None;
+                            // The verdict decides the attempt even here (spec
+                            // 2026-08-05 section 2.1): the process exit, the signal,
+                            // or the deadline kill is transport-level noise once the
+                            // agent has written its explicit completion signal.
+                            match &verdict {
+                                // Overruled by the supervisor. The verdict is not
+                                // thrown away silently: it rides the anomaly wake
+                                // (and `partial_output`) so the supervisor can see
+                                // the work existed and accept it explicitly, for
+                                // instance by re-running from the next node.
+                                Some(sfr) if interrupted_by_supervisor => {
+                                    let recorded =
+                                        sfr.outputs.clone().unwrap_or_else(|| msg.clone());
+                                    journal.raise_wake(
+                                        run_dir,
+                                        crate::event::WakeTrigger::Anomaly,
+                                        node_id,
+                                        format!(
+                                            "agent_task node `{node_id}` attempt {cur_attempt} recorded a `{}` verdict in its status file, but a supervisor interrupt overrules it and the attempt stays {attempt_status}: {recorded}",
+                                            sfr.status.as_str()
+                                        ),
+                                    )?;
+                                    journal.append(EventPayload::AttemptFinished {
+                                        node: node_id.into(),
+                                        attempt,
+                                        status: attempt_status.into(),
+                                        duration_ms,
+                                        session: None,
+                                        summary: None,
+                                        rejected_output: None,
+                                        partial_output: Some(recorded),
+                                        // A supervisor interrupt is a control
+                                        // decision, not an infrastructure
+                                        // failure: nothing is classified.
+                                        failure_kind: None,
+                                    })?;
+                                    last_msg = msg;
+                                }
+                                // SUCCESS was recorded before the process died
+                                // (issue #74 finding 1: a tail crash used to discard
+                                // the finished deliverable). The attempt succeeds
+                                // with the outputs the agent wrote, and the abnormal
+                                // exit is journaled as an anomaly so it stays
+                                // visible. Without a written outputs object the
+                                // adapter's failure detail is kept as the output: it
+                                // carries the agent's own stderr/stdout tail, which
+                                // beats handing downstream nodes nothing.
+                                Some(sfr) if sfr.status == NodeStatus::Succeeded => {
+                                    journal.raise_wake(
+                                        run_dir,
+                                        crate::event::WakeTrigger::Anomaly,
+                                        node_id,
+                                        format!(
+                                            "agent_task node `{node_id}` attempt {cur_attempt} recorded a success verdict in its status file, then its process ended abnormally: {msg}"
+                                        ),
+                                    )?;
+                                    let output = sfr.outputs.clone().unwrap_or_else(|| msg.clone());
+                                    // The recovered verdict does not bypass the
+                                    // gate: a success_check still runs on it,
+                                    // exactly as on the Ok branch, and a rejection
+                                    // consumes a retry with the discarded text
+                                    // preserved (S3 behavior).
+                                    match success_check_rejection(
+                                        node.success_check.as_ref(),
+                                        run_dir,
+                                        &attempt_workdir,
+                                        &output,
+                                    )? {
+                                        None => {
+                                            journal.append(EventPayload::AttemptFinished {
+                                                node: node_id.into(),
+                                                attempt,
+                                                status: NodeStatus::Succeeded.as_str().into(),
+                                                duration_ms,
+                                                session: None,
+                                                summary: None,
+                                                rejected_output: None,
+                                                partial_output: None,
+                                                failure_kind: None,
+                                            })?;
+                                            return Ok(AttemptOutcome::Finished {
+                                                status: NodeStatus::Succeeded,
+                                                output,
+                                                events,
+                                            });
+                                        }
+                                        Some(reason) => {
+                                            journal.append(EventPayload::AttemptFinished {
+                                                node: node_id.into(),
+                                                attempt,
+                                                status: "failed".into(),
+                                                duration_ms,
+                                                session: None,
+                                                summary: None,
+                                                rejected_output: Some(output.clone()),
+                                                partial_output: None,
+                                                failure_kind: None,
+                                            })?;
+                                            last_msg = format!("{reason}: {output}");
+                                            last_timed_out = false;
+                                        }
+                                    }
+                                }
+                                // FAILURE was recorded: the attempt stays failed (a
+                                // timeout stays timed out), but the agent's own
+                                // outputs become the attempt output instead of the
+                                // raw CLI error text.
+                                Some(sfr) => {
+                                    journal.append(EventPayload::AttemptFinished {
+                                        node: node_id.into(),
+                                        attempt,
+                                        status: attempt_status.into(),
+                                        duration_ms,
+                                        session: None,
+                                        summary: None,
+                                        rejected_output: None,
+                                        partial_output: None,
+                                        failure_kind: None,
+                                    })?;
+                                    last_msg = sfr.outputs.clone().unwrap_or_else(|| msg.clone());
+                                }
+                                // No verdict: today's failure semantics, except that
+                                // a require_verdict node labels the exit an
+                                // interruption (spec section 2.2) and preserves what
+                                // the process produced. Either label consumes the
+                                // same retry; the label plus `partial_output` say
+                                // which of the two it was.
+                                None => {
+                                    // This is the one shape a curated classifier
+                                    // can say something useful about: the process
+                                    // died and left only the adapter's detail
+                                    // string behind (spec section 2.3).
+                                    if !interrupted_by_supervisor {
+                                        failure_kind = Some(effective_failure_kind(
+                                            &msg,
+                                            class,
+                                            require_verdict,
+                                        ));
+                                    }
+                                    if require_verdict {
+                                        journal_interrupted_attempt(
+                                            journal,
+                                            node_id,
+                                            attempt,
+                                            duration_ms,
+                                            None,
+                                            &msg,
+                                            failure_kind,
+                                        )?;
+                                        was_interrupted = true;
+                                    } else {
+                                        journal.append(EventPayload::AttemptFinished {
+                                            node: node_id.into(),
+                                            attempt,
+                                            status: attempt_status.into(),
+                                            duration_ms,
+                                            session: None,
+                                            summary: None,
+                                            rejected_output: None,
+                                            partial_output: None,
+                                            failure_kind: failure_kind
+                                                .map(|k| k.as_str().to_string()),
+                                        })?;
+                                    }
+                                    last_msg = msg;
+                                }
+                            }
+                            // Bounded infrastructure retry (spec 2026-08-05
+                            // section 2.3): a transient failure is the
+                            // infrastructure's fault, so the SAME executor is
+                            // attempted again out of its own budget - the node's
+                            // `max_retries` belongs to the agent's own mistakes -
+                            // after a backoff. This also resolves the section 2.2
+                            // addendum ruling: a `require_verdict` attempt lost to
+                            // a deadline kill or a transport error is classified
+                            // transient by `effective_failure_kind`, so it now
+                            // retries the chosen executor instead of breaking
+                            // straight to fallback, while keeping its
+                            // `interrupted` label and its partial output.
+                            if failure_kind == Some(FailureKind::Transient)
+                                && infra_used < backoff.len()
+                            {
+                                let wait = backoff[infra_used];
+                                infra_used += 1;
+                                // Cheapest observable form: a supervisor-action
+                                // marker in the attempt timeline, right between
+                                // the failed attempt and its infrastructure retry.
+                                // No new event type, so old readers are unaffected.
+                                journal.append(EventPayload::SupervisorAction {
+                                    action: INFRA_RETRY_ACTION.to_string(),
+                                    node: Some(node_id.to_string()),
+                                    detail: format!(
+                                        "agent_task node `{node_id}` attempt {cur_attempt} failed with a transient infrastructure error; waiting {} ms before infrastructure retry {infra_used} of {} on the same executor `{}`",
+                                        wait.as_millis(),
+                                        backoff.len(),
+                                        step.agent,
+                                    ),
+                                })?;
+                                // Tick-polled, so an abort posted during a 30 s
+                                // backoff lands within a tick. A cancelled wait
+                                // returns here and the loop's own cancellation
+                                // check (top of the next iteration) owns the
+                                // decision, exactly as it does for a cancel that
+                                // arrives between attempts.
+                                crate::failure_class::wait_backoff(wait, cancel);
+                                infra_retry = true;
+                            } else if failure_kind.is_some_and(FailureKind::is_non_transient) {
+                                // Non-transient (auth, budget): no further attempt
+                                // on this step can succeed, so the remaining node
+                                // retries are skipped, and the chain loop above
+                                // will skip every later step on this same agent.
+                                blocked_agents.insert(step.agent.clone());
+                                break;
+                            } else if class == ErrorClass::Transport || class == ErrorClass::Timeout
+                            {
+                                // A transport error and a timeout break the retry loop for this
+                                // executor and go to fallback. Unchanged by the verdict
+                                // handling above: a step that cannot be re-run usefully is
+                                // still abandoned in favor of the next executor.
                                 break;
                             }
                         }
+                    }
+                    // An infrastructure retry re-attempts the same executor
+                    // without spending a node retry, so the node's budget only
+                    // advances here.
+                    if !infra_retry {
+                        try_i += 1;
                     }
                 }
             }
@@ -1093,8 +1631,26 @@ pub(crate) fn execute_finish_answer(
     // the instruction as an overriding order) and, paired with `report_contract:
     // false` on its task below, no status-verdict protocol. Supervisor notes are
     // still delivered as steering.
-    let text =
-        crate::context::assemble_finish_answer_prompt(&text, cfg.instruction.as_deref(), &events);
+    // Spec 2026-08-05 section 2.7 (issue #74 finding 6): the context above
+    // reaches the composer ONLY through a `{{run.context}}` substitution, so a
+    // finish prompt that places no context reference of its own used to be handed
+    // zero upstream output while the deliverable statement still told it to
+    // summarize "the recorded run context above". Such a template gets the
+    // terminal context appended; one that reads the context itself (through
+    // `{{run.context}}` or an explicit `{{nodes.*}}` field) keeps the byte-identical
+    // assembly it has today, since its author already chose what the composer sees.
+    let auto_context =
+        (!crate::context::reads_recorded_context(prompt)).then_some(context.as_str());
+    // A finish prompt reading `{{nodes.X.output}}` is subject to the same
+    // missing-input hole as any node template, and it does not pass through
+    // `execute_node` where that check lives (Task 4 handover note 5).
+    journal_missing_inputs(journal, run_dir, node_id, prompt, state)?;
+    let text = crate::context::assemble_finish_answer_prompt(
+        &text,
+        cfg.instruction.as_deref(),
+        &events,
+        auto_context,
+    );
     let retries = playbook.defaults.max_retries.unwrap_or(0);
     let timeout = playbook.defaults.timeout_seconds.map(Duration::from_secs);
     let grant_autonomy = apb_core::effects::effective(playbook)
@@ -1150,6 +1706,17 @@ pub(crate) fn execute_finish_answer(
                     .unwrap_or_else(|| entry.chain[idx - 1].agent_id.clone()),
                 to: ri.agent_id.clone(),
                 profile: Some(entry.key()),
+                // Models, as in the agent_task chain above. The finish-answer
+                // composer does not classify failures (spec 2.3 targets the
+                // agent_task attempt lifecycle), so it gets the observability
+                // half only.
+                from_model: Some(
+                    last_tried
+                        .as_ref()
+                        .map(|(_, model)| model.clone())
+                        .unwrap_or_else(|| entry.chain[idx - 1].model.clone()),
+                ),
+                to_model: Some(ri.model.clone()),
             });
         }
         last_tried = Some((ri.agent_id.clone(), ri.model.clone()));
@@ -1248,6 +1815,8 @@ pub(crate) fn execute_finish_answer(
                         session: report.session.clone(),
                         summary: Some(report.summary.clone()),
                         rejected_output: None,
+                        partial_output: None,
+                        failure_kind: None,
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         // The composed finish answer is the agent's reply body,
@@ -1272,6 +1841,8 @@ pub(crate) fn execute_finish_answer(
                         session: None,
                         summary: None,
                         rejected_output: None,
+                        partial_output: None,
+                        failure_kind: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {
@@ -1714,6 +2285,24 @@ pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
     )
 }
 
+/// Whether a node may run as a MEMBER of the concurrent batch: slow external
+/// work, not interactive, and not a join.
+///
+/// Joins are excluded because a join's readiness verdict is the sequential
+/// path's business. A join whose input already failed is `ReadyFailure` and is
+/// deliberately pushed into the frontier so the drive loop can journal it
+/// `failed` with the barrier's own reason and, in supervised mode, raise a wake
+/// on it. The batch has no such arm: it would simply execute the node and carry
+/// the run past a failure the supervisor never saw (review finding I1 of
+/// 2026-08-05 Task 3). A `ReadySuccess` join runs sequentially right after
+/// instead, which is semantically identical - and most joins are `prompt` nodes,
+/// which never batched anyway.
+pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
+    is_agent_or_script(playbook, node)
+        && !is_interactive(playbook, node)
+        && !parallel::is_join(playbook, node)
+}
+
 /// Context compaction (spec 8.5): if enabled (cfg.context_max_bytes) and the
 /// full context exceeds the threshold, old sections are compacted by a cheap model
 /// into context_compact.md, and a ContextCompacted event is returned, which drive
@@ -1826,12 +2415,17 @@ pub(crate) fn maybe_compact_context(
 /// can ask "would advancing past this node have anything to run" WITHOUT any
 /// journal side effect. `advance_frontier` layers the join:any cancellation and
 /// the frontier writes on top of this.
-pub(crate) fn seed_successors(playbook: &Playbook, node: &str, state: &RunState) -> Vec<String> {
+pub(crate) fn seed_successors(
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    active: &[String],
+) -> Vec<String> {
     let mut runnable: Vec<String> = Vec::new();
     for s in parallel::successors(playbook, node, state) {
         let ready = if parallel::is_join(playbook, &s) {
             !matches!(
-                parallel::join_readiness(playbook, &s, state),
+                parallel::join_readiness(playbook, &s, state, active),
                 JoinReadiness::NotReady
             )
         } else {
@@ -1844,34 +2438,146 @@ pub(crate) fn seed_successors(playbook: &Playbook, node: &str, state: &RunState)
     runnable
 }
 
+/// The nodes the run can still execute at the moment a frontier is advanced or
+/// a join is weighed: the node in hand, the other branch heads, and whatever
+/// `also_active` adds - the members of a concurrent batch that may still be
+/// running, or on a resume the [`parallel::pending_heads`] rebuilt from the
+/// journal because the in-memory frontier was lost.
+///
+/// Join readiness treats an input source outside the region reachable from this
+/// set as dead, so the set must never under-count: an over-wide set only falls
+/// back to the plain wait-until-terminal behavior, while a too-narrow one lets a
+/// join fire without a branch that was still going to arrive.
+pub(crate) fn active_set(node: &str, frontier: &[String], also_active: &[String]) -> Vec<String> {
+    let mut active = vec![node.to_string()];
+    for n in frontier.iter().chain(also_active) {
+        if !active.contains(n) {
+            active.push(n.clone());
+        }
+    }
+    active
+}
+
+/// Re-installs the branch heads a previous driver lost. The frontier lives only
+/// in the driver's memory, so a drive over an existing run dir has to rebuild it
+/// from the journal ([`parallel::pending_heads`]); a fresh run has no finished
+/// node yet and so gets nothing. Without this the heads inform a single liveness
+/// query and are then forgotten, and the next advance - which computes liveness
+/// from the frontier alone - writes the unstarted branches off as dead.
+///
+/// A head that is a JOIN is restored only when its barrier has already DECIDED.
+/// Nothing re-gates readiness once a join becomes `current`, so a `NotReady` join
+/// sitting in the frontier would execute early; a join that is already
+/// `ReadySuccess` or `ReadyFailure`, on the other hand, has to be restored here,
+/// because nothing else will ever offer it again. A `NotReady` one is the case
+/// [`advance_frontier`] covers: it re-enters as soon as a further input lands,
+/// and that path checks readiness. A join every input of which landed BEFORE the
+/// crash gets no further input and no further advance, so leaving it out
+/// unconditionally silently dropped it - the run either completed with the
+/// barrier never executed or died on the unrelated "has no outgoing edge" error.
+///
+/// Readiness is weighed with every rebuilt head counted as active, so a join fed
+/// by a branch that has not run yet stays `NotReady` and is left to
+/// `advance_frontier` exactly as before. A restored `ReadyFailure` join is what
+/// the drive loop's own readiness arm expects: it journals the node failed with
+/// the barrier's reason instead of executing it.
+pub(crate) fn restore_frontier(
+    playbook: &Playbook,
+    state: &RunState,
+    current: &str,
+    frontier: &mut Vec<String>,
+) {
+    let heads = parallel::pending_heads(playbook, state);
+    let active = active_set(current, frontier, &heads);
+    for head in &heads {
+        if head == current || frontier.contains(head) {
+            continue;
+        }
+        if parallel::is_join(playbook, head)
+            && matches!(
+                parallel::join_readiness(playbook, head, state, &active),
+                JoinReadiness::NotReady
+            )
+        {
+            continue;
+        }
+        frontier.push(head.clone());
+    }
+}
+
+/// Journals the branch inputs a join is about to proceed WITHOUT, at the moment
+/// the engine acts on the readiness verdict (Task 4; Task 1 handover note 1).
+///
+/// A dead input is a legitimate and common outcome (an either-or merge has one by
+/// construction, and the implicit barrier widened how many nodes can have one),
+/// but writing it off inside a pure function left no trace at all: a run report
+/// showed the skipped branch pending forever while the join reported success.
+/// Contrast the `join: any` sibling cancel, which journals `cancelled`.
+///
+/// One event per decision, listing every source written off for it, on the
+/// dedicated [`EventPayload::JoinInputDead`] variant: the same decision is
+/// legitimately journaled twice (a resume re-advancing through this function, a
+/// loop re-entering an either-or fork), which is honest on its own variant and
+/// would be a false "looping supervisor" on `SupervisorAction`. A wake is
+/// deliberately NOT raised either: this is routine graph bookkeeping, not an
+/// anomaly that needs a supervisor's attention.
+fn journal_dead_inputs(
+    log: &mut EventLog,
+    playbook: &Playbook,
+    node: &str,
+    state: &RunState,
+    active: &[String],
+) -> Result<(), EngineError> {
+    let sources = parallel::dead_inputs(playbook, node, state, active);
+    if sources.is_empty() {
+        return Ok(());
+    }
+    log.append(EventPayload::JoinInputDead {
+        node: node.to_string(),
+        sources,
+    })?;
+    Ok(())
+}
+
 pub(crate) fn advance_frontier(
     playbook: &Playbook,
     node: &str,
     state: &RunState,
     frontier: &mut Vec<String>,
+    also_active: &[String],
     log: &mut EventLog,
 ) -> Result<(), EngineError> {
-    let mut runnable: Vec<String> = seed_successors(playbook, node, state)
+    let active = active_set(node, frontier, also_active);
+    let mut runnable: Vec<String> = seed_successors(playbook, node, state, &active)
         .into_iter()
         .filter(|s| !frontier.contains(s))
         .collect();
     if let Some(join) = runnable
         .iter()
         .find(|s| {
-            parallel::is_join(playbook, s)
-                && parallel::join_mode(playbook, s) == parallel::JoinMode::Any
+            matches!(
+                parallel::join_kind(playbook, s),
+                Some(parallel::JoinKind::Explicit(parallel::JoinMode::Any))
+            )
         })
         .cloned()
     {
         for other in std::mem::take(frontier) {
-            if !parallel::is_join(playbook, &other) {
-                log.append(EventPayload::NodeFinished {
-                    node: other,
-                    status: "cancelled".into(),
-                    attempt: 1,
-                    output: String::new(),
-                    artifacts: Vec::new(),
-                })?;
+            match parallel::is_join(playbook, &other) {
+                // A pending join elsewhere in the graph is not part of this
+                // race: it keeps waiting for its own inputs instead of being
+                // cancelled. It has to be put back explicitly - the frontier was
+                // taken whole, so anything not re-pushed here is simply lost.
+                true => frontier.push(other),
+                false => {
+                    log.append(EventPayload::NodeFinished {
+                        node: other,
+                        status: "cancelled".into(),
+                        attempt: 1,
+                        output: String::new(),
+                        artifacts: Vec::new(),
+                    })?;
+                }
             }
         }
         runnable.retain(|s| s == &join);
@@ -1882,6 +2588,7 @@ pub(crate) fn advance_frontier(
     let selected = parallel::selected_edges(playbook, node, state);
     for s in runnable {
         if !frontier.contains(&s) {
+            journal_dead_inputs(log, playbook, &s, state, &active)?;
             // Journal a traversal ONLY when the edge taken carries
             // max_traversals (keeps the journal lean). The cap check itself
             // already happened in the pure `selected_edges`/`seed_successors`
@@ -1896,6 +2603,7 @@ pub(crate) fn advance_frontier(
                 log.append(EventPayload::EdgeTraversed {
                     from: node.to_string(),
                     to: s.clone(),
+                    via_policy: false,
                 })?;
             }
             frontier.push(s);
@@ -1921,6 +2629,7 @@ mod tests {
             dir.path(),
             Control::Interrupt {
                 reason: "already spent".into(),
+                node: None,
             },
         )
         .unwrap();
@@ -1959,6 +2668,7 @@ mod tests {
             dir.path(),
             Control::Interrupt {
                 reason: "stale".into(),
+                node: None,
             },
         )
         .unwrap();
@@ -1986,6 +2696,7 @@ mod tests {
             dir.path(),
             Control::Interrupt {
                 reason: "stale".into(),
+                node: None,
             },
         )
         .unwrap();
@@ -1995,6 +2706,66 @@ mod tests {
             interrupt,
             "None baseline replays the channel; latest_control_seq must not degrade to None on error"
         );
+    }
+
+    /// A targeted interrupt (spec 2026-08-05 section 1.6) is invisible to every
+    /// other node: not acknowledged, not journaled, and not consumed - the entry
+    /// stays in the channel for the attempt it names.
+    #[test]
+    fn observe_control_ignores_an_interrupt_targeting_another_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        let journal = Journal::new(&mut log);
+        post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "the other branch is wedged".into(),
+                node: Some("n2".into()),
+            },
+        )
+        .unwrap();
+
+        let (seen, interrupt) = observe_control(dir.path(), "n1", 1, &journal, None).unwrap();
+        assert!(
+            !interrupt,
+            "an interrupt naming another node must not kill this attempt"
+        );
+        assert_eq!(
+            seen, None,
+            "the entry must not be consumed on another node's behalf"
+        );
+        let actions: Vec<String> = crate::event::read_all(dir.path())
+            .unwrap()
+            .into_iter()
+            .filter_map(|e| match e.payload {
+                EventPayload::SupervisorAction { action, .. } => Some(action),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            actions.is_empty(),
+            "another node's interrupt must not be journaled here, got {actions:?}"
+        );
+    }
+
+    /// The same entry addressed to THIS node is honored exactly like a broadcast.
+    #[test]
+    fn observe_control_honors_an_interrupt_targeting_this_node() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut log = EventLog::create(dir.path()).unwrap();
+        let journal = Journal::new(&mut log);
+        let seq = post_control(
+            dir.path(),
+            Control::Interrupt {
+                reason: "this branch is wedged".into(),
+                node: Some("n1".into()),
+            },
+        )
+        .unwrap();
+
+        let (seen, interrupt) = observe_control(dir.path(), "n1", 1, &journal, None).unwrap();
+        assert!(interrupt, "the named node's attempt must be interrupted");
+        assert_eq!(seen, Some(seq));
     }
 
     /// A gated child spawn threads the pin's verified connector permit maps into

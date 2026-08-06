@@ -299,3 +299,74 @@ edges:
         "expected a succeeded run_finished"
     );
 }
+
+// Spec 2026-08-05 section 2.7 (issue #74 finding 6): a finish prompt that
+// references NEITHER `{{run.context}}` NOR any `{{nodes.*}}` read used to reach
+// the composer with ZERO upstream output, while the deliverable instruction
+// still told it to summarize "the recorded run context above". The engine now
+// appends that context itself, so a placeholder-free finish prompt still
+// summarizes real results.
+#[test]
+fn finish_prompt_without_placeholders_still_sees_upstream_output() {
+    let dir = tempfile::tempdir().unwrap();
+    let yaml = r#"
+schema: 1
+id: fctx
+name: FinishContext
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: p1, type: prompt, prompt: "MARKER_P1 shipped-the-feature-branch" }
+  - { id: p2, type: prompt, prompt: "MARKER_P2 opened-the-pull-request" }
+  - { id: done, type: finish, outcome: success, prompt: "compose the closing answer" }
+edges:
+  - { from: start, to: p1 }
+  - { from: p1, to: p2 }
+  - { from: p2, to: done }
+"#;
+    seed(dir.path(), yaml);
+    let _env = common::env_lock();
+    // No compaction here (the context is tiny), so this agent only ever serves
+    // the finish node and dumps the exact prompt it received.
+    let prog = lossy_summarizer_agent(dir.path());
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+
+    let res = run(dir.path(), "fctx", None, RunOptions::default()).unwrap();
+
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+    assert_eq!(res.outcome, RunStatus::Succeeded, "run must succeed");
+
+    let finish_prompt =
+        fs::read_to_string(dir.path().join("finish-prompt.txt")).unwrap_or_default();
+    // The premise: this really is the placeholder-free template.
+    assert!(
+        finish_prompt.contains("compose the closing answer"),
+        "the finish node's own template must still lead the prompt:\n{finish_prompt}"
+    );
+    // Both upstream nodes' recorded output reached the composer.
+    for marker in ["MARKER_P1", "MARKER_P2"] {
+        assert!(
+            finish_prompt.contains(marker),
+            "a placeholder-free finish prompt lost `{marker}`; it saw only:\n{finish_prompt}"
+        );
+    }
+    // The deliverable instruction stays LAST, so "the recorded run context
+    // above" is literally true.
+    let ctx_at = finish_prompt
+        .find("MARKER_P1")
+        .expect("context section present");
+    let task_at = finish_prompt
+        .find("## your task")
+        .expect("deliverable instruction present");
+    assert!(
+        ctx_at < task_at,
+        "the appended context must come before the deliverable instruction:\n{finish_prompt}"
+    );
+}

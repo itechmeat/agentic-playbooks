@@ -1,7 +1,9 @@
 //! Template rules: which `{{ ... }}` namespaces exist, and whether every
 //! reference in a playbook resolves to something the run will actually have.
 
+use super::graph::must_have_finished;
 use super::*;
+use crate::graphutil::{adjacency, reachable_from};
 
 pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
     let params: HashSet<&str> = playbook.params.iter().map(|p| p.name.as_str()).collect();
@@ -42,20 +44,96 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
         }
     };
 
-    for n in &playbook.nodes {
-        match &n.kind {
-            NodeKind::AgentTask { prompt, .. } | NodeKind::Prompt { prompt } => {
-                check_text(&n.id, prompt, r)
+    for (owner, text) in template_texts(playbook) {
+        check_text(owner, text, r);
+    }
+}
+
+/// The template-bearing texts of a playbook as `(owner node id, text)` pairs.
+/// The single place that knows which node kinds carry a template, so V13 and
+/// V38 always scan exactly the same texts.
+pub(crate) fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
+    playbook
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            let text = match &n.kind {
+                NodeKind::AgentTask { prompt, .. } | NodeKind::Prompt { prompt } => prompt.as_str(),
+                NodeKind::Playbook {
+                    instruction: Some(instruction),
+                    ..
+                } => instruction.as_str(),
+                NodeKind::Finish {
+                    prompt: Some(prompt),
+                    ..
+                } => prompt.as_str(),
+                _ => return None,
+            };
+            Some((n.id.as_str(), text))
+        })
+        .collect()
+}
+
+/// V38 (warning): a template reads `nodes.<id>.output` or `nodes.<id>.report`
+/// where the graph does not order `<id>` before the reading node. At run time
+/// such a read renders as an empty string rather than failing the node (spec
+/// 2026-08-05, 1.5), so the mistake is otherwise invisible until an agent gets a
+/// prompt with a hole in it.
+///
+/// Guaranteed-before comes from [`must_have_finished`], so a linear chain, a read
+/// at or behind a wait-for-all barrier (explicit `join: all` or the implicit
+/// barrier of an acyclic fan-in), and an either-or conditional merge reading both
+/// of its branches are all silent. What is left is the genuinely racy read: a
+/// parallel sibling branch with nothing synchronizing the two, or a first-arrival
+/// merge (`join: any`) reading a branch that may still be running.
+///
+/// Three shapes are excluded on purpose, to keep the rule quiet where the
+/// author's intent is clear:
+///
+/// * a loop-carried read, where source and reader sit in one cycle (the reader
+///   sees the previous iteration's value, which is the idiom the first-arrival
+///   semantics of a cycle merge point exist for);
+/// * a self-read (a special case of the above test);
+/// * a read by the node `defaults.on_failure` routes to, which is entered from
+///   anywhere in the graph, so no drawn edge describes what preceded it.
+pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationReport) {
+    let must = must_have_finished(playbook);
+    let adj = adjacency(playbook);
+    let failure_handler = match &playbook.defaults.on_failure {
+        FailurePolicy::Node(target) => Some(target.as_str()),
+        _ => None,
+    };
+    for (owner, text) in template_texts(playbook) {
+        if Some(owner) == failure_handler {
+            continue;
+        }
+        for cap in template_refs(text) {
+            let parts: Vec<&str> = cap.split('.').collect();
+            let (source, field) = match parts.as_slice() {
+                ["nodes", source, field @ ("output" | "report")] => (*source, *field),
+                // Any other namespace is V13's business, not this rule's.
+                _ => continue,
+            };
+            if playbook.node(source).is_none() {
+                // Unknown node: already a V13 error, nothing to add here.
+                continue;
             }
-            NodeKind::Playbook {
-                instruction: Some(instruction),
-                ..
-            } => check_text(&n.id, instruction, r),
-            NodeKind::Finish {
-                prompt: Some(prompt),
-                ..
-            } => check_text(&n.id, prompt, r),
-            _ => {}
+            // One cycle around both (a self-read included): loop-carried, not racy.
+            if reachable_from(&adj, source).contains(owner)
+                && reachable_from(&adj, owner).contains(source)
+            {
+                continue;
+            }
+            if must.get(owner).is_some_and(|set| set.contains(source)) {
+                continue;
+            }
+            r.warn(
+                "V38",
+                Some(owner),
+                format!(
+                    "template reads `nodes.{source}.{field}` but nothing orders `{source}` before `{owner}`, so the value may render empty; add `join: all` on the edges into `{owner}` (or route it behind a node that joins both branches)"
+                ),
+            );
         }
     }
 }

@@ -16,7 +16,14 @@ use apb_engine::event::{Event, EventPayload, read_all};
 use apb_engine::scheduler::{RunMode, RunOptions, post_supervisor_command, run_background};
 use apb_engine::state::{RunState, RunStatus};
 
-const POLL_DEADLINE: Duration = Duration::from_secs(5);
+/// Anti-hang ceiling, not a performance budget: the polls wait for a journal
+/// event or a run status to appear, never for it to appear quickly. Widened from
+/// 5s after one observed spurious failure on a clean tree, where the background
+/// driver plus its `sh` stubs each paid a per-launch macOS security scan
+/// (BUILD-OPTIMIZATION rule 8; measured at 3.9s to 53.5s of spawn stall in the
+/// timeout suites). 30s stays inside nextest's 60s SLOW period, so a genuine hang
+/// still fails by name rather than sitting.
+const POLL_DEADLINE: Duration = Duration::from_secs(30);
 const POLL_STEP: Duration = Duration::from_millis(20);
 
 fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {

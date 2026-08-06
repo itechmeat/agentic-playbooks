@@ -25,6 +25,7 @@ fn run_config_round_trips() {
         expected_connector_accounts: Default::default(),
         cache: Default::default(),
         mode: RunMode::Supervised,
+        max_parallel: Some(2),
     };
     write_run_config(dir.path(), &cfg).unwrap();
     let back = read_run_config(dir.path()).unwrap();
@@ -33,6 +34,8 @@ fn run_config_round_trips() {
     // The run mode is persisted: a detached driver re-opens the run from disk
     // and has no other way to learn it (Task 7).
     assert_eq!(back.mode, RunMode::Supervised);
+    // Same for the concurrency cap (spec 2026-08-05 section 1.3).
+    assert_eq!(back.max_parallel, Some(2));
 }
 
 #[test]

@@ -1,7 +1,6 @@
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
-use std::time::Instant;
 
 use apb_core::registry::init_project;
 use apb_engine::event::{EventPayload, read_all};
@@ -31,9 +30,26 @@ edges:
   - { from: work, to: no, fallback: true }
 "#;
 
-fn write_slow_agent(root: &Path) -> String {
+/// The stub sleeps past its node's `timeout_seconds`, then leaves a marker. The
+/// marker is the kill evidence: if the engine ever let the process run to the
+/// end of its sleep, the file exists.
+///
+/// This replaces an earlier wall-clock assertion (`run()` had to return in under
+/// 3s while the stub slept 5s). That bound was not a property of the engine: on
+/// this project's macOS machines the per-launch security scan of a freshly
+/// written `sh` stub (BUILD-OPTIMIZATION rule 8) measured 3.9s to 53.5s of pure
+/// spawn and kill stall on an otherwise idle tree, which failed the 3s budget in
+/// 5 of 8 isolated runs while the engine behaved correctly every time. A marker
+/// file bounds the same claim by construction instead of by clock.
+fn write_slow_agent(root: &Path, marker: &Path) -> String {
     let path = root.join("slow-agent.sh");
-    common::write_sync(&path, "#!/bin/sh\nsleep 5\necho done\n");
+    common::write_sync(
+        &path,
+        &format!(
+            "#!/bin/sh\nsleep 5\necho done\n: > {}\n",
+            marker.to_string_lossy()
+        ),
+    );
     let mut p = fs::metadata(&path).unwrap().permissions();
     p.set_mode(0o755);
     fs::set_permissions(&path, p).unwrap();
@@ -54,14 +70,13 @@ fn agent_task_timeout_kills_and_fails() {
     let _env = common::env_lock();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
-    let prog = write_slow_agent(dir.path());
+    let marker = dir.path().join("agent-ran-to-completion");
+    let prog = write_slow_agent(dir.path(), &marker);
     unsafe {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }
 
-    let started = Instant::now();
     let res = run(dir.path(), "to", None, RunOptions::default()).unwrap();
-    let elapsed = started.elapsed();
 
     unsafe {
         std::env::remove_var("APB_AGENT_CMD");
@@ -69,10 +84,11 @@ fn agent_task_timeout_kills_and_fails() {
 
     // Timeout steered the run through the fallback into a failure finish.
     assert_eq!(res.outcome, RunStatus::Failed);
-    // Killed on timeout (~1s), did not wait the full 5s.
+    // Killed on timeout: the stub never reached the line past its 5s sleep.
     assert!(
-        elapsed.as_millis() < 3000,
-        "agent not killed on timeout: took {elapsed:?}"
+        !marker.exists(),
+        "agent not killed on timeout: it ran past its sleep and wrote {}",
+        marker.display()
     );
 
     let run_dir = dir.path().join(".apb/runs").join(&res.run_id);

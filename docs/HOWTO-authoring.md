@@ -125,6 +125,114 @@ textual report. Put the completion marker in `outputs` when you write one, or
 omit `outputs` and keep the marker in the reply text, so the check can still
 find it.
 
+### require_verdict (mandatory completion signal)
+
+`success_check` gates a report the agent already chose to write.
+`require_verdict: true` on an `agent_task` node goes further: writing a valid
+status file becomes the only way for the node to succeed, whatever the process
+exit code or the agent's final text say.
+
+```yaml
+- id: migrate
+  type: agent_task
+  prompt: "run the long migration; write your status file when truly done"
+  profile: dev
+  require_verdict: true
+  max_retries: 2
+```
+
+`defaults.require_verdict: true` turns the requirement on for every `agent_task`
+in the playbook. The node field and the default are combined with a logical OR,
+so the setting is switch-on only: a node cannot opt out of a playbook-wide
+`defaults.require_verdict: true`, and `require_verdict: false` on a node is
+indistinguishable from leaving it unset. Set it per node when only some steps
+need it.
+
+With `require_verdict` in force:
+
+- the status-file contract note is appended to the prompt unconditionally
+  (normally it appears only when the node has a `success_check`), together with a
+  note saying plainly that an attempt whose process ends without a valid file is
+  recorded as interrupted;
+- an attempt whose process exits without leaving a valid
+  `{"status": "success"|"failure", ...}` file behind is recorded as
+  **interrupted** rather than succeeded. The text it had produced is preserved on
+  the attempt as `partial_output`, a retry is consumed, and the next attempt's
+  prompt carries a note that a previous attempt ended without recording a verdict
+  and to check for work already done - commits, branches, worktrees, written
+  files, running background jobs - before redoing any of it. That note also
+  rides the first attempt of a node re-executed later (a supervisor retry, a
+  resume, a continue-from) when the node's last journaled attempt was
+  interrupted, so the recovery advice does not die with the process that earned
+  it;
+- a status file that already holds a verdict is read even past a non-zero exit,
+  a timeout, or a kill: once the agent's own completion signal exists, the exit
+  code is tail noise and is journaled as such. A `{"status": "failure"}` file on
+  a failed process keeps the attempt failed but exposes the agent's own `outputs`
+  as the node output instead of the raw CLI error text.
+
+`require_verdict` defaults to `false`. Turning every "exit 0, no status file"
+attempt into an interruption would change the contract under every playbook that
+relies on the ordinary text report. Opt in for nodes that orchestrate
+long-running or background work, where "the process ended" and "the work is
+done" are different questions, and see "Long-running orchestrator nodes: commit
+early and often" below for the authoring discipline that makes an interruption
+cheap to recover from.
+
+### Declared deliverables (outputs.files)
+
+A node may declare `outputs.files`, glob patterns for the files it is expected to
+produce:
+
+```yaml
+- id: report
+  type: agent_task
+  prompt: "write the audit report to report-<date>.md"
+  profile: dev
+  outputs:
+    files: ["report-*.md"]
+```
+
+On every successful attempt of a declaring node the engine matches those globs
+against the run's working tree and records what they matched as the node's
+artifacts, available to later steps and to the run report. This no longer depends
+on the node having a cache configured: a declaration is checked because it was
+declared.
+
+A declaration whose globs match nothing journals a `deliverable_missing` warning
+event naming the node and the declared patterns. The same event carries a
+`detail` when the capture itself failed instead (an unreadable match, a path
+escaping the node's scope). It never fails the node: a glob is brittle enough
+that hard-failing on drift would be worse than a visible warning. Watch the run's
+events (the dashboard, or `run_events`) for it after a run whose deliverables
+matter, particularly on orchestrator-style nodes where the agent's own success
+report is the least trustworthy signal that a file actually landed. A node served
+from the cache journals neither an artifacts capture nor this warning: its
+artifacts are replayed from the cache record.
+
+### outputs.extract (output hygiene)
+
+`outputs` also carries `extract`, a marker name, independent of `files`:
+
+```yaml
+- id: review
+  type: agent_task
+  prompt: "review the diff and end with <VERDICT>your verdict</VERDICT>"
+  profile: dev
+  outputs:
+    extract: VERDICT
+```
+
+Set on an `agent_task` node, the engine takes the content of the last
+`<VERDICT>...</VERDICT>` block (whatever marker name is given) the agent emitted
+anywhere in its turn as the node's output, instead of its last assistant message.
+Unset, the node keeps the default: the last assistant message with any report
+block stripped. This keeps the recorded output intact when a host `Stop` hook or
+a guardrail appends a turn after the agent's real work finished, which would
+otherwise become the node's output. The other half of that hygiene lives on the
+profile: see PROFILES.md's `hermetic` guidance, which suppresses the appended
+turn at the source instead of filtering around it.
+
 ### Warning: premature success in long-running orchestrator nodes
 
 A single-process agent node that spawns background workers and is expected to
@@ -152,12 +260,32 @@ Author around it, in order of strength:
   or as sub-playbooks, rather than asking one agent node to babysit external
   processes for the whole duration.
 
+### Long-running orchestrator nodes: commit early and often
+
+An orchestrator or otherwise long-running `agent_task` node can be cut off
+mid-work by anything from a host process restart to a supervisor interrupt aimed
+at it. When its work happens inside a git worktree (an `isolation: full` or
+`best_effort` node, or an agent managing its own worktree), the recovery cost of
+that interruption is entirely a function of how much uncommitted work existed
+when it happened.
+
+Author the node's prompt to commit its own progress at natural checkpoints, after
+each subtask, each file, each passing test, rather than saving one large commit
+for the end. Paired with `require_verdict` and the interruption note a retried
+attempt receives, that turns "the run was interrupted" into "the next attempt
+resumes from the last commit and loses minutes" instead of losing the whole
+phase. This is authoring discipline, not an engine mechanism: nothing forces an
+agent to commit often, but the prompt can ask for it, and a node that checkpoints
+little and often degrades gracefully under exactly the failure modes the
+engine's resilience features exist to handle.
+
 ## Node types
 
 `start`, `agent_task`, `script`, `prompt`, `condition`, `human_review`,
 `wait`, `finish`. A playbook needs exactly one `start` and at least one
 `finish`. Edges connect node ids; conditional edges gate on node status,
-review status, or output match.
+review status, an output substring match, or one structured field of a node's
+output.
 
 ## Template variables
 
@@ -186,6 +314,28 @@ playbook, a namespace outside this list) fails validation before the
 playbook can be saved or run, rather than silently rendering empty at run
 time.
 
+Whether a reference resolves and whether it has a value yet are separate
+questions. A template that reads `nodes.<id>.output` or `nodes.<id>.report` where
+nothing in the graph orders `<id>` before the reading node is validator warning
+**V38**: across un-joined parallel branches that value may render empty, and the
+remedy is a `join: all` on the edges into the reader, or routing the reader
+behind a node that already joins both branches (see "Joining parallel branches").
+A loop-carried read, where both nodes sit in one cycle, is not flagged: there the
+previous pass supplies the value.
+
+At run time the same hole is observable rather than silent. When a node executes
+and one of its `nodes.<id>.output|report` references renders empty, the run
+journals a missing-input anomaly naming every empty reference and why it is empty
+(`never ran`, the source's own status, or `<status> with empty output`), and in a
+supervised run that anomaly wakes the supervisor. The criterion is the rendered
+value, never the source's status: a reference is reported only when the source
+has no recorded output at all or its output is the empty string. So an
+`on_failure` handler reading the failure it handles stays silent, because a
+failed node's own text is recorded and does render, while a source that succeeded
+with nothing to say is caught. One anomaly per node execution lists all of that
+node's holes. A finish node composing an answer is checked the same way; a node
+served from the cache is not, because neither its execution nor its capture runs.
+
 ## Human review and conditional edges
 
 A `human_review` node pauses the run for a human decision:
@@ -198,7 +348,7 @@ A `human_review` node pauses the run for a human decision:
 `review_decide` records one of them as the node's decision, plus a free-form
 note (available downstream as `{{nodes.review.review_note}}`).
 
-An edge's `condition` gates traversal on one of three types:
+An edge's `condition` gates traversal on one of four types:
 
 - `node_status { node, equals: success|failure }` - matches when the named
   node's status is `success` or `failure` (which also covers a timeout).
@@ -207,6 +357,22 @@ An edge's `condition` gates traversal on one of three types:
   option string.
 - `output_match { node, pattern }` - matches when the named node's output
   contains `pattern` as a substring (not a regex).
+- `output_field { node, field, equals }` - matches when the named node's
+  output parses as a JSON object whose top-level `field` equals `equals` as a
+  string. This is the way to route on a verdict the agent wrote deliberately:
+  an `agent_task` writes `{"status":"success","outputs":{"verdict":"failed"}}`
+  to `$APB_STATUS_FILE`, the `outputs` object becomes the node output as
+  compact JSON, and the edge reads one field of it. The comparison is exact
+  (no substring, no case folding). Anything unreadable is simply a non-match:
+  output that is not a JSON object, a missing field, or a value that is null,
+  an array or an object. Booleans and numbers compare by their JSON text
+  (`true`, `3`).
+
+```yaml
+edges:
+  - { from: verify, to: fix,  condition: { type: output_field, node: verify, field: verdict, equals: failed } }
+  - { from: verify, to: done, condition: { type: output_field, node: verify, field: verdict, equals: ok } }
+```
 
 An edge with no `condition` always matches. Two edges from the same node with
 structurally identical conditions (or two fallbacks) and different targets are
@@ -228,6 +394,114 @@ edges:
   - { from: review,  to: publish, condition: { type: review_status, equals: approve } }
   - { from: review,  to: notify,  condition: { type: review_status, equals: reject } }
 ```
+
+## Joining parallel branches
+
+Several unconditional outgoing edges from one node are a fork: every target starts
+as soon as the source finishes. A node with more than one INCOMING edge is where
+those branches come back together, and how it waits depends on the edges into it:
+
+- An incoming edge may carry `join: all` or `join: any`. `all` makes the node wait
+  for every incoming branch to reach a terminal status before it runs; `any` lets
+  the first arrival trigger it. This is the explicit form and behaves as it always
+  has.
+- A node with two or more incoming edges and NO `join:` on any of them is not
+  first-arrival by default. When every incoming source lies outside the node's own
+  cycle (an acyclic fan-in, the ordinary diamond of fork, two branches, merge) the
+  node is an implicit `all` join: it waits for every branch, exactly as if
+  `join: all` had been written, without anyone writing it.
+- A node with no `join:` whose fan-in IS part of a cycle (`check -> tick ->
+  check`, where `tick` has two inputs and one of them is the loop's own back edge)
+  keeps first-arrival semantics. A wait-for-all barrier there would deadlock,
+  because the back-edge source has not run yet in this pass. Loop bodies rely on
+  that, and it is unchanged.
+
+An implicit join only synchronizes: it waits, then runs. It never fails the node
+because an incoming branch failed, the way an explicit `join` does. An
+unconditional fan-in fed by a failure edge is very often meant as a shared error
+sink, and the implicit form is deliberately permissive about that. Write an
+explicit `join: all` (or `join: any`) when the node itself should fail on a failed
+input.
+
+A join, implicit or explicit `all`, does not deadlock on a branch that will never
+run - a conditional fork where only one of two branches was selected, say. A
+source no longer reachable from anything still active in the run counts as
+satisfied instead of leaving the join waiting forever, and the run journals a
+`join_input_dead` event naming the join and the sources written off, so the
+decision is auditable afterwards. That is routine graph bookkeeping rather than an
+anomaly - an either-or merge has one by construction - so no supervisor is woken
+for it.
+
+```yaml
+nodes:
+  - { id: start,   type: start }
+  - { id: fetch_a, type: agent_task, prompt: "fetch A", profile: dev }
+  - { id: fetch_b, type: agent_task, prompt: "fetch B", profile: dev }
+  - { id: merge,   type: agent_task, prompt: "combine {{nodes.fetch_a.output}} and {{nodes.fetch_b.output}}", profile: dev }
+  - { id: done,    type: finish, outcome: success }
+edges:
+  - { from: start,   to: fetch_a }
+  - { from: start,   to: fetch_b }
+  - { from: fetch_a, to: merge }     # no join: - implicit all-join, acyclic fan-in
+  - { from: fetch_b, to: merge }
+  - { from: merge,   to: done }
+```
+
+`merge` above waits for both `fetch_a` and `fetch_b` with no `join:` written
+anywhere.
+
+### Validating a join
+
+`join` values are validated, not silently coerced. A value other than `all` or
+`any` on an edge is validator error **V36**. Mixing `all` and `any` across the
+incoming edges of one node is validator warning **V37**: the engine takes the
+first `join` in file order and ignores the rest, which is easy to do by accident
+when edges are edited independently. A template that reads across un-joined
+branches is validator warning **V38** (see "Template variables").
+
+### Concurrency limit (max_parallel)
+
+A fork's ready branches run concurrently in every run mode, supervised as well as
+autonomous, bounded by `max_parallel`: at most that many branch nodes run at once,
+and the rest are admitted as slots free up.
+
+```yaml
+defaults:
+  profile: dev
+  max_parallel: 2   # at most two branch nodes run at the same time
+```
+
+`defaults.max_parallel` wins. Failing that, the value persisted on the run's own
+config applies, so a detached run resumed later keeps the cap it started with.
+Failing that, the engine default of 4. A declared `0` reads as `1` rather than
+admitting nothing, and the cap is re-resolved on every scheduling pass, so a
+supervisor patch that changes it takes effect from the next batch. There is no CLI
+flag and no MCP argument for the cap today: `defaults.max_parallel` in the
+playbook is the knob an author has.
+
+`max_parallel: 1` does not form one-member batches; it takes the sequential path
+outright, the same path a single ready node has always taken. Lower the cap for
+playbooks whose branches are resource-heavy (large builds, rate-limited external
+calls) or where many branches at once would just be noise to review; leave it
+alone for cheap, independent branches.
+
+One shape never joins a batch at all, whatever the cap says: a node that is a
+join. That covers acyclic fan-in (implicit `all`) and any node with a `join:`
+edge; an in-cycle fan-in without `join:` keeps first-arrival semantics and stays
+batchable. A join's readiness verdict belongs to the sequential path, because
+that is the only place a barrier whose input failed can be recorded failed with the
+barrier's own reason and raise a wake for a supervisor, instead of just being
+executed as if nothing had gone wrong. The consequence is worth planning around:
+fan-in consumers serialize. Two `agent_task` nodes that each read the same pair of
+producers are both joins, so they run one after the other, one scheduling pass
+each, even with slots free. Give a consumer a single incoming edge if it needs to
+run alongside its siblings.
+
+In a supervised run the execution is concurrent but the supervision stays serial:
+the whole batch runs, then failures are presented one at a time, in batch order,
+at the batch tail. A `join: any` satisfied by an earlier group cancels the
+branches still waiting for a slot, and those are journaled cancelled like any
+other cancelled branch.
 
 ## Unhandled failures (defaults.on_failure)
 
@@ -277,6 +551,115 @@ run either way.
 One thing to know before choosing `stop`: a `finish` node with a `prompt` is
 what composes a written closing answer for a failed run. Where that answer
 matters, point the policy at that node rather than stopping.
+
+## Attempt failures: kinds, retries and interruptions
+
+A failed attempt is classified before the engine decides what to do with it, and
+the label is journaled on the attempt as `failure_kind`:
+
+- `budget` - a money or quota problem (a spend limit, an exhausted plan). This is
+  a property of the account, so neither a retry nor a different model on the same
+  agent can fix it.
+- `auth` - a credential problem. The same executor will fail identically until a
+  human re-authenticates.
+- `transient` - infrastructure noise: a dropped connection, a 5xx, a rate limit.
+  The same executor, run again, has a real chance of succeeding.
+- `agent` - everything else, the agent's own mistakes included. This is the
+  historical behavior: consume a node retry, then walk the fallback chain.
+
+The classifier is a curated table over the failure text, checked in that order,
+because a spend limit and an expired token are both routinely delivered as a 429.
+A plain "agent timed out" is deliberately NOT transient: that wording is the
+engine's own deadline kill, and reading it as infrastructure would hand every
+timed-out node extra same-executor attempts it never had. The one exception is a
+`require_verdict` node, where a timeout or a dropped transport says the work may
+well have continued and is worth one more attempt on the same executor, so those
+count as transient unless the text says something more specific.
+
+A `transient` failure is retried on the SAME executor out of a separate
+infrastructure budget that never touches `max_retries`: the node's own retry count
+does not move and no retry is journaled against it, while each infrastructure
+attempt is journaled in its own right and announced by a `supervisor_action` event
+with action `infra_retry`. The budget IS the backoff schedule, by default two
+waits of 5s and 30s, and it applies per fallback-chain step: every step of a
+node's chain gets its own fresh allowance, so a node with three chain steps can
+spend up to six infrastructure attempts before its own retries begin. Set
+`APB_INFRA_BACKOFF_MS` to a comma-separated list of milliseconds to change the
+waits and the budget together (`APB_INFRA_BACKOFF_MS=20,20` in tests); a
+malformed or empty value falls back to the default rather than disabling
+infrastructure retries.
+
+An `auth` or `budget` failure fails the attempt at once and additionally
+suppresses every remaining fallback step bound to the SAME agent: another agent
+may still succeed where an exhausted quota cannot, but the same account certainly
+will not. That suppression lives for one node execution and is not persisted. A
+resume, a supervisor retry, or the next node walks the chain from the top again
+and hits the same expired credential unless a human fixed it in between, which is
+the point: between two drives, someone may have.
+
+### Interrupted attempts and reaping
+
+An attempt recorded `interrupted` ended without a verdict rather than with one: it
+is neither a success nor a decided failure, and the node is re-executed. Three
+things produce it. One is a `require_verdict` node whose process ended without a
+valid status file (see "require_verdict" above). A supervisor interrupt of such a
+node is the same shape and gets the same label when no status file was written
+(see "Supervisor interrupts" below). The third is reaping: when a run
+is driven again after its previous driver died mid-attempt, drive entry closes out
+any attempt the journal still shows open whose recorded process id is provably
+gone, journaling it `interrupted` so the fact lives in the log rather than only in
+a status reader's head. The node then re-enters scheduling the way an interrupted
+node always has.
+
+Reaping is deliberately narrow. An attempt with no recorded process id is never
+reaped: unknown is not dead. A live process id is never reaped either, and neither
+is anything the liveness probe could not answer, because a live id may mean
+another driver still owns the run and ownership is settled by the working-directory
+lock rather than by a guess. Reaping happens only at drive entry: nothing is reaped
+while a run sits abandoned, which is why `apb doctor --run` and `run_status` keep
+reporting such a run's attempt as lost until someone drives it again. In the
+journal a reaped node can legitimately show two attempts numbered 1, the first
+`interrupted`: the attempt counter is per execution, and the reap makes the stale
+attempt explicit instead of letting the fresh one quietly overwrite it.
+
+An attempt cut off with work in flight keeps whatever it had said so far in
+`attempt_finished.partial_output`, so the recovery attempt and a human reading the
+run both see how far it got.
+
+### Supervisor interrupts
+
+A supervising agent can interrupt an attempt with `supervisor_interrupt_attempt`
+(see `docs/MCP.md`). Passing `node` interrupts only that node's running attempt,
+which is what a wedged branch of a concurrent fan-out needs: its healthy siblings
+keep running, and they neither acknowledge nor consume an interrupt addressed to
+another node. With `node` omitted the interrupt is a broadcast and terminates every
+attempt currently running in the run. Either way the interrupted branches recover
+through their ordinary retry and fallback paths; unlike `supervisor_run_abort`, an
+interrupt does not stop the run.
+
+An interrupt only reaches an attempt that was already running when it was posted.
+It is not queued for a later attempt of the same node, and a node sitting between
+attempts in an infrastructure backoff does not observe one. Interrupt a running
+attempt; when the run itself should stop, use `supervisor_run_abort`.
+
+Where that abort is observed depends on how the node is running. A node on the
+sequential path observes it within a poll tick even in the middle of a backoff, so
+it does not have to wait the backoff out. A member of a concurrent batch observes
+it at the batch's next admission boundary: the groups still queued behind the
+running one are never started and are journaled cancelled, and the run ends
+aborted at the boundary after the batch. A member already in flight, including one
+waiting out its own backoff, runs to its own end first.
+
+The label an interrupted attempt carries is decided by the node, not by the
+interrupt. On an ordinary node the attempt is journaled `failed`, or `timed_out`
+when its own deadline had already expired, and that holds whether or not the agent
+had written a status file: a verdict does not survive the interrupt, it rides an
+anomaly wake instead, so a supervisor can see the work existed and accept it
+explicitly. On a `require_verdict` node the attempt is journaled `failed` or
+`timed_out` when there was a status file to overrule, and `interrupted` when none
+was written, because that node's contract is a recorded verdict and none was
+recorded. Either label consumes the same retry, and neither carries a
+`failure_kind`: an interrupt is a control decision, not an infrastructure failure.
 
 ## Interactive nodes
 

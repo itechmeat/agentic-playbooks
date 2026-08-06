@@ -268,6 +268,429 @@ fn supervised_retry_recovers_after_wake() {
         "expected a SupervisorAction{{action: node_retry}} event in the log");
 }
 
+// Scenario 2b: a supervised FAN-OUT. Both branches are batched (spec 1.3), and
+// the failing one raises its wake only after the whole batch has completed; a
+// posted Retry then recovers exactly as it does after a sequential node.
+const WF_SUPERVISED_DIAMOND: &str = r#"
+schema: 1
+id: supdia
+name: Supervised diamond
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: "branch a steady" }
+  - { id: b, type: agent_task, prompt: "branch b flaky" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: j, join: all }
+  - { from: b, to: j, join: all }
+  - { from: j, to: done }
+"#;
+
+/// One stub for both branches: the adapter passes `-p <prompt> --model <model>`,
+/// so `$2` is the prompt and the branch is told apart by its text. The flaky
+/// branch fails once (marker file) and succeeds afterwards.
+fn branch_agent(dir: &Path) -> String {
+    let marker = dir.join("branch_b.marker");
+    let path = dir.join("branch_agent.sh");
+    let body = format!(
+        "#!/bin/sh\ncase \"$2\" in\n  *flaky*)\n    if [ -f '{m}' ]; then echo ok; exit 0; fi\n    touch '{m}'\n    echo 'branch b boom' 1>&2\n    exit 1\n    ;;\nesac\necho ok\n",
+        m = marker.display()
+    );
+    fs::write(&path, body).unwrap();
+    set_executable(&path);
+    path.to_string_lossy().to_string()
+}
+
+fn index_of(events: &[Event], what: &str, pred: impl Fn(&EventPayload) -> bool) -> usize {
+    events
+        .iter()
+        .position(|e| pred(&e.payload))
+        .unwrap_or_else(|| panic!("expected a {what} event in the log"))
+}
+
+fn node_started_at(events: &[Event], node: &str) -> usize {
+    index_of(
+        events,
+        &format!("node_started for {node}"),
+        |p| matches!(p, EventPayload::NodeStarted { node: n, .. } if n == node),
+    )
+}
+
+fn node_finished_at(events: &[Event], node: &str) -> usize {
+    index_of(
+        events,
+        &format!("node_finished for {node}"),
+        |p| matches!(p, EventPayload::NodeFinished { node: n, .. } if n == node),
+    )
+}
+
+#[test]
+fn supervised_batch_failure_wakes_after_the_batch_and_retry_recovers() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "supdia", WF_SUPERVISED_DIAMOND);
+
+    let prog = branch_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), "supdia", opts);
+
+    let run_dir = find_run_dir(dir.path(), "supdia-");
+    let wake = wait_for_wake(&run_dir);
+    match &wake.payload {
+        EventPayload::WakeRaised { trigger, node, .. } => {
+            assert_eq!(*trigger, WakeTrigger::NodeFailed);
+            assert_eq!(node, "b", "the wake must name the failed branch");
+        }
+        other => panic!("expected WakeRaised, got {other:?}"),
+    }
+
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "b".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "a retry of the failed batch branch must let the run reach finish"
+    );
+    let events = read_all(&run_dir).unwrap();
+    // Both branches were in flight together: `b` started before `a` finished.
+    assert!(
+        node_started_at(&events, "b") < node_finished_at(&events, "a"),
+        "a supervised fan-out must batch its branches, not serialize them"
+    );
+    // The wake belongs to the batch TAIL: it comes after every member finished.
+    let wake_at = index_of(&events, "wake_raised", |p| {
+        matches!(p, EventPayload::WakeRaised { .. })
+    });
+    for n in ["a", "b"] {
+        assert!(
+            node_finished_at(&events, n) < wake_at,
+            "the wake must be raised only after batch member {n} finished"
+        );
+    }
+    // The retry re-ran only the failed branch, and the join then executed.
+    let started_b = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "b"))
+        .count();
+    assert_eq!(started_b, 2, "branch b must run again after the retry");
+    assert_eq!(
+        events
+            .iter()
+            .filter(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "a"))
+            .count(),
+        1,
+        "branch a must not be re-executed by the retry of b"
+    );
+    node_finished_at(&events, "j");
+}
+
+// Scenario 2c: TWO failures in one supervised batch. Each is presented on its
+// own, in batch order, and the run only moves on once the supervisor has answered
+// both - the contract that replaces per-branch live parking (spec 1.3).
+const WF_SUPERVISED_TWO_FAILURES: &str = r#"
+schema: 1
+id: supdia2
+name: Supervised two failures
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: "branch a steady" }
+  - { id: b1, type: agent_task, prompt: "branch flaky1" }
+  - { id: b2, type: agent_task, prompt: "branch flaky2" }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b1 }
+  - { from: start, to: b2 }
+  - { from: a, to: j, join: all }
+  - { from: b1, to: j, join: all }
+  - { from: b2, to: j, join: all }
+  - { from: j, to: done }
+"#;
+
+/// Two independently flaky branches (one marker each) plus a steady one.
+fn two_flaky_branches_agent(dir: &Path) -> String {
+    let path = dir.join("two_flaky.sh");
+    let body = format!(
+        "#!/bin/sh\ncase \"$2\" in\n\
+         \x20 *flaky1*) m='{m1}' ;;\n\
+         \x20 *flaky2*) m='{m2}' ;;\n\
+         \x20 *) echo ok; exit 0 ;;\n\
+         esac\n\
+         if [ -f \"$m\" ]; then echo ok; exit 0; fi\n\
+         touch \"$m\"\n\
+         echo 'first attempt boom' 1>&2\n\
+         exit 1\n",
+        m1 = dir.join("flaky1.marker").display(),
+        m2 = dir.join("flaky2.marker").display(),
+    );
+    fs::write(&path, body).unwrap();
+    set_executable(&path);
+    path.to_string_lossy().to_string()
+}
+
+/// Waits for a wake that names `node`, so a test can follow the batch-order
+/// sequence of wakes instead of only seeing the first one.
+fn wait_for_wake_on(run_dir: &Path, node: &'static str) -> Event {
+    poll_until(&format!("a WakeRaised event for node {node}"), || {
+        read_all(run_dir)
+            .ok()?
+            .into_iter()
+            .find(|e| matches!(&e.payload, EventPayload::WakeRaised { node: n, .. } if n == node))
+    })
+}
+
+#[test]
+fn two_failures_in_one_batch_park_one_at_a_time_in_batch_order() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "supdia2", WF_SUPERVISED_TWO_FAILURES);
+
+    let prog = two_flaky_branches_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), "supdia2", opts);
+    let run_dir = find_run_dir(dir.path(), "supdia2-");
+
+    // Batch order is `current` then the frontier in edge-declaration order, so
+    // b1's wake comes first and b2 is not presented until b1 is answered.
+    wait_for_wake_on(&run_dir, "b1");
+    assert!(
+        !read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::WakeRaised { node, .. } if node == "b2")),
+        "only one wake may be outstanding at a time"
+    );
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "b1".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+
+    wait_for_wake_on(&run_dir, "b2");
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "b2".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+
+    let res = recv_result(&rx).unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "both retried branches must reach the barrier and the run must finish"
+    );
+    let events = read_all(&run_dir).unwrap();
+    for n in ["b1", "b2"] {
+        assert_eq!(
+            events
+                .iter()
+                .filter(
+                    |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == n)
+                )
+                .count(),
+            2,
+            "branch {n} must run once in the batch and once for its retry"
+        );
+    }
+    node_finished_at(&events, "j");
+}
+
+// Scenario 2d: a join whose input already failed must be FAILED and woken on,
+// never executed - even when it is an agent_task sitting next to another ready
+// branch, which is the shape the concurrent batch would otherwise swallow
+// (review finding I1).
+//
+// `src` fails, so its success route to `p` is not taken; the supervisor answers
+// the wake with the routine "the source is hopeless, keep going" directive
+// (Retry on the surviving input). `p` then succeeds, which makes the explicit
+// `all` join `j` ReadyFailure and pushes it into the frontier next to `k` - two
+// batchable-looking heads, one of them doomed.
+const WF_SUPERVISED_DOOMED_JOIN: &str = r#"
+schema: 1
+id: supjoin
+name: Supervised doomed join
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: src, type: agent_task, prompt: "fail-me source" }
+  - { id: p, type: agent_task, prompt: "surviving input" }
+  - { id: j, type: agent_task, prompt: "the doomed join" }
+  - { id: k, type: agent_task, prompt: "sibling head" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: src }
+  - { from: src, to: p, condition: { type: node_status, node: src, equals: success } }
+  - { from: src, to: j, condition: { type: node_status, node: src, equals: failure }, join: all }
+  - { from: p, to: j, join: all }
+  - { from: p, to: k }
+  - { from: j, to: done }
+  - { from: k, to: done }
+"#;
+
+/// A stub that fails whenever the prompt asks it to and succeeds otherwise.
+fn fail_on_demand_agent(dir: &Path) -> String {
+    let path = dir.join("fail_on_demand.sh");
+    fs::write(
+        &path,
+        "#!/bin/sh\ncase \"$2\" in *fail-me*) echo 'boom' 1>&2; exit 1 ;; esac\necho ok\n",
+    )
+    .unwrap();
+    set_executable(&path);
+    path.to_string_lossy().to_string()
+}
+
+/// Sets `APB_AGENT_CMD` and restores the previous value on EVERY exit path,
+/// including a panicking assertion - the bare `remove_var` at the end of the
+/// older tests in this file does not run on unwind and would leak the stub into
+/// the next test. Declare it after the `env_lock` guard so the restore happens
+/// while the lock is still held.
+struct AgentCmdGuard(Option<std::ffi::OsString>);
+
+impl AgentCmdGuard {
+    fn set(prog: &str) -> Self {
+        let prev = std::env::var_os("APB_AGENT_CMD");
+        unsafe {
+            std::env::set_var("APB_AGENT_CMD", prog);
+        }
+        AgentCmdGuard(prev)
+    }
+}
+
+impl Drop for AgentCmdGuard {
+    fn drop(&mut self) {
+        match self.0.take() {
+            Some(v) => unsafe { std::env::set_var("APB_AGENT_CMD", v) },
+            None => unsafe { std::env::remove_var("APB_AGENT_CMD") },
+        }
+    }
+}
+
+#[test]
+fn a_doomed_join_is_failed_and_woken_on_instead_of_being_batch_executed() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "supjoin", WF_SUPERVISED_DOOMED_JOIN);
+
+    let prog = fail_on_demand_agent(dir.path());
+    let _env = common::env_lock();
+    let _agent = AgentCmdGuard::set(&prog);
+
+    let opts = RunOptions {
+        mode: RunMode::Supervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), "supjoin", opts);
+    let run_dir = find_run_dir(dir.path(), "supjoin-");
+
+    // The source failed; keep going with the surviving input instead of retrying it.
+    wait_for_wake_on(&run_dir, "src");
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "p".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+
+    // The join is now doomed. It must raise its OWN wake rather than run.
+    let wake = wait_for_wake_on(&run_dir, "j");
+    match &wake.payload {
+        EventPayload::WakeRaised {
+            trigger, detail, ..
+        } => {
+            assert_eq!(*trigger, WakeTrigger::NodeFailed);
+            assert!(
+                detail.contains("join"),
+                "the wake must carry the join verdict, got {detail:?}"
+            );
+        }
+        other => panic!("expected WakeRaised, got {other:?}"),
+    }
+
+    post_control(
+        &run_dir,
+        Control::Abort {
+            reason: "join is unrecoverable".into(),
+        },
+    )
+    .unwrap();
+    let res = recv_result(&rx).unwrap();
+    assert_eq!(res.outcome, RunStatus::Aborted);
+
+    let events = read_all(&run_dir).unwrap();
+    let verdict = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::NodeFinished {
+                node,
+                status,
+                output,
+                ..
+            } if node == "j" => Some((status.clone(), output.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a node_finished for the join, got {events:?}"));
+    assert_eq!(
+        verdict.0, "failed",
+        "the join must be failed by the barrier, not executed"
+    );
+    assert!(
+        verdict.1.contains("join: upstream branch failed"),
+        "unexpected join output: {:?}",
+        verdict.1
+    );
+}
+
 // Scenario 3: autonomous mode is unchanged. The same failing playbook, but now
 // node `work` has only an edge conditioned on success (no fallback and no failure
 // branch) - as before Phase 4a, next_node finds no matching edge. Before issue

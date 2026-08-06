@@ -341,6 +341,25 @@ pub struct Defaults {
     /// every existing playbook already has.
     #[serde(default, skip_serializing_if = "FailurePolicy::is_default")]
     pub on_failure: FailurePolicy,
+    /// Playbook-wide default for `agent_task.require_verdict` (spec 2026-08-05
+    /// section 2.2). `None` (absent) means today's behavior. A node's own
+    /// `require_verdict: true` wins; this turns the requirement on for every
+    /// agent_task of the playbook.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require_verdict: Option<bool>,
+    /// How many ready branches this playbook may execute at the same time (spec
+    /// 2026-08-05 section 1.3). The authoring end of the precedence chain
+    /// `defaults.max_parallel -> RunOptions/RunConfig.max_parallel -> engine
+    /// default`; `1` serializes every fan-out. Absent means the run decides.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_parallel: Option<usize>,
+}
+
+/// For `skip_serializing_if` on additive boolean flags: a `false` value is
+/// omitted from written YAML, so re-saving an existing playbook does not sprout
+/// the new key.
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// What happens when a node ends `failed` or `timed_out` and none of its
@@ -748,6 +767,15 @@ pub enum NodeKind {
         /// elapses. Requires `question_timeout_seconds` (validator V32).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         default_answer: Option<String>,
+        /// Require an explicit verdict from the agent (spec 2026-08-05 section
+        /// 2.2). With this set, the attempt must record its result in the
+        /// per-attempt status file (`APB_STATUS_FILE`): a process that ends
+        /// without a valid verdict is classified `interrupted`, consumes a
+        /// retry, and the next attempt is told a previous attempt was cut off
+        /// mid-work. Default `false` keeps the documented text-report contract.
+        /// Falls back to `defaults.require_verdict` when unset here.
+        #[serde(default, skip_serializing_if = "is_false")]
+        require_verdict: bool,
     },
     Script {
         script: String,
@@ -877,9 +905,34 @@ pub struct Edge {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EdgeCondition {
-    NodeStatus { node: String, equals: StatusEq },
-    ReviewStatus { equals: String },
-    OutputMatch { node: String, pattern: String },
+    NodeStatus {
+        node: String,
+        equals: StatusEq,
+    },
+    ReviewStatus {
+        equals: String,
+    },
+    OutputMatch {
+        node: String,
+        pattern: String,
+    },
+    /// Structured-verdict routing (spec 2026-08-05 section 2.5): the source
+    /// node's output is parsed as JSON and ONE top-level field is compared to
+    /// `equals` as a string. The intended producer is an agent's status file
+    /// (`APB_STATUS_FILE`), whose `outputs` object becomes the node output as
+    /// compact JSON, so a route can read a verdict the agent wrote deliberately
+    /// instead of substring-matching prose.
+    ///
+    /// Every shape the condition cannot read is a NON-match, never an error: an
+    /// output that is not JSON or not a JSON object, an absent field, and a value
+    /// with no unambiguous string form (null, array, object). Strings, booleans
+    /// and numbers compare by their JSON textual form, exactly (no substring, no
+    /// case folding - that is what `OutputMatch` is for).
+    OutputField {
+        node: String,
+        field: String,
+        equals: String,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
@@ -1284,6 +1337,53 @@ edges:
         );
         let out = serde_yaml_ng::to_string(&pb).unwrap();
         assert!(out.contains("on_failure: aborted"), "got: {out}");
+    }
+
+    // Spec 2026-08-05 section 2.2: `require_verdict` is additive on both the
+    // node and `defaults`, absent by default, and the default never appears in
+    // written YAML (so re-saving an existing playbook does not sprout the key).
+    #[test]
+    fn require_verdict_is_additive_on_the_node_and_defaults() {
+        let plain = r#"schema: 2
+id: p
+name: P
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, profile: x }
+edges:
+  - { from: s, to: a }
+"#;
+        let pb = Playbook::from_yaml(plain).unwrap();
+        assert_eq!(pb.defaults.require_verdict, None);
+        match &pb.node("a").unwrap().kind {
+            NodeKind::AgentTask {
+                require_verdict, ..
+            } => assert!(!*require_verdict, "the node default must be false"),
+            other => panic!("expected agent_task, got {other:?}"),
+        }
+        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        assert!(!out.contains("require_verdict"), "got: {out}");
+
+        // On the node.
+        let on_node = plain.replace(
+            "type: agent_task, prompt: hi, profile: x",
+            "type: agent_task, prompt: hi, profile: x, require_verdict: true",
+        );
+        let pb = Playbook::from_yaml(&on_node).unwrap();
+        match &pb.node("a").unwrap().kind {
+            NodeKind::AgentTask {
+                require_verdict, ..
+            } => assert!(*require_verdict),
+            other => panic!("expected agent_task, got {other:?}"),
+        }
+        let out = serde_yaml_ng::to_string(&pb).unwrap();
+        assert!(out.contains("require_verdict: true"), "got: {out}");
+
+        // Playbook-wide, through defaults.
+        let on_defaults = plain.replace("nodes:", "defaults:\n  require_verdict: true\nnodes:");
+        let pb = Playbook::from_yaml(&on_defaults).unwrap();
+        assert_eq!(pb.defaults.require_verdict, Some(true));
     }
 
     // The policy never sends the handler to itself: a failure of the handler

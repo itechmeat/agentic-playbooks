@@ -327,7 +327,7 @@ fn traversal_run_id_is_not_found_in_all_tools() {
         "run_continue_from traversal: expected NotFound, got {err:?}"
     );
 
-    let err = interrupt_attempt(dir.path(), bad, None).unwrap_err();
+    let err = interrupt_attempt(dir.path(), bad, None, None).unwrap_err();
     assert!(
         matches!(err, ToolError::NotFound(_)),
         "interrupt_attempt traversal: expected NotFound, got {err:?}"
@@ -347,7 +347,7 @@ fn interrupt_attempt_posts_command() {
     params.insert("who".to_string(), "world".to_string());
     let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
-    let v = interrupt_attempt(dir.path(), &run_id, Some("wedged")).unwrap();
+    let v = interrupt_attempt(dir.path(), &run_id, Some("wedged"), None).unwrap();
     assert!(
         v["posted_seq"].is_u64(),
         "interrupt_attempt should return posted_seq, got {v:?}"
@@ -360,12 +360,67 @@ fn interrupt_attempt_posts_command() {
             .join("control.jsonl"),
     )
     .unwrap();
+    let entries: Vec<serde_json::Value> = control
+        .lines()
+        .filter_map(|l| serde_json::from_str(l).ok())
+        .collect();
+    let posted = entries
+        .iter()
+        .find(|v| v.get("cmd").and_then(|c| c.as_str()) == Some("interrupt"))
+        .unwrap_or_else(|| {
+            panic!("control.jsonl must contain an interrupt command, got:\n{control}")
+        });
+    // Broadcast is the shape of an interrupt posted without a node: the entry
+    // carries no target, which is what every attempt's observer reads as "for me"
+    // (spec 2026-08-05 section 1.6).
     assert!(
-        control
-            .lines()
-            .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
-            .any(|v| v.get("cmd").and_then(|c| c.as_str()) == Some("interrupt")),
-        "control.jsonl must contain an interrupt command, got:\n{control}"
+        posted.get("node").is_none_or(|n| n.is_null()),
+        "an interrupt posted without a node must carry no target, got: {posted}"
+    );
+}
+
+// Spec 2026-08-05 section 1.6: the tool accepts a node and forwards it verbatim
+// into the posted `Control::Interrupt`, which is what makes the interrupt
+// targeted (the engine's per-attempt observer filters on that field). The tool's
+// job is only to post, single-writer.
+#[test]
+fn interrupt_attempt_forwards_the_targeted_node() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "noagent_sv", NOAGENT);
+
+    let mut params = BTreeMap::new();
+    params.insert("who".to_string(), "world".to_string());
+    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+
+    let v = interrupt_attempt(dir.path(), &run_id, Some("branch is wedged"), Some("work")).unwrap();
+    assert!(
+        v["posted_seq"].is_u64(),
+        "interrupt_attempt should return posted_seq, got {v:?}"
+    );
+
+    let control = fs::read_to_string(
+        dir.path()
+            .join(".apb/runs")
+            .join(&run_id)
+            .join("control.jsonl"),
+    )
+    .unwrap();
+    let posted = control
+        .lines()
+        .filter_map(|l| serde_json::from_str::<serde_json::Value>(l).ok())
+        .find(|v| v.get("cmd").and_then(|c| c.as_str()) == Some("interrupt"))
+        .unwrap_or_else(|| {
+            panic!("control.jsonl must contain an interrupt command, got:\n{control}")
+        });
+    assert_eq!(
+        posted.get("node").and_then(|n| n.as_str()),
+        Some("work"),
+        "the tool must forward the targeted node into the control entry, got: {posted}"
+    );
+    assert_eq!(
+        posted.get("reason").and_then(|n| n.as_str()),
+        Some("branch is wedged"),
+        "the reason must still ride the targeted entry, got: {posted}"
     );
 }
 

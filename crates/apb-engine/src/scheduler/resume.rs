@@ -415,7 +415,12 @@ pub(crate) fn resume_inner(
     // the run to running forever and appending another marker on every retry.
     if decision.mode == StartMode::After {
         let state = RunState::fold(&read_all(&run_dir)?);
-        if seed_successors(&playbook, &decision.start_node, &state).is_empty() {
+        // Same active-set reconstruction as the `After` seed in `drive`: the
+        // outstanding branch heads come from the journal, so a sibling branch
+        // that never started still blocks a join instead of being written off.
+        let outstanding = parallel::pending_heads(&playbook, &state);
+        let active = active_set(&decision.start_node, &[], &outstanding);
+        if seed_successors(&playbook, &decision.start_node, &state, &active).is_empty() {
             return Err(EngineError::Invalid(format!(
                 "node `{}` already finished with no pending successor to resume into - pass --from-node to re-run from a specific node",
                 decision.start_node

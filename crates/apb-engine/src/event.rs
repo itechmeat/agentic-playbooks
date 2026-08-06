@@ -14,6 +14,13 @@ pub enum WakeTrigger {
     Anomaly,
 }
 
+/// `skip_serializing_if` helper for additive `bool` payload fields: a false
+/// flag stays off the wire, so an event that does not use it serializes exactly
+/// as it did before the field existed.
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 /// Fingerprint of the profile used, for run provenance (spec 6.5).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileProvenance {
@@ -104,6 +111,26 @@ pub enum EventPayload {
         /// old logs. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         rejected_output: Option<String>,
+        /// Whatever the attempt produced before it ended without recording a
+        /// verdict (spec 2026-08-05 section 2.2): the agent's mid-work text on
+        /// an `interrupted` attempt, or the adapter's failure detail when the
+        /// process died. Kept so an interruption is observable and the work is
+        /// not silently dropped; the next attempt is told to look for work
+        /// already done rather than being handed this text. `None` for every
+        /// attempt that recorded a verdict or a report, and for old logs.
+        /// Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        partial_output: Option<String>,
+        /// How the attempt's failure was classified (spec 2026-08-05 section
+        /// 2.3): `transient` (infrastructure, retried on the same executor
+        /// after a backoff), `auth`, `budget` (both non-transient: no further
+        /// retry on this step, same-agent fallback steps suppressed), or
+        /// `agent`. `None` for a successful attempt, for a failure the agent
+        /// itself reported through a verdict or a report block (a written
+        /// verdict decides the attempt, so nothing is classified), for an
+        /// attempt a supervisor interrupted, and for old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        failure_kind: Option<String>,
     },
     NodeFinished {
         node: String,
@@ -127,6 +154,15 @@ pub enum EventPayload {
         /// The node's profile (`<scope>/<name>`) within which the fallback occurred.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         profile: Option<String>,
+        /// Model of the chain step that just failed, and model of the step taken
+        /// instead (spec 2026-08-05 section 2.3, issue #74 finding 2). Without
+        /// them a claude -> claude fallback that only changed the model reads
+        /// like a pointless retry of the identical binding in the journal.
+        /// `None` only for old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        from_model: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        to_model: Option<String>,
     },
     RunPaused {
         reason: String,
@@ -347,6 +383,28 @@ pub enum EventPayload {
         node: String,
         reason: String,
     },
+    /// A node succeeded but a deliverable it DECLARED in `outputs.files` was not
+    /// captured (spec 2026-08-05 section 2.6, issue #74 finding 4).
+    ///
+    /// A warning, never a failure: prompt-driven drift (the agent wrote
+    /// `findings.md` where the playbook declared `report-*.md`) must be visible,
+    /// but hard-failing a node on a glob is too brittle - the declaration is a
+    /// statement of intent, not a contract the engine can verify semantically.
+    /// `globs` carries the declaration verbatim so the journal shows what was
+    /// expected without a reader having to fetch the playbook version.
+    ///
+    /// `detail` is `None` for the ordinary case (the globs matched no file) and
+    /// carries the reason when capture itself failed (an unreadable match, a path
+    /// escaping its scope root). Fields default per the additive convention; old
+    /// logs never carry the variant at all.
+    DeliverableMissing {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        globs: Vec<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+    },
     /// A bounded loop edge (one carrying `max_traversals`) was traversed (spec
     /// 2026-07-20-run-reliability). Journaled ONLY for edges that carry
     /// `max_traversals`, so the journal stays lean: `RunState::fold` counts
@@ -357,6 +415,39 @@ pub enum EventPayload {
     EdgeTraversed {
         from: String,
         to: String,
+        /// True when the hop was taken by the `defaults.on_failure` policy
+        /// rather than by a declared edge (spec 2026-08-05 section 1.5 /
+        /// Task 4). The policy pushes its handler onto the frontier without
+        /// consulting any edge, so nothing in the journal used to record where
+        /// the run went and no reconstruction from the journal could see the
+        /// handler (`parallel::pending_heads`). Recording it as a traversal
+        /// makes it visible to that one reconstruction rather than duplicating
+        /// the failure-policy predicate in a second place; the flag keeps the
+        /// record honest about there being no such edge, and keeps the fold
+        /// from spending a bounded edge's `max_traversals` budget on it.
+        /// Additive: absent in every log written before, and omitted from the
+        /// wire whenever false.
+        #[serde(default, skip_serializing_if = "is_false")]
+        via_policy: bool,
+    },
+    /// A join proceeded WITHOUT one or more of its declared inputs, because no
+    /// node the run can still execute reaches them (spec 2026-08-05, Task 4).
+    /// Written by drive at the moment it acts on the readiness verdict, listing
+    /// every source written off for that decision.
+    ///
+    /// Its own variant rather than a `SupervisorAction`, for two reasons. It is
+    /// engine bookkeeping, so a consumer that reads `SupervisorAction` as "a
+    /// supervisor acted" (the dashboard's intervention journal does) would report
+    /// a false class. And the same decision is legitimately journaled twice - a
+    /// resume re-advancing through `advance_frontier`, or a loop re-entering an
+    /// either-or fork - which `run_doctor`'s repeated-action check would read as a
+    /// looping supervisor. Fields default per the additive convention; old logs
+    /// never carry the variant at all.
+    JoinInputDead {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        sources: Vec<String>,
     },
     /// An interactive node's agent asked the user a question (spec
     /// 2026-07-20-interactive-nodes). Written by drive when it observes a new
@@ -694,6 +785,8 @@ mod tests {
             session: None,
             summary: None,
             rejected_output: Some("interim progress only".into()),
+            partial_output: None,
+            failure_kind: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
@@ -702,6 +795,85 @@ mod tests {
                 rejected_output, ..
             } => assert_eq!(rejected_output.as_deref(), Some("interim progress only")),
             other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    /// An old journal line, written before `failure_kind` existed, still parses
+    /// (spec 2026-08-05 section 2.3: every new payload field is additive).
+    #[test]
+    fn attempt_finished_without_failure_kind_deserializes_to_none() {
+        let line = r#"{"type":"attempt_finished","node":"a","attempt":1,"status":"failed"}"#;
+        let back: EventPayload = serde_json::from_str(line).unwrap();
+        match back {
+            EventPayload::AttemptFinished { failure_kind, .. } => assert_eq!(failure_kind, None),
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attempt_finished_with_failure_kind_round_trips() {
+        let payload = EventPayload::AttemptFinished {
+            node: "a".into(),
+            attempt: 1,
+            status: "failed".into(),
+            duration_ms: Some(42),
+            session: None,
+            summary: None,
+            rejected_output: None,
+            partial_output: None,
+            failure_kind: Some("transient".into()),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::AttemptFinished { failure_kind, .. } => {
+                assert_eq!(failure_kind.as_deref(), Some("transient"));
+            }
+            other => panic!("expected AttemptFinished, got {other:?}"),
+        }
+    }
+
+    /// Old `fallback_triggered` lines carry agent ids only; the models are
+    /// additive and default to `None`.
+    #[test]
+    fn fallback_triggered_without_models_deserializes_to_none() {
+        let line = r#"{"type":"fallback_triggered","node":"a","from":"claude","to":"claude-code"}"#;
+        let back: EventPayload = serde_json::from_str(line).unwrap();
+        match back {
+            EventPayload::FallbackTriggered {
+                from_model,
+                to_model,
+                ..
+            } => {
+                assert_eq!(from_model, None);
+                assert_eq!(to_model, None);
+            }
+            other => panic!("expected FallbackTriggered, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fallback_triggered_with_models_round_trips() {
+        let payload = EventPayload::FallbackTriggered {
+            node: "a".into(),
+            from: "claude".into(),
+            to: "claude".into(),
+            profile: Some("project/main".into()),
+            from_model: Some("haiku".into()),
+            to_model: Some("opus".into()),
+        };
+        let line = serde_json::to_string(&payload).unwrap();
+        let back: EventPayload = serde_json::from_str(&line).unwrap();
+        match back {
+            EventPayload::FallbackTriggered {
+                from_model,
+                to_model,
+                ..
+            } => {
+                assert_eq!(from_model.as_deref(), Some("haiku"));
+                assert_eq!(to_model.as_deref(), Some("opus"));
+            }
+            other => panic!("expected FallbackTriggered, got {other:?}"),
         }
     }
 
@@ -715,6 +887,8 @@ mod tests {
             session: Some("abc".into()),
             summary: Some("did the thing".into()),
             rejected_output: None,
+            partial_output: None,
+            failure_kind: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
