@@ -691,8 +691,10 @@ fn drive_inner(
                 // member waiting for a slot is still going to run and a join fed
                 // by it must not be judged dead and fired early.
                 for chunk in batch.chunks(max_parallel) {
-                    // Admission-time re-check: a join:any that an earlier chunk
-                    // already satisfied cancels the batch. Members that were
+                    // Admission-time re-check, against BOTH stop signals.
+                    //
+                    // `cancel` is the batch-local one: a join:any that an earlier
+                    // chunk already satisfied cancels the batch. Members that were
                     // running when that happened are SIGKILLed through `cancel`;
                     // members not yet admitted are simply never started and are
                     // journaled with the same `cancelled` status their killed
@@ -701,7 +703,18 @@ fn drive_inner(
                     // own any-join is ready) would be finer-grained than the kill
                     // itself, which stops every running member regardless of
                     // which join it feeds; one rule for both is the point.
-                    if cancel.load(Ordering::Relaxed) {
+                    //
+                    // `run_cancel` is the run-level one, and it has to be read
+                    // here too: an `Abort` posted while an earlier chunk was
+                    // running is not visible to this loop otherwise (the drive
+                    // applies it only at the next top-of-loop scan), so every
+                    // remaining chunk used to be admitted and SPAWNED in full
+                    // after the operator said stop - real agent processes bought
+                    // by a run that is already stopping. Killing the members
+                    // already IN FLIGHT is a separate matter: they hold `cancel`,
+                    // not `run_cancel`, so they run to their own end and the run
+                    // aborts at the boundary right after this batch.
+                    if cancel.load(Ordering::Relaxed) || run_cancel.load(Ordering::SeqCst) {
                         for n in chunk {
                             log.append(EventPayload::NodeFinished {
                                 node: n.clone(),

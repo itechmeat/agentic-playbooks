@@ -176,6 +176,13 @@ Two boundary rulings recorded after the Task 5 review:
   failed (the pre-existing `supervisor_interrupt_attempt` contract), and the
   journaled anomaly carries the verdict so the supervisor can accept the work
   explicitly if it chooses.
+  Shipped nuance, recorded after the whole-branch review: "stays failed" is the
+  label when there WAS a verdict to overrule. On a `require_verdict` node with no
+  status file written, the no-verdict arm runs regardless of the interrupt, so the
+  attempt is journaled `interrupted` and the next attempt carries the interruption
+  note. The control decision itself is unchanged either way (no `failure_kind`,
+  ordinary retry/fallback/patch proceeds); only the label differs, and it differs
+  because the node's own contract was not met.
 - For `ErrorClass::Timeout | Transport` with `require_verdict` in force, the
   attempt is labeled interrupted but keeps the pre-existing break-to-fallback
   behavior (no same-executor retry consumed in Task 5). The retry semantics

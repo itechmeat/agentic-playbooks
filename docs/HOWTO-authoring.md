@@ -485,6 +485,17 @@ playbooks whose branches are resource-heavy (large builds, rate-limited external
 calls) or where many branches at once would just be noise to review; leave it
 alone for cheap, independent branches.
 
+One shape never joins a batch at all, whatever the cap says: a node with two or
+more incoming edges. Every such node is a join (implicit, or explicit through
+`join:`), and a join's readiness verdict belongs to the sequential path, because
+that is the only place a barrier whose input failed can be recorded failed with the
+barrier's own reason and raise a wake for a supervisor, instead of just being
+executed as if nothing had gone wrong. The consequence is worth planning around:
+fan-in consumers serialize. Two `agent_task` nodes that each read the same pair of
+producers are both joins, so they run one after the other, one scheduling pass
+each, even with slots free. Give a consumer a single incoming edge if it needs to
+run alongside its siblings.
+
 In a supervised run the execution is concurrent but the supervision stays serial:
 the whole batch runs, then failures are presented one at a time, in batch order,
 at the batch tail. A `join: any` satisfied by an earlier group cancels the
@@ -588,9 +599,11 @@ the point: between two drives, someone may have.
 ### Interrupted attempts and reaping
 
 An attempt recorded `interrupted` ended without a verdict rather than with one: it
-is neither a success nor a decided failure, and the node is re-executed. Two
+is neither a success nor a decided failure, and the node is re-executed. Three
 things produce it. One is a `require_verdict` node whose process ended without a
-valid status file (see "require_verdict" above). The other is reaping: when a run
+valid status file (see "require_verdict" above). A supervisor interrupt of such a
+node is the same shape and gets the same label when no status file was written
+(see "Supervisor interrupts" below). The third is reaping: when a run
 is driven again after its previous driver died mid-attempt, drive entry closes out
 any attempt the journal still shows open whose recorded process id is provably
 gone, journaling it `interrupted` so the fact lives in the log rather than only in
@@ -626,9 +639,26 @@ interrupt does not stop the run.
 An interrupt only reaches an attempt that was already running when it was posted.
 It is not queued for a later attempt of the same node, and a node sitting between
 attempts in an infrastructure backoff does not observe one. Interrupt a running
-attempt; when the run itself should stop, use `supervisor_run_abort`, which IS
-observed during a backoff, within a poll tick, so it does not have to wait the
-backoff out.
+attempt; when the run itself should stop, use `supervisor_run_abort`.
+
+Where that abort is observed depends on how the node is running. A node on the
+sequential path observes it within a poll tick even in the middle of a backoff, so
+it does not have to wait the backoff out. A member of a concurrent batch observes
+it at the batch's next admission boundary: the groups still queued behind the
+running one are never started and are journaled cancelled, and the run ends
+aborted at the boundary after the batch. A member already in flight, including one
+waiting out its own backoff, runs to its own end first.
+
+The label an interrupted attempt carries is decided by the node, not by the
+interrupt. On an ordinary node the attempt is journaled `failed`, or `timed_out`
+when its own deadline had already expired, and that holds whether or not the agent
+had written a status file: a verdict does not survive the interrupt, it rides an
+anomaly wake instead, so a supervisor can see the work existed and accept it
+explicitly. On a `require_verdict` node the attempt is journaled `failed` or
+`timed_out` when there was a status file to overrule, and `interrupted` when none
+was written, because that node's contract is a recorded verdict and none was
+recorded. Either label consumes the same retry, and neither carries a
+`failure_kind`: an interrupt is a control decision, not an infrastructure failure.
 
 ## Interactive nodes
 

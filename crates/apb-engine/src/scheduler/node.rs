@@ -2465,20 +2465,43 @@ pub(crate) fn active_set(node: &str, frontier: &[String], also_active: &[String]
 /// query and are then forgotten, and the next advance - which computes liveness
 /// from the frontier alone - writes the unstarted branches off as dead.
 ///
-/// A head that is a JOIN is deliberately left out: nothing re-gates readiness
-/// once a join becomes `current`, so a not-yet-ready join sitting in the frontier
-/// would execute early. Joins re-enter through [`advance_frontier`] as soon as an
-/// input actually lands, which is the one path that checks readiness.
+/// A head that is a JOIN is restored only when its barrier has already DECIDED.
+/// Nothing re-gates readiness once a join becomes `current`, so a `NotReady` join
+/// sitting in the frontier would execute early; a join that is already
+/// `ReadySuccess` or `ReadyFailure`, on the other hand, has to be restored here,
+/// because nothing else will ever offer it again. A `NotReady` one is the case
+/// [`advance_frontier`] covers: it re-enters as soon as a further input lands,
+/// and that path checks readiness. A join every input of which landed BEFORE the
+/// crash gets no further input and no further advance, so leaving it out
+/// unconditionally silently dropped it - the run either completed with the
+/// barrier never executed or died on the unrelated "has no outgoing edge" error.
+///
+/// Readiness is weighed with every rebuilt head counted as active, so a join fed
+/// by a branch that has not run yet stays `NotReady` and is left to
+/// `advance_frontier` exactly as before. A restored `ReadyFailure` join is what
+/// the drive loop's own readiness arm expects: it journals the node failed with
+/// the barrier's reason instead of executing it.
 pub(crate) fn restore_frontier(
     playbook: &Playbook,
     state: &RunState,
     current: &str,
     frontier: &mut Vec<String>,
 ) {
-    for head in parallel::pending_heads(playbook, state) {
-        if head != current && !frontier.contains(&head) && !parallel::is_join(playbook, &head) {
-            frontier.push(head);
+    let heads = parallel::pending_heads(playbook, state);
+    let active = active_set(current, frontier, &heads);
+    for head in &heads {
+        if head == current || frontier.contains(head) {
+            continue;
         }
+        if parallel::is_join(playbook, head)
+            && matches!(
+                parallel::join_readiness(playbook, head, state, &active),
+                JoinReadiness::NotReady
+            )
+        {
+            continue;
+        }
+        frontier.push(head.clone());
     }
 }
 

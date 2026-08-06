@@ -488,3 +488,88 @@ fn a_reaped_plain_node_gets_no_interruption_note() {
         "the premise of the gate: a plain node is never told the status-file contract, got:\n{prompt}"
     );
 }
+
+/// Three branches meeting two barriers: `a` and `b` feed the implicit join `j`,
+/// while the long-running `c` runs alongside them and reaches the finish node on
+/// its own. `max_parallel: 1` keeps the first pass strictly sequential, so the
+/// journal cut below lands at a deterministic point: `a` and `b` fully finished,
+/// `c` open.
+const JOIN_RESUME_PLAYBOOK: &str = r#"
+schema: 1
+id: reapjoin
+name: ReapJoin
+version: 1.0.0
+defaults:
+  profile: main
+  max_parallel: 1
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: agent_task, prompt: "left" }
+  - { id: b, type: agent_task, prompt: "right" }
+  - { id: j, type: prompt, prompt: "merge" }
+  - { id: c, type: agent_task, prompt: "long" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: start, to: c }
+  - { from: a, to: j }
+  - { from: b, to: j }
+  - { from: j, to: done }
+  - { from: c, to: done }
+"#;
+
+/// A resume must not silently drop a JOIN whose every input landed BEFORE the
+/// crash.
+///
+/// The frontier lives in the dead driver's memory, so a resume rebuilds it from
+/// the journal. That reconstruction used to skip every join head, on the rationale
+/// that a join re-enters scheduling through `advance_frontier` as soon as an input
+/// lands - which is false in precisely the case the reconstruction exists for: here
+/// `a` and `b` both delivered into `j` before the driver died, so no further input
+/// will ever land and no advance will ever re-offer it. Against the pre-fix engine
+/// `j` is dropped, `c` reruns, its branch reaches the finish node, and the run
+/// reports SUCCESS with the barrier never executed at all.
+#[test]
+fn a_resume_still_executes_a_join_whose_inputs_all_landed_before_the_crash() {
+    let dir = tempfile::tempdir().unwrap();
+    let (prog, tally) = seed_named(dir.path(), "reapjoin", JOIN_RESUME_PLAYBOOK);
+
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "reapjoin", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert_eq!(
+        invocations(&tally),
+        3,
+        "the first pass ran all three branches"
+    );
+
+    // The crash shape: cut at `c`'s open attempt, which the sequential first pass
+    // guarantees sits after both `a` and `b` finished and before `j` ever ran.
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    cut_at_open_attempt(&run_dir, "c", Some(dead_pid()));
+
+    let again = resume(dir.path(), &res.run_id, None);
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    let again = again.unwrap();
+    assert_eq!(again.outcome, RunStatus::Succeeded);
+    assert!(
+        read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::NodeFinished { node, .. } if node == "j")),
+        "the join whose inputs all landed before the crash must still execute on the resume"
+    );
+    assert_eq!(
+        invocations(&tally),
+        4,
+        "only the reaped branch re-runs; the two delivered branches are not re-executed"
+    );
+}

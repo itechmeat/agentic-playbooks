@@ -262,8 +262,14 @@ const BACKOFF_TICK: Duration = Duration::from_millis(25);
 /// caller can hand the decision back to its own cancellation check.
 ///
 /// A supervisor `Interrupt` is deliberately NOT polled here: it targets a
-/// RUNNING attempt, and during a backoff there is no agent process to tear
-/// down. It is observed by the next attempt's control poll, one backoff later.
+/// RUNNING attempt, and during a backoff there is no agent process to tear down.
+/// Nor does the next attempt pick it up: every attempt takes its control baseline
+/// from the latest seq already posted when it begins (`node::execute_node`), so an
+/// entry queued during the backoff sits at or below that baseline and is never
+/// re-acked - it is spent, and the next node boundary consumes it as the no-op
+/// that `control_apply`'s `Interrupt` arm documents. An operator who wants work to
+/// stop during a backoff has to post an `Abort`, which is the signal this wait
+/// does poll.
 pub fn wait_backoff(total: Duration, cancel: &AtomicBool) -> bool {
     let deadline = Instant::now() + total;
     loop {

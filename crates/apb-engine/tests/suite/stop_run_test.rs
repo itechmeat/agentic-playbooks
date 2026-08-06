@@ -1,12 +1,14 @@
 //! Task 8: a stop that interrupts in-flight work.
 //!
-//! Three properties, all bounded in wall-clock so a regression fails fast
+//! Four properties, all bounded in wall-clock so a regression fails fast
 //! instead of hanging the suite:
 //!   (a) a `stop_run` against a live drive interrupts the agent MID-NODE (the
 //!       drive returns far sooner than the stub agent's own sleep) and the
 //!       journal ends with `RunAborted`;
 //!   (b) a run whose driver is gone is finalized by `stop_run` itself;
-//!   (c) an already terminal run is left completely untouched.
+//!   (c) an already terminal run is left completely untouched;
+//!   (d) a stop posted while a CONCURRENT batch is running stops the batch from
+//!       admitting the groups still queued behind it.
 
 use crate::common;
 use std::fs;
@@ -411,6 +413,142 @@ fn stop_of_a_terminal_run_changes_nothing() {
     assert!(
         !run_dir.join("control.jsonl").is_file(),
         "a terminal run must not even get an abort posted"
+    );
+}
+
+/// A fan-out of four script branches with two slots: the batch is admitted in
+/// two chunks of two. The first chunk holds until the test releases it, the
+/// second chunk records the fact that it ran at all.
+const BATCH_FANOUT: &str = r#"
+schema: 1
+id: stopbatch
+name: Stop Batch
+version: 1.0.0
+defaults:
+  max_parallel: 2
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/hold.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/hold.sh", runner: sh }
+  - { id: c, type: script, script: "scripts/mark.sh", runner: sh }
+  - { id: d, type: script, script: "scripts/mark.sh", runner: sh }
+  - { id: m, type: prompt, prompt: "merged" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: start, to: c }
+  - { from: start, to: d }
+  - { from: a, to: m }
+  - { from: b, to: m }
+  - { from: c, to: m }
+  - { from: d, to: m }
+  - { from: m, to: done }
+"#;
+
+/// The first chunk's script: announce that the chunk is genuinely in flight, wait
+/// (bounded) for the test to release it, and then linger one second. The linger
+/// is what makes the assertion about the SECOND chunk meaningful rather than a
+/// race: the release happens only after the abort is posted, and one second is
+/// several `stop::WATCH_INTERVAL`s, so the abort watcher has latched the run-level
+/// cancel flag long before the admission gate for the next chunk is reached.
+fn hold_script(root: &Path) -> String {
+    format!(
+        "touch '{root}/chunk1_started'\n\
+         i=0\n\
+         while [ ! -f '{root}/release' ]; do\n\
+         \x20 i=$((i + 1))\n\
+         \x20 if [ \"$i\" -gt 200 ]; then break; fi\n\
+         \x20 sleep 0.05\n\
+         done\n\
+         sleep 1\n",
+        root = root.display(),
+    )
+}
+
+fn seed_batch(root: &Path) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/stopbatch/1.0.0");
+    let scripts = vdir.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(vdir.join("playbook.yaml"), BATCH_FANOUT).unwrap();
+    fs::write(root.join(".apb/playbooks/stopbatch/current"), "1.0.0").unwrap();
+    fs::write(scripts.join("hold.sh"), hold_script(root)).unwrap();
+    fs::write(
+        scripts.join("mark.sh"),
+        format!("printf x >> '{}/chunk2_ran'\n", root.display()),
+    )
+    .unwrap();
+}
+
+/// (d) A stop must reach the CONCURRENT batch, not only the node in hand.
+///
+/// A fan-out wider than `max_parallel` is admitted in chunks, and the admission
+/// gate used to consult only the batch-local `join: any` cancel flag. An abort
+/// posted while the first chunk was running therefore still admitted and SPAWNED
+/// every remaining chunk in full before the run aborted at the batch tail: a
+/// 12-node fan-out at `max_parallel: 4` started eight fresh agent processes after
+/// the operator said stop. Killing the members ALREADY in flight is a separate,
+/// pre-existing gap and deliberately not asserted here - `a` and `b` are expected
+/// to run to their own end.
+#[cfg(unix)]
+#[test]
+fn a_stop_during_a_batch_does_not_admit_the_queued_chunks() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_batch(dir.path());
+
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stopbatch", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "stopbatch-");
+    poll_until("the first chunk to start", || {
+        dir.path().join("chunk1_started").is_file().then_some(())
+    });
+
+    assert_eq!(
+        stop_run(dir.path(), &run_id).unwrap(),
+        StopOutcome::SignaledLiveDriver
+    );
+    // Only now may the first chunk finish, so the abort is provably in
+    // control.jsonl while the batch is still mid-flight.
+    fs::write(dir.path().join("release"), "go").unwrap();
+
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
+    let res = res.expect("a stopped batch must abort cleanly, not fail the drive");
+    assert_eq!(res.outcome, RunStatus::Aborted, "the run must end aborted");
+
+    assert!(
+        !dir.path().join("chunk2_ran").exists(),
+        "the queued chunk was spawned after the operator said stop"
+    );
+    let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    for n in ["c", "d"] {
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == n)),
+            "queued member {n} must never be admitted once the run is cancelled"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                &e.payload,
+                EventPayload::NodeFinished { node, status, .. } if node == n && status == "cancelled"
+            )),
+            "queued member {n} must be journaled cancelled, not left pending"
+        );
+    }
+    assert!(
+        matches!(
+            events.last().map(|e| &e.payload),
+            Some(EventPayload::RunAborted { .. })
+        ),
+        "the journal must end with RunAborted, got {:?}",
+        events.last().map(|e| &e.payload)
     );
 }
 
