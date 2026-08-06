@@ -115,6 +115,9 @@ export interface RunSummary {
   parent_run?: string | null
   continued_from?: string | null
   superseded_by?: string | null
+  // Present and true only when the driver pid is provably gone; absent when
+  // false (see showsDriverDead in lib/status.ts for how it is rendered).
+  driver_dead?: boolean
 }
 
 export interface WfEvent {
