@@ -485,9 +485,10 @@ playbooks whose branches are resource-heavy (large builds, rate-limited external
 calls) or where many branches at once would just be noise to review; leave it
 alone for cheap, independent branches.
 
-One shape never joins a batch at all, whatever the cap says: a node with two or
-more incoming edges. Every such node is a join (implicit, or explicit through
-`join:`), and a join's readiness verdict belongs to the sequential path, because
+One shape never joins a batch at all, whatever the cap says: a node that is a
+join. That covers acyclic fan-in (implicit `all`) and any node with a `join:`
+edge; an in-cycle fan-in without `join:` keeps first-arrival semantics and stays
+batchable. A join's readiness verdict belongs to the sequential path, because
 that is the only place a barrier whose input failed can be recorded failed with the
 barrier's own reason and raise a wake for a supervisor, instead of just being
 executed as if nothing had gone wrong. The consequence is worth planning around:
