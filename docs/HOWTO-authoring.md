@@ -496,17 +496,14 @@ playbooks whose branches are resource-heavy (large builds, rate-limited external
 calls) or where many branches at once would just be noise to review; leave it
 alone for cheap, independent branches.
 
-One shape never joins a batch at all, whatever the cap says: a node that is a
-join. That covers acyclic fan-in (implicit `all`) and any node with a `join:`
-edge; an in-cycle fan-in without `join:` keeps first-arrival semantics and stays
-batchable. A join's readiness verdict belongs to the sequential path, because
-that is the only place a barrier whose input failed can be recorded failed with the
-barrier's own reason and raise a wake for a supervisor, instead of just being
-executed as if nothing had gone wrong. The consequence is worth planning around:
-fan-in consumers serialize. Two `agent_task` nodes that each read the same pair of
-producers are both joins, so they run one after the other, one scheduling pass
-each, even with slots free. Give a consumer a single incoming edge if it needs to
-run alongside its siblings.
+One shape never joins a batch at all, whatever the cap says: a node with an
+explicit `join:` edge. Only an explicit barrier can be recorded failed with the
+barrier's own reason when one of its inputs failed, and raise a wake for a
+supervisor, and that verdict belongs to the sequential path. An implicit fan-in
+(two or more incoming edges and no `join:` field, outside any cycle) only
+synchronizes, so it batches like anything else. Two `agent_task` nodes that each
+read the same pair of producers therefore run alongside each other, in one
+scheduling pass, when slots are free.
 
 In a supervised run the execution is concurrent but the supervision stays serial:
 the whole batch runs, then failures are presented one at a time, in batch order,

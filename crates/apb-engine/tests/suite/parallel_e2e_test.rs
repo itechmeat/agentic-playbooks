@@ -226,6 +226,43 @@ edges:
   - { from: w, to: wdone }
 "#;
 
+/// #79 counter-pin: an EXPLICIT join stays out of the batch, because
+/// `ReadyFailure` is the verdict only the sequential arm can journal with the
+/// barrier's own reason. Narrowing `is_batchable` must not reach this shape.
+const EXPLICIT_JOIN_FAILURE: &str = r#"
+schema: 1
+id: par
+name: Par
+version: 1.0.0
+defaults:
+  max_parallel: 4
+nodes:
+  - { id: start, type: start }
+  - { id: ok, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: bad, type: script, script: "scripts/fail.sh", runner: sh }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: ok }
+  - { from: start, to: bad }
+  - { from: ok, to: j, join: all }
+  - { from: bad, to: j, join: all }
+  - { from: j, to: done }
+"#;
+
+#[test]
+fn an_explicit_join_with_a_failed_input_is_journaled_failed_by_the_barrier() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_with_scripts(dir.path(), EXPLICIT_JOIN_FAILURE);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    assert_eq!(
+        finish_status_of(&run_dir, "j"),
+        "failed",
+        "an explicit join whose input failed must be journaled failed, not executed"
+    );
+}
+
 // A fork where one branch reaches finish - the run completes, the other does not execute.
 const FORK_FINISH: &str = r#"
 schema: 1

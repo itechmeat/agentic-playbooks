@@ -2286,21 +2286,28 @@ pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
 }
 
 /// Whether a node may run as a MEMBER of the concurrent batch: slow external
-/// work, not interactive, and not a join.
+/// work, not interactive, and not an EXPLICIT join.
 ///
-/// Joins are excluded because a join's readiness verdict is the sequential
-/// path's business. A join whose input already failed is `ReadyFailure` and is
-/// deliberately pushed into the frontier so the drive loop can journal it
-/// `failed` with the barrier's own reason and, in supervised mode, raise a wake
-/// on it. The batch has no such arm: it would simply execute the node and carry
-/// the run past a failure the supervisor never saw (review finding I1 of
-/// 2026-08-05 Task 3). A `ReadySuccess` join runs sequentially right after
-/// instead, which is semantically identical - and most joins are `prompt` nodes,
-/// which never batched anyway.
+/// Only an explicit join is excluded. `ReadyFailure` is the verdict only the
+/// sequential arm can journal (the barrier's own reason) and wake a supervisor
+/// on, and it is reachable exclusively from `JoinKind::Explicit`: an implicit
+/// fan-in's readiness is `NotReady` or `ReadySuccess` and nothing else
+/// (`parallel::join_readiness`). So the hazard the exclusion was written for
+/// cannot arise for an implicit fan-in, which only synchronizes.
+///
+/// A not-ready join never reaches the batch in the first place: a join enters
+/// the frontier only through `seed_successors` or `restore_frontier`, both of
+/// which drop a `NotReady` join. The one residual is pre-existing and unchanged
+/// by this narrowing: `defaults.on_failure: <node>` pushes its handler with no
+/// readiness check at all, and the sequential arm would execute a not-ready
+/// implicit join there too.
 pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
     is_agent_or_script(playbook, node)
         && !is_interactive(playbook, node)
-        && !parallel::is_join(playbook, node)
+        && !matches!(
+            parallel::join_kind(playbook, node),
+            Some(parallel::JoinKind::Explicit(_))
+        )
 }
 
 /// Context compaction (spec 8.5): if enabled (cfg.context_max_bytes) and the
