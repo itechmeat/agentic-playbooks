@@ -59,30 +59,46 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
             &["--permission-mode", "bypassPermissions"],
             Interaction::Live,
         )),
+        // Verified against the local `agy --help`: `--dangerously-skip-permissions`
+        // auto-approves all tool permission requests, the exact equivalent of
+        // claude's flag.
         "agy" => Some(mk(
             &["-p", "{prompt}", "--model", "{model}"],
             SoulDelivery::Prefix,
             None,
-            &[],
+            &["--dangerously-skip-permissions"],
             Interaction::Reprompt,
         )),
+        // Verified against the local `codex exec --help`:
+        // `--dangerously-bypass-approvals-and-sandbox` skips all confirmation
+        // prompts and runs without sandboxing, the one-shot equivalent of
+        // claude's bypassPermissions.
         "codex" => Some(mk(
             &["exec", "{prompt}", "-m", "{model}"],
             SoulDelivery::Prefix,
             None,
-            &[],
+            &["--dangerously-bypass-approvals-and-sandbox"],
             Interaction::Resume,
         )),
+        // Verified against the local `opencode run --help`: `--auto`
+        // auto-approves permissions that are not explicitly denied.
         "opencode" => Some(mk(
             &["run", "{prompt}", "-m", "{model}"],
             SoulDelivery::Prefix,
             None,
-            &[],
+            &["--auto"],
             Interaction::Resume,
         )),
         // hermes one-shot mode prints only the final response text to
         // stdout and auto-bypasses approvals by design (script mode);
         // the SOUL travels as a prompt prefix like the other aggregators.
+        //
+        // No autonomous flag: hermes documents `--yolo` at the same top level
+        // as `-z`, but it could not be verified in combination with the
+        // one-shot `-z` form against a local binary, and shipping an
+        // unverified flag into every hermes invocation is worse than the
+        // documented gap. `apb doctor --run` warns on a node bound to hermes
+        // instead (#85 finding 1).
         "hermes" => Some(mk(
             &["-z", "{prompt}", "-m", "{model}"],
             SoulDelivery::Prefix,
@@ -493,6 +509,44 @@ mod tests {
         assert_eq!(spec.soul, SoulDelivery::Prefix);
         assert_eq!(spec.soul_flag, None);
         assert_eq!(spec.transport, Transport::Headless);
+        assert!(spec.autonomous_args.is_empty());
+    }
+
+    /// Verified against the local `opencode run --help`: `--auto` auto-approves
+    /// permissions that are not explicitly denied.
+    #[test]
+    fn builtin_opencode_passes_a_non_interactive_flag() {
+        let spec = builtin("opencode").expect("opencode is a builtin");
+        assert_eq!(spec.autonomous_args, vec!["--auto"]);
+    }
+
+    /// Verified against the local `codex exec --help`: skips all confirmation
+    /// prompts and runs without sandboxing, the one-shot equivalent of claude's
+    /// bypassPermissions.
+    #[test]
+    fn builtin_codex_passes_a_non_interactive_flag() {
+        let spec = builtin("codex").expect("codex is a builtin");
+        assert_eq!(
+            spec.autonomous_args,
+            vec!["--dangerously-bypass-approvals-and-sandbox"]
+        );
+    }
+
+    /// Verified against the local `agy --help`: auto-approves all tool
+    /// permission requests, the exact equivalent of claude's flag.
+    #[test]
+    fn builtin_agy_passes_a_non_interactive_flag() {
+        let spec = builtin("agy").expect("agy is a builtin");
+        assert_eq!(spec.autonomous_args, vec!["--dangerously-skip-permissions"]);
+    }
+
+    /// hermes deliberately carries NO autonomous flag: its `--yolo` could not be
+    /// verified in combination with the `-z` one-shot form, and an unverified
+    /// flag on every invocation is worse than a documented gap. The doctor warns
+    /// instead. Change this test only together with a live verification.
+    #[test]
+    fn builtin_hermes_carries_no_unverified_autonomous_flag() {
+        let spec = builtin("hermes").expect("hermes is a builtin");
         assert!(spec.autonomous_args.is_empty());
     }
 
