@@ -16,7 +16,6 @@
 - Scoped gates while iterating (`cargo test -p <crate>`, `cargo clippy -p <crate> --all-targets -- -D warnings`); ONE cargo invocation at a time, never in parallel with another; full `cargo test --workspace` at task boundaries that touched apb-core/apb-engine.
 - Commit per completed task with DCO signoff (`git commit --signoff`) and a `Co-Authored-By:` trailer naming the acting model. Never push.
 - Do not weaken existing assertions. Tests that pin behavior to preserve: `parallel_e2e_test.rs` (incl. `finish_in_one_branch_cancels_the_other` FIFO pin), `loop_edges_test.rs` first-arrival loop semantics, `failure_stop_test.rs` batch-order failure scan, `supervised_drive_test.rs` park/wake flow, `status_file_test.rs`, `retry_test.rs`, `cache_test.rs`.
-- Research maps with verified anchors: `/private/tmp/claude-501/-Users-techmeat-www-projects-omniteamhq-agentic-playbooks/31c72b8b-8939-492e-a627-a2ae8b80bf24/scratchpad/research-75.md` and `research-71-74.md` (session-local, read them before coding).
 
 ---
 

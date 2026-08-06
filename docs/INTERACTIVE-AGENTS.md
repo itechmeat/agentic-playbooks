@@ -51,13 +51,14 @@ runs after the engine's runtime downgrade:
 |---|---|---|---|---|
 | Claude Code | yes, `--mcp-config` (file or inline JSON) | default about 28 h (`MCP_TOOL_TIMEOUT`, per-server `timeout`); 30 min stdio idle timer, reset by progress notifications | yes, `--resume <session-id>` with `-p` | **live** (shipped: the `apb __ask-server` sidecar plus `ask_user`) |
 | Codex CLI | config file only (`.codex/config.toml`); inline `-c` override for `mcp_servers.*` unconfirmed | `tool_timeout_sec`, default 60 s, config file only | yes, `codex exec resume <id>` | declared `resume`, runs as **reprompt**: a one-shot `codex exec` surfaces no session id to capture, so the engine downgrades every attempt |
-| OpenCode | no flag; `opencode.json` only, with an open project-scope detection bug | effectively hard-capped around 30-120 s regardless of config (open issues) | `--session <id>` / `--continue`, open "Session not found" headless bug | declared `resume`, runs as **reprompt** (needs verification): same no-session-id downgrade as codex |
+| OpenCode | no flag; `opencode.json` only, with an open project-scope detection bug | effectively hard-capped around 30-120 s regardless of config (open issues) | `--session <id>` / `--continue`; two distinct problems, not one: (1) a completed one-shot `opencode run` surfaces no session id in its output for apb to capture (the "Session not found" bug this row already tracked); (2) separately, an invocation killed before its first assistant message never persists a session at all, so even a caller with a correctly captured id has nothing to resume, because the session simply does not exist yet. Case (2) is strictly harder than case (1): fixing the id-surfacing bug upstream would not fix it. | declared `resume`, runs as **reprompt** (needs verification): same no-session-id downgrade as codex |
 | Hermes Agent | not documented; `config.yaml` / `hermes mcp add` only | not documented | `--resume` / `--continue` documented; combination with `-z` one-shot unverified | declared `resume`, runs as **reprompt** (needs verification): same no-session-id downgrade as codex |
 | Antigravity CLI | no; persistent config files only | not documented | no: `-p` never surfaces a conversation id (open upstream issue #7) | **reprompt** (shipped, unchanged) |
 
 Every downgrade (`live` -> `resume`, `resume` -> `reprompt`) is journaled as
 `SupervisorAction { action: "interaction_downgraded", node, detail }`, so a
 supervisor or `apb doctor --run` can see when and why a node fell back.
+The shipped `resume -> reprompt` runtime downgrade for OpenCode (and for codex and hermes) already covers both cases today by re-running the full prompt from scratch, so nothing is broken in production, but any future "continue an agent's own session after an interruption" feature cannot rely on OpenCode until case (2) is fixed upstream: there is no session object to attach to no matter how the id problem is solved.
 
 Popular agents apb does not support yet (candidates):
 
