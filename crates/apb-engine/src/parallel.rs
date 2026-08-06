@@ -219,8 +219,12 @@ pub fn join_kind(playbook: &Playbook, node: &str) -> Option<JoinKind> {
     if inc.iter().any(|e| e.join.is_some()) {
         return Some(JoinKind::Explicit(join_mode(playbook, node)));
     }
-    let downstream = apb_core::graphutil::reachable(playbook, &[node]);
-    match inc.iter().all(|e| !downstream.contains(&e.from)) {
+    // The acyclic-fan-in test itself lives in `apb_core::graphutil` so the
+    // validator's `waits_for_all_inputs` and this classification can never
+    // disagree about what an implicit barrier is.
+    let adj = apb_core::graphutil::adjacency(playbook);
+    let sources: Vec<&str> = inc.iter().map(|e| e.from.as_str()).collect();
+    match apb_core::graphutil::is_acyclic_fan_in(&adj, node, &sources) {
         true => Some(JoinKind::Implicit),
         false => None,
     }

@@ -340,10 +340,8 @@ fn waits_for_all_inputs<'a>(
         // Lenient exactly like the engine: only `any` is first-arrival.
         return mode != "any";
     }
-    let downstream = reachable_from(adj, node);
-    incoming
-        .iter()
-        .all(|e| !downstream.contains(e.from.as_str()))
+    let sources: Vec<&str> = incoming.iter().map(|e| e.from.as_str()).collect();
+    crate::graphutil::is_acyclic_fan_in(adj, node, &sources)
 }
 
 /// For every node, the nodes the graph GUARANTEES have finished before it runs.
