@@ -16,6 +16,61 @@ const GOOD_EVENTS: &str = r#"{"seq":0,"ts":1,"type":"run_started","playbook":"go
 const LEGACY_LINE: &str = r#"{"ts":"1783580252038","kind":"run_started","node":null}
 "#;
 
+/// The same minimal journal as `GOOD_EVENTS`, without the terminal
+/// `run_finished` line, so the pure fold reads `running`.
+const RUNNING_EVENTS: &str = r#"{"seq":0,"ts":1,"type":"run_started","playbook":"dead","version":"1.0.0"}
+{"seq":1,"ts":2,"type":"node_started","node":"start","attempt":1}
+"#;
+
+/// A pid that existed and is provably gone. Bounded by construction: `exit 0`
+/// cannot fail to exit.
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .expect("spawn a throwaway child to borrow a pid from");
+    let pid = child.id();
+    child.wait().expect("reap the throwaway child");
+    pid
+}
+
+/// #85 finding 4: a run whose driver was killed reads `running` from the pure
+/// fold, which is exactly right, and exactly useless in a list. The listing now
+/// carries the driver verdict alongside the status.
+#[test]
+fn list_runs_marks_a_run_whose_driver_is_gone() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+
+    let dead = dir.path().join(".apb/runs/dead-1");
+    fs::create_dir_all(&dead).unwrap();
+    fs::write(dead.join("events.jsonl"), RUNNING_EVENTS).unwrap();
+    fs::write(dead.join("driver.pid"), format!("{}\n", dead_pid())).unwrap();
+
+    let healthy = dir.path().join(".apb/runs/good-1");
+    fs::create_dir_all(&healthy).unwrap();
+    fs::write(healthy.join("events.jsonl"), GOOD_EVENTS).unwrap();
+
+    let runs = list_runs(dir.path()).unwrap();
+    let d = runs
+        .iter()
+        .find(|r| r.run_id == "dead-1")
+        .expect("dead-1 listed");
+    assert!(
+        d.driver_dead,
+        "a run with a provably dead driver.pid must be marked"
+    );
+    let g = runs
+        .iter()
+        .find(|r| r.run_id == "good-1")
+        .expect("good-1 listed");
+    assert!(
+        !g.driver_dead,
+        "a run with no drive claim at all is not marked"
+    );
+}
+
 #[test]
 fn list_runs_skips_unreadable_run_dir_but_keeps_good_ones() {
     let dir = tempfile::tempdir().unwrap();

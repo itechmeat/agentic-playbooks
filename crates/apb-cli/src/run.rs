@@ -681,7 +681,15 @@ pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
         }
         Ok(runs) => {
             for r in runs {
-                println!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+                // The status column stays exactly as it always has (a script
+                // parsing it must keep working); a dead driver is called out
+                // as an appended marker rather than a rewrite of that text
+                // (#85 finding 4).
+                if r.driver_dead {
+                    println!("{}\t{}\t{}\tdriver dead", r.run_id, r.playbook, r.status);
+                } else {
+                    println!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+                }
                 print_waiting_on_question(r.progress.as_ref());
             }
             ExitCode::SUCCESS

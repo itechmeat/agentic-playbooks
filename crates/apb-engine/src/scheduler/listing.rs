@@ -17,6 +17,14 @@ pub struct RunSummary {
     pub continued_from: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub superseded_by: Option<String>,
+    /// The run has a drive claim and that claim's process is provably gone: the
+    /// journal still reads `running` because the only thing that writes a
+    /// terminal event is the drive loop that no longer exists. The single-run
+    /// surfaces (`run_status`, `apb doctor --run`) have answered this for a
+    /// while; a listing could not, so a killed driver looked healthy in a table.
+    /// `false` also covers "no drive claim at all", which is not a problem.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub driver_dead: bool,
 }
 
 pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
@@ -53,6 +61,10 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
         let superseded_by = cfg.as_ref().and_then(|c| c.superseded_by.clone());
+        let driver_dead = matches!(
+            crate::liveness::driver_alive(&entry.path(), &run_id),
+            Some(false)
+        );
         out.push(RunSummary {
             run_id,
             playbook,
@@ -64,6 +76,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             parent_run,
             continued_from,
             superseded_by,
+            driver_dead,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.started_ts));
