@@ -1550,9 +1550,19 @@ pub(crate) fn execute_node(
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
             let r = run_script(run_dir, workdir, script, runner, timeout, Some(cancel))?;
+            // A killed script's captured stdout is whatever it happened to
+            // print before the signal landed (often nothing at all), not the
+            // stable "cancelled" text the agent_task cancel paths already
+            // return. Task 9's unified cancelled shape needs both paths to
+            // render the same `{{nodes.<id>.output}}`.
+            let output = if r.status == NodeStatus::Cancelled {
+                "cancelled".to_string()
+            } else {
+                r.stdout
+            };
             Ok(AttemptOutcome::Finished {
                 status: r.status,
-                output: r.stdout,
+                output,
                 events,
             })
         }

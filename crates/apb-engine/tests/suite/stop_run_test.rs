@@ -20,7 +20,7 @@ use apb_core::registry::init_project;
 use apb_engine::control::{Control, read_control_after, read_control_cursor};
 use apb_engine::error::EngineError;
 use apb_engine::event::{EventLog, EventPayload, read_all};
-use apb_engine::scheduler::{RunOptions, RunResult, run};
+use apb_engine::scheduler::{RunOptions, RunResult, post_supervisor_command, resume, run};
 use apb_engine::state::{RunState, RunStatus};
 use apb_engine::stop::{StopOutcome, stop_run};
 
@@ -461,9 +461,25 @@ fn hold_script(root: &Path) -> String {
          \x20 if [ \"$i\" -gt 200 ]; then break; fi\n\
          \x20 sleep 0.05\n\
          done\n\
-         sleep 1\n",
+         sleep 1\n\
+         touch '{root}/chunk1_finished_naturally'\n",
         root = root.display(),
     )
+}
+
+/// The status on a node's `NodeFinished`, for "did it really finish this way"
+/// checks. Mirrors `parallel_e2e_test::finish_status`; kept local because each
+/// file in this suite is its own module.
+fn finish_status(events: &[apb_engine::event::Event], node: &str) -> String {
+    events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::NodeFinished {
+                node: n, status, ..
+            } if n == node => Some(status.clone()),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("node `{node}` never finished"))
 }
 
 fn seed_batch(root: &Path) {
@@ -488,9 +504,9 @@ fn seed_batch(root: &Path) {
 /// posted while the first chunk was running therefore still admitted and SPAWNED
 /// every remaining chunk in full before the run aborted at the batch tail: a
 /// 12-node fan-out at `max_parallel: 4` started eight fresh agent processes after
-/// the operator said stop. Killing the members ALREADY in flight is a separate,
-/// pre-existing gap and deliberately not asserted here - `a` and `b` are expected
-/// to run to their own end.
+/// the operator said stop. Killing the members ALREADY in flight is covered
+/// separately by `a_stop_during_a_batch_kills_the_members_in_flight`; this test
+/// is only about the members still QUEUED behind the chunk in flight.
 #[cfg(unix)]
 #[test]
 fn a_stop_during_a_batch_does_not_admit_the_queued_chunks() {
@@ -528,11 +544,16 @@ fn a_stop_during_a_batch_does_not_admit_the_queued_chunks() {
     );
     let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
     for n in ["c", "d"] {
+        // A queued member now gets a paired NodeStarted (the unified cancelled
+        // journal shape), so `!NodeStarted` is no longer the honest property.
+        // What actually matters, and still holds, is that it was never
+        // SPAWNED: no `AttemptStarted`, and (checked once for both above via
+        // `chunk2_ran`) its script body never ran.
         assert!(
-            !events
-                .iter()
-                .any(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == n)),
-            "queued member {n} must never be admitted once the run is cancelled"
+            !events.iter().any(
+                |e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == n)
+            ),
+            "queued member {n} must never be spawned once the run is cancelled"
         );
         assert!(
             events.iter().any(|e| matches!(
@@ -550,6 +571,196 @@ fn a_stop_during_a_batch_does_not_admit_the_queued_chunks() {
         "the journal must end with RunAborted, got {:?}",
         events.last().map(|e| &e.payload)
     );
+}
+
+/// #77(A): an abort must kill the members already in flight, not only stop
+/// admission. Negative evidence, not a wall clock: `hold.sh` touches
+/// `chunk1_finished_naturally` only after its post-release linger, so the
+/// marker's ABSENCE proves the members were killed rather than allowed to end.
+#[cfg(unix)]
+#[test]
+fn a_stop_during_a_batch_kills_the_members_in_flight() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_batch(dir.path());
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stopbatch", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "stopbatch-");
+    poll_until("the first chunk to start", || {
+        dir.path().join("chunk1_started").is_file().then_some(())
+    });
+    assert_eq!(
+        stop_run(dir.path(), &run_id).unwrap(),
+        StopOutcome::SignaledLiveDriver
+    );
+
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
+    let res = res.expect("a stopped batch must abort cleanly, not fail the drive");
+    assert_eq!(res.outcome, RunStatus::Aborted);
+    assert!(
+        !dir.path().join("chunk1_finished_naturally").exists(),
+        "the in-flight members ran to their own end instead of being killed"
+    );
+    let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    for n in ["a", "b"] {
+        assert_eq!(
+            finish_status(&events, n),
+            "cancelled",
+            "an in-flight member killed by the abort is journaled cancelled"
+        );
+    }
+}
+
+/// #77(B), the sharpest trap: a PAUSE stops admission and writes NOTHING off.
+/// `Cancelled` is terminal for `parallel::is_terminal`, so journaling a queued
+/// member cancelled here would make the resume skip it forever and silently
+/// drop that branch.
+#[cfg(unix)]
+#[test]
+fn a_pause_during_a_batch_stops_admission_without_writing_members_off() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_batch(dir.path());
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stopbatch", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "stopbatch-");
+    poll_until("the first chunk to start", || {
+        dir.path().join("chunk1_started").is_file().then_some(())
+    });
+    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    std::fs::write(dir.path().join("release"), "go").unwrap();
+
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"))
+        .expect("a paused batch must not fail the drive");
+    assert_eq!(res.outcome, RunStatus::Paused);
+    assert!(
+        !dir.path().join("chunk2_ran").exists(),
+        "the queued chunk was admitted after the pause"
+    );
+    let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    for n in ["c", "d"] {
+        assert!(
+            !events.iter().any(|e| matches!(
+                &e.payload,
+                EventPayload::NodeFinished { node, .. } if node == n
+            )),
+            "a paused run must not write member {n} off: the resume still has to run it"
+        );
+    }
+}
+
+/// The resume half of the pause test: the members the pause deferred really do
+/// run afterwards. This is what the "no NodeFinished on pause" rule buys, and
+/// without it the pause would silently drop those branches for good.
+#[cfg(unix)]
+#[test]
+fn a_paused_batch_resumes_and_runs_the_deferred_members() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_batch(dir.path());
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stopbatch", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "stopbatch-");
+    poll_until("the first chunk to start", || {
+        dir.path().join("chunk1_started").is_file().then_some(())
+    });
+    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    std::fs::write(dir.path().join("release"), "go").unwrap();
+    let paused = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"))
+        .expect("a paused batch must not fail the drive");
+    assert_eq!(paused.outcome, RunStatus::Paused);
+    // Premise of the test, asserted so a collapsed race fails loudly instead of
+    // passing vacuously: the deferred members really had not run yet.
+    assert!(!dir.path().join("chunk2_ran").exists());
+
+    let resumed = resume(dir.path(), &run_id, None).expect("a paused run must resume");
+    assert_eq!(resumed.outcome, RunStatus::Succeeded);
+    assert!(
+        dir.path().join("chunk2_ran").exists(),
+        "the members the pause deferred must actually run on resume"
+    );
+    let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    for n in ["c", "d"] {
+        assert_eq!(
+            finish_status(&events, n),
+            "succeeded",
+            "member {n} was deferred by the pause and must succeed on resume"
+        );
+    }
+}
+
+/// #77(D): one journal shape. Every cancelled member has a paired NodeStarted
+/// before its NodeFinished, and every such finish carries `output: "cancelled"`.
+/// The pairing is what `cache::verify_connector_calls`,
+/// `journal::current_visit_start_seq`, `progress::node_durations_seconds` and
+/// the interactive re-entry guard all assume; the single output text is what a
+/// `{{nodes.<id>.output}}` read renders on both paths.
+#[cfg(unix)]
+#[test]
+fn a_cancelled_member_journals_a_paired_start_and_a_cancelled_output() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_batch(dir.path());
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stopbatch", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "stopbatch-");
+    poll_until("the first chunk to start", || {
+        dir.path().join("chunk1_started").is_file().then_some(())
+    });
+    stop_run(dir.path(), &run_id).unwrap();
+    let _ = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
+
+    let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    let cancelled: Vec<(usize, String, String)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match &e.payload {
+            EventPayload::NodeFinished {
+                node,
+                status,
+                output,
+                ..
+            } if status == "cancelled" => Some((i, node.clone(), output.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !cancelled.is_empty(),
+        "the abort fixture must produce at least one cancelled member"
+    );
+    for (at, node, output) in cancelled {
+        assert!(
+            events[..at].iter().any(|e| matches!(
+                &e.payload,
+                EventPayload::NodeStarted { node: n, .. } if *n == node
+            )),
+            "cancelled member {node} has no preceding NodeStarted"
+        );
+        assert_eq!(
+            output, "cancelled",
+            "both cancel paths must render the same output text for {node}"
+        );
+    }
 }
 
 /// An unknown run id is a not-found error, not a silently created directory.

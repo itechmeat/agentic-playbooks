@@ -419,6 +419,17 @@ fn drive_inner(
                 &outstanding,
                 log,
             )?;
+            // `start_node` is just the LAST node the journal happened to
+            // finish, and its own edges can be empty while the run still has
+            // real work elsewhere: a batch a Pause deferred (Task 9) leaves
+            // siblings that never started at all, reachable only from an
+            // EARLIER fan-out point, not from `start_node`. Pull every other
+            // outstanding head in now, before deciding this is a dead end -
+            // exactly what `restore_frontier` would do a few lines down
+            // anyway, just early enough to save the empty-frontier case.
+            if frontier.is_empty() {
+                restore_frontier(&playbook, &entry_state, &start_node, &mut frontier);
+            }
             if frontier.is_empty() {
                 // A pointless resume: the start node already finished and has no
                 // pending successor to advance into. `resume_inner` already
@@ -473,8 +484,9 @@ fn drive_inner(
     let run_cancel = Arc::new(AtomicBool::new(false));
     // `halt` is set on Abort OR Pause ("admit no new work"), unlike
     // `run_cancel`, which must stay Abort-only or a pause would be read as an
-    // abort pending by `control_apply`. Nothing in this drive loop reads it
-    // yet; a future task wires chunk admission to it.
+    // abort pending by `control_apply`. Read at the batch admission gate
+    // below to stop chunk admission on a Pause without journaling anything
+    // off (Task 9).
     let halt = Arc::new(AtomicBool::new(false));
     let watcher = crate::stop::StopWatcher::spawn(
         run_dir,
@@ -482,17 +494,23 @@ fn drive_inner(
         Arc::clone(&run_cancel),
         Arc::clone(&halt),
     );
-    // Kept alive for a future task to register batch-local cancel flags with:
     // `fanout.fire()` (triggered by the watcher on Abort) is what lets a
     // run-level Abort reach a flag a batch member polls directly instead of
-    // `run_cancel`.
-    let _fanout = watcher.fanout();
+    // `run_cancel`: the batch registers its batch-local `cancel` with this
+    // fanout, so an Abort now also latches `cancel` and kills members already
+    // in flight, through their existing pre-attempt and post-adapter-error
+    // cancel reads.
+    let fanout = watcher.fanout();
     let _stop_watcher = watcher;
     // True once the loop has already taken the cancel short-circuit below, so
     // a pathological case (an unconsumable Retry queued ahead of the Abort
     // stops the top-of-loop scan before it reaches it) degrades to the old
     // behavior instead of spinning.
     let mut cancel_short_circuited = false;
+    // Same one-shot idea, for the batch tail: separate from
+    // `cancel_short_circuited` because the sequential arm and the batch arm
+    // each own their own latch.
+    let mut batch_stop_short_circuited = false;
     // One-shot prompt overrides set by the Retry{prompt_override} command:
     // node_id -> text that will replace the rendered prompt for EXACTLY the next
     // execution of that node, after which the entry is removed.
@@ -695,11 +713,24 @@ fn drive_inner(
                 // A shared cancel flag: once join:any is ready we set it, and
                 // still-running branches kill their processes (7c-3).
                 let cancel = Arc::new(AtomicBool::new(false));
+                // Members poll ONE flag; the run-level stop reaches them through
+                // it, so `execute_node`'s existing pre-attempt and
+                // post-adapter-error cancel reads now cover the abort with
+                // exactly the sequential semantics (Cancelled, output
+                // "cancelled"). The guard unregisters at the end of the batch.
+                let _fan = fanout.register(&cancel);
                 // Node, terminal status and output per branch. The output is
                 // kept (not just the status) because `defaults.on_failure:
                 // stop` reports the failing node's own words as the run's
                 // failure reason.
                 let mut batch_results: Vec<(String, NodeStatus, String)> = Vec::new();
+                // Set inside the admission gate below: `stopped` when an Abort
+                // wrote off a queued chunk (so the tail must go straight back
+                // to the top-of-loop scan to apply it), `halted` when a Pause
+                // stopped admission (same short-circuit, but nothing was
+                // written off).
+                let mut stopped = false;
+                let mut halted = false;
                 // Every member's own pre-execution fingerprint, taken against
                 // the tree as it stands before the FIRST chunk runs. Without
                 // this a member's cache key silently depends on `max_parallel`,
@@ -720,30 +751,75 @@ fn drive_inner(
                 // member waiting for a slot is still going to run and a join fed
                 // by it must not be judged dead and fired early.
                 for chunk in batch.chunks(max_parallel) {
-                    // Admission-time re-check, against BOTH stop signals.
+                    // Admission-time re-check, against BOTH stop signals, kept
+                    // as separate cases even though both write a queued member
+                    // off as cancelled: `run_cancel` (a run-level Abort) gets
+                    // Task 9's unified cancelled shape below, while `cancel`
+                    // (a batch-local join:any already won - unrelated to a
+                    // run-level stop, and not this task's subject) keeps its
+                    // pre-Task-9 shape exactly, so
+                    // `a_queued_branch_is_cancelled_when_an_any_join_is_already_won`
+                    // stays green with its existing (unweakened) assertions.
                     //
-                    // `cancel` is the batch-local one: a join:any that an earlier
-                    // chunk already satisfied cancels the batch. Members that were
-                    // running when that happened are SIGKILLed through `cancel`;
-                    // members not yet admitted are simply never started and are
-                    // journaled with the same `cancelled` status their killed
-                    // siblings get, so no batch member is left looking pending
-                    // forever. Deciding this per queued node (only skip when its
-                    // own any-join is ready) would be finer-grained than the kill
-                    // itself, which stops every running member regardless of
-                    // which join it feeds; one rule for both is the point.
-                    //
-                    // `run_cancel` is the run-level one, and it has to be read
-                    // here too: an `Abort` posted while an earlier chunk was
-                    // running is not visible to this loop otherwise (the drive
-                    // applies it only at the next top-of-loop scan), so every
-                    // remaining chunk used to be admitted and SPAWNED in full
-                    // after the operator said stop - real agent processes bought
-                    // by a run that is already stopping. Killing the members
-                    // already IN FLIGHT is a separate matter: they hold `cancel`,
-                    // not `run_cancel`, so they run to their own end and the run
-                    // aborts at the boundary right after this batch.
-                    if cancel.load(Ordering::Relaxed) || run_cancel.load(Ordering::SeqCst) {
+                    // `run_cancel` has to be read here: an `Abort` posted while
+                    // an earlier chunk was running is not visible to this loop
+                    // otherwise (the drive applies it only at the next
+                    // top-of-loop scan), so every remaining chunk used to be
+                    // admitted and SPAWNED in full after the operator said stop
+                    // - real agent processes bought by a run that is already
+                    // stopping. Killing the members already IN FLIGHT is
+                    // handled separately (Task 9): `cancel` is registered with
+                    // the run-level fanout above, so an Abort's `fanout.fire()`
+                    // latches this very flag too and each running member's own
+                    // poll (in `execute_node`) sees it and kills its process
+                    // tree. This gate only has to write off the members not
+                    // yet admitted.
+                    if run_cancel.load(Ordering::SeqCst) {
+                        for n in chunk {
+                            // Paired start: four consumers assume a finish is
+                            // preceded by one (the cache's connector-call
+                            // window, the journal's visit window, the progress
+                            // duration table, and the interactive re-entry
+                            // guard). `"cancelled"` is the same output text the
+                            // killed path writes, so both paths render the same
+                            // `{{nodes.<id>.output}}`.
+                            log.append(EventPayload::NodeStarted {
+                                node: n.clone(),
+                                attempt: 1,
+                            })?;
+                            log.append(EventPayload::NodeFinished {
+                                node: n.clone(),
+                                status: NodeStatus::Cancelled.as_str().into(),
+                                attempt: 1,
+                                output: "cancelled".into(),
+                                artifacts: Vec::new(),
+                            })?;
+                            batch_results.push((
+                                n.clone(),
+                                NodeStatus::Cancelled,
+                                "cancelled".into(),
+                            ));
+                        }
+                        stopped = true;
+                        continue;
+                    }
+                    // A batch-local join:any that an earlier chunk already
+                    // satisfied cancels the batch. Members that were running
+                    // when that happened are SIGKILLed through `cancel`;
+                    // members not yet admitted are simply never started and
+                    // are journaled with the same `cancelled` status their
+                    // killed siblings get, so no batch member is left looking
+                    // pending forever. Deciding this per queued node (only
+                    // skip when its own any-join is ready) would be
+                    // finer-grained than the kill itself, which stops every
+                    // running member regardless of which join it feeds; one
+                    // rule for both is the point. Unchanged by Task 9: no
+                    // `NodeStarted`, empty output - the two other cancelled
+                    // shapes in this file (`advance_frontier`'s join:any
+                    // sibling cancel and `stop_on_unhandled_failure`'s frontier
+                    // cancel, both for nodes that never entered a batch at
+                    // all) are left alone the same way.
+                    if cancel.load(Ordering::Relaxed) {
                         for n in chunk {
                             log.append(EventPayload::NodeFinished {
                                 node: n.clone(),
@@ -755,6 +831,16 @@ fn drive_inner(
                             batch_results.push((n.clone(), NodeStatus::Cancelled, String::new()));
                         }
                         continue;
+                    }
+                    // A pause: no NEW work, and NOTHING is written off. A paused
+                    // run is resumable and `Cancelled` is terminal for
+                    // `parallel::is_terminal`, so journaling a queued member
+                    // here would make `pending_heads` skip it forever and the
+                    // resume would silently drop that branch. The gate's
+                    // POSITION is shared with the abort; its effect is not.
+                    if halt.load(Ordering::SeqCst) {
+                        halted = true;
+                        break;
                     }
                     // Per-member cache probe, on the drive thread and in chunk
                     // order, through the same unit the sequential arm uses (spec
@@ -961,6 +1047,20 @@ fn drive_inner(
                 // be journaled at all. `None` fallback: no single node is "the"
                 // node here, so an unnamed report is left to the top-of-loop.
                 control_cursor = drain_progress_after_execute(run_dir, log, control_cursor, None)?;
+                // A stop landed while this batch was in flight. Go straight back
+                // to the top-of-loop scan, which applies the Abort or Pause
+                // exactly as it always has and returns terminal. Skipping the
+                // tail also removes the supervised park and the on_failure
+                // policy from a stopping run, and removes `advance_frontier`
+                // over members that never ran. The one-shot latch is mandatory
+                // for the same reason `cancel_short_circuited` exists: a
+                // terminal command queued behind an unconsumable Retry leaves
+                // `scan_control` returning Proceed, and an unlatched `continue`
+                // would spin forever.
+                if (stopped || halted) && !batch_stop_short_circuited {
+                    batch_stop_short_circuited = true;
+                    continue;
+                }
                 // unknown/interrupted in any branch - pause the run (as in the
                 // sequential path).
                 if batch_results
@@ -1058,6 +1158,15 @@ fn drive_inner(
                 }
 
                 for node in &batch {
+                    // A member that was killed or never admitted produced
+                    // nothing, and `selected_edges` takes unconditional edges
+                    // regardless of the source's status, so without this a
+                    // cancelled member's `a -> a2` chain continues as if it had
+                    // run. A member with no entry at all never reached the gate.
+                    match batch_results.iter().find(|(n, _, _)| n == node) {
+                        Some((_, NodeStatus::Cancelled, _)) | None => continue,
+                        Some(_) => {}
+                    }
                     advance_frontier(&playbook, node, &state_now, &mut frontier, &batch, log)?;
                 }
                 match frontier.is_empty() {
