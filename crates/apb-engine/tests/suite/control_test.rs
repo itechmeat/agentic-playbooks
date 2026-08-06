@@ -96,6 +96,7 @@ fn progress_control_serializes_with_cmd_tag() {
         done: 3,
         total: 14,
         label: Some("chapter 3 of 14".into()),
+        node: None,
     };
     let s = serde_json::to_string(&c).unwrap();
     assert!(s.contains("\"cmd\":\"progress\""), "got {s}");

@@ -134,9 +134,14 @@ pub(crate) fn scan_control(
                     }
                 }
             }
-            Control::Progress { done, total, label } => {
+            Control::Progress {
+                done,
+                total,
+                label,
+                node,
+            } => {
                 log.append(EventPayload::RunProgress {
-                    node_id: current.clone(),
+                    node_id: node.unwrap_or_else(|| current.clone()),
                     done,
                     total,
                     label,

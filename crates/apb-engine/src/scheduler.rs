@@ -936,6 +936,14 @@ fn drive_inner(
                     })?;
                 }
                 rebuild_context_md(run_dir)?;
+                // Attribute progress the members posted while the batch was in
+                // flight, before the tail can return terminally. The batch can
+                // exit without ever reaching another top-of-loop scan (the
+                // unknown/interrupted pause, a supervised park verdict, or
+                // `on_failure: stop`), so a named report would otherwise never
+                // be journaled at all. `None` fallback: no single node is "the"
+                // node here, so an unnamed report is left to the top-of-loop.
+                control_cursor = drain_progress_after_execute(run_dir, log, control_cursor, None)?;
                 // unknown/interrupted in any branch - pause the run (as in the
                 // sequential path).
                 if batch_results
@@ -1784,7 +1792,8 @@ fn drive_inner(
 
         // Attribute any progress the agent posted while `current` was executing
         // to `current`, before the frontier advances to the successor (B2).
-        control_cursor = drain_progress_after_execute(run_dir, log, control_cursor, &current)?;
+        control_cursor =
+            drain_progress_after_execute(run_dir, log, control_cursor, Some(current.as_str()))?;
 
         // A stop landed while this node was in flight (Task 8): the watcher
         // set the cancel flag and the agent's process tree was killed, so the

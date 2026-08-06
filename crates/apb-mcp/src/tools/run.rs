@@ -445,8 +445,18 @@ pub fn run_progress_report(
     done: u64,
     total: u64,
     label: Option<String>,
+    node: Option<String>,
 ) -> Result<Value, ToolError> {
-    let seq = post_supervisor_command(root, run_id, Control::Progress { done, total, label })?;
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::Progress {
+            done,
+            total,
+            label,
+            node,
+        },
+    )?;
     Ok(json!({ "posted_seq": seq }))
 }
 
@@ -465,7 +475,7 @@ mod progress_tests {
             "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n",
         )
         .unwrap();
-        let out = run_progress_report(tmp.path(), "r1", 2, 5, Some("x".into())).unwrap();
+        let out = run_progress_report(tmp.path(), "r1", 2, 5, Some("x".into()), None).unwrap();
         assert!(out.get("posted_seq").is_some());
         let control = std::fs::read_to_string(run_dir.join("control.jsonl")).unwrap();
         assert!(control.contains("\"cmd\":\"progress\""));
