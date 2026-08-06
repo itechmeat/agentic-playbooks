@@ -468,9 +468,26 @@ fn drive_inner(
     // OBSERVES control.jsonl; the drive loop below still applies the Abort and
     // owns the cursor, so the abort takes effect exactly once. The guard is
     // dropped when this function returns, which stops and joins the thread.
+    // `run_cancel` keeps its exact prior meaning: set on Abort only, read by
+    // `control_apply` as "an Abort is pending".
     let run_cancel = Arc::new(AtomicBool::new(false));
-    let _abort_watcher =
-        crate::stop::AbortWatcher::spawn(run_dir, control_cursor, Arc::clone(&run_cancel));
+    // `halt` is set on Abort OR Pause ("admit no new work"), unlike
+    // `run_cancel`, which must stay Abort-only or a pause would be read as an
+    // abort pending by `control_apply`. Nothing in this drive loop reads it
+    // yet; a future task wires chunk admission to it.
+    let halt = Arc::new(AtomicBool::new(false));
+    let watcher = crate::stop::StopWatcher::spawn(
+        run_dir,
+        control_cursor,
+        Arc::clone(&run_cancel),
+        Arc::clone(&halt),
+    );
+    // Kept alive for a future task to register batch-local cancel flags with:
+    // `fanout.fire()` (triggered by the watcher on Abort) is what lets a
+    // run-level Abort reach a flag a batch member polls directly instead of
+    // `run_cancel`.
+    let _fanout = watcher.fanout();
+    let _stop_watcher = watcher;
     // True once the loop has already taken the cancel short-circuit below, so
     // a pathological case (an unconsumable Retry queued ahead of the Abort
     // stops the top-of-loop scan before it reaches it) degrades to the old

@@ -6,7 +6,7 @@
 //!   * The drive loop only reads control at the boundary BETWEEN nodes, so an
 //!     abort could not touch an agent that was already running. A supervisor
 //!     watching an agent burn through a doomed retry loop had no way to stop
-//!     it short of killing the driver process. `AbortWatcher` fixes that: every
+//!     it short of killing the driver process. `StopWatcher` fixes that: every
 //!     drive spawns one, it polls control.jsonl a few times a second, and on a
 //!     pending Abort it sets the run-level cancel flag that `run_cancellable`
 //!     already honors - which kills the in-flight agent's process tree. The
@@ -19,6 +19,30 @@
 //!     only thing that ever writes a terminal event is the drive loop that no
 //!     longer exists. `stop_run` closes that hole: when nothing is driving the
 //!     run any more, it appends `RunAborted` itself.
+//!
+//! `StopWatcher` produces two outputs, and they are deliberately two separate
+//! flags rather than one:
+//!
+//!   * `cancel` - set on Abort only. It is the kill signal (`run_cancellable`,
+//!     `run_script` and `wait_backoff` all poll it to tear down in-flight
+//!     work) and it is also read by `control_apply.rs` as "an Abort is
+//!     pending": seeing it set there appends `RunAborted`. Both readings
+//!     require the flag to mean Abort and only Abort.
+//!   * `halt` - set on Abort OR Pause. It means "admit no new work" (stop
+//!     picking up further chunks of a batch) without claiming the run is
+//!     aborting. A Pause must never touch `cancel`: latching it on a pause
+//!     would make `control_apply` treat a pause as an abort-in-progress and
+//!     terminate the run, which is exactly the bug a single shared flag would
+//!     cause.
+//!
+//! A batch member cannot poll `cancel`/`halt` directly: it only ever sees a
+//! batch-local `&AtomicBool` (handed down as a bare pointer into
+//! `adapter.run_cancellable`, `run_script` and `wait_backoff`, four agent
+//! impls, `proc.rs` and `script.rs`), so the run-level `cancel` has no way to
+//! reach it by itself. `CancelFanout` fixes that from the setter's side: every
+//! batch-local flag registers itself with the fanout, and `fire()` latches
+//! every registered flag through one code path, including a flag registered
+//! after the fire already happened.
 
 use std::path::Path;
 use std::sync::Arc;
@@ -199,45 +223,147 @@ const WATCH_INTERVAL: Duration = Duration::from_millis(200);
 /// a full interval for the watcher to notice it should stop.
 const WATCH_SLICE: Duration = Duration::from_millis(25);
 
-/// Watches `control.jsonl` for a pending `Control::Abort` while a drive is in
-/// progress and, on seeing one, sets the drive's cancel flag - which is what
-/// kills the agent process tree mid-node.
+/// Flags that must all latch the moment the run-level stop fires.
+///
+/// A batch member polls ONE flag, the batch-local `cancel` its siblings share,
+/// because that flag travels all the way into `adapter.run_cancellable`,
+/// `run_script` and `wait_backoff` as a bare `&AtomicBool`. Rather than ripple a
+/// token type through the adapter trait and every agent impl, the SETTER fans
+/// out: the watcher fires once and every registered flag latches through one
+/// code path.
+///
+/// Registration is race-free: a flag registered after the stop already fired
+/// latches on registration, which is exactly the window a batch formed during
+/// an abort would otherwise fall into.
+#[derive(Default)]
+pub(crate) struct CancelFanout {
+    inner: std::sync::Mutex<FanoutInner>,
+}
+
+#[derive(Default)]
+struct FanoutInner {
+    fired: bool,
+    flags: Vec<Arc<AtomicBool>>,
+}
+
+impl CancelFanout {
+    pub(crate) fn register(self: &Arc<Self>, flag: &Arc<AtomicBool>) -> FanoutGuard {
+        let mut inner = self.inner.lock().expect("cancel fanout mutex poisoned");
+        if inner.fired {
+            flag.store(true, Ordering::SeqCst);
+        }
+        inner.flags.push(Arc::clone(flag));
+        drop(inner);
+        FanoutGuard {
+            fanout: Arc::clone(self),
+            flag: Arc::clone(flag),
+        }
+    }
+
+    fn fire(&self) {
+        let mut inner = self.inner.lock().expect("cancel fanout mutex poisoned");
+        inner.fired = true;
+        for f in &inner.flags {
+            f.store(true, Ordering::SeqCst);
+        }
+    }
+
+    #[cfg(test)]
+    fn registered_len(&self) -> usize {
+        self.inner
+            .lock()
+            .expect("cancel fanout mutex poisoned")
+            .flags
+            .len()
+    }
+}
+
+/// Unregisters on drop, so a long run does not accumulate one dead flag per
+/// batch.
+pub(crate) struct FanoutGuard {
+    fanout: Arc<CancelFanout>,
+    flag: Arc<AtomicBool>,
+}
+
+impl Drop for FanoutGuard {
+    fn drop(&mut self) {
+        let mut inner = self
+            .fanout
+            .inner
+            .lock()
+            .expect("cancel fanout mutex poisoned");
+        inner.flags.retain(|f| !Arc::ptr_eq(f, &self.flag));
+    }
+}
+
+/// Watches `control.jsonl` for a pending `Control::Pause` or `Control::Abort`
+/// while a drive is in progress.
+///
+/// On a pending Pause it sets `halt` and keeps polling - a Pause is not
+/// terminal, and an Abort may still arrive later in the same drive. On a
+/// pending Abort it sets `halt`, fires the fanout (which latches the run-level
+/// `cancel` and every batch-local flag registered with it - which is what
+/// kills an in-flight agent's process tree), and returns: an Abort is
+/// terminal, so there is nothing left to watch.
 ///
 /// The watcher OBSERVES only. It does not consume the entry and never writes
-/// the control cursor: the drive loop still applies the abort and owns the
-/// cursor, so the abort takes effect exactly once.
+/// the control cursor: the drive loop still applies the command and owns the
+/// cursor, so it takes effect exactly once.
 ///
 /// It cannot outlive the drive: the guard is dropped when `drive` returns, and
 /// dropping it stops and joins the thread (bounded by one `WATCH_SLICE`).
-pub(crate) struct AbortWatcher {
+pub(crate) struct StopWatcher {
     stop: Arc<AtomicBool>,
     handle: Option<JoinHandle<()>>,
+    fanout: Arc<CancelFanout>,
 }
 
-impl AbortWatcher {
+impl StopWatcher {
     /// `after` is the drive's starting control cursor: entries at or below it
     /// have already been applied by an earlier drive and must not re-fire.
-    pub(crate) fn spawn(run_dir: &Path, after: Option<u64>, cancel: Arc<AtomicBool>) -> Self {
+    /// `cancel` is registered with the returned fanout at construction, so a
+    /// batch-local flag registered later through [`Self::fanout`] latches
+    /// through the exact same call that latches `cancel` itself.
+    pub(crate) fn spawn(
+        run_dir: &Path,
+        after: Option<u64>,
+        cancel: Arc<AtomicBool>,
+        halt: Arc<AtomicBool>,
+    ) -> Self {
+        let fanout = Arc::new(CancelFanout::default());
+        let _cancel_guard = fanout.register(&cancel);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_c = Arc::clone(&stop);
         let dir = run_dir.to_path_buf();
+        let fanout_thread = Arc::clone(&fanout);
         let handle = std::thread::spawn(move || {
+            // Keeps `cancel` registered with the fanout for the life of the
+            // watcher thread; the drop that would unregister it never runs
+            // until the thread itself exits.
+            let _cancel_guard = _cancel_guard;
             loop {
                 if stop_c.load(Ordering::Relaxed) {
                     return;
                 }
                 // A read error (a torn line being appended right now) is not
                 // fatal: the next poll re-reads the file.
-                if let Ok(entries) = read_control_after(&dir, after)
-                    && entries
+                if let Ok(entries) = read_control_after(&dir, after) {
+                    if entries
                         .iter()
                         .any(|e| matches!(e.cmd, Control::Abort { .. }))
-                {
-                    cancel.store(true, Ordering::SeqCst);
-                    // The flag is sticky for the rest of the drive and the
-                    // drive loop finalizes from here, so there is nothing left
-                    // to watch.
-                    return;
+                    {
+                        halt.store(true, Ordering::SeqCst);
+                        fanout_thread.fire();
+                        // Abort is terminal for the drive; the drive loop
+                        // finalizes from here, so there is nothing left to
+                        // watch.
+                        return;
+                    }
+                    if entries.iter().any(|e| matches!(e.cmd, Control::Pause)) {
+                        halt.store(true, Ordering::SeqCst);
+                        // A Pause is not terminal: keep polling, because an
+                        // Abort may still be posted later in the same drive.
+                    }
                 }
                 let mut slept = Duration::ZERO;
                 while slept < WATCH_INTERVAL {
@@ -252,11 +378,19 @@ impl AbortWatcher {
         Self {
             stop,
             handle: Some(handle),
+            fanout,
         }
+    }
+
+    /// The fanout the watcher fires on Abort. A batch registers its
+    /// batch-local cancel flag with it so a run-level Abort reaches
+    /// in-flight batch members too.
+    pub(crate) fn fanout(&self) -> Arc<CancelFanout> {
+        Arc::clone(&self.fanout)
     }
 }
 
-impl Drop for AbortWatcher {
+impl Drop for StopWatcher {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Relaxed);
         if let Some(h) = self.handle.take() {
@@ -277,5 +411,44 @@ mod tests {
         );
         assert_eq!(StopOutcome::FinalizedDeadRun.as_str(), "finalized_dead_run");
         assert_eq!(StopOutcome::AlreadyTerminal.as_str(), "already_terminal");
+    }
+
+    /// The race the registry closes: a batch created AFTER the abort already
+    /// fired must still see the cancel. Registration latches an
+    /// already-fired fanout under the same lock that fires it, so there is no
+    /// window in which a fresh batch-local flag reads false. Pure, no timing.
+    #[test]
+    fn a_flag_registered_after_the_stop_fired_latches_on_registration() {
+        let fanout = Arc::new(CancelFanout::default());
+        let early = Arc::new(AtomicBool::new(false));
+        let _g1 = fanout.register(&early);
+        fanout.fire();
+        assert!(
+            early.load(Ordering::SeqCst),
+            "a registered flag latches on fire"
+        );
+
+        let late = Arc::new(AtomicBool::new(false));
+        let _g2 = fanout.register(&late);
+        assert!(
+            late.load(Ordering::SeqCst),
+            "a flag registered after the fire must latch on registration"
+        );
+    }
+
+    /// A long run must not accumulate one dead flag per batch.
+    #[test]
+    fn dropping_the_guard_unregisters_the_flag() {
+        let fanout = Arc::new(CancelFanout::default());
+        let gone = Arc::new(AtomicBool::new(false));
+        {
+            let _g = fanout.register(&gone);
+        }
+        assert_eq!(fanout.registered_len(), 0, "the guard unregisters on drop");
+        fanout.fire();
+        assert!(
+            !gone.load(Ordering::SeqCst),
+            "an unregistered flag is not touched by a later fire"
+        );
     }
 }
