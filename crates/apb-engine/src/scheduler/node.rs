@@ -2573,6 +2573,13 @@ pub(crate) fn advance_frontier(
         .into_iter()
         .filter(|s| !frontier.contains(s))
         .collect();
+    // Targets this advance decided AGAINST: the frontier heads a won `join:
+    // any` race cancels, plus the runnable successors the same race narrows
+    // away. Phase 1 below must not record a hop into any of them (external
+    // review, finding 2): the race is precisely the drive deciding not to take
+    // those hops, and an `EdgeTraversed` for one is durable evidence of a
+    // traversal that never happened.
+    let mut raced_out: Vec<String> = Vec::new();
     if let Some(join) = runnable
         .iter()
         .find(|s| {
@@ -2592,22 +2599,25 @@ pub(crate) fn advance_frontier(
                 true => frontier.push(other),
                 false => {
                     log.append(EventPayload::NodeFinished {
-                        node: other,
+                        node: other.clone(),
                         status: "cancelled".into(),
                         attempt: 1,
                         output: String::new(),
                         artifacts: Vec::new(),
                     })?;
+                    raced_out.push(other);
                 }
             }
         }
+        raced_out.extend(runnable.iter().filter(|s| *s != &join).cloned());
         runnable.retain(|s| s == &join);
     }
     // The edges actually selected out of `node` for this advance. Used to
     // decide which pushes cross a bounded edge and must be journaled, and
     // (phase 1 below) as the ground truth for every hop actually taken.
     // Computed from the same `state`, so it agrees with the `runnable` set
-    // above.
+    // above EXCEPT where the `join: any` race just narrowed it - hence the
+    // `raced_out` filter in phase 1.
     let selected = parallel::selected_edges(playbook, node, state);
     // Phase 1, the ROUTING DECISION: journaled for every target the routing
     // selected, including a target already on the frontier and a barrier that
@@ -2615,11 +2625,18 @@ pub(crate) fn advance_frontier(
     // them really was taken, and this record is the only evidence of it: "A
     // delivered into barrier J, which is not ready yet" is exactly the delivery
     // proof `arrival` needs, and journaling from `runnable` would miss it.
-    // Deduplicated against the folded hop set (which includes prior drives), so
-    // a loop cannot grow the journal without bound; the counted record below is
-    // deliberately NOT deduped.
+    // A target the `join: any` race wrote off is the one case that is NOT a
+    // taken hop, so it is filtered out: `journaled_hops` is what
+    // `routed_targets`/`pending_heads` trust as "every hop the drive loop
+    // actually took", and the record outlives even a patch that removes the
+    // edge. Deduplicated against the folded hop set (which includes prior
+    // drives), so a loop cannot grow the journal without bound; the counted
+    // record below is deliberately NOT deduped.
     for e in &selected {
         if e.to == node {
+            continue;
+        }
+        if raced_out.contains(&e.to) {
             continue;
         }
         if state
