@@ -725,13 +725,6 @@ fn drive_inner(
                 // stop` reports the failing node's own words as the run's
                 // failure reason.
                 let mut batch_results: Vec<(String, NodeStatus, String)> = Vec::new();
-                // Set inside the admission gate below: `stopped` when an Abort
-                // wrote off a queued chunk (so the tail must go straight back
-                // to the top-of-loop scan to apply it), `halted` when a Pause
-                // stopped admission (same short-circuit, but nothing was
-                // written off).
-                let mut stopped = false;
-                let mut halted = false;
                 // Every member's own pre-execution fingerprint, taken against
                 // the tree as it stands before the FIRST chunk runs. Without
                 // this a member's cache key silently depends on `max_parallel`,
@@ -764,10 +757,18 @@ fn drive_inner(
                     // has not stored it yet from this reader's perspective),
                     // then `cancel.load()` returns true (fire's later store
                     // already landed) - taking the legacy join:any shape for
-                    // a write-off that was really the abort, and leaving
-                    // `stopped` unset. Snapshotting `cancel` first closes the
-                    // window: `run_cancel`, checked after, still wins below
-                    // whenever it is - or has become - true.
+                    // a write-off that was really the abort.
+                    //
+                    // This ordering narrows that window rather than formally
+                    // eliminating it (external review, finding 6): the model
+                    // still permits the relaxed `cancel` load to observe
+                    // `fire()`'s store while the SeqCst `run_cancel` load below
+                    // returns stale, and on real hardware (x86, ARM) the
+                    // anomaly is not observable. What makes the residual
+                    // harmless rather than merely unlikely is the batch tail:
+                    // it no longer depends on what any gate concluded, it reads
+                    // both stop flags itself, so a write-off that took the
+                    // wrong shape here still ends the run as stopped.
                     let cancel_now = cancel.load(Ordering::Relaxed);
                     // Admission-time re-check, against BOTH stop signals, kept
                     // as separate cases even though both write a queued member
@@ -818,7 +819,6 @@ fn drive_inner(
                                 "cancelled".into(),
                             ));
                         }
-                        stopped = true;
                         continue;
                     }
                     // A batch-local join:any that an earlier chunk already
@@ -857,7 +857,6 @@ fn drive_inner(
                     // resume would silently drop that branch. The gate's
                     // POSITION is shared with the abort; its effect is not.
                     if halt.load(Ordering::SeqCst) {
-                        halted = true;
                         break;
                     }
                     // Per-member cache probe, on the drive thread and in chunk
@@ -1075,7 +1074,22 @@ fn drive_inner(
                 // terminal command queued behind an unconsumable Retry leaves
                 // `scan_control` returning Proceed, and an unlatched `continue`
                 // would spin forever.
-                if (stopped || halted) && !batch_stop_short_circuited {
+                //
+                // The flags are read HERE, directly, exactly as the sequential
+                // arm reads `run_cancel` at its own short-circuit - not through
+                // the admission gate's locals. The gate runs only BEFORE each
+                // chunk, so a stop landing while the FINAL (or only) chunk is in
+                // flight is observed by no gate at all: every member is killed
+                // and journaled cancelled, `advance_frontier` skips all of them,
+                // the frontier goes empty, and the tail used to return
+                // `EngineError::Invalid("parallel batch produced no runnable
+                // successor...")` - journaling a deliberately stopped run as
+                // FAILED with an engine message for a reason. Both flags are
+                // write-once for the life of a drive and `halt` is stored before
+                // `fanout.fire()` latches `run_cancel`, so this pair of loads is
+                // monotone: whatever a gate saw, the tail still sees.
+                let stop_now = run_cancel.load(Ordering::SeqCst) || halt.load(Ordering::SeqCst);
+                if stop_now && !batch_stop_short_circuited {
                     batch_stop_short_circuited = true;
                     continue;
                 }

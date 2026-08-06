@@ -456,6 +456,30 @@ edges:
   - { from: m, to: done }
 "#;
 
+/// The same fan-out narrowed to ONE chunk: two branches, two slots, so every
+/// member is admitted in a single pass and the abort lands after the only
+/// admission gate the batch ever reaches.
+const BATCH_SINGLE_CHUNK: &str = r#"
+schema: 1
+id: stoplast
+name: Stop Last Chunk
+version: 1.0.0
+defaults:
+  max_parallel: 2
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/hold.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/hold.sh", runner: sh }
+  - { id: m, type: prompt, prompt: "merged" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: m }
+  - { from: b, to: m }
+  - { from: m, to: done }
+"#;
+
 /// The first chunk's script: announce that the chunk is genuinely in flight, wait
 /// (bounded) for the test to release it, and then linger one second. The linger
 /// is what makes the assertion about the SECOND chunk meaningful rather than a
@@ -505,6 +529,82 @@ fn seed_batch(root: &Path) {
         format!("printf x >> '{}/chunk2_ran'\n", root.display()),
     )
     .unwrap();
+}
+
+fn seed_single_chunk(root: &Path) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/stoplast/1.0.0");
+    let scripts = vdir.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(vdir.join("playbook.yaml"), BATCH_SINGLE_CHUNK).unwrap();
+    fs::write(root.join(".apb/playbooks/stoplast/current"), "1.0.0").unwrap();
+    fs::write(scripts.join("hold.sh"), hold_script(root)).unwrap();
+}
+
+/// External review, finding 1: an abort landing while the FINAL (here: only)
+/// chunk of a batch is in flight is observed by no admission gate, because
+/// `stopped`/`halted` are set exclusively BEFORE a chunk runs. The batch tail
+/// therefore used to fall through to `advance_frontier`, which skips every
+/// cancelled member; the frontier went empty and the drive returned
+/// `EngineError::Invalid("parallel batch produced no runnable successor and no
+/// finish")`, so a run the operator deliberately stopped was journaled
+/// `RunFinished { failed }` with that engine message as its reason.
+///
+/// Bounded by construction, not by a sleep: `hold.sh` blocks until the test
+/// writes `release`, and the release happens only after `stop_run` has returned,
+/// so the abort is provably in `control.jsonl` while the single chunk is still
+/// mid-flight.
+#[cfg(unix)]
+#[test]
+fn a_stop_during_the_last_chunk_of_a_batch_still_aborts_the_run() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_single_chunk(dir.path());
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stoplast", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "stoplast-");
+    poll_until("the only chunk to start", || {
+        dir.path().join("chunk1_started").is_file().then_some(())
+    });
+    assert_eq!(
+        stop_run(dir.path(), &run_id).unwrap(),
+        StopOutcome::SignaledLiveDriver
+    );
+    fs::write(dir.path().join("release"), "go").unwrap();
+
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"))
+        .expect("a stopped batch must abort cleanly, not fail the drive");
+    assert_eq!(
+        res.outcome,
+        RunStatus::Aborted,
+        "an abort during the last chunk must abort the run, not fail it"
+    );
+
+    let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RunError { .. })),
+        "the abort must not be reported through a RunError"
+    );
+    assert!(
+        matches!(
+            events.last().map(|e| &e.payload),
+            Some(EventPayload::RunAborted { .. })
+        ),
+        "the journal must end with RunAborted, got {:?}",
+        events.last().map(|e| &e.payload)
+    );
+    assert_eq!(
+        RunState::fold(&events).run_status,
+        RunStatus::Aborted,
+        "the folded run state must read aborted"
+    );
 }
 
 /// (d) A stop must reach the CONCURRENT batch, not only the node in hand.
