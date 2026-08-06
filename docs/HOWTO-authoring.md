@@ -317,11 +317,12 @@ time.
 Whether a reference resolves and whether it has a value yet are separate
 questions. A template that reads `nodes.<id>.output` or `nodes.<id>.report` where
 nothing in the graph orders `<id>` before the reading node is validator warning
-**V38**: across un-joined parallel branches that value may render empty, and the
-remedy is a `join: all` on the edges into the reader, or routing the reader
-behind a node that already joins both branches (see "Joining parallel branches").
-A loop-carried read, where both nodes sit in one cycle, is not flagged: there the
-previous pass supplies the value.
+**V38**: across un-joined parallel branches that value may render empty. The
+remedy is to route the read behind `<id>` itself, or behind a node that already
+joins both branches (see "Joining parallel branches"). Adding `join: all` to the
+reader does nothing when the reader has a single incoming edge, which is the
+common shape this warning catches. A loop-carried read, where both nodes sit in
+one cycle, is not flagged: there the previous pass supplies the value.
 
 At run time the same hole is observable rather than silent. When a node executes
 and one of its `nodes.<id>.output|report` references renders empty, the run
