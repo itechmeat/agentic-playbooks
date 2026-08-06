@@ -3,7 +3,7 @@ use apb_core::schema::Playbook;
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, run};
-use apb_engine::state::RunStatus;
+use apb_engine::state::{RunState, RunStatus};
 
 // A pipeline with an infinite loop: start -> tick -> check(max_loops: 2) -> tick -> ...
 // The only edge out of check is unconditional (no condition and no fallback), so the
@@ -31,6 +31,36 @@ fn seed(root: &std::path::Path) {
     std::fs::create_dir_all(&vdir).unwrap();
     std::fs::write(vdir.join("playbook.yaml"), LOOPWF).unwrap();
     std::fs::write(root.join(".apb/playbooks/loopwf/current"), "1.0.0").unwrap();
+}
+
+// A condition node with max_loops:2 that ALSO declares a fallback edge: the
+// unconditional `check -> tick` edge is what routes every ordinary pass (it
+// wins over the fallback in `selected_edges`), and the fallback `check ->
+// done` edge is what the budget-exhausted branch in the scheduler jumps to
+// directly, bypassing `advance_frontier` entirely.
+const LOOPWF_FALLBACK: &str = r#"
+schema: 1
+id: loopwf_fb
+name: Loop Playbook With Fallback
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: tick, type: prompt, prompt: "tick" }
+  - { id: check, type: condition, max_loops: 2 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: tick }
+  - { from: tick, to: check }
+  - { from: check, to: tick }
+  - { from: check, to: done, fallback: true }
+"#;
+
+fn seed_fallback(root: &std::path::Path) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/loopwf_fb/1.0.0");
+    std::fs::create_dir_all(&vdir).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), LOOPWF_FALLBACK).unwrap();
+    std::fs::write(root.join(".apb/playbooks/loopwf_fb/current"), "1.0.0").unwrap();
 }
 
 #[test]
@@ -94,4 +124,38 @@ fn max_loops_exhausted_without_fallback_fails_the_run() {
     assert!(events.iter().any(
         |e| matches!(&e.payload, EventPayload::RunFinished { outcome } if outcome == "failed")
     ));
+}
+
+/// (f) A condition node WITH a fallback edge, budget exhausted: the fallback
+/// hop the scheduler takes directly (never through `advance_frontier`) must
+/// still be journaled, and it must not spend a bounded edge's traversal
+/// budget - it crossed no bounded edge at all.
+#[test]
+fn max_loops_fallback_hop_is_journaled_uncounted() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_fallback(dir.path());
+    let res = run(dir.path(), "loopwf_fb", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+
+    let fallback_hop = events.iter().find(|e| {
+        matches!(
+            &e.payload,
+            EventPayload::EdgeTraversed { from, to, uncounted, .. }
+                if from == "check" && to == "done" && *uncounted
+        )
+    });
+    assert!(
+        fallback_hop.is_some(),
+        "the max_loops fallback hop must be journaled as uncounted, got: {events:?}"
+    );
+
+    let s = RunState::fold(&events);
+    assert!(
+        !s.edge_counts
+            .contains_key(&("check".to_string(), "done".to_string())),
+        "the fallback hop must not spend a bounded edge's traversal budget"
+    );
 }

@@ -707,3 +707,31 @@ fn a_dead_join_input_is_journaled_as_a_write_off() {
         "the write-off must not ride the supervisor-action variant"
     );
 }
+
+/// #82: the single most valuable record. When `a` advances, `j` is a barrier
+/// that is not ready yet, so `seed_successors` drops it from `runnable` and the
+/// old journal held no trace of the delivery at all. That hop is exactly the
+/// proof `arrival` needs, so it has to be journaled from `selected_edges`.
+#[test]
+fn a_hop_into_a_not_yet_ready_barrier_is_journaled() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), DIAMOND_ALL);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    let hops: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::EdgeTraversed { from, to, .. } => Some((from.clone(), to.clone())),
+            _ => None,
+        })
+        .collect();
+    // `a` runs before `b` in journal order, so `j` was still NotReady when `a`
+    // advanced past it. The record must exist anyway.
+    assert!(
+        hops.contains(&("a".to_string(), "j".to_string())),
+        "the hop into the not-yet-ready barrier must be journaled, got {hops:?}"
+    );
+}

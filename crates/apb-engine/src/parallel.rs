@@ -320,19 +320,34 @@ fn live_nodes(playbook: &Playbook, state: &RunState, active: &[String]) -> BTree
 /// filter is deliberately on the target NODE, not on a declared edge - a policy
 /// route is a real hop with no declared edge, and a hop the run demonstrably
 /// took is still outstanding work when a patch merely removes its edge.
+///
+/// Known residual: the journaled evidence is monotone - once a hop is folded it
+/// keeps its target live for the rest of the run, so a fork inside a loop that
+/// selected `a` on one pass and `b` on another keeps BOTH branches live from
+/// here on, and a downstream barrier can wait longer than it strictly needs to.
+/// The direction of error is the documented-safe one (an over-wide live set
+/// only degrades to plain wait-until-terminal; a too-narrow one lets a join
+/// fire without a branch that was still going to arrive), so this is pinned
+/// with a dedicated test rather than fixed here. The correct narrow fix scopes
+/// journaled evidence per loop pass, which needs a pass counter the journal
+/// does not carry today.
 fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet<String> {
-    let mut targets: BTreeSet<String> = successors(playbook, node, state).into_iter().collect();
-    let journaled = state
-        .edge_counts
+    // Journaled evidence first: every hop the drive loop actually took out of
+    // this node. Re-derivation is the fallback and is UNIONED rather than
+    // consulted conditionally, and that is load-bearing: inside
+    // `advance_frontier`, readiness and `journal_dead_inputs` both consult this
+    // against a state snapshot that by construction does not yet contain the
+    // hop being taken right now, so for the node being advanced past the
+    // derivation is the ground truth. A later "optimization" that drops the
+    // derivation term would make a barrier take the vacuous nothing-arrived
+    // early return.
+    let mut targets: BTreeSet<String> = state
+        .journaled_hops
         .iter()
-        .filter(|(_, count)| **count > 0)
-        .map(|((from, to), _)| (from, to))
-        .chain(state.policy_routes.iter().map(|(from, to)| (from, to)));
-    for (from, to) in journaled {
-        if from == node && playbook.node(to).is_some() {
-            targets.insert(to.clone());
-        }
-    }
+        .filter(|(from, to)| from == node && playbook.node(to).is_some())
+        .map(|(_, to)| to.clone())
+        .collect();
+    targets.extend(successors(playbook, node, state));
     targets
 }
 
@@ -556,6 +571,57 @@ edges:
   - { from: check, to: done, condition: { type: node_status, node: check, equals: success } }
 "#;
 
+    /// `j` waits for both `a` and `b`. The edge `a -> j` is gated on a THIRD
+    /// node's status, so re-running `c` changes what re-derivation says `a`
+    /// routed into, even though `a` demonstrably delivered.
+    const THIRD_NODE_CONDITIONED_JOIN: &str = r#"
+schema: 1
+id: tn
+name: TN
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: c, type: prompt, prompt: "c" }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: c }
+  - { from: c, to: a }
+  - { from: c, to: b }
+  - { from: a, to: j, join: all, condition: { type: node_status, node: c, equals: success } }
+  - { from: b, to: j, join: all }
+  - { from: j, to: done }
+"#;
+
+    /// `gate` is a condition node inside a cycle with two conditional outgoing
+    /// edges to `a` and `b`, both feeding a merge node `m` under `join: all`; a
+    /// bounded back edge `m -> gate` closes the loop, with a fallback exit to
+    /// `done` once the cap is spent. Different passes through `gate` can select
+    /// different branches.
+    const LOOP_FORK_MERGE: &str = r#"
+schema: 1
+id: d
+name: D
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: condition }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: m, type: prompt, prompt: "m" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: a, condition: { type: node_status, node: gate, equals: success } }
+  - { from: gate, to: b, condition: { type: node_status, node: gate, equals: failure } }
+  - { from: a, to: m, join: all }
+  - { from: b, to: m, join: all }
+  - { from: m, to: gate, max_traversals: 2 }
+  - { from: m, to: done, fallback: true }
+"#;
+
     /// An either-or fork: exactly one of `a`/`b` is selected, and both feed the
     /// same merge node `m`.
     const EITHER_OR: &str = r#"
@@ -769,12 +835,16 @@ edges:
     #[test]
     fn a_delivered_input_survives_its_bounded_edge_reaching_the_cap() {
         // `a -> j` delivered once and thereby hit its cap, so `successors(a)`
-        // no longer offers it. The journaled traversal count is proof it did
-        // arrive, so the join must still see the failure rather than treat the
-        // input as dead and pass vacuously.
+        // no longer offers it. The journaled hop is proof it did arrive, so the
+        // join must still see the failure rather than treat the input as dead
+        // and pass vacuously. `edge_counts` is what a real fold would ALSO
+        // carry for this record (it is a counted bounded traversal), kept here
+        // for realism even though `routed_targets` itself now reads
+        // `journaled_hops` alone.
         let pb = Playbook::from_yaml(BOUNDED_INPUT_JOIN).unwrap();
         let mut s = state_with(&[("a", NodeStatus::Failed), ("b", NodeStatus::Succeeded)]);
         s.edge_counts.insert(("a".into(), "j".into()), 1);
+        s.journaled_hops.insert(("a".to_string(), "j".to_string()));
         assert_eq!(
             join_readiness(&pb, "j", &s, &active(&["a", "b"])),
             JoinReadiness::ReadyFailure
@@ -871,7 +941,7 @@ edges:
             ("work", NodeStatus::Failed),
         ]);
         // What the drive journals when it takes the policy route.
-        s.policy_routes
+        s.journaled_hops
             .insert(("work".to_string(), "handler".to_string()));
         assert_eq!(pending_heads(&pb, &s), vec!["handler".to_string()]);
     }
@@ -887,7 +957,9 @@ edges:
             ("a", NodeStatus::Succeeded),
         ]);
         s.edge_counts.insert(("a".into(), "ghost".into()), 1);
-        s.policy_routes
+        s.journaled_hops
+            .insert(("a".to_string(), "ghost".to_string()));
+        s.journaled_hops
             .insert(("a".to_string(), "phantom".to_string()));
         let heads = pending_heads(&pb, &s);
         assert!(
@@ -1043,5 +1115,56 @@ edges:
             Some(r#"{"verdict":" failed"}"#),
             "failed"
         ));
+    }
+
+    /// (a) The issue's headline case: a hop taken under a third node's earlier
+    /// status survives that node re-running. Pre-fix, flipping `c` to Failed
+    /// re-derives `a -> j` away, `a` is written off as Dead, and the barrier
+    /// takes the vacuous "nothing arrived at all" early return.
+    #[test]
+    fn a_journaled_hop_survives_the_re_run_of_the_node_its_condition_read() {
+        let pb = Playbook::from_yaml(THIRD_NODE_CONDITIONED_JOIN).unwrap();
+        let mut s = state_with(&[
+            ("c", NodeStatus::Failed),
+            ("a", NodeStatus::Succeeded),
+            ("b", NodeStatus::Succeeded),
+        ]);
+        // `a` really did deliver into `j`, back when `c` still read success.
+        s.journaled_hops.insert(("a".to_string(), "j".to_string()));
+        s.journaled_hops.insert(("b".to_string(), "j".to_string()));
+        assert_eq!(
+            join_readiness(&pb, "j", &s, &active(&["j"])),
+            JoinReadiness::ReadySuccess,
+            "a delivered input must not be un-delivered by its condition's source re-running"
+        );
+    }
+
+    /// (d) Monotone liveness must not deadlock a loop that changed its route.
+    /// A fork inside a cycle that selected `a` on pass 1 and `b` on pass 2
+    /// keeps BOTH branches live for the rest of the run; the downstream join
+    /// must still resolve rather than reading NotReady forever. This is the
+    /// pin for the residual named in this task's header: if it ever fails, the
+    /// per-loop-pass scoping becomes its own issue.
+    #[test]
+    fn a_loop_fork_that_changed_branches_still_resolves_its_downstream_join() {
+        let pb = Playbook::from_yaml(LOOP_FORK_MERGE).unwrap();
+        let mut s = state_with(&[
+            ("gate", NodeStatus::Succeeded),
+            ("a", NodeStatus::Succeeded),
+            ("b", NodeStatus::Succeeded),
+        ]);
+        // Pass 1 routed into `a`; pass 2 routed into `b`. Both hops are folded,
+        // so both branches read live from here on.
+        s.journaled_hops
+            .insert(("gate".to_string(), "a".to_string()));
+        s.journaled_hops
+            .insert(("gate".to_string(), "b".to_string()));
+        s.journaled_hops.insert(("a".to_string(), "m".to_string()));
+        s.journaled_hops.insert(("b".to_string(), "m".to_string()));
+        assert_ne!(
+            join_readiness(&pb, "m", &s, &active(&["m"])),
+            JoinReadiness::NotReady,
+            "a loop fork that changed branches must not leave its merge point waiting forever"
+        );
     }
 }

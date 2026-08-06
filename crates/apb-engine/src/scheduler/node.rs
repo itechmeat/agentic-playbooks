@@ -2599,10 +2599,44 @@ pub(crate) fn advance_frontier(
         }
         runnable.retain(|s| s == &join);
     }
-    // The edges actually selected out of `node` for this advance. Used only to
-    // decide which pushes cross a bounded edge and must be journaled. Computed
-    // from the same `state`, so it agrees with the `runnable` set above.
+    // The edges actually selected out of `node` for this advance. Used to
+    // decide which pushes cross a bounded edge and must be journaled, and
+    // (phase 1 below) as the ground truth for every hop actually taken.
+    // Computed from the same `state`, so it agrees with the `runnable` set
+    // above.
     let selected = parallel::selected_edges(playbook, node, state);
+    // Phase 1, the ROUTING DECISION: journaled for every target the routing
+    // selected, including a target already on the frontier and a barrier that
+    // is not ready yet. Those two are dropped from `runnable`, but the hop into
+    // them really was taken, and this record is the only evidence of it: "A
+    // delivered into barrier J, which is not ready yet" is exactly the delivery
+    // proof `arrival` needs, and journaling from `runnable` would miss it.
+    // Deduplicated against the folded hop set (which includes prior drives), so
+    // a loop cannot grow the journal without bound; the counted record below is
+    // deliberately NOT deduped.
+    for e in &selected {
+        if e.to == node {
+            continue;
+        }
+        if state
+            .journaled_hops
+            .contains(&(node.to_string(), e.to.clone()))
+        {
+            continue;
+        }
+        log.append(EventPayload::EdgeTraversed {
+            from: node.to_string(),
+            to: e.to.clone(),
+            via_policy: false,
+            uncounted: true,
+        })?;
+    }
+    // Phase 2, the frontier pushes and the bounded COUNT: same condition, same
+    // site, same one-per-actual-push semantics as before. Two records can
+    // describe one bounded traversal, a decision record plus the counted one.
+    // That is deliberate: `journaled_hops` is a set and `edge_counts` only ever
+    // sees the counted record, which is what makes "accounting unchanged"
+    // mechanically checkable instead of argued.
     for s in runnable {
         if !frontier.contains(&s) {
             journal_dead_inputs(log, playbook, &s, state, &active)?;
@@ -2621,6 +2655,7 @@ pub(crate) fn advance_frontier(
                     from: node.to_string(),
                     to: s.clone(),
                     via_policy: false,
+                    uncounted: false,
                 })?;
             }
             frontier.push(s);

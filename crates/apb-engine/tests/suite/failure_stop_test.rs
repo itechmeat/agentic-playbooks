@@ -424,10 +424,22 @@ fn the_policy_route_is_journaled_as_a_traversal() {
     drop(_env);
 
     let events = read_all(&run_dir_of(dir.path(), &res.run_id)).unwrap();
+    // Re-scoped for #82: `advance_frontier` now also journals an `uncounted`
+    // routing-decision record for every hop it selects (including unbounded
+    // declared edges), so the journal legitimately carries more
+    // `EdgeTraversed` records than just the policy route this test is about.
+    // Filtering on `via_policy: true` keeps this test's own assertion - the
+    // policy route is journaled exactly once - scoped to the record it is
+    // actually testing.
     let routes: Vec<(String, String)> = events
         .iter()
         .filter_map(|e| match &e.payload {
-            EventPayload::EdgeTraversed { from, to, .. } => Some((from.clone(), to.clone())),
+            EventPayload::EdgeTraversed {
+                from,
+                to,
+                via_policy: true,
+                ..
+            } => Some((from.clone(), to.clone())),
             _ => None,
         })
         .collect();

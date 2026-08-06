@@ -405,13 +405,15 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
-    /// A bounded loop edge (one carrying `max_traversals`) was traversed (spec
-    /// 2026-07-20-run-reliability). Journaled ONLY for edges that carry
-    /// `max_traversals`, so the journal stays lean: `RunState::fold` counts
-    /// these per `(from, to)` into `edge_counts`, and edge selection blocks the
-    /// edge once the count reaches its cap. A resume restores loop progress
-    /// exactly because the counts come from the journal. Additive variant: old
-    /// logs never carry it.
+    /// Every hop the drive loop actually took out of a node (spec
+    /// 2026-07-20-run-reliability, widened by #82): a declared edge (bounded or
+    /// not), or a `defaults.on_failure` policy hop that consulted no edge at
+    /// all. `RunState::fold` puts every record into `journaled_hops`, and
+    /// additionally counts it into `edge_counts` when it is neither a policy
+    /// route nor `uncounted` - that is the single site a bounded edge's
+    /// `max_traversals` budget is spent, unchanged from before. A resume
+    /// restores loop progress exactly because the counts come from the
+    /// journal.
     EdgeTraversed {
         from: String,
         to: String,
@@ -429,6 +431,18 @@ pub enum EventPayload {
         /// wire whenever false.
         #[serde(default, skip_serializing_if = "is_false")]
         via_policy: bool,
+        /// True when this record must NOT consume a bounded edge's
+        /// `max_traversals` budget: an unbounded declared edge (there is no cap
+        /// to spend), or a hop journaled outside the single counting site in
+        /// `advance_frontier`. Polarity is dictated by back-compatibility:
+        /// every record written before this field existed was a counted bounded
+        /// traversal, so the serde default has to read as "counted". Named
+        /// `uncounted` rather than `unbounded` because the `max_loops` fallback
+        /// hop may cross an edge that genuinely IS bounded while still needing
+        /// not to change accounting. Additive: absent in every log written
+        /// before, and omitted from the wire whenever false.
+        #[serde(default, skip_serializing_if = "is_false")]
+        uncounted: bool,
     },
     /// A join proceeded WITHOUT one or more of its declared inputs, because no
     /// node the run can still execute reaches them (spec 2026-08-05, Task 4).

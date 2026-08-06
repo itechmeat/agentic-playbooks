@@ -307,6 +307,7 @@ fn a_policy_route_folds_separately_from_a_declared_edge_traversal() {
                 from: "check".into(),
                 to: "tick".into(),
                 via_policy: false,
+                uncounted: false,
             },
         ),
         ev(
@@ -315,6 +316,7 @@ fn a_policy_route_folds_separately_from_a_declared_edge_traversal() {
                 from: "work".into(),
                 to: "handler".into(),
                 via_policy: true,
+                uncounted: false,
             },
         ),
     ];
@@ -331,8 +333,76 @@ fn a_policy_route_folds_separately_from_a_declared_edge_traversal() {
         "a policy route must not consume an edge budget"
     );
     assert!(
-        s.policy_routes
+        s.journaled_hops
             .contains(&("work".to_string(), "handler".to_string())),
         "the policy route is recorded as one"
     );
+}
+
+/// The whole accounting contract in one table. Only a record that is neither a
+/// policy route nor uncounted spends a bounded edge's max_traversals budget;
+/// every record, whatever its flags, is a hop.
+#[test]
+fn edge_traversed_flags_decide_counting_and_every_record_is_a_hop() {
+    let events = vec![
+        ev(
+            0,
+            EventPayload::EdgeTraversed {
+                from: "a".into(),
+                to: "b".into(),
+                via_policy: false,
+                uncounted: false,
+            },
+        ),
+        ev(
+            1,
+            EventPayload::EdgeTraversed {
+                from: "c".into(),
+                to: "d".into(),
+                via_policy: false,
+                uncounted: true,
+            },
+        ),
+        ev(
+            2,
+            EventPayload::EdgeTraversed {
+                from: "e".into(),
+                to: "f".into(),
+                via_policy: true,
+                uncounted: false,
+            },
+        ),
+        ev(
+            3,
+            EventPayload::EdgeTraversed {
+                from: "g".into(),
+                to: "h".into(),
+                via_policy: true,
+                uncounted: true,
+            },
+        ),
+    ];
+    let s = RunState::fold(&events);
+    assert_eq!(s.edge_counts.get(&("a".into(), "b".into())), Some(&1));
+    assert!(!s.edge_counts.contains_key(&("c".into(), "d".into())));
+    assert!(!s.edge_counts.contains_key(&("e".into(), "f".into())));
+    assert!(!s.edge_counts.contains_key(&("g".into(), "h".into())));
+    for pair in [("a", "b"), ("c", "d"), ("e", "f"), ("g", "h")] {
+        assert!(
+            s.journaled_hops.contains(&(pair.0.into(), pair.1.into())),
+            "every journaled record is a hop, missing {pair:?}"
+        );
+    }
+}
+
+/// A journal line written before the field existed carries neither flag on the
+/// wire and must still COUNT, unchanged. Written as raw JSON on purpose, so the
+/// test exercises serde defaulting rather than a Rust literal.
+#[test]
+fn a_legacy_edge_traversed_line_still_counts() {
+    let line = r#"{"seq":0,"ts":1,"type":"edge_traversed","from":"a","to":"b"}"#;
+    let e: Event = serde_json::from_str(line).unwrap();
+    let s = RunState::fold(&[e]);
+    assert_eq!(s.edge_counts.get(&("a".into(), "b".into())), Some(&1));
+    assert!(s.journaled_hops.contains(&("a".into(), "b".into())));
 }

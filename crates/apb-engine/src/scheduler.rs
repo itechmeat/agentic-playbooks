@@ -113,6 +113,7 @@ fn journal_policy_route(log: &mut EventLog, from: &str, to: &str) -> Result<(), 
         from: from.to_string(),
         to: to.to_string(),
         via_policy: true,
+        uncounted: false,
     })?;
     Ok(())
 }
@@ -2003,6 +2004,20 @@ fn drive_inner(
                     .find(|e| e.from == current && e.fallback);
                 match fallback {
                     Some(e) => {
+                        // The budget-exhausted condition node jumps over its
+                        // `fallback` edge without going through
+                        // `advance_frontier`, so nothing in the journal
+                        // recorded where the run went. `uncounted: true` keeps
+                        // accounting exactly as it is: a bounded fallback edge
+                        // is still not counted here, which is pre-existing and
+                        // deliberately left alone rather than silently fixed in
+                        // this change.
+                        log.append(EventPayload::EdgeTraversed {
+                            from: current.clone(),
+                            to: e.to.clone(),
+                            via_policy: false,
+                            uncounted: true,
+                        })?;
                         current = e.to.clone();
                         continue;
                     }
