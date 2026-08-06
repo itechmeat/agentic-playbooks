@@ -335,7 +335,7 @@ fn a_wedged_agent_that_already_reported_keeps_its_result() {
     let result = ad.run_cancellable(
         &task(dir.path(), &policy),
         &AtomicBool::new(false),
-        Some(&|pid| {
+        Some(&|pid, _spawn_ms| {
             *spawned.lock().unwrap() = pid;
         }),
         None,
@@ -381,7 +381,7 @@ fn a_wedged_agent_with_no_result_fails_as_a_bounded_timeout() {
         .run_cancellable(
             &task(dir.path(), &policy),
             &AtomicBool::new(false),
-            Some(&|pid| {
+            Some(&|pid, _spawn_ms| {
                 *spawned.lock().unwrap() = pid;
             }),
             None,

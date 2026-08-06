@@ -77,6 +77,15 @@ pub enum EventPayload {
         /// finish-answer composition - journals the attempt at spawn.
         #[serde(default)]
         pid: Option<u32>,
+        /// Wall-clock milliseconds the process spawn itself took, measured
+        /// around `spawn_in_group` and before any of the child's work runs.
+        /// `duration_ms` on the matching `AttemptFinished` covers the whole
+        /// attempt and cannot separate a slow agent from an OS that took tens of
+        /// seconds just to start the process (a first-exec security scan is the
+        /// case this exists for). `None` only for old logs, and for a spawn that
+        /// failed before the callback could run.
+        #[serde(default)]
+        spawn_ms: Option<u64>,
     },
     AttemptFinished {
         node: String,
@@ -762,6 +771,55 @@ mod tests {
                 assert_eq!(answered_by, "human");
             }
             other => panic!("expected QuestionAnswered, got {other:?}"),
+        }
+    }
+
+    /// Additive per the workspace rule: an old log line has no `spawn_ms` and
+    /// must deserialize, not fail.
+    #[test]
+    fn attempt_started_spawn_ms_defaults_to_none_on_an_old_line() {
+        let line =
+            r#"{"seq":0,"ts":1,"type":"attempt_started","node":"a","attempt":1,"agent":"claude"}"#;
+        let e: Event = serde_json::from_str(line).unwrap();
+        match e.payload {
+            EventPayload::AttemptStarted { spawn_ms, .. } => assert_eq!(spawn_ms, None),
+            other => panic!("wrong payload: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn attempt_started_spawn_ms_round_trips() {
+        let p = EventPayload::AttemptStarted {
+            node: "a".into(),
+            attempt: 1,
+            agent: "claude".into(),
+            soul_delivery: None,
+            skills_mode: None,
+            pid: Some(4242),
+            spawn_ms: Some(37),
+        };
+        let s = serde_json::to_string(&p).unwrap();
+        assert!(s.contains("\"spawn_ms\":37"), "got {s}");
+        let back: EventPayload = serde_json::from_str(&s).unwrap();
+        match back {
+            EventPayload::AttemptStarted {
+                node,
+                attempt,
+                agent,
+                soul_delivery,
+                skills_mode,
+                pid,
+                spawn_ms,
+            } => {
+                assert_eq!(node, "a");
+                assert_eq!(attempt, 1);
+                assert_eq!(agent, "claude");
+                assert_eq!(soul_delivery, None);
+                assert_eq!(skills_mode, None);
+                assert_eq!(pid, Some(4242));
+                assert_eq!(spawn_ms, Some(37));
+            }
+            other => panic!("expected AttemptStarted, got {other:?}"),
         }
     }
 

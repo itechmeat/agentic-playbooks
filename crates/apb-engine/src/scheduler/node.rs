@@ -889,7 +889,7 @@ pub(crate) fn execute_node(
                         std::cell::Cell::new(None);
                     let spawn_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
-                    let on_spawn = |pid: u32| {
+                    let on_spawn = |pid: u32, spawn_ms: u64| {
                         spawn_at.set(Some(std::time::Instant::now()));
                         if let Err(e) = journal.append(EventPayload::AttemptStarted {
                             node: node_id.to_string(),
@@ -898,6 +898,7 @@ pub(crate) fn execute_node(
                             soul_delivery: soul_del.clone(),
                             skills_mode: smode.clone(),
                             pid: Some(pid),
+                            spawn_ms: Some(spawn_ms),
                         }) {
                             *spawn_err.borrow_mut() = Some(e);
                         }
@@ -1084,6 +1085,7 @@ pub(crate) fn execute_node(
                             soul_delivery: step.soul_delivery.clone(),
                             skills_mode: Some(skills_mode.to_string()),
                             pid: None,
+                            spawn_ms: None,
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -1780,7 +1782,7 @@ pub(crate) fn execute_finish_answer(
             let soul_del = Some(soul_delivery_str(ri.soul_delivery));
             let spawn_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
             let spawn_err: std::cell::RefCell<Option<EngineError>> = std::cell::RefCell::new(None);
-            let on_spawn = |pid: u32| {
+            let on_spawn = |pid: u32, spawn_ms: u64| {
                 spawn_at.set(Some(std::time::Instant::now()));
                 if let Err(e) = journal.append(EventPayload::AttemptStarted {
                     node: node_id.to_string(),
@@ -1789,6 +1791,7 @@ pub(crate) fn execute_finish_answer(
                     soul_delivery: soul_del.clone(),
                     skills_mode: None,
                     pid: Some(pid),
+                    spawn_ms: Some(spawn_ms),
                 }) {
                     *spawn_err.borrow_mut() = Some(e);
                 }
@@ -1812,6 +1815,7 @@ pub(crate) fn execute_finish_answer(
                     soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
                     skills_mode: None,
                     pid: None,
+                    spawn_ms: None,
                 })?;
             }
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);

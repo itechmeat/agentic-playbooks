@@ -117,6 +117,7 @@ fn open_attempt_marks_interrupted() {
                 soul_delivery: None,
                 skills_mode: None,
                 pid: Some(4242),
+                spawn_ms: None,
             },
         ),
     ];
@@ -192,6 +193,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 soul_delivery: None,
                 skills_mode: None,
                 pid: Some(1001),
+                spawn_ms: None,
             },
         ),
         ev(
@@ -224,6 +226,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 soul_delivery: None,
                 skills_mode: None,
                 pid: Some(1002),
+                spawn_ms: None,
             },
         ),
     ];
