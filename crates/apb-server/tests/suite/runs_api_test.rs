@@ -238,6 +238,67 @@ async fn lists_runs() {
     assert_eq!(json[0]["progress"]["percent"], 100);
 }
 
+/// #85 finding 4, server pass-through: `GET /api/runs` carries `driver_dead`
+/// for a run whose driver.pid names a provably gone process, and the field is
+/// ABSENT (not `false`) on a healthy row, which is what keeps old snapshots
+/// byte-identical.
+#[tokio::test]
+async fn lists_runs_surfaces_a_dead_driver() {
+    let dir = seed_with_run();
+    let run_id = apb_engine::list_runs(dir.path()).unwrap()[0].run_id.clone();
+
+    // The healthy run seeded above has no driver.pid at all: no drive claim,
+    // so the field must be entirely absent from the JSON.
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs").await;
+    assert_eq!(status, StatusCode::OK);
+    let healthy_row = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == run_id)
+        .expect("seeded run listed");
+    assert!(
+        healthy_row.get("driver_dead").is_none(),
+        "a healthy row must omit driver_dead entirely, got: {healthy_row:?}"
+    );
+
+    // A second run whose driver.pid names a process that existed and is now
+    // provably gone (spawn, wait, reap, reuse the number).
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .expect("spawn a throwaway child to borrow a pid from");
+    let dead_pid = child.id();
+    child.wait().expect("reap the throwaway child");
+
+    let dead_dir = dir.path().join(".apb/runs/dead-1");
+    fs::create_dir_all(&dead_dir).unwrap();
+    fs::write(
+        dead_dir.join("events.jsonl"),
+        concat!(
+            r#"{"seq":0,"ts":1,"type":"run_started","playbook":"dead","version":"1.0.0"}"#,
+            "\n",
+            r#"{"seq":1,"ts":2,"type":"node_started","node":"start","attempt":1}"#,
+            "\n",
+        ),
+    )
+    .unwrap();
+    fs::write(dead_dir.join("driver.pid"), format!("{dead_pid}\n")).unwrap();
+
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs").await;
+    assert_eq!(status, StatusCode::OK);
+    let dead_row = json
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == "dead-1")
+        .expect("dead-1 listed");
+    assert_eq!(dead_row["driver_dead"], serde_json::json!(true));
+}
+
 #[tokio::test]
 async fn run_detail_has_statuses_and_events() {
     let dir = seed_with_run();

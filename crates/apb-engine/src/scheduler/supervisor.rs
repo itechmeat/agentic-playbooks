@@ -136,9 +136,14 @@ pub(crate) fn await_control(
                     cursor = Some(entry.seq);
                     crate::control::write_control_cursor(run_dir, entry.seq)?;
                 }
-                Control::Progress { done, total, label } => {
+                Control::Progress {
+                    done,
+                    total,
+                    label,
+                    node,
+                } => {
                     log.append(EventPayload::RunProgress {
-                        node_id: current_node.to_string(),
+                        node_id: node.unwrap_or_else(|| current_node.to_string()),
                         done,
                         total,
                         label,
@@ -154,27 +159,42 @@ pub(crate) fn await_control(
 }
 
 /// Drains the `Control::Progress` commands pending right after a node finished
-/// executing, stamping each `RunProgress` with `node` (the node that just ran)
-/// and advancing `cursor` past them. Stops at the first non-Progress command,
-/// leaving it untouched for the top-of-loop scan.
+/// executing, stamping each `RunProgress` with its own `node` if it named one,
+/// falling back to `fallback` otherwise, and advancing `cursor` past them.
+/// Stops at the first entry that is neither Progress nor attributable (an
+/// unnamed report with no `fallback`), leaving it untouched for the
+/// top-of-loop scan.
 ///
 /// B2: a report the agent posts during `execute_node` of node A is otherwise
 /// only drained at the next top-of-loop, by which point `current` has advanced
 /// to the successor B, so the report is stamped with B. Draining here, before
-/// frontier advancement, keeps the attribution on A. The remaining drains
-/// (top-of-loop, await_control) still catch commands that arrive between nodes.
+/// frontier advancement, keeps the attribution on A - the sequential call site
+/// passes `Some(current)` as `fallback`. The batch tail (#78) has no single
+/// "current" node - concurrent members may each post their own named report -
+/// so it passes `None`: a NAMED report is always drained, but an unnamed one
+/// is left for the top-of-loop scan rather than mis-stamped, exactly the old
+/// behavior for an old control line. The remaining drains (top-of-loop,
+/// await_control) still catch commands that arrive between nodes.
 pub(crate) fn drain_progress_after_execute(
     run_dir: &Path,
     log: &mut EventLog,
     cursor: Option<u64>,
-    node: &str,
+    fallback: Option<&str>,
 ) -> Result<Option<u64>, EngineError> {
     let mut cursor = cursor;
     for entry in read_control_after(run_dir, cursor)? {
         match entry.cmd {
-            Control::Progress { done, total, label } => {
+            Control::Progress {
+                done,
+                total,
+                label,
+                node,
+            } => {
+                let Some(target) = node.or_else(|| fallback.map(str::to_string)) else {
+                    break;
+                };
                 log.append(EventPayload::RunProgress {
-                    node_id: node.to_string(),
+                    node_id: target,
                     done,
                     total,
                     label,
@@ -525,11 +545,13 @@ mod tests {
                 done: 2,
                 total: 5,
                 label: Some("chapter 2 of 5".into()),
+                node: None,
             },
         )
         .unwrap();
 
-        let cursor = super::drain_progress_after_execute(&run_dir, &mut log, None, "a").unwrap();
+        let cursor =
+            super::drain_progress_after_execute(&run_dir, &mut log, None, Some("a")).unwrap();
         assert_eq!(cursor, Some(0));
 
         let events = read_all(&run_dir).unwrap();
@@ -564,12 +586,14 @@ mod tests {
                 done: 1,
                 total: 3,
                 label: None,
+                node: None,
             },
         )
         .unwrap();
         post_control(&run_dir, Control::Pause).unwrap();
 
-        let cursor = super::drain_progress_after_execute(&run_dir, &mut log, None, "a").unwrap();
+        let cursor =
+            super::drain_progress_after_execute(&run_dir, &mut log, None, Some("a")).unwrap();
         // Consumed the progress at seq 0, stopped before the pause at seq 1.
         assert_eq!(cursor, Some(0));
         let progress_count = read_all(&run_dir)
@@ -578,5 +602,79 @@ mod tests {
             .filter(|e| matches!(e.payload, EventPayload::RunProgress { .. }))
             .count();
         assert_eq!(progress_count, 1);
+    }
+
+    /// #78: a batch member names itself on the report, and the drain honours
+    /// that name instead of the drive's current attribution. With no fallback
+    /// (the batch case) an UNNAMED entry is left for the top-of-loop scan
+    /// rather than being mis-stamped, so the cursor stays monotonic.
+    #[test]
+    fn drain_honours_the_node_named_on_the_report() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+
+        post_control(
+            &run_dir,
+            Control::Progress {
+                done: 2,
+                total: 5,
+                label: None,
+                node: Some("member_b".into()),
+            },
+        )
+        .unwrap();
+
+        let cursor = super::drain_progress_after_execute(&run_dir, &mut log, None, None).unwrap();
+        assert_eq!(
+            cursor,
+            Some(0),
+            "a NAMED entry is drained even with no fallback"
+        );
+
+        let events = read_all(&run_dir).unwrap();
+        let stamped = events
+            .iter()
+            .find_map(|e| match &e.payload {
+                EventPayload::RunProgress { node_id, .. } => Some(node_id.clone()),
+                _ => None,
+            })
+            .expect("a RunProgress event must have been written");
+        assert_eq!(stamped, "member_b");
+    }
+
+    /// An UNNAMED entry in the batch case stops the drain instead of being
+    /// attributed to a node that did not post it. That is exactly today's
+    /// compatibility behavior: the top-of-loop scan picks it up.
+    #[test]
+    fn drain_leaves_an_unnamed_report_for_the_top_of_loop_when_there_is_no_fallback() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join("run");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let mut log = EventLog::create(&run_dir).unwrap();
+
+        post_control(
+            &run_dir,
+            Control::Progress {
+                done: 1,
+                total: 3,
+                label: None,
+                node: None,
+            },
+        )
+        .unwrap();
+
+        let cursor = super::drain_progress_after_execute(&run_dir, &mut log, None, None).unwrap();
+        assert_eq!(
+            cursor, None,
+            "an unnamed entry is not consumed without a fallback"
+        );
+        let count = read_all(&run_dir)
+            .unwrap()
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::RunProgress { .. }))
+            .count();
+        assert_eq!(count, 0);
     }
 }

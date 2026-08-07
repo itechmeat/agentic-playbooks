@@ -185,6 +185,75 @@ fn doctor_run_rejects_an_unknown_run() {
         .failure();
 }
 
+/// #85 finding 1: a node bound to an agent with no known non-interactive
+/// permission flag (hermes today) surfaces through the CLI as a `[warn]
+/// autonomy:` line, not just in the library-level checks.
+#[test]
+fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
+    let dir = tempfile::tempdir().unwrap();
+    init(dir.path());
+    let rd = run_dir(dir.path(), "no-flag-1");
+    fs::write(
+        rd.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":1000,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n\
+         {\"seq\":1,\"ts\":2000,\"type\":\"node_started\",\"node\":\"a\",\"attempt\":1}\n\
+         {\"seq\":2,\"ts\":3000,\"type\":\"node_finished\",\"node\":\"a\",\"status\":\"succeeded\",\"attempt\":1,\"output\":\"\"}\n\
+         {\"seq\":3,\"ts\":4000,\"type\":\"run_finished\",\"outcome\":\"succeeded\"}\n",
+    )
+    .unwrap();
+    fs::write(
+        rd.join("playbook.yaml"),
+        "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n",
+    )
+    .unwrap();
+    let invocation = apb_engine::invocation::ResolvedInvocation {
+        agent_id: "hermes".to_string(),
+        model: "m".into(),
+        spec: apb_engine::invocation::builtin("hermes").expect("hermes is a builtin"),
+        soul_delivery: apb_core::config::SoulDelivery::Prefix,
+        canonical_executable: std::path::PathBuf::from("/bin/true"),
+        executable_fingerprint: "0:0".into(),
+    };
+    let manifest = apb_engine::manifest::RunExecutionManifest {
+        profiles: vec![apb_engine::manifest::ManifestProfile {
+            scope: "project".into(),
+            name: "x".into(),
+            profile_digest: "sha256:a".into(),
+            bundle_digest: "sha256:b".into(),
+            soul: "role".into(),
+            soul_requirement: apb_core::profile::SoulRequirement::Any,
+            skills: Vec::new(),
+            chain: vec![invocation],
+            ephemeral: false,
+            hermetic: false,
+        }],
+        node_bindings: std::collections::BTreeMap::from([(
+            "a".to_string(),
+            "project/x".to_string(),
+        )]),
+        connectors: Vec::new(),
+        connector_grants: std::collections::BTreeMap::new(),
+    };
+    apb_engine::manifest::write(&rd, &manifest).unwrap();
+
+    let out = apb()
+        .arg("doctor")
+        .arg("--run")
+        .arg("no-flag-1")
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    let stdout = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(
+        stdout.contains("[warn] autonomy:"),
+        "expected an `[warn] autonomy:` line in:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("node `a`") && stdout.contains("agent `hermes`"),
+        "the offending node and agent must be named: {stdout}"
+    );
+}
+
 /// The environment doctor is untouched: a bare `apb doctor` still runs the
 /// whole-project checks.
 #[test]

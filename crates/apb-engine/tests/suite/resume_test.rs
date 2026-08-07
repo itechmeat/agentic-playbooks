@@ -126,6 +126,7 @@ fn attempt_started(node: &str) -> EventPayload {
         soul_delivery: None,
         skills_mode: None,
         pid: Some(4242),
+        spawn_ms: None,
     }
 }
 
@@ -358,5 +359,122 @@ fn resume_traversal_run_id_is_not_found() {
     assert!(
         matches!(err, EngineError::NotFound(_)),
         "expected NotFound, got {err:?}"
+    );
+}
+
+// --- Task 10 (#82): legacy on-disk EdgeTraversed lines still count ---
+
+const RLOOP_PLAYBOOK: &str = r#"
+schema: 1
+id: rloop
+name: RLoop
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: check, type: condition, max_loops: 5 }
+  - { id: tick, type: prompt, prompt: "tick" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: check }
+  - { from: check, to: tick, max_traversals: 1 }
+  - { from: tick, to: check }
+  - { from: check, to: done, fallback: true }
+"#;
+
+/// (b) A journal written before the `uncounted` field existed carries neither
+/// it nor `via_policy` on the wire for the ordinary case (both were, and still
+/// are, omitted when false). Hand-built via `write_journal` rather than a real
+/// run, so the wire shape is exactly the legacy shape by construction, and
+/// reading it back exercises serde defaulting, not a Rust literal read
+/// straight out of memory. Ends right after the one bounded traversal
+/// `check -> tick` is journaled, simulating a crash before `tick` started -
+/// an `AdvancePastFinished` resume from `check`.
+#[test]
+fn a_legacy_journal_still_counts_and_resumes_to_the_same_outcome() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_id = "r-legacy";
+    write_journal(
+        dir.path(),
+        run_id,
+        vec![
+            EventPayload::RunStarted {
+                playbook: "rloop".into(),
+                version: "1.0.0".into(),
+            },
+            EventPayload::NodeStarted {
+                node: "start".into(),
+                attempt: 1,
+            },
+            node_finished("start", "succeeded"),
+            EventPayload::EdgeTraversed {
+                from: "start".into(),
+                to: "check".into(),
+                via_policy: false,
+                uncounted: true,
+            },
+            EventPayload::NodeStarted {
+                node: "check".into(),
+                attempt: 1,
+            },
+            node_finished("check", "succeeded"),
+            EventPayload::EdgeTraversed {
+                from: "check".into(),
+                to: "tick".into(),
+                via_policy: false,
+                uncounted: true,
+            },
+            // The single counted record: `uncounted: false` and
+            // `via_policy: false` are both the ordinary case, so
+            // `skip_serializing_if` keeps both off the wire - this line reads
+            // back byte-for-byte like a journal written before either flag
+            // existed.
+            EventPayload::EdgeTraversed {
+                from: "check".into(),
+                to: "tick".into(),
+                via_policy: false,
+                uncounted: false,
+            },
+        ],
+    );
+    let run_dir = dir.path().join(".apb/runs").join(run_id);
+    fs::write(run_dir.join("playbook.yaml"), RLOOP_PLAYBOOK).unwrap();
+
+    let raw = fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
+    let last_line = raw.lines().last().unwrap();
+    assert!(
+        !last_line.contains("uncounted") && !last_line.contains("via_policy"),
+        "the counted traversal must serialize with neither flag on the wire: {last_line}"
+    );
+
+    let events = read_all(&run_dir).unwrap();
+    let state = RunState::fold(&events);
+    assert_eq!(
+        state
+            .edge_counts
+            .get(&("check".to_string(), "tick".to_string())),
+        Some(&1),
+        "a legacy-shaped line still counts toward the bounded edge's budget"
+    );
+    assert!(
+        state
+            .journaled_hops
+            .contains(&("check".to_string(), "tick".to_string())),
+        "a legacy-shaped line is still a journaled hop"
+    );
+
+    let pb = apb_core::schema::Playbook::from_yaml(RLOOP_PLAYBOOK).unwrap();
+    let heads = apb_engine::parallel::pending_heads(&pb, &state);
+    assert_eq!(
+        heads,
+        vec!["done".to_string(), "tick".to_string()],
+        "pending_heads must rebuild the same concrete branch heads a \
+         pre-change binary returned, got: {heads:?}"
+    );
+
+    let res = resume(dir.path(), run_id, None).unwrap();
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "the resume must reach the same concrete outcome as an uninterrupted run"
     );
 }

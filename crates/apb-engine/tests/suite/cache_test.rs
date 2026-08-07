@@ -122,6 +122,16 @@ fn stored_key(events: &[Event], node: &str) -> Option<String> {
     })
 }
 
+/// The key recorded on a node's `NodeCacheMiss`, for a member whose admission
+/// is rejected (so it never reaches `NodeCacheStored`) but whose pre-execution
+/// key is still the one under test (#80).
+fn key_of_miss(events: &[Event], node: &str) -> Option<String> {
+    events.iter().find_map(|e| match &e.payload {
+        EventPayload::NodeCacheMiss { node: n, key } if n == node => Some(key.clone()),
+        _ => None,
+    })
+}
+
 fn rejected_reason(events: &[Event], node: &str) -> Option<String> {
     events.iter().find_map(|e| match &e.payload {
         EventPayload::NodeCacheRejected { node: n, reason } if n == node => Some(reason.clone()),
@@ -915,6 +925,209 @@ fn batched_member_hits_the_cache_and_is_never_spawned() {
         node_artifacts(&ev2, "a"),
         arts,
         "the hit's NodeFinished replays the stored artifacts"
+    );
+}
+
+// --- per-batch cache fingerprint and quieter batch rejection (Task 6, #80) -
+//
+// A batch member's cache key used to fold in the workspace fingerprint taken
+// when its OWN chunk started, so the same node keyed differently depending on
+// which chunk it landed in (that is, on `max_parallel`). The engine now takes
+// every member's fingerprint once, against the pre-batch tree. Second: a
+// batch member sharing a workspace with concurrent siblings is a structural
+// condition, not evidence the member itself dirtied the tree, so its
+// admission rejection gets its own reason, distinct from the sequential
+// path's `undeclared_workspace_write_is_rejected`.
+//
+// Both fixtures reuse `cachewf`/`1.0.0` (the id/version `run_once` hardcodes)
+// with a `start -> {c, e, d}` fan-out of `cache: auto` script nodes, an
+// implicit-fan-in merge node (`m`, the same non-interactive `prompt` shape
+// `seed_batch` above uses), and `defaults.max_parallel`. Edges are declared
+// in the order that puts the node under test in the SECOND chunk at
+// `max_parallel: 2` (batch order = current + frontier, in edge-declaration
+// order out of `start`).
+
+/// Commits `root` (staged content must already be `git add`ed) with a FIXED
+/// author/committer identity and date, so two independently seeded repos with
+/// byte-identical tracked content produce the same commit hash. Without this,
+/// `git commit`'s wall-clock committer date makes two repos' `HEAD` (and thus
+/// their git-aware fingerprints, which fold `HEAD` in) diverge by real-time
+/// chance alone - flaky evidence for a test that means to compare two RUNS,
+/// not two moments. `#80(a)` is the only test that compares a fingerprint
+/// across separate temp repos; the other fixtures in this file compare within
+/// one repo, where a single `git commit` call is already deterministic
+/// relative to itself.
+fn git_commit_deterministic(root: &Path, message: &str) {
+    let ok = Command::new("git")
+        .args([
+            "-C",
+            root.to_str().unwrap(),
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-qm",
+            message,
+        ])
+        .env("GIT_AUTHOR_NAME", "t")
+        .env("GIT_AUTHOR_EMAIL", "t@t")
+        .env("GIT_AUTHOR_DATE", "2020-01-01T00:00:00Z")
+        .env("GIT_COMMITTER_NAME", "t")
+        .env("GIT_COMMITTER_EMAIL", "t@t")
+        .env("GIT_COMMITTER_DATE", "2020-01-01T00:00:00Z")
+        .output()
+        .unwrap()
+        .status
+        .success();
+    assert!(ok, "deterministic git commit failed");
+}
+
+/// `start -> {c, e, d}`, edges declared `c, e, d` so the batch order is
+/// `[c, e, d]`: at `max_parallel: 2` the first chunk is `[c, e]` and `d`
+/// alone forms the second, later chunk.
+fn batch_fanout_playbook(cap: usize) -> String {
+    format!(
+        r#"
+schema: 1
+id: cachewf
+name: Cache Playbook
+version: 1.0.0
+defaults:
+  max_parallel: {cap}
+nodes:
+  - {{ id: start, type: start }}
+  - {{ id: c, type: script, script: "scripts/c.sh", runner: sh, cache: auto }}
+  - {{ id: e, type: script, script: "scripts/e.sh", runner: sh, cache: auto }}
+  - {{ id: d, type: script, script: "scripts/d.sh", runner: sh, cache: auto }}
+  - {{ id: m, type: prompt, prompt: "merge" }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: start, to: c }}
+  - {{ from: start, to: e }}
+  - {{ from: start, to: d }}
+  - {{ from: c, to: m }}
+  - {{ from: e, to: m }}
+  - {{ from: d, to: m }}
+  - {{ from: m, to: done }}
+"#
+    )
+}
+
+/// Seeds `cachewf`/`1.0.0` with [`batch_fanout_playbook`] at `cap`, each
+/// member running [`CLEAN_SCRIPT`] (no workspace writes), and an initial git
+/// commit. Mirrors [`seed`]'s structure (git init, gitignored `.apb/`).
+fn seed_batch_cache(root: &Path, cap: usize) {
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/work.txt"), "hello\n").unwrap();
+    std::fs::write(root.join(".gitignore"), ".apb/\n").unwrap();
+
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/cachewf/1.0.0");
+    std::fs::create_dir_all(vdir.join("scripts")).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), batch_fanout_playbook(cap)).unwrap();
+    for id in ["c", "e", "d"] {
+        common::write_sync(&vdir.join(format!("scripts/{id}.sh")), CLEAN_SCRIPT);
+    }
+    std::fs::write(root.join(".apb/playbooks/cachewf/current"), "1.0.0").unwrap();
+
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@t"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "."]);
+    git_commit_deterministic(root, "c1");
+}
+
+/// `start -> {d, e, c}`, edges declared `d, e, c` so the batch order is
+/// `[d, e, c]`: at `max_parallel: 2` the first chunk is `[d, e]` and `c`
+/// alone forms the second, later chunk. `d` (first chunk) writes an
+/// undeclared file into the shared workspace.
+const BATCH_SIBLING_WRITE_PLAYBOOK: &str = r#"
+schema: 1
+id: cachewf
+name: Cache Playbook
+version: 1.0.0
+defaults:
+  max_parallel: 2
+nodes:
+  - { id: start, type: start }
+  - { id: d, type: script, script: "scripts/d.sh", runner: sh, cache: auto }
+  - { id: e, type: script, script: "scripts/e.sh", runner: sh, cache: auto }
+  - { id: c, type: script, script: "scripts/c.sh", runner: sh, cache: auto }
+  - { id: m, type: prompt, prompt: "merge" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: d }
+  - { from: start, to: e }
+  - { from: start, to: c }
+  - { from: d, to: m }
+  - { from: e, to: m }
+  - { from: c, to: m }
+  - { from: m, to: done }
+"#;
+
+/// Seeds `cachewf`/`1.0.0` with [`BATCH_SIBLING_WRITE_PLAYBOOK`]: `d` (first
+/// chunk) runs [`DIRTY_SCRIPT`], `e` and `c` run [`CLEAN_SCRIPT`], so `c` (the
+/// sole second-chunk member) sees a tree its own execution never touched.
+fn seed_batch_cache_with_sibling_write(root: &Path) {
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::write(root.join("src/work.txt"), "hello\n").unwrap();
+    std::fs::write(root.join(".gitignore"), ".apb/\n").unwrap();
+
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/cachewf/1.0.0");
+    std::fs::create_dir_all(vdir.join("scripts")).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), BATCH_SIBLING_WRITE_PLAYBOOK).unwrap();
+    common::write_sync(&vdir.join("scripts/d.sh"), DIRTY_SCRIPT);
+    common::write_sync(&vdir.join("scripts/e.sh"), CLEAN_SCRIPT);
+    common::write_sync(&vdir.join("scripts/c.sh"), CLEAN_SCRIPT);
+    std::fs::write(root.join(".apb/playbooks/cachewf/current"), "1.0.0").unwrap();
+
+    git(root, &["init", "-q"]);
+    git(root, &["config", "user.email", "t@t"]);
+    git(root, &["config", "user.name", "t"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-qm", "c1"]);
+}
+
+/// #80(a): a member's cache key must not depend on which chunk it landed in.
+/// Two runs of the same fan-out at different caps must produce the same stored
+/// key for the member that falls into a later chunk at the lower cap. Pure
+/// journal comparison, no timing.
+#[test]
+fn a_batch_members_cache_key_does_not_depend_on_max_parallel() {
+    let two = tempfile::tempdir().unwrap();
+    seed_batch_cache(two.path(), 2);
+    let (_id2, ev2) = run_once(two.path(), CacheRunMode::Auto);
+
+    let four = tempfile::tempdir().unwrap();
+    seed_batch_cache(four.path(), 4);
+    let (_id4, ev4) = run_once(four.path(), CacheRunMode::Auto);
+
+    let k2 = stored_key(&ev2, "d").or_else(|| key_of_miss(&ev2, "d"));
+    let k4 = stored_key(&ev4, "d").or_else(|| key_of_miss(&ev4, "d"));
+    assert!(
+        k2.is_some(),
+        "member `d` must have a cache key at max_parallel 2"
+    );
+    assert_eq!(
+        k2, k4,
+        "the cache key of a later-chunk member must not depend on the cap"
+    );
+}
+
+/// #80(b): a sibling's write into the shared workspace is a structural
+/// condition of running as a batch member, not evidence that this node dirtied
+/// the tree, so it gets its own rejection reason a dashboard can filter out.
+/// The sequential reason is unchanged and is asserted by the existing
+/// `undeclared_workspace_write_is_rejected`.
+#[test]
+fn a_batch_members_rejection_names_the_shared_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_batch_cache_with_sibling_write(dir.path());
+    let (_id, ev) = run_once(dir.path(), CacheRunMode::Auto);
+    assert_eq!(
+        rejected_reason(&ev, "c").as_deref(),
+        Some("workspace shared with concurrent batch siblings"),
+        "a batch member's rejection must name the structural condition, not blame the node"
     );
 }
 

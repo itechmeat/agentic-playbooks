@@ -97,6 +97,12 @@ pub struct ProgressReportArgs {
     /// Optional human label shown next to the bar, e.g. "chapter 3 of 14".
     #[serde(default)]
     pub label: Option<String>,
+    /// The node id this report belongs to. An executing agent should pass its
+    /// own, which it has in APB_NODE_ID; omitting it keeps the old
+    /// best-effort attribution to whatever node the drive is currently
+    /// holding.
+    #[serde(default)]
+    pub node: Option<String>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,

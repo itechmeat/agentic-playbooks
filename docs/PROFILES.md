@@ -158,3 +158,21 @@ price is visible rather than implied as authoritative; a user overlay at
 `<config_dir>/models.yaml` merges field-wise per model (setting one price does
 not reset the other fields). Declare which subscriptions you have with
 `subscriptions_set` (or `apb subscriptions`) so advice matches your access.
+
+Not every agent can run unattended. apb passes a non-interactive permission flag
+where the agent has one: `--permission-mode bypassPermissions` for claude and
+grok, `--force` for cursor, `--dangerously-skip-permissions` for agy,
+`--dangerously-bypass-approvals-and-sandbox` for codex, and `--auto` for
+opencode. hermes has no flag apb passes today: its `--yolo` is documented but
+unverified in the one-shot form apb uses, so it is deliberately not shipped. A
+node bound to an agent without such a flag can hang indefinitely on a write
+permission prompt in an autonomous run, and `apb doctor --run <id>` warns about
+exactly that binding.
+
+The workaround that always works is a stdout-only reviewer profile. Give the
+profile a SOUL that tells the agent to report everything it finds on stdout and
+to write nothing, and let apb capture the output as the node's result. The agent
+then never needs write permission at all, so no approval prompt can appear,
+whatever flags the CLI does or does not offer. That is also the right shape for
+review, audit and analysis nodes regardless of the agent, because the finding is
+the deliverable and nothing in the workspace changes.

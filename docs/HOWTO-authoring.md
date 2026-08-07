@@ -317,11 +317,12 @@ time.
 Whether a reference resolves and whether it has a value yet are separate
 questions. A template that reads `nodes.<id>.output` or `nodes.<id>.report` where
 nothing in the graph orders `<id>` before the reading node is validator warning
-**V38**: across un-joined parallel branches that value may render empty, and the
-remedy is a `join: all` on the edges into the reader, or routing the reader
-behind a node that already joins both branches (see "Joining parallel branches").
-A loop-carried read, where both nodes sit in one cycle, is not flagged: there the
-previous pass supplies the value.
+**V38**: across un-joined parallel branches that value may render empty. The
+remedy is to route the read behind `<id>` itself, or behind a node that already
+joins both branches (see "Joining parallel branches"). Adding `join: all` to the
+reader does nothing when the reader has a single incoming edge, which is the
+common shape this warning catches. A loop-carried read, where both nodes sit in
+one cycle, is not flagged: there the previous pass supplies the value.
 
 At run time the same hole is observable rather than silent. When a node executes
 and one of its `nodes.<id>.output|report` references renders empty, the run
@@ -373,6 +374,16 @@ edges:
   - { from: verify, to: fix,  condition: { type: output_field, node: verify, field: verdict, equals: failed } }
   - { from: verify, to: done, condition: { type: output_field, node: verify, field: verdict, equals: ok } }
 ```
+
+Two rules guard conditional edges. On a `condition` node they are hard errors:
+**V09** if `node_status` branches cover only one of success and failure with no
+`fallback` edge, and **V10** if a condition references a node that cannot
+execute before the owner (an unknown node, or one that only runs after it). The
+same two mistakes are possible on conditional edges hung off any other node
+kind, for example an `output_field` route off an `agent_task`, and there they
+are reported as warnings **V39** and **V40** with the same meaning. Warnings do
+not block a save or a run, so an existing playbook keeps working, but they are
+pointing at a route that can never be taken.
 
 An edge with no `condition` always matches. Two edges from the same node with
 structurally identical conditions (or two fallbacks) and different targets are
@@ -485,23 +496,29 @@ playbooks whose branches are resource-heavy (large builds, rate-limited external
 calls) or where many branches at once would just be noise to review; leave it
 alone for cheap, independent branches.
 
-One shape never joins a batch at all, whatever the cap says: a node that is a
-join. That covers acyclic fan-in (implicit `all`) and any node with a `join:`
-edge; an in-cycle fan-in without `join:` keeps first-arrival semantics and stays
-batchable. A join's readiness verdict belongs to the sequential path, because
-that is the only place a barrier whose input failed can be recorded failed with the
-barrier's own reason and raise a wake for a supervisor, instead of just being
-executed as if nothing had gone wrong. The consequence is worth planning around:
-fan-in consumers serialize. Two `agent_task` nodes that each read the same pair of
-producers are both joins, so they run one after the other, one scheduling pass
-each, even with slots free. Give a consumer a single incoming edge if it needs to
-run alongside its siblings.
+One shape never joins a batch at all, whatever the cap says: a node with an
+explicit `join:` edge. Only an explicit barrier can be recorded failed with the
+barrier's own reason when one of its inputs failed, and raise a wake for a
+supervisor, and that verdict belongs to the sequential path. An implicit fan-in
+(two or more incoming edges and no `join:` field, outside any cycle) only
+synchronizes, so it batches like anything else. Two `agent_task` nodes that each
+read the same pair of producers therefore run alongside each other, in one
+scheduling pass, when slots are free.
 
 In a supervised run the execution is concurrent but the supervision stays serial:
 the whole batch runs, then failures are presented one at a time, in batch order,
 at the batch tail. A `join: any` satisfied by an earlier group cancels the
 branches still waiting for a slot, and those are journaled cancelled like any
 other cancelled branch.
+
+One consequence for `cache: auto` nodes: a node executed as a batch member
+usually fails cache admission, because batch siblings share one workspace and
+any sibling write changes the post-execution fingerprint. Caching pays off on the
+sequential path and on re-runs, not within a wave. The rejection is journaled
+with its own reason, `workspace shared with concurrent batch siblings`, so it can
+be told apart from a node that really did dirty the tree. Every member's cache
+key is taken against the tree as it stood before the wave started, so the key
+does not change when `max_parallel` does.
 
 ## Unhandled failures (defaults.on_failure)
 

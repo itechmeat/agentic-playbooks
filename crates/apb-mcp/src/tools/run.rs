@@ -445,8 +445,18 @@ pub fn run_progress_report(
     done: u64,
     total: u64,
     label: Option<String>,
+    node: Option<String>,
 ) -> Result<Value, ToolError> {
-    let seq = post_supervisor_command(root, run_id, Control::Progress { done, total, label })?;
+    let seq = post_supervisor_command(
+        root,
+        run_id,
+        Control::Progress {
+            done,
+            total,
+            label,
+            node,
+        },
+    )?;
     Ok(json!({ "posted_seq": seq }))
 }
 
@@ -465,7 +475,7 @@ mod progress_tests {
             "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n",
         )
         .unwrap();
-        let out = run_progress_report(tmp.path(), "r1", 2, 5, Some("x".into())).unwrap();
+        let out = run_progress_report(tmp.path(), "r1", 2, 5, Some("x".into()), None).unwrap();
         assert!(out.get("posted_seq").is_some());
         let control = std::fs::read_to_string(run_dir.join("control.jsonl")).unwrap();
         assert!(control.contains("\"cmd\":\"progress\""));
@@ -543,6 +553,68 @@ mod progress_tests {
         let out = run_status(tmp.path(), "r1").unwrap();
         assert_eq!(out["run_status"], "succeeded");
         assert!(out["failure_reason"].is_null());
+    }
+
+    /// #85 finding 4: `runs_list` just wraps `list_runs`, so `driver_dead`
+    /// arrives for free through `RunSummary`'s serde shape; this pins that it
+    /// actually does - present and `true` for a dead-driver run, absent for a
+    /// run with no drive claim at all.
+    #[test]
+    fn runs_list_serializes_driver_dead_and_omits_it_otherwise() {
+        let tmp = tempfile::tempdir().unwrap();
+        let runs_dir = tmp.path().join(".apb/runs");
+
+        let healthy_dir = runs_dir.join("good-1");
+        std::fs::create_dir_all(&healthy_dir).unwrap();
+        std::fs::write(
+            healthy_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":1,"type":"run_started","playbook":"good","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":2,"type":"run_finished","outcome":"succeeded"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+
+        // A pid that existed and is provably gone: spawn, wait, reap, reuse.
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn a throwaway child to borrow a pid from");
+        let dead_pid = child.id();
+        child.wait().expect("reap the throwaway child");
+
+        let dead_dir = runs_dir.join("dead-1");
+        std::fs::create_dir_all(&dead_dir).unwrap();
+        std::fs::write(
+            dead_dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":1,"type":"run_started","playbook":"dead","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":2,"type":"node_started","node":"start","attempt":1}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        std::fs::write(dead_dir.join("driver.pid"), format!("{dead_pid}\n")).unwrap();
+
+        let out = runs_list(tmp.path()).unwrap();
+        let runs = out.as_array().expect("runs_list returns an array");
+        let dead = runs
+            .iter()
+            .find(|r| r["run_id"] == "dead-1")
+            .expect("dead-1 listed");
+        assert_eq!(dead["driver_dead"], serde_json::json!(true));
+        let good = runs
+            .iter()
+            .find(|r| r["run_id"] == "good-1")
+            .expect("good-1 listed");
+        assert!(
+            good.get("driver_dead").is_none(),
+            "a run with no drive claim at all must omit driver_dead, got: {good:?}"
+        );
     }
 
     #[test]

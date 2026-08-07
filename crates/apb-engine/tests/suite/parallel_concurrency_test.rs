@@ -401,6 +401,71 @@ fn a_queued_branch_is_cancelled_when_an_any_join_is_already_won() {
     finished_at(&events, "m");
 }
 
+/// #79: two implicit multi-input consumers of the same producer pair must run
+/// CONCURRENTLY. `w1` and `w2` each have two incoming edges and no `join:`
+/// field, so they are implicit fan-ins; before the narrowing they were both
+/// excluded from the batch and ran one scheduling pass each. The overlap proof
+/// is the rendezvous marker, not elapsed time.
+const IMPLICIT_CONSUMERS: &str = r#"
+schema: 1
+id: implconc
+name: Implicit consumers
+version: 1.0.0
+defaults:
+  max_parallel: 4
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: w1, type: script, script: "scripts/rv_w1.sh", runner: sh }
+  - { id: w2, type: script, script: "scripts/rv_w2.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: w1 }
+  - { from: b, to: w1 }
+  - { from: a, to: w2 }
+  - { from: b, to: w2 }
+  - { from: w1, to: done }
+  - { from: w2, to: done }
+"#;
+
+fn seed_implicit_consumers(root: &Path) {
+    init_project(root).unwrap();
+    let dir = root.join(".apb/playbooks/implconc/1.0.0");
+    let scripts = dir.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(dir.join("playbook.yaml"), IMPLICIT_CONSUMERS).unwrap();
+    fs::write(root.join(".apb/playbooks/implconc/current"), "1.0.0").unwrap();
+    fs::write(
+        scripts.join("rv_w1.sh"),
+        rendezvous_script(root, "w1", "w2"),
+    )
+    .unwrap();
+    fs::write(
+        scripts.join("rv_w2.sh"),
+        rendezvous_script(root, "w2", "w1"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn implicit_fan_in_consumers_batch_with_each_other() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_implicit_consumers(dir.path());
+    let res = run(dir.path(), "implconc", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    for branch in ["w1", "w2"] {
+        let path = dir.path().join(format!("no_overlap_{branch}"));
+        assert!(
+            !path.is_file(),
+            "implicit fan-in consumers did not overlap: {}",
+            fs::read_to_string(&path).unwrap_or_default().trim()
+        );
+    }
+}
+
 #[test]
 fn parallel_script_branches_run_concurrently() {
     let dir = tempfile::tempdir().unwrap();

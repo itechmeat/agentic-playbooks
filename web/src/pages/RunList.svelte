@@ -12,7 +12,7 @@
   import * as Table from '$lib/components/ui/table'
   import * as Empty from '$lib/components/ui/empty'
   import { Skeleton } from '$lib/components/ui/skeleton'
-  import { runStatusClass } from '../lib/status'
+  import { runStatusClass, showsDriverDead } from '../lib/status'
   import { toast } from 'svelte-sonner'
   import PlayCircle from '@lucide/svelte/icons/play-circle'
 
@@ -99,6 +99,9 @@
                   <Badge variant={statusVariant(r.status)} class={runStatusClass(r.status)}>
                     {r.status}
                   </Badge>
+                  {#if showsDriverDead(r.status, r.driver_dead)}
+                    <Badge variant="outline" class="ml-1">needs resume</Badge>
+                  {/if}
                 </Table.Cell>
                 <Table.Cell class="w-56">
                   <RunProgress

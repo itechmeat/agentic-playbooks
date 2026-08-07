@@ -133,14 +133,16 @@ pub struct RunState {
     /// resume restores loop progress exactly because the counts come from the
     /// journal.
     pub edge_counts: BTreeMap<(String, String), u32>,
-    /// The `(from, to)` hops the `defaults.on_failure` policy routed, folded
-    /// from `EdgeTraversed { via_policy: true }` (spec 2026-08-05, Task 4).
-    /// Deliberately NOT part of `edge_counts`: the policy traverses no declared
-    /// edge, so counting it there would spend a bounded edge's `max_traversals`
-    /// budget on a hop that never used the edge. `parallel::routed_targets`
-    /// unions both, so "which way did this node actually go" includes a handler
-    /// the policy reached.
-    pub policy_routes: BTreeSet<(String, String)>,
+    /// Every `(from, to)` hop the drive loop journaled, folded from every
+    /// `EdgeTraversed` record whatever its flags (spec 2026-08-05 Task 4,
+    /// widened by #82). This is the union `parallel::routed_targets` used to
+    /// compute itself from `edge_counts` (entries with count > 0) and the old
+    /// `policy_routes`: on an old journal it receives exactly that same set,
+    /// so `routed_targets` returns the identical set bit for bit. A hop that
+    /// only ever appears here (never in `edge_counts`) is either a policy
+    /// route or a routing decision that crossed no bounded edge; either way,
+    /// "which way did this node actually go" reads this set, not `edge_counts`.
+    pub journaled_hops: BTreeSet<(String, String)>,
     /// Per-node agent text discarded when a `success_check` rejected an
     /// otherwise-succeeded attempt (spec field-report-robustness), folded from
     /// `AttemptFinished.rejected_output`. Exposed to downstream templates as
@@ -252,23 +254,24 @@ impl RunState {
                 // and its `NodeFinished` (with whatever WAS captured) carries the
                 // state effect.
                 EventPayload::DeliverableMissing { .. } => {}
-                // A bounded loop edge traversal: count it per (from, to) so
-                // edge selection can cap the loop and a resume restores progress.
-                // A policy route (`defaults.on_failure`) is recorded as the hop
-                // it is, but separately: it traversed no declared edge, so it
-                // must not consume a bounded edge's traversal budget.
+                // Every hop the drive loop journaled, whatever kind of edge it
+                // crossed. The counting rule is on the flags: a policy route
+                // traversed no declared edge, and an `uncounted` record is a
+                // routing DECISION rather than the single counting site, so
+                // neither spends a bounded edge's traversal budget. An old
+                // record carries neither flag and still counts, exactly as
+                // before.
                 EventPayload::EdgeTraversed {
                     from,
                     to,
                     via_policy,
-                } => match via_policy {
-                    true => {
-                        s.policy_routes.insert((from.clone(), to.clone()));
-                    }
-                    false => {
+                    uncounted,
+                } => {
+                    s.journaled_hops.insert((from.clone(), to.clone()));
+                    if !via_policy && !uncounted {
                         *s.edge_counts.entry((from.clone(), to.clone())).or_insert(0) += 1;
                     }
-                },
+                }
                 // The explanatory record for an abnormal termination (issue
                 // #42 finding 3): does not itself change node/run status
                 // (the terminal `run_finished`/`node_finished` right next to

@@ -168,12 +168,21 @@ pub(crate) fn check_reachability(playbook: &Playbook, r: &mut ValidationReport) 
 pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
     let adj = adjacency(playbook);
     for n in &playbook.nodes {
-        if !matches!(n.kind, NodeKind::Condition { .. }) {
+        // A conditional edge is legal off any node kind since output_field
+        // routing shipped, and the same two mistakes are possible there: a
+        // node_status fan-out that covers only one outcome, and a reference to
+        // a node that cannot execute first. Off a `condition` node those are
+        // the hard errors V09/V10; off any other kind they are the warnings
+        // V39/V40, because an existing playbook that validates today must not
+        // start failing (`is_valid` gates on Severity::Error alone).
+        let is_condition = matches!(n.kind, NodeKind::Condition { .. });
+        let out: Vec<_> = playbook.edges.iter().filter(|e| e.from == n.id).collect();
+        if out.iter().all(|e| e.condition.is_none()) {
             continue;
         }
-        let out: Vec<_> = playbook.edges.iter().filter(|e| e.from == n.id).collect();
         let has_fallback = out.iter().any(|e| e.fallback);
-        // V09: node_status branches must cover success and failure (or declare a fallback)
+        // V09 / V39: node_status branches must cover success and failure (or
+        // declare a fallback).
         let mut covered = HashSet::new();
         for e in &out {
             if let Some(EdgeCondition::NodeStatus { equals, .. }) = &e.condition {
@@ -184,14 +193,23 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
             .iter()
             .any(|e| matches!(e.condition, Some(EdgeCondition::NodeStatus { .. })));
         if uses_node_status && covered.len() < 2 && !has_fallback {
-            r.error(
-                "V09",
-                Some(&n.id),
-                "condition edges must cover both success and failure or declare a fallback edge"
-                    .into(),
-            );
+            match is_condition {
+                true => r.error(
+                    "V09",
+                    Some(&n.id),
+                    "condition edges must cover both success and failure or declare a fallback edge"
+                        .into(),
+                ),
+                false => r.warn(
+                    "V39",
+                    Some(&n.id),
+                    "condition edges off a non-condition node should still cover both success and failure or declare a fallback edge, the same as a condition node"
+                        .into(),
+                ),
+            }
         }
-        // V10: a condition may only reference nodes from which this condition node is reachable
+        // V10 / V40: a condition may only reference nodes from which this node
+        // is reachable.
         for e in &out {
             let referenced = match &e.condition {
                 Some(EdgeCondition::NodeStatus { node, .. }) => Some(node),
@@ -205,14 +223,24 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
                 let ok = playbook.node(dep).is_some()
                     && reachable_from(&adj, dep.as_str()).contains(n.id.as_str());
                 if !ok {
-                    r.error(
-                        "V10",
-                        Some(&n.id),
-                        format!(
-                            "condition references node `{dep}` that cannot execute before `{}`",
-                            n.id
+                    match is_condition {
+                        true => r.error(
+                            "V10",
+                            Some(&n.id),
+                            format!(
+                                "condition references node `{dep}` that cannot execute before `{}`",
+                                n.id
+                            ),
                         ),
-                    );
+                        false => r.warn(
+                            "V40",
+                            Some(&n.id),
+                            format!(
+                                "condition references node `{dep}` that cannot execute before `{}`, the same reachability rule V10 applies to condition nodes",
+                                n.id
+                            ),
+                        ),
+                    }
                 }
             }
         }
@@ -340,10 +368,8 @@ fn waits_for_all_inputs<'a>(
         // Lenient exactly like the engine: only `any` is first-arrival.
         return mode != "any";
     }
-    let downstream = reachable_from(adj, node);
-    incoming
-        .iter()
-        .all(|e| !downstream.contains(e.from.as_str()))
+    let sources: Vec<&str> = incoming.iter().map(|e| e.from.as_str()).collect();
+    crate::graphutil::is_acyclic_fan_in(adj, node, &sources)
 }
 
 /// For every node, the nodes the graph GUARANTEES have finished before it runs.

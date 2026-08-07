@@ -681,6 +681,7 @@ mod tests {
             soul_delivery: None,
             skills_mode: None,
             pid,
+            spawn_ms: None,
         }
     }
 

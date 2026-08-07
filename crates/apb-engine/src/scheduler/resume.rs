@@ -420,7 +420,35 @@ pub(crate) fn resume_inner(
         // that never started still blocks a join instead of being written off.
         let outstanding = parallel::pending_heads(&playbook, &state);
         let active = active_set(&decision.start_node, &[], &outstanding);
-        if seed_successors(&playbook, &decision.start_node, &state, &active).is_empty() {
+        let has_direct_successor =
+            !seed_successors(&playbook, &decision.start_node, &state, &active).is_empty();
+        // `decision.start_node` is just the LAST node the journal happened to
+        // finish. On a resume of a batch a Pause deferred mid-flight (Task 9),
+        // its own edges can be empty (a join still waiting on siblings that
+        // never started at all) while the run is nowhere near done: those
+        // siblings are separate pending heads, reachable from an EARLIER
+        // finished node (the fan-out point), not from `start_node`. Treat any
+        // such still-runnable head as proof this is not a dead end; `drive`'s
+        // own `restore_frontier` is what actually re-admits them.
+        //
+        // Gated on `RunStatus::Paused`, not just "no interrupted node": an
+        // ordinary crash (a driver that died with no `RunPaused` on disk)
+        // leaves the exact same journal shape - a finished node next to a
+        // sibling with zero events - but there the missing sibling is
+        // ambiguous (never started, or started and lost to a torn write?), so
+        // `--from-node` stays required. A clean Pause is unambiguous: the
+        // drive that wrote it faithfully finished writing everything up to
+        // that point, so a never-started sibling is provably never started.
+        let has_other_pending_work = state.run_status == RunStatus::Paused
+            && outstanding.iter().any(|n| {
+                n != &decision.start_node
+                    && (!parallel::is_join(&playbook, n)
+                        || !matches!(
+                            parallel::join_readiness(&playbook, n, &state, &active),
+                            JoinReadiness::NotReady
+                        ))
+            });
+        if !has_direct_successor && !has_other_pending_work {
             return Err(EngineError::Invalid(format!(
                 "node `{}` already finished with no pending successor to resume into - pass --from-node to re-run from a specific node",
                 decision.start_node

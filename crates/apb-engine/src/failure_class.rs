@@ -257,9 +257,10 @@ pub fn backoff_schedule() -> Vec<Duration> {
 const BACKOFF_TICK: Duration = Duration::from_millis(25);
 
 /// Waits out one backoff, polling `cancel` every [`BACKOFF_TICK`]. Returns
-/// `false` when the wait was cut short because the run was cancelled (a
-/// `Control::Abort` sets that same flag through `stop::AbortWatcher`), so the
-/// caller can hand the decision back to its own cancellation check.
+/// `false` when the wait was cut short because the run was cancelled: `cancel`
+/// is the Abort-only flag `stop::StopWatcher` latches via its
+/// `stop::CancelFanout` on a pending `Control::Abort`, so the caller can hand
+/// the decision back to its own cancellation check.
 ///
 /// A supervisor `Interrupt` is deliberately NOT polled here: it targets a
 /// RUNNING attempt, and during a backoff there is no agent process to tear down.

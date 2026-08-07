@@ -49,9 +49,9 @@ impl RunCheck {
 
 /// Diagnoses run `run_id` under project `root`.
 ///
-/// Returns the checks in a fixed order - run, nodes, attempts, driver, workdir
-/// lock, control backlog, supervisor actions - so two reports of the same run
-/// are comparable line by line.
+/// Returns the checks in a fixed order - run, nodes, attempts, autonomy,
+/// driver, workdir lock, control backlog, supervisor actions - so two reports
+/// of the same run are comparable line by line.
 pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineError> {
     if !apb_core::registry::is_safe_segment(run_id) {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
@@ -66,6 +66,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.extend(failure_reason_check(&events));
     checks.extend(supervisor_wait_check(&events));
     checks.extend(attempt_checks(&events));
+    checks.extend(autonomy_check(&run_dir));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(root));
     checks.push(control_check(&run_dir)?);
@@ -188,6 +189,73 @@ fn attempt_checks(events: &[Event]) -> Vec<RunCheck> {
                     ),
                 ),
             }
+        })
+        .collect()
+}
+
+/// An autonomous `agent_task` node bound to an agent with no known
+/// non-interactive permission flag can hang forever on an approval prompt
+/// nobody will answer (#85 finding 1). Reads the run's own manifest and
+/// playbook SNAPSHOTS (`runs/<id>/manifest.yaml`, `runs/<id>/playbook.yaml`),
+/// not live profiles or the working-copy playbook, so the verdict matches
+/// what this run actually bound rather than whatever was edited since.
+/// Skipped for a node with no snapshot at all (the manifest-less executor
+/// path, or a run started before either snapshot existed) - nothing to read.
+/// An `interactive` agent_task already has an escape valve (the question can
+/// be relayed through `ask_user`), and any other node kind (e.g.
+/// `human_review`) never binds a profile, so both are excluded by
+/// construction rather than by an explicit check.
+///
+/// The WHOLE chain is inspected, not just the primary (external review,
+/// finding 5): a fallback invocation runs the agent exactly the way the primary
+/// does, so a fallback with no permission flag can hang on the same approval
+/// prompt. Each bare link gets its own row, so the operator sees which one.
+fn autonomy_check(run_dir: &Path) -> Vec<RunCheck> {
+    let Some(playbook) = crate::progress::load_run_playbook(run_dir) else {
+        return Vec::new();
+    };
+    let Ok(Some(manifest)) = crate::manifest::read(run_dir) else {
+        return Vec::new();
+    };
+    playbook
+        .nodes
+        .iter()
+        .filter(|node| {
+            matches!(
+                &node.kind,
+                apb_core::schema::NodeKind::AgentTask {
+                    interactive: false,
+                    ..
+                }
+            )
+        })
+        .flat_map(|node| match manifest.for_node(&node.id) {
+            Some(profile) => bare_links(&node.id, &profile.chain),
+            None => Vec::new(),
+        })
+        .collect()
+}
+
+/// One WARN row per invocation in `chain` that carries no non-interactive
+/// permission flag, naming its position so a fallback is not mistaken for the
+/// primary binding.
+fn bare_links(node_id: &str, chain: &[crate::invocation::ResolvedInvocation]) -> Vec<RunCheck> {
+    chain
+        .iter()
+        .enumerate()
+        .filter(|(_, invocation)| invocation.spec.autonomous_args.is_empty())
+        .map(|(at, invocation)| {
+            let bound = match at {
+                0 => format!("binds agent `{}`", invocation.agent_id),
+                n => format!("binds fallback agent `{}` (fallback {n})", invocation.agent_id),
+            };
+            RunCheck::new(
+                WARN,
+                "autonomy",
+                format!(
+                    "node `{node_id}` {bound}, which has no known non-interactive permission flag; an autonomous run can hang waiting for an approval prompt nobody will answer. Consider a stdout-only reviewer profile (prompt the agent to report its findings to stdout with no write access) or a human_review gate before this node."
+                ),
+            )
         })
         .collect()
 }
@@ -686,6 +754,113 @@ mod tests {
         );
         let attempt = find(&checks, "attempt a#1");
         assert_eq!(attempt.status, OK, "{attempt:?}");
+    }
+
+    /// A run snapshot (`playbook.yaml` + `manifest.yaml`) binding a single
+    /// `agent_task` node `a` to `agent_id`, via a fresh builtin
+    /// `ResolvedInvocation` for that agent - so the fixture always reflects
+    /// `invocation::builtin`'s current `autonomous_args`, not a hand-copied
+    /// value that could drift from it.
+    fn write_autonomy_fixture(run_dir: &Path, agent_id: &str) {
+        write_autonomy_chain_fixture(run_dir, &[agent_id]);
+    }
+
+    /// The same fixture with the node's binding carrying a whole fallback
+    /// chain, in order: `chain[0]` is the primary.
+    fn write_autonomy_chain_fixture(run_dir: &Path, chain: &[&str]) {
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n",
+        )
+        .unwrap();
+        let chain: Vec<crate::invocation::ResolvedInvocation> = chain
+            .iter()
+            .map(|agent_id| crate::invocation::ResolvedInvocation {
+                agent_id: (*agent_id).to_string(),
+                model: "m".into(),
+                spec: crate::invocation::builtin(agent_id).expect("builtin agent"),
+                soul_delivery: apb_core::config::SoulDelivery::Prefix,
+                canonical_executable: std::path::PathBuf::from("/bin/true"),
+                executable_fingerprint: "0:0".into(),
+            })
+            .collect();
+        let manifest = crate::manifest::RunExecutionManifest {
+            profiles: vec![crate::manifest::ManifestProfile {
+                scope: "project".into(),
+                name: "x".into(),
+                profile_digest: "sha256:a".into(),
+                bundle_digest: "sha256:b".into(),
+                soul: "role".into(),
+                soul_requirement: apb_core::profile::SoulRequirement::Any,
+                skills: Vec::new(),
+                chain,
+                ephemeral: false,
+                hermetic: false,
+            }],
+            node_bindings: BTreeMap::from([("a".to_string(), "project/x".to_string())]),
+            connectors: Vec::new(),
+            connector_grants: BTreeMap::new(),
+        };
+        crate::manifest::write(run_dir, &manifest).unwrap();
+    }
+
+    /// #85 finding 1: hermes carries no verified non-interactive flag, so a
+    /// node bound to it must warn rather than read as silently fine.
+    #[test]
+    fn a_node_bound_to_an_agent_with_no_autonomous_flag_warns_autonomy() {
+        let (tmp, run_dir) = run_root(HEALTHY);
+        write_autonomy_fixture(&run_dir, "hermes");
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        let c = find(&checks, "autonomy");
+        assert_eq!(c.status, WARN, "{c:?}");
+        assert!(c.detail.contains("node `a`"), "{c:?}");
+        assert!(c.detail.contains("agent `hermes`"), "{c:?}");
+        assert!(c.detail.contains("stdout-only reviewer profile"), "{c:?}");
+        assert!(c.detail.contains("human_review"), "{c:?}");
+    }
+
+    /// External review, finding 5: the check used to read `chain.first()` only,
+    /// so a node whose PRIMARY carries a permission flag but whose FALLBACK does
+    /// not passed silently - and the fallback hangs on an approval prompt the
+    /// same way. The row must name the fallback, not the primary.
+    #[test]
+    fn a_fallback_with_no_autonomous_flag_warns_autonomy() {
+        let (tmp, run_dir) = run_root(HEALTHY);
+        write_autonomy_chain_fixture(&run_dir, &["claude", "hermes"]);
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        let warnings: Vec<&RunCheck> = checks
+            .iter()
+            .filter(|c| c.subject == "autonomy" && c.status == WARN)
+            .collect();
+        assert_eq!(
+            warnings.len(),
+            1,
+            "only the bare fallback warns, not the flagged primary: {checks:?}"
+        );
+        let c = warnings[0];
+        assert!(c.detail.contains("node `a`"), "{c:?}");
+        assert!(
+            c.detail.contains("fallback agent `hermes` (fallback 1)"),
+            "the row must name the fallback and its position: {c:?}"
+        );
+        assert!(
+            !c.detail.contains("`claude`"),
+            "the flagged primary must not be blamed: {c:?}"
+        );
+    }
+
+    /// claude carries a verified `bypassPermissions` flag: no warning row.
+    #[test]
+    fn a_node_bound_to_claude_does_not_warn_autonomy() {
+        let (tmp, run_dir) = run_root(HEALTHY);
+        write_autonomy_fixture(&run_dir, "claude");
+        let checks = diagnose_run(tmp.path(), "r1").unwrap();
+        assert!(
+            !checks
+                .iter()
+                .any(|c| c.subject == "autonomy" && c.status == WARN),
+            "{checks:?}"
+        );
     }
 
     /// Issue #45 finding 10: a parent-driven child with a live parent must

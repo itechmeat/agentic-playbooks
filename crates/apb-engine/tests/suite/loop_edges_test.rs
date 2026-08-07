@@ -79,11 +79,16 @@ fn count_starts(events: &[Event], node: &str) -> usize {
         .count()
 }
 
+/// Counted traversals only (#82): `advance_frontier` now also journals an
+/// `uncounted` routing-decision record for every hop selected, including
+/// unbounded ones, so an unfiltered match here would start counting those too.
+/// Only a record that is neither a policy route nor `uncounted` spent a
+/// bounded edge's `max_traversals` budget, so that is what this helper counts.
 fn count_traversals(events: &[Event], from_id: &str, to_id: &str) -> usize {
     events
         .iter()
         .filter(|e| {
-            matches!(&e.payload, EventPayload::EdgeTraversed { from, to, .. } if from == from_id && to == to_id)
+            matches!(&e.payload, EventPayload::EdgeTraversed { from, to, via_policy, uncounted } if from == from_id && to == to_id && !via_policy && !uncounted)
         })
         .count()
 }
@@ -338,4 +343,79 @@ fn keep_through<F: FnMut(&EventPayload) -> bool>(root: &Path, run_id: &str, mut 
         buf.push('\n');
     }
     fs::write(dir.join("events.jsonl"), buf).unwrap();
+}
+
+const LOOP_FORK: &str = r#"schema: 2
+id: loopfork
+name: Loop Fork
+version: 1.0.0
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: agent_task, prompt: "gate" }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: m, type: prompt, prompt: "m" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: a, condition: { type: node_status, node: gate, equals: failure } }
+  - { from: gate, to: b, condition: { type: node_status, node: gate, equals: success } }
+  - { from: a, to: m, join: all }
+  - { from: b, to: m, join: all }
+  - { from: m, to: gate, max_traversals: 1 }
+  - { from: m, to: done, fallback: true }
+"#;
+
+fn seed_loop_fork(root: &Path) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/loopfork/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), LOOP_FORK).unwrap();
+    fs::write(root.join(".apb/playbooks/loopfork/current"), "1.0.0").unwrap();
+    common::seed_main(root);
+}
+
+/// (d) End-to-end pin for the monotone-liveness residual documented on
+/// `parallel::routed_targets`: `gate` forks into `a` on the first pass (the
+/// flaky stub fails first) and into `b` on the second (it succeeds after),
+/// both feeding the same `join: all` merge `m`, with a bounded back edge
+/// `m -> gate` and a fallback exit to `done` once the cap is spent. Widened
+/// journaling keeps both `a` and `b` live for the rest of the run once either
+/// has delivered, rather than writing off whichever branch a later pass did
+/// not select - the direction of error this task accepts is a run that can
+/// wait longer than strictly necessary, never one that fires a join short a
+/// branch. This run must still reach `done` rather than dead-ending with "no
+/// outgoing edge and is not finish" or "parallel batch produced no runnable
+/// successor and no finish".
+#[test]
+fn a_loop_fork_that_changes_branches_still_reaches_finish() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_loop_fork(dir.path());
+    let marker = dir.path().join("flaky.marker");
+    let prog = write_agent(dir.path(), "flaky.sh", &flaky_body(&marker));
+
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let res = run(dir.path(), "loopfork", None, RunOptions::default());
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+
+    let res = res.unwrap_or_else(|e| {
+        panic!("a loop fork that changed branches must still reach finish, got: {e}")
+    });
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    // Both branches actually ran, on different passes, and both delivered into
+    // the merge: this is the shape the residual is about, not a fixture that
+    // happens to take only one branch.
+    assert_eq!(count_starts(&events, "a"), 1, "the first pass took `a`");
+    assert_eq!(count_starts(&events, "b"), 1, "the second pass took `b`");
+    assert_eq!(count_starts(&events, "m"), 2, "the merge ran once per pass");
+    assert_eq!(count_finishes(&events, "done"), 1, "the run reached finish");
 }

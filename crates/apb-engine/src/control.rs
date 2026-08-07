@@ -28,6 +28,15 @@ pub enum Control {
         total: u64,
         #[serde(default)]
         label: Option<String>,
+        /// The node that produced this report (issue #78), mirroring
+        /// `Interrupt.node`. With concurrent branches in flight the drive's
+        /// current attribution is wrong by construction: the report belongs to
+        /// a batch member, not to whatever the drive loop is holding. `None` is
+        /// the historical shape, and what an older `control.jsonl` line
+        /// deserializes to: the drive stamps whatever node it is currently
+        /// attributing to, as it always did.
+        #[serde(default)]
+        node: Option<String>,
     },
     Patch {
         version: String,

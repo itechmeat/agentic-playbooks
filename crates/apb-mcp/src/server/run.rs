@@ -415,7 +415,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Report cycle progress for a run: done of total iterations of the current cycle group, with an optional label. Scales the progress bar for loops with a known amount of work.",
+        description = "Report cycle progress for a run: done of total iterations of the current cycle group, with an optional label. Scales the progress bar for loops with a known amount of work. Pass your own node id when you are the executing agent (it is in APB_NODE_ID); with concurrent branches in flight, omitting it means the report may be attributed to a sibling.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn run_progress_report(
@@ -425,6 +425,7 @@ impl WfMcp {
             done,
             total,
             label,
+            node,
             workspace,
         }): Parameters<ProgressReportArgs>,
     ) -> CallToolResult {
@@ -433,7 +434,7 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         to_call_tool_result(tools::run_progress_report(
-            &root, &run_id, done, total, label,
+            &root, &run_id, done, total, label, node,
         ))
     }
 

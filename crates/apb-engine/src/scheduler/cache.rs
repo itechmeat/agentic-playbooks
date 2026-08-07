@@ -35,6 +35,69 @@ pub(crate) struct NodeCacheCtx {
     /// Declared output globs, excluded from the post-execution fingerprint so
     /// a node's own products never count as an unexpected workspace change.
     exclude: Vec<String>,
+    /// This node ran as a member of a concurrent batch, whose siblings share
+    /// its workspace by design (#80). Changes the admission rejection reason
+    /// on a fingerprint mismatch, never the admission decision itself.
+    batch_member: bool,
+}
+
+/// What the caller knows about the execution surrounding this node's cache
+/// step. Bundled rather than passed as two more arguments, because `probe`
+/// already carries seven (#80).
+#[derive(Default, Clone, Copy)]
+pub(crate) struct ProbeContext<'a> {
+    /// Pre-execution workspace fingerprint taken by the caller (the batch
+    /// takes it once for the whole logical batch, via [`pre_fingerprint`]).
+    /// `None` means compute it now, exactly as before this context existed.
+    pub pre_fingerprint: Option<&'a str>,
+    /// This node runs as a member of a concurrent batch, whose siblings write
+    /// into the same workspace by design.
+    pub batch_member: bool,
+}
+
+/// The single definition of "this node participates in the cache at all":
+/// caching is on for the run, the node declares `cache: auto`, and it is a
+/// script or an agent_task. Shared by `prepare` and `pre_fingerprint` so the
+/// two can never answer differently for the same node (#80).
+fn cache_eligible<'a>(playbook: &'a Playbook, node_id: &str, cfg: &RunConfig) -> Option<&'a Node> {
+    if cfg.cache == CacheRunMode::Off {
+        return None;
+    }
+    let node = playbook.node(node_id)?;
+    if node.cache_mode() != CacheMode::Auto {
+        return None;
+    }
+    match &node.kind {
+        NodeKind::Script { .. } | NodeKind::AgentTask { .. } => Some(node),
+        _ => None,
+    }
+}
+
+/// The pre-execution workspace fingerprint for one node, taken against the
+/// tree as it stands NOW. The concurrent batch takes every member's
+/// fingerprint once, before the first chunk runs, so a member's cache key
+/// does not depend on which chunk it landed in (that is, on `max_parallel`,
+/// #80). `None` when the node is not cache-eligible or no fingerprint can be
+/// computed, exactly as `prepare`.
+pub(crate) fn pre_fingerprint(
+    playbook: &Playbook,
+    node_id: &str,
+    workdir: &Path,
+    cfg: &RunConfig,
+) -> Option<String> {
+    let node = cache_eligible(playbook, node_id, cfg)?;
+    // The same two fingerprint modes `prepare` uses: declared `inputs.files`
+    // narrow it, otherwise the whole git work tree, with the node's declared
+    // `outputs.files` excluded either way so its own products never shift it.
+    let exclude = node
+        .outputs
+        .as_ref()
+        .map(|o| o.files.clone())
+        .unwrap_or_default();
+    match node.inputs.as_ref() {
+        Some(inp) if !inp.files.is_empty() => files_fingerprint(workdir, &inp.files, &exclude).ok(),
+        _ => git_fingerprint(workdir, &exclude),
+    }
 }
 
 /// Builds the cache context for `node_id`, or `None` when the node is not
@@ -46,6 +109,11 @@ pub(crate) struct NodeCacheCtx {
 /// The key's `workspace_fingerprint` excludes the node's declared
 /// `outputs.files`, the same set `admit` excludes from the post-execution
 /// fingerprint, so a node's own products never shift its key between runs.
+///
+/// `probe_ctx.pre_fingerprint`, when `Some`, is used verbatim instead of being
+/// recomputed here: the concurrent batch takes it once for the whole batch
+/// (#80). `probe_ctx.batch_member` is carried onto the built context so
+/// `admit` can pick the right rejection reason on a mismatch.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn prepare(
     playbook: &Playbook,
@@ -57,20 +125,16 @@ pub(crate) fn prepare(
     bundle_digest: Option<&str>,
     agent_model: Option<(&str, &str)>,
     connector_digests: Vec<String>,
+    probe_ctx: ProbeContext<'_>,
 ) -> Option<NodeCacheCtx> {
-    if cfg.cache == CacheRunMode::Off {
-        return None;
-    }
-    let node = playbook.node(node_id)?;
-    if node.cache_mode() != CacheMode::Auto {
-        return None;
-    }
+    let node = cache_eligible(playbook, node_id, cfg)?;
     // Script and agent_task nodes participate; every other kind skips the
-    // cache. A script folds in its script digest + runner; an agent_task folds
-    // in the caller-supplied rendered prompt + bundle digest + agent/model +
-    // connector digests instead (all None/empty for a script). The script body
-    // is resolved from the run snapshot exactly as `run_script` does: the
-    // node's `script` value already carries the `scripts/` prefix, so it joins
+    // cache (ruled out by `cache_eligible` above). A script folds in its
+    // script digest + runner; an agent_task folds in the caller-supplied
+    // rendered prompt + bundle digest + agent/model + connector digests
+    // instead (all None/empty for a script). The script body is resolved
+    // from the run snapshot exactly as `run_script` does: the node's
+    // `script` value already carries the `scripts/` prefix, so it joins
     // directly onto `run_dir` (no extra `scripts` segment).
     let (script_digest, runner, node_type): (Option<String>, Option<String>, &'static str) =
         match &node.kind {
@@ -83,7 +147,7 @@ pub(crate) fn prepare(
                 )
             }
             NodeKind::AgentTask { .. } => (None, None, "agent_task"),
-            _ => return None,
+            _ => unreachable!("cache_eligible only returns script or agent_task nodes"),
         };
 
     // Declared outputs are excluded from BOTH the pre-execution fingerprint
@@ -97,11 +161,14 @@ pub(crate) fn prepare(
         .as_ref()
         .map(|o| o.files.clone())
         .unwrap_or_default();
-    let fingerprint = match node.inputs.as_ref() {
-        Some(inp) if !inp.files.is_empty() => {
-            files_fingerprint(workdir, &inp.files, &exclude).ok()?
-        }
-        _ => git_fingerprint(workdir, &exclude)?,
+    let fingerprint = match probe_ctx.pre_fingerprint {
+        Some(f) => f.to_string(),
+        None => match node.inputs.as_ref() {
+            Some(inp) if !inp.files.is_empty() => {
+                files_fingerprint(workdir, &inp.files, &exclude).ok()?
+            }
+            _ => git_fingerprint(workdir, &exclude)?,
+        },
     };
 
     let node_def = serde_json::to_string(node).ok()?;
@@ -127,6 +194,7 @@ pub(crate) fn prepare(
         node_type,
         bundle_digest: bundle_digest.map(str::to_string),
         exclude,
+        batch_member: probe_ctx.batch_member,
     })
 }
 
@@ -270,9 +338,20 @@ impl NodeCacheCtx {
             _ => git_fingerprint(workdir, &self.exclude),
         };
         if post.as_deref() != Some(self.pre_fingerprint.as_str()) {
+            // A batch member shares one workspace with its siblings by design,
+            // so a changed post-execution fingerprint is structurally expected
+            // and is NOT evidence that this node dirtied the tree. The engine
+            // cannot tell a sibling's write from this node's own undeclared
+            // one, so the reason names the condition and never claims a cause.
+            // Distinct string so a dashboard can filter it out of the honest
+            // rejections.
+            let reason = match self.batch_member {
+                true => "workspace shared with concurrent batch siblings",
+                false => "workspace changed during node execution",
+            };
             return EventPayload::NodeCacheRejected {
                 node: self.node_id.clone(),
-                reason: "workspace changed during node execution".into(),
+                reason: reason.into(),
             };
         }
 
@@ -352,6 +431,12 @@ pub(crate) enum CacheProbe {
 /// The returned `events` are the caller's to append, in order, before anything
 /// else it writes for this node. Every failure here degrades to a miss, never a
 /// run error.
+///
+/// `probe_ctx` carries what the caller already knows about the surrounding
+/// execution (#80): a pre-computed workspace fingerprint (the concurrent
+/// batch takes one per member, once, before the first chunk runs) and whether
+/// this node runs as a batch member at all, threaded into `prepare`.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn probe(
     playbook: &Playbook,
     node_id: &str,
@@ -360,6 +445,7 @@ pub(crate) fn probe(
     run_id: &str,
     state: &RunState,
     cfg: &RunConfig,
+    probe_ctx: ProbeContext<'_>,
 ) -> Result<CacheProbe, EngineError> {
     // Agent-task key parts come from the run's own immutable manifest snapshot
     // (bundle digest + primary agent/model + the node's connector digests). A
@@ -386,6 +472,7 @@ pub(crate) fn probe(
         bundle_digest.as_deref(),
         agent_model.as_ref().map(|(a, m)| (a.as_str(), m.as_str())),
         connector_digests,
+        probe_ctx,
     );
     let already_finished = state.nodes.get(node_id).is_some_and(|st| st.is_finished());
     let entry = match already_finished {

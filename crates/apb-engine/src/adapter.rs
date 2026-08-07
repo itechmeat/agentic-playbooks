@@ -694,10 +694,13 @@ pub trait AgentAdapter {
     /// parallel branches so join:any can cancel the losing branch (spec 8.4).
     ///
     /// `on_spawn`, when set, is invoked exactly once immediately after the agent
-    /// process is successfully spawned, carrying the child pid (`child.id()`).
-    /// The attempt-journaling path uses it to append `attempt_started` at spawn
-    /// time so a crash mid-attempt leaves an open attempt on disk. It never
-    /// fires if the spawn itself fails.
+    /// process is successfully spawned, carrying the child pid (`child.id()`)
+    /// and the wall-clock milliseconds the spawn itself took, measured around
+    /// `spawn_in_group`. The attempt-journaling path uses it to append
+    /// `attempt_started` at spawn time so a crash mid-attempt leaves an open
+    /// attempt on disk, and so an OS-level first-exec stall is visible
+    /// separately from the agent's own work. It never fires if the spawn
+    /// itself fails.
     ///
     /// `live`, when set (spec 2026-07-20, Transport: live), injects the
     /// `apb __ask-server` sidecar into the agent's argv and hands the adapter a
@@ -720,7 +723,7 @@ pub trait AgentAdapter {
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
-        on_spawn: Option<&dyn Fn(u32)>,
+        on_spawn: Option<&dyn Fn(u32, u64)>,
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
@@ -1096,7 +1099,7 @@ impl ClaudeAdapter {
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
-        on_spawn: Option<&dyn Fn(u32)>,
+        on_spawn: Option<&dyn Fn(u32, u64)>,
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
@@ -1132,6 +1135,7 @@ impl ClaudeAdapter {
         if let Some(sf) = &task.status_file {
             cmd.env("APB_STATUS_FILE", sf);
         }
+        let started = std::time::Instant::now();
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -1141,7 +1145,7 @@ impl ClaudeAdapter {
         // Attempt journaling (spawn-time): the process exists, so record it now
         // (pid = child.id()) before any of its work runs.
         if let Some(cb) = on_spawn {
-            cb(child.id());
+            cb(child.id(), started.elapsed().as_millis() as u64);
         }
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
@@ -1296,7 +1300,7 @@ impl ClaudeAdapter {
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
-        on_spawn: Option<&dyn Fn(u32)>,
+        on_spawn: Option<&dyn Fn(u32, u64)>,
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
@@ -1334,6 +1338,7 @@ impl ClaudeAdapter {
         if let Some(sf) = &task.status_file {
             cmd.env("APB_STATUS_FILE", sf);
         }
+        let started = std::time::Instant::now();
         let mut child = spawn_in_group(&mut cmd).map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -1343,7 +1348,7 @@ impl ClaudeAdapter {
         // Attempt journaling (spawn-time): record the process (pid = child.id())
         // now, before its streaming work runs.
         if let Some(cb) = on_spawn {
-            cb(child.id());
+            cb(child.id(), started.elapsed().as_millis() as u64);
         }
 
         // Read stdout on a background thread: BufReader::lines() blocks
@@ -1674,7 +1679,7 @@ impl AgentAdapter for ClaudeAdapter {
         &self,
         task: &AgentTask,
         cancel: &AtomicBool,
-        on_spawn: Option<&dyn Fn(u32)>,
+        on_spawn: Option<&dyn Fn(u32, u64)>,
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,

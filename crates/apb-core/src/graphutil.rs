@@ -46,6 +46,35 @@ pub fn reachable_from<'a>(adj: &HashMap<&'a str, Vec<&'a str>>, from: &'a str) -
     seen
 }
 
+/// Whether a fan-in at `node` is an ACYCLIC fan-in: at least two branches, and
+/// no source lies in `node`'s own forward-reachable set (a source downstream of
+/// `node` is what a cycle merge point or a self-loop looks like, and
+/// `reachable_from` seeds with `node` itself, so a self-loop source is excluded
+/// here with no special case).
+///
+/// This backs the IMPLICIT half of both `apb_engine::parallel::join_kind` and
+/// `apb_core::validate::graph::waits_for_all_inputs`, so the two can never drift.
+/// It answers only the acyclic-fan-in question: a caller's explicit-`join`
+/// priority (an author's `join` on any incoming edge always wins, including
+/// inside a cycle) is layered on top by the caller, before this is ever reached.
+/// This function is not told about `join` at all.
+///
+/// Takes an adjacency map and bare source ids rather than a `Playbook`, because
+/// the validator's call site holds only a prebuilt adjacency map and a slice of
+/// incoming edges, and neither caller needs anything about an edge except its
+/// `from`.
+pub fn is_acyclic_fan_in<'a>(
+    adj: &HashMap<&'a str, Vec<&'a str>>,
+    node: &'a str,
+    sources: &[&'a str],
+) -> bool {
+    if sources.len() < 2 {
+        return false;
+    }
+    let downstream = reachable_from(adj, node);
+    sources.iter().all(|s| !downstream.contains(s))
+}
+
 /// Nodes forward-reachable from any of `from`, the seeds themselves included
 /// (a seed that is not a declared node contributes only itself).
 pub fn reachable(playbook: &Playbook, from: &[&str]) -> BTreeSet<String> {
@@ -150,12 +179,80 @@ edges:
   - { from: check, to: done, condition: { type: node_status, node: check, equals: success } }
 "#;
 
+    /// A fan-in whose merge point also carries a self edge: `tick` has three
+    /// inputs, one of which is itself.
+    const SELF_LOOP: &str = r#"
+schema: 1
+id: sl
+name: SL
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: tick, type: condition, max_loops: 2 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: tick }
+  - { from: start, to: a }
+  - { from: a, to: tick }
+  - { from: tick, to: tick, condition: { type: node_status, node: tick, equals: failure } }
+  - { from: tick, to: done, condition: { type: node_status, node: tick, equals: success } }
+"#;
+
     fn playbook() -> Playbook {
         Playbook::from_yaml(DIAMOND_WITH_LOOP).unwrap()
     }
 
     fn set(ids: &[&str]) -> BTreeSet<String> {
         ids.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn is_acyclic_fan_in_true_for_a_plain_diamond() {
+        let pb = playbook();
+        let adj = adjacency(&pb);
+        assert!(
+            is_acyclic_fan_in(&adj, "j", &["a", "b"]),
+            "a two-branch diamond merge point is an acyclic fan-in"
+        );
+    }
+
+    #[test]
+    fn is_acyclic_fan_in_false_for_a_cycle_merge_point() {
+        let pb = playbook();
+        let adj = adjacency(&pb);
+        // `check` is downstream of `j` (j -> check), so the fan-in at `j` that
+        // includes the back edge keeps first-arrival semantics.
+        assert!(
+            !is_acyclic_fan_in(&adj, "j", &["a", "b", "check"]),
+            "a source reachable from the node itself makes the fan-in cyclic"
+        );
+    }
+
+    #[test]
+    fn is_acyclic_fan_in_false_for_a_self_loop() {
+        let pb = Playbook::from_yaml(SELF_LOOP).unwrap();
+        let adj = adjacency(&pb);
+        // No special case in the predicate: `reachable_from` seeds with `tick`
+        // itself, so a self-loop source is downstream by construction.
+        assert!(
+            !is_acyclic_fan_in(&adj, "tick", &["start", "a", "tick"]),
+            "a self-loop source must not read as an acyclic fan-in"
+        );
+    }
+
+    #[test]
+    fn is_acyclic_fan_in_false_below_minimum_fan_in() {
+        let pb = playbook();
+        let adj = adjacency(&pb);
+        assert!(
+            !is_acyclic_fan_in(&adj, "j", &["a"]),
+            "one source is not a fan-in"
+        );
+        assert!(
+            !is_acyclic_fan_in(&adj, "j", &[]),
+            "no source is not a fan-in"
+        );
     }
 
     #[test]

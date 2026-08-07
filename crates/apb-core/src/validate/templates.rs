@@ -131,7 +131,7 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
                 "V38",
                 Some(owner),
                 format!(
-                    "template reads `nodes.{source}.{field}` but nothing orders `{source}` before `{owner}`, so the value may render empty; add `join: all` on the edges into `{owner}` (or route it behind a node that joins both branches)"
+                    "template reads `nodes.{source}.{field}` but nothing orders `{source}` before `{owner}`, so the value may render empty; route the read behind `{source}` itself, or behind a node that already joins both branches, so `{source}` is guaranteed to have run first"
                 ),
             );
         }

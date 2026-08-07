@@ -46,6 +46,31 @@ edges:
   - { from: j, to: done }
 "#;
 
+// The same join:any race, with a SIDE target on the winning branch: `a` routes
+// both into the any-join `j` and into `side`. The race keeps only `j`, so the
+// hop into `side` is one the drive decided against and must leave no trace.
+const ANY_WIN_WITH_SIDE_TARGET: &str = r#"
+schema: 1
+id: par
+name: Par
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: side, type: prompt, prompt: "side" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: j, join: any }
+  - { from: a, to: side }
+  - { from: b, to: j, join: any }
+  - { from: side, to: done }
+  - { from: j, to: done }
+"#;
+
 // A barrier-less diamond with branches of different length: `a` reaches the
 // merge in one hop, `b` needs two. Without an implicit join `j` would run as
 // soon as `a` arrived, while `b2` was still pending.
@@ -225,6 +250,43 @@ edges:
   - { from: m, to: mdone }
   - { from: w, to: wdone }
 "#;
+
+/// #79 counter-pin: an EXPLICIT join stays out of the batch, because
+/// `ReadyFailure` is the verdict only the sequential arm can journal with the
+/// barrier's own reason. Narrowing `is_batchable` must not reach this shape.
+const EXPLICIT_JOIN_FAILURE: &str = r#"
+schema: 1
+id: par
+name: Par
+version: 1.0.0
+defaults:
+  max_parallel: 4
+nodes:
+  - { id: start, type: start }
+  - { id: ok, type: script, script: "scripts/ok.sh", runner: sh }
+  - { id: bad, type: script, script: "scripts/fail.sh", runner: sh }
+  - { id: j, type: prompt, prompt: "joined" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: ok }
+  - { from: start, to: bad }
+  - { from: ok, to: j, join: all }
+  - { from: bad, to: j, join: all }
+  - { from: j, to: done }
+"#;
+
+#[test]
+fn an_explicit_join_with_a_failed_input_is_journaled_failed_by_the_barrier() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_with_scripts(dir.path(), EXPLICIT_JOIN_FAILURE);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    assert_eq!(
+        finish_status_of(&run_dir, "j"),
+        "failed",
+        "an explicit join whose input failed must be journaled failed, not executed"
+    );
+}
 
 // A fork where one branch reaches finish - the run completes, the other does not execute.
 const FORK_FINISH: &str = r#"
@@ -668,5 +730,72 @@ fn a_dead_join_input_is_journaled_as_a_write_off() {
             EventPayload::SupervisorAction { action, .. } if action == "join_input_dead"
         )),
         "the write-off must not ride the supervisor-action variant"
+    );
+}
+
+/// #82: the single most valuable record. When `a` advances, `j` is a barrier
+/// that is not ready yet, so `seed_successors` drops it from `runnable` and the
+/// old journal held no trace of the delivery at all. That hop is exactly the
+/// proof `arrival` needs, so it has to be journaled from `selected_edges`.
+#[test]
+fn a_hop_into_a_not_yet_ready_barrier_is_journaled() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), DIAMOND_ALL);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    let hops: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::EdgeTraversed { from, to, .. } => Some((from.clone(), to.clone())),
+            _ => None,
+        })
+        .collect();
+    // `a` runs before `b` in journal order, so `j` was still NotReady when `a`
+    // advanced past it. The record must exist anyway.
+    assert!(
+        hops.contains(&("a".to_string(), "j".to_string())),
+        "the hop into the not-yet-ready barrier must be journaled, got {hops:?}"
+    );
+}
+
+/// External review, finding 2: the routing decision is journaled from
+/// `selected_edges`, which is computed independently of the `join: any` race
+/// that narrows `runnable` just above it. A target the race dropped therefore
+/// used to get a durable `EdgeTraversed` for a hop that was never taken - and
+/// `journaled_hops` is exactly what `routed_targets`/`pending_heads` trust as
+/// "every hop the drive loop actually took".
+#[test]
+fn a_target_the_any_race_dropped_gets_no_traversal_record() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), ANY_WIN_WITH_SIDE_TARGET);
+    let res = run(dir.path(), "par", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let events = read_all(&run_dir).unwrap();
+    let hops: Vec<(String, String)> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::EdgeTraversed { from, to, .. } => Some((from.clone(), to.clone())),
+            _ => None,
+        })
+        .collect();
+    // Premise, asserted so the test cannot pass vacuously: the race really did
+    // happen and really did keep the any-join.
+    assert!(
+        hops.contains(&("a".to_string(), "j".to_string())),
+        "the winning hop must still be journaled, got {hops:?}"
+    );
+    assert_eq!(
+        started(&events, "side"),
+        0,
+        "the race-dropped target must not run"
+    );
+    assert!(
+        !hops.contains(&("a".to_string(), "side".to_string())),
+        "the race decided against this hop, so it must leave no traversal record, got {hops:?}"
     );
 }

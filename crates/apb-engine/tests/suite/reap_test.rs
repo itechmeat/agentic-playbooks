@@ -229,6 +229,7 @@ fn attempt_started(node: &str, pid: Option<u32>) -> EventPayload {
         soul_delivery: None,
         skills_mode: None,
         pid,
+        spawn_ms: None,
     }
 }
 

@@ -839,6 +839,151 @@ edges:
   - { from: gate, to: done, condition: { type: node_status, node: gate, equals: success } }"#,
         ));
     }
+
+    /// The `defaults.on_failure` handler is entered from anywhere in the graph,
+    /// so no drawn edge describes what preceded it and V38 stays silent. This is
+    /// a SILENCE rule: a regression here is a false warning, not a missed one.
+    #[test]
+    fn v38_silent_for_the_on_failure_handler() {
+        let pb = pb_yaml(
+            r#"
+defaults: { on_failure: h }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: h, type: prompt, prompt: "handler reads {{nodes.a.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: h }
+  - { from: a, to: done }
+  - { from: h, to: done }"#,
+        );
+        assert_no_v38(&pb);
+    }
+
+    /// A node reading its own output is loop-carried by definition, never racy.
+    #[test]
+    fn v38_silent_for_a_self_read() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a rereads {{nodes.a.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        assert_no_v38(&pb);
+    }
+
+    /// An unknown source is V13's business. V38 defers rather than piling a
+    /// second, less useful diagnosis on the same line.
+    #[test]
+    fn v38_silent_for_an_unknown_source_already_v13() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: b, type: prompt, prompt: "b needs {{nodes.missing.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: b }
+  - { from: b, to: done }"#,
+        );
+        assert!(
+            issues(&pb).contains(&("V13", Severity::Error)),
+            "an unknown template source must still be V13"
+        );
+        assert_no_v38(&pb);
+    }
+
+    /// Not a sibling race but a strictly backwards read: `owner` is a genuine
+    /// ancestor of `source`, so `source` cannot possibly have run yet.
+    #[test]
+    fn v38_read_of_a_strictly_downstream_node_warns() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: owner, type: prompt, prompt: "owner needs {{nodes.source.output}}" }
+  - { id: source, type: prompt, prompt: "source" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: owner }
+  - { from: owner, to: source }
+  - { from: source, to: done }"#,
+        );
+        let found = v38(&pb);
+        assert_eq!(found.len(), 1, "expected exactly one V38, got {found:?}");
+        assert_eq!(
+            found[0].0.as_deref(),
+            Some("owner"),
+            "V38 owner is the reader"
+        );
+    }
+
+    /// The either-or merge is already pinned for the IMPLICIT acyclic fan-in.
+    /// The explicit `join: all` branch must produce the same silence.
+    #[test]
+    fn either_or_merge_reading_both_branches_behind_explicit_join_all_is_clean() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: gate, type: condition }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b" }
+  - { id: m, type: prompt, prompt: "merge {{nodes.a.output}} and {{nodes.b.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: gate }
+  - { from: gate, to: a, condition: { type: node_status, node: gate, equals: success } }
+  - { from: gate, to: b, condition: { type: node_status, node: gate, equals: failure } }
+  - { from: a, to: m, join: all }
+  - { from: b, to: m, join: all }
+  - { from: m, to: done }"#,
+        );
+        assert_no_v38(&pb);
+    }
+
+    /// The old remedy told the author to put `join: all` on the edges into the
+    /// reader, but the shape this rule most often catches gives the reader ONE
+    /// incoming edge, and a join needs at least two to do anything at all.
+    #[test]
+    fn v38_message_does_not_advise_join_all_on_a_single_input_reader() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b needs {{nodes.a.output}}" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: j }
+  - { from: b, to: j }
+  - { from: j, to: done }"#,
+        );
+        let found = v38(&pb);
+        assert_eq!(found.len(), 1, "expected exactly one V38, got {found:?}");
+        let msg = &found[0].1;
+        assert!(
+            msg.contains("nodes.a.output"),
+            "the message names the read: {msg}"
+        );
+        assert!(
+            !msg.contains("join: all"),
+            "V38 must not advise a join on a reader with one incoming edge: {msg}"
+        );
+        assert!(
+            msg.contains("route the read behind"),
+            "V38 must name the remedy that works: {msg}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -1098,5 +1243,142 @@ edges:
             c.contains(&"V34"),
             "identical output_field routes to different targets must be V34, got {c:?}"
         );
+    }
+}
+
+#[cfg(test)]
+mod widened_condition_checks_tests {
+    use super::*;
+    use crate::schema::Playbook;
+
+    fn pb_yaml(body: &str) -> Playbook {
+        let yaml = format!("schema: 2\nid: p\nname: p\nversion: 1.0.0\n{body}\n");
+        Playbook::from_yaml(&yaml).unwrap()
+    }
+
+    fn codes(pb: &Playbook) -> Vec<(&'static str, Severity)> {
+        validate(pb, &ValidationContext::default())
+            .issues
+            .iter()
+            .map(|i| (i.code, i.severity))
+            .collect()
+    }
+
+    /// The conditions hang off `verify`, an agent_task, not off a condition node.
+    /// `SOURCE` is the node the two conditions read.
+    fn agent_owned(source: &str) -> Playbook {
+        pb_yaml(&format!(
+            r#"
+defaults: {{ profile: x }}
+nodes:
+  - {{ id: s, type: start }}
+  - {{ id: verify, type: agent_task, prompt: hi, expected_duration: 5m }}
+  - {{ id: fix, type: agent_task, prompt: hi, expected_duration: 5m }}
+  - {{ id: done, type: finish, outcome: success }}
+edges:
+  - {{ from: s, to: verify }}
+  - {{ from: verify, to: fix, condition: {{ type: output_field, node: {source}, field: verdict, equals: failed }} }}
+  - {{ from: verify, to: done, condition: {{ type: output_field, node: {source}, field: verdict, equals: ok }} }}
+  - {{ from: fix, to: done }}"#
+        ))
+    }
+
+    #[test]
+    fn a_valid_output_field_route_off_an_agent_task_raises_nothing() {
+        let c = codes(&agent_owned("verify"));
+        assert!(c.is_empty(), "expected a clean playbook, got {c:?}");
+    }
+
+    #[test]
+    fn v40_output_field_off_an_agent_task_referencing_an_unknown_node() {
+        let c = codes(&agent_owned("nope"));
+        assert!(
+            c.contains(&("V40", Severity::Warning)),
+            "an unknown condition source off a non-condition node must warn V40, got {c:?}"
+        );
+        assert!(
+            !c.iter().any(|(code, _)| *code == "V10"),
+            "V10 stays an error reserved for condition nodes, got {c:?}"
+        );
+    }
+
+    #[test]
+    fn v40_output_field_off_an_agent_task_referencing_a_downstream_node() {
+        // `fix` only runs after `verify` routes to it, so its output can never
+        // be available to `verify`'s own routing decision.
+        let c = codes(&agent_owned("fix"));
+        assert!(
+            c.contains(&("V40", Severity::Warning)),
+            "a downstream condition source off a non-condition node must warn V40, got {c:?}"
+        );
+    }
+
+    #[test]
+    fn v39_node_status_off_an_agent_task_missing_failure_branch_warns() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: verify, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: verify }
+  - { from: verify, to: done, condition: { type: node_status, node: verify, equals: success } }"#,
+        );
+        let c = codes(&pb);
+        assert!(
+            c.contains(&("V39", Severity::Warning)),
+            "node_status branches off a non-condition node that cover only one outcome must warn V39, got {c:?}"
+        );
+    }
+
+    #[test]
+    fn v10_and_v40_do_not_both_fire_on_the_same_condition_node() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: verify, type: agent_task, prompt: hi }
+  - { id: check, type: condition }
+  - { id: fix, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: verify }
+  - { from: verify, to: check }
+  - { from: check, to: fix, condition: { type: output_field, node: nope, field: verdict, equals: failed } }
+  - { from: check, to: done, condition: { type: output_field, node: nope, field: verdict, equals: ok } }
+  - { from: fix, to: done }"#,
+        );
+        let c = codes(&pb);
+        assert!(
+            c.iter()
+                .any(|(code, sev)| *code == "V10" && *sev == Severity::Error),
+            "a condition node keeps the V10 error, got {c:?}"
+        );
+        assert!(
+            !c.iter().any(|(code, _)| *code == "V40"),
+            "the owner-kind branch is exclusive, not additive, got {c:?}"
+        );
+    }
+
+    /// A playbook with no conditional edges anywhere must be untouched by the
+    /// widening: the loop now visits every node, so the early skip matters.
+    #[test]
+    fn a_plain_linear_playbook_gains_no_new_warning() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi, expected_duration: 5m }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: done }"#,
+        );
+        let c = codes(&pb);
+        assert!(c.is_empty(), "expected a clean playbook, got {c:?}");
     }
 }

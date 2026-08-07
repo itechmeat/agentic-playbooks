@@ -889,7 +889,7 @@ pub(crate) fn execute_node(
                         std::cell::Cell::new(None);
                     let spawn_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
-                    let on_spawn = |pid: u32| {
+                    let on_spawn = |pid: u32, spawn_ms: u64| {
                         spawn_at.set(Some(std::time::Instant::now()));
                         if let Err(e) = journal.append(EventPayload::AttemptStarted {
                             node: node_id.to_string(),
@@ -898,6 +898,7 @@ pub(crate) fn execute_node(
                             soul_delivery: soul_del.clone(),
                             skills_mode: smode.clone(),
                             pid: Some(pid),
+                            spawn_ms: Some(spawn_ms),
                         }) {
                             *spawn_err.borrow_mut() = Some(e);
                         }
@@ -1084,6 +1085,7 @@ pub(crate) fn execute_node(
                             soul_delivery: step.soul_delivery.clone(),
                             skills_mode: Some(skills_mode.to_string()),
                             pid: None,
+                            spawn_ms: None,
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -1550,9 +1552,19 @@ pub(crate) fn execute_node(
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
             let r = run_script(run_dir, workdir, script, runner, timeout, Some(cancel))?;
+            // A killed script's captured stdout is whatever it happened to
+            // print before the signal landed (often nothing at all), not the
+            // stable "cancelled" text the agent_task cancel paths already
+            // return. Task 9's unified cancelled shape needs both paths to
+            // render the same `{{nodes.<id>.output}}`.
+            let output = if r.status == NodeStatus::Cancelled {
+                "cancelled".to_string()
+            } else {
+                r.stdout
+            };
             Ok(AttemptOutcome::Finished {
                 status: r.status,
-                output: r.stdout,
+                output,
                 events,
             })
         }
@@ -1770,7 +1782,7 @@ pub(crate) fn execute_finish_answer(
             let soul_del = Some(soul_delivery_str(ri.soul_delivery));
             let spawn_at: std::cell::Cell<Option<std::time::Instant>> = std::cell::Cell::new(None);
             let spawn_err: std::cell::RefCell<Option<EngineError>> = std::cell::RefCell::new(None);
-            let on_spawn = |pid: u32| {
+            let on_spawn = |pid: u32, spawn_ms: u64| {
                 spawn_at.set(Some(std::time::Instant::now()));
                 if let Err(e) = journal.append(EventPayload::AttemptStarted {
                     node: node_id.to_string(),
@@ -1779,6 +1791,7 @@ pub(crate) fn execute_finish_answer(
                     soul_delivery: soul_del.clone(),
                     skills_mode: None,
                     pid: Some(pid),
+                    spawn_ms: Some(spawn_ms),
                 }) {
                     *spawn_err.borrow_mut() = Some(e);
                 }
@@ -1802,6 +1815,7 @@ pub(crate) fn execute_finish_answer(
                     soul_delivery: Some(soul_delivery_str(ri.soul_delivery)),
                     skills_mode: None,
                     pid: None,
+                    spawn_ms: None,
                 })?;
             }
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -2286,21 +2300,28 @@ pub(crate) fn is_interactive(playbook: &Playbook, node: &str) -> bool {
 }
 
 /// Whether a node may run as a MEMBER of the concurrent batch: slow external
-/// work, not interactive, and not a join.
+/// work, not interactive, and not an EXPLICIT join.
 ///
-/// Joins are excluded because a join's readiness verdict is the sequential
-/// path's business. A join whose input already failed is `ReadyFailure` and is
-/// deliberately pushed into the frontier so the drive loop can journal it
-/// `failed` with the barrier's own reason and, in supervised mode, raise a wake
-/// on it. The batch has no such arm: it would simply execute the node and carry
-/// the run past a failure the supervisor never saw (review finding I1 of
-/// 2026-08-05 Task 3). A `ReadySuccess` join runs sequentially right after
-/// instead, which is semantically identical - and most joins are `prompt` nodes,
-/// which never batched anyway.
+/// Only an explicit join is excluded. `ReadyFailure` is the verdict only the
+/// sequential arm can journal (the barrier's own reason) and wake a supervisor
+/// on, and it is reachable exclusively from `JoinKind::Explicit`: an implicit
+/// fan-in's readiness is `NotReady` or `ReadySuccess` and nothing else
+/// (`parallel::join_readiness`). So the hazard the exclusion was written for
+/// cannot arise for an implicit fan-in, which only synchronizes.
+///
+/// A not-ready join never reaches the batch in the first place: a join enters
+/// the frontier only through `seed_successors` or `restore_frontier`, both of
+/// which drop a `NotReady` join. The one residual is pre-existing and unchanged
+/// by this narrowing: `defaults.on_failure: <node>` pushes its handler with no
+/// readiness check at all, and the sequential arm would execute a not-ready
+/// implicit join there too.
 pub(crate) fn is_batchable(playbook: &Playbook, node: &str) -> bool {
     is_agent_or_script(playbook, node)
         && !is_interactive(playbook, node)
-        && !parallel::is_join(playbook, node)
+        && !matches!(
+            parallel::join_kind(playbook, node),
+            Some(parallel::JoinKind::Explicit(_))
+        )
 }
 
 /// Context compaction (spec 8.5): if enabled (cfg.context_max_bytes) and the
@@ -2552,6 +2573,13 @@ pub(crate) fn advance_frontier(
         .into_iter()
         .filter(|s| !frontier.contains(s))
         .collect();
+    // Targets this advance decided AGAINST: the frontier heads a won `join:
+    // any` race cancels, plus the runnable successors the same race narrows
+    // away. Phase 1 below must not record a hop into any of them (external
+    // review, finding 2): the race is precisely the drive deciding not to take
+    // those hops, and an `EdgeTraversed` for one is durable evidence of a
+    // traversal that never happened.
+    let mut raced_out: Vec<String> = Vec::new();
     if let Some(join) = runnable
         .iter()
         .find(|s| {
@@ -2571,21 +2599,65 @@ pub(crate) fn advance_frontier(
                 true => frontier.push(other),
                 false => {
                     log.append(EventPayload::NodeFinished {
-                        node: other,
+                        node: other.clone(),
                         status: "cancelled".into(),
                         attempt: 1,
                         output: String::new(),
                         artifacts: Vec::new(),
                     })?;
+                    raced_out.push(other);
                 }
             }
         }
+        raced_out.extend(runnable.iter().filter(|s| *s != &join).cloned());
         runnable.retain(|s| s == &join);
     }
-    // The edges actually selected out of `node` for this advance. Used only to
-    // decide which pushes cross a bounded edge and must be journaled. Computed
-    // from the same `state`, so it agrees with the `runnable` set above.
+    // The edges actually selected out of `node` for this advance. Used to
+    // decide which pushes cross a bounded edge and must be journaled, and
+    // (phase 1 below) as the ground truth for every hop actually taken.
+    // Computed from the same `state`, so it agrees with the `runnable` set
+    // above EXCEPT where the `join: any` race just narrowed it - hence the
+    // `raced_out` filter in phase 1.
     let selected = parallel::selected_edges(playbook, node, state);
+    // Phase 1, the ROUTING DECISION: journaled for every target the routing
+    // selected, including a target already on the frontier and a barrier that
+    // is not ready yet. Those two are dropped from `runnable`, but the hop into
+    // them really was taken, and this record is the only evidence of it: "A
+    // delivered into barrier J, which is not ready yet" is exactly the delivery
+    // proof `arrival` needs, and journaling from `runnable` would miss it.
+    // A target the `join: any` race wrote off is the one case that is NOT a
+    // taken hop, so it is filtered out: `journaled_hops` is what
+    // `routed_targets`/`pending_heads` trust as "every hop the drive loop
+    // actually took", and the record outlives even a patch that removes the
+    // edge. Deduplicated against the folded hop set (which includes prior
+    // drives), so a loop cannot grow the journal without bound; the counted
+    // record below is deliberately NOT deduped.
+    for e in &selected {
+        if e.to == node {
+            continue;
+        }
+        if raced_out.contains(&e.to) {
+            continue;
+        }
+        if state
+            .journaled_hops
+            .contains(&(node.to_string(), e.to.clone()))
+        {
+            continue;
+        }
+        log.append(EventPayload::EdgeTraversed {
+            from: node.to_string(),
+            to: e.to.clone(),
+            via_policy: false,
+            uncounted: true,
+        })?;
+    }
+    // Phase 2, the frontier pushes and the bounded COUNT: same condition, same
+    // site, same one-per-actual-push semantics as before. Two records can
+    // describe one bounded traversal, a decision record plus the counted one.
+    // That is deliberate: `journaled_hops` is a set and `edge_counts` only ever
+    // sees the counted record, which is what makes "accounting unchanged"
+    // mechanically checkable instead of argued.
     for s in runnable {
         if !frontier.contains(&s) {
             journal_dead_inputs(log, playbook, &s, state, &active)?;
@@ -2604,6 +2676,7 @@ pub(crate) fn advance_frontier(
                     from: node.to_string(),
                     to: s.clone(),
                     via_policy: false,
+                    uncounted: false,
                 })?;
             }
             frontier.push(s);
