@@ -57,10 +57,12 @@ story, then probe the gaps. Do not interrupt with structure.
 "How do you yourself know you did this right?" The answers become the
 playbook's `goal` field: a statement in the owner's words plus verifiable
 criteria (a row appears in the sheet, the email is in Sent). Each criterion
-gets a check kind: `manual` when only a person can confirm it, `marker` when
+gets a check type: `manual` when only a person can confirm it, `marker` when
 the run result can carry a marker string, `script` when a check script could
 confirm it. An interview without this block is not finished and must not
-produce a draft.
+produce a draft. Today these criteria are recorded and reviewed by people
+(and by the trial path); automatic execution of marker and script checks is
+later engine work.
 
 ### 5. Human gates
 

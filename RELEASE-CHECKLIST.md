@@ -42,6 +42,13 @@
 - Confirm that the web server still binds to loopback by default.
 - Confirm that runtime state, logs, tokens, and credentials are not included in archives.
 
+## Manual acceptance checks
+
+- When `docs/HOWTO-interview.md` changed since the last release, run the
+  emulated scripted-interview acceptance from
+  `docs/superpowers/specs/2026-08-15-playbook-interview-design.md` (Testing
+  section) before tagging.
+
 ## Naming
 
 - Check the project, binary, crate, package, Homebrew formula, domain, and social

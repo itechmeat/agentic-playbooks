@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
 use crate::schema::{
-    CacheMode, CacheSpec, EdgeCondition, FailurePolicy, FunctionsAllow, Isolation, NodeKind,
-    Playbook, SuccessCheck,
+    CacheMode, CacheSpec, EdgeCondition, FailurePolicy, FunctionsAllow, GoalCheck, Isolation,
+    NodeKind, Playbook, SuccessCheck,
 };
 
 use connectors::check_connectors;

@@ -31,7 +31,7 @@
 - Consumes: nothing new; `Playbook::from_yaml` already exists.
 - Produces: `pub struct Goal { pub statement: String, pub criteria: Vec<GoalCriterion> }`, `pub struct GoalCriterion { pub description: String, pub check: GoalCheck }`, `pub enum GoalCheck { Manual, Marker { marker: String }, Script { path: String } }`, and `pub goal: Option<Goal>` on `Playbook`. Task 2's validator and Task 4's docs rely on these exact names.
 
-- [ ] **Step 1: Write the failing round-trip tests**
+- [x] **Step 1: Write the failing round-trip tests**
 
 Add to the existing `#[cfg(test)]` tests module in `crates/apb-core/src/schema.rs` (next to the other round-trip tests):
 
@@ -47,10 +47,10 @@ goal:
   statement: the invoice is recorded and sent for approval
   criteria:
     - description: a row with the invoice amount appears in the sheet
-      check: { kind: marker, marker: INVOICE_ROW_ADDED }
+      check: { type: marker, marker: INVOICE_ROW_ADDED }
     - description: the email is in Sent
     - description: a script confirms the ledger balance
-      check: { kind: script, path: checks/ledger.sh }
+      check: { type: script, path: scripts/ledger.sh }
 nodes: []
 edges: []
 "#;
@@ -65,7 +65,7 @@ edges: []
     assert_eq!(goal.criteria[1].check, GoalCheck::Manual);
     assert_eq!(
         goal.criteria[2].check,
-        GoalCheck::Script { path: "checks/ledger.sh".into() }
+        GoalCheck::Script { path: "scripts/ledger.sh".into() }
     );
 
     let back = serde_yaml_ng::to_string(&p).unwrap();
@@ -85,12 +85,12 @@ fn playbook_without_goal_serializes_without_goal_key() {
 
 If the tests module does not already import the new names, extend its `use` line (the module uses `use super::*;` in this file; verify and keep whatever pattern is there).
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p apb-core --lib goal_fields_round_trip`
 Expected: COMPILE ERROR, `Goal`/`GoalCheck` not found and no `goal` field on `Playbook`.
 
-- [ ] **Step 3: Implement the types and the field**
+- [x] **Step 3: Implement the types and the field**
 
 In `crates/apb-core/src/schema.rs`, near the other auxiliary playbook types (for example right after the `Requires` definition), add:
 
@@ -99,7 +99,7 @@ In `crates/apb-core/src/schema.rs`, near the other auxiliary playbook types (for
 /// `Script` execution is not wired into run verdicts yet; the variant
 /// records the contract for later engine work.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum GoalCheck {
     /// A person confirms the criterion by hand.
     #[default]
@@ -138,17 +138,17 @@ On the `Playbook` struct, insert after the `requires` field and before `effects`
     pub goal: Option<Goal>,
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p apb-core --lib goal_`
 Expected: both new tests PASS.
 
-- [ ] **Step 5: Run the crate suite to catch regressions**
+- [x] **Step 5: Run the crate suite to catch regressions**
 
 Run: `cargo test -p apb-core`
 Expected: PASS (the field is additive; nothing else constructs `Playbook` literals outside `schema.rs` tests).
 
-- [ ] **Step 6: Gates and commit**
+- [x] **Step 6: Gates and commit**
 
 Run: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo metadata --format-version 1 >/dev/null && code-ranker check .`
 
@@ -172,7 +172,7 @@ git commit --signoff -m "feat(core): goal field with verifiable criteria on the 
 - Consumes: `Playbook.goal: Option<Goal>` from Task 1; `ValidationReport::error(code, node, msg)` and the `validate()` entry point in `validate/mod.rs`.
 - Produces: `pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport)` emitting code `"V41"` with severity Error. Task 3's guide and Task 4's docs reference rule V41 by that code.
 
-- [ ] **Step 1: Write the failing validator tests**
+- [x] **Step 1: Write the failing validator tests**
 
 Create `crates/apb-core/tests/suite/validate_goal_test.rs`:
 
@@ -246,12 +246,12 @@ Wire it into the single test binary. In `crates/apb-core/tests/main.rs`, next to
 mod validate_goal_test;
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p apb-core --test main v41`
 Expected: FAIL, the three `v41_*` tests find no `"V41"` code (the rule does not exist yet). `complete_goal_passes` and `playbook_without_goal_has_no_v41` pass vacuously.
 
-- [ ] **Step 3: Implement the rule**
+- [x] **Step 3: Implement the rule**
 
 In `crates/apb-core/src/validate/nodes.rs`, after `check_trigger`, add:
 
@@ -286,12 +286,12 @@ In `crates/apb-core/src/validate/mod.rs`: add `check_goal` to the existing `use 
     check_goal(playbook, &mut r); // V41
 ```
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p apb-core --test main validate_goal`
 Expected: all five tests PASS.
 
-- [ ] **Step 5: Document the field in the authoring guide**
+- [x] **Step 5: Document the field in the authoring guide**
 
 In `docs/HOWTO-authoring.md`:
 
@@ -310,11 +310,11 @@ statement, at least one criterion, and a description on every criterion.
 - `statement` (string): the goal in plain words, e.g. "the invoice is
   recorded in the tracking sheet and sent for approval".
 - `criteria` (list): each `{ description, check? }`.
-  - `check: { kind: manual }` (default when omitted): a person confirms the
+  - `check: { type: manual }` (default when omitted): a person confirms the
     criterion.
-  - `check: { kind: marker, marker: <string> }`: the marker string is
+  - `check: { type: marker, marker: <string> }`: the marker string is
     expected in the run result.
-  - `check: { kind: script, path: <relative path> }`: a check script
+  - `check: { type: script, path: <relative path> }`: a check script
     confirms the criterion. Script execution is not wired into run verdicts
     yet; the field records the contract.
 
@@ -323,12 +323,12 @@ process, but must never weaken or rewrite the criteria; only a person may
 change them.
 ```
 
-- [ ] **Step 6: Run the full crate suite**
+- [x] **Step 6: Run the full crate suite**
 
 Run: `cargo test -p apb-core`
 Expected: PASS.
 
-- [ ] **Step 7: Gates and commit**
+- [x] **Step 7: Gates and commit**
 
 Run: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo metadata --format-version 1 >/dev/null && code-ranker check .`
 
@@ -350,7 +350,7 @@ git commit --signoff -m "feat(core): validator rule V41 for goal completeness"
 - Consumes: the `goal` field semantics from Tasks 1-2 (referenced in prose).
 - Produces: the file `docs/HOWTO-interview.md` whose exact path Task 4 embeds via `include_str!`, containing the heading `# Playbook interview (tier 2)` and a section titled `### 4. Goal and criteria (mandatory)` that Task 4's content test asserts on.
 
-- [ ] **Step 1: Write the guide**
+- [x] **Step 1: Write the guide**
 
 Create `docs/HOWTO-interview.md` with exactly this content:
 
@@ -467,12 +467,12 @@ and play back again. Only after the yes do you assemble the playbook.
   covered by an existing playbook, say so and offer it.
 ```
 
-- [ ] **Step 2: Verify prose conventions**
+- [x] **Step 2: Verify prose conventions**
 
 Run: `grep -n $'—' docs/HOWTO-interview.md; grep -cn '!' docs/HOWTO-interview.md`
 Expected: no em-dashes; `!` count 0.
 
-- [ ] **Step 3: Commit**
+- [x] **Step 3: Commit**
 
 ```bash
 git add docs/HOWTO-interview.md
@@ -492,7 +492,7 @@ git commit --signoff -m "docs: playbook interview guide (tier 2)"
 - Consumes: `docs/HOWTO-interview.md` from Task 3 (embedded via `include_str!`); the existing `to_call_tool_result` helper and `#[tool_router(router = playbook_router)]` impl block.
 - Produces: MCP tool named `playbook_interview`, tool-layer function `pub fn playbook_interview() -> Result<Value, ToolError>` returning `{ "guide": <markdown> }`. Task 5's instructions text names this tool.
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 In `crates/apb-mcp/src/server/tests.rs`:
 
@@ -509,12 +509,12 @@ fn playbook_interview_returns_the_embedded_guide() {
 }
 ```
 
-- [ ] **Step 2: Run the tests to verify they fail**
+- [x] **Step 2: Run the tests to verify they fail**
 
 Run: `cargo test -p apb-mcp --lib tool_router_registers && cargo test -p apb-mcp --lib playbook_interview_returns`
 Expected: the first FAILS on the length assertion (expected list now longer than registered tools); the second FAILS to compile (`playbook_interview` not found). A compile error in the test target fails both invocations; that is fine, it is the red state.
 
-- [ ] **Step 3: Implement the tool function and register it**
+- [x] **Step 3: Implement the tool function and register it**
 
 In `crates/apb-mcp/src/tools/playbook.rs`, after `playbook_howto`:
 
@@ -540,12 +540,12 @@ In `crates/apb-mcp/src/server/playbook.rs`, after the `playbook_howto` tool meth
 
 No other wiring: the `#[tool]` macro auto-registers the method into `playbook_router()`, which `tool_router()` in `server/mod.rs` already merges.
 
-- [ ] **Step 4: Run the tests to verify they pass**
+- [x] **Step 4: Run the tests to verify they pass**
 
 Run: `cargo test -p apb-mcp --lib`
 Expected: PASS, including both edited/new tests.
 
-- [ ] **Step 5: Gates and commit**
+- [x] **Step 5: Gates and commit**
 
 Run: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo metadata --format-version 1 >/dev/null && code-ranker check .`
 
@@ -566,7 +566,7 @@ git commit --signoff -m "feat(mcp): playbook_interview tool serving the intervie
 - Consumes: the `playbook_interview` tool name from Task 4.
 - Produces: updated TIER0 text; nothing downstream.
 
-- [ ] **Step 1: Extend the failing phrase test**
+- [x] **Step 1: Extend the failing phrase test**
 
 In `tier0_keeps_the_load_bearing_rules`, add two entries to the phrase array:
 
@@ -575,12 +575,12 @@ In `tier0_keeps_the_load_bearing_rules`, add two entries to the phrase array:
             "offer a short interview",
 ```
 
-- [ ] **Step 2: Run the test to verify it fails**
+- [x] **Step 2: Run the test to verify it fails**
 
 Run: `cargo test -p apb-mcp --lib tier0_keeps`
 Expected: FAIL, TIER0 lacks the new phrases.
 
-- [ ] **Step 3: Replace TIER0 with the pre-measured text**
+- [x] **Step 3: Replace TIER0 with the pre-measured text**
 
 The current TIER0 is 1948 bytes of the 1950 cap, so the interview sentence requires trimming elsewhere. The replacement below is pre-measured at 1943 bytes and keeps every phrase the tests pin. Replace the entire `TIER0` string so its paragraphs (separated by blank lines, in the existing escaped-string style with `\n\n` between paragraphs) read exactly:
 
@@ -606,17 +606,17 @@ Lifecycle: update, clone, version and delete playbooks; pull playbook_howto when
 
 Diffs from the current text, so the reviewer can see nothing load-bearing was lost: paragraph 1 drops `, scope` from the return-fields list; paragraph 2 shortens `recommended first (project if project-specific)` to `project first if project-specific` and `compare the action with` to `compare it with`; paragraph 3 drops `; the server escalates the silence`; the Interview paragraph is new; Using a match drops `here or global`; Human gates drops `The moment you see it you MUST relay` in favor of `Relay`; Lifecycle drops `you may `.
 
-- [ ] **Step 4: Run the instructions tests to verify they pass**
+- [x] **Step 4: Run the instructions tests to verify they pass**
 
 Run: `cargo test -p apb-mcp --lib tier0`
 Expected: PASS, including `tier0_fits_the_host_budget` (1943 <= 1950), `tier0_keeps_the_load_bearing_rules`, and `tier0_follows_the_prose_conventions`.
 
-- [ ] **Step 5: Run the full workspace suite**
+- [x] **Step 5: Run the full workspace suite**
 
 Run: `cargo test --workspace`
 Expected: PASS.
 
-- [ ] **Step 6: Gates and commit**
+- [x] **Step 6: Gates and commit**
 
 Run: `cargo fmt --all -- --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo metadata --format-version 1 >/dev/null && code-ranker check .`
 

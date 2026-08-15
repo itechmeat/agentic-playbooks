@@ -47,6 +47,14 @@ pub(crate) fn check_trigger(playbook: &Playbook, r: &mut ValidationReport) {
 /// least one criterion, and a description on every criterion. An empty goal
 /// is worse than none, because agents and supervisors treat the goal as the
 /// contract of the run.
+///
+/// A criterion's `check` is also guarded here, mirroring the twin rules for
+/// `success_check` (V33 for an empty marker, V12 for an unsafe script path):
+/// a `Marker` check with an empty (or whitespace-only) marker would match
+/// every non-empty output, and a `Script` check whose path escapes the
+/// version directory or falls outside `scripts/` is unsafe the same way an
+/// agent_task's success_check path would be. Both are reported under V41
+/// (no new code is minted) because they are still goal-completeness issues.
 pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport) {
     let Some(g) = &playbook.goal else { return };
     if g.statement.trim().is_empty() {
@@ -59,6 +67,8 @@ pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport) {
             "goal.criteria is empty, at least one criterion is required".to_string(),
         );
     }
+    let escapes =
+        |script: &str| script.starts_with('/') || script.split('/').any(|seg| seg == "..");
     for (i, c) in g.criteria.iter().enumerate() {
         if c.description.trim().is_empty() {
             r.error(
@@ -66,6 +76,25 @@ pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport) {
                 None,
                 format!("goal.criteria[{i}].description is empty"),
             );
+        }
+        match &c.check {
+            GoalCheck::Marker { marker } if marker.trim().is_empty() => {
+                r.error(
+                    "V41",
+                    None,
+                    format!("goal.criteria[{i}].check marker must not be empty"),
+                );
+            }
+            GoalCheck::Script { path } if escapes(path) || !path.starts_with("scripts/") => {
+                r.error(
+                    "V41",
+                    None,
+                    format!(
+                        "goal.criteria[{i}].check path `{path}` must live under `scripts/` inside the version directory"
+                    ),
+                );
+            }
+            _ => {}
         }
     }
 }

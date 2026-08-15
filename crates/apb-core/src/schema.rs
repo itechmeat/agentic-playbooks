@@ -76,7 +76,7 @@ pub struct Requires {
 /// `Script` execution is not wired into run verdicts yet; the variant
 /// records the contract for later engine work.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum GoalCheck {
     /// A person confirms the criterion by hand.
     #[default]
@@ -1254,10 +1254,10 @@ goal:
   statement: the invoice is recorded and sent for approval
   criteria:
     - description: a row with the invoice amount appears in the sheet
-      check: { kind: marker, marker: INVOICE_ROW_ADDED }
+      check: { type: marker, marker: INVOICE_ROW_ADDED }
     - description: the email is in Sent
     - description: a script confirms the ledger balance
-      check: { kind: script, path: checks/ledger.sh }
+      check: { type: script, path: scripts/ledger.sh }
 nodes: []
 edges: []
 "#;
@@ -1278,7 +1278,7 @@ edges: []
         assert_eq!(
             goal.criteria[2].check,
             GoalCheck::Script {
-                path: "checks/ledger.sh".into()
+                path: "scripts/ledger.sh".into()
             }
         );
 

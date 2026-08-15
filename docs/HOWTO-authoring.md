@@ -899,11 +899,11 @@ statement, at least one criterion, and a description on every criterion.
 - `statement` (string): the goal in plain words, e.g. "the invoice is
   recorded in the tracking sheet and sent for approval".
 - `criteria` (list): each `{ description, check? }`.
-  - `check: { kind: manual }` (default when omitted): a person confirms the
+  - `check: { type: manual }` (default when omitted): a person confirms the
     criterion.
-  - `check: { kind: marker, marker: <string> }`: the marker string is
+  - `check: { type: marker, marker: <string> }`: the marker string is
     expected in the run result.
-  - `check: { kind: script, path: <relative path> }`: a check script
+  - `check: { type: script, path: <relative path> }`: a check script
     confirms the criterion. Script execution is not wired into run verdicts
     yet; the field records the contract.
 

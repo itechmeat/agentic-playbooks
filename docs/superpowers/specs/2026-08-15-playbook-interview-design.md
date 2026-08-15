@@ -55,7 +55,7 @@ New optional field on `Playbook`, additive, no migration; playbooks without a
 goal remain fully valid.
 
 ```rust
-#[serde(tag = "kind", rename_all = "snake_case")]
+#[serde(tag = "type", rename_all = "snake_case")]
 pub enum GoalCheck {
     Manual,
     Marker { marker: String },

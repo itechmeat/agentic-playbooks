@@ -57,3 +57,35 @@ fn v41_empty_criterion_description() {
 fn playbook_without_goal_has_no_v41() {
     assert!(!error_codes(VALID).contains(&"V41"));
 }
+
+#[test]
+fn v41_marker_check_whitespace_only() {
+    let yaml = with_goal(
+        "goal:\n  statement: the invoice is recorded\n  criteria:\n    - description: a row appears\n      check: { type: marker, marker: \"   \" }\n",
+    );
+    assert!(error_codes(&yaml).contains(&"V41"));
+}
+
+#[test]
+fn v41_script_check_path_traversal() {
+    let yaml = with_goal(
+        "goal:\n  statement: the invoice is recorded\n  criteria:\n    - description: a row appears\n      check: { type: script, path: ../../../etc/passwd }\n",
+    );
+    assert!(error_codes(&yaml).contains(&"V41"));
+}
+
+#[test]
+fn v41_script_check_path_outside_scripts_dir() {
+    let yaml = with_goal(
+        "goal:\n  statement: the invoice is recorded\n  criteria:\n    - description: a row appears\n      check: { type: script, path: checks/ledger.sh }\n",
+    );
+    assert!(error_codes(&yaml).contains(&"V41"));
+}
+
+#[test]
+fn v41_script_check_path_under_scripts_dir_passes() {
+    let yaml = with_goal(
+        "goal:\n  statement: the invoice is recorded\n  criteria:\n    - description: a row appears\n      check: { type: script, path: scripts/check.sh }\n",
+    );
+    assert!(!error_codes(&yaml).contains(&"V41"));
+}
