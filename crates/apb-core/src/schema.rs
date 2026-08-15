@@ -38,6 +38,11 @@ pub struct Playbook {
     /// preflight before a run starts.
     #[serde(default)]
     pub requires: Option<Requires>,
+    /// The goal this playbook exists to reach, with verifiable criteria
+    /// (spec 2026-08-15). Agents and supervisors may adapt the process but
+    /// must never change the criteria; only a person may.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub goal: Option<Goal>,
     /// Effects declared by the author (spec 8.5). Not taken on faith:
     /// policy uses effective = inferred ∪ declared (see `effects`).
     #[serde(default)]
@@ -65,6 +70,38 @@ pub struct Requires {
     pub files: Vec<String>,
     #[serde(default)]
     pub commands: Vec<String>,
+}
+
+/// How a goal criterion is verified after a run (spec 2026-08-15).
+/// `Script` execution is not wired into run verdicts yet; the variant
+/// records the contract for later engine work.
+#[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum GoalCheck {
+    /// A person confirms the criterion by hand.
+    #[default]
+    Manual,
+    /// The marker string is expected in the run result.
+    Marker { marker: String },
+    /// A check script confirms the criterion.
+    Script { path: String },
+}
+
+/// One verifiable fact confirming the goal was reached.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct GoalCriterion {
+    pub description: String,
+    #[serde(default)]
+    pub check: GoalCheck,
+}
+
+/// The playbook's goal in the owner's words plus verifiable criteria.
+/// Parsing is permissive; completeness is enforced by validator rule V41.
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct Goal {
+    pub statement: String,
+    #[serde(default)]
+    pub criteria: Vec<GoalCriterion>,
 }
 
 /// Class of a run effect (spec 8.5). Ord/Hash - so it can be put into a
@@ -1204,6 +1241,62 @@ edges: []
         assert!(yaml.contains("functions: read_only"));
         assert!(!yaml.contains("accounts"));
         assert!(!yaml.contains("max_calls"));
+    }
+
+    #[test]
+    fn goal_fields_round_trip() {
+        let yaml = r#"
+schema: 2
+id: demo
+name: Demo
+version: 1.0.0
+goal:
+  statement: the invoice is recorded and sent for approval
+  criteria:
+    - description: a row with the invoice amount appears in the sheet
+      check: { type: marker, marker: INVOICE_ROW_ADDED }
+    - description: the email is in Sent
+    - description: a script confirms the ledger balance
+      check: { type: script, path: scripts/ledger.sh }
+nodes: []
+edges: []
+"#;
+        let p = Playbook::from_yaml(yaml).unwrap();
+        let goal = p.goal.clone().unwrap();
+        assert_eq!(
+            goal.statement,
+            "the invoice is recorded and sent for approval"
+        );
+        assert_eq!(goal.criteria.len(), 3);
+        assert_eq!(
+            goal.criteria[0].check,
+            GoalCheck::Marker {
+                marker: "INVOICE_ROW_ADDED".into()
+            }
+        );
+        assert_eq!(goal.criteria[1].check, GoalCheck::Manual);
+        assert_eq!(
+            goal.criteria[2].check,
+            GoalCheck::Script {
+                path: "scripts/ledger.sh".into()
+            }
+        );
+
+        let back = serde_yaml_ng::to_string(&p).unwrap();
+        let again = Playbook::from_yaml(&back).unwrap();
+        assert_eq!(again.goal, p.goal);
+    }
+
+    #[test]
+    fn playbook_without_goal_serializes_without_goal_key() {
+        let yaml = "schema: 2\nid: demo\nname: Demo\nversion: 1.0.0\nnodes: []\nedges: []\n";
+        let p = Playbook::from_yaml(yaml).unwrap();
+        assert!(p.goal.is_none());
+        let back = serde_yaml_ng::to_string(&p).unwrap();
+        assert!(
+            !back.contains("goal"),
+            "goal-less playbook grew a goal key: {back}"
+        );
     }
 
     #[test]

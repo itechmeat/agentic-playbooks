@@ -63,6 +63,8 @@ mod schema_migrate_test;
 mod schema_test;
 #[path = "suite/validate_duration_test.rs"]
 mod validate_duration_test;
+#[path = "suite/validate_goal_test.rs"]
+mod validate_goal_test;
 #[path = "suite/validate_profiles_test.rs"]
 mod validate_profiles_test;
 #[path = "suite/validate_semantics_test.rs"]

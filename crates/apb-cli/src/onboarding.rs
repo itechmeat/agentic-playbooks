@@ -424,7 +424,12 @@ mod tests {
     #[test]
     fn playbook_block_carries_the_discovery_capture_and_decline_duties() {
         assert!(PLAYBOOK_BLOCK.starts_with(PLAYBOOKS.marker));
-        for tool in ["playbook_catalog", "playbook_capture", "suggestion_dismiss"] {
+        for tool in [
+            "playbook_catalog",
+            "playbook_capture",
+            "suggestion_dismiss",
+            "playbook_interview",
+        ] {
             assert!(
                 PLAYBOOK_BLOCK.contains(tool),
                 "playbook block lost the reference to {tool}"
@@ -439,6 +444,7 @@ mod tests {
             "kind soft",
             "kind hard",
             "global scope only when",
+            "offer a short interview",
         ] {
             assert!(
                 PLAYBOOK_BLOCK.contains(phrase),

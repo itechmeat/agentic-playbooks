@@ -17,8 +17,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 use crate::profile_store::PlaybookOrigin;
 use crate::schema::{
-    CacheMode, CacheSpec, EdgeCondition, FailurePolicy, FunctionsAllow, Isolation, NodeKind,
-    Playbook, SuccessCheck,
+    CacheMode, CacheSpec, EdgeCondition, FailurePolicy, FunctionsAllow, GoalCheck, Isolation,
+    NodeKind, Playbook, SuccessCheck,
 };
 
 use connectors::check_connectors;
@@ -27,8 +27,8 @@ use graph::{
     check_joins, check_reachability, check_start_finish, check_unique_ids,
 };
 use nodes::{
-    check_cache, check_expected_duration, check_finish, check_interactive, check_isolation,
-    check_playbook_ref, check_scripts, check_success_check, check_trigger,
+    check_cache, check_expected_duration, check_finish, check_goal, check_interactive,
+    check_isolation, check_playbook_ref, check_scripts, check_success_check, check_trigger,
 };
 use templates::{check_cross_branch_reads, check_refs, check_templates};
 
@@ -138,6 +138,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_refs(playbook, ctx, &mut r); // V14, V15
         check_isolation(playbook, &mut r); // V16
         check_trigger(playbook, &mut r); // V17
+        check_goal(playbook, &mut r); // V41
     }
     r
 }

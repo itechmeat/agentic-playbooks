@@ -107,6 +107,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "playbook_catalog",
         "projects_list",
         "playbook_howto",
+        "playbook_interview",
         "run_progress_report",
         "profile_list",
         "connectors_list",
@@ -161,6 +162,14 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         expected.len(),
         "unexpected extra tools registered: {names:?}"
     );
+}
+
+#[test]
+fn playbook_interview_returns_the_embedded_guide() {
+    let value = crate::tools::playbook_interview().unwrap();
+    let guide = value["guide"].as_str().unwrap();
+    assert!(guide.contains("# Playbook interview"));
+    assert!(guide.contains("### 4. Goal and criteria (mandatory)"));
 }
 
 /// Tools carry safety annotations: read-only on reads, destructive on

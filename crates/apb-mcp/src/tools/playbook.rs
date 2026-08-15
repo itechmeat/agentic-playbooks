@@ -85,6 +85,12 @@ pub fn playbook_howto() -> Result<Value, ToolError> {
     Ok(json!({ "howto": include_str!("../../../../docs/HOWTO-authoring.md") }))
 }
 
+/// Tier 2 (spec 2026-08-15): the guided-interview guide. Pulled only when
+/// the user wants a playbook built from a process they describe.
+pub fn playbook_interview() -> Result<Value, ToolError> {
+    Ok(json!({ "guide": include_str!("../../../../docs/HOWTO-interview.md") }))
+}
+
 /// Detail level for [`playbook_get`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailMode {
@@ -209,7 +215,7 @@ fn playbook_summary(id: &str, loaded: &LoadedPlaybook) -> Value {
         None => json!(null),
     };
 
-    json!({
+    let mut summary = json!({
         "detail": "summary",
         "id": id,
         "name": pb.name,
@@ -221,7 +227,14 @@ fn playbook_summary(id: &str, loaded: &LoadedPlaybook) -> Value {
         "nodes": nodes,
         "edges": edges,
         "supervisor": supervisor,
-    })
+    });
+    // The goal is the contract of the run (spec 2026-08-15): an adopting
+    // agent must see it here, not only in `detail: "full"` or the run
+    // manifest. Additive, present only when the playbook declares one.
+    if let Some(goal) = &pb.goal {
+        summary["goal"] = serde_json::to_value(goal).unwrap_or(Value::Null);
+    }
+    summary
 }
 
 /// The profile a node declares on itself (not resolved against `defaults`):

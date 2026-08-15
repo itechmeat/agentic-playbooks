@@ -245,6 +245,52 @@ fn catalog_returns_suppressed_suggestions_and_moves_its_revision() {
 }
 
 #[test]
+fn catalog_entry_carries_goal_statement_when_present() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    setup(cfg.path());
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+
+    let vdir = proj.path().join(".apb/playbooks/withgoal/1.0.0");
+    std::fs::create_dir_all(&vdir).unwrap();
+    let yaml = "schema: 2\nid: withgoal\nname: withgoal\nversion: 1.0.0\ngoal:\n  statement: the report is written and accurate\n  criteria:\n    - description: report exists\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n";
+    std::fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    std::fs::write(proj.path().join(".apb/playbooks/withgoal/current"), "1.0.0").unwrap();
+
+    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let entries = cat["entries"].as_array().unwrap();
+    let entry = entries
+        .iter()
+        .find(|e| e["ref"]["id"] == "withgoal")
+        .unwrap();
+    assert_eq!(
+        entry["goal_statement"].as_str(),
+        Some("the report is written and accurate")
+    );
+}
+
+#[test]
+fn catalog_entry_omits_goal_statement_when_absent() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    setup(cfg.path());
+    let _g = EnvGuard;
+    init_project(proj.path()).unwrap();
+    seed(&proj.path().join(".apb"), "nogoal");
+
+    let cat = playbook_catalog(proj.path(), None, None, None).unwrap();
+    let entries = cat["entries"].as_array().unwrap();
+    let entry = entries.iter().find(|e| e["ref"]["id"] == "nogoal").unwrap();
+    assert!(
+        entry.get("goal_statement").is_none(),
+        "goal-less playbook must omit goal_statement: {entry}"
+    );
+}
+
+#[test]
 fn corrupt_suggestion_store_surfaces_in_catalog_diagnostics_not_dropped() {
     let _l = lock();
     let cfg = tempfile::tempdir().unwrap();

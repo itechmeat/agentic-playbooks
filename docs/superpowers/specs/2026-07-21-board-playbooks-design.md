@@ -235,7 +235,7 @@ trigger:
   - the task is already refined and labeled with brainstorming
   - the request is to implement code changes, not to refine a task
   examples:
-  - Проведи брейншторминг по задаче с доски
+  - Run a brainstorming session for a task from the board
   - Brainstorm issue 38 from the board
   - Prepare the windows adaptation task for implementation
 requires:
@@ -527,7 +527,7 @@ trigger:
   - a quick one-off question or trivial edit without process
   - refining a task is the goal, with no implementation
   examples:
-  - Возьми задачу с доски в работу
+  - Take a task from the board into work
   - Implement issue 35 from the board
   - Start implementation of the connectors task
 requires:

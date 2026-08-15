@@ -43,6 +43,77 @@ pub(crate) fn check_trigger(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
+/// True if `path` cannot escape the version directory it is resolved
+/// against: not an absolute path, and no `..` segment.
+fn path_confined(path: &str) -> bool {
+    !path.starts_with('/') && !path.split('/').any(|seg| seg == "..")
+}
+
+/// Shared safety rule for a script-based check path: an agent_task's
+/// `success_check` script (V12) and a goal criterion's `Script` check (V41)
+/// both point at a script that runs on the user's behalf, so both require the
+/// same thing - the path must stay inside the version directory
+/// ([`path_confined`]) and must live under `scripts/`. A plain script node's
+/// own path is confined-only (see [`check_scripts`]); it is not required to
+/// sit under `scripts/`.
+pub(crate) fn script_check_path_ok(path: &str) -> bool {
+    path_confined(path) && path.starts_with("scripts/")
+}
+
+/// V41: a goal, when present, must be complete: a non-empty statement, at
+/// least one criterion, and a description on every criterion. An empty goal
+/// is worse than none, because agents and supervisors treat the goal as the
+/// contract of the run.
+///
+/// A criterion's `check` is also guarded here, mirroring the twin rules for
+/// `success_check` (V33 for an empty marker, V12 for an unsafe script path):
+/// a `Marker` check with an empty (or whitespace-only) marker would match
+/// every non-empty output, and a `Script` check whose path fails
+/// [`script_check_path_ok`] is unsafe the same way an agent_task's
+/// success_check path would be. Both are reported under V41 (no new code is
+/// minted) because they are still goal-completeness issues.
+pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport) {
+    let Some(g) = &playbook.goal else { return };
+    if g.statement.trim().is_empty() {
+        r.error("V41", None, "goal.statement is empty".to_string());
+    }
+    if g.criteria.is_empty() {
+        r.error(
+            "V41",
+            None,
+            "goal.criteria is empty, at least one criterion is required".to_string(),
+        );
+    }
+    for (i, c) in g.criteria.iter().enumerate() {
+        if c.description.trim().is_empty() {
+            r.error(
+                "V41",
+                None,
+                format!("goal.criteria[{i}].description is empty"),
+            );
+        }
+        match &c.check {
+            GoalCheck::Marker { marker } if marker.trim().is_empty() => {
+                r.error(
+                    "V41",
+                    None,
+                    format!("goal.criteria[{i}].check marker must not be empty"),
+                );
+            }
+            GoalCheck::Script { path } if !script_check_path_ok(path) => {
+                r.error(
+                    "V41",
+                    None,
+                    format!(
+                        "goal.criteria[{i}].check path `{path}` must live under `scripts/` inside the version directory"
+                    ),
+                );
+            }
+            _ => {}
+        }
+    }
+}
+
 /// V16: isolation is declared. The engine materializes skills as copies into
 /// an isolated per-node workdir (skills_mode: materialized), but does not yet
 /// enforce full sandboxing (project tree, process) (spec 8.3). A warning so the
@@ -261,11 +332,9 @@ pub(crate) fn check_success_check(playbook: &Playbook, r: &mut ValidationReport)
 }
 
 pub(crate) fn check_scripts(playbook: &Playbook, r: &mut ValidationReport) {
-    let escapes =
-        |script: &str| script.starts_with('/') || script.split('/').any(|seg| seg == "..");
     for n in &playbook.nodes {
         if let NodeKind::Script { script, .. } = &n.kind
-            && escapes(script)
+            && !path_confined(script)
         {
             r.error(
                 "V12",
@@ -274,7 +343,7 @@ pub(crate) fn check_scripts(playbook: &Playbook, r: &mut ValidationReport) {
             );
         }
         if let Some(script) = n.success_check.as_ref().and_then(SuccessCheck::script_path)
-            && (escapes(script) || !script.starts_with("scripts/"))
+            && !script_check_path_ok(script)
         {
             r.error("V12", Some(&n.id),
                 format!("success_check path `{script}` must live under `scripts/` inside the version directory"));
