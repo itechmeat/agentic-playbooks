@@ -159,9 +159,9 @@ a call without executing it, or the dashboard healthcheck to probe an account.
 
 ## Official connectors
 
-Eleven official connectors ship inside the `apb` binary and install with
+Twelve official connectors ship inside the `apb` binary and install with
 `apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`,
-`asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`, `slack`.
+`asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`, `slack`, `atrip`.
 Installing
 from the binary records trust for the
 connector's tree digest in the same action, since the bytes are already
@@ -352,6 +352,33 @@ list and history functions page with a body-carried cursor (pass
 `reply_in_thread` are separate functions so a grant can allow thread
 replies without allowing new top-level posts. Healthcheck:
 `auth_test` (a POST by Slack API convention, mutates nothing).
+
+### atrip
+
+Account fields: `client_id`, `client_secret` (secret), `base_url`, and
+`search_base_url` (all required). The four fields split search traffic
+from everything else: `search` goes to `search_base_url`, every other
+function goes to `base_url`. Sandbox uses
+`https://sandbox.atriptech.com` for both; production issues two separate
+per-tenant URLs (and a separate credential pair) inside the ATRIP portal
+under My Profile then Company Information, only after UAT approval and
+once a customer manager switches the account to LIVE status - there is no
+shared production hostname to hardcode. Most functions signal outcome
+through a `status` field inside a 200-OK JSON body rather than through
+HTTP status; several calls (`verify`, `pay`, `void`, `refund`) use their
+own status range or field rather than a plain 0/nonzero pair, so each
+function's description states what success means for that call. Eight
+functions are effectful: `order` (creates a booking), `pay` (charges
+money), `void` (cancels a booking and starts a refund), `refund` (moves
+money back to the customer), `stop_ticket` (irreversibly halts ticket
+issuance), `regenerate_order` and `pnr_claim` (each creates a new order),
+and `post_booking_ancillary_order` (charges money for a baggage add-on).
+`pay` carries no documented idempotency key, so it must never be retried
+blindly: back off and check `query_order_details` before trying again.
+The `healthcheck` is `query_void_orders`, a no-required-arguments read-only
+status poll; a business-level error in its body still proves reachability
+and credentials, and the fuller verification is a real read-only call
+(for example `balance`).
 
 ### Demo playbooks
 
