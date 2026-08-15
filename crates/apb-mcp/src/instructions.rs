@@ -8,21 +8,23 @@
 pub const TIER0_MAX_BYTES: usize = 1950;
 
 pub const TIER0: &str = "\
-Discovery: call playbook_catalog once per task that names a doable action, before acting. Skip chit-chat. It returns trigger, effects, trust, scope and suppressed_suggestions.
+Discovery: call playbook_catalog once per task that names a doable action, before acting. Skip chit-chat. It returns trigger, effects, trust and suppressed_suggestions.
 
-Offering to save: if you just completed a multi-step repeatable action, or the user asks for one recurring by nature, and no playbook matched, you MUST offer once to save it with playbook_capture: one short question offering project or global scope, recommended first (project if project-specific). First compare the action with suppressed_suggestions by synopsis meaning, not slug (empty synopsis: by slug); a covering record means no offer. One offer per session.
+Offering to save: if you just completed a multi-step repeatable action, or the user asks for one recurring by nature, and no playbook matched, you MUST offer once to save it with playbook_capture: one short question offering project or global scope, project first if project-specific. First compare it with suppressed_suggestions by synopsis meaning, not slug (empty synopsis: by slug); a covering record means no offer. One offer per session.
 
-Declines: when the user declines without saying never, call suggestion_dismiss with kind soft, project scope and a one-sentence synopsis; the server escalates the silence. Reserve kind hard for an explicit never-again, global scope for everywhere-wording. Never ask about scope.
+Declines: when the user declines without saying never, call suggestion_dismiss with kind soft, project scope and a one-sentence synopsis. Reserve kind hard for an explicit never-again, global scope for everywhere-wording. Never ask about scope.
 
-Using a match: on a confident match to an active, trusted playbook here or global, name it in one line and run it. One short question if ambiguous; confirm first for another project.
+Interview: when the user describes a process to automate, offer a short interview and pull playbook_interview.
+
+Using a match: on a confident match to an active, trusted playbook, name it in one line and run it. One short question if ambiguous; confirm first for another project.
 
 Running policy: the server refuses drafts and untrusted playbooks until trial or acknowledgement. Effects beyond the request (network, secrets, deploys, irreversible) need confirmation.
 
-Human gates: run_status, supervisor_wait_event and supervisor_run_inspect return pending_review at a human_review gate. The moment you see it you MUST relay its instruction in the user's language with the options, then record it with review_decide. Frozen until then; repeat while pending.
+Human gates: run_status, supervisor_wait_event and supervisor_run_inspect return pending_review at a human_review gate. Relay its instruction in the user's language with the options, then record it with review_decide. Frozen until then; repeat while pending.
 
 Profiles: a node binds its executor only through a profile (agent, model, fallbacks, role prompt, skills). Call profile_list to reuse one, profile_howto for format.
 
-Lifecycle: you may update, clone, version and delete playbooks; pull playbook_howto when authoring. Call projects_list for another workspace. Machine fields are English; speak the user's language.";
+Lifecycle: update, clone, version and delete playbooks; pull playbook_howto when authoring. Call projects_list for another workspace. Machine fields are English; speak the user's language.";
 
 #[cfg(test)]
 mod tests {
@@ -58,6 +60,8 @@ mod tests {
             "review_decide",
             "profile_list",
             "projects_list",
+            "playbook_interview",
+            "offer a short interview",
         ] {
             assert!(TIER0.contains(phrase), "TIER0 lost the phrase `{phrase}`");
         }
