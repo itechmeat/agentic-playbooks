@@ -15,7 +15,7 @@ A playbook is a YAML document with these top-level fields:
 - `version` (string, `X.Y.Z`)
 - `params` (list): each `{ name, type, label?, options?, default? }`
 - `defaults` (profile, retries, timeout, on_failure)
-- `trigger`, `requires`, `effects` (see below)
+- `trigger`, `requires`, `effects`, `goal` (see below)
 - `nodes` (list) and `edges` (list)
 
 ## Visual editor and graph check
@@ -889,6 +889,27 @@ the server infers from node types, never narrow it. Values: `fs_read`,
 `fs_write`, `network`, `external`, `secrets`, `irreversible`. Declare
 `irreversible` for anything that cannot be rolled back (deploys, publishes,
 external notifications) so the policy layer requires explicit confirmation.
+
+## goal (target and criteria)
+
+Optional. The goal this playbook exists to reach, in the owner's words, plus
+verifiable criteria. When present, the validator (V41) requires a non-empty
+statement, at least one criterion, and a description on every criterion.
+
+- `statement` (string): the goal in plain words, e.g. "the invoice is
+  recorded in the tracking sheet and sent for approval".
+- `criteria` (list): each `{ description, check? }`.
+  - `check: { kind: manual }` (default when omitted): a person confirms the
+    criterion.
+  - `check: { kind: marker, marker: <string> }`: the marker string is
+    expected in the run result.
+  - `check: { kind: script, path: <relative path> }`: a check script
+    confirms the criterion. Script execution is not wired into run verdicts
+    yet; the field records the contract.
+
+The goal is the contract of the run: agents and supervisors may adapt the
+process, but must never weaken or rewrite the criteria; only a person may
+change them.
 
 ## Secrets
 

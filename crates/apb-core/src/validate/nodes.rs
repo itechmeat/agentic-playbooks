@@ -43,6 +43,33 @@ pub(crate) fn check_trigger(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
+/// V41: a goal, when present, must be complete: a non-empty statement, at
+/// least one criterion, and a description on every criterion. An empty goal
+/// is worse than none, because agents and supervisors treat the goal as the
+/// contract of the run.
+pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport) {
+    let Some(g) = &playbook.goal else { return };
+    if g.statement.trim().is_empty() {
+        r.error("V41", None, "goal.statement is empty".to_string());
+    }
+    if g.criteria.is_empty() {
+        r.error(
+            "V41",
+            None,
+            "goal.criteria is empty, at least one criterion is required".to_string(),
+        );
+    }
+    for (i, c) in g.criteria.iter().enumerate() {
+        if c.description.trim().is_empty() {
+            r.error(
+                "V41",
+                None,
+                format!("goal.criteria[{i}].description is empty"),
+            );
+        }
+    }
+}
+
 /// V16: isolation is declared. The engine materializes skills as copies into
 /// an isolated per-node workdir (skills_mode: materialized), but does not yet
 /// enforce full sandboxing (project tree, process) (spec 8.3). A warning so the
