@@ -591,9 +591,10 @@ fn probe_reaps_a_daemonized_descendant_of_the_agent() {
 /// grok, cursor and qoder are built-in probes (spec 2026-07-21, and the
 /// 2026-08-15 qoder addition). The binary names are verified against the real
 /// CLIs: Grok Build installs `grok`, Cursor installs `cursor-agent`, Qoder
-/// installs `qoder` (plus a `qodercli` alias). All three also ship or overlap
-/// with a generic `agent` alias, so `agent` is deliberately NOT probed - it
-/// cannot identify any of them unambiguously.
+/// installs `qoder` (plus a `qodercli` alias, not `agent`). Grok and Cursor
+/// both also ship or overlap with a generic `agent` alias, so `agent` is
+/// deliberately NOT probed for either - it cannot identify either agent
+/// unambiguously.
 #[test]
 fn builtin_probes_include_grok_and_cursor() {
     let probes = detect::builtin_probes();

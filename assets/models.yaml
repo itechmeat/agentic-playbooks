@@ -309,6 +309,7 @@ models:
     source_url: https://docs.x.ai/docs/models
     checked_at: "2026-07-21"
     price_basis: list
+  # --- DeepSeek (source: api-docs.deepseek.com/quick_start/pricing) ---
   # DeepSeek switches to peak/off-peak billing on 2026-08-16 (off-peak flash
   # 0.22/0.66, pro 0.66/1.98; peak doubles both). The flat rows below are the
   # pre-switch flat prices and need a follow-up refresh once the new scheme
@@ -331,6 +332,7 @@ models:
     source_url: https://api-docs.deepseek.com/quick_start/pricing
     checked_at: "2026-07-13"
     price_basis: list
+  # --- Alibaba / Qwen (source: alibabacloud.com/help/en/model-studio) ---
   # Deliberately not added: qwen3.7-max/plus have no distinct published
   # metered pricing separate from qwen3.8-max as of 2026-08-15. The
   # Singapore region for qwen3.8-max is priced at 2.0/6.0. This new-generation
