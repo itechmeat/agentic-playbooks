@@ -31,6 +31,12 @@ pub struct CatalogEntry {
     pub effective_effects: Vec<Effect>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requires: Option<Requires>,
+    /// The goal statement, when the playbook declares one (spec
+    /// 2026-08-15): the contract of the run, in the owner's words. The
+    /// criteria themselves are not carried here (tier 1 stays compact); an
+    /// agent that needs them reads `playbook_summary`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub goal_statement: Option<String>,
     /// A shadowed entry (spec 5.1): visible in the catalog, but lost the
     /// id-collision resolution.
     pub shadowed: bool,
@@ -81,6 +87,7 @@ fn collect_scope(
                     trigger: loaded.playbook.trigger.clone(),
                     effective_effects: effects,
                     requires: loaded.playbook.requires.clone(),
+                    goal_statement: loaded.playbook.goal.as_ref().map(|g| g.statement.clone()),
                     shadowed: false,
                     ambiguous: false,
                     digest,

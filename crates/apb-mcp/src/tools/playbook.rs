@@ -215,7 +215,7 @@ fn playbook_summary(id: &str, loaded: &LoadedPlaybook) -> Value {
         None => json!(null),
     };
 
-    json!({
+    let mut summary = json!({
         "detail": "summary",
         "id": id,
         "name": pb.name,
@@ -227,7 +227,14 @@ fn playbook_summary(id: &str, loaded: &LoadedPlaybook) -> Value {
         "nodes": nodes,
         "edges": edges,
         "supervisor": supervisor,
-    })
+    });
+    // The goal is the contract of the run (spec 2026-08-15): an adopting
+    // agent must see it here, not only in `detail: "full"` or the run
+    // manifest. Additive, present only when the playbook declares one.
+    if let Some(goal) = &pb.goal {
+        summary["goal"] = serde_json::to_value(goal).unwrap_or(Value::Null);
+    }
+    summary
 }
 
 /// The profile a node declares on itself (not resolved against `defaults`):

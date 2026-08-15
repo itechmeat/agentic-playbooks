@@ -42,6 +42,42 @@ fn validate_reports_ok() {
 }
 
 #[test]
+fn get_summary_includes_goal_when_present() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb_core::registry::init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/implement-task/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    let yaml = format!(
+        "goal:\n  statement: the task is implemented and verified\n  criteria:\n    - description: tests pass\n      check: {{ type: marker, marker: DONE }}\n{VALID}"
+    );
+    fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    fs::write(root.join(".apb/playbooks/implement-task/current"), "1.0.0").unwrap();
+    fs::create_dir_all(root.join(".apb/profiles/architect")).unwrap();
+
+    let v = playbook_get(root, "implement-task", None, DetailMode::Summary).unwrap();
+    assert_eq!(
+        v["goal"]["statement"].as_str(),
+        Some("the task is implemented and verified")
+    );
+    let criteria = v["goal"]["criteria"].as_array().unwrap();
+    assert_eq!(criteria[0]["description"].as_str(), Some("tests pass"));
+    assert_eq!(criteria[0]["check"]["type"].as_str(), Some("marker"));
+    assert_eq!(criteria[0]["check"]["marker"].as_str(), Some("DONE"));
+}
+
+#[test]
+fn get_summary_omits_goal_key_when_absent() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let v = playbook_get(dir.path(), "implement-task", None, DetailMode::Summary).unwrap();
+    assert!(
+        v.get("goal").is_none(),
+        "goal-less playbook must omit the goal key from the summary: {v}"
+    );
+}
+
+#[test]
 fn get_unknown_is_error() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());

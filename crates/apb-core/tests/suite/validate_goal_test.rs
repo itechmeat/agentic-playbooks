@@ -89,3 +89,19 @@ fn v41_script_check_path_under_scripts_dir_passes() {
     );
     assert!(!error_codes(&yaml).contains(&"V41"));
 }
+
+#[test]
+fn v41_marker_check_non_empty_passes() {
+    let yaml = with_goal(
+        "goal:\n  statement: the invoice is recorded\n  criteria:\n    - description: a row appears\n      check: { type: marker, marker: NON_EMPTY }\n",
+    );
+    assert!(!error_codes(&yaml).contains(&"V41"));
+}
+
+#[test]
+fn v41_script_check_absolute_path_fails() {
+    let yaml = with_goal(
+        "goal:\n  statement: the invoice is recorded\n  criteria:\n    - description: a row appears\n      check: { type: script, path: /etc/passwd }\n",
+    );
+    assert!(error_codes(&yaml).contains(&"V41"));
+}
