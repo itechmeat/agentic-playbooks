@@ -11,7 +11,7 @@ params: []
 defaults:
   profile:
     name: branch-reviewer
-    scope: global
+    scope: project
   max_retries: null
   timeout_seconds: null
   on_failure: failed
@@ -65,8 +65,8 @@ nodes:
     implementation code, commit, push, publish, or send files externally.
 
     Use the Superpowers review skill for the review workflow. Never use
-    CodeRabbit. If the requested Superpowers skill is not available in the host,
-    record that limitation in the report and continue with a manual
+    CodeRabbit. Attempt to load the Superpowers review skill first; only if
+    loading hard-fails, record the failure and continue with a manual
     evidence-based review.
 
     Start with CodeGraph. Use codegraph_context to understand the project and
