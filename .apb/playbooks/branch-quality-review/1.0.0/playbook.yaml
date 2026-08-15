@@ -1,0 +1,152 @@
+schema: 2
+id: branch-quality-review
+name: Branch quality review
+description: |
+  Reviews the current branch and working tree against main, checks correctness,
+  architecture, SOLID, KISS, DRY, misleading fallbacks and hardcoded values,
+  executes the repository quality gates, and writes prioritized findings to a
+  Markdown review report without changing implementation code.
+version: 1.0.0
+params: []
+defaults:
+  profile:
+    name: reviewer
+    scope: project
+  max_retries: null
+  timeout_seconds: null
+  on_failure: failed
+supervisor: null
+trigger:
+  when:
+  - review the current branch against main
+  - perform a full code review and write a Markdown report
+  - check a branch for SOLID KISS DRY and correctness issues
+  avoid_when:
+  - the request is only to explain existing code without reviewing a diff
+  - the user asks to implement fixes rather than review them
+  examples:
+  - Review this branch against main and save the findings to a report
+  - Check the current diff for correctness and design problems
+  - Run a senior full-stack review of the working tree
+requires:
+  files:
+  - AGENTS.md
+  - Cargo.toml
+  commands:
+  - git
+  - cargo
+  - code-ranker
+  - bun
+effects:
+- fs_read
+- fs_write
+nodes:
+- id: start
+  title: null
+  expected_duration: null
+  inputs: null
+  outputs: null
+  cache: null
+  type: start
+- id: review
+  title: Review the branch and write the report
+  expected_duration: 30m
+  inputs: null
+  outputs: null
+  cache: null
+  type: agent_task
+  prompt: |
+    Perform a senior full-stack review of the current checkout against main.
+
+    Additional run instruction:
+    {{run.instruction}}
+
+    Read and follow every applicable AGENTS.md before reviewing. Do not modify
+    implementation code, commit, push, publish, or send files externally.
+
+    Use the Superpowers review skill for the review workflow. Never use
+    CodeRabbit. If the requested Superpowers skill is not available in the host,
+    record that limitation in the report and continue with a manual
+    evidence-based review.
+
+    Start with CodeGraph. Use codegraph_context to understand the project and
+    the changed feature, then one focused codegraph_explore call for the related
+    symbols. Use CodeGraph search, callers, callees, or impact for structural
+    questions. Use native text search only for literal text or a file already
+    identified by CodeGraph.
+
+    Resolve the real review scope before judging it. Compare committed changes
+    with main. If HEAD is main or the worktree is dirty, include tracked and
+    untracked working-tree changes relative to main and state that explicitly.
+    Preserve all user changes.
+
+    Review behavior and invariants before style. Check correctness, security,
+    data loss, concurrency, error propagation, backward compatibility, API and
+    UI contracts, tests, and documentation. Apply SOLID, KISS and DRY. Reject
+    misleading best-effort paths, silent fallbacks, duplicated sources of truth,
+    unexplained hardcoded values, and success responses for operations that did
+    not persist or complete. Prefer named constants and existing local or global
+    configuration where appropriate.
+
+    Warm the Rust cache with cargo metadata, then run code-ranker check and read
+    the documentation for every reported rule before judging or proposing a
+    fix. Run cargo fmt check, clippy with warnings denied, the relevant Rust
+    tests, and the frontend test, check and build gates when web files changed.
+    Do not claim a gate passed unless it completed successfully. Record hangs,
+    timeouts, skips and external dependency warnings precisely.
+
+    Write the final review to docs/reviews/_date_time_review.md unless the run
+    instruction explicitly provides another path. The report must contain the
+    scope and baseline, a merge recommendation, prioritized findings with file
+    and line evidence, concrete impact and remediation, a SOLID/KISS/DRY
+    assessment, and the exact verification results. Findings come first and
+    summaries stay concise. Follow repository prose conventions.
+  profile: null
+  max_retries: null
+  timeout_seconds: null
+  workdir: null
+  isolation: null
+  connectors: []
+  interactive: false
+- id: done
+  title: null
+  expected_duration: null
+  inputs: null
+  outputs: null
+  cache: null
+  type: finish
+  outcome: success
+  prompt: null
+  profile: null
+- id: failed
+  title: null
+  expected_duration: null
+  inputs: null
+  outputs: null
+  cache: null
+  type: finish
+  outcome: failure
+  prompt: null
+  profile: null
+edges:
+- from: start
+  to: review
+  condition: null
+  fallback: false
+  join: null
+- from: review
+  to: done
+  condition:
+    type: node_status
+    node: review
+    equals: success
+  fallback: false
+  join: null
+- from: review
+  to: failed
+  condition:
+    type: node_status
+    node: review
+    equals: failure
+  fallback: false
+  join: null

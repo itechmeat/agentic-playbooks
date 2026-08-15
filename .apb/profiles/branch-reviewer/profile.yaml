@@ -1,0 +1,8 @@
+name: branch-reviewer
+description: Dedicated English-only branch review profile for the branch-quality-review playbook, with no external skill dependency.
+executor:
+  agent: claude
+  model: claude-opus-4-8
+  fallbacks: []
+soul: any
+skills: []
