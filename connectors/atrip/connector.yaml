@@ -1,0 +1,1037 @@
+name: atrip
+version: 0.1.0
+healthcheck: query_void_orders
+# healthcheck: the repo-wide official-connectors gate
+# (crates/apb-cli/tests/suite/official_connectors_gate.rs) requires every
+# official connector to declare one; it only checks that the named function
+# is read_only or mock, it never invokes it live. None of the 28 documented
+# operations is confirmed to succeed against an arbitrary tenant account
+# with no arguments, so query_void_orders was picked as the least-committal
+# candidate: it is read_only, its args_schema requires nothing, and it is a
+# pure status poll (no booking/money side effect even in principle). A live
+# call against a tenant with no void records may return a business-level
+# "not found" style error rather than a clean success; that is a known,
+# documented limitation of this choice, not a claim that this call always
+# succeeds.
+#
+# Note on argument naming: the connector template engine requires every
+# `{{args.<name>}}` placeholder name to be snake_case ([a-z0-9_]*), but the
+# vendor's own JSON field names are camelCase (tripType, orderNo, and so on).
+# Every function below therefore takes snake_case call arguments and maps
+# each one to its literal vendor-camelCase JSON body key; the wire body sent
+# to AtripTech uses the vendor's own field names unchanged. The four loose
+# passthrough functions (void_quotation, query_void_orders, refund_quotation,
+# query_refund_orders) are the exception: their body is the whole `{{args}}`
+# value verbatim, so callers pass raw vendor camelCase keys directly for
+# those four.
+auth:
+  kind: header
+  header: x-atlas-client-secret
+  value_template: "{{secret.client_secret}}"
+account_fields:
+  - name: client_id
+    required: true
+  - name: client_secret
+    required: true
+    secret: true
+  - name: base_url
+    required: true
+  - name: search_base_url
+    required: true
+functions:
+  - name: search
+    description: >-
+      Search flights and return cached routing options (routingIdentifier,
+      valid about 6 hours) for the fulfilment flow. Read-only; success is
+      status 0 in the response body, not HTTP status.
+    read_only: true
+    method: POST
+    url: "{{account.search_base_url}}/search.do"
+    timeout_sec: 60
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      tripType: "{{args.trip_type}}"
+      adultNum: "{{args.adult_num}}"
+      childNum: "{{args.child_num}}"
+      infantNum: "{{args.infant_num}}"
+      fromCity: "{{args.from_city}}"
+      toCity: "{{args.to_city}}"
+      fromAirport: "{{args.from_airport}}"
+      toAirport: "{{args.to_airport}}"
+      fromDate: "{{args.from_date}}"
+      retDate: "{{args.ret_date}}"
+      airlines: "{{args.airlines}}"
+      fromFlightNumbers: "{{args.from_flight_numbers}}"
+      retFlightNumbers: "{{args.ret_flight_numbers}}"
+      includeMultipleFareFamily: "{{args.include_multiple_fare_family}}"
+      currency: "{{args.currency}}"
+      requestSource: "{{args.request_source}}"
+      residentCode: "{{args.resident_code}}"
+    args_schema:
+      type: object
+      properties:
+        trip_type: { type: string, enum: ["1", "2"], description: "1 = one-way, 2 = round-trip (vendor field tripType)" }
+        adult_num: { type: integer, minimum: 1, maximum: 9, description: "vendor field adultNum" }
+        child_num: { type: integer, minimum: 0, maximum: 8, description: "vendor field childNum" }
+        infant_num: { type: integer, minimum: 0, maximum: 9, description: "vendor field infantNum; must not exceed adult_num" }
+        from_city: { type: string, description: "IATA city code (vendor field fromCity)" }
+        to_city: { type: string, description: "IATA city code (vendor field toCity)" }
+        from_airport: { type: string, description: "optional IATA airport code (vendor field fromAirport)" }
+        to_airport: { type: string, description: "optional IATA airport code (vendor field toAirport)" }
+        from_date: { type: string, pattern: "^[0-9]{8}$", description: "YYYYMMDD (vendor field fromDate)" }
+        ret_date: { type: string, pattern: "^[0-9]{8}$", description: "YYYYMMDD, required when trip_type is round-trip (vendor field retDate)" }
+        airlines: { type: array, items: { type: string }, description: "optional airline-code filter" }
+        from_flight_numbers: { type: array, items: { type: string }, description: "vendor field fromFlightNumbers" }
+        ret_flight_numbers: { type: array, items: { type: string }, description: "vendor field retFlightNumbers" }
+        include_multiple_fare_family: { type: boolean, default: false, description: "vendor field includeMultipleFareFamily" }
+        currency: { type: string }
+        request_source: { type: string, description: "vendor field requestSource" }
+        resident_code: { type: string, description: "vendor field residentCode" }
+      required: [trip_type, adult_num, from_city, to_city, from_date]
+      if:
+        properties: { trip_type: { const: "2" } }
+        required: [trip_type]
+      then:
+        required: [ret_date]
+    examples:
+      - args: { trip_type: "1", adult_num: 1, from_city: "JFK", to_city: "LAX", from_date: "20260901" }
+        note: "one-way search; ret_date is only required when trip_type is 2 (round-trip). Default search QPS is 10; over-limit returns HTTP 429 with retryAfter, and business status 110 means too many concurrent requests."
+    response_pick:
+      - status
+      - msg
+      - routings.routingIdentifier
+      - routings.supportPaymentMethods
+      - routings.transactionFee
+      - routings.transactionFeeMode
+      - routings.refreshTime
+      - routings.expireTime
+
+  - name: verify
+    description: >-
+      Re-price and re-validate a routing before booking, returning a
+      sessionId (valid 2 hours) consumed by order. Read-only; status carries
+      several non-fatal confirm-and-proceed codes (200-222, 299), not a
+      uniform success/fail pair.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/verify.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      routingIdentifier: "{{args.routing_identifier}}"
+      maxResponseTime: "{{args.max_response_time}}"
+      requestSource: "{{args.request_source}}"
+      outboundSegments: "{{args.outbound_segments}}"
+      inboundSegments: "{{args.inbound_segments}}"
+    args_schema:
+      type: object
+      properties:
+        routing_identifier: { type: string, description: "from search, valid about 6 hours (vendor field routingIdentifier)" }
+        max_response_time: { type: integer, default: 15000, description: "milliseconds (vendor field maxResponseTime)" }
+        request_source: { type: string, description: "vendor field requestSource" }
+        outbound_segments: { type: array, items: { type: object }, description: "optional overrides (vendor field outboundSegments)" }
+        inbound_segments: { type: array, items: { type: object }, description: "optional overrides (vendor field inboundSegments)" }
+      required: [routing_identifier]
+    examples:
+      - args: { routing_identifier: "rid-abc123" }
+        note: "status is a multi-value confirm-and-proceed code, not a plain 0/nonzero pair; read the vendor error table before treating any non-zero value as fatal."
+    response_pick: [status, sessionId, maxSeats, priceChange]
+
+  - name: get_offers
+    description: >-
+      Look up a known itinerary directly (bypassing search/verify), returning
+      an offerID and offerToken (valid about 6 hours). Read-only; success is
+      status 0 in the response body (116 = airline error, 112 = timeout,
+      9999 = system error).
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/getOffers.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      adults: "{{args.adults}}"
+      children: "{{args.children}}"
+      infants: "{{args.infants}}"
+      outboundSegments: "{{args.outbound_segments}}"
+      inboundSegments: "{{args.inbound_segments}}"
+      currency: "{{args.currency}}"
+      residentCode: "{{args.resident_code}}"
+    args_schema:
+      type: object
+      properties:
+        adults: { type: integer, minimum: 1, maximum: 9 }
+        children: { type: integer, minimum: 0, maximum: 9 }
+        infants: { type: integer, minimum: 0, maximum: 9 }
+        outbound_segments:
+          type: array
+          items: { type: object, description: "carrier, airports, flight number, date" }
+          description: "vendor field outboundSegments"
+        inbound_segments:
+          type: array
+          items: { type: object }
+          description: "optional; omit for one-way (vendor field inboundSegments)"
+        currency: { type: string }
+        resident_code: { type: string, description: "vendor field residentCode" }
+      required: [adults, outbound_segments]
+    examples:
+      - args:
+          adults: 1
+          outbound_segments:
+            - { carrier: "AA", fromAirport: "JFK", toAirport: "LAX", flightNumber: "100", date: "20260901" }
+        note: "inbound_segments is optional and should be omitted for a one-way itinerary."
+    response_pick:
+      - status
+      - data.offerID
+      - data.offerToken
+      - data.serviceFee
+      - data.bookingRequirement
+      - data.supportedPaymentMethods
+
+  - name: get_offer_price
+    description: >-
+      Entry point to the fulfilment (instant-ticketing) flow for a known
+      itinerary; same request and response shape as get_offers. Read-only;
+      success is status 0 (116 = airline error, 112 = timeout, 9999 = system
+      error). offerToken validity is generally not more than 6 hours.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/getOfferPrice.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      adults: "{{args.adults}}"
+      children: "{{args.children}}"
+      infants: "{{args.infants}}"
+      outboundSegments: "{{args.outbound_segments}}"
+      inboundSegments: "{{args.inbound_segments}}"
+      currency: "{{args.currency}}"
+      residentCode: "{{args.resident_code}}"
+    args_schema:
+      type: object
+      properties:
+        adults: { type: integer, minimum: 1, maximum: 9 }
+        children: { type: integer, minimum: 0, maximum: 9 }
+        infants: { type: integer, minimum: 0, maximum: 9 }
+        outbound_segments:
+          type: array
+          items: { type: object, description: "carrier, airports, flight number, date" }
+          description: "vendor field outboundSegments"
+        inbound_segments:
+          type: array
+          items: { type: object }
+          description: "optional; omit for one-way (vendor field inboundSegments)"
+        currency: { type: string }
+        resident_code: { type: string, description: "vendor field residentCode" }
+      required: [adults, outbound_segments]
+    examples:
+      - args:
+          adults: 1
+          outbound_segments:
+            - { carrier: "AA", fromAirport: "JFK", toAirport: "LAX", flightNumber: "100", date: "20260901" }
+        note: "same request and response shape as get_offers; this call starts the automated instant-ticketing (fulfilment) flow."
+    response_pick:
+      - status
+      - data.offerID
+      - data.offerToken
+      - data.serviceFee
+      - data.bookingRequirement
+      - data.supportedPaymentMethods
+
+  - name: order
+    description: >-
+      Create a passenger order (a real booking) from a verify sessionId or a
+      getOffers/getOfferPrice offerId. Success is status 0. EFFECTFUL: this
+      creates a real reservation with the airline; cancel via void (before
+      the same-day deadline) or refund afterward.
+    method: POST
+    url: "{{account.base_url}}/order.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      passengers: "{{args.passengers}}"
+      contact: "{{args.contact}}"
+      sessionId: "{{args.session_id}}"
+      offerId: "{{args.offer_id}}"
+      payment: "{{args.payment}}"
+      clientContact: "{{args.client_contact}}"
+      ifSeatOccupied: "{{args.if_seat_occupied}}"
+      passengerBaggages: "{{args.passenger_baggages}}"
+      birthday: "{{args.birthday}}"
+      cardType: "{{args.card_type}}"
+      cardNum: "{{args.card_num}}"
+      nationality: "{{args.nationality}}"
+      ffpCardNo: "{{args.ffp_card_no}}"
+      ancillaries: "{{args.ancillaries}}"
+      residentInfo: "{{args.resident_info}}"
+      locale: "{{args.locale}}"
+      useAtlasMailForContact: "{{args.use_atlas_mail_for_contact}}"
+      requestSource: "{{args.request_source}}"
+    args_schema:
+      type: object
+      properties:
+        passengers:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              type: { type: string, description: "passenger type, e.g. ADT/CHD/INF" }
+              gender: { type: string }
+              documents: { type: array, items: { type: object } }
+            required: [name, type, gender]
+        contact:
+          type: object
+          properties:
+            name: { type: string }
+            address: { type: string }
+            postcode: { type: string }
+            email: { type: string }
+            mobile: { type: string }
+          required: [name]
+        session_id: { type: string, description: "from verify, valid 2 hours (vendor field sessionId)" }
+        offer_id: { type: string, description: "from getOffers/getOfferPrice (vendor field offerId)" }
+        payment: { type: object, description: "cardType only, merchant-of-record flow" }
+        client_contact: { type: object, description: "FR (fulfilment-retailer) market only (vendor field clientContact)" }
+        if_seat_occupied: { type: string, default: "SIMILAR_SEAT", description: "vendor field ifSeatOccupied" }
+        passenger_baggages: { type: array, items: { type: object }, description: "OTA external baggage pricing (vendor field passengerBaggages)" }
+        birthday: { type: string }
+        card_type: { type: string, description: "vendor field cardType" }
+        card_num: { type: string, description: "vendor field cardNum" }
+        nationality: { type: string }
+        ffp_card_no: { type: string, description: "vendor field ffpCardNo" }
+        ancillaries: { type: array, items: { type: object } }
+        resident_info: { type: object, description: "vendor field residentInfo" }
+        locale: { type: string }
+        use_atlas_mail_for_contact: { type: boolean, description: "vendor field useAtlasMailForContact" }
+        request_source: { type: string, description: "vendor field requestSource" }
+      required: [passengers, contact]
+      oneOf:
+        - required: [session_id]
+        - required: [offer_id]
+    examples:
+      - args:
+          passengers: [{ name: "John Doe", type: "ADT", gender: "M" }]
+          contact: { name: "John Doe", email: "john@example.com" }
+          session_id: "sess-abc123"
+        note: "exactly one of session_id (from verify) or offer_id (from getOffers/getOfferPrice) is required. Connecting-flight segments in the same direction must share the same baggage selection or the call fails with error 307."
+    response_pick:
+      - status
+      - orderNo
+      - pnrCode
+      - totalPrice
+      - totalTransactionFee
+      - currency
+      - tktLimitTime
+      - paymentOptions
+
+  - name: order_commit
+    description: >-
+      Get an FR (fulfilment-retailer) market order-confirmation page link for
+      an order, pre-payment. Read-only workflow step, no charge; the
+      research does not document a status field for this response.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/orderCommit.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      orderNo: "{{args.order_no}}"
+      redirectUri: "{{args.redirect_uri}}"
+      iframe: "{{args.iframe}}"
+      timeout: "{{args.timeout}}"
+    args_schema:
+      type: object
+      properties:
+        order_no: { type: string, description: "vendor field orderNo" }
+        redirect_uri: { type: string, description: "vendor field redirectUri" }
+        iframe: { type: boolean }
+        timeout: { type: integer }
+      required: [order_no]
+      additionalProperties: true
+    examples:
+      - args: { order_no: "ORD-1001" }
+        note: "produces a user-facing confirmation page link (confirmationUrl); it does not itself charge money. Per the research this is a workflow step with no charge (non-effectful), so it stays read-only rather than joining the effectful list."
+    response_pick: [confirmationUrl]
+
+  - name: pay
+    description: >-
+      Process payment for an order (account balance draw, VCC pass-through,
+      BYOA, or merchant-of-record card capture). Success is status in the
+      400-415 range with 404 meaning already paid and 406 meaning payment in
+      progress. EFFECTFUL and RETRY-UNSAFE: there is no documented
+      idempotency key; retrying while a prior call may still be in flight
+      (status 406) risks a duplicate charge. Payment success does not always
+      mean ticketing is complete; poll query_order_details to confirm.
+    method: POST
+    url: "{{account.base_url}}/pay.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      orderNo: "{{args.order_no}}"
+      paymentMethod: "{{args.payment_method}}"
+      creditCard: "{{args.credit_card}}"
+      clientOrderNo: "{{args.client_order_no}}"
+      requestSource: "{{args.request_source}}"
+    args_schema:
+      type: object
+      properties:
+        order_no: { type: string, description: "vendor field orderNo" }
+        payment_method: { type: integer, enum: [1, 3, 4, 5], description: "1=balance, 3=VCC pass-through, 4=BYOA, 5=merchant-of-record (vendor field paymentMethod)" }
+        credit_card: { type: object, description: "full card and billing fields; required only for payment_method 3 or 5 (vendor field creditCard)" }
+        client_order_no: { type: string, description: "vendor field clientOrderNo" }
+        request_source: { type: string, description: "vendor field requestSource" }
+      required: [order_no, payment_method]
+      if:
+        properties: { payment_method: { enum: [3, 5] } }
+        required: [payment_method]
+      then:
+        required: [credit_card]
+    examples:
+      - args: { order_no: "ORD-1001", payment_method: 1 }
+        note: "payment_method 1 (balance) needs no credit_card; do not retry a 406 (payment in progress) response without backing off first, and never retry blindly since no idempotency key exists."
+    response_pick: [status, msg, orderNo, paymentMethod]
+
+  - name: query_order_details
+    description: >-
+      Read current order/ticket status, PNR, and ticket numbers by orderNo or
+      pnrCode. Read-only; success is status 0 (800, 701-705 are errors).
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/queryOrderDetails.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      orderNo: "{{args.order_no}}"
+      pnrCode: "{{args.pnr_code}}"
+    args_schema:
+      type: object
+      properties:
+        order_no: { type: string, description: "vendor field orderNo" }
+        pnr_code: { type: string, description: "vendor field pnrCode" }
+      oneOf:
+        - required: [order_no]
+        - required: [pnr_code]
+    examples:
+      - args: { order_no: "ORD-1001" }
+        note: "exactly one of order_no or pnr_code is required; both must resolve to the same order data source."
+    response_pick: [status, orderStatus, ticketStatus, tktLimitTime, paymentOptions]
+
+  - name: seat_availability
+    description: >-
+      Get the seat map and per-seat pricing for a routing after verify or
+      getOffers. Read-only; shares a 60 QPM rate-limit pool with get_luggage.
+      The research does not name this endpoint's own response fields; only
+      the connector-wide business-status convention (most .do calls return
+      a status field in a 200 body) is projected below.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/seatAvailability.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      carrier: "{{args.carrier}}"
+      segments: "{{args.segments}}"
+      sessionId: "{{args.session_id}}"
+      offerId: "{{args.offer_id}}"
+    args_schema:
+      type: object
+      properties:
+        carrier: { type: string }
+        segments: { type: array, items: { type: object } }
+        session_id: { type: string, description: "from verify (vendor field sessionId)" }
+        offer_id: { type: string, description: "from getOffers/getOfferPrice (vendor field offerId)" }
+      required: [carrier, segments]
+      additionalProperties: true
+    examples:
+      - args:
+          carrier: "AA"
+          segments: [{ fromAirport: "JFK", toAirport: "LAX", flightNumber: "100", date: "20260901" }]
+          session_id: "sess-abc123"
+        note: "one of session_id or offer_id is also needed; exact combination rules beyond carrier and segments are not detailed in the referenced docs. The payload itself (seat map, per-seat pricing) has no documented field names for this endpoint."
+    response_pick: [status]
+
+  - name: get_luggage
+    description: >-
+      Get precise baggage quotes after verify or getOffers. Read-only; shares
+      a 60 QPM rate-limit pool with seat_availability. The research does not
+      name this endpoint's own response fields; only the connector-wide
+      business-status convention (most .do calls return a status field in a
+      200 body) is projected below.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/getLuggage.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      offerId: "{{args.offer_id}}"
+    args_schema:
+      type: object
+      properties:
+        offer_id: { type: string, description: "session or offer identifier (vendor field offerId)" }
+      required: [offer_id]
+      additionalProperties: true
+    examples:
+      - args: { offer_id: "offer-abc123" }
+        note: "shares the seat_availability 60 QPM rate-limit pool. The payload itself (baggage quote) has no documented field names for this endpoint."
+    response_pick: [status]
+
+  - name: void_quotation
+    description: >-
+      Check void eligibility for an order and obtain a voidOfferId to submit
+      to void. Read-only; the referenced docs do not name this endpoint's
+      request body fields, so the schema is intentionally unconstrained.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/voidQuotation.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties: {}
+      additionalProperties: true
+      description: "request body fields are not named in the available API reference; consult the vendor docs for the exact shape."
+    examples:
+      - args: { orderNo: "ORD-1001" }
+        note: "a quotation must precede every void call; the strict same-day void deadline applies before a void is submitted."
+    response_pick: [voidOfferId]
+
+  - name: void
+    description: >-
+      Submit a void for an order (full-order only, no partial-passenger
+      voids), which initiates a refund. EFFECTFUL and terminal for that
+      booking: cancels the reservation. Success/outcome is voidStatus (0-6),
+      not a generic status field.
+    method: POST
+    url: "{{account.base_url}}/void.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      orderNo: "{{args.order_no}}"
+      voidOfferId: "{{args.void_offer_id}}"
+    args_schema:
+      type: object
+      properties:
+        order_no: { type: string, description: "vendor field orderNo" }
+        void_offer_id: { type: string, description: "from void_quotation (vendor field voidOfferId)" }
+      required: [order_no, void_offer_id]
+    examples:
+      - args: { order_no: "ORD-1001", void_offer_id: "void-offer-1" }
+        note: "a void_quotation call must precede this; once the same-day deadline passes the void is rejected outright, and only the whole order can be voided, never a subset of passengers."
+    response_pick: [voidCode, voidStatus]
+
+  - name: query_void_orders
+    description: >-
+      Track the progress or outcome of a submitted void. Read-only; the
+      referenced docs do not name this endpoint's request body fields, so
+      the schema is intentionally unconstrained.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/queryVoidOrders.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties: {}
+      additionalProperties: true
+      description: "request body fields are not named in the available API reference; consult the vendor docs for the exact shape."
+    examples:
+      - args: { orderNo: "ORD-1001" }
+        note: "a parallel order.void webhook exists for near-real-time status instead of polling this endpoint. This endpoint's own response fields are not individually named in the research; voidStatus is projected by analogy with void.do's documented voidStatus (0-6), since tracking that value is this endpoint's entire documented purpose."
+    response_pick: [voidStatus]
+
+  - name: refund_quotation
+    description: >-
+      Get a refund quote for an order, returning a refundOfferId to submit
+      to refund. Read-only; the referenced docs do not name this endpoint's
+      request body fields, so the schema is intentionally unconstrained.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/refundQuotation.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties: {}
+      additionalProperties: true
+      description: "request body fields are not named in the available API reference; consult the vendor docs for the exact shape."
+    examples:
+      - args: { orderNo: "ORD-1001" }
+        note: "full ticket only (no partial-sector refunds); a partially-used itinerary cannot be refunded."
+    response_pick: [refundOfferId]
+
+  - name: refund
+    description: >-
+      Submit a refund for an order, identified by orderNo or by airlinePNR
+      plus carrier, using the quotation's refundOfferId (or a fresh
+      refundRequestList). EFFECTFUL and terminal: moves money back to the
+      customer. Outcome is refundStatus (0-6), not a generic status field.
+    method: POST
+    url: "{{account.base_url}}/refund.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      orderNo: "{{args.order_no}}"
+      airlinePNR: "{{args.airline_pnr}}"
+      carrier: "{{args.carrier}}"
+      refundOfferId: "{{args.refund_offer_id}}"
+      refundRequestList: "{{args.refund_request_list}}"
+    args_schema:
+      type: object
+      properties:
+        order_no: { type: string, description: "vendor field orderNo" }
+        airline_pnr: { type: string, description: "vendor field airlinePNR" }
+        carrier: { type: string }
+        refund_offer_id: { type: string, description: "from refund_quotation (vendor field refundOfferId)" }
+        refund_request_list: { type: array, items: { type: object }, description: "a fresh refund request when no quotation was taken (vendor field refundRequestList)" }
+      oneOf:
+        - required: [order_no]
+        - required: [airline_pnr, carrier]
+      allOf:
+        - oneOf:
+            - required: [refund_offer_id]
+            - required: [refund_request_list]
+    examples:
+      - args: { order_no: "ORD-1001", refund_offer_id: "refund-offer-1" }
+        note: "single-passenger refunds within a multi-pax booking are supported; medical/death refunds are not."
+    response_pick: [refundStatus]
+
+  - name: query_refund_orders
+    description: >-
+      Track the progress or outcome of a submitted refund. Read-only; the
+      referenced docs do not name this endpoint's request body fields, so
+      the schema is intentionally unconstrained.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/queryRefundOrders.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body: "{{args}}"
+    args_schema:
+      type: object
+      properties: {}
+      additionalProperties: true
+      description: "request body fields are not named in the available API reference; consult the vendor docs for the exact shape."
+    examples:
+      - args: { orderNo: "ORD-1001" }
+        note: "refundStatus values: 0=Atlas Processing, 1=Airline Processing, 2=Refunded, 3=Airline Refunding, 4=Rejected, 5=Fulfillment Done, 6=Withdrew. This endpoint's own response fields are not individually named in the research; refundStatus is projected by analogy with refund.do's documented refundStatus, since tracking that value is this endpoint's entire documented purpose."
+    response_pick: [refundStatus]
+
+  - name: stop_ticket
+    description: >-
+      Halt ticket issuance on an already-paid order. EFFECTFUL and
+      irreversible: this interrupts the ticketing workflow and is not a
+      refund by itself. The research does not document a response shape for
+      this endpoint.
+    method: POST
+    url: "{{account.base_url}}/stopTicket.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      orderNo: "{{args.order_no}}"
+    args_schema:
+      type: object
+      properties:
+        order_no: { type: string, description: "vendor field orderNo" }
+      required: [order_no]
+    examples:
+      - args: { order_no: "ORD-1001" }
+        note: "requires payment to have already completed; irreversible workflow interruption, not a refund."
+
+  - name: regenerate_order
+    description: >-
+      Regenerate a ticket order from an original order, producing a new
+      orderNo/pnrCode/sessionId. EFFECTFUL: creates a new order, so treat it
+      like the order function. Duplicate-order detection returns
+      duplicateOrders (error 318).
+    method: POST
+    url: "{{account.base_url}}/regenerateOrder.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      originalOrderNo: "{{args.original_order_no}}"
+    args_schema:
+      type: object
+      properties:
+        original_order_no: { type: string, description: "vendor field originalOrderNo" }
+      required: [original_order_no]
+      additionalProperties: true
+    examples:
+      - args: { original_order_no: "ORD-1001" }
+        note: "a 318 duplicateOrders response means a regenerated order already exists; check it before retrying. No status field is verified in the research as belonging to this endpoint's own response body (error 318 is documented at the stage level, not tied to a named field here), so the full body is passed through rather than projected."
+
+  - name: pnr_claim
+    description: >-
+      Claim (import) an existing airline PNR into Atlas as a new order.
+      EFFECTFUL: creates a new Atlas order from external data, so treat it
+      like the order function.
+    method: POST
+    url: "{{account.base_url}}/pnr/claim.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      mmb: "{{args.mmb}}"
+      passengers: "{{args.passengers}}"
+      fromSegments: "{{args.from_segments}}"
+      retSegments: "{{args.ret_segments}}"
+      connectInfo: "{{args.connect_info}}"
+    args_schema:
+      type: object
+      properties:
+        mmb: { type: string, description: "the existing airline PNR / manage-my-booking reference" }
+        passengers: { type: array, items: { type: object } }
+        from_segments: { type: array, items: { type: object }, description: "vendor field fromSegments" }
+        ret_segments: { type: array, items: { type: object }, description: "optional; omit for a one-way itinerary (vendor field retSegments)" }
+        connect_info: { type: object, description: "connecting-flight information (vendor field connectInfo)" }
+      required: [mmb, passengers, from_segments]
+      additionalProperties: true
+    examples:
+      - args:
+          mmb: "PNR123456"
+          passengers: [{ name: "John Doe", type: "ADT", gender: "M" }]
+          from_segments: [{ carrier: "AA", fromAirport: "JFK", toAirport: "LAX", flightNumber: "100", date: "20260901" }]
+        note: "ret_segments and connect_info are omitted here based on the search/get_offers one-way convention used elsewhere in this API; the docs do not explicitly confirm ret_segments is optional for this endpoint. No status field is documented for this response, so the full body is passed through rather than projected."
+
+  - name: extract_pnr
+    description: >-
+      Live-read PNR status directly from the airline (schedule, ticket
+      status). Read-only in the sense of not changing Atlas state, but it
+      hits a live airline system on every call. No generic status field is
+      documented; the outcome is pnrStatus.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/extractPnr.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      airlinePnr: "{{args.airline_pnr}}"
+      carrier: "{{args.carrier}}"
+      passengers: "{{args.passengers}}"
+      contact: "{{args.contact}}"
+      routing: "{{args.routing}}"
+      timeout: "{{args.timeout}}"
+    args_schema:
+      type: object
+      properties:
+        airline_pnr: { type: string, description: "vendor field airlinePnr" }
+        carrier: { type: string }
+        passengers: { type: array, items: { type: object } }
+        contact: { type: object }
+        routing: { type: object }
+        timeout: { type: integer, default: 15000, description: "milliseconds" }
+      required: [airline_pnr, carrier, passengers, contact, routing]
+      additionalProperties: true
+    examples:
+      - args:
+          airline_pnr: "PNR654321"
+          carrier: "AA"
+          passengers: [{ name: "John Doe" }]
+          contact: { name: "John Doe", email: "john@example.com" }
+          routing: { fromAirport: "JFK", toAirport: "LAX" }
+        note: "pnrStatus is one of OnHold, Ticketed, Cancelled, Unknown."
+    response_pick: [pnrStatus, pnrUsed]
+
+  - name: post_booking_ancillary_search
+    description: >-
+      Search post-ticketing ancillary (currently baggage only) options for an
+      existing order. Read-only; the research does not name this endpoint's
+      own response fields; only the connector-wide business-status
+      convention (most .do calls return a status field in a 200 body) is
+      projected below.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/postBookingAncillarySearch.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      ancillaryCategory: "{{args.ancillary_category}}"
+    args_schema:
+      type: object
+      properties:
+        ancillary_category: { type: string, enum: ["BAGGAGE"], description: "currently only BAGGAGE is supported (vendor field ancillaryCategory)" }
+      additionalProperties: true
+      description: "the referenced docs name only ancillaryCategory for this endpoint; the order-identifying field is not stated and is left to additionalProperties."
+    examples:
+      - args: { ancillary_category: "BAGGAGE" }
+        note: "operates against an existing order; consult the vendor docs for the exact order-identifying field."
+    response_pick: [status]
+
+  - name: post_booking_ancillary_order
+    description: >-
+      Purchase a post-ticketing ancillary (currently baggage only) for an
+      existing order. EFFECTFUL: this spends money for an add-on purchase.
+      The research does not document a status field for this response.
+    method: POST
+    url: "{{account.base_url}}/postBookingAncillaryOrder.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      ancillaryCategory: "{{args.ancillary_category}}"
+    args_schema:
+      type: object
+      properties:
+        ancillary_category: { type: string, enum: ["BAGGAGE"], description: "currently only BAGGAGE is supported (vendor field ancillaryCategory)" }
+      additionalProperties: true
+      description: "the referenced docs name only ancillaryCategory for this endpoint; the order-identifying field is not stated and is left to additionalProperties."
+    examples:
+      - args: { ancillary_category: "BAGGAGE" }
+        note: "constraints beyond standard refund/void rules are not documented; consult the vendor docs for the exact order-identifying field before use."
+
+  - name: balance
+    description: >-
+      Get the account balance for a currency. Read-only; the research does
+      not document a status field for this response beyond the
+      accountBalance payload itself.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/balance.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      currency: "{{args.currency}}"
+    args_schema:
+      type: object
+      properties:
+        currency: { type: string }
+      required: [currency]
+    examples:
+      - args: { currency: "USD" }
+        note: "returns accountBalance.amount and accountBalance.currency."
+    response_pick: [accountBalance.amount, accountBalance.currency]
+
+  - name: route_export
+    description: >-
+      Bulk export of supported city-pair routes, paginated. Read-only; the
+      research does not name this endpoint's own response fields (the
+      route-list payload shape is unnamed); only the connector-wide
+      business-status convention (most .do calls return a status field in a
+      200 body) is projected below.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/route/export.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      routeType: "{{args.route_type}}"
+      pageSize: "{{args.page_size}}"
+      pageNumber: "{{args.page_number}}"
+    args_schema:
+      type: object
+      properties:
+        route_type: { type: integer, enum: [1, 2], description: "1 = airline routes, 2 = Atlas routes (vendor field routeType)" }
+        page_size: { type: integer, default: 10000, description: "vendor field pageSize" }
+        page_number: { type: integer, default: 1, description: "vendor field pageNumber" }
+      required: [route_type]
+      additionalProperties: true
+      description: "additional geo/airline filters exist per the vendor docs but are not individually named there; only route_type, page_size, and page_number are restated here."
+    examples:
+      - args: { route_type: 1 }
+        note: "this is the only endpoint besides query_mail and event_get_page_list with documented pagination."
+    response_pick: [status]
+
+  - name: query_mail
+    description: >-
+      Query Atlas-received airline emails (itinerary, schedule change,
+      payment-due, and similar categories), filtered by order and/or a date
+      range spanning at most one month (UTC+08:00). Read-only; the research
+      does not document a status field for this response.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/queryMail.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      orderNo: "{{args.order_no}}"
+      emailCategories: "{{args.email_categories}}"
+      pageIndex: "{{args.page_index}}"
+      pageSize: "{{args.page_size}}"
+    args_schema:
+      type: object
+      properties:
+        order_no: { type: string, description: "vendor field orderNo" }
+        email_categories: { type: array, items: { type: string }, description: "vendor field emailCategories" }
+        page_index: { type: integer, default: 1, description: "vendor field pageIndex" }
+        page_size: { type: integer, default: 100, description: "vendor field pageSize" }
+      additionalProperties: true
+      description: "the vendor docs also support filtering by a date range (max one month span, UTC+08:00) but do not name its exact request fields, so that filter is left to additionalProperties."
+    examples:
+      - args: { order_no: "ORD-1001" }
+        note: "each returned record's emailLink is valid for 10 minutes."
+    response_pick: [hasNext, records.emailLink]
+
+  - name: get_atrip_token
+    description: >-
+      Mint a portal-access URL token for the Atlas customer-service web UI.
+      Read-only from the connector's perspective (no booking/money effect);
+      this is not an API bearer token for other Atlas calls. Success is
+      status 0 (2 = system error, 3 = unauthorized).
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/getAtripToken.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      orderNo: "{{args.order_no}}"
+      userName: "{{args.user_name}}"
+      role: "{{args.role}}"
+    args_schema:
+      type: object
+      properties:
+        order_no: { type: string, description: "vendor field orderNo" }
+        user_name: { type: string, description: "vendor field userName" }
+        role: { type: string, enum: ["Customer service", "Finance", "Developer", "Admin"] }
+      required: [order_no, user_name, role]
+    examples:
+      - args: { order_no: "ORD-1001", user_name: "agent1", role: "Customer service" }
+        note: "the returned url embeds a portal-access token, not an Atlas API bearer token."
+    response_pick: [status, url]
+
+  - name: update_webhook_url
+    description: >-
+      Register or update the account's webhook callback URL. Success is an
+      ack status. Webhook delivery is best effort, not guaranteed; use
+      query_order_details, airline email, and event_get_page_list for final
+      reconciliation.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/updateWebhookURL.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      url: "{{args.webhook_url}}"
+    args_schema:
+      type: object
+      properties:
+        webhook_url: { type: string, description: "vendor field url; renamed to avoid colliding with the connector's own url placeholder namespace" }
+      required: [webhook_url]
+    examples:
+      - args: { webhook_url: "https://example.net/webhooks/atrip" }
+        note: "this changes account-level webhook configuration; it is not one of the 8 operations flagged effectful in this connector, per the design decision covering booking/money-moving operations only."
+    response_pick: [status]
+
+  - name: event_get_page_list
+    description: >-
+      Query incident records for webhook-miss reconciliation, filtered by
+      many optional fields with pageSize required. Read-only; the response
+      is paginated with a total count.
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/event/getPageList.do"
+    headers:
+      x-atlas-client-id: "{{account.client_id}}"
+      Accept: "*/*"
+      Content-Type: application/json
+      Accept-Encoding: gzip
+    body:
+      eventId: "{{args.event_id}}"
+      orderNo: "{{args.order_no}}"
+      eventType: "{{args.event_type}}"
+      pnr: "{{args.pnr}}"
+      paxName: "{{args.pax_name}}"
+      paxEmail: "{{args.pax_email}}"
+      airline: "{{args.airline}}"
+      eventStatus: "{{args.event_status}}"
+      pageSize: "{{args.page_size}}"
+    args_schema:
+      type: object
+      properties:
+        event_id: { type: string, description: "vendor field eventId" }
+        order_no: { type: string, description: "vendor field orderNo" }
+        event_type: { type: string, description: "vendor field eventType" }
+        pnr: { type: string }
+        pax_name: { type: string, description: "vendor field paxName" }
+        pax_email: { type: string, description: "vendor field paxEmail" }
+        airline: { type: string }
+        event_status: { type: string, description: "vendor field eventStatus" }
+        page_size: { type: integer, description: "vendor field pageSize" }
+      required: [page_size]
+      additionalProperties: true
+      description: "the vendor docs also support filtering by a time range but do not name its exact request fields, so that filter is left to additionalProperties."
+    examples:
+      - args: { page_size: 50 }
+        note: "response includes a total count alongside the paginated records."
+    response_pick: [total, records]

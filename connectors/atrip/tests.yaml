@@ -1,0 +1,308 @@
+cases:
+  # --- auth / header rendering ---------------------------------------------
+  # x-atlas-client-id is a plain function header rendered from account.client_id.
+  # The secret auth header (x-atlas-client-secret) is injected at dispatch time,
+  # after this render step, so it is not asserted here; that is the whole point
+  # of the auth/header split (secret.client_secret only ever appears in `auth`).
+  - function: search
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { trip_type: "1", adult_num: 1, from_city: JFK, to_city: LAX, from_date: "20260901" }
+    expect:
+      method: POST
+      url: "https://search.example.net/search.do"
+      headers:
+        x-atlas-client-id: cid-1
+        Accept: "*/*"
+        Content-Type: application/json
+        Accept-Encoding: gzip
+      body_contains:
+        tripType: "1"
+        adultNum: 1
+        fromCity: JFK
+        toCity: LAX
+        fromDate: "20260901"
+
+  # base_url routing (everything except search) and header check repeated on a
+  # second function to show the split is per-function, not accidental.
+  - function: balance
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { currency: USD }
+    expect:
+      method: POST
+      url: "https://api.example.net/balance.do"
+      headers:
+        x-atlas-client-id: cid-1
+        Accept: "*/*"
+        Content-Type: application/json
+      body_contains:
+        currency: USD
+
+  - function: verify
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { routing_identifier: rid-abc123 }
+    expect:
+      method: POST
+      url: "https://api.example.net/verify.do"
+      body_contains:
+        routingIdentifier: rid-abc123
+
+  - function: get_offers
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args:
+      adults: 1
+      outbound_segments:
+        - { carrier: AA, fromAirport: JFK, toAirport: LAX, flightNumber: "100", date: "20260901" }
+    expect:
+      method: POST
+      url: "https://api.example.net/getOffers.do"
+      body_contains:
+        adults: 1
+        outboundSegments:
+          - { carrier: AA, fromAirport: JFK, toAirport: LAX, flightNumber: "100", date: "20260901" }
+
+  - function: get_offer_price
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args:
+      adults: 1
+      outbound_segments:
+        - { carrier: AA, fromAirport: JFK, toAirport: LAX, flightNumber: "100", date: "20260901" }
+    expect:
+      method: POST
+      url: "https://api.example.net/getOfferPrice.do"
+      body_contains:
+        adults: 1
+
+  # --- order.do: EFFECTFUL, creates a real booking -------------------------
+  - function: order
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args:
+      passengers: [{ name: "John Doe", type: ADT, gender: M }]
+      contact: { name: "John Doe", email: "john@example.com" }
+      session_id: sess-abc123
+    expect:
+      method: POST
+      url: "https://api.example.net/order.do"
+      body_contains:
+        sessionId: sess-abc123
+        contact: { name: "John Doe" }
+
+  - function: order_commit
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { order_no: ORD-1001 }
+    expect:
+      method: POST
+      url: "https://api.example.net/orderCommit.do"
+      body_contains:
+        orderNo: ORD-1001
+
+  # --- pay.do: EFFECTFUL, spends money, retry-unsafe -----------------------
+  - function: pay
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { order_no: ORD-1001, payment_method: 1 }
+    expect:
+      method: POST
+      url: "https://api.example.net/pay.do"
+      body_contains:
+        orderNo: ORD-1001
+        paymentMethod: 1
+
+  - function: query_order_details
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { order_no: ORD-1001 }
+    expect:
+      method: POST
+      url: "https://api.example.net/queryOrderDetails.do"
+      body_contains:
+        orderNo: ORD-1001
+
+  - function: seat_availability
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args:
+      carrier: AA
+      segments: [{ fromAirport: JFK, toAirport: LAX, flightNumber: "100", date: "20260901" }]
+      session_id: sess-abc123
+    expect:
+      method: POST
+      url: "https://api.example.net/seatAvailability.do"
+      body_contains:
+        carrier: AA
+
+  - function: get_luggage
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { offer_id: offer-abc123 }
+    expect:
+      method: POST
+      url: "https://api.example.net/getLuggage.do"
+      body_contains:
+        offerId: offer-abc123
+
+  - function: void_quotation
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { orderNo: ORD-1001 }
+    expect:
+      method: POST
+      url: "https://api.example.net/voidQuotation.do"
+      body_contains:
+        orderNo: ORD-1001
+
+  # --- void.do: EFFECTFUL, cancels the booking -----------------------------
+  - function: void
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { order_no: ORD-1001, void_offer_id: void-offer-1 }
+    expect:
+      method: POST
+      url: "https://api.example.net/void.do"
+      body_contains:
+        orderNo: ORD-1001
+        voidOfferId: void-offer-1
+
+  - function: query_void_orders
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { orderNo: ORD-1001 }
+    expect:
+      method: POST
+      url: "https://api.example.net/queryVoidOrders.do"
+      body_contains:
+        orderNo: ORD-1001
+
+  - function: refund_quotation
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { orderNo: ORD-1001 }
+    expect:
+      method: POST
+      url: "https://api.example.net/refundQuotation.do"
+      body_contains:
+        orderNo: ORD-1001
+
+  # --- refund.do: EFFECTFUL, moves money back ------------------------------
+  - function: refund
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { order_no: ORD-1001, refund_offer_id: refund-offer-1 }
+    expect:
+      method: POST
+      url: "https://api.example.net/refund.do"
+      body_contains:
+        orderNo: ORD-1001
+        refundOfferId: refund-offer-1
+
+  - function: query_refund_orders
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { orderNo: ORD-1001 }
+    expect:
+      method: POST
+      url: "https://api.example.net/queryRefundOrders.do"
+      body_contains:
+        orderNo: ORD-1001
+
+  # --- stop_ticket: EFFECTFUL, irreversible workflow halt ------------------
+  - function: stop_ticket
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { order_no: ORD-1001 }
+    expect:
+      method: POST
+      url: "https://api.example.net/stopTicket.do"
+      body_contains:
+        orderNo: ORD-1001
+
+  # --- regenerate_order: EFFECTFUL, creates a new order --------------------
+  - function: regenerate_order
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { original_order_no: ORD-1001 }
+    expect:
+      method: POST
+      url: "https://api.example.net/regenerateOrder.do"
+      body_contains:
+        originalOrderNo: ORD-1001
+
+  # --- pnr_claim: EFFECTFUL, creates a new Atlas order from a PNR ----------
+  - function: pnr_claim
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args:
+      mmb: PNR123456
+      passengers: [{ name: "John Doe", type: ADT, gender: M }]
+      from_segments: [{ carrier: AA, fromAirport: JFK, toAirport: LAX, flightNumber: "100", date: "20260901" }]
+    expect:
+      method: POST
+      url: "https://api.example.net/pnr/claim.do"
+      body_contains:
+        mmb: PNR123456
+
+  - function: extract_pnr
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args:
+      airline_pnr: PNR654321
+      carrier: AA
+      passengers: [{ name: "John Doe" }]
+      contact: { name: "John Doe", email: "john@example.com" }
+      routing: { fromAirport: JFK, toAirport: LAX }
+    expect:
+      method: POST
+      url: "https://api.example.net/extractPnr.do"
+      body_contains:
+        airlinePnr: PNR654321
+        carrier: AA
+
+  - function: post_booking_ancillary_search
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { ancillary_category: BAGGAGE }
+    expect:
+      method: POST
+      url: "https://api.example.net/postBookingAncillarySearch.do"
+      body_contains:
+        ancillaryCategory: BAGGAGE
+
+  # --- post_booking_ancillary_order: EFFECTFUL, spends money ---------------
+  - function: post_booking_ancillary_order
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { ancillary_category: BAGGAGE }
+    expect:
+      method: POST
+      url: "https://api.example.net/postBookingAncillaryOrder.do"
+      body_contains:
+        ancillaryCategory: BAGGAGE
+
+  - function: route_export
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { route_type: 1 }
+    expect:
+      method: POST
+      url: "https://api.example.net/route/export.do"
+      body_contains:
+        routeType: 1
+
+  - function: query_mail
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { order_no: ORD-1001 }
+    expect:
+      method: POST
+      url: "https://api.example.net/queryMail.do"
+      body_contains:
+        orderNo: ORD-1001
+
+  - function: get_atrip_token
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { order_no: ORD-1001, user_name: agent1, role: "Customer service" }
+    expect:
+      method: POST
+      url: "https://api.example.net/getAtripToken.do"
+      body_contains:
+        orderNo: ORD-1001
+        role: "Customer service"
+
+  - function: update_webhook_url
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { webhook_url: "https://example.net/webhooks/atrip" }
+    expect:
+      method: POST
+      url: "https://api.example.net/updateWebhookURL.do"
+      body_contains:
+        url: "https://example.net/webhooks/atrip"
+
+  - function: event_get_page_list
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args: { page_size: 50 }
+    expect:
+      method: POST
+      url: "https://api.example.net/event/getPageList.do"
+      body_contains:
+        pageSize: 50
