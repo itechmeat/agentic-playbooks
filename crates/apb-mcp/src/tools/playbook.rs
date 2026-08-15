@@ -85,6 +85,12 @@ pub fn playbook_howto() -> Result<Value, ToolError> {
     Ok(json!({ "howto": include_str!("../../../../docs/HOWTO-authoring.md") }))
 }
 
+/// Tier 2 (spec 2026-08-15): the guided-interview guide. Pulled only when
+/// the user wants a playbook built from a process they describe.
+pub fn playbook_interview() -> Result<Value, ToolError> {
+    Ok(json!({ "guide": include_str!("../../../../docs/HOWTO-interview.md") }))
+}
+
 /// Detail level for [`playbook_get`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DetailMode {

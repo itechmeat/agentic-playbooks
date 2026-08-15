@@ -70,6 +70,14 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "Interview guide (tier 2): how to build a playbook by interviewing the user about a process they describe. Pull when the user wants to automate a process no playbook covers.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn playbook_interview(&self) -> CallToolResult {
+        to_call_tool_result(tools::playbook_interview())
+    }
+
+    #[tool(
         description = "Adoption readiness of a playbook (or all project playbooks): resolvable profiles, present skills, trusted bundles, and model availability per the free detection. Read-only. Model availability is only asserted when detection authority is Full.",
         annotations(read_only_hint = true)
     )]
