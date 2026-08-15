@@ -588,10 +588,12 @@ fn probe_reaps_a_daemonized_descendant_of_the_agent() {
     }
 }
 
-/// grok and cursor are built-in probes (spec 2026-07-21). The binary names are
-/// verified against the real CLIs: Grok Build installs `grok`, Cursor installs
-/// `cursor-agent`. Both also ship a generic `agent` alias, so `agent` is
-/// deliberately NOT probed - it cannot identify either agent unambiguously.
+/// grok, cursor and qoder are built-in probes (spec 2026-07-21, and the
+/// 2026-08-15 qoder addition). The binary names are verified against the real
+/// CLIs: Grok Build installs `grok`, Cursor installs `cursor-agent`, Qoder
+/// installs `qoder` (plus a `qodercli` alias). All three also ship or overlap
+/// with a generic `agent` alias, so `agent` is deliberately NOT probed - it
+/// cannot identify any of them unambiguously.
 #[test]
 fn builtin_probes_include_grok_and_cursor() {
     let probes = detect::builtin_probes();
@@ -611,6 +613,11 @@ fn builtin_probes_include_grok_and_cursor() {
     assert_eq!(cursor.bins, vec!["cursor-agent".to_string()]);
     assert_eq!(cursor.category, AgentCategory::Aggregator);
     assert_eq!(cursor.version_args, vec!["--version".to_string()]);
+
+    let qoder = by_id("qoder");
+    assert_eq!(qoder.bins, vec!["qoder".to_string()]);
+    assert_eq!(qoder.category, AgentCategory::Aggregator);
+    assert_eq!(qoder.version_args, vec!["--version".to_string()]);
 
     // The ambiguous `agent` alias must not be probed by anyone.
     for p in &probes {

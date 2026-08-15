@@ -551,3 +551,19 @@ fn capture_session_reads_grok_and_cursor_json_session_ids() {
     assert_eq!(capture_session("grok", plain), None);
     assert_eq!(capture_session("cursor", plain), None);
 }
+
+/// qoder emits a JSON session id only under its json/stream-json output modes;
+/// under the plain-text one-shot form used by the built-in invocation it
+/// yields `None` and relies on the resume -> reprompt downgrade, exactly like
+/// codex/opencode/hermes/grok/cursor.
+#[test]
+fn capture_session_reads_qoder_json_session_id() {
+    let qoder = r#"{"type":"result","session_id":"qoder-session-99"}"#;
+    assert_eq!(
+        capture_session("qoder", qoder).as_deref(),
+        Some("qoder-session-99")
+    );
+
+    let plain = "just the final answer text\n";
+    assert_eq!(capture_session("qoder", plain), None);
+}

@@ -540,6 +540,7 @@ mod tests {
         assert_eq!(agent_vendor("grok"), Some("xai"));
         assert_eq!(agent_vendor("opencode"), None);
         assert_eq!(agent_vendor("cursor"), None);
+        assert_eq!(agent_vendor("qoder"), None);
         assert_eq!(agent_vendor("some-custom-agent"), None);
     }
 

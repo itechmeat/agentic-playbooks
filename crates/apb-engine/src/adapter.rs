@@ -653,6 +653,7 @@ pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
         "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
         "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
         "cursor" => capture_json_string_field(raw, &["chatId", "chat_id", "session_id"]),
+        "qoder" => capture_json_string_field(raw, &["session_id"]),
         _ => None,
     }
 }
