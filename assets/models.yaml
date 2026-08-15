@@ -9,10 +9,22 @@
 # that were not machine-verified against a primary source, or
 # `launch-until-YYYY-MM-DD` for time-boxed introductory pricing). Costs are USD
 # per million tokens. Update via pull request and bump `as_of` + `checked_at`.
-as_of: "2026-07-21"
+as_of: "2026-08-15"
 
 models:
   # --- Anthropic (source: platform.claude.com/docs/en/about-claude/pricing) ---
+  # Deliberately not added: Claude Mythos 5 has gated availability with no
+  # published metered pricing as of 2026-08-15.
+  - id: claude-opus-5
+    vendor: anthropic
+    cost_in_usd_mtok: 5.0
+    cost_out_usd_mtok: 25.0
+    reasoning: high
+    context_tokens: 1000000
+    vision: true
+    source_url: https://platform.claude.com/docs/en/about-claude/pricing
+    checked_at: "2026-08-15"
+    price_basis: list
   - id: claude-opus-4-8
     vendor: anthropic
     cost_in_usd_mtok: 5.0
@@ -41,8 +53,8 @@ models:
     context_tokens: 1000000
     vision: true
     source_url: https://platform.claude.com/docs/en/about-claude/pricing
-    checked_at: "2026-07-13"
-    price_basis: launch-until-2026-08-31
+    checked_at: "2026-08-15"
+    price_basis: list
   - id: claude-sonnet-4-6
     vendor: anthropic
     cost_in_usd_mtok: 3.0
@@ -74,6 +86,8 @@ models:
     price_basis: list
 
   # --- OpenAI (source: developers.openai.com/api/docs/pricing) ---
+  # Deliberately not added: gpt-5.6-cyber/5.5-cyber are a specialized
+  # red-team line with no general-purpose curated fit.
   - id: gpt-5.6-sol
     vendor: openai
     cost_in_usd_mtok: 5.0
@@ -85,21 +99,21 @@ models:
     price_basis: list
   - id: gpt-5.6-terra
     vendor: openai
-    cost_in_usd_mtok: 2.5
-    cost_out_usd_mtok: 15.0
+    cost_in_usd_mtok: 2.0
+    cost_out_usd_mtok: 12.0
     reasoning: high
     vision: true
     source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-07-13"
+    checked_at: "2026-08-15"
     price_basis: list
   - id: gpt-5.6-luna
     vendor: openai
-    cost_in_usd_mtok: 1.0
-    cost_out_usd_mtok: 6.0
+    cost_in_usd_mtok: 0.2
+    cost_out_usd_mtok: 1.2
     reasoning: medium
     vision: true
     source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-07-13"
+    checked_at: "2026-08-15"
     price_basis: list
   - id: gpt-5.5
     vendor: openai
@@ -148,12 +162,12 @@ models:
     price_basis: list
   - id: o4-mini
     vendor: openai
-    cost_in_usd_mtok: 4.0
-    cost_out_usd_mtok: 16.0
+    cost_in_usd_mtok: 1.10
+    cost_out_usd_mtok: 4.40
     reasoning: high
     vision: true
     source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-07-13"
+    checked_at: "2026-08-15"
     price_basis: list
   - id: whisper-large-v3
     vendor: openai
@@ -176,6 +190,17 @@ models:
     source_url: https://ai.google.dev/gemini-api/docs/pricing
     checked_at: "2026-07-13"
     price_basis: list
+  # gemini-3.7-flash's launch price rises to 1.5/7.5 after 2026-12-31.
+  - id: gemini-3.7-flash
+    vendor: google
+    cost_in_usd_mtok: 0.75
+    cost_out_usd_mtok: 3.75
+    reasoning: high
+    vision: true
+    stt: true
+    source_url: https://ai.google.dev/gemini-api/docs/pricing
+    checked_at: "2026-08-15"
+    price_basis: launch-until-2026-12-31
   - id: gemini-3.5-flash
     vendor: google
     cost_in_usd_mtok: 1.5
@@ -187,6 +212,16 @@ models:
     tts: true
     source_url: https://ai.google.dev/gemini-api/docs/pricing
     checked_at: "2026-07-13"
+    price_basis: list
+  - id: gemini-3.5-flash-lite
+    vendor: google
+    cost_in_usd_mtok: 0.3
+    cost_out_usd_mtok: 2.5
+    reasoning: medium
+    vision: true
+    stt: true
+    source_url: https://ai.google.dev/gemini-api/docs/pricing
+    checked_at: "2026-08-15"
     price_basis: list
   - id: gemini-3.1-flash-lite
     vendor: google
@@ -231,22 +266,20 @@ models:
     checked_at: "2026-07-13"
     price_basis: list
 
-  # --- Other vendors (community estimates, not machine-verified) ---
-  - id: grok-4
-    vendor: xai
-    cost_in_usd_mtok: 5.0
-    cost_out_usd_mtok: 25.0
-    reasoning: high
-    context_tokens: 256000
-    vision: true
-    source_url: https://x.ai/api
-    checked_at: "2026-07-13"
-    price_basis: estimate
-
   # --- xAI / Grok CLI (source: docs.x.ai/docs/models) ---
   # xAI bills these in two tiers: a request whose prompt reaches 200k tokens is
   # billed at the higher rate for ALL tokens in the request. The rows below
   # carry the base (under-200k) rate; the high tier is exactly double.
+  # grok-4 is dropped: no longer listed on docs.x.ai, superseded by 4.3/4.5/4.6.
+  - id: grok-4.6
+    vendor: xai
+    cost_in_usd_mtok: 2.0
+    cost_out_usd_mtok: 6.0
+    reasoning: high
+    context_tokens: 500000
+    source_url: https://docs.x.ai/docs/models
+    checked_at: "2026-08-15"
+    price_basis: list
   - id: grok-4.5
     vendor: xai
     cost_in_usd_mtok: 2.0
@@ -276,6 +309,10 @@ models:
     source_url: https://docs.x.ai/docs/models
     checked_at: "2026-07-21"
     price_basis: list
+  # DeepSeek switches to peak/off-peak billing on 2026-08-16 (off-peak flash
+  # 0.22/0.66, pro 0.66/1.98; peak doubles both). The flat rows below are the
+  # pre-switch flat prices and need a follow-up refresh once the new scheme
+  # is live.
   - id: deepseek-v4-pro
     vendor: deepseek
     cost_in_usd_mtok: 0.435
@@ -294,6 +331,19 @@ models:
     source_url: https://api-docs.deepseek.com/quick_start/pricing
     checked_at: "2026-07-13"
     price_basis: list
+  # Deliberately not added: qwen3.7-max/plus have no distinct published
+  # metered pricing separate from qwen3.8-max as of 2026-08-15. The
+  # Singapore region for qwen3.8-max is priced at 2.0/6.0.
+  - id: qwen3.8-max
+    vendor: alibaba
+    cost_in_usd_mtok: 1.65
+    cost_out_usd_mtok: 4.951
+    reasoning: high
+    context_tokens: 1000000
+    vision: true
+    source_url: https://www.alibabacloud.com/help/en/model-studio/qwen3-8-max
+    checked_at: "2026-08-15"
+    price_basis: list
   - id: qwen3-coder
     vendor: alibaba
     cost_in_usd_mtok: 0.4
@@ -303,16 +353,33 @@ models:
     source_url: https://www.alibabacloud.com/help/en/model-studio/models
     checked_at: "2026-07-13"
     price_basis: estimate
-  - id: llama-4-maverick
-    vendor: meta
-    cost_in_usd_mtok: 0.2
-    cost_out_usd_mtok: 0.8
-    reasoning: medium
-    context_tokens: 256000
-    vision: true
-    source_url: https://llama.developer.meta.com/
-    checked_at: "2026-07-13"
-    price_basis: estimate
+
+  # --- Moonshot / Zhipu / new-generation Alibaba (model families served by
+  # the qoder agent) ---
+  # Deliberately not added: kimi-k2.7-code and glm-5.3 have no official
+  # metered pricing published as of 2026-08-15.
+  - id: kimi-k3
+    vendor: moonshot
+    cost_in_usd_mtok: 3.0
+    cost_out_usd_mtok: 15.0
+    reasoning: high
+    context_tokens: 1048576
+    source_url: https://platform.kimi.ai/docs/pricing/chat-k3
+    checked_at: "2026-08-15"
+    price_basis: list
+  - id: glm-5.2
+    vendor: zhipu
+    cost_in_usd_mtok: 1.4
+    cost_out_usd_mtok: 4.4
+    reasoning: high
+    source_url: https://docs.z.ai/guides/overview/pricing
+    checked_at: "2026-08-15"
+    price_basis: list
+
+  # Meta wound down its first-party Llama API on 2026-07-06 (source_url dead,
+  # no vendor pricing published); the llama-4-maverick row and this section
+  # are dropped. No Cantus row: no official metered pricing published as of
+  # 2026-08-15.
 
 # Scored recommendations. score is 1-10; higher means better fit for the purpose.
 purposes:
@@ -346,7 +413,7 @@ purposes:
     scores:
       - { model: claude-opus-4-8, score: 9 }
       - { model: gpt-5.6-terra, score: 8 }
-      - { model: grok-4, score: 7 }
+      - { model: grok-4.6, score: 7 }
   - id: writing
     description: Prose, documentation and copy.
     scores:
@@ -391,6 +458,7 @@ purposes:
 # CLI model identifiers claude accepts. Detection uses this for claude's Static
 # authority list (spec 7, 8.4).
 claude_static_models:
+  - claude-opus-5
   - claude-opus-4-8
   - claude-opus-4-5
   - claude-sonnet-5

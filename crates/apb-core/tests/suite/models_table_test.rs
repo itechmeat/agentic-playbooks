@@ -228,3 +228,66 @@ fn builtin_table_carries_curated_xai_rows() {
         );
     }
 }
+
+/// The 2026-08-15 refresh drops `grok-4` (superseded by 4.3/4.5/4.6) and
+/// `llama-4-maverick`/the Meta section (first-party Llama API wound down);
+/// neither dropped id may resurface in the built-in table.
+#[test]
+fn builtin_table_drops_grok_4_and_llama_4_maverick() {
+    let t = models_table::builtin();
+    assert!(
+        !t.models.iter().any(|m| m.id == "grok-4"),
+        "grok-4 must be dropped, superseded by grok-4.3/4.5/4.6"
+    );
+    assert!(
+        !t.models.iter().any(|m| m.id == "llama-4-maverick"),
+        "llama-4-maverick must be dropped along with the Meta section"
+    );
+    assert!(
+        !t.models.iter().any(|m| m.vendor == "meta"),
+        "no meta-vendor row should remain"
+    );
+    for p in &t.purposes {
+        for s in &p.scores {
+            assert_ne!(s.model, "grok-4", "purpose `{}` still cites grok-4", p.id);
+            assert_ne!(
+                s.model, "llama-4-maverick",
+                "purpose `{}` still cites llama-4-maverick",
+                p.id
+            );
+        }
+    }
+}
+
+/// The 2026-08-15 refresh adds new-vendor rows (moonshot, zhipu) and new
+/// entries for existing vendors (anthropic, xai, alibaba); each must parse
+/// with the expected vendor and full provenance.
+#[test]
+fn builtin_table_carries_2026_08_15_refresh_rows() {
+    let t = models_table::builtin();
+    let expect: &[(&str, &str)] = &[
+        ("claude-opus-5", "anthropic"),
+        ("grok-4.6", "xai"),
+        ("qwen3.8-max", "alibaba"),
+        ("kimi-k3", "moonshot"),
+        ("glm-5.2", "zhipu"),
+    ];
+    for (id, vendor) in expect {
+        let m = t
+            .models
+            .iter()
+            .find(|m| m.id == *id)
+            .unwrap_or_else(|| panic!("expected curated row `{id}`"));
+        assert_eq!(m.vendor, *vendor, "row `{id}` has the wrong vendor");
+        assert!(
+            m.cost_in_usd_mtok.is_some() && m.cost_out_usd_mtok.is_some(),
+            "row `{id}` is missing a price"
+        );
+        assert!(!m.source_url.is_empty(), "row `{id}` is missing source_url");
+        assert!(!m.checked_at.is_empty(), "row `{id}` is missing checked_at");
+        assert!(
+            !m.price_basis.is_empty(),
+            "row `{id}` is missing price_basis"
+        );
+    }
+}
