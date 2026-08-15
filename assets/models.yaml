@@ -333,7 +333,9 @@ models:
     price_basis: list
   # Deliberately not added: qwen3.7-max/plus have no distinct published
   # metered pricing separate from qwen3.8-max as of 2026-08-15. The
-  # Singapore region for qwen3.8-max is priced at 2.0/6.0.
+  # Singapore region for qwen3.8-max is priced at 2.0/6.0. This new-generation
+  # Alibaba model is also part of the model lineup served by the qoder agent
+  # (see the moonshot/zhipu group below).
   - id: qwen3.8-max
     vendor: alibaba
     cost_in_usd_mtok: 1.65
@@ -354,8 +356,8 @@ models:
     checked_at: "2026-07-13"
     price_basis: estimate
 
-  # --- Moonshot / Zhipu / new-generation Alibaba (model families served by
-  # the qoder agent) ---
+  # --- Moonshot / Zhipu (model families served by the qoder agent, alongside
+  # qwen3.8-max above) ---
   # Deliberately not added: kimi-k2.7-code and glm-5.3 have no official
   # metered pricing published as of 2026-08-15.
   - id: kimi-k3
