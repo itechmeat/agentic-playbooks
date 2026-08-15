@@ -19,7 +19,7 @@ with two files:
   name: architect            # must equal the directory name
   description: senior implementation agent
   executor:
-    agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes, grok, cursor) or a configured one
+    agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes, grok, cursor, qoder) or a configured one
     model: claude-opus-4-8   # exactly the string that agent's --model expects
     fallbacks:               # optional ordered chain; same role, different executor
       - { agent: codex, model: gpt-5.2-codex }
@@ -161,7 +161,8 @@ not reset the other fields). Declare which subscriptions you have with
 
 Not every agent can run unattended. apb passes a non-interactive permission flag
 where the agent has one: `--permission-mode bypassPermissions` for claude and
-grok, `--force` for cursor, `--dangerously-skip-permissions` for agy,
+grok, `--force` for cursor, `--permission-mode bypass_permissions` for qoder,
+`--dangerously-skip-permissions` for agy,
 `--dangerously-bypass-approvals-and-sandbox` for codex, and `--auto` for
 opencode. hermes has no flag apb passes today: its `--yolo` is documented but
 unverified in the one-shot form apb uses, so it is deliberately not shipped. A

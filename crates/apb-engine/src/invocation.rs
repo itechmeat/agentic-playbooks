@@ -1,6 +1,6 @@
 //! Resolving the agent invocation form (spec 2026-07-12, sections 6.2-6.3).
 //!
-//! The invocation form is data (`InvocationDef`), not code: the built-in eight
+//! The invocation form is data (`InvocationDef`), not code: the built-in nine
 //! are provided by `builtin`, custom agents come from the global config's
 //! `agents:`. `resolve_invocation` fixes the agent, model, invocation form,
 //! SOUL delivery method, canonical binary path, and its fingerprint - all of
@@ -27,7 +27,7 @@ pub struct ResolvedInvocation {
     pub executable_fingerprint: String,
 }
 
-/// Built-in invocation form for the known eight. `None` for unknown agents and
+/// Built-in invocation form for the known nine. `None` for unknown agents and
 /// for pi (details will follow once the binary exists).
 pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
     let mk = |argv: &[&str],
@@ -132,6 +132,28 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
             &["--output-format", "text", "--force"],
             Interaction::Resume,
         )),
+        // qoder's `-p/--print` is a BOOLEAN flag and the prompt is a
+        // positional argument, so the prompt slot goes last, after the
+        // options, like cursor. Unlike cursor it has a real system-prompt
+        // flag; `--append-system-prompt` is used (not `--system-prompt`) so
+        // the SOUL rides alongside qoder's own agentic system prompt instead
+        // of replacing it. `--permission-mode bypass_permissions` (snake_case,
+        // unlike claude's camelCase) is the non-interactive approval mode and
+        // `--output-format text` pins plain stdout.
+        "qoder" => Some(mk(
+            &[
+                "-p",
+                "--output-format",
+                "text",
+                "--model",
+                "{model}",
+                "{prompt}",
+            ],
+            SoulDelivery::Native,
+            Some("--append-system-prompt"),
+            &["--permission-mode", "bypass_permissions"],
+            Interaction::Resume,
+        )),
         _ => None,
     }
 }
@@ -197,6 +219,18 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
             "{model}",
             "{prompt}",
         ])),
+        // qoder resumes a session via `--resume <id>`; the follow-up prompt
+        // stays positional and therefore last, like cursor.
+        "qoder" => Some(v(&[
+            "--resume",
+            "{session}",
+            "-p",
+            "--output-format",
+            "text",
+            "--model",
+            "{model}",
+            "{prompt}",
+        ])),
         _ => None,
     }
 }
@@ -211,7 +245,7 @@ pub fn spec_for(agent_id: &str, global: &GlobalConfig) -> Result<InvocationDef, 
         .and_then(|a| a.invocation.clone())
         .or_else(|| builtin(agent_id))
         // Agent is defined in config but without an explicit form and is not
-        // one of the built-in eight: historical compatibility falls back to
+        // one of the built-in nine: historical compatibility falls back to
         // the claude form (`-p {prompt} --model {model}`).
         .or_else(|| global.agents.get(agent_id).and(builtin("claude")))
         .ok_or_else(|| {
@@ -447,7 +481,7 @@ mod tests {
     #[test]
     fn builtin_agents_present_and_valid() {
         for id in [
-            "claude", "agy", "codex", "opencode", "hermes", "grok", "cursor",
+            "claude", "agy", "codex", "opencode", "hermes", "grok", "cursor", "qoder",
         ] {
             builtin(id).unwrap().validate().unwrap();
         }
@@ -495,6 +529,48 @@ mod tests {
                 "--resume",
                 "{session}",
                 "-p",
+                "--model",
+                "{model}",
+                "{prompt}"
+            ]
+        );
+    }
+
+    /// qoder's `-p` is a boolean print flag and the prompt is POSITIONAL, so
+    /// the prompt slot must come last, after every option, like cursor. It
+    /// delivers the SOUL natively via `--append-system-prompt` and resumes
+    /// with `--resume`, both verified against `@qoder-ai/qodercli` 1.1.22
+    /// `--help`.
+    #[test]
+    fn builtin_qoder_form() {
+        let spec = builtin("qoder").expect("qoder builtin spec");
+        assert_eq!(
+            spec.argv,
+            vec![
+                "-p",
+                "--output-format",
+                "text",
+                "--model",
+                "{model}",
+                "{prompt}"
+            ]
+        );
+        assert_eq!(spec.soul, SoulDelivery::Native);
+        assert_eq!(spec.soul_flag.as_deref(), Some("--append-system-prompt"));
+        assert_eq!(spec.transport, Transport::Headless);
+        assert_eq!(
+            spec.autonomous_args,
+            vec!["--permission-mode", "bypass_permissions"]
+        );
+        assert_eq!(spec.interaction, Interaction::Resume);
+        assert_eq!(
+            resume_argv("qoder").expect("qoder resume argv"),
+            vec![
+                "--resume",
+                "{session}",
+                "-p",
+                "--output-format",
+                "text",
                 "--model",
                 "{model}",
                 "{prompt}"

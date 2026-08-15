@@ -337,6 +337,12 @@ describe('vendor-tied agents (server narrows the curated table; the client only 
       { id: 'grok-4.5', vendor: 'xai', detected: false },
       { id: 'grok-4.3', vendor: 'xai', detected: false },
     ],
+    qoder: [
+      { id: 'claude-opus-4-8', vendor: 'anthropic', detected: false },
+      { id: 'gpt-5.6-sol', vendor: 'openai', detected: false },
+      { id: 'grok-4.5', vendor: 'xai', detected: false },
+      { id: 'grok-4.3', vendor: 'xai', detected: false },
+    ],
   }
 
   it('narrows grok to the curated xAI rows', () => {
@@ -345,6 +351,15 @@ describe('vendor-tied agents (server narrows the curated table; the client only 
 
   it('leaves an aggregator like cursor on the full table', () => {
     expect(modelIdsForAgent('cursor', table, [])).toEqual([
+      'claude-opus-4-8',
+      'gpt-5.6-sol',
+      'grok-4.5',
+      'grok-4.3',
+    ])
+  })
+
+  it('leaves an aggregator like qoder on the full table', () => {
+    expect(modelIdsForAgent('qoder', table, [])).toEqual([
       'claude-opus-4-8',
       'gpt-5.6-sol',
       'grok-4.5',

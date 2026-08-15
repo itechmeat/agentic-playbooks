@@ -273,9 +273,9 @@ pub fn load_merged() -> Result<ModelsTable, ModelsError> {
 
 /// Vendor a known single-vendor agent is tied to (issue #42 finding 9): used
 /// to narrow the curated table to that vendor's rows for the profile
-/// editor's model selector. An aggregator (opencode, pi, agy, hermes, cursor)
-/// or an unrecognized agent id has no entry here and keeps the whole table -
-/// it is not pinned to one vendor. The legacy `claude-code` id (still found in
+/// editor's model selector. An aggregator (opencode, pi, agy, hermes, cursor,
+/// qoder) or an unrecognized agent id has no entry here and keeps the whole
+/// table - it is not pinned to one vendor. The legacy `claude-code` id (still found in
 /// profiles saved before the agent id was renamed) resolves to the same
 /// vendor as `claude`.
 pub fn agent_vendor(agent: &str) -> Option<&'static str> {
@@ -540,6 +540,7 @@ mod tests {
         assert_eq!(agent_vendor("grok"), Some("xai"));
         assert_eq!(agent_vendor("opencode"), None);
         assert_eq!(agent_vendor("cursor"), None);
+        assert_eq!(agent_vendor("qoder"), None);
         assert_eq!(agent_vendor("some-custom-agent"), None);
     }
 

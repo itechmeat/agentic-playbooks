@@ -125,8 +125,8 @@ pub struct Probe {
     auth_source: AuthSource,
 }
 
-/// Built-in probes for the eight agents (claude, codex, agy, opencode, pi,
-/// hermes, grok, cursor).
+/// Built-in probes for the nine agents (claude, codex, agy, opencode, pi,
+/// hermes, grok, cursor, qoder).
 pub fn builtin_probes() -> Vec<Probe> {
     let v = |s: &str| vec![s.to_string()];
     vec![
@@ -203,6 +203,20 @@ pub fn builtin_probes() -> Vec<Probe> {
         Probe {
             id: "cursor".into(),
             bins: v("cursor-agent"),
+            category: AgentCategory::Aggregator,
+            version_args: v("--version"),
+            models_source: ModelsSource::None,
+            auth_source: AuthSource::None,
+        },
+        // Qoder CLI. An aggregator: one subscription serving Qwen, DeepSeek,
+        // GLM, Kimi and MiniMax models, so it contributes no curated rows of
+        // its own. npm installs both `qoder` and a `qodercli` alias for the
+        // same binary; the shorter `qoder` is unambiguous and is the one
+        // probed. Model enumeration via `--list-models` requires
+        // authentication, so it is deferred like grok's.
+        Probe {
+            id: "qoder".into(),
+            bins: v("qoder"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
             models_source: ModelsSource::None,
@@ -716,7 +730,7 @@ fn probe_one(p: &Probe) -> AgentInfo {
 }
 
 /// Custom probes from the global config: agents with `probe: true` (the
-/// built-in eight are not duplicated). Only checks for the binary's presence -
+/// built-in nine are not duplicated). Only checks for the binary's presence -
 /// no model/auth sources. Best-effort: a malformed config yields an empty
 /// list.
 fn custom_probes() -> Vec<Probe> {
@@ -724,7 +738,7 @@ fn custom_probes() -> Vec<Probe> {
         return Vec::new();
     };
     let builtin: std::collections::BTreeSet<&str> = [
-        "claude", "codex", "agy", "opencode", "pi", "hermes", "grok", "cursor",
+        "claude", "codex", "agy", "opencode", "pi", "hermes", "grok", "cursor", "qoder",
     ]
     .into_iter()
     .collect();

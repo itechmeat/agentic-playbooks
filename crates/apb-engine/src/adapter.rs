@@ -653,6 +653,7 @@ pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
         "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
         "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
         "cursor" => capture_json_string_field(raw, &["chatId", "chat_id", "session_id"]),
+        "qoder" => capture_json_string_field(raw, &["session_id"]),
         _ => None,
     }
 }
@@ -1851,6 +1852,40 @@ mod tests {
             !argv.iter().any(|a| a == "bypassPermissions"),
             "must not grant permissions without autonomy, got {argv:?}"
         );
+    }
+
+    /// qoder is the only builtin combining a trailing positional `{prompt}`
+    /// with `SoulDelivery::Native`: the SOUL and the autonomy flags are
+    /// appended AFTER the positional prompt, not before it like claude/grok
+    /// (whose `{prompt}` sits mid-argv). Pins the fully assembled command,
+    /// not just `spec.argv`, so a future change to `build_command`'s append
+    /// order is caught here.
+    #[test]
+    fn build_command_assembles_qoder_soul_and_autonomy_after_the_positional_prompt() {
+        let spec = crate::invocation::builtin("qoder").expect("builtin qoder spec");
+        let (argv, stdin) = build_command(
+            &spec,
+            "do the thing",
+            "qwen3.8-max",
+            Some("You are a careful reviewer."),
+            true,
+        );
+        assert_eq!(
+            argv,
+            vec![
+                "-p",
+                "--output-format",
+                "text",
+                "--model",
+                "qwen3.8-max",
+                "do the thing",
+                "--append-system-prompt",
+                "You are a careful reviewer.",
+                "--permission-mode",
+                "bypass_permissions",
+            ]
+        );
+        assert_eq!(stdin, None);
     }
 
     #[test]
