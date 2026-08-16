@@ -25,6 +25,9 @@ pub use state::AppState;
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(routes::meta::health))
+        .route("/api/auth/login", post(routes::auth::login_handler))
+        .route("/api/auth/logout", post(routes::auth::logout_handler))
+        .route("/api/auth/status", get(routes::auth::status_handler))
         .route("/api/projects", get(routes::meta::list_projects_handler))
         .route(
             "/api/playbooks",
