@@ -1,15 +1,19 @@
 //! The dashboard HTTP API: an axum router over the local `.apb` state, with
-//! the built svelte frontend embedded as static assets.
+//! the built svelte frontend embedded as static assets, plus a second,
+//! structurally separate ingest listener for inbound provider webhooks.
 //!
 //! The surface is split by resource. [`routes`] holds one module per API
 //! family (playbooks, runs, profiles, connectors, and the small read-only
 //! `meta` endpoints); [`state`] holds the shared [`AppState`] plus the
 //! request-scoped project resolution every handler starts from; [`ws`] is the
 //! event stream the dashboard subscribes to; [`assets`] serves the embedded
-//! frontend. This module wires them into a router and runs the server.
+//! frontend. [`ingest`] is a separate router on a separate socket carrying
+//! only the hook routes, so a proxy pointed at it cannot reach anything here.
+//! This module wires the dashboard router together and runs the server.
 
 pub mod assets;
 pub mod auth;
+pub mod ingest;
 pub mod lock;
 pub mod routes;
 pub mod state;
