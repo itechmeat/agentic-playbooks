@@ -38,12 +38,8 @@ pub struct InboxCall {
     account: String,
     op: InboxOp,
     consumer: String,
-    // `pub(crate)`, not private: the offline contract-test runner
-    // (`contract_test.rs`, same crate) replays these against its expected
-    // envelope without going through the network-free `send()` path, the way
-    // it already does for `SmtpCall`/`ImapCall` inputs it re-renders.
-    pub(crate) limit: usize,
-    pub(crate) up_to_seq: u64,
+    limit: usize,
+    up_to_seq: u64,
     /// The effective `response_pick` projection; empty when the function
     /// declares none or `--full` bypasses it.
     response_pick: Vec<String>,

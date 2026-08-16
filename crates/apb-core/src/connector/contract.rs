@@ -435,9 +435,13 @@ cases:
 
     #[test]
     fn inbox_wins_the_shape_discrimination() {
-        // An inbox case never also carries an imap block, but the ordering
-        // must be deterministic and documented, so it is asserted.
-        let yaml = "cases:\n  - function: f\n    expect:\n      inbox: { op: read }\n";
+        // `Expectation` has no `deny_unknown_fields`-style mutual exclusion
+        // between `inbox` and `imap` (both are plain sibling `Option`
+        // fields), so a case co-declaring both parses. `resolve` checks
+        // `inbox` first, so it wins over the co-declared `imap` block; this
+        // pins that ordering as deliberate and documented rather than
+        // incidental.
+        let yaml = "cases:\n  - function: f\n    expect:\n      inbox: { op: read }\n      imap: { op: search }\n";
         let doc = TestsDoc::from_yaml(yaml).unwrap();
         assert!(matches!(
             doc.cases[0].expect.resolve().unwrap(),

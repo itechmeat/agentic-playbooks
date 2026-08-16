@@ -442,12 +442,11 @@ fn eval_inbox(function: &FunctionSpec, args: &Value, expected: &InboxExpect) -> 
         ));
     }
 
-    // `InboxCall`'s fields are private to its module (encapsulated on
-    // purpose), so the runner reads the rendered `limit`/`up_to_seq` back off
-    // the dry-run envelope rather than the live `Call` variant. This still
-    // runs the exact same argument validation as a live call
-    // (`connector::inbox::build`); only the branch taken to observe the
-    // result differs.
+    // Read the rendered `limit`/`up_to_seq` off the dry-run envelope, the
+    // same render path a `--dry-run` call uses, rather than off a live
+    // `Call`: this mirrors how `eval_http` observes rendered output through
+    // `render_http`'s own return value instead of reaching into the
+    // request it builds.
     let build = crate::connector::inbox::build(
         spec,
         "contract",
