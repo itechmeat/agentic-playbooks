@@ -37,6 +37,8 @@ mod detect_test;
 mod doctor_test;
 #[path = "suite/fsutil_test.rs"]
 mod fsutil_test;
+#[path = "suite/inbox_store_test.rs"]
+mod inbox_store_test;
 #[path = "suite/instruction_draft_test.rs"]
 mod instruction_draft_test;
 #[path = "suite/interactive_howto_example_test.rs"]

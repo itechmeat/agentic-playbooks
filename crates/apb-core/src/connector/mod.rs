@@ -10,6 +10,9 @@ pub mod common;
 pub mod config;
 pub mod contract;
 pub mod def;
+// Deliberately not glob re-exported: `inbox::{read, depth}` would collide
+// with the `pub use store::*` glob below. Callers use `inbox::Inbox`.
+pub mod inbox;
 pub mod install;
 // No glob re-export: `official::{list,get}` would collide with `store::{list,...}`
 // under the `pub use store::*` glob below. Callers use `official::list()` etc.
