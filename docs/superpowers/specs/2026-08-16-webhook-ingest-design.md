@@ -75,12 +75,13 @@ webhook:
     header: X-Hub-Signature-256
     prefix: "sha256="
     secret: "{{secret.app_secret}}"
-  dedupe_path: entry.0.id                # dot path into the body yielding the provider id; optional; segments are map keys or numeric array indices, and the walker must support numeric indices (verify the shared dot-path walker does, extend it if it is maps-only)
+  dedupe_path: entry.0.id                # dot path into the body yielding the provider id; optional; segments are map keys or numeric array indices
 ```
 
 - `{{secret.*}}` placement: the webhook block becomes the third deliberate exemption to the auth-only secret rule (after the smtp and imap connection passwords), validated and tested with the same density. Secrets resolve at ingest time from the account's secret references; values are never cached.
 - The referenced fields (`verify_token`, `app_secret`) must exist in `account_fields` and be `secret: true`; the validator enforces this.
 - `dedupe_path` missing means dedupe falls back to the SHA-256 of the raw body.
+- The dedupe walker is a small array-aware helper in apb-core, deliberately separate from the engine's response_pick walker: core cannot depend on the engine crate, and response_pick's documented maps-only semantics must not change for existing connectors. The two notations stay distinct on purpose; the engine walker remains maps-only.
 - The webhook block is covered by the connector tree digest, and the secret references by the account digest, so editing either drops trust. This is the property that stops a shared config from silently weakening verification.
 
 ## Connector schema: the inbox function kind
