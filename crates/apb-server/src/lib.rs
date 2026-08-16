@@ -17,6 +17,7 @@ pub mod ws;
 
 use axum::Router;
 use axum::routing::{get, post, put};
+use std::net::{IpAddr, SocketAddr};
 
 pub use state::AppState;
 
@@ -138,12 +139,41 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Startup interlock (spec 2026-08-16-server-mode-design): binding anywhere
+/// but the loopback interface requires at least one issued API key. This is a
+/// hard error and not a warning, because the API can start runs and make
+/// authenticated connector calls, which makes an open bind equivalent to
+/// remote code execution.
+pub fn check_bind_allowed(bind: IpAddr, key_count: usize) -> Result<(), String> {
+    if bind.is_loopback() || key_count > 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to bind {bind}: no API key is configured, so the dashboard would be reachable from the network without authentication. Issue one with `apb server key issue`, or keep the default 127.0.0.1 bind"
+    ))
+}
+
+/// The host part of the dashboard URL for a bind address, with IPv6 bracketed.
+fn display_host(bind: IpAddr) -> String {
+    match bind {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => format!("[{v6}]"),
+    }
+}
+
 /// Runs the global, machine-wide dashboard: one server, no project binding.
 /// Playbooks and runs are aggregated across every reachable project in the
 /// registry; project-specific requests carry `?workspace=<id>`. A single
 /// instance lock lives in the config dir so two global dashboards cannot race
 /// on the same port.
-pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    // The key file decides two things at once: whether the requested bind is
+    // permitted at all, and (from Task 4 on) whether auth is enforced. A
+    // malformed file is a startup error rather than a silent "no keys", so a
+    // typo can never quietly open the server.
+    let auth_file = apb_core::server_auth::load()?;
+    check_bind_allowed(bind, auth_file.keys.len()).map_err(std::io::Error::other)?;
+
     let state = AppState::new_global();
     let cfg = apb_core::config::config_dir()
         .ok_or_else(|| std::io::Error::other("no config dir for the global server lock"))?;
@@ -152,7 +182,7 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // mutual exclusion (a second server on the same port fails here), so if it
     // fails we must return without having written a lock that no cleanup path
     // would then remove.
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     let _lock = lock::write_global_lock(&cfg, port)?;
     // Real-time updates across all projects: a filesystem watcher broadcasts
     // change pings on the shared channel that the dashboard's WebSocket relays.
@@ -166,10 +196,19 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let app = build_router(state);
-    println!("apb dashboard (global): http://127.0.0.1:{port}");
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    println!(
+        "apb dashboard (global): http://{}:{port}",
+        display_host(bind)
+    );
+    // ConnectInfo carries the socket peer address into every request, which the
+    // auth layer needs for rate-limit keying and for deciding whether a
+    // forwarded header came from a trusted proxy.
+    let result = axum::serve(
+        listener,
+        app.into_make_service_with_connect_info::<SocketAddr>(),
+    )
+    .with_graceful_shutdown(shutdown_signal())
+    .await;
     // Remove the lock both on normal shutdown and after catching a signal.
     lock::remove_global_lock(&cfg)?;
     result?;

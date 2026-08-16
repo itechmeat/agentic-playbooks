@@ -6,6 +6,7 @@ mod profile;
 mod run;
 mod selfupdate;
 mod serve;
+mod server;
 mod suggestions;
 mod util;
 
@@ -27,8 +28,9 @@ use crate::run::{
 };
 use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dashboard, dev_cmd, mcp_cmd};
+use crate::server::{ServerAction, server_cmd};
 use crate::suggestions::{SuggestionsAction, suggestions_cmd};
-use crate::util::resolve_port;
+use crate::util::{resolve_bind, resolve_port};
 
 #[derive(Parser)]
 #[command(name = "apb", version, about = "Playbooks CLI")]
@@ -195,8 +197,18 @@ enum Command {
         /// Port: the flag overrides the global config, default 7321.
         #[arg(long)]
         port: Option<u16>,
+        /// IP address to bind: the flag overrides `server.bind` in the global
+        /// config, default 127.0.0.1. Any non-loopback address requires at
+        /// least one key from `apb server key issue`.
+        #[arg(long)]
+        bind: Option<String>,
         #[arg(long)]
         no_open: bool,
+    },
+    /// Manage server mode: the API keys that authenticate a networked dashboard
+    Server {
+        #[command(subcommand)]
+        action: ServerAction,
     },
     /// Dev mode: Vite HMR frontend + API server (source tree only)
     Dev {
@@ -351,7 +363,18 @@ fn main() -> ExitCode {
         Some(Command::Answer { run, node, text }) => {
             answer_cmd(&root, &run, node.as_deref(), &text)
         }
-        Some(Command::Dashboard { port, no_open }) => dashboard(resolve_port(port), no_open),
+        Some(Command::Dashboard {
+            port,
+            bind,
+            no_open,
+        }) => match resolve_bind(bind.as_deref()) {
+            Ok(addr) => dashboard(addr, resolve_port(port), no_open),
+            Err(e) => {
+                eprintln!("dashboard failed: {e}");
+                ExitCode::from(2)
+            }
+        },
+        Some(Command::Server { action }) => server_cmd(action),
         Some(Command::Dev { no_open }) => dev_cmd(root, no_open),
         Some(Command::Mcp) => mcp_cmd(&root),
         Some(Command::SelfUpdate { check }) => run_self_update(check),
@@ -398,6 +421,12 @@ fn main() -> ExitCode {
             allow_environment_drift,
         ),
         Some(Command::AskServer { run, node, attempt }) => ask_server_cmd(&run, &node, attempt),
-        None => dashboard(resolve_port(None), false),
+        None => match resolve_bind(None) {
+            Ok(addr) => dashboard(addr, resolve_port(None), false),
+            Err(e) => {
+                eprintln!("dashboard failed: {e}");
+                ExitCode::from(2)
+            }
+        },
     }
 }

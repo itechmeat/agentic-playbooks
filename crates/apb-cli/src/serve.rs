@@ -1,3 +1,4 @@
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -6,13 +7,12 @@ use apb_core::registry::init_project;
 /// Starts the single, global dashboard for the machine. There is no
 /// project-scoped server: the dashboard aggregates every registered project,
 /// so it does not bind to (or initialize) the current directory.
-pub(crate) fn dashboard(port: u16, no_open: bool) -> ExitCode {
+pub(crate) fn dashboard(bind: IpAddr, port: u16, no_open: bool) -> ExitCode {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if !no_open {
-        let url = format!("http://127.0.0.1:{port}");
-        let _ = open::that_detached(&url);
+        let _ = open::that_detached(browse_url(bind, port));
     }
-    match rt.block_on(apb_server::run_server(port)) {
+    match rt.block_on(apb_server::run_server(bind, port)) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             if error_looks_like_addr_in_use(&e) {
@@ -23,6 +23,22 @@ pub(crate) fn dashboard(port: u16, no_open: bool) -> ExitCode {
             }
             ExitCode::from(2)
         }
+    }
+}
+
+/// The URL to open in a local browser for a given bind address. An
+/// all-interfaces bind has no address of its own to visit, so the loopback
+/// alias is used; any other bind is visited at its own address, IPv6
+/// bracketed.
+fn browse_url(bind: IpAddr, port: u16) -> String {
+    let host = if bind.is_unspecified() {
+        IpAddr::V4(Ipv4Addr::LOCALHOST)
+    } else {
+        bind
+    };
+    match host {
+        IpAddr::V4(v4) => format!("http://{v4}:{port}"),
+        IpAddr::V6(v6) => format!("http://[{v6}]:{port}"),
     }
 }
 
@@ -127,7 +143,10 @@ pub(crate) fn dev_cmd(root: PathBuf, no_open: bool) -> ExitCode {
     // Daemon thread: dies with the process when Vite exits.
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
-        if let Err(e) = rt.block_on(apb_server::run_server(7321)) {
+        if let Err(e) = rt.block_on(apb_server::run_server(
+            IpAddr::V4(Ipv4Addr::LOCALHOST),
+            7321,
+        )) {
             if error_looks_like_addr_in_use(&e) {
                 let holders = lookup_port_holders(7321);
                 eprintln!("{}", format_port_in_use_error(7321, holders.as_deref()));
@@ -235,6 +254,30 @@ mod tests {
             "hint must still guide the operator: {msg}"
         );
         assert!(!msg.contains('!'), "no exclamation marks: {msg}");
+    }
+
+    #[test]
+    fn browse_url_maps_bind_to_a_visitable_address() {
+        use super::browse_url;
+        use std::net::{IpAddr, Ipv4Addr};
+        assert_eq!(
+            browse_url(IpAddr::V4(Ipv4Addr::LOCALHOST), 7321),
+            "http://127.0.0.1:7321"
+        );
+        assert_eq!(
+            browse_url(IpAddr::V4(Ipv4Addr::UNSPECIFIED), 7321),
+            "http://127.0.0.1:7321",
+            "an all-interfaces bind is visited on loopback"
+        );
+        assert_eq!(
+            browse_url("10.0.0.5".parse().unwrap(), 8080),
+            "http://10.0.0.5:8080"
+        );
+        assert_eq!(
+            browse_url("::1".parse().unwrap(), 7321),
+            "http://[::1]:7321",
+            "IPv6 hosts are bracketed"
+        );
     }
 
     #[test]

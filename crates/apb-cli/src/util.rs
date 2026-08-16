@@ -26,6 +26,15 @@ pub(crate) fn resolve_port(flag: Option<u16>) -> u16 {
     .unwrap_or(7321)
 }
 
+/// Bind address for the dashboard: the `--bind` flag, then `server.bind` from
+/// the global config, then loopback. A malformed config or an unparseable
+/// address is an error rather than a silent fallback, so an operator who
+/// mistypes `0.0.0.0` never gets a loopback server they believe is public.
+pub(crate) fn resolve_bind(flag: Option<&str>) -> Result<std::net::IpAddr, String> {
+    let cfg = apb_core::config::GlobalConfig::load()?;
+    cfg.server.resolve_bind(flag)
+}
+
 /// Prints left-aligned, space-padded columns with a two-space gutter. Rows are
 /// ragged-tolerant: a short row simply has fewer columns. The first row is the
 /// header by convention of the callers.
