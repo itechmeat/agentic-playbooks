@@ -720,9 +720,12 @@ fn push_ingest_checks(
             }),
         }
 
-        let depth = apb_core::connector::inbox::Inbox::open(name, &account.name)
-            .and_then(|inbox| inbox.depth(apb_engine::connector::inbox::DEFAULT_CONSUMER));
-        let detail = match depth {
+        let inbox = apb_core::connector::inbox::Inbox::open(name, &account.name);
+        let depth = inbox.as_ref().map_err(|e| e.to_string()).and_then(|i| {
+            i.depth(apb_engine::connector::inbox::DEFAULT_CONSUMER)
+                .map_err(|e| e.to_string())
+        });
+        let detail = match &depth {
             Ok(d) if d.total == 0 => "no events received yet".to_string(),
             Ok(d) => format!(
                 "{} pending of {} stored for consumer `{}`",
@@ -735,6 +738,32 @@ fn push_ingest_checks(
         checks.push(Check {
             name: format!("connector `{name}` account `{}`: inbox", account.name),
             status: CheckStatus::Ok,
+            detail,
+        });
+
+        // `depth.dropped` reads the persisted counter (`Inbox::dropped_count`,
+        // folded into `Depth` by `Inbox::depth`), so it is visible here even
+        // when the drop happened in a different process (the dashboard's
+        // ingest listener) than the one running doctor. Reused from the
+        // `depth` already resolved above rather than a second lookup, so a
+        // broken inbox is reported once, not twice.
+        let (status, detail) = match &depth {
+            Ok(d) if d.dropped == 0 => (CheckStatus::Ok, "no deliveries dropped".to_string()),
+            Ok(d) => (
+                CheckStatus::Warn,
+                format!(
+                    "{} deliveries were dropped by the accept cap; the provider retried faster than apb accepted",
+                    d.dropped
+                ),
+            ),
+            Err(e) => (
+                CheckStatus::Warn,
+                format!("dropped counter unreadable: {e}"),
+            ),
+        };
+        checks.push(Check {
+            name: format!("connector `{name}` account `{}`: dropped", account.name),
+            status,
             detail,
         });
     }

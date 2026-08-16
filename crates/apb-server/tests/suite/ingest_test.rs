@@ -244,6 +244,54 @@ async fn an_unknown_connector_or_account_is_a_flat_404() {
     }
 }
 
+/// A connector directory that is itself a symlink resolving outside
+/// `connectors_dir()` must be refused, not read. This is the containment
+/// check `load_connector_doc` restores (mirroring `store::load`'s
+/// defense-in-depth): the name is already a validated `[a-z0-9-]` slug, but a
+/// symlink planted at `connectors_dir()/<name>` could still point anywhere.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_connector_symlinked_outside_the_connectors_root_is_refused() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+
+    // A fully valid webhook manifest, but planted outside the connectors
+    // root and only reachable through a symlink.
+    let real_dir = outside.path().join(CONNECTOR);
+    std::fs::create_dir_all(&real_dir).unwrap();
+    std::fs::write(real_dir.join("connector.yaml"), CONNECTOR_YAML).unwrap();
+
+    let connectors_dir = cfg.path().join("connectors");
+    std::fs::create_dir_all(&connectors_dir).unwrap();
+    std::os::unix::fs::symlink(&real_dir, connectors_dir.join(CONNECTOR)).unwrap();
+
+    let adir = cfg.path().join("connector-config");
+    std::fs::create_dir_all(&adir).unwrap();
+    std::fs::write(
+        adir.join(format!("{CONNECTOR}.yaml")),
+        format!(
+            "accounts:\n  - name: {ACCOUNT}\n    default: true\n    verify_token: \"{{{{env.{TOKEN_VAR}}}}}\"\n    app_secret: \"{{{{env.{SECRET_VAR}}}}}\"\n"
+        ),
+    )
+    .unwrap();
+    let _guards = [
+        set_var("APB_CONFIG_DIR", cfg.path()),
+        set_var(SECRET_VAR, SECRET),
+        set_var(TOKEN_VAR, TOKEN),
+    ];
+
+    let body = br#"{"id":"evt-1"}"#;
+    let app = build_ingest_router(fresh_state());
+    let (status, text) = send(app, post(body, Some(&signed(body)))).await;
+    assert_eq!(
+        status,
+        StatusCode::NOT_FOUND,
+        "a connector dir symlinked outside connectors_dir() must not resolve"
+    );
+    assert!(text.is_empty(), "no detail is disclosed: {text}");
+}
+
 #[tokio::test]
 async fn an_oversize_body_is_refused_before_it_is_stored() {
     let _lock = crate::common::env_lock().await;
@@ -384,6 +432,18 @@ async fn the_per_account_accept_cap_drops_with_a_200() {
         state.dropped(CONNECTOR, ACCOUNT),
         5,
         "the drops are counted"
+    );
+    assert_eq!(
+        apb_core::connector::inbox::Inbox::at(
+            &cfg.path().join("connector-inbox"),
+            CONNECTOR,
+            ACCOUNT
+        )
+        .unwrap()
+        .dropped_count()
+        .unwrap(),
+        5,
+        "the persisted counter is the operator-visible source of truth, not just the in-process one"
     );
 }
 

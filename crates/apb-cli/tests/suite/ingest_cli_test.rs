@@ -125,6 +125,65 @@ fn doctor_reports_the_ingest_surface_of_a_webhook_connector() {
 }
 
 #[test]
+fn doctor_reports_no_drops_ok_when_nothing_was_dropped() {
+    let cfg = tempfile::tempdir().unwrap();
+    seed_connector(cfg.path());
+    std::fs::write(
+        cfg.path().join("config.yaml"),
+        "ingest:\n  enabled: true\n  public_base_url: https://hooks.example.com\n",
+    )
+    .unwrap();
+
+    let (out, _err, _ok) = run(cfg.path(), &["connector", "doctor"]);
+    assert!(
+        out.contains("account `main`: dropped: no deliveries dropped"),
+        "an absent counter reads as no drops, reported ok: {out}"
+    );
+}
+
+#[test]
+fn doctor_warns_when_deliveries_were_dropped_by_the_accept_cap() {
+    let cfg = tempfile::tempdir().unwrap();
+    seed_connector(cfg.path());
+    std::fs::write(
+        cfg.path().join("config.yaml"),
+        "ingest:\n  enabled: true\n  public_base_url: https://hooks.example.com\n",
+    )
+    .unwrap();
+
+    // Seeds the persisted counter directly, the way `Inbox::note_dropped`
+    // would after a real accept-cap drop, without needing this test to send
+    // 600+ requests at the listener.
+    let inbox_dir = cfg
+        .path()
+        .join("connector-inbox")
+        .join("echo-hooks")
+        .join("main");
+    std::fs::create_dir_all(&inbox_dir).unwrap();
+    std::fs::write(inbox_dir.join("dropped.count"), "3").unwrap();
+
+    let (out, _err, _ok) = run(cfg.path(), &["connector", "doctor"]);
+    assert!(
+        out.contains("account `main`: dropped"),
+        "the dropped row is present: {out}"
+    );
+    assert!(
+        out.contains("3 deliveries were dropped by the accept cap"),
+        "the row names the count and the cause: {out}"
+    );
+    let dropped_line = out
+        .lines()
+        .find(|l| l.contains("account `main`: dropped"))
+        .expect("dropped row line");
+    assert!(
+        dropped_line.starts_with("[warn]"),
+        "a nonzero dropped count is a warning, not merely informational: {dropped_line}"
+    );
+    assert!(!out.contains('!'), "no exclamation marks: {out}");
+    assert!(!out.contains('\u{2014}'), "no em-dashes: {out}");
+}
+
+#[test]
 fn doctor_warns_that_a_project_only_account_cannot_be_addressed() {
     let cfg = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();

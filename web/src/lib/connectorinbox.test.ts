@@ -19,6 +19,7 @@ const inbox = (over: Partial<ConnectorInbox> = {}): ConnectorInbox => ({
       cursor: 3,
       lastReceivedAt: 1_700_000_000_000,
       callbackUrl: 'https://hooks.example.com/hooks/echo-hooks/main',
+      dropped: 0,
     },
   ],
   ...over,

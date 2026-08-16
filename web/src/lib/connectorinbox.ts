@@ -9,6 +9,10 @@ export interface ConnectorInboxAccount {
   cursor: number
   lastReceivedAt: number | null
   callbackUrl: string | null
+  // Deliveries the accept cap dropped for this account, from the persisted
+  // counter, so it survives a dashboard restart and reads the same from
+  // `apb connector doctor`.
+  dropped: number
 }
 
 export interface ConnectorInbox {

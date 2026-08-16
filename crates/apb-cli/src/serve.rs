@@ -70,7 +70,16 @@ fn spawn_ingest_if_enabled() -> Option<tokio::task::JoinHandle<()>> {
     };
     Some(tokio::spawn(async move {
         if let Err(e) = apb_server::ingest::run_ingest_server(bind, port).await {
-            eprintln!("apb ingest: listener stopped: {e}");
+            // Same diagnostic `ingest_cmd` and `dashboard` already use: an
+            // address-in-use failure gets the who-holds-this-port message
+            // rather than a raw `io::Error` the operator has to decode
+            // themselves.
+            if error_looks_like_addr_in_use(&e) {
+                let holders = lookup_port_holders(port);
+                eprintln!("{}", format_port_in_use_error(port, holders.as_deref()));
+            } else {
+                eprintln!("apb ingest: listener stopped: {e}");
+            }
         }
     }))
 }

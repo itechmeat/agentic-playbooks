@@ -280,6 +280,7 @@ interface ConnectorInboxAccountDto {
   total: number
   cursor: number
   last_received_at: number | null
+  dropped: number
   callback_url: string | null
 }
 
@@ -297,6 +298,7 @@ const toInboxAccount = (d: ConnectorInboxAccountDto): ConnectorInboxAccount => (
   cursor: d.cursor,
   lastReceivedAt: d.last_received_at,
   callbackUrl: d.callback_url,
+  dropped: d.dropped,
 })
 
 // GET /api/connectors/{name}/inbox: counts and the callback URL per account.

@@ -102,6 +102,7 @@
               <Table.Row>
                 <Table.Head>Account</Table.Head>
                 <Table.Head>Pending</Table.Head>
+                <Table.Head>Dropped</Table.Head>
                 <Table.Head>Stored</Table.Head>
                 <Table.Head>Last received</Table.Head>
                 <Table.Head>Callback URL</Table.Head>
@@ -117,6 +118,13 @@
                       <Badge variant="outline">{a.pending}</Badge>
                     {:else}
                       {a.pending}
+                    {/if}
+                  </Table.Cell>
+                  <Table.Cell>
+                    {#if a.dropped > 0}
+                      <Badge variant="destructive">{a.dropped}</Badge>
+                    {:else}
+                      {a.dropped}
                     {/if}
                   </Table.Cell>
                   <Table.Cell>{a.total}</Table.Cell>

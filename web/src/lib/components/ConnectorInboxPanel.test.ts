@@ -15,6 +15,7 @@ const inbox: ConnectorInbox = {
       cursor: 3,
       lastReceivedAt: 1_700_000_000_000,
       callbackUrl: 'https://hooks.example.com/hooks/echo-hooks/main',
+      dropped: 0,
     },
   ],
 }
@@ -29,6 +30,22 @@ describe('ConnectorInboxPanel', () => {
     expect(body).toContain('2')
     expect(body).toContain('2023-11-14T22:13:20Z')
     expect(body).toContain('https://hooks.example.com/hooks/echo-hooks/main')
+  })
+
+  it('shows the dropped count next to pending when the accept cap has dropped deliveries', () => {
+    const { body } = render(ConnectorInboxPanel, {
+      props: {
+        name: 'echo-hooks',
+        inbox: {
+          ...inbox,
+          accounts: [{ ...inbox.accounts[0], dropped: 7 }],
+        },
+        loaded: true,
+        failed: false,
+      },
+    })
+    expect(body).toContain('Dropped')
+    expect(body).toContain('7')
   })
 
   it('warns instead of a URL when no public base is configured', () => {

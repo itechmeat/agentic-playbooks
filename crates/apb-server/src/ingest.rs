@@ -454,8 +454,19 @@ async fn post_hook_handler(
     };
 
     // Over the cap: drop with a 200 and a counter, so the provider stops
-    // retrying rather than filling the disk twice over.
+    // retrying rather than filling the disk twice over. `allow_accept` bumps
+    // the in-process counter (kept for tests that read `state.dropped`
+    // directly); the persisted counter below is the operator-visible source
+    // of truth (`apb connector doctor`, the dashboard panel), so it must
+    // survive a restart and be readable from any process, not just this one.
+    // Best effort: a failure to persist must not turn an already-rejected
+    // delivery into a 500 for a request that was never going to be stored.
     if !state.allow_accept(&connector, &account) {
+        if let Ok(store) = Inbox::open(&connector, &account)
+            && let Err(e) = store.note_dropped()
+        {
+            eprintln!("apb ingest_store_error connector={connector} account={account}: {e}");
+        }
         return flat(StatusCode::OK);
     }
 
@@ -512,10 +523,25 @@ fn resolve_target(connector: &str, account: &str) -> Option<(ConnectorDoc, Accou
 /// account-config CPU work on a path an unauthenticated caller can trigger at
 /// will. `connector` was already validated as a plain `[a-z0-9-]` slug by
 /// `resolve_target`, so joining it into a path here carries no traversal
-/// risk.
+/// risk from the name alone - but skipping `store::load` means this function
+/// must restore its symlink-containment check itself (see below), since
+/// nothing else on this path re-adds it.
 fn load_connector_doc(name: &str) -> Option<ConnectorDoc> {
     let base = store::connectors_dir()?;
-    let yaml = std::fs::read_to_string(base.join(name).join("connector.yaml")).ok()?;
+    let cand = base.join(name);
+    let canonical_path = std::fs::canonicalize(&cand).ok()?;
+    // Symlink-containment check, mirroring `store::load`'s defense-in-depth:
+    // even with `name` already validated as a plain `[a-z0-9-]` slug, a
+    // symlink planted inside the connectors root (by an installed connector,
+    // or by anything else with write access to `connectors_dir()`) could
+    // resolve outside it. Every delivery reaches this call, including ones
+    // an unauthenticated caller can trigger at will, so refusing containment
+    // is not optional here.
+    let canonical_root = std::fs::canonicalize(&base).unwrap_or_else(|_| base.clone());
+    if !canonical_path.starts_with(&canonical_root) {
+        return None;
+    }
+    let yaml = std::fs::read_to_string(canonical_path.join("connector.yaml")).ok()?;
     ConnectorDoc::from_yaml(&yaml, name).ok()
 }
 

@@ -70,6 +70,39 @@ fn append_read_ack_round_trip() {
 }
 
 #[test]
+fn dropped_counter_round_trips_and_persists_across_a_fresh_handle() {
+    let dir = tempfile::tempdir().unwrap();
+    let box_ = inbox(&dir);
+
+    assert_eq!(
+        box_.dropped_count().unwrap(),
+        0,
+        "absent counter file reads as 0"
+    );
+
+    assert_eq!(box_.note_dropped().unwrap(), 1);
+    assert_eq!(box_.note_dropped().unwrap(), 2);
+    assert_eq!(box_.dropped_count().unwrap(), 2);
+
+    // A fresh handle over the same directory reads the same persisted count:
+    // the counter is not the in-process `IngestState` one, it must be
+    // visible from another process (`apb connector doctor`, a second
+    // dashboard).
+    let reopened = Inbox::at(dir.path(), "echo-hooks", "main").unwrap();
+    assert_eq!(reopened.dropped_count().unwrap(), 2);
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(box_.dir().join("dropped.count"))
+            .unwrap()
+            .permissions()
+            .mode();
+        assert_eq!(mode & 0o777, 0o600, "dropped.count must be owner-only");
+    }
+}
+
+#[test]
 fn a_duplicate_provider_id_is_not_appended() {
     let dir = tempfile::tempdir().unwrap();
     let box_ = inbox(&dir);
