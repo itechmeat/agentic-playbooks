@@ -373,6 +373,15 @@ impl Inbox {
     /// exceeded, the oldest events regardless of ack state. Rewrites the log
     /// only when something actually goes, so the ordinary append does one
     /// metadata read and one first-line parse.
+    ///
+    /// Invariant: the newest event is never removed, on either path, even
+    /// when it is acked and past the age window. `append` derives the next
+    /// `seq` from the last line of `events.jsonl`, so an emptied file would
+    /// restart `seq` at 1 while `cursors.yaml` still held the old high
+    /// cursor - `depth`'s cheap first/last-plus-cursor arithmetic would then
+    /// compute `pending` against a cursor above any live `seq`, and dedupe
+    /// and cursor semantics would no longer describe the same log. Keeping
+    /// one event alive at all times keeps `seq` continuous across retention.
     fn enforce_retention(&self, retention: &Retention) -> Result<(), InboxError> {
         let path = self.dir.join(EVENTS_FILE);
         let size = std::fs::metadata(&path).map(|m| m.len()).unwrap_or(0);
@@ -392,12 +401,16 @@ impl Inbox {
         let mut events = self.read_events()?;
         let before = events.len();
         let acked_through = self.min_cursor()?;
+        // The log is append-only and ordered by seq, so the last element
+        // holds the newest event; it is exempt from the age-based drop
+        // below regardless of ack or age, per the invariant on this method.
+        let newest_seq = events.last().map(|e| e.seq);
         events.retain(|e| {
             let acked = e.seq <= acked_through;
             let expired = now.saturating_sub(e.received_at) >= retention.max_age_ms;
-            !(acked && expired)
+            Some(e.seq) == newest_seq || !(acked && expired)
         });
-        // The newest event is never dropped by the size cap: a single
+        // The newest event is never dropped by the size cap either: a single
         // delivery larger than the whole envelope must not empty the store,
         // and an inbox that answers "nothing arrived" after something did is
         // worse than one that is briefly over its cap.

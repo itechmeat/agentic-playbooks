@@ -211,6 +211,61 @@ fn retention_drops_acked_entries_first_then_the_oldest_by_size() {
 }
 
 #[test]
+fn retention_never_empties_the_log_even_when_every_event_is_acked_and_expired() {
+    let dir = tempfile::tempdir().unwrap();
+    let box_ = inbox(&dir);
+    let keep = Retention {
+        max_bytes: 64 * 1024 * 1024,
+        max_age_ms: u64::MAX,
+    };
+    for i in 1..=3u32 {
+        box_.append_with(&format!("m{i}"), &json!({"i": i}), &keep)
+            .unwrap();
+    }
+    // `ack` takes any seq with no upper bound check, so a stale or
+    // optimistic ack can reach past every event that exists yet. That is
+    // exactly the shape that must not be allowed to wipe the log: the
+    // cursor here already covers the event this test is about to append.
+    let cursor_before = box_.ack("worker", 100).unwrap();
+    assert_eq!(cursor_before, 100);
+
+    // (a) A zero-length age window makes every existing event, and even the
+    // one this very append creates, read as acked and expired. Retention
+    // must still keep the newest event rather than emptying events.jsonl.
+    let age_only = Retention {
+        max_bytes: 64 * 1024 * 1024,
+        max_age_ms: 0,
+    };
+    box_.append_with("m4", &json!({"i": 4}), &age_only).unwrap();
+    let (events, _) = box_.read("someone_else", 100).unwrap();
+    assert_eq!(
+        events.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![4],
+        "the newest event survives even fully acked and expired"
+    );
+
+    // (b) seq keeps counting up from the survivor: it does not restart at 1
+    // because the log was never actually emptied. Depth stays consistent
+    // with the pre-retention cursor even though that cursor now sits above
+    // every live seq.
+    assert_eq!(
+        box_.append("m5", &json!({"i": 5})).unwrap(),
+        Appended::Stored(5),
+        "seq continues monotonically after retention, it does not restart at 1"
+    );
+    let depth = box_.depth("worker").unwrap();
+    assert_eq!(
+        depth.cursor, 100,
+        "depth reports the pre-retention cursor as-is"
+    );
+    assert_eq!(depth.total, 2, "seqs 4 and 5 survive");
+    assert_eq!(
+        depth.pending, 0,
+        "pending never goes negative even though the cursor exceeds every live seq"
+    );
+}
+
+#[test]
 fn every_inbox_file_is_owner_only() {
     let dir = tempfile::tempdir().unwrap();
     let box_ = inbox(&dir);
