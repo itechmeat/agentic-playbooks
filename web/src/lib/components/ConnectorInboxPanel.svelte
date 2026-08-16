@@ -11,9 +11,12 @@
   import { Button } from '$lib/components/ui/button'
   import * as Card from '$lib/components/ui/card'
   import * as Table from '$lib/components/ui/table'
+  import * as Alert from '$lib/components/ui/alert'
   import { Skeleton } from '$lib/components/ui/skeleton'
   import Inbox from '@lucide/svelte/icons/inbox'
   import Copy from '@lucide/svelte/icons/copy'
+  import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
+  import { untrack } from 'svelte'
   import { toast } from 'svelte-sonner'
 
   let {
@@ -47,7 +50,26 @@
   // (spec 2026-08-16-webhook-ingest-design). Showing an account's events puts
   // their metadata on the page; reading what a stranger actually wrote is a
   // second, deliberate click per event.
-  let expanded = $state<number[]>(expandedSeqs)
+  //
+  // Read through `untrack` so this is an initial value and not a reactive
+  // read: `expandedSeqs` is a prop only a server-render test sets, and the
+  // panel owns the state from here.
+  let expanded = $state<number[]>(untrack(() => [...expandedSeqs]))
+
+  // Seqs are per account and every account starts at 1, so an expand under
+  // one account must never carry over to another: expanding event #2 of
+  // account A and then showing account B would otherwise reveal B's event #2
+  // with no click at all, which is exactly the control this state implements.
+  // Keyed on the account rather than reset on every render, so the prop above
+  // still decides the first paint.
+  let shownAccount = untrack(() => eventsAccount)
+  $effect(() => {
+    if (eventsAccount !== shownAccount) {
+      shownAccount = eventsAccount
+      expanded = []
+    }
+  })
+
   const isOpen = (seq: number) => expanded.includes(seq)
   const toggle = (seq: number) => {
     expanded = isOpen(seq) ? expanded.filter((s) => s !== seq) : [...expanded, seq]
@@ -159,10 +181,15 @@
 
           {#if eventsAccount}
             <div class="flex flex-col gap-2">
-              <p class="text-sm text-muted-foreground">{UNTRUSTED_NOTICE}</p>
+              <Alert.Root class="border-warning/40 bg-warning/10 text-warning-foreground">
+                <TriangleAlert class="text-warning" />
+                <Alert.Title>Untrusted content</Alert.Title>
+                <Alert.Description>{UNTRUSTED_NOTICE}</Alert.Description>
+              </Alert.Root>
               {#if events.length === 0}
                 <p class="text-sm text-muted-foreground">
-                  No stored events for {eventsAccount}.
+                  No unread events for {eventsAccount}. Anything a playbook has already acknowledged
+                  is not listed here.
                 </p>
               {:else}
                 <ul class="flex flex-col gap-1">
@@ -177,9 +204,23 @@
                         </Button>
                       </div>
                       {#if isOpen(e.seq)}
-                        <!-- Interpolated as text, never as markup: the body is
-                             written by whoever sent the message. -->
-                        <code class="text-xs break-all">{previewBody(e.body, 2000)}</code>
+                        <!-- Marked on the body itself, not only once above the
+                             list: the notice at the top scrolls away by event
+                             #18, and an operator must not be able to mistake
+                             what a stranger wrote for something apb produced. -->
+                        <div
+                          class="flex flex-col gap-1 rounded-md border border-warning/40 bg-warning/5 p-2"
+                        >
+                          <span
+                            class="flex items-center gap-1 text-xs font-medium tracking-wide text-warning uppercase"
+                          >
+                            <TriangleAlert class="size-3" />
+                            Untrusted content, sender authored
+                          </span>
+                          <!-- Interpolated as text, never as markup: the body
+                               is written by whoever sent the message. -->
+                          <code class="text-xs break-all">{previewBody(e.body, 2000)}</code>
+                        </div>
                       {/if}
                     </li>
                   {/each}

@@ -154,11 +154,21 @@
   // one call, but the panel keeps each body collapsed until that event is
   // expanded on its own, so nothing a stranger wrote lands on screen by
   // accident.
+  //
+  // Token-guarded like every other loader on this page, and for a sharper
+  // reason: navigating to another connector while this request is in flight
+  // clears both fields in the effect below, and an unguarded late resolve
+  // would repopulate them, rendering one connector's untrusted bodies under
+  // another connector's heading.
   async function expandInbox(account: string) {
+    const token = loadToken
     try {
-      inboxEvents = await fetchConnectorInboxEvents(name, account)
+      const events = await fetchConnectorInboxEvents(name, account)
+      if (token !== loadToken) return
+      inboxEvents = events
       inboxEventsAccount = account
     } catch (e) {
+      if (token !== loadToken) return
       toast.error('Failed to load inbox events', { description: String(e) })
     }
   }

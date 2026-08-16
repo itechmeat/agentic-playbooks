@@ -77,6 +77,57 @@ describe('ConnectorInboxPanel', () => {
       },
     })
     expect(body).toContain('untrusted')
+    // Announced, not whispered: an alert rather than the same muted paragraph
+    // the empty state and the error state use.
+    expect(body).toContain('role="alert"')
+    expect(body).toContain('Untrusted content')
+  })
+
+  it('marks every expanded body itself, not only the list around it', () => {
+    const events = [
+      { seq: 1, receivedAt: 1_700_000_000_000, body: { text: 'first' } },
+      { seq: 2, receivedAt: 1_700_000_000_001, body: { text: 'second' } },
+    ]
+    const props = {
+      name: 'echo-hooks',
+      inbox,
+      loaded: true,
+      failed: false,
+      events,
+      eventsAccount: 'main',
+    }
+    const count = (html: string) =>
+      html.split('Untrusted content, sender authored').length - 1
+
+    // The notice above the list appears once whatever is open; the per-body
+    // marking appears once per revealed body, because that notice is off
+    // screen by the time an operator is reading event #18.
+    expect(count(render(ConnectorInboxPanel, { props }).body)).toBe(0)
+    expect(count(render(ConnectorInboxPanel, { props: { ...props, expandedSeqs: [1] } }).body)).toBe(
+      1,
+    )
+    const both = render(ConnectorInboxPanel, { props: { ...props, expandedSeqs: [1, 2] } }).body
+    expect(count(both)).toBe(2)
+    // And the marking is styled as a warning, not as ordinary muted text.
+    expect(both).toContain('border-warning/40')
+  })
+
+  it('calls the listed events unread rather than stored', () => {
+    // The server filters to events past every consumer's cursor, so an
+    // account showing `total: 5` can legitimately list none. Saying "no
+    // stored events" next to a Stored column reading 5 reads as a bug.
+    const { body } = render(ConnectorInboxPanel, {
+      props: {
+        name: 'echo-hooks',
+        inbox,
+        loaded: true,
+        failed: false,
+        events: [],
+        eventsAccount: 'main',
+      },
+    })
+    expect(body).toContain('No unread events for main')
+    expect(body).not.toContain('No stored events')
   })
 
   it('keeps every event body collapsed until that event is expanded', () => {
