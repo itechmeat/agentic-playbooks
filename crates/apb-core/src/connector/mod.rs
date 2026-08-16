@@ -21,6 +21,9 @@ pub mod resolve;
 pub mod secrets;
 pub mod store;
 pub mod template;
+// Not glob re-exported, for the same reason as `inbox`: `webhook::verify_*`
+// and future `store::*` names must not compete under one glob.
+pub mod webhook;
 pub use common::*;
 pub use config::*;
 pub use contract::*;

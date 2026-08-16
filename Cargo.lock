@@ -132,6 +132,7 @@ dependencies = [
  "base64 0.22.1",
  "getrandom 0.3.4",
  "globset",
+ "hmac",
  "jsonschema",
  "libc",
  "percent-encoding",
