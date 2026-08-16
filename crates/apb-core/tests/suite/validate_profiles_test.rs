@@ -71,6 +71,7 @@ fn scope_project_in_global_playbook_is_v14() {
     let ctx = ValidationContext {
         profiles: vec!["architect".into()],
         playbook_origin: PlaybookOrigin::Global,
+        ..Default::default()
     };
     let r = validate(&playbook, &ctx);
     assert!(
@@ -130,6 +131,7 @@ fn finish_with_prompt_scope_project_in_global_playbook_is_v14() {
     let ctx = ValidationContext {
         profiles: vec!["architect".into()],
         playbook_origin: PlaybookOrigin::Global,
+        ..Default::default()
     };
     let r = validate(&playbook, &ctx);
     assert!(

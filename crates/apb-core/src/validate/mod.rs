@@ -111,6 +111,13 @@ pub struct ValidationContext {
     /// Origin of the playbook being checked: a global playbook cannot
     /// reference a profile with `scope: project` (V14).
     pub playbook_origin: PlaybookOrigin,
+    /// Non-secret facts about the installed connectors (spec
+    /// 2026-08-16-webhook-ingest-design), keyed by connector name. Empty
+    /// means the caller has no connector store to check against, in which
+    /// case the connector rules that need it (V42, V43) stay silent, the
+    /// same way `profiles` being empty leaves a global profile reference to
+    /// the run-start resolver.
+    pub connectors: std::collections::BTreeMap<String, crate::connector::resolve::ConnectorFacts>,
 }
 
 pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationReport {
@@ -119,7 +126,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_expected_duration(playbook, &mut r); // V19, V20
     check_finish(playbook, &mut r); // V21
     check_playbook_ref(playbook, &mut r); // V22
-    check_connectors(playbook, &mut r); // V23, V24, V25, V26
+    check_connectors(playbook, ctx, &mut r); // V23, V24, V25, V26, V42, V43
     check_cache(playbook, &mut r); // V27, V28, V29
     check_edges(playbook, &mut r); // V30, V34
     check_interactive(playbook, &mut r); // V31, V32

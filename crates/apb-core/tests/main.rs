@@ -69,6 +69,8 @@ mod server_auth_test;
 mod validate_duration_test;
 #[path = "suite/validate_goal_test.rs"]
 mod validate_goal_test;
+#[path = "suite/validate_inbox_test.rs"]
+mod validate_inbox_test;
 #[path = "suite/validate_profiles_test.rs"]
 mod validate_profiles_test;
 #[path = "suite/validate_semantics_test.rs"]

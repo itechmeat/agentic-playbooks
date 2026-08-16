@@ -407,6 +407,11 @@ pub(crate) fn prepare_run_target(
     let ctx = ValidationContext {
         profiles: reg.profiles(),
         playbook_origin: origin,
+        // The run is about to snapshot these connectors, so the inbox rules
+        // are checkable here and worth checking: a node granting inbox
+        // functions of a connector that cannot receive anything would park
+        // forever on an empty inbox.
+        connectors: apb_core::connector::resolve::validation_facts(),
     };
     let report = validate(&playbook, &ctx);
     if report.issues.iter().any(|i| i.severity == Severity::Error) {

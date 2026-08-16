@@ -1,5 +1,6 @@
-//! Connector rules: the grants a playbook declares, and the function
-//! allowlists inside them.
+//! Connector rules: the grants a playbook declares, the function allowlists
+//! inside them, and the two inbox rules that need to know what the installed
+//! connectors actually look like.
 
 use super::*;
 
@@ -12,7 +13,29 @@ use super::*;
 /// same connector name more than once. V25 (error): an `accounts` or
 /// `functions` list entry that is empty or repeated within one binding. V26
 /// (error): `max_calls` is 0 (a binding that can never be called).
-pub(crate) fn check_connectors(playbook: &Playbook, r: &mut ValidationReport) {
+///
+/// V42 (error): a node grants inbox functions of a connector whose manifest
+/// carries no `webhook` block, so no delivery could ever reach the inbox it
+/// intends to read. The manifest-internal version of this rule lives in
+/// `ConnectorDoc::from_yaml`; V42 catches the case where an installed
+/// connector lost its block after a playbook was authored against it.
+/// V43 (error): a node grants inbox functions of a connector whose webhook
+/// block references account fields that a selectable account does not
+/// define, so a delivery to that account could never be verified. The
+/// accounts it checks are the GLOBAL ones only, matching what a hook URL can
+/// address: `/hooks/{connector}/{account}` carries no workspace, so a
+/// project-scoped account cannot receive anything and must not be blessed
+/// here. `apb connector doctor` reports that case separately.
+///
+/// Both inbox rules read `ctx.connectors` and are silent when it is empty:
+/// a caller with no connector store cannot decide either way, and a false
+/// error there would block every playbook on a machine that simply has not
+/// installed the connector yet.
+pub(crate) fn check_connectors(
+    playbook: &Playbook,
+    ctx: &ValidationContext,
+    r: &mut ValidationReport,
+) {
     for n in &playbook.nodes {
         let mut seen_connectors = HashSet::new();
         for b in n.kind.connector_bindings() {
@@ -53,6 +76,84 @@ pub(crate) fn check_connectors(playbook: &Playbook, r: &mut ValidationReport) {
                     format!("node `{}` connector `{}` has max_calls 0", n.id, b.name),
                 );
             }
+            check_inbox_binding(&n.id, b, ctx, r);
+        }
+    }
+}
+
+/// V42 and V43 for one binding. Does nothing unless the binding actually
+/// reaches at least one inbox function of a known connector.
+fn check_inbox_binding(
+    node_id: &str,
+    b: &crate::schema::ConnectorBinding,
+    ctx: &ValidationContext,
+    r: &mut ValidationReport,
+) {
+    let Some(facts) = ctx.connectors.get(&b.name) else {
+        return;
+    };
+    if facts.inbox_functions.is_empty() && !facts.has_webhook {
+        return;
+    }
+    // Which inbox functions this binding actually reaches. An explicit list
+    // is intersected with the manifest; `read_only` and `all` reach every
+    // inbox function the connector declares, because both expand at run
+    // start over the manifest itself.
+    let granted: Vec<&String> = match &b.functions {
+        FunctionsAllow::List(names) => facts
+            .inbox_functions
+            .iter()
+            .filter(|f| names.contains(f))
+            .collect(),
+        _ => facts.inbox_functions.iter().collect(),
+    };
+    if granted.is_empty() {
+        return;
+    }
+
+    if !facts.has_webhook {
+        r.error(
+            "V42",
+            Some(node_id),
+            format!(
+                "node `{node_id}` grants inbox function(s) {} of connector `{}`, which declares no webhook block, so no event can ever be delivered to that inbox",
+                granted
+                    .iter()
+                    .map(|f| f.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", "),
+                b.name
+            ),
+        );
+        return;
+    }
+
+    // Which accounts a call could select: the explicit allowlist, or every
+    // configured account when the binding names none.
+    let selectable: Vec<&String> = match &b.accounts {
+        Some(list) => facts.accounts.keys().filter(|a| list.contains(a)).collect(),
+        None => facts.accounts.keys().collect(),
+    };
+    for account in selectable {
+        let Some(defined) = facts.accounts.get(account) else {
+            continue;
+        };
+        let missing: Vec<&str> = facts
+            .webhook_secret_fields
+            .iter()
+            .filter(|f| !defined.contains(f.as_str()))
+            .map(String::as_str)
+            .collect();
+        if !missing.is_empty() {
+            r.error(
+                "V43",
+                Some(node_id),
+                format!(
+                    "node `{node_id}` grants inbox functions of connector `{}` on account `{account}`, whose webhook block references account field(s) {} that the account does not define, so a delivery could not be verified",
+                    b.name,
+                    missing.join(", ")
+                ),
+            );
         }
     }
 }

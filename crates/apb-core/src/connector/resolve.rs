@@ -310,6 +310,98 @@ pub fn all_referenced_env_names(root: &Path) -> Vec<String> {
     names.into_iter().collect()
 }
 
+/// The non-secret facts about one installed connector that the playbook
+/// validator needs (spec 2026-08-16-webhook-ingest-design, V42 and V43).
+///
+/// Produced here rather than in `crate::validate` so the dependency runs one
+/// way: the validator reads connector data, connector code never reads the
+/// validator. Mirrors how `ValidationContext::profiles` carries a list of
+/// names for a structural existence check while full resolution happens at
+/// run start.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ConnectorFacts {
+    /// Whether the manifest carries a `webhook:` block, which is what makes
+    /// the connector able to receive anything at all.
+    pub has_webhook: bool,
+    /// Names of its `inbox` functions, in manifest order.
+    pub inbox_functions: Vec<String>,
+    /// Account field names the webhook block's `{{secret.*}}` placeholders
+    /// reference, sorted and deduplicated. Empty when there is no block.
+    pub webhook_secret_fields: Vec<String>,
+    /// Global account name -> the field names that account defines.
+    ///
+    /// Global only, deliberately, matching what the ingest listener can
+    /// actually address: a hook URL is `/hooks/{connector}/{account}` with no
+    /// workspace segment, so a project-scoped account can never receive a
+    /// delivery. Merging project accounts in here would make V43 bless an
+    /// account no provider could ever reach, which is the opposite of what
+    /// the rule is for.
+    pub accounts: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+}
+
+/// Collects [`ConnectorFacts`] for every installed connector.
+///
+/// Takes no project root: the only accounts it reports are the global ones,
+/// because those are the only accounts an inbound delivery can name.
+///
+/// Best effort by design, exactly like `store::list`: a connector whose
+/// manifest or account file does not parse is skipped rather than failing
+/// the whole validation, because a broken manifest already has its own error
+/// path and V42/V43 must not become a second, confusing report of it. A
+/// caller with no connector store simply gets an empty map, which makes both
+/// rules silent.
+pub fn validation_facts() -> std::collections::BTreeMap<String, ConnectorFacts> {
+    use crate::connector::template::{Namespace, placeholders};
+
+    let mut out = std::collections::BTreeMap::new();
+    for summary in store::list() {
+        let Ok(loaded) = store::load(&summary.name) else {
+            continue;
+        };
+        let mut webhook_secret_fields: Vec<String> = Vec::new();
+        if let Some(hook) = &loaded.doc.webhook {
+            let templates = [
+                Some(hook.signature.secret.as_str()),
+                hook.verify_token.as_deref(),
+            ];
+            for template in templates.into_iter().flatten() {
+                let Ok(found) = placeholders(template) else {
+                    continue;
+                };
+                for (ns, name) in found {
+                    if ns == Namespace::Secret || ns == Namespace::Account {
+                        webhook_secret_fields.push(name);
+                    }
+                }
+            }
+            webhook_secret_fields.sort();
+            webhook_secret_fields.dedup();
+        }
+        let mut accounts = std::collections::BTreeMap::new();
+        if let Some(path) = config::global_config_path(&summary.name)
+            && let Ok(raw) = std::fs::read_to_string(path)
+            && let Ok(file) = serde_yaml_ng::from_str::<config::AccountsFile>(&raw)
+        {
+            for account in file.accounts {
+                accounts.insert(
+                    account.name.clone(),
+                    account.fields.keys().cloned().collect(),
+                );
+            }
+        }
+        out.insert(
+            summary.name.clone(),
+            ConnectorFacts {
+                has_webhook: loaded.doc.webhook.is_some(),
+                inbox_functions: loaded.doc.inbox_functions(),
+                webhook_secret_fields,
+                accounts,
+            },
+        );
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

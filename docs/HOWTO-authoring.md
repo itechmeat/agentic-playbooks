@@ -896,6 +896,17 @@ Optional. The goal this playbook exists to reach, in the owner's words, plus
 verifiable criteria. When present, the validator (V41) requires a non-empty
 statement, at least one criterion, and a description on every criterion.
 
+Two more codes cover connectors that receive inbound events. A node that
+grants `inbox` functions of a connector whose manifest carries no `webhook`
+block is validator error **V42**: nothing can ever be delivered to that
+inbox, so the node would poll an empty store forever. A node that grants
+`inbox` functions on an account that does not define the account fields the
+connector's webhook block references is validator error **V43**: a delivery
+to that account could not be verified and would be rejected at the door.
+Both checks are skipped when the tool running them cannot see the installed
+connectors, so a machine that has not installed the connector yet still
+validates its playbooks.
+
 - `statement` (string): the goal in plain words, e.g. "the invoice is
   recorded in the tracking sheet and sent for approval".
 - `criteria` (list): each `{ description, check? }`.
