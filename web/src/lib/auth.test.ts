@@ -9,7 +9,7 @@ import {
   refreshAuthStatus,
   XRW_HEADER,
   XRW_VALUE,
-} from './auth'
+} from './auth.svelte'
 
 const fetchMock = vi.fn<typeof fetch>()
 

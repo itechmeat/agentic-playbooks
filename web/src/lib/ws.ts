@@ -1,4 +1,4 @@
-import { refreshAuthStatus } from './auth'
+import { refreshAuthStatus } from './auth.svelte'
 
 // Subscribe to server change events over the dashboard WebSocket. Filesystem
 // events are chatty and arrive steadily (~every few hundred ms) while a run

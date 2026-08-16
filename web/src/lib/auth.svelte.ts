@@ -37,6 +37,25 @@ export const auth = writable<AuthSnapshot>({
   checked: false,
 })
 
+/** Reactive view of `auth` as runes state, for components that need its
+ * fields directly in the template or a `$derived` instead of each wiring its
+ * own `$state` + `subscribe` boilerplate. Call once per component; the
+ * subscription follows the calling component's lifecycle (the effect's
+ * return value is `subscribe`'s own unsubscribe function, so teardown is
+ * automatic). Fields are mutated in place rather than the object being
+ * reassigned, so the same returned proxy stays live for whoever holds it. */
+export function authState(): AuthSnapshot {
+  const state = $state<AuthSnapshot>({ required: false, authenticated: true, checked: false })
+  $effect(() =>
+    auth.subscribe((v) => {
+      state.required = v.required
+      state.authenticated = v.authenticated
+      state.checked = v.checked
+    }),
+  )
+  return state
+}
+
 /** Reads GET /api/auth/status. An unreachable or older server (no such route)
  * is treated as auth off, so a dashboard built before server mode keeps
  * working against a newer frontend and vice versa. */

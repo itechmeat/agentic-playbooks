@@ -273,7 +273,7 @@ describe('callConnector', () => {
 
 describe('401 handling', () => {
   it('flips the auth store and still throws an ApiError', async () => {
-    const { auth } = await import('./auth')
+    const { auth } = await import('./auth.svelte')
     const { get } = await import('svelte/store')
     auth.set({ required: false, authenticated: true, checked: false })
     fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'auth' }, 401))

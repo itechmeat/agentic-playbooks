@@ -4,9 +4,9 @@
 //
 // Every request carries the CSRF marker header, and every 401 flips the shared
 // auth store so the app can show the login screen instead of a toast nobody
-// can act on. Both live in `../auth`, which imports nothing from here.
+// can act on. Both live in `../auth.svelte`, which imports nothing from here.
 
-import { apiHeaders, markUnauthenticated } from '../auth'
+import { apiHeaders, markUnauthenticated } from '../auth.svelte'
 
 export async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: apiHeaders() })

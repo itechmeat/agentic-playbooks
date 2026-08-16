@@ -3,7 +3,7 @@
   // browser does not have one. One field, one button: the operator pastes the
   // key from `apb server key issue`, the server swaps it for an HttpOnly
   // cookie, and the key is never stored on this side.
-  import { login } from '$lib/auth'
+  import { login } from '$lib/auth.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
   import * as Card from '$lib/components/ui/card'
@@ -21,10 +21,8 @@
     error = ''
     const result = await login(key.trim())
     busy = false
-    if (result.ok) {
-      key = ''
-      return
-    }
+    key = ''
+    if (result.ok) return
     error = result.message ?? 'Sign in failed.'
   }
 </script>

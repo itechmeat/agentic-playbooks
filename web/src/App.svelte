@@ -11,7 +11,7 @@
   import { connectorRouteName, decodeSegment } from '$lib/route'
   import { ModeWatcher } from 'mode-watcher'
   import Login from './pages/Login.svelte'
-  import { auth, refreshAuthStatus } from '$lib/auth'
+  import { authState, refreshAuthStatus } from '$lib/auth.svelte'
 
   let hash = $state(location.hash)
   $effect(() => {
@@ -20,12 +20,13 @@
     return () => window.removeEventListener('hashchange', onHash)
   })
 
-  // Server mode: the app renders normally until the server says a credential
-  // is required and this browser lacks one. Starting permissive keeps the
-  // local, keyless dashboard from flashing a login screen on every load; a
-  // 401 from any request flips the same store immediately.
-  let authState = $state({ required: false, authenticated: true, checked: false })
-  $effect(() => auth.subscribe((v) => (authState = v)))
+  // Server mode: nothing routed renders until the first status read lands
+  // (`authSnapshot.checked`) — otherwise the store's optimistic default
+  // (authenticated: true) would let a protected page flash on first paint
+  // and fire 401ing requests before the real answer arrives. Once checked,
+  // show the login screen when the server requires a credential this browser
+  // does not have, else the routed page below.
+  const authSnapshot = authState()
   $effect(() => {
     void refreshAuthStatus()
   })
@@ -88,7 +89,9 @@
      would have to be cast to `any` and would check nothing. Every arm carries
      all three branches: a chunk in flight, and a chunk that never arrives,
      would otherwise both render nothing and leave the route silently blank. -->
-{#if authState.required && !authState.authenticated}
+{#if !authSnapshot.checked}
+  <ChunkPending />
+{:else if authSnapshot.required && !authSnapshot.authenticated}
   <Login />
 {:else if route.page === 'new'}
   {#await loadPlaybookEdit()}
