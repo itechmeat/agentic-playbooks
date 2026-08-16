@@ -1,0 +1,369 @@
+cases:
+  # -- Companies ------------------------------------------------------------
+
+  - function: list_companies
+    account: { base_url: "https://crm.example.com" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/companies"
+
+  - function: list_companies
+    account: { base_url: "https://crm.example.com" }
+    args: { filter: "name[ilike]:\"%acme%\"", order_by: "name[DescNullsLast]", limit: 20 }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/companies?filter=name%5Bilike%5D%3A%22%25acme%25%22&limit=20&order_by=name%5BDescNullsLast%5D"
+
+  - function: get_company
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "11111111-1111-1111-1111-111111111111" }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/companies/11111111-1111-1111-1111-111111111111"
+
+  - function: create_company
+    account: { base_url: "https://crm.example.com" }
+    args: { record: { name: "Acme Inc" } }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/companies"
+      body_contains:
+        name: "Acme Inc"
+
+  - function: update_company
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "11111111-1111-1111-1111-111111111111", record: { name: "Acme Incorporated" } }
+    expect:
+      method: PATCH
+      url: "https://crm.example.com/rest/companies/11111111-1111-1111-1111-111111111111"
+      body_contains:
+        name: "Acme Incorporated"
+
+  - function: delete_company
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "11111111-1111-1111-1111-111111111111" }
+    expect:
+      method: DELETE
+      url: "https://crm.example.com/rest/companies/11111111-1111-1111-1111-111111111111?soft_delete=true"
+
+  # -- People -----------------------------------------------------------------
+
+  - function: list_people
+    account: { base_url: "https://crm.example.com" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/people"
+
+  - function: get_person
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "22222222-2222-2222-2222-222222222222" }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/people/22222222-2222-2222-2222-222222222222"
+
+  - function: create_person
+    account: { base_url: "https://crm.example.com" }
+    args: { record: { name: { firstName: "Ada", lastName: "Lovelace" } } }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/people"
+      body_contains:
+        name: { firstName: "Ada", lastName: "Lovelace" }
+
+  - function: update_person
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "22222222-2222-2222-2222-222222222222", record: { jobTitle: "Engineer" } }
+    expect:
+      method: PATCH
+      url: "https://crm.example.com/rest/people/22222222-2222-2222-2222-222222222222"
+      body_contains:
+        jobTitle: "Engineer"
+
+  - function: delete_person
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "22222222-2222-2222-2222-222222222222" }
+    expect:
+      method: DELETE
+      url: "https://crm.example.com/rest/people/22222222-2222-2222-2222-222222222222?soft_delete=true"
+
+  # -- Opportunities ------------------------------------------------------------
+
+  - function: list_opportunities
+    account: { base_url: "https://crm.example.com" }
+    args: { order_by: "closeDate[DescNullsLast]" }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/opportunities?order_by=closeDate%5BDescNullsLast%5D"
+
+  - function: get_opportunity
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "33333333-3333-3333-3333-333333333333", depth: 1 }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/opportunities/33333333-3333-3333-3333-333333333333?depth=1"
+
+  - function: create_opportunity
+    account: { base_url: "https://crm.example.com" }
+    args: { record: { name: "Acme renewal" } }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/opportunities"
+      body_contains:
+        name: "Acme renewal"
+
+  - function: update_opportunity
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "33333333-3333-3333-3333-333333333333", record: { name: "Acme renewal (Q3)" } }
+    expect:
+      method: PATCH
+      url: "https://crm.example.com/rest/opportunities/33333333-3333-3333-3333-333333333333"
+      body_contains:
+        name: "Acme renewal (Q3)"
+
+  - function: delete_opportunity
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "33333333-3333-3333-3333-333333333333" }
+    expect:
+      method: DELETE
+      url: "https://crm.example.com/rest/opportunities/33333333-3333-3333-3333-333333333333?soft_delete=true"
+
+  # -- Notes --------------------------------------------------------------------
+
+  - function: list_notes
+    account: { base_url: "https://crm.example.com" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/notes"
+
+  - function: get_note
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "44444444-4444-4444-4444-444444444444" }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/notes/44444444-4444-4444-4444-444444444444"
+
+  - function: create_note
+    account: { base_url: "https://crm.example.com" }
+    args: { record: { title: "Follow-up call notes" } }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/notes"
+      body_contains:
+        title: "Follow-up call notes"
+
+  - function: update_note
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "44444444-4444-4444-4444-444444444444", record: { title: "Follow-up call notes (updated)" } }
+    expect:
+      method: PATCH
+      url: "https://crm.example.com/rest/notes/44444444-4444-4444-4444-444444444444"
+      body_contains:
+        title: "Follow-up call notes (updated)"
+
+  - function: delete_note
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "44444444-4444-4444-4444-444444444444" }
+    expect:
+      method: DELETE
+      url: "https://crm.example.com/rest/notes/44444444-4444-4444-4444-444444444444?soft_delete=true"
+
+  # -- Tasks --------------------------------------------------------------------
+
+  - function: list_tasks
+    account: { base_url: "https://crm.example.com" }
+    args: { filter: "status[eq]:\"DONE\"" }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/tasks?filter=status%5Beq%5D%3A%22DONE%22"
+
+  - function: get_task
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "55555555-5555-5555-5555-555555555555" }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/tasks/55555555-5555-5555-5555-555555555555"
+
+  - function: create_task
+    account: { base_url: "https://crm.example.com" }
+    args: { record: { title: "Send proposal" } }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/tasks"
+      body_contains:
+        title: "Send proposal"
+
+  - function: update_task
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "55555555-5555-5555-5555-555555555555", record: { status: "DONE" } }
+    expect:
+      method: PATCH
+      url: "https://crm.example.com/rest/tasks/55555555-5555-5555-5555-555555555555"
+      body_contains:
+        status: "DONE"
+
+  - function: delete_task
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "55555555-5555-5555-5555-555555555555" }
+    expect:
+      method: DELETE
+      url: "https://crm.example.com/rest/tasks/55555555-5555-5555-5555-555555555555?soft_delete=true"
+
+  # -- Link objects -------------------------------------------------------------
+
+  - function: create_note_target
+    account: { base_url: "https://crm.example.com" }
+    args: { record: { noteId: "44444444-4444-4444-4444-444444444444", targetPersonId: "22222222-2222-2222-2222-222222222222" } }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/noteTargets"
+      body_contains:
+        noteId: "44444444-4444-4444-4444-444444444444"
+        targetPersonId: "22222222-2222-2222-2222-222222222222"
+
+  - function: create_task_target
+    account: { base_url: "https://crm.example.com" }
+    args: { record: { taskId: "55555555-5555-5555-5555-555555555555", targetCompanyId: "11111111-1111-1111-1111-111111111111" } }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/taskTargets"
+      body_contains:
+        taskId: "55555555-5555-5555-5555-555555555555"
+        targetCompanyId: "11111111-1111-1111-1111-111111111111"
+
+  - function: list_note_targets
+    account: { base_url: "https://crm.example.com" }
+    args: { filter: "noteId[eq]:\"44444444-4444-4444-4444-444444444444\"" }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/noteTargets?filter=noteId%5Beq%5D%3A%2244444444-4444-4444-4444-444444444444%22"
+
+  - function: list_task_targets
+    account: { base_url: "https://crm.example.com" }
+    args: { filter: "taskId[eq]:\"55555555-5555-5555-5555-555555555555\"" }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/taskTargets?filter=taskId%5Beq%5D%3A%2255555555-5555-5555-5555-555555555555%22"
+
+  # -- Duplicates -----------------------------------------------------------------
+
+  - function: find_duplicate_companies
+    account: { base_url: "https://crm.example.com" }
+    args: { data: [{ name: "Notion" }] }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/companies/duplicates"
+      body_contains:
+        data: [{ name: "Notion" }]
+
+  - function: find_duplicate_companies
+    account: { base_url: "https://crm.example.com" }
+    args: { ids: ["11111111-1111-1111-1111-111111111111"] }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/companies/duplicates"
+      body_contains:
+        ids: ["11111111-1111-1111-1111-111111111111"]
+
+  - function: find_duplicate_people
+    account: { base_url: "https://crm.example.com" }
+    args: { ids: ["22222222-2222-2222-2222-222222222222"] }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/people/duplicates"
+      body_contains:
+        ids: ["22222222-2222-2222-2222-222222222222"]
+
+  - function: find_duplicate_people
+    account: { base_url: "https://crm.example.com" }
+    args: { data: [{ name: { firstName: "Ada", lastName: "Lovelace" } }] }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/people/duplicates"
+      body_contains:
+        data: [{ name: { firstName: "Ada", lastName: "Lovelace" } }]
+
+  # -- Generic record access -------------------------------------------------------
+
+  - function: list_records
+    account: { base_url: "https://crm.example.com" }
+    args: { object: "workspaceMembers", limit: 10 }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/workspaceMembers?limit=10"
+
+  - function: get_record
+    account: { base_url: "https://crm.example.com" }
+    args: { object: "attachments", id: "66666666-6666-6666-6666-666666666666" }
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/attachments/66666666-6666-6666-6666-666666666666"
+
+  - function: create_record
+    account: { base_url: "https://crm.example.com" }
+    args: { object: "attachments", record: { name: "contract.pdf" } }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/attachments"
+      body_contains:
+        name: "contract.pdf"
+
+  - function: update_record
+    account: { base_url: "https://crm.example.com" }
+    args: { object: "attachments", id: "66666666-6666-6666-6666-666666666666", record: { name: "contract-v2.pdf" } }
+    expect:
+      method: PATCH
+      url: "https://crm.example.com/rest/attachments/66666666-6666-6666-6666-666666666666"
+      body_contains:
+        name: "contract-v2.pdf"
+
+  - function: delete_record
+    account: { base_url: "https://crm.example.com" }
+    args: { object: "attachments", id: "66666666-6666-6666-6666-666666666666" }
+    expect:
+      method: DELETE
+      url: "https://crm.example.com/rest/attachments/66666666-6666-6666-6666-666666666666?soft_delete=true"
+
+  - function: restore_record
+    account: { base_url: "https://crm.example.com" }
+    args: { object: "companies", id: "11111111-1111-1111-1111-111111111111" }
+    expect:
+      method: PATCH
+      url: "https://crm.example.com/rest/restore/companies/11111111-1111-1111-1111-111111111111"
+
+  # -- Webhooks ---------------------------------------------------------------------
+
+  - function: list_webhooks
+    account: { base_url: "https://crm.example.com" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/webhooks"
+
+  - function: create_webhook
+    account: { base_url: "https://crm.example.com" }
+    args: { target_url: "https://example.com/hooks/twenty", operations: ["person.created", "*.*"] }
+    expect:
+      method: POST
+      url: "https://crm.example.com/rest/webhooks"
+      body_contains:
+        targetUrl: "https://example.com/hooks/twenty"
+        operations: ["person.created", "*.*"]
+
+  - function: delete_webhook
+    account: { base_url: "https://crm.example.com" }
+    args: { id: "77777777-7777-7777-7777-777777777777" }
+    expect:
+      method: DELETE
+      url: "https://crm.example.com/rest/webhooks/77777777-7777-7777-7777-777777777777"
+
+  # -- Metadata -----------------------------------------------------------------------
+
+  - function: list_objects
+    account: { base_url: "https://crm.example.com" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://crm.example.com/rest/metadata/objects"

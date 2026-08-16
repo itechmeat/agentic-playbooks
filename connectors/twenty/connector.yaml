@@ -1,0 +1,1091 @@
+name: twenty
+version: 0.1.0
+# Twenty is an open-source CRM. Every endpoint below is namespaced under
+# /rest/... on the same origin as the app: for a self-hosted instance that is
+# your own host with no /api prefix and no separate api. subdomain; for the
+# cloud product it is https://api.twenty.com. base_url is documented as
+# scheme plus host only, no trailing path.
+#
+# Soft-delete stance: Twenty's own DELETE verb defaults to a HARD,
+# unrecoverable destroy when no soft_delete flag is sent. This connector
+# deliberately never exposes that default on any record delete: every
+# delete_<singular>/delete_record function below always sends the fixed
+# query soft_delete=true, so a delete here only sets deletedAt and can be
+# undone with restore_record. delete_webhook is the one exception in this
+# connector: webhooks have no soft-delete flag or restore route, so it is a
+# plain, unrecoverable delete.
+#
+# Argument naming: call arguments are snake_case throughout, matching
+# Twenty's own query-string params (filter, order_by, limit, starting_after,
+# ending_before, depth), which are already snake_case on the wire. The
+# record/body field maps this connector forwards verbatim carry Twenty's own
+# camelCase JSON keys (targetUrl, targetPersonId, firstName, and so on); the
+# `object` argument on the generic functions is likewise Twenty's camelCase
+# plural REST name for the target object (workspaceMembers, attachments, or
+# a custom object's namePlural).
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.api_key}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: api_key
+    required: true
+    secret: true
+healthcheck: list_companies
+functions:
+  # -- Companies --------------------------------------------------------
+
+  - name: list_companies
+    description: >-
+      List companies. filter: field[op]:value; comma joins predicates as AND;
+      wrap with or(...)/and(...)/not(...) for other groupings; operators: eq,
+      neq, in, containsAny, is, gt, gte, lt, lte, startsWith, endsWith, like,
+      ilike (like/ilike take % wildcards, e.g. name[ilike]:"%acme%").
+      order_by: field[DIRECTION],field2,...; directions AscNullsFirst,
+      AscNullsLast, DescNullsFirst, DescNullsLast (default AscNullsFirst per
+      field); id is force-appended as a tiebreaker when not already present.
+      limit defaults to 60 and caps at 200 when omitted. starting_after and
+      ending_before are cursor values taken from a previous response's
+      pageInfo.endCursor / pageInfo.startCursor. depth expands relation
+      fields in the response (0 default or 1 only; any other value is a
+      400). Response envelope: {data: {companies: [...]}, totalCount,
+      pageInfo: {hasNextPage, hasPreviousPage, startCursor, endCursor}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/companies"
+    query:
+      filter: "{{args.filter}}"
+      order_by: "{{args.order_by}}"
+      limit: "{{args.limit}}"
+      starting_after: "{{args.starting_after}}"
+      ending_before: "{{args.ending_before}}"
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        filter: { type: string, description: "filter expression: field[op]:value, comma-joined as AND, or(...)/and(...)/not(...) to wrap groups" }
+        order_by: { type: string, description: "sort expression: field[DIRECTION],field2,...; directions AscNullsFirst, AscNullsLast, DescNullsFirst, DescNullsLast" }
+        limit: { type: integer, minimum: 1, maximum: 200, description: "page size; Twenty defaults to 60 and caps at 200" }
+        starting_after: { type: string, description: "cursor from a previous response's pageInfo.endCursor; fetches the next page" }
+        ending_before: { type: string, description: "cursor from a previous response's pageInfo.startCursor; fetches the previous page" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: []
+    examples:
+      - args: { filter: "name[ilike]:\"%acme%\"", limit: 20 }
+        note: "any of filter, order_by, limit, starting_after, ending_before, depth may be omitted; an omitted optional arg is dropped from the query rather than sent empty."
+    response_pick: [data.companies, totalCount, pageInfo.hasNextPage, pageInfo.endCursor]
+
+  - name: get_company
+    description: >-
+      Get a single company by id. depth expands relation fields in the
+      response (0 default or 1 only; any other value is a 400). A malformed
+      or nil-UUID id is rejected with a 400; a well-formed but unknown id
+      returns a 404. Response envelope: {data: {company: {...}}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/companies/{{args.id}}"
+    query:
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "company record id (uuid)" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: [id]
+    examples:
+      - args: { id: "11111111-1111-1111-1111-111111111111" }
+        note: "depth is optional and dropped from the query when omitted."
+    response_pick: [data.company]
+
+  - name: create_company
+    description: >-
+      Create a company. record needs at minimum a name (string); every other
+      field auto-defaults to empty/zero when omitted. domainName and
+      linkedinLink are LINKS composite objects: {primaryLinkLabel,
+      primaryLinkUrl, secondaryLinks}. address is a composite object with
+      addressStreet1/addressStreet2/addressCity/addressState/addressCountry/addressPostcode
+      (confirmed as addressPostcode, not addressZipCode, by the saved
+      OpenAPI schema, a live company record capture, and the smoke test
+      against this 2.30.x instance). annualRevenue is a CURRENCY composite:
+      {amountMicros, currencyCode}
+      (the amount is in micros; divide by 1,000,000 for the display value).
+      record accepts arbitrary custom fields (additionalProperties).
+      Response envelope: {data: {createCompany: {...}}}.
+    method: POST
+    url: "{{account.base_url}}/rest/companies"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        record:
+          type: object
+          description: "company field map; name is the only field Twenty requires"
+          properties:
+            name: { type: string }
+          required: [name]
+          additionalProperties: true
+      required: [record]
+    examples:
+      - args: { record: { name: "Acme Inc" } }
+        note: "domainName, address, annualRevenue, and every other field are auto-defaulted to empty/zero when omitted from record."
+    response_pick: [data.createCompany]
+
+  - name: update_company
+    description: >-
+      Update a company by id. record is merged into the existing record:
+      only the fields present in record are changed, everything else is
+      left untouched. record must carry only the fields to change, never the
+      id itself - the id belongs in the id argument, not inside record.
+      Response envelope: {data: {updateCompany: {...}}}.
+    method: PATCH
+    url: "{{account.base_url}}/rest/companies/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "company record id (uuid)" }
+        record: { type: object, description: "partial field map; only the fields present are changed", additionalProperties: true }
+      required: [id, record]
+    examples:
+      - args: { id: "11111111-1111-1111-1111-111111111111", record: { name: "Acme Incorporated" } }
+        note: "any subset of the company's fields may be set in record; every field left out is unchanged."
+
+  - name: delete_company
+    description: >-
+      Soft-delete a company by id: sets deletedAt, the record stops
+      appearing in list_companies/get_company but is not destroyed. This
+      connector always sends soft_delete=true and never exposes Twenty's
+      default hard-destroy behavior. Undo with restore_record. Response
+      envelope: {data: {deleteCompany: {id}}}.
+    method: DELETE
+    url: "{{account.base_url}}/rest/companies/{{args.id}}"
+    query:
+      soft_delete: "true"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "company record id (uuid)" }
+      required: [id]
+    examples:
+      - args: { id: "11111111-1111-1111-1111-111111111111" }
+        note: "the deletion is recoverable; call restore_record to undo it."
+
+  # -- People -------------------------------------------------------------
+
+  - name: list_people
+    description: >-
+      List people. Same filter/order_by/limit/starting_after/ending_before/depth
+      semantics as list_companies (see that description for the full filter
+      and pagination syntax). Response envelope: {data: {people: [...]},
+      totalCount, pageInfo: {hasNextPage, hasPreviousPage, startCursor,
+      endCursor}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/people"
+    query:
+      filter: "{{args.filter}}"
+      order_by: "{{args.order_by}}"
+      limit: "{{args.limit}}"
+      starting_after: "{{args.starting_after}}"
+      ending_before: "{{args.ending_before}}"
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        filter: { type: string, description: "filter expression: field[op]:value, comma-joined as AND, or(...)/and(...)/not(...) to wrap groups" }
+        order_by: { type: string, description: "sort expression: field[DIRECTION],field2,...; directions AscNullsFirst, AscNullsLast, DescNullsFirst, DescNullsLast" }
+        limit: { type: integer, minimum: 1, maximum: 200, description: "page size; Twenty defaults to 60 and caps at 200" }
+        starting_after: { type: string, description: "cursor from a previous response's pageInfo.endCursor; fetches the next page" }
+        ending_before: { type: string, description: "cursor from a previous response's pageInfo.startCursor; fetches the previous page" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: []
+    examples:
+      - args: { filter: "name.lastName[ilike]:\"%probe%\"" }
+        note: "dotted field.subField[op]:value addresses composite/relation subfields such as name.lastName."
+    response_pick: [data.people, totalCount, pageInfo.hasNextPage, pageInfo.endCursor]
+
+  - name: get_person
+    description: >-
+      Get a single person by id. depth expands relation fields (0 default or
+      1 only; any other value is a 400). A malformed or nil-UUID id is
+      rejected with a 400; a well-formed but unknown id returns a 404.
+      Response envelope: {data: {person: {...}}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/people/{{args.id}}"
+    query:
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "person record id (uuid)" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: [id]
+    examples:
+      - args: { id: "22222222-2222-2222-2222-222222222222" }
+        note: "depth is optional and dropped from the query when omitted."
+    response_pick: [data.person]
+
+  - name: create_person
+    description: >-
+      Create a person. record needs at minimum name: {firstName, lastName} -
+      a bare string name is rejected with a 400 "Invalid object value" error.
+      emails is a composite object {primaryEmail, additionalEmails}; phones
+      is {primaryPhoneNumber, primaryPhoneCountryCode,
+      primaryPhoneCallingCode, additionalPhones}; linkedinLink is a LINKS
+      composite object like company domainName. record accepts arbitrary
+      custom fields (additionalProperties). Response envelope: {data:
+      {createPerson: {...}}}.
+    method: POST
+    url: "{{account.base_url}}/rest/people"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        record:
+          type: object
+          description: "person field map; name is required and must be the composite object shown"
+          properties:
+            name:
+              type: object
+              description: "composite full-name object"
+              properties:
+                firstName: { type: string }
+                lastName: { type: string }
+              required: [firstName, lastName]
+              additionalProperties: true
+          required: [name]
+          additionalProperties: true
+      required: [record]
+    examples:
+      - args: { record: { name: { firstName: "Ada", lastName: "Lovelace" } } }
+        note: "emails, phones, linkedinLink, and every other field are auto-defaulted when omitted from record."
+    response_pick: [data.createPerson]
+
+  - name: update_person
+    description: >-
+      Update a person by id. record is merged into the existing record: only
+      the fields present in record are changed. record must carry only the
+      fields to change, never the id - the id belongs in the id argument,
+      not inside record. Response envelope: {data: {updatePerson: {...}}}.
+    method: PATCH
+    url: "{{account.base_url}}/rest/people/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "person record id (uuid)" }
+        record: { type: object, description: "partial field map; only the fields present are changed", additionalProperties: true }
+      required: [id, record]
+    examples:
+      - args: { id: "22222222-2222-2222-2222-222222222222", record: { jobTitle: "Engineer" } }
+        note: "any subset of the person's fields may be set in record; every field left out is unchanged."
+
+  - name: delete_person
+    description: >-
+      Soft-delete a person by id: sets deletedAt, the record stops appearing
+      in list_people/get_person but is not destroyed. This connector always
+      sends soft_delete=true and never exposes Twenty's default hard-destroy
+      behavior. Undo with restore_record. Response envelope: {data:
+      {deletePerson: {id}}}.
+    method: DELETE
+    url: "{{account.base_url}}/rest/people/{{args.id}}"
+    query:
+      soft_delete: "true"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "person record id (uuid)" }
+      required: [id]
+    examples:
+      - args: { id: "22222222-2222-2222-2222-222222222222" }
+        note: "the deletion is recoverable; call restore_record to undo it."
+
+  # -- Opportunities --------------------------------------------------------
+
+  - name: list_opportunities
+    description: >-
+      List opportunities. Same filter/order_by/limit/starting_after/ending_before/depth
+      semantics as list_companies (see that description for the full filter
+      and pagination syntax). Response envelope: {data: {opportunities:
+      [...]}, totalCount, pageInfo: {hasNextPage, hasPreviousPage,
+      startCursor, endCursor}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/opportunities"
+    query:
+      filter: "{{args.filter}}"
+      order_by: "{{args.order_by}}"
+      limit: "{{args.limit}}"
+      starting_after: "{{args.starting_after}}"
+      ending_before: "{{args.ending_before}}"
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        filter: { type: string, description: "filter expression: field[op]:value, comma-joined as AND, or(...)/and(...)/not(...) to wrap groups" }
+        order_by: { type: string, description: "sort expression: field[DIRECTION],field2,...; directions AscNullsFirst, AscNullsLast, DescNullsFirst, DescNullsLast" }
+        limit: { type: integer, minimum: 1, maximum: 200, description: "page size; Twenty defaults to 60 and caps at 200" }
+        starting_after: { type: string, description: "cursor from a previous response's pageInfo.endCursor; fetches the next page" }
+        ending_before: { type: string, description: "cursor from a previous response's pageInfo.startCursor; fetches the previous page" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: []
+    examples:
+      - args: { order_by: "closeDate[DescNullsLast]", limit: 25 }
+        note: "any of filter, order_by, limit, starting_after, ending_before, depth may be omitted."
+    response_pick: [data.opportunities, totalCount, pageInfo.hasNextPage, pageInfo.endCursor]
+
+  - name: get_opportunity
+    description: >-
+      Get a single opportunity by id. depth expands relation fields (0
+      default or 1 only; any other value is a 400). A malformed or nil-UUID
+      id is rejected with a 400; a well-formed but unknown id returns a 404.
+      Response envelope: {data: {opportunity: {...}}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/opportunities/{{args.id}}"
+    query:
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "opportunity record id (uuid)" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: [id]
+    examples:
+      - args: { id: "33333333-3333-3333-3333-333333333333" }
+        note: "depth is optional and dropped from the query when omitted."
+    response_pick: [data.opportunity]
+
+  - name: create_opportunity
+    description: >-
+      Create an opportunity. amount is a CURRENCY composite: {amountMicros,
+      currencyCode} (the amount is in micros; divide by 1,000,000 for the
+      display value). companyId and pointOfContactId link the opportunity
+      to an existing company/person. Twenty auto-fills any omitted field
+      with an empty/zero default rather than rejecting the create, so
+      include a name if the opportunity should be findable by it. record
+      accepts arbitrary custom fields (additionalProperties). Response
+      envelope: {data: {createOpportunity: {...}}}.
+    method: POST
+    url: "{{account.base_url}}/rest/opportunities"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        record:
+          type: object
+          description: "opportunity field map"
+          properties:
+            name: { type: string }
+          additionalProperties: true
+      required: [record]
+    examples:
+      - args: { record: { name: "Acme renewal" } }
+        note: "amount, companyId, pointOfContactId, and every other field are auto-defaulted or left unset when omitted from record."
+    response_pick: [data.createOpportunity]
+
+  - name: update_opportunity
+    description: >-
+      Update an opportunity by id. record is merged into the existing
+      record: only the fields present in record are changed. record must
+      carry only the fields to change, never the id - the id belongs in the
+      id argument, not inside record. Response envelope: {data:
+      {updateOpportunity: {...}}}.
+    method: PATCH
+    url: "{{account.base_url}}/rest/opportunities/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "opportunity record id (uuid)" }
+        record: { type: object, description: "partial field map; only the fields present are changed", additionalProperties: true }
+      required: [id, record]
+    examples:
+      - args: { id: "33333333-3333-3333-3333-333333333333", record: { name: "Acme renewal (Q3)" } }
+        note: "any subset of the opportunity's fields may be set in record; every field left out is unchanged."
+
+  - name: delete_opportunity
+    description: >-
+      Soft-delete an opportunity by id: sets deletedAt, the record stops
+      appearing in list_opportunities/get_opportunity but is not destroyed.
+      This connector always sends soft_delete=true and never exposes
+      Twenty's default hard-destroy behavior. Undo with restore_record.
+      Response envelope: {data: {deleteOpportunity: {id}}}.
+    method: DELETE
+    url: "{{account.base_url}}/rest/opportunities/{{args.id}}"
+    query:
+      soft_delete: "true"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "opportunity record id (uuid)" }
+      required: [id]
+    examples:
+      - args: { id: "33333333-3333-3333-3333-333333333333" }
+        note: "the deletion is recoverable; call restore_record to undo it."
+
+  # -- Notes ----------------------------------------------------------------
+
+  - name: list_notes
+    description: >-
+      List notes. Same filter/order_by/limit/starting_after/ending_before/depth
+      semantics as list_companies (see that description for the full filter
+      and pagination syntax). Response envelope: {data: {notes: [...]},
+      totalCount, pageInfo: {hasNextPage, hasPreviousPage, startCursor,
+      endCursor}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/notes"
+    query:
+      filter: "{{args.filter}}"
+      order_by: "{{args.order_by}}"
+      limit: "{{args.limit}}"
+      starting_after: "{{args.starting_after}}"
+      ending_before: "{{args.ending_before}}"
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        filter: { type: string, description: "filter expression: field[op]:value, comma-joined as AND, or(...)/and(...)/not(...) to wrap groups" }
+        order_by: { type: string, description: "sort expression: field[DIRECTION],field2,...; directions AscNullsFirst, AscNullsLast, DescNullsFirst, DescNullsLast" }
+        limit: { type: integer, minimum: 1, maximum: 200, description: "page size; Twenty defaults to 60 and caps at 200" }
+        starting_after: { type: string, description: "cursor from a previous response's pageInfo.endCursor; fetches the next page" }
+        ending_before: { type: string, description: "cursor from a previous response's pageInfo.startCursor; fetches the previous page" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: []
+    examples:
+      - args: { limit: 10 }
+        note: "any of filter, order_by, limit, starting_after, ending_before, depth may be omitted."
+    response_pick: [data.notes, totalCount, pageInfo.hasNextPage, pageInfo.endCursor]
+
+  - name: get_note
+    description: >-
+      Get a single note by id. depth expands relation fields (0 default or 1
+      only; any other value is a 400). A malformed or nil-UUID id is
+      rejected with a 400; a well-formed but unknown id returns a 404.
+      Response envelope: {data: {note: {...}}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/notes/{{args.id}}"
+    query:
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "note record id (uuid)" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: [id]
+    examples:
+      - args: { id: "44444444-4444-4444-4444-444444444444" }
+        note: "depth is optional and dropped from the query when omitted."
+    response_pick: [data.note]
+
+  - name: create_note
+    description: >-
+      Create a note. bodyV2 (a rich-text composite) carries the note's body.
+      Twenty auto-fills any omitted field with an empty/zero default rather
+      than rejecting the create, so include a title if the note should be
+      findable by it. record accepts arbitrary custom fields
+      (additionalProperties). Response envelope: {data: {createNote:
+      {...}}}. Use create_note_target afterward to link the note to a
+      person, company, or opportunity.
+    method: POST
+    url: "{{account.base_url}}/rest/notes"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        record:
+          type: object
+          description: "note field map"
+          properties:
+            title: { type: string }
+          additionalProperties: true
+      required: [record]
+    examples:
+      - args: { record: { title: "Follow-up call notes" } }
+        note: "bodyV2 and every other field are auto-defaulted when omitted from record; link the note to a record with create_note_target."
+    response_pick: [data.createNote]
+
+  - name: update_note
+    description: >-
+      Update a note by id. record is merged into the existing record: only
+      the fields present in record are changed. record must carry only the
+      fields to change, never the id - the id belongs in the id argument,
+      not inside record. Response envelope: {data: {updateNote: {...}}}.
+    method: PATCH
+    url: "{{account.base_url}}/rest/notes/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "note record id (uuid)" }
+        record: { type: object, description: "partial field map; only the fields present are changed", additionalProperties: true }
+      required: [id, record]
+    examples:
+      - args: { id: "44444444-4444-4444-4444-444444444444", record: { title: "Follow-up call notes (updated)" } }
+        note: "any subset of the note's fields may be set in record; every field left out is unchanged."
+
+  - name: delete_note
+    description: >-
+      Soft-delete a note by id: sets deletedAt, the record stops appearing
+      in list_notes/get_note but is not destroyed. This connector always
+      sends soft_delete=true and never exposes Twenty's default hard-destroy
+      behavior. Undo with restore_record. Response envelope: {data:
+      {deleteNote: {id}}}.
+    method: DELETE
+    url: "{{account.base_url}}/rest/notes/{{args.id}}"
+    query:
+      soft_delete: "true"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "note record id (uuid)" }
+      required: [id]
+    examples:
+      - args: { id: "44444444-4444-4444-4444-444444444444" }
+        note: "the deletion is recoverable; call restore_record to undo it."
+
+  # -- Tasks ----------------------------------------------------------------
+
+  - name: list_tasks
+    description: >-
+      List tasks. Same filter/order_by/limit/starting_after/ending_before/depth
+      semantics as list_companies (see that description for the full filter
+      and pagination syntax). Response envelope: {data: {tasks: [...]},
+      totalCount, pageInfo: {hasNextPage, hasPreviousPage, startCursor,
+      endCursor}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/tasks"
+    query:
+      filter: "{{args.filter}}"
+      order_by: "{{args.order_by}}"
+      limit: "{{args.limit}}"
+      starting_after: "{{args.starting_after}}"
+      ending_before: "{{args.ending_before}}"
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        filter: { type: string, description: "filter expression: field[op]:value, comma-joined as AND, or(...)/and(...)/not(...) to wrap groups" }
+        order_by: { type: string, description: "sort expression: field[DIRECTION],field2,...; directions AscNullsFirst, AscNullsLast, DescNullsFirst, DescNullsLast" }
+        limit: { type: integer, minimum: 1, maximum: 200, description: "page size; Twenty defaults to 60 and caps at 200" }
+        starting_after: { type: string, description: "cursor from a previous response's pageInfo.endCursor; fetches the next page" }
+        ending_before: { type: string, description: "cursor from a previous response's pageInfo.startCursor; fetches the previous page" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: []
+    examples:
+      - args: { filter: "status[eq]:\"DONE\"" }
+        note: "any of filter, order_by, limit, starting_after, ending_before, depth may be omitted."
+    response_pick: [data.tasks, totalCount, pageInfo.hasNextPage, pageInfo.endCursor]
+
+  - name: get_task
+    description: >-
+      Get a single task by id. depth expands relation fields (0 default or 1
+      only; any other value is a 400). A malformed or nil-UUID id is
+      rejected with a 400; a well-formed but unknown id returns a 404.
+      Response envelope: {data: {task: {...}}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/tasks/{{args.id}}"
+    query:
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "task record id (uuid)" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: [id]
+    examples:
+      - args: { id: "55555555-5555-5555-5555-555555555555" }
+        note: "depth is optional and dropped from the query when omitted."
+    response_pick: [data.task]
+
+  - name: create_task
+    description: >-
+      Create a task. dueAt (ISO 8601 timestamp) and status are optional
+      fields. Twenty auto-fills any omitted field with an empty/zero
+      default rather than rejecting the create, so include a title if the
+      task should be findable by it. record accepts arbitrary custom
+      fields (additionalProperties). Response envelope: {data: {createTask:
+      {...}}}. Use create_task_target afterward to link the task to a
+      person, company, or opportunity.
+    method: POST
+    url: "{{account.base_url}}/rest/tasks"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        record:
+          type: object
+          description: "task field map"
+          properties:
+            title: { type: string }
+          additionalProperties: true
+      required: [record]
+    examples:
+      - args: { record: { title: "Send proposal" } }
+        note: "dueAt, status, and every other field are auto-defaulted when omitted from record; link the task to a record with create_task_target."
+    response_pick: [data.createTask]
+
+  - name: update_task
+    description: >-
+      Update a task by id. record is merged into the existing record: only
+      the fields present in record are changed. record must carry only the
+      fields to change, never the id - the id belongs in the id argument,
+      not inside record. Response envelope: {data: {updateTask: {...}}}.
+    method: PATCH
+    url: "{{account.base_url}}/rest/tasks/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "task record id (uuid)" }
+        record: { type: object, description: "partial field map; only the fields present are changed", additionalProperties: true }
+      required: [id, record]
+    examples:
+      - args: { id: "55555555-5555-5555-5555-555555555555", record: { status: "DONE" } }
+        note: "any subset of the task's fields may be set in record; every field left out is unchanged."
+
+  - name: delete_task
+    description: >-
+      Soft-delete a task by id: sets deletedAt, the record stops appearing
+      in list_tasks/get_task but is not destroyed. This connector always
+      sends soft_delete=true and never exposes Twenty's default hard-destroy
+      behavior. Undo with restore_record. Response envelope: {data:
+      {deleteTask: {id}}}.
+    method: DELETE
+    url: "{{account.base_url}}/rest/tasks/{{args.id}}"
+    query:
+      soft_delete: "true"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "task record id (uuid)" }
+      required: [id]
+    examples:
+      - args: { id: "55555555-5555-5555-5555-555555555555" }
+        note: "the deletion is recoverable; call restore_record to undo it."
+
+  # -- Link objects (noteTargets / taskTargets) ------------------------------
+
+  - name: create_note_target
+    description: >-
+      Link a note to exactly one of a person, company, or opportunity via
+      the noteTargets join object. record needs noteId plus exactly one of
+      targetPersonId, targetCompanyId, targetOpportunityId. Response
+      envelope follows the same {data: {create<Singular>: {...}}} shape as
+      every other create call (key is create + capitalized singular object
+      name, here createNoteTarget).
+    method: POST
+    url: "{{account.base_url}}/rest/noteTargets"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        record:
+          type: object
+          description: "noteTarget field map: noteId plus exactly one of targetPersonId, targetCompanyId, targetOpportunityId"
+          properties:
+            noteId: { type: string, description: "note record id (uuid)" }
+            targetPersonId: { type: string, description: "person record id (uuid); set exactly one of targetPersonId, targetCompanyId, targetOpportunityId" }
+            targetCompanyId: { type: string, description: "company record id (uuid); set exactly one of targetPersonId, targetCompanyId, targetOpportunityId" }
+            targetOpportunityId: { type: string, description: "opportunity record id (uuid); set exactly one of targetPersonId, targetCompanyId, targetOpportunityId" }
+          required: [noteId]
+          additionalProperties: true
+      required: [record]
+    examples:
+      - args: { record: { noteId: "44444444-4444-4444-4444-444444444444", targetPersonId: "22222222-2222-2222-2222-222222222222" } }
+        note: "set exactly one of targetPersonId, targetCompanyId, targetOpportunityId alongside noteId."
+
+  - name: create_task_target
+    description: >-
+      Link a task to exactly one of a person, company, or opportunity via
+      the taskTargets join object. record needs taskId plus exactly one of
+      targetPersonId, targetCompanyId, targetOpportunityId. Response
+      envelope follows the same {data: {create<Singular>: {...}}} shape as
+      every other create call (key is create + capitalized singular object
+      name, here createTaskTarget).
+    method: POST
+    url: "{{account.base_url}}/rest/taskTargets"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        record:
+          type: object
+          description: "taskTarget field map: taskId plus exactly one of targetPersonId, targetCompanyId, targetOpportunityId"
+          properties:
+            taskId: { type: string, description: "task record id (uuid)" }
+            targetPersonId: { type: string, description: "person record id (uuid); set exactly one of targetPersonId, targetCompanyId, targetOpportunityId" }
+            targetCompanyId: { type: string, description: "company record id (uuid); set exactly one of targetPersonId, targetCompanyId, targetOpportunityId" }
+            targetOpportunityId: { type: string, description: "opportunity record id (uuid); set exactly one of targetPersonId, targetCompanyId, targetOpportunityId" }
+          required: [taskId]
+          additionalProperties: true
+      required: [record]
+    examples:
+      - args: { record: { taskId: "55555555-5555-5555-5555-555555555555", targetCompanyId: "11111111-1111-1111-1111-111111111111" } }
+        note: "set exactly one of targetPersonId, targetCompanyId, targetOpportunityId alongside taskId."
+
+  - name: list_note_targets
+    description: >-
+      List noteTargets, the join records linking notes to a person, company,
+      or opportunity. Same filter/order_by/limit/starting_after/ending_before/depth
+      semantics as list_companies. Response envelope: {data: {noteTargets:
+      [...]}, totalCount, pageInfo: {hasNextPage, hasPreviousPage,
+      startCursor, endCursor}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/noteTargets"
+    query:
+      filter: "{{args.filter}}"
+      order_by: "{{args.order_by}}"
+      limit: "{{args.limit}}"
+      starting_after: "{{args.starting_after}}"
+      ending_before: "{{args.ending_before}}"
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        filter: { type: string, description: "filter expression: field[op]:value, comma-joined as AND, or(...)/and(...)/not(...) to wrap groups" }
+        order_by: { type: string, description: "sort expression: field[DIRECTION],field2,...; directions AscNullsFirst, AscNullsLast, DescNullsFirst, DescNullsLast" }
+        limit: { type: integer, minimum: 1, maximum: 200, description: "page size; Twenty defaults to 60 and caps at 200" }
+        starting_after: { type: string, description: "cursor from a previous response's pageInfo.endCursor; fetches the next page" }
+        ending_before: { type: string, description: "cursor from a previous response's pageInfo.startCursor; fetches the previous page" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: []
+    examples:
+      - args: { filter: "noteId[eq]:\"44444444-4444-4444-4444-444444444444\"" }
+        note: "filter by noteId or the target's *Id field to find what a note is linked to."
+    response_pick: [data.noteTargets, totalCount, pageInfo.hasNextPage, pageInfo.endCursor]
+
+  - name: list_task_targets
+    description: >-
+      List taskTargets, the join records linking tasks to a person, company,
+      or opportunity. Same filter/order_by/limit/starting_after/ending_before/depth
+      semantics as list_companies. Response envelope: {data: {taskTargets:
+      [...]}, totalCount, pageInfo: {hasNextPage, hasPreviousPage,
+      startCursor, endCursor}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/taskTargets"
+    query:
+      filter: "{{args.filter}}"
+      order_by: "{{args.order_by}}"
+      limit: "{{args.limit}}"
+      starting_after: "{{args.starting_after}}"
+      ending_before: "{{args.ending_before}}"
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        filter: { type: string, description: "filter expression: field[op]:value, comma-joined as AND, or(...)/and(...)/not(...) to wrap groups" }
+        order_by: { type: string, description: "sort expression: field[DIRECTION],field2,...; directions AscNullsFirst, AscNullsLast, DescNullsFirst, DescNullsLast" }
+        limit: { type: integer, minimum: 1, maximum: 200, description: "page size; Twenty defaults to 60 and caps at 200" }
+        starting_after: { type: string, description: "cursor from a previous response's pageInfo.endCursor; fetches the next page" }
+        ending_before: { type: string, description: "cursor from a previous response's pageInfo.startCursor; fetches the previous page" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: []
+    examples:
+      - args: { filter: "taskId[eq]:\"55555555-5555-5555-5555-555555555555\"" }
+        note: "filter by taskId or the target's *Id field to find what a task is linked to."
+    response_pick: [data.taskTargets, totalCount, pageInfo.hasNextPage, pageInfo.endCursor]
+
+  # -- Duplicates -------------------------------------------------------------
+
+  - name: find_duplicate_companies
+    description: >-
+      Find candidate duplicate companies for a set of candidate records or
+      existing ids. Send data (an array of candidate company objects to
+      check) or ids (an array of existing company record ids); Twenty
+      rejects a request carrying neither with a 400 "You have to provide
+      either \"data\" or \"ids\" argument". This is logically a search
+      despite the POST verb, so it is marked read_only. Response is an array
+      with one entry per input item: [{companyDuplicates: [...matches...],
+      totalCount, pageInfo}].
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/rest/companies/duplicates"
+    body:
+      data: "{{args.data}}"
+      ids: "{{args.ids}}"
+    args_schema:
+      type: object
+      properties:
+        data: { type: array, items: { type: object, additionalProperties: true }, description: "candidate company records to check for duplicates" }
+        ids: { type: array, items: { type: string }, description: "existing company record ids (uuid) to check for duplicates" }
+      required: []
+    examples:
+      - args: { data: [{ name: "Notion" }] }
+        note: "send data or ids alone, or both; sending neither is rejected with a 400."
+      - args: { ids: ["11111111-1111-1111-1111-111111111111"] }
+        note: "the ids wrapper works the same way as data, alone or combined with it."
+    response_pick: [data]
+
+  - name: find_duplicate_people
+    description: >-
+      Find candidate duplicate people for a set of candidate records or
+      existing ids. Send data (an array of candidate person objects to
+      check) or ids (an array of existing person record ids); Twenty rejects
+      a request carrying neither with a 400 "You have to provide either
+      \"data\" or \"ids\" argument". This is logically a search despite the
+      POST verb, so it is marked read_only. Response is an array with one
+      entry per input item: [{personDuplicates: [...matches...],
+      totalCount, pageInfo}].
+    read_only: true
+    method: POST
+    url: "{{account.base_url}}/rest/people/duplicates"
+    body:
+      data: "{{args.data}}"
+      ids: "{{args.ids}}"
+    args_schema:
+      type: object
+      properties:
+        data: { type: array, items: { type: object, additionalProperties: true }, description: "candidate person records to check for duplicates" }
+        ids: { type: array, items: { type: string }, description: "existing person record ids (uuid) to check for duplicates" }
+      required: []
+    examples:
+      - args: { ids: ["22222222-2222-2222-2222-222222222222"] }
+        note: "send data or ids alone, or both; sending neither is rejected with a 400."
+      - args: { data: [{ name: { firstName: "Ada", lastName: "Lovelace" } }] }
+        note: "the data wrapper works the same way as ids, alone or combined with it."
+    response_pick: [data]
+
+  # -- Generic record access (every other object, including custom ones) ----
+
+  - name: list_records
+    description: >-
+      List records of any object, standard or custom, by its camelCase
+      plural REST name (e.g. workspaceMembers, attachments, or a custom
+      object's namePlural from list_objects). Same
+      filter/order_by/limit/starting_after/ending_before/depth semantics as
+      list_companies. This is an intentionally loose passthrough for
+      objects with no typed function above; response field names depend
+      entirely on the target object's own schema. Response envelope: {data:
+      {...}, totalCount, pageInfo: {hasNextPage, hasPreviousPage,
+      startCursor, endCursor}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/{{args.object}}"
+    query:
+      filter: "{{args.filter}}"
+      order_by: "{{args.order_by}}"
+      limit: "{{args.limit}}"
+      starting_after: "{{args.starting_after}}"
+      ending_before: "{{args.ending_before}}"
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        object: { type: string, description: "camelCase plural REST name of the target object, e.g. workspaceMembers, attachments, or a custom object's namePlural" }
+        filter: { type: string, description: "filter expression: field[op]:value, comma-joined as AND, or(...)/and(...)/not(...) to wrap groups" }
+        order_by: { type: string, description: "sort expression: field[DIRECTION],field2,...; directions AscNullsFirst, AscNullsLast, DescNullsFirst, DescNullsLast" }
+        limit: { type: integer, minimum: 1, maximum: 200, description: "page size; Twenty defaults to 60 and caps at 200" }
+        starting_after: { type: string, description: "cursor from a previous response's pageInfo.endCursor; fetches the next page" }
+        ending_before: { type: string, description: "cursor from a previous response's pageInfo.startCursor; fetches the previous page" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: [object]
+    examples:
+      - args: { object: "workspaceMembers", limit: 10 }
+        note: "use this for any object without a typed list_<plural> function above, including custom objects."
+    response_pick: [data, totalCount, pageInfo.hasNextPage, pageInfo.endCursor]
+
+  - name: get_record
+    description: >-
+      Get a single record of any object, standard or custom, by its
+      camelCase plural REST name and id. depth expands relation fields (0
+      default or 1 only; any other value is a 400). This is an intentionally
+      loose passthrough; response field names depend entirely on the target
+      object's own schema. Response envelope: {data: {...}}.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/{{args.object}}/{{args.id}}"
+    query:
+      depth: "{{args.depth}}"
+    args_schema:
+      type: object
+      properties:
+        object: { type: string, description: "camelCase plural REST name of the target object, e.g. workspaceMembers, attachments, or a custom object's namePlural" }
+        id: { type: string, description: "record id (uuid)" }
+        depth: { type: integer, enum: [0, 1], description: "expand relation fields; 0 (default) or 1 only" }
+      required: [object, id]
+    examples:
+      - args: { object: "attachments", id: "66666666-6666-6666-6666-666666666666" }
+        note: "use this for any object without a typed get_<singular> function above, including custom objects."
+    response_pick: [data]
+
+  - name: create_record
+    description: >-
+      Create a record of any object, standard or custom, by its camelCase
+      plural REST name. record is the object's field map, forwarded
+      verbatim; its shape depends entirely on the target object's own
+      schema (see list_objects for the object's names). This is an
+      intentionally loose passthrough for objects with no typed create
+      function above. Response envelope: {data: {create<Singular>: {...}}}.
+    method: POST
+    url: "{{account.base_url}}/rest/{{args.object}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        object: { type: string, description: "camelCase plural REST name of the target object, e.g. workspaceMembers, attachments, or a custom object's namePlural" }
+        record: { type: object, description: "the target object's field map, forwarded verbatim", additionalProperties: true }
+      required: [object, record]
+    examples:
+      - args: { object: "attachments", record: { name: "contract.pdf" } }
+        note: "use this for any object without a typed create_<singular> function above, including custom objects."
+
+  - name: update_record
+    description: >-
+      Update a record of any object, standard or custom, by its camelCase
+      plural REST name and id. record is merged into the existing record:
+      only the fields present in record are changed. record must carry only
+      the fields to change, never the id - the id belongs in the id
+      argument, not inside record. This is an intentionally loose
+      passthrough. Response envelope: {data: {update<Singular>: {...}}}.
+    method: PATCH
+    url: "{{account.base_url}}/rest/{{args.object}}/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        object: { type: string, description: "camelCase plural REST name of the target object, e.g. workspaceMembers, attachments, or a custom object's namePlural" }
+        id: { type: string, description: "record id (uuid)" }
+        record: { type: object, description: "partial field map; only the fields present are changed", additionalProperties: true }
+      required: [object, id, record]
+    examples:
+      - args: { object: "attachments", id: "66666666-6666-6666-6666-666666666666", record: { name: "contract-v2.pdf" } }
+        note: "use this for any object without a typed update_<singular> function above, including custom objects."
+
+  - name: delete_record
+    description: >-
+      Soft-delete a record of any object, standard or custom, by its
+      camelCase plural REST name and id: sets deletedAt, the record stops
+      appearing in list_records/get_record but is not destroyed. This
+      connector always sends soft_delete=true and never exposes Twenty's
+      default hard-destroy behavior. Undo with restore_record. This is an
+      intentionally loose passthrough. Response envelope: {data:
+      {delete<Singular>: {id}}}.
+    method: DELETE
+    url: "{{account.base_url}}/rest/{{args.object}}/{{args.id}}"
+    query:
+      soft_delete: "true"
+    args_schema:
+      type: object
+      properties:
+        object: { type: string, description: "camelCase plural REST name of the target object, e.g. workspaceMembers, attachments, or a custom object's namePlural" }
+        id: { type: string, description: "record id (uuid)" }
+      required: [object, id]
+    examples:
+      - args: { object: "attachments", id: "66666666-6666-6666-6666-666666666666" }
+        note: "use this for any object without a typed delete_<singular> function above, including custom objects; the deletion is recoverable via restore_record."
+
+  - name: restore_record
+    description: >-
+      Restore (undo the soft delete of) a record of any object, standard or
+      custom, by its camelCase plural REST name and id. Sends no request
+      body. Response envelope: {data: {restore<Singular>: {...}}}.
+    method: PATCH
+    url: "{{account.base_url}}/rest/restore/{{args.object}}/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        object: { type: string, description: "camelCase plural REST name of the target object, e.g. workspaceMembers, attachments, or a custom object's namePlural" }
+        id: { type: string, description: "record id (uuid)" }
+      required: [object, id]
+    examples:
+      - args: { object: "companies", id: "11111111-1111-1111-1111-111111111111" }
+        note: "undoes a prior soft delete (delete_company/delete_record with soft_delete=true); no request body is sent."
+
+  # -- Webhooks -----------------------------------------------------------
+
+  - name: list_webhooks
+    description: >-
+      List webhooks registered on this workspace. This instance returned a
+      bare array under data; per the metadata OpenAPI spec the exact shape
+      depends on the workspace's IS_REST_METADATA_API_NEW_FORMAT_DIRECT
+      setting, so a legacy nested envelope is possible on a workspace with
+      that setting off. response_pick reads the data value directly either
+      way.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/webhooks"
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "no arguments; lists every webhook on the workspace."
+    response_pick: [data]
+
+  - name: create_webhook
+    description: >-
+      Register a webhook. operations is an array of event names such as
+      person.created, company.updated, or the whole-surface wildcard *.*
+      for every object and action (the metadata schema's own default).
+      targetUrl must be a publicly reachable endpoint. This connector does
+      not accept a signing-secret argument, because call arguments land in
+      run/event logs, which is not a safe place for a webhook secret - set
+      the signing secret from the Twenty UI (Settings > API & Webhooks)
+      instead. Twenty signs deliveries with an X-Twenty-Webhook-Signature
+      header (HMAC-SHA256 over "{timestamp}:{json_payload}") and an
+      X-Twenty-Webhook-Timestamp header; the receiver must answer 2xx.
+    method: POST
+    url: "{{account.base_url}}/rest/webhooks"
+    body:
+      targetUrl: "{{args.target_url}}"
+      operations: "{{args.operations}}"
+      description: "{{args.description}}"
+    args_schema:
+      type: object
+      properties:
+        target_url: { type: string, description: "publicly reachable endpoint Twenty will POST deliveries to" }
+        operations: { type: array, items: { type: string }, description: "event names to subscribe to, e.g. person.created, company.updated, or the whole-surface wildcard *.* for every object and action" }
+        description: { type: string, description: "optional human-readable label for this webhook" }
+      required: [target_url, operations]
+    examples:
+      - args: { target_url: "https://example.com/hooks/twenty", operations: ["person.created", "*.*"] }
+        note: "description is optional; set the delivery signing secret from the Twenty UI, never as a call argument."
+
+  - name: delete_webhook
+    description: "Delete a webhook by id."
+    method: DELETE
+    url: "{{account.base_url}}/rest/webhooks/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "webhook id" }
+      required: [id]
+    examples:
+      - args: { id: "77777777-7777-7777-7777-777777777777" }
+        note: "irreversible; there is no restore for a deleted webhook."
+
+  # -- Metadata -------------------------------------------------------------
+
+  - name: list_objects
+    description: >-
+      List every object, standard and custom, defined in this workspace's
+      data model, trimmed to
+      id/nameSingular/namePlural/labelSingular/labelPlural/isSystem/isActive
+      (the full per-object fields[] payload is stripped by response_pick
+      since it is large and rarely needed just to discover an object's REST
+      name for list_records/get_record/create_record/etc.). This call may
+      fail without an API key whose role has the data-model settings
+      permission (the guard is attested; the exact status code it returns
+      is not).
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/rest/metadata/objects"
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "no arguments; lists every standard and custom object on the workspace."
+    response_pick: [data.id, data.nameSingular, data.namePlural, data.labelSingular, data.labelPlural, data.isSystem, data.isActive]

@@ -159,10 +159,10 @@ a call without executing it, or the dashboard healthcheck to probe an account.
 
 ## Official connectors
 
-Twelve official connectors ship inside the `apb` binary and install with
+Thirteen official connectors ship inside the `apb` binary and install with
 `apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`,
-`asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`, `slack`, `atrip`.
-Installing
+`asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`, `slack`, `atrip`,
+`twenty`. Installing
 from the binary records trust for the
 connector's tree digest in the same action, since the bytes are already
 part of the binary you are running; `apb connector install --from-dir
@@ -379,6 +379,37 @@ The `healthcheck` is `query_void_orders`, a no-required-arguments read-only
 status poll; a business-level error in its body still proves reachability
 and credentials, and the fuller verification is a real read-only call
 (for example `balance`).
+
+### twenty
+
+Account fields: `base_url` (the app origin, no path suffix - your own host
+for a self-hosted instance, `https://api.twenty.com` for the cloud product)
+and `api_key` (secret). Create the key in Twenty under Settings, API and
+Webhooks (some versions label this section Playground instead), then Create
+key; the value is shown only once, it is scoped to the workspace it was
+created in, its permissions follow the role assigned to it under Settings,
+Members, Roles (Assignment tab), and every key carries a mandatory expiry
+with no "never expires" option. Covers typed CRUD for the five core objects
+(companies, people, opportunities, notes, tasks), the noteTargets/taskTargets
+join objects, duplicate detection for companies and people, generic record
+access for every other object including custom ones (addressed by camelCase
+plural REST name, discoverable with `list_objects`), and webhook management.
+41 functions in total. Every record delete (the five typed deletes and the
+generic `delete_record`) always sends the fixed query `soft_delete=true`
+rather than Twenty's own hard-destroy default, so a delete here sets
+`deletedAt` and can be undone with `restore_record`; `delete_webhook` is the
+one exception, a hard delete with no restore. 23 functions are effectful:
+the five typed create/update/delete triples, `create_note_target`,
+`create_task_target`, the generic
+`create_record`/`update_record`/`delete_record`/`restore_record`, and
+`create_webhook`/`delete_webhook`. `depth` accepts only `0` or `1`; error
+bodies carry a `messages` array rather than a single `message` string; a
+missing auth header returns 403 while an invalid key returns 401; `limit`
+defaults to 60 and caps at 200. Batch endpoints, `groupBy`, merge, attachment
+binary upload, GraphQL, and API-key management are out of scope for this
+connector's 0.1 surface. The `healthcheck` is `list_companies`, which
+renders with zero arguments and succeeds against any key that can read
+companies.
 
 ### Demo playbooks
 
