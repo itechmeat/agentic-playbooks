@@ -38,6 +38,14 @@ Examples of issues that should be reported privately include:
 ## Safe use
 
 Treat third-party playbooks and imported bundles as executable code. Review them
-before running. Do not expose development web or MCP interfaces to untrusted
-networks or users unless authentication, authorization, and transport security
-have been explicitly designed and tested for that deployment.
+before running.
+
+The web dashboard binds `127.0.0.1` and runs unauthenticated by default. Before
+exposing it to a network, issue an authorization key with `apb server key issue`
+and place it behind a reverse proxy that terminates TLS; with a key present,
+every `/api` route requires a bearer key or a session cookie, and binding a
+non-loopback address without one is refused at startup. See
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the supported topology.
+
+The MCP interface speaks stdio and carries no authentication of its own. Do not
+expose it to untrusted users or networks.
