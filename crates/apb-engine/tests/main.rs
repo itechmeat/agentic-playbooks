@@ -50,6 +50,8 @@ mod child_run_event_test;
 mod connector_asana;
 #[path = "suite/connector_call.rs"]
 mod connector_call;
+#[path = "suite/connector_contract_inbox.rs"]
+mod connector_contract_inbox;
 #[path = "suite/connector_discord.rs"]
 mod connector_discord;
 #[path = "suite/connector_e2e.rs"]

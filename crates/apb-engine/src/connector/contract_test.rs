@@ -7,8 +7,11 @@
 
 use std::collections::BTreeMap;
 
-use apb_core::connector::contract::{Envelope, ExpectKind, ImapExpect, TestCase, TestsDoc};
-use apb_core::connector::def::{ConnectorDoc, FunctionSpec};
+use apb_core::connector::contract::{
+    Envelope, ExpectKind, ImapExpect, InboxExpect, TestCase, TestsDoc,
+};
+use apb_core::connector::def::{ConnectorDoc, FunctionSpec, InboxOp};
+use apb_core::connector::inbox::InboxEvent;
 use serde_json::Value;
 
 use crate::connector::call::render_http;
@@ -87,6 +90,7 @@ fn evaluate(doc: &ConnectorDoc, case: &TestCase) -> Result<(), String> {
         ),
         ExpectKind::Smtp(envelope) => eval_smtp(doc, function, &case.account, &args, envelope),
         ExpectKind::Imap(expected) => eval_imap(doc, function, &case.account, &args, expected),
+        ExpectKind::Inbox(expected) => eval_inbox(function, &args, expected),
     }
 }
 
@@ -411,6 +415,121 @@ fn json_subset(expected: &Value, actual: &Value) -> bool {
             .all(|(k, v)| a.get(k).is_some_and(|av| json_subset(v, av))),
         _ => expected == actual,
     }
+}
+
+/// Matches an `inbox` expectation. Fully offline and filesystem-free: the
+/// case's inline `seed` becomes an in-memory event list, and the op runs
+/// against it through the same argument validation
+/// (`connector::inbox::build`) and the same envelope builders a live call
+/// uses, so a contract test asserts exactly what an agent would receive.
+///
+/// The store itself is not exercised here, deliberately: its own concurrency,
+/// dedupe and retention behavior is covered by `apb-core`'s unit tests, and
+/// dragging a tempdir into the contract runner would make `tests.yaml` cases
+/// depend on filesystem state they cannot see.
+fn eval_inbox(function: &FunctionSpec, args: &Value, expected: &InboxExpect) -> Result<(), String> {
+    let spec = function.inbox.as_ref().ok_or_else(|| {
+        format!(
+            "function `{}` is not an inbox function but the case expects an inbox result",
+            function.name
+        )
+    })?;
+    if spec.op.as_str() != expected.op {
+        return Err(format!(
+            "op mismatch: the case expects `{}`, the function declares `{}`",
+            expected.op,
+            spec.op.as_str()
+        ));
+    }
+
+    // `InboxCall`'s fields are private to its module (encapsulated on
+    // purpose), so the runner reads the rendered `limit`/`up_to_seq` back off
+    // the dry-run envelope rather than the live `Call` variant. This still
+    // runs the exact same argument validation as a live call
+    // (`connector::inbox::build`); only the branch taken to observe the
+    // result differs.
+    let build = crate::connector::inbox::build(
+        spec,
+        "contract",
+        "contract",
+        args,
+        function.response_pick.clone(),
+        true,
+    )
+    .map_err(|e| format!("render failed: {}", e.message))?;
+    let dry = match build {
+        crate::connector::inbox::InboxBuild::DryRun(v) => v,
+        crate::connector::inbox::InboxBuild::Call(_) => {
+            return Err("inbox build unexpectedly produced a live call".to_string());
+        }
+    };
+    let limit = dry["inbox"]["limit"]
+        .as_u64()
+        .ok_or_else(|| "the dry run carries no `inbox.limit`".to_string())?
+        as usize;
+    let up_to_seq = dry["inbox"]["up_to_seq"]
+        .as_u64()
+        .ok_or_else(|| "the dry run carries no `inbox.up_to_seq`".to_string())?;
+
+    // Seed order defines seq, exactly as an append sequence would.
+    let seeded: Vec<InboxEvent> = expected
+        .seed
+        .iter()
+        .enumerate()
+        .map(|(i, s)| InboxEvent {
+            seq: i as u64 + 1,
+            received_at: 0,
+            provider_id: s.provider_id.clone(),
+            body: s.body.clone(),
+        })
+        .collect();
+
+    let envelope = match spec.op {
+        InboxOp::Read => {
+            let mut pending: Vec<InboxEvent> = seeded
+                .iter()
+                .filter(|e| e.seq > expected.acked)
+                .cloned()
+                .collect();
+            pending.truncate(limit);
+            crate::connector::inbox::read_envelope(&pending, expected.acked)
+        }
+        InboxOp::Ack => crate::connector::inbox::ack_envelope(expected.acked.max(up_to_seq)),
+        InboxOp::PeekDepth => {
+            let pending = seeded.iter().filter(|e| e.seq > expected.acked).count() as u64;
+            crate::connector::inbox::depth_envelope(pending)
+        }
+    };
+
+    if let Some(want) = &expected.events {
+        let got: Vec<u64> = envelope["events"]
+            .as_array()
+            .ok_or_else(|| "the envelope carries no `events` array".to_string())?
+            .iter()
+            .filter_map(|e| e["seq"].as_u64())
+            .collect();
+        if &got != want {
+            return Err(format!(
+                "events mismatch: expected seqs {want:?}, rendered {got:?}"
+            ));
+        }
+    }
+    for (label, want) in [
+        ("cursor", expected.cursor),
+        ("acked_up_to", expected.acked_up_to),
+        ("pending", expected.pending),
+    ] {
+        let Some(want) = want else {
+            continue;
+        };
+        let got = envelope[label]
+            .as_u64()
+            .ok_or_else(|| format!("the envelope carries no `{label}` for op `{}`", expected.op))?;
+        if got != want {
+            return Err(format!("{label} mismatch: expected {want}, rendered {got}"));
+        }
+    }
+    Ok(())
 }
 
 #[cfg(test)]
