@@ -1,7 +1,7 @@
 <script lang="ts">
   import {
-    fetchAgents,
-    fetchModels,
+    fetchAgentsCached,
+    fetchModelsCached,
     fetchProfile,
     fetchProjects,
     fetchSkills,
@@ -165,7 +165,11 @@
   async function loadMeta() {
     metaLoaded = false
     try {
-      const [pj, ag, md] = await Promise.all([fetchProjects(), fetchAgents(), fetchModels()])
+      const [pj, ag, md] = await Promise.all([
+        fetchProjects(),
+        fetchAgentsCached(),
+        fetchModelsCached(),
+      ])
       projects = pj
       agents = ag
       modelsTable = md.models
