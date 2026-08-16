@@ -79,5 +79,7 @@ mod validate_structure_test;
 mod versioning_test;
 #[path = "suite/versions_provenance_test.rs"]
 mod versions_provenance_test;
+#[path = "suite/webhook_digest_test.rs"]
+mod webhook_digest_test;
 #[path = "suite/webhook_verify_test.rs"]
 mod webhook_verify_test;

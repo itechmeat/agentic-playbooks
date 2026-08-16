@@ -1,12 +1,14 @@
 //! Connector definition schema: the content of `connector.yaml` (spec
 //! 2026-07-18-connectors-design, section 3.1).
 //!
-//! A connector links a playbook node to an external HTTP service through a
-//! declarative manifest: an auth block, the account fields the connector
-//! needs, and a set of callable functions (HTTP or mock). Besides the
-//! structural checks below, `from_yaml` also runs `validate_templates`,
-//! which enforces the secret-placement policy over the template placeholders
-//! parsed by `super::template` (e.g. `{{secret.*}}` only allowed in `auth`).
+//! A connector links a playbook node to an external service through a
+//! declarative manifest: an auth block, an optional inbound `webhook` block,
+//! the account fields the connector needs, and a set of callable functions.
+//! A function is exactly one of five kinds: HTTP, mock, smtp, imap, or
+//! inbox. Besides the structural checks below, `from_yaml` also runs
+//! `validate_templates`, which enforces the secret-placement policy over the
+//! template placeholders parsed by `super::template` (`{{secret.*}}` only in
+//! `auth`, the smtp password, the imap password, and the webhook block).
 
 use std::collections::BTreeMap;
 
@@ -177,10 +179,112 @@ pub struct ImapSpec {
     pub params: BTreeMap<String, String>,
 }
 
-/// One callable function of the connector: either an HTTP call (`method` +
-/// `url`, optionally `query`/`body`) or a `mock` (canned response, no
-/// network). `from_yaml` enforces that a function is exactly one of the two,
-/// never both and never neither.
+/// The challenge dialect a provider performs before it will deliver
+/// anything (spec 2026-08-16-webhook-ingest-design). One variant in v1:
+/// `meta_hub`, the `hub.mode`/`hub.verify_token`/`hub.challenge` echo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChallengeDialect {
+    MetaHub,
+}
+
+/// The signature scheme a provider signs deliveries with. One variant in v1:
+/// HMAC-SHA256 over the raw body, hex encoded. An enum rather than a free
+/// description, because a fully generic scheme language would be
+/// speculation; a second provider adds a second variant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SignatureScheme {
+    HmacSha256Hex,
+}
+
+/// How a delivery is authenticated. There is no unsigned mode: this block is
+/// mandatory inside `webhook`, and `secret` is the one place besides `auth`,
+/// the smtp password and the imap password where `{{secret.*}}` is allowed.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct SignatureSpec {
+    pub scheme: SignatureScheme,
+    /// Header the provider carries the signature in, matched
+    /// case-insensitively at ingest time. A literal, never a template.
+    pub header: String,
+    /// Literal prefix the header value carries before the hex digest, e.g.
+    /// `sha256=`. Empty means the header is the bare digest.
+    #[serde(default)]
+    pub prefix: String,
+    /// The shared secret, as a `{{secret.<field>}}` reference to a
+    /// `secret: true` account field. Resolved at ingest time, never cached.
+    pub secret: String,
+}
+
+/// The document-level `webhook:` block: everything the ingest listener needs
+/// to accept a delivery for this connector (spec
+/// 2026-08-16-webhook-ingest-design, "Connector schema: the webhook block").
+///
+/// A connector carrying this block declares inbox functions, and a connector
+/// declaring inbox functions carries this block; `from_yaml` enforces both
+/// directions, since a manifest violating either is broken for every
+/// consumer and not only for a playbook that happens to reference it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct WebhookSpec {
+    /// Absent when the provider performs no verification handshake, in which
+    /// case a GET to the hook path is a flat 404.
+    #[serde(default)]
+    pub challenge: Option<ChallengeDialect>,
+    /// Required exactly when `challenge` is set; a `{{secret.<field>}}`
+    /// reference like `signature.secret`.
+    #[serde(default)]
+    pub verify_token: Option<String>,
+    pub signature: SignatureSpec,
+    /// Dot path into the delivery body yielding the provider's own id for
+    /// this event, used for dedupe. Absent means dedupe falls back to the
+    /// SHA-256 of the raw body.
+    #[serde(default)]
+    pub dedupe_path: Option<String>,
+}
+
+/// One inbox operation a function can perform (spec
+/// 2026-08-16-webhook-ingest-design). All three are local reads or cursor
+/// moves against `apb_core::connector::inbox`; none touches the network.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum InboxOp {
+    /// Return pending events without moving the cursor.
+    Read,
+    /// Advance a consumer cursor after processing.
+    Ack,
+    /// Return the pending count only. The natural probe for an
+    /// ingest-only connector, which has no outbound function to healthcheck.
+    PeekDepth,
+}
+
+impl InboxOp {
+    /// The snake_case name of the op, as it appears on the wire.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            InboxOp::Read => "read",
+            InboxOp::Ack => "ack",
+            InboxOp::PeekDepth => "peek_depth",
+        }
+    }
+}
+
+/// The `inbox` function kind (spec 2026-08-16-webhook-ingest-design). The
+/// fifth and last kind a function may be. It carries no connection block:
+/// the store it reads is derived from the connector name and the selected
+/// account, and the arguments come from `args_schema` like any other call.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboxSpec {
+    pub op: InboxOp,
+}
+
+/// One callable function of the connector: exactly one of an HTTP call
+/// (`method` + `url`, optionally `query`/`headers`/`body`/`body_form`), a
+/// `mock` (canned response, no network), an `smtp` block, an `imap` block, or
+/// an `inbox` block (a read of the local inbound-event store). `from_yaml`
+/// enforces the exactly-one rule, never more and never none.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct FunctionSpec {
@@ -222,6 +326,8 @@ pub struct FunctionSpec {
     pub smtp: Option<SmtpSpec>,
     #[serde(default)]
     pub imap: Option<ImapSpec>,
+    #[serde(default)]
+    pub inbox: Option<InboxSpec>,
 }
 
 impl FunctionSpec {
@@ -241,6 +347,13 @@ impl FunctionSpec {
     /// of making an HTTP call, returning a mock, or sending mail over smtp.
     pub fn is_imap(&self) -> bool {
         self.imap.is_some()
+    }
+
+    /// An inbox function reads the local inbound-event store (spec
+    /// 2026-08-16-webhook-ingest-design) instead of making an HTTP call,
+    /// returning a mock, sending mail, or opening a mailbox.
+    pub fn is_inbox(&self) -> bool {
+        self.inbox.is_some()
     }
 }
 
@@ -278,6 +391,10 @@ pub struct ConnectorDoc {
     /// applies to every HTTP function.
     #[serde(default)]
     pub error_when: Option<ErrorWhen>,
+    /// Inbound delivery contract (spec 2026-08-16-webhook-ingest-design).
+    /// Present exactly when the connector declares `inbox` functions.
+    #[serde(default)]
+    pub webhook: Option<WebhookSpec>,
     #[serde(default)]
     pub account_fields: Vec<AccountField>,
     #[serde(default)]
@@ -335,14 +452,15 @@ impl ConnectorDoc {
             let is_mock = f.mock.is_some();
             let is_smtp = f.smtp.is_some();
             let is_imap = f.imap.is_some();
-            match [is_http, is_mock, is_smtp, is_imap]
+            let is_inbox = f.inbox.is_some();
+            match [is_http, is_mock, is_smtp, is_imap, is_inbox]
                 .iter()
                 .filter(|set| **set)
                 .count()
             {
                 0 => {
                     return Err(ConnectorError::Invalid(format!(
-                        "function `{}` is not an HTTP call (method + url), a mock, an smtp block, or an imap block",
+                        "function `{}` is not an HTTP call (method + url), a mock, an smtp block, an imap block, or an inbox block",
                         f.name
                     )));
                 }
@@ -364,25 +482,31 @@ impl ConnectorDoc {
                         }
                     } else if is_smtp {
                         validate_smtp_shape(f)?;
-                    } else {
+                    } else if is_imap {
                         validate_imap_shape(f)?;
+                    } else {
+                        validate_inbox_shape(f)?;
                     }
                 }
                 _ => {
                     return Err(ConnectorError::Invalid(format!(
-                        "function `{}` must be exactly one of: an HTTP call, a mock, an smtp block, or an imap block",
+                        "function `{}` must be exactly one of: an HTTP call, a mock, an smtp block, an imap block, or an inbox block",
                         f.name
                     )));
                 }
             }
 
-            // response_pick projects an HTTP response body (spec 4.5); a mock
-            // returns an authored payload, an smtp function returns a send/
-            // verify receipt, and an imap function returns its own op result,
-            // so a projection on any of those is meaningless.
+            // response_pick projects a JSON document (spec 4.5). An HTTP
+            // function projects the response body and an inbox function
+            // projects the fixed envelope it returns; a mock returns an
+            // authored payload, an smtp function a send/verify receipt, and
+            // an imap function its own op result, so a projection on any of
+            // those three is meaningless. The inbox case is not merely
+            // tolerated: the official-connector gate requires every
+            // read_only function that is not smtp or imap to carry one.
             if !f.response_pick.is_empty() && (is_mock || is_smtp || is_imap) {
                 return Err(ConnectorError::Invalid(format!(
-                    "function `{}` sets response_pick but is not an HTTP function; response_pick is only valid on HTTP functions",
+                    "function `{}` sets response_pick but is neither an HTTP nor an inbox function; response_pick is only valid on those two kinds",
                     f.name
                 )));
             }
@@ -415,6 +539,36 @@ impl ConnectorDoc {
             }
         }
 
+        if let Some(hook) = &doc.webhook {
+            validate_webhook_shape(&doc.name, hook)?;
+        }
+
+        // The webhook block and the inbox functions are two halves of one
+        // contract: the block says how a delivery is accepted, the functions
+        // say how it is read back. A manifest with one and not the other is
+        // broken for every consumer (install, listing, run snapshot), so it
+        // is refused here rather than deferred to the playbook validator,
+        // which never opens a connector manifest. The playbook-facing half
+        // (a node granting inbox functions of a connector that lost its
+        // block) is validator rule V42.
+        let inbox_names = doc.inbox_functions();
+        match (doc.webhook.is_some(), inbox_names.is_empty()) {
+            (true, true) => {
+                return Err(ConnectorError::Invalid(format!(
+                    "connector `{}` declares a webhook block but no inbox function to read the delivered events",
+                    doc.name
+                )));
+            }
+            (false, false) => {
+                return Err(ConnectorError::Invalid(format!(
+                    "connector `{}` declares inbox function(s) {} but no webhook block, so nothing can ever be delivered",
+                    doc.name,
+                    inbox_names.join(", ")
+                )));
+            }
+            _ => {}
+        }
+
         let mut seen_fields = std::collections::HashSet::new();
         for field in &doc.account_fields {
             validate_snake_name(&field.name).map_err(ConnectorError::Invalid)?;
@@ -444,6 +598,18 @@ impl ConnectorDoc {
         self.functions
             .iter()
             .filter(|f| f.read_only)
+            .map(|f| f.name.clone())
+            .collect()
+    }
+
+    /// Names of `inbox` functions, in manifest order. Used by the
+    /// mutual-requirement rule here, by the playbook validator (V42, V43),
+    /// and by the doctor and dashboard to decide whether a connector is
+    /// ingest-capable.
+    pub fn inbox_functions(&self) -> Vec<String> {
+        self.functions
+            .iter()
+            .filter(|f| f.is_inbox())
             .map(|f| f.name.clone())
             .collect()
     }
@@ -544,6 +710,28 @@ fn validate_imap_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
     validate_imap_params(&f.name, imap.op, &imap.params)
 }
 
+/// Inbox-internal shape rules (spec 2026-08-16-webhook-ingest-design): an
+/// inbox function must not carry `query`, `body`, `body_form`, or `headers`
+/// (those are HTTP-only), and it has no connection block to check. Its
+/// arguments are validated at call time against `args_schema` like every
+/// other kind, so nothing about `op` constrains them here.
+fn validate_inbox_shape(f: &FunctionSpec) -> Result<(), ConnectorError> {
+    for (present, field) in [
+        (!f.query.is_empty(), "query"),
+        (f.body.is_some(), "body"),
+        (!f.body_form.is_empty(), "body_form"),
+        (!f.headers.is_empty(), "headers"),
+    ] {
+        if present {
+            return Err(ConnectorError::Invalid(format!(
+                "inbox function `{}` must not set `{field}`",
+                f.name
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// Validates `params` against the allowed and required keys of `op` (spec
 /// 3.3): `verify` and `list_folders` take no params; `search` requires
 /// `folder` and `limit` with optional `unread_only`, `from_contains`,
@@ -585,6 +773,40 @@ fn validate_imap_params(
                 op.as_str()
             )));
         }
+    }
+    Ok(())
+}
+
+/// Webhook-block shape rules (spec 2026-08-16-webhook-ingest-design). The
+/// signature block is mandatory by the struct itself; what is checked here
+/// is that the optional parts are coherent: a challenge dialect needs a
+/// token and a token needs a dialect, the header names something, and a
+/// declared dedupe path is a real path.
+fn validate_webhook_shape(connector: &str, hook: &WebhookSpec) -> Result<(), ConnectorError> {
+    if hook.signature.header.trim().is_empty() {
+        return Err(ConnectorError::Invalid(format!(
+            "connector `{connector}` webhook signature needs a non-empty `header`"
+        )));
+    }
+    match (hook.challenge.is_some(), hook.verify_token.is_some()) {
+        (true, false) => {
+            return Err(ConnectorError::Invalid(format!(
+                "connector `{connector}` webhook declares a challenge dialect and must carry a `verify_token`"
+            )));
+        }
+        (false, true) => {
+            return Err(ConnectorError::Invalid(format!(
+                "connector `{connector}` webhook carries a `verify_token` but declares no `challenge` dialect to use it in"
+            )));
+        }
+        _ => {}
+    }
+    if let Some(path) = &hook.dedupe_path
+        && (path.trim().is_empty() || path.split('.').any(|s| s.trim().is_empty()))
+    {
+        return Err(ConnectorError::Invalid(format!(
+            "connector `{connector}` webhook `dedupe_path` must be a dot path with non-empty segments"
+        )));
     }
     Ok(())
 }
@@ -710,6 +932,10 @@ pub fn validate_templates(doc: &ConnectorDoc) -> Result<(), ConnectorError> {
         if let Some(imap) = &f.imap {
             validate_imap_templates(imap, &f.name, &fields)?;
         }
+    }
+
+    if let Some(hook) = &doc.webhook {
+        validate_webhook_templates(hook, &doc.name, &fields)?;
     }
 
     if let Some(auth) = &doc.auth {
@@ -847,6 +1073,53 @@ fn validate_imap_templates(
             reject_auth(ns, &format!("function `{function_name}` imap params"))?;
             reject_secret(ns, &format!("function `{function_name}` imap params"))?;
             fields.check(ns, &name)?;
+        }
+    }
+    Ok(())
+}
+
+/// Validates the placeholders in the `webhook` block (spec
+/// 2026-08-16-webhook-ingest-design). `verify_token` and `signature.secret`
+/// are the third deliberate exemption to the auth-only secret rule, after
+/// `SmtpConnection.password` and `ImapConnection.password`: `account.*` and
+/// `secret.*` are allowed there, `args.*` is not (no call args exist at
+/// ingest time), and the reserved `{{auth}}` marker is a function-url-only
+/// construct rejected everywhere here. Every other field of the block is a
+/// literal the ingest listener compares byte for byte, so any placeholder in
+/// it is an authoring error rather than a value that would be rendered.
+fn validate_webhook_templates(
+    hook: &WebhookSpec,
+    connector: &str,
+    fields: &FieldNames,
+) -> Result<(), ConnectorError> {
+    use crate::connector::template::{Namespace, placeholders};
+
+    let secret_bearing = [
+        Some(hook.signature.secret.as_str()),
+        hook.verify_token.as_deref(),
+    ];
+    for template in secret_bearing.into_iter().flatten() {
+        for (ns, name) in placeholders(template)? {
+            reject_auth(ns, &format!("connector `{connector}` webhook"))?;
+            if ns == Namespace::Args {
+                return Err(ConnectorError::Invalid(format!(
+                    "args placeholders are not allowed in the webhook block of connector `{connector}`"
+                )));
+            }
+            fields.check(ns, &name)?;
+        }
+    }
+
+    let literals = [
+        Some(hook.signature.header.as_str()),
+        Some(hook.signature.prefix.as_str()),
+        hook.dedupe_path.as_deref(),
+    ];
+    for template in literals.into_iter().flatten() {
+        if !placeholders(template)?.is_empty() {
+            return Err(ConnectorError::Invalid(format!(
+                "connector `{connector}` webhook `header`, `prefix` and `dedupe_path` are literals and must not contain placeholders"
+            )));
         }
     }
     Ok(())
@@ -1593,6 +1866,291 @@ functions:
         assert!(
             err.contains("error_when") && err.contains("HTTP"),
             "was: {err}"
+        );
+    }
+
+    // -- webhook block (spec 2026-08-16-webhook-ingest-design) --
+
+    const WEBHOOK_YAML: &str = r#"
+name: echo-hooks
+version: 0.1.0
+webhook:
+  challenge: meta_hub
+  verify_token: "{{secret.verify_token}}"
+  signature:
+    scheme: hmac_sha256_hex
+    header: X-Hub-Signature-256
+    prefix: "sha256="
+    secret: "{{secret.app_secret}}"
+  dedupe_path: entry.0.id
+account_fields:
+  - name: verify_token
+    required: true
+    secret: true
+  - name: app_secret
+    required: true
+    secret: true
+functions:
+  - name: inbox_read
+    description: Read pending inbound events without consuming them
+    read_only: true
+    response_pick: [events, cursor]
+    args_schema: { type: object, properties: { consumer: { type: string } } }
+    inbox:
+      op: read
+"#;
+
+    #[test]
+    fn parses_the_webhook_block() {
+        let doc = ConnectorDoc::from_yaml(WEBHOOK_YAML, "echo-hooks").unwrap();
+        let hook = doc.webhook.as_ref().expect("webhook block parses");
+        assert_eq!(hook.challenge, Some(ChallengeDialect::MetaHub));
+        assert_eq!(
+            hook.verify_token.as_deref(),
+            Some("{{secret.verify_token}}")
+        );
+        assert_eq!(hook.signature.scheme, SignatureScheme::HmacSha256Hex);
+        assert_eq!(hook.signature.header, "X-Hub-Signature-256");
+        assert_eq!(hook.signature.prefix, "sha256=");
+        assert_eq!(hook.signature.secret, "{{secret.app_secret}}");
+        assert_eq!(hook.dedupe_path.as_deref(), Some("entry.0.id"));
+    }
+
+    #[test]
+    fn webhook_block_defaults_to_absent_and_rejects_unknown_keys() {
+        assert!(
+            ConnectorDoc::from_yaml(JIRA_YAML, "jira")
+                .unwrap()
+                .webhook
+                .is_none()
+        );
+        let bad = WEBHOOK_YAML.replace("  dedupe_path: entry.0.id", "  bogus: 1");
+        assert!(ConnectorDoc::from_yaml(&bad, "echo-hooks").is_err());
+        let bad_sig = WEBHOOK_YAML.replace("    prefix: \"sha256=\"", "    bogus: 1");
+        assert!(ConnectorDoc::from_yaml(&bad_sig, "echo-hooks").is_err());
+    }
+
+    #[test]
+    fn webhook_secret_placeholders_are_the_third_exemption() {
+        // The two secret-carrying fields accept `{{secret.*}}`.
+        assert!(ConnectorDoc::from_yaml(WEBHOOK_YAML, "echo-hooks").is_ok());
+
+        // A secret placeholder naming a non-secret field is rejected, exactly
+        // like the smtp and imap password fields.
+        let non_secret = WEBHOOK_YAML.replace(
+            "  - name: app_secret\n    required: true\n    secret: true",
+            "  - name: app_secret\n    required: true",
+        );
+        let err = ConnectorDoc::from_yaml(&non_secret, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("app_secret"), "was: {err}");
+
+        // An undeclared field is rejected.
+        let unknown = WEBHOOK_YAML.replace("{{secret.app_secret}}", "{{secret.nope}}");
+        let err = ConnectorDoc::from_yaml(&unknown, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("nope"), "was: {err}");
+
+        // `{{account.*}}` is allowed (a non-secret token is a bad idea but a
+        // legal one); `{{args.*}}` and `{{auth}}` are not.
+        let with_args = WEBHOOK_YAML.replace("{{secret.app_secret}}", "{{args.app_secret}}");
+        let err = ConnectorDoc::from_yaml(&with_args, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("args"), "was: {err}");
+        let with_auth = WEBHOOK_YAML.replace("{{secret.verify_token}}", "{{auth}}");
+        let err = ConnectorDoc::from_yaml(&with_auth, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("auth"), "was: {err}");
+    }
+
+    #[test]
+    fn webhook_literal_fields_reject_placeholders() {
+        for (field, replacement) in [
+            (
+                "    header: X-Hub-Signature-256",
+                "    header: \"{{account.h}}\"",
+            ),
+            ("    prefix: \"sha256=\"", "    prefix: \"{{args.p}}\""),
+            (
+                "  dedupe_path: entry.0.id",
+                "  dedupe_path: \"{{secret.app_secret}}\"",
+            ),
+        ] {
+            let y = WEBHOOK_YAML.replace(field, replacement);
+            let err = ConnectorDoc::from_yaml(&y, "echo-hooks")
+                .unwrap_err()
+                .to_string();
+            assert!(
+                err.contains("webhook"),
+                "a placeholder in a literal webhook field must be named: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn webhook_shape_rules() {
+        // A challenge dialect requires a verify token.
+        let no_token = WEBHOOK_YAML.replace("  verify_token: \"{{secret.verify_token}}\"\n", "");
+        let err = ConnectorDoc::from_yaml(&no_token, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("verify_token"), "was: {err}");
+
+        // A verify token without a challenge dialect has nothing to verify.
+        let no_challenge = WEBHOOK_YAML.replace("  challenge: meta_hub\n", "");
+        let err = ConnectorDoc::from_yaml(&no_challenge, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("challenge"), "was: {err}");
+
+        // An empty header name would match nothing.
+        let empty_header =
+            WEBHOOK_YAML.replace("    header: X-Hub-Signature-256", "    header: \"\"");
+        let err = ConnectorDoc::from_yaml(&empty_header, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("header"), "was: {err}");
+
+        // An empty dedupe path is an authoring mistake, not "no path".
+        let empty_path = WEBHOOK_YAML.replace("  dedupe_path: entry.0.id", "  dedupe_path: \"\"");
+        let err = ConnectorDoc::from_yaml(&empty_path, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("dedupe_path"), "was: {err}");
+
+        // The signature block itself is mandatory: no unsigned mode exists.
+        let unsigned = "name: echo-hooks\nversion: 0.1.0\nwebhook:\n  dedupe_path: id\nfunctions:\n  - name: f\n    description: d\n    inbox: { op: read }\n";
+        assert!(ConnectorDoc::from_yaml(unsigned, "echo-hooks").is_err());
+    }
+
+    // -- inbox function kind (spec 2026-08-16-webhook-ingest-design) --
+
+    #[test]
+    fn parses_the_three_inbox_ops() {
+        let y = WEBHOOK_YAML.replace(
+            "  - name: inbox_read\n    description: Read pending inbound events without consuming them\n    read_only: true\n    response_pick: [events, cursor]\n    args_schema: { type: object, properties: { consumer: { type: string } } }\n    inbox:\n      op: read\n",
+            "  - name: inbox_read\n    description: Read pending inbound events without consuming them\n    read_only: true\n    response_pick: [events, cursor]\n    inbox:\n      op: read\n  - name: inbox_ack\n    description: Advance the consumer cursor after processing\n    inbox:\n      op: ack\n  - name: inbox_depth\n    description: How many events are pending\n    read_only: true\n    response_pick: [pending]\n    inbox:\n      op: peek_depth\n",
+        );
+        let doc = ConnectorDoc::from_yaml(&y, "echo-hooks").unwrap();
+        assert_eq!(doc.functions.len(), 3);
+        assert!(doc.function("inbox_read").unwrap().is_inbox());
+        assert_eq!(
+            doc.function("inbox_read")
+                .unwrap()
+                .inbox
+                .as_ref()
+                .unwrap()
+                .op,
+            InboxOp::Read
+        );
+        assert_eq!(
+            doc.function("inbox_ack")
+                .unwrap()
+                .inbox
+                .as_ref()
+                .unwrap()
+                .op,
+            InboxOp::Ack
+        );
+        assert_eq!(
+            doc.function("inbox_depth")
+                .unwrap()
+                .inbox
+                .as_ref()
+                .unwrap()
+                .op,
+            InboxOp::PeekDepth
+        );
+        assert_eq!(InboxOp::PeekDepth.as_str(), "peek_depth");
+        assert_eq!(
+            doc.inbox_functions(),
+            vec![
+                "inbox_read".to_string(),
+                "inbox_ack".to_string(),
+                "inbox_depth".to_string()
+            ]
+        );
+        // An inbox function is not any of the other four kinds.
+        let f = doc.function("inbox_ack").unwrap();
+        assert!(!f.is_mock() && !f.is_smtp() && !f.is_imap());
+    }
+
+    #[test]
+    fn an_inbox_function_is_exactly_one_kind() {
+        let hook = "webhook:\n  signature: { scheme: hmac_sha256_hex, header: X-Sig, secret: \"{{secret.s}}\" }\naccount_fields:\n  - name: s\n    secret: true\n";
+        for other in [
+            "    method: GET\n    url: http://a\n",
+            "    mock: { status: 200, body: {} }\n",
+            "    smtp:\n      connection: { host: h, port: \"25\", use_tls: \"false\" }\n      verify: true\n",
+            "    imap:\n      connection: { host: h, port: \"993\", use_tls: \"true\", auth_method: password, username: u, password: p }\n      op: verify\n",
+        ] {
+            let y = format!(
+                "name: x\nversion: 0.1.0\n{hook}functions:\n  - name: f\n    description: d\n{other}    inbox:\n      op: read\n"
+            );
+            let err = ConnectorDoc::from_yaml(&y, "x").unwrap_err().to_string();
+            assert!(err.contains("exactly one"), "was: {err}");
+        }
+        // And the zero-kind message names the new kind too.
+        let none = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n";
+        let err = ConnectorDoc::from_yaml(none, "x").unwrap_err().to_string();
+        assert!(err.contains("inbox"), "was: {err}");
+    }
+
+    #[test]
+    fn inbox_rejects_http_only_fields() {
+        let hook = "webhook:\n  signature: { scheme: hmac_sha256_hex, header: X-Sig, secret: \"{{secret.s}}\" }\naccount_fields:\n  - name: s\n    secret: true\n";
+        for (field, needle) in [
+            ("    query: { k: v }\n", "query"),
+            ("    body: { a: 1 }\n", "body"),
+            ("    body_form: { k: v }\n", "body_form"),
+            ("    headers: { X-A: b }\n", "headers"),
+        ] {
+            let y = format!(
+                "name: x\nversion: 0.1.0\n{hook}functions:\n  - name: f\n    description: d\n{field}    inbox:\n      op: read\n"
+            );
+            let err = ConnectorDoc::from_yaml(&y, "x").unwrap_err().to_string();
+            assert!(err.contains(needle), "expected `{needle}` in: {err}");
+        }
+    }
+
+    #[test]
+    fn response_pick_is_allowed_on_inbox_and_still_refused_on_the_other_three() {
+        // Allowed: an inbox read projects the fixed envelope, and the
+        // official-connector gate requires a read_only function to carry one.
+        assert!(ConnectorDoc::from_yaml(WEBHOOK_YAML, "echo-hooks").is_ok());
+
+        // The rejection message now names the two kinds that may carry it.
+        let y = "name: x\nversion: 0.1.0\nfunctions:\n  - name: f\n    description: d\n    response_pick: [a]\n    mock: { status: 200, body: { a: 1 } }\n";
+        let err = ConnectorDoc::from_yaml(y, "x").unwrap_err().to_string();
+        assert!(err.contains("response_pick"), "was: {err}");
+        assert!(
+            err.contains("inbox"),
+            "the message must say where it is legal: {err}"
+        );
+    }
+
+    #[test]
+    fn inbox_functions_and_the_webhook_block_require_each_other() {
+        let no_hook = "name: x\nversion: 0.1.0\nfunctions:\n  - name: inbox_read\n    description: d\n    read_only: true\n    response_pick: [events]\n    inbox:\n      op: read\n";
+        let err = ConnectorDoc::from_yaml(no_hook, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("inbox") && err.contains("webhook"),
+            "an inbox function without a webhook block must be refused: {err}"
+        );
+
+        let no_inbox = "name: x\nversion: 0.1.0\nwebhook:\n  signature: { scheme: hmac_sha256_hex, header: X-Sig, secret: \"{{secret.s}}\" }\naccount_fields:\n  - name: s\n    secret: true\nfunctions:\n  - name: f\n    description: d\n    mock: { status: 200, body: {} }\n";
+        let err = ConnectorDoc::from_yaml(no_inbox, "x")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("webhook") && err.contains("inbox"),
+            "a webhook block with no inbox function must be refused: {err}"
         );
     }
 }
