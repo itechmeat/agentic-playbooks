@@ -428,3 +428,46 @@ fn filetime_bump(path: &std::path::Path) {
     let raw = std::fs::read(path).unwrap();
     apb_core::fsutil::atomic_write_private(path, &raw).unwrap();
 }
+
+#[tokio::test]
+async fn a_session_cookie_is_accepted_at_the_websocket_upgrade() {
+    let dir = seed();
+    let (_key, state) = authed(dir.path().to_path_buf());
+    let token = server_auth::random_token().unwrap();
+    {
+        state
+            .auth
+            .sessions()
+            .insert(server_auth::hash_hex(&token), apb_core::clock::now_ms());
+    }
+    // A plain GET cannot complete an upgrade, so the assertion is about the
+    // gate: with a session cookie the request reaches the ws handler (which
+    // answers with an upgrade error), without one it is stopped at 401.
+    let res = build_router(state.clone())
+        .oneshot(
+            Request::get("/api/ws")
+                .header("cookie", format!("{SESSION_COOKIE}={token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::UNAUTHORIZED);
+    assert_ne!(res.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_bearer_key_is_accepted_at_the_websocket_upgrade() {
+    let dir = seed();
+    let (key, state) = authed(dir.path().to_path_buf());
+    let res = build_router(state.clone())
+        .oneshot(
+            Request::get("/api/ws")
+                .header("authorization", format!("Bearer {key}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::UNAUTHORIZED);
+}
