@@ -1,0 +1,221 @@
+# Offline contract-test cases (spec 2026-07-19-official-connectors, section
+# 4.6). Every case renders through the same path a `--dry-run` call uses, no
+# network, no secrets (the runner stubs every `{{secret.*}}` field to a fixed
+# value it never reads; the Authorization header carries a secret so it is
+# never asserted here, exactly as connectors/twenty/tests.yaml does).
+#
+# HTTP cases (`account.access_token`/`app_secret`/`verify_token` omitted on
+# purpose) exercise: the fixed-envelope sends (send_text, send_template,
+# mark_read), the full-body passthrough sends (send_media, create_template,
+# update_business_profile), path substitution of phone_number_id/waba_id and
+# {{args.media_id}} into the URL, and the fixed literal `fields` query on
+# get_phone_number. That query has no `{{args.*}}`/`{{account.*}}`
+# placeholder at all, so the renderer's percent-encoding pass (which only
+# touches SUBSTITUTED values, never literal template text) never applies to
+# it; the case therefore pins the literal, comma-separated form exactly as
+# written in connector.yaml, not a URL-encoded one. A `response_pick` shape
+# cannot be asserted on an HTTP case here: the offline runner renders the
+# outbound request only, it never fabricates a response body to project (see
+# `eval_http` in crates/apb-engine/src/connector/contract_test.rs), so the
+# seven read_only functions' `response_pick` correctness rests on Task 1's
+# connector.yaml review, not on a case in this file. The inbox cases below are
+# the one place `response_pick` is actually exercised offline, because
+# `eval_inbox` builds the envelope and projects it through the same
+# `response_pick` a live call would use before comparing.
+#
+# Every HTTP case shares the same fake account (spec step 1): base_url
+# https://graph.facebook.com, graph_version v23.0, phone_number_id
+# 100000000000000, waba_id 200000000000000.
+cases:
+  # -- Send (fixed envelope: messaging_product, recipient_type, type) --------
+
+  - function: send_text
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: { to: "15551234567", text: { body: "Hello from apb" } }
+    expect:
+      method: POST
+      url: "https://graph.facebook.com/v23.0/100000000000000/messages"
+      body_contains:
+        messaging_product: whatsapp
+        to: "15551234567"
+        type: text
+
+  - function: send_template
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: { to: "15551234567", template: { name: "hello_world", language: { code: "en_US" } } }
+    expect:
+      method: POST
+      url: "https://graph.facebook.com/v23.0/100000000000000/messages"
+      body_contains:
+        messaging_product: whatsapp
+        to: "15551234567"
+        type: template
+
+  - function: mark_read
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: { message_id: "wamid.HBgLMTY1MDM4Nzk0MzkVAgASGBQzQTRBNjU5OUFFRTAzODEwMTQ0RgA=" }
+    expect:
+      method: POST
+      url: "https://graph.facebook.com/v23.0/100000000000000/messages"
+      body_contains:
+        messaging_product: whatsapp
+        status: read
+        message_id: "wamid.HBgLMTY1MDM4Nzk0MzkVAgASGBQzQTRBNjU5OUFFRTAzODEwMTQ0RgA="
+
+  - function: send_media
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args:
+      message_body: { messaging_product: "whatsapp", to: "15551234567", type: "image", image: { link: "https://example.com/photo.jpg" } }
+    expect:
+      method: POST
+      url: "https://graph.facebook.com/v23.0/100000000000000/messages"
+      body_contains:
+        messaging_product: whatsapp
+        type: image
+        image: { link: "https://example.com/photo.jpg" }
+
+  # -- Template management (path-substitutes waba_id) ------------------------
+
+  - function: list_templates
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: { fields: "name,status,category,language" }
+    expect:
+      method: GET
+      url: "https://graph.facebook.com/v23.0/200000000000000/message_templates?fields=name%2Cstatus%2Ccategory%2Clanguage"
+
+  - function: create_template
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args:
+      template: { name: "order_confirmation", category: "utility", language: "en_US", components: [{ type: "BODY", text: "Your order has shipped." }] }
+    expect:
+      method: POST
+      url: "https://graph.facebook.com/v23.0/200000000000000/message_templates"
+      body_contains:
+        name: "order_confirmation"
+        category: "utility"
+        language: "en_US"
+
+  - function: delete_template
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: { name: "order_confirmation" }
+    expect:
+      method: DELETE
+      url: "https://graph.facebook.com/v23.0/200000000000000/message_templates?name=order_confirmation"
+
+  # -- Business profile (path-substitutes phone_number_id) -------------------
+
+  - function: get_business_profile
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://graph.facebook.com/v23.0/100000000000000/whatsapp_business_profile"
+
+  - function: update_business_profile
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args:
+      profile: { messaging_product: "whatsapp", about: "We help teams ship." }
+    expect:
+      method: POST
+      url: "https://graph.facebook.com/v23.0/100000000000000/whatsapp_business_profile"
+      body_contains:
+        messaging_product: whatsapp
+        about: "We help teams ship."
+
+  # -- Phone numbers -----------------------------------------------------------
+
+  - function: list_phone_numbers
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://graph.facebook.com/v23.0/200000000000000/phone_numbers"
+
+  # get_phone_number takes no args; its `fields` query is a fixed literal, not
+  # caller controlled. The renderer only percent-encodes SUBSTITUTED
+  # placeholder values (spec 4.4/6.1), never the literal text surrounding
+  # them, so a query template with no placeholder at all (this one) renders
+  # byte-for-byte as written, commas included; there is nothing here for
+  # `render_query`'s per-value encoding pass to touch.
+  - function: get_phone_number
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://graph.facebook.com/v23.0/100000000000000?fields=verified_name,quality_rating,display_phone_number,code_verification_status"
+
+  # -- Media (path-substitutes {{args.media_id}}, carries ?phone_number_id=) -
+
+  - function: get_media_url
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: { media_id: "1234567890123456" }
+    expect:
+      method: GET
+      url: "https://graph.facebook.com/v23.0/1234567890123456?phone_number_id=100000000000000"
+
+  - function: delete_media
+    account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
+    args: { media_id: "1234567890123456" }
+    expect:
+      method: DELETE
+      url: "https://graph.facebook.com/v23.0/1234567890123456?phone_number_id=100000000000000"
+
+  # -- Receive (inbox, mirrors crates/apb-engine/tests/fixtures/connectors/echo-hooks/tests.yaml) --
+
+  - function: inbox_read
+    args: { consumer: worker }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: "wamid.AAA1", body: { from: "15551234567", text: { body: "Hi" } } }
+          - { provider_id: "wamid.AAA2", body: { from: "15551234567", text: { body: "Are you open today" } } }
+          - { provider_id: "wamid.AAA3", body: { from: "15551234567", text: { body: "Never mind, found it" } } }
+        events: [1, 2, 3]
+        cursor: 0
+
+  - function: inbox_read
+    args: { consumer: worker, limit: 2 }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: "wamid.AAA1", body: { from: "15551234567", text: { body: "Hi" } } }
+          - { provider_id: "wamid.AAA2", body: { from: "15551234567", text: { body: "Are you open today" } } }
+          - { provider_id: "wamid.AAA3", body: { from: "15551234567", text: { body: "Never mind, found it" } } }
+        events: [1, 2]
+        cursor: 0
+
+  - function: inbox_read
+    args: { consumer: worker }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: "wamid.AAA1", body: { from: "15551234567", text: { body: "Hi" } } }
+          - { provider_id: "wamid.AAA2", body: { from: "15551234567", text: { body: "Are you open today" } } }
+          - { provider_id: "wamid.AAA3", body: { from: "15551234567", text: { body: "Never mind, found it" } } }
+        acked: 2
+        events: [3]
+        cursor: 2
+
+  - function: inbox_ack
+    args: { consumer: worker, up_to_seq: 2 }
+    expect:
+      inbox:
+        op: ack
+        seed:
+          - { provider_id: "wamid.AAA1", body: {} }
+          - { provider_id: "wamid.AAA2", body: {} }
+        acked_up_to: 2
+
+  - function: inbox_peek_depth
+    args: { consumer: worker }
+    expect:
+      inbox:
+        op: peek_depth
+        seed:
+          - { provider_id: "wamid.AAA1", body: {} }
+          - { provider_id: "wamid.AAA2", body: {} }
+        acked: 1
+        pending: 1

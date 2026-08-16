@@ -250,10 +250,10 @@ a call without executing it, or the dashboard healthcheck to probe an account.
 
 ## Official connectors
 
-Thirteen official connectors ship inside the `apb` binary and install with
+Fourteen official connectors ship inside the `apb` binary and install with
 `apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`,
 `asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`, `slack`, `atrip`,
-`twenty`. Installing
+`twenty`, `whatsapp`. Installing
 from the binary records trust for the
 connector's tree digest in the same action, since the bytes are already
 part of the binary you are running; `apb connector install --from-dir
@@ -501,6 +501,45 @@ binary upload, GraphQL, and API-key management are out of scope for this
 connector's 0.1 surface. The `healthcheck` is `list_companies`, which
 renders with zero arguments and succeeds against any key that can read
 companies.
+
+### whatsapp
+
+Account fields: `base_url` (`https://graph.facebook.com`), `graph_version`
+(an account field rather than a hardcoded segment because Meta supports each
+Graph API version for about two years; documented current value `v23.0`),
+`phone_number_id`, `waba_id` (all required, non-secret), `access_token`
+(required, secret), and `app_secret`, `verify_token` (both secret, optional -
+required only on an account that receives). Create the access token as a
+System User permanent token under the Meta Business Suite with the
+`whatsapp_business_messaging` and `whatsapp_business_management`
+permissions, set to Never expire; `phone_number_id` and `waba_id` are both
+visible on the Meta app's WhatsApp > API Setup page. Sending works from any
+install with a token; receiving has no polling endpoint on Meta's side and
+needs the server-mode plus webhook-ingest topology, a document-level
+`webhook` block (`challenge: meta_hub`, `hmac_sha256_hex` signature over
+`X-Hub-Signature-256`) whose `verify_token` and `app_secret` are the two
+account fields above. Covers send (`send_text`, `send_template`,
+`send_media`, `mark_read`), template management (`list_templates`,
+`create_template`, `delete_template`), business profile
+(`get_business_profile`, `update_business_profile`), phone numbers
+(`list_phone_numbers`, `get_phone_number`), media (`get_media_url`,
+`delete_media`), and receiving (`inbox_read`, `inbox_ack`,
+`inbox_peek_depth`). 16 functions in total. A plain `send_text` only
+succeeds inside the 24-hour customer-service window opened by the
+recipient's last inbound message; outside that window Meta rejects it with
+error 131047 and `send_template` is required instead to re-initiate contact,
+a rule the connector cannot enforce since it is per-recipient runtime state
+on Meta's side. `delete_template` and `delete_media` are HARD,
+unrecoverable deletes, unlike this connector family's twenty sibling, where
+every delete is reversible. `send_media` is a full-body passthrough (the
+media object's JSON key varies with the message type), so a grant of it can
+in practice send any message type, not only media. Uploading binary media
+is out of scope: Meta's upload endpoint is multipart/form-data with a
+binary file part, which this connector's schema cannot express, so media is
+sent by a hosted `link` or by a media `id` obtained out of band. The
+`healthcheck` is `get_phone_number`, which takes no arguments (its `fields`
+query is a fixed literal so the no-arg probe stays self-sufficient) and
+proves the token is valid and that `phone_number_id` belongs to it.
 
 ### Demo playbooks
 
