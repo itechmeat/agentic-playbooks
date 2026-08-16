@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,9 @@ pub struct GlobalConfig {
     /// named constants in `crate::dismiss`; a project `.apb/config.yaml` may
     /// override either key for its own project.
     pub suggestions: SuggestionSettings,
+    /// Server-deployment knobs (spec 2026-08-16-server-mode-design). Absent
+    /// section means the historical behavior: loopback bind, no proxy trust.
+    pub server: ServerConfig,
 }
 
 /// Transport used to communicate with the agent (spec 7.2).
@@ -383,4 +387,64 @@ pub fn project_suggestion_settings(root: &Path) -> Result<SuggestionSettings, St
     let parsed: ProjectSuggestionsFile = serde_yaml_ng::from_str(&raw)
         .map_err(|e| format!("invalid project config `{}`: {e}", path.display()))?;
     Ok(parsed.suggestions)
+}
+
+/// The address the dashboard binds when no flag is given. Loopback, because a
+/// server that anyone on the network can reach must be an explicit decision.
+pub const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+/// Optional `server:` section of the global config (spec
+/// 2026-08-16-server-mode-design). Every key is optional: an operator who
+/// never touches the section keeps today's loopback-only behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerConfig {
+    /// IP address to bind, parsed at startup. `0.0.0.0` for a server
+    /// deployment. An unparseable value is a startup error, never a silent
+    /// fallback to loopback.
+    pub bind: Option<String>,
+    /// Public origin the dashboard is reached at, e.g.
+    /// `https://apb.example.com`. Used to print absolute URLs and to decide
+    /// whether the session cookie carries the `Secure` attribute.
+    pub public_base_url: Option<String>,
+    /// Exact peer IPs whose `X-Forwarded-For` and `X-Forwarded-Proto` headers
+    /// are believed. No CIDR ranges in v1: a reverse proxy has one address.
+    /// Forwarded headers are never used for an authentication decision, only
+    /// for rate-limit keying and logging.
+    pub trusted_proxies: Vec<String>,
+}
+
+impl ServerConfig {
+    /// Bind precedence: `--bind` flag, then `server.bind`, then loopback.
+    pub fn resolve_bind(&self, flag: Option<&str>) -> Result<IpAddr, String> {
+        match flag.or(self.bind.as_deref()) {
+            None => Ok(DEFAULT_BIND),
+            Some(raw) => raw
+                .trim()
+                .parse::<IpAddr>()
+                .map_err(|e| format!("invalid bind address `{raw}`: {e}")),
+        }
+    }
+
+    /// `trusted_proxies` as parsed addresses. A CIDR range or any other
+    /// unparseable entry is an error rather than a silently ignored line.
+    pub fn trusted_proxy_set(&self) -> Result<BTreeSet<IpAddr>, String> {
+        let mut out = BTreeSet::new();
+        for raw in &self.trusted_proxies {
+            let addr = raw.trim().parse::<IpAddr>().map_err(|e| {
+                format!("invalid server.trusted_proxies entry `{raw}`: {e} (exact IP addresses only, no CIDR ranges)")
+            })?;
+            out.insert(addr);
+        }
+        Ok(out)
+    }
+
+    /// Whether the configured public origin is https, which is one of the two
+    /// signals that make the session cookie `Secure`.
+    pub fn public_scheme_is_https(&self) -> bool {
+        self.public_base_url
+            .as_deref()
+            .map(|u| u.trim().starts_with("https://"))
+            .unwrap_or(false)
+    }
 }

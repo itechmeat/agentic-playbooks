@@ -171,3 +171,109 @@ fn project_suggestion_settings_read_the_project_config() {
     let s = apb_core::config::project_suggestion_settings(bare.path()).unwrap();
     assert_eq!(s.hard_ttl_days, None);
 }
+
+#[test]
+fn server_section_loads_and_defaults() {
+    let _lock = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", dir.path());
+    }
+
+    // A config with no server section keeps every default.
+    std::fs::write(dir.path().join("config.yaml"), "port: 7321\n").unwrap();
+    let cfg = GlobalConfig::load().unwrap();
+    assert_eq!(cfg.server.bind, None);
+    assert_eq!(cfg.server.public_base_url, None);
+    assert!(cfg.server.trusted_proxies.is_empty());
+
+    let yaml = "port: 7321\nserver:\n  bind: \"0.0.0.0\"\n  public_base_url: https://apb.example.com\n  trusted_proxies: [\"127.0.0.1\", \"10.0.0.7\"]\n";
+    std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+    let cfg = GlobalConfig::load().unwrap();
+    assert_eq!(cfg.server.bind.as_deref(), Some("0.0.0.0"));
+    assert_eq!(
+        cfg.server.public_base_url.as_deref(),
+        Some("https://apb.example.com")
+    );
+    assert_eq!(cfg.server.trusted_proxies.len(), 2);
+    assert!(cfg.server.public_scheme_is_https());
+
+    // An unknown key inside the section is a hard error, like every other
+    // section in this file.
+    std::fs::write(dir.path().join("config.yaml"), "server:\n  bnid: 0.0.0.0\n").unwrap();
+    let broken = GlobalConfig::load();
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+    assert!(
+        broken.is_err(),
+        "a typo in the server section must not be ignored"
+    );
+}
+
+#[test]
+fn bind_precedence_is_flag_then_config_then_loopback() {
+    use apb_core::config::ServerConfig;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let empty = ServerConfig::default();
+    assert_eq!(
+        empty.resolve_bind(None).unwrap(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "no flag and no config means loopback"
+    );
+    assert_eq!(
+        empty.resolve_bind(Some("0.0.0.0")).unwrap(),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    );
+
+    let configured = ServerConfig {
+        bind: Some("10.0.0.5".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        configured.resolve_bind(None).unwrap(),
+        "10.0.0.5".parse::<IpAddr>().unwrap()
+    );
+    assert_eq!(
+        configured.resolve_bind(Some("127.0.0.1")).unwrap(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "the flag wins over the config"
+    );
+
+    let bad = ServerConfig {
+        bind: Some("not-an-ip".to_string()),
+        ..Default::default()
+    };
+    let err = bad.resolve_bind(None).unwrap_err();
+    assert!(
+        err.contains("not-an-ip"),
+        "the error names the value: {err}"
+    );
+    assert!(!err.contains('!'), "no exclamation marks: {err}");
+}
+
+#[test]
+fn trusted_proxies_parse_into_a_set() {
+    use apb_core::config::ServerConfig;
+    use std::net::IpAddr;
+
+    let cfg = ServerConfig {
+        trusted_proxies: vec!["127.0.0.1".to_string(), " 10.0.0.7 ".to_string()],
+        ..Default::default()
+    };
+    let set = cfg.trusted_proxy_set().unwrap();
+    assert!(set.contains(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+    assert!(set.contains(&"10.0.0.7".parse::<IpAddr>().unwrap()));
+
+    let cidr = ServerConfig {
+        trusted_proxies: vec!["10.0.0.0/8".to_string()],
+        ..Default::default()
+    };
+    let err = cidr.trusted_proxy_set().unwrap_err();
+    assert!(
+        err.contains("10.0.0.0/8"),
+        "CIDR is not supported in v1: {err}"
+    );
+}
