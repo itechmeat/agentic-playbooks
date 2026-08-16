@@ -550,10 +550,18 @@ telegram, smtp, and sentry connectors end to end;
 `examples/playbooks/release-heartbeat.yaml` exercises gitlab,
 youtrack, and slack (checking the latest pipeline, posting a summary,
 and filing an issue on failure; `trigger_pipeline` is deliberately
-absent from its grants). All four double as reference examples for
-grant allowlists and `max_calls`. They validate in CI against fake
-accounts and are not run against real services there; run them
-manually once your own accounts are configured and approved.
+absent from its grants). `examples/playbooks/whatsapp-inbox.yaml`
+exercises whatsapp: it sends a greeting, then reads one batch of
+pending inbox events, drafts and sends a reply for each, and
+acknowledges the batch; its `read_inbox` node prompt marks inbox
+content as untrusted external input. That pass is single-shot by
+design (a cycle back to `read_inbox` needs a bounding condition node
+or a `max_traversals` edge); a real deployment wraps the poll in such
+a loop, or simply runs this playbook on a schedule. All five double as
+reference examples for grant allowlists and `max_calls`. They validate
+in CI against fake accounts and are not run against real services
+there; run them manually once your own accounts are configured and
+approved.
 
 ### Coverage note
 
