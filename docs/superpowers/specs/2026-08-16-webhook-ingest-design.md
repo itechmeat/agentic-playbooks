@@ -136,3 +136,8 @@ Separate listener (structural, tested), mandatory signature verification over ra
 ## Out of scope
 
 Message-triggered runs and any daemon, per-project inbox routing, media download flows, provider SDK helpers, webhook blocks with multiple signature schemes per connector, and the WhatsApp connector itself (next spec, built on this one).
+
+## Implementation
+
+Implemented by docs/superpowers/plans/2026-08-16-webhook-ingest.md, which
+depends on docs/superpowers/plans/2026-08-16-server-mode.md landing first.

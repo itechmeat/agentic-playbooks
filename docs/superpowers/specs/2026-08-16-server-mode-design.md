@@ -120,3 +120,7 @@ Direct additions, latest stable verified at implementation time: `sha2`, `subtle
 ## Out of scope
 
 Multi-user accounts, roles and per-key scopes, passkeys or OIDC, TLS in-process, CIDR trusted-proxy ranges, persisting sessions across restarts, any change to the MCP stdio surface (it does not traverse HTTP), and the cloudflared tunnel implementation itself.
+
+The inbound webhook listener in 2026-08-16-webhook-ingest-design.md builds on
+this topology and reuses this spec's constant-time comparison and its
+rate-limiting shape, on a second socket with its own router.

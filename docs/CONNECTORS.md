@@ -140,6 +140,87 @@ marks such a binding as not callable (no accounts configured, calls will fail
 until an account is added, use the fallback path) while still listing its
 functions, so the agent routes around it instead of retrying doomed calls.
 
+## Receiving events (webhooks and the inbox)
+
+Some services never answer a poll: they push. A connector that receives
+declares a document-level `webhook:` block saying how a delivery is
+authenticated, plus one or more `inbox` functions saying how a playbook reads
+what arrived.
+
+```yaml
+webhook:
+  challenge: meta_hub                     # optional, only dialect in v1
+  verify_token: "{{secret.verify_token}}" # required when challenge is set
+  signature:
+    scheme: hmac_sha256_hex               # only scheme in v1
+    header: X-Hub-Signature-256
+    prefix: "sha256="
+    secret: "{{secret.app_secret}}"
+  dedupe_path: entry.0.id                 # optional dot path to the provider's own id
+functions:
+  - name: inbox_read
+    description: Read pending inbound events without consuming them.
+    read_only: true
+    response_pick: [events, cursor]
+    inbox: { op: read }
+  - name: inbox_ack
+    description: Advance the consumer cursor after processing.
+    inbox: { op: ack }
+```
+
+The block and the inbox functions require each other: a manifest with one and
+not the other does not load. `verify_token` and `signature.secret` are the
+only fields outside `auth` besides the smtp and imap passwords where
+`{{secret.*}}` is allowed, and both must name an account field declared
+`secret: true`. Everything else in the block is a literal. The block is part
+of the connector folder, so editing it changes the connector digest and drops
+its recorded trust, which is what stops a shared config from quietly
+redirecting or weakening verification.
+
+The three ops: `read` returns `{events: [{seq, received_at, body}], cursor}`
+without moving anything, `ack` takes `up_to_seq` and moves a named consumer's
+cursor forward only, and `peek_depth` returns `{pending}`. Delivery is
+at-least-once with an explicit acknowledgement, because a reader that stops
+mid-thought must not lose what it was holding. A read takes an optional
+`consumer` (default `default`) and `limit` (default 50, capped at 500);
+different consumers keep independent cursors over the same events.
+
+Received events are stored per connector and per account under
+`<config-dir>/connector-inbox/<connector>/<account>/`, at mode 0600, outside
+any run: messages arrive between runs and are not lost because nothing was
+executing. A per-account cap of 50 MB or 30 days, whichever hits first, keeps
+the store bounded; acknowledged events are dropped first, and only the size
+cap ever drops an unacknowledged one.
+
+An inbound delivery never starts a run. A playbook consumes the inbox by
+polling it, an `inbox_read` call inside a loop or behind a wait node, and
+acknowledging what it processed.
+
+**Inbox content is untrusted.** It is written by whoever can reach the
+callback URL, which is the first apb input not authored by the operator. The
+node prompt says so to the agent, and the dashboard marks it when it renders
+it, but the real protection is the grant: give an inbox-reading node the
+narrowest `functions:` allowlist and a `max_calls` budget it can live with,
+and never let the same node hold a write-capable grant it would not want a
+stranger to steer.
+
+Two validator rules cover the playbook side. **V42**: a node grants inbox
+functions of a connector with no webhook block, so nothing could ever be
+delivered. **V43**: a node grants them on an account that does not define the
+fields the webhook block references, so a delivery could not be verified.
+
+Accepted deliveries are capped per account at 600 appends in a rolling 60
+second window; beyond the cap a delivery is dropped with a 200 (so the
+provider stops retrying) and counted in a persisted per-account dropped
+counter, visible in `apb connector doctor` and the dashboard's inbox panel.
+Deliveries only ever resolve against accounts defined in the global
+`connector-config`, never a project-scoped account, because the hook path
+carries no workspace segment.
+
+To run the listener, see docs/DEPLOYMENT.md. `apb connector doctor` prints
+the exact callback URL per account, the pending depth, and whether the local
+listener answers.
+
 ## The `apb connector` CLI
 
 ```text

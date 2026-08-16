@@ -264,6 +264,116 @@ findtime = 600
 bantime = 3600
 ```
 
+## 8. Receiving webhooks
+
+A connector that receives events needs a public HTTPS endpoint. The listener
+is separate from the dashboard on purpose: it is its own socket with its own
+router, and pointing a proxy or tunnel at it cannot reach `/api`.
+
+Enable it in the global config:
+
+```yaml
+ingest:
+  enabled: true
+  bind: "127.0.0.1"
+  port: 7322
+  public_base_url: https://hooks.example.com
+```
+
+`apb dashboard` then co-starts it. On a machine that runs no dashboard, run
+`apb ingest` instead; both use the same implementation.
+
+Proxy the hooks host to it, and nothing else. With Caddy:
+
+```caddyfile
+hooks.example.com {
+	reverse_proxy 127.0.0.1:7322
+}
+```
+
+Or with nginx:
+
+```nginx
+server {
+	listen 443 ssl;
+	server_name hooks.example.com;
+
+	location /hooks/ {
+		proxy_pass http://127.0.0.1:7322;
+		proxy_set_header Host $host;
+		client_max_body_size 256k;
+	}
+
+	location /healthz {
+		proxy_pass http://127.0.0.1:7322;
+	}
+
+	location / {
+		return 404;
+	}
+}
+```
+
+Use a separate hostname from the dashboard. Sharing one host and routing by
+path works, but it puts the two surfaces one proxy typo apart, and the whole
+point of the second listener is that a typo cannot reach the API.
+
+Keep `ingest.bind` on the loopback interface and let the proxy reach it
+there. Binding anywhere else puts the hook endpoints on the network with no
+TLS of their own. apb cannot refuse that the way `apb dashboard` refuses a
+non-loopback bind without a key, because on this listener the signature is
+the authentication and there is no key to require, so it prints a warning to
+stderr at startup and leaves the decision to you.
+
+Add the proxy's own address to `server.trusted_proxies`, the same key the
+dashboard uses. The ingest listener reads it too, and without it every
+delivery arrives from the proxy's loopback address: the per-sender failure
+limit would then be shared by every provider, so one sender with a stale
+secret would lock all of them out, and the fail2ban filter below would ban the
+proxy instead of the sender. With the key set, the listener attributes a
+delivery to the rightmost `X-Forwarded-For` entry, which is the one the proxy
+itself appended.
+
+```yaml
+server:
+  trusted_proxies: ["127.0.0.1"]
+```
+
+**Never point fail2ban, or any address-based ban, at the proxy's own
+address.** The failure limiter below is keyed by client IP; without
+`trusted_proxies` set as shown above, that IP is the proxy itself, and a ban
+rule reading its log would ban the proxy, not the sender.
+
+Register the callback URL with the provider. `apb connector doctor` prints
+the exact one per account:
+
+```
+[ok]   connector `whatsapp` account `main`: callback: register this URL with the provider: https://hooks.example.com/hooks/whatsapp/main
+```
+
+Accounts are resolved from the global `<config-dir>/connector-config/` only.
+The hook path carries no workspace, so a project-scoped account cannot be
+addressed by a delivery.
+
+Watch for rejected deliveries the same way you watch for auth failures. The
+listener logs one line per rejection, keyed by a rolling 60 second, 10-failure
+window per client address:
+
+```sh
+journalctl -u apb -f | grep apb ingest_rejected
+```
+
+A fail2ban filter matching `apb ingest_rejected ip=<HOST>` bans an address
+that keeps sending bad signatures. As above, point it at the sender's address
+only once `trusted_proxies` is configured; otherwise every ban lands on the
+proxy.
+
+**Deliveries that arrive while the listener is down are lost.** Providers
+retry for a limited window and then give up. apb cannot change that: it has
+no way to ask for a redelivery, and nothing buffers on its behalf while the
+machine is asleep, the tunnel is down, or the service is restarting. If the
+events matter, run the listener somewhere that stays up.
+
 ## Notes and limits
 
 - `POST /api/hooks/{run_id}/{secret}` stays reachable from the internet by
