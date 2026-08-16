@@ -21,15 +21,13 @@
 
 use std::collections::{BTreeSet, HashMap};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use apb_core::server_auth::{self, KeyRecord};
 use axum::extract::{ConnectInfo, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Json, Response};
-
-use crate::state::AppState;
 
 /// Name of the browser session cookie.
 pub const SESSION_COOKIE: &str = "apb_session";
@@ -525,12 +523,16 @@ fn deny_framing(mut res: Response) -> Response {
 /// The gate. Runs for every request, including static assets, so that
 /// [`ClientCtx`] is always available downstream and every response carries the
 /// frame-protection header.
+///
+/// Extracts only the [`AuthState`] substate (via `FromRef<AppState>` in
+/// `crate::state`), not the whole `AppState`: this module has no business
+/// needing the rest of the app state, and importing the full type back here
+/// would put `auth` and `state` in a dependency cycle.
 pub async fn auth_middleware(
-    State(state): State<AppState>,
+    State(auth): State<Arc<AuthState>>,
     mut req: Request,
     next: Next,
 ) -> Response {
-    let auth = state.auth.clone();
     let peer = req
         .extensions()
         .get::<ConnectInfo<SocketAddr>>()
