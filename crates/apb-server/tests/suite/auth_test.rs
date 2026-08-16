@@ -303,7 +303,7 @@ async fn every_response_denies_framing() {
 
     // And on a rejection, where the response never reaches a handler.
     let (_key, state) = authed(dir.path().to_path_buf());
-    let res = build_router(state)
+    let res = build_router(state.clone())
         .oneshot(Request::get("/api/runs").body(Body::empty()).unwrap())
         .await
         .unwrap();
@@ -313,6 +313,55 @@ async fn every_response_denies_framing() {
             .get("x-frame-options")
             .and_then(|v| v.to_str().ok()),
         Some("DENY")
+    );
+
+    // A CSRF rejection is also produced before the handler runs.
+    let token = server_auth::random_token().unwrap();
+    state
+        .auth
+        .sessions()
+        .insert(server_auth::hash_hex(&token), apb_core::clock::now_ms());
+    let res = build_router(state.clone())
+        .oneshot(
+            Request::post("/api/connectors/demo/call")
+                .header("cookie", format!("{SESSION_COOKIE}={token}"))
+                .header("content-type", "application/json")
+                .body(Body::from("{}"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(
+        res.headers()
+            .get("x-frame-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("DENY"),
+        "a CSRF rejection must still deny framing"
+    );
+
+    // And a 429 from the rate limiter. The UNAUTHORIZED check above already
+    // spent one failure on this same state; nine more unauthenticated
+    // requests bring the count to ten (still plain 401s), and the eleventh
+    // trips the limiter.
+    for _ in 0..9 {
+        send(
+            &state,
+            Request::get("/api/runs").body(Body::empty()).unwrap(),
+        )
+        .await;
+    }
+    let res = build_router(state.clone())
+        .oneshot(Request::get("/api/runs").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        res.headers()
+            .get("x-frame-options")
+            .and_then(|v| v.to_str().ok()),
+        Some("DENY"),
+        "a rate-limited response must still deny framing"
     );
 }
 

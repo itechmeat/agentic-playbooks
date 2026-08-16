@@ -1,10 +1,10 @@
 //! Server-mode authentication (spec 2026-08-16-server-mode-design).
 //!
 //! One axum middleware wraps the whole router. Its evaluation order is fixed:
-//! exempt paths first, then the "no keys means no auth" pass-through that
-//! keeps the local dashboard byte-for-byte as it was, then a bearer key, then
-//! a session cookie, then 401. Cookie-authenticated writes additionally carry
-//! a custom marker header, which a cross-site form cannot set.
+//! the "no keys means no auth" pass-through that keeps the local dashboard
+//! byte-for-byte as it was, then exempt paths, then a bearer key, then a
+//! session cookie, then 401. Cookie-authenticated writes additionally carry a
+//! custom marker header, which a cross-site form cannot set.
 //!
 //! Every lock in this module is a std mutex taken inside a plain block and
 //! dropped before any await, because a guard held across an await stalls the
@@ -700,6 +700,47 @@ mod tests {
         store.insert("newest".to_string(), 9_999_999);
         assert_eq!(store.len(), MAX_SESSIONS, "the cap holds");
         assert!(!store.touch("s0", 9_999_999), "the oldest was evicted");
+    }
+
+    /// Locks in that only a presented bearer credential forces a key reload.
+    /// `evaluate` guards `verify_key_with_reload` behind `bearer_token(...)`
+    /// being present, so a credential-less request and a cookie-only request
+    /// must never reach it. Proven black-box: the key file is revoked on disk
+    /// after `AuthState` is constructed, then both non-bearer shapes are
+    /// evaluated; if either had forced a reload, the revoked key would
+    /// already be gone from the in-memory set by the final check. A future
+    /// refactor that widens the force-reload trigger to every request (not
+    /// just a presented bearer key) would make this test fail.
+    #[test]
+    fn non_bearer_requests_never_force_a_key_reload() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("server-auth.yaml");
+        let (key_a, record_a) = server_auth::issue_into(&path).unwrap();
+        let file = server_auth::load_from(&path).unwrap();
+        let auth = AuthState::new(
+            Some(path.clone()),
+            file.keys,
+            &apb_core::config::ServerConfig::default(),
+        )
+        .unwrap();
+        let now = apb_core::clock::now_ms();
+
+        // Revoke key A on disk, underneath the running AuthState, without
+        // going through anything that would itself force a reload.
+        server_auth::revoke_in(&path, &record_a.id).unwrap();
+
+        let no_credential = HeaderMap::new();
+        assert_eq!(evaluate(&auth, &no_credential, now), Credential::None);
+
+        let cookie_only = headers(&[("cookie", "apb_session=not-a-real-session")]);
+        assert_eq!(evaluate(&auth, &cookie_only, now), Credential::None);
+
+        assert_eq!(
+            auth.verify_key(&key_a),
+            Some(record_a.id),
+            "neither call should have forced a reload that would drop the \
+             revoked key from the in-memory set"
+        );
     }
 
     #[test]
