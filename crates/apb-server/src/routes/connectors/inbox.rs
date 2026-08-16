@@ -94,7 +94,7 @@ fn account_row(
         "cursor": depth.cursor,
         "last_received_at": depth.last_received_at,
         "dropped": depth.dropped,
-        "callback_url": ingest.callback_url(connector, account),
+        "callback_url": ingest.callback_url(connector, account).ok(),
     })
 }
 

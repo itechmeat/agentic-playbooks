@@ -281,7 +281,10 @@ ingest:
 ```
 
 `apb dashboard` then co-starts it. On a machine that runs no dashboard, run
-`apb ingest` instead; both use the same implementation.
+`apb ingest` instead; both use the same implementation. `enabled` gates only
+the co-start: `apb ingest` runs when you ask it to whatever the flag says, and
+prints a line noting that the dashboard will not start the listener on its own
+until the flag is set.
 
 Proxy the hooks host to it, and nothing else. With Caddy:
 
@@ -327,12 +330,15 @@ stderr at startup and leaves the decision to you.
 
 Add the proxy's own address to `server.trusted_proxies`, the same key the
 dashboard uses. The ingest listener reads it too, and without it every
-delivery arrives from the proxy's loopback address: the per-sender failure
-limit would then be shared by every provider, so one sender with a stale
-secret would lock all of them out, and the fail2ban filter below would ban the
-proxy instead of the sender. With the key set, the listener attributes a
-delivery to the rightmost `X-Forwarded-For` entry, which is the one the proxy
-itself appended.
+delivery arrives from the proxy's loopback address, so the per-sender failure
+budget is shared by every provider. A validly signed delivery is accepted
+whatever that budget says, so events are not lost either way, but a shared key
+means one sender with a stale secret exhausts it for everyone: unsigned
+requests and the subscription handshake (`GET /hooks/...`) are then refused
+for all senders until the window rolls, and the fail2ban filter below would
+ban the proxy instead of the sender. With the key set, the listener attributes
+a delivery to the rightmost `X-Forwarded-For` entry, which is the one the
+proxy itself appended.
 
 ```yaml
 server:

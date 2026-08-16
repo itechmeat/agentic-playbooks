@@ -363,10 +363,22 @@ fn ingest_bind_and_port_precedence() {
 
 #[test]
 fn callback_url_is_printable_only_with_a_public_base() {
-    use apb_core::config::IngestConfig;
+    use apb_core::config::{CallbackGap, IngestConfig};
 
     let none = IngestConfig::default();
-    assert_eq!(none.callback_url("whatsapp", "main"), None);
+    assert_eq!(
+        none.callback_url("whatsapp", "main"),
+        Err(CallbackGap::NoPublicBase)
+    );
+    // A base that trims to nothing is the same gap, not a URL of slashes.
+    let blank = IngestConfig {
+        public_base_url: Some("   ".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        blank.callback_url("whatsapp", "main"),
+        Err(CallbackGap::NoPublicBase)
+    );
 
     let configured = IngestConfig {
         public_base_url: Some("https://hooks.example.com/".to_string()),
@@ -374,7 +386,7 @@ fn callback_url_is_printable_only_with_a_public_base() {
     };
     assert_eq!(
         configured.callback_url("whatsapp", "main").as_deref(),
-        Some("https://hooks.example.com/hooks/whatsapp/main"),
+        Ok("https://hooks.example.com/hooks/whatsapp/main"),
         "a trailing slash on the base must not double up"
     );
 
@@ -384,11 +396,24 @@ fn callback_url_is_printable_only_with_a_public_base() {
     };
     assert_eq!(
         no_slash.callback_url("whatsapp", "main").as_deref(),
-        Some("https://hooks.example.com/hooks/whatsapp/main")
+        Ok("https://hooks.example.com/hooks/whatsapp/main")
     );
 
     // Segments that could not be routed are refused rather than printed as a
-    // URL nobody could register.
-    assert_eq!(no_slash.callback_url("../evil", "main"), None);
-    assert_eq!(no_slash.callback_url("whatsapp", "Not An Account"), None);
+    // URL nobody could register, and they are refused for their own reason:
+    // the caller reports what to fix, and it is not the public base.
+    assert_eq!(
+        no_slash.callback_url("../evil", "main"),
+        Err(CallbackGap::UnroutableSegment("../evil".to_string()))
+    );
+    assert_eq!(
+        no_slash.callback_url("whatsapp", "Not An Account"),
+        Err(CallbackGap::UnroutableSegment("Not An Account".to_string()))
+    );
+    // Including when the public base is missing too: the segment is named
+    // first, because no base would make that account addressable.
+    assert_eq!(
+        none.callback_url("whatsapp", "Not An Account"),
+        Err(CallbackGap::UnroutableSegment("Not An Account".to_string()))
+    );
 }

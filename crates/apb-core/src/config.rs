@@ -465,9 +465,10 @@ pub const DEFAULT_INGEST_PORT: u16 = 7322;
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct IngestConfig {
-    /// Whether `apb dashboard` co-starts the ingest listener, and whether
-    /// `apb ingest` will run at all. Off by default: an inbound port is an
-    /// explicit decision.
+    /// Whether `apb dashboard` co-starts the ingest listener. Off by default:
+    /// an inbound port is an explicit decision. It does not gate `apb ingest`,
+    /// which runs when it is asked to and prints an advisory noting that the
+    /// dashboard will not start the same listener on its own.
     pub enabled: bool,
     /// IP address to bind. Loopback by default, because the supported
     /// topology puts a TLS-terminating reverse proxy on the same host. An
@@ -498,22 +499,38 @@ impl IngestConfig {
         flag.or(self.port).unwrap_or(DEFAULT_INGEST_PORT)
     }
 
-    /// The exact URL to register with a provider for one connector account,
-    /// or `None` when no public base is configured or either segment could
-    /// not be routed. Building it here rather than in each caller keeps the
-    /// doctor, the dashboard and the docs from drifting apart on the path.
-    pub fn callback_url(&self, connector: &str, account: &str) -> Option<String> {
+    /// The exact URL to register with a provider for one connector account.
+    /// Building it here rather than in each caller keeps the doctor, the
+    /// dashboard and the docs from drifting apart on the path.
+    ///
+    /// The two ways it can fail are separate values rather than one `None`,
+    /// because an operator is told what to fix: a doctor that collapsed them
+    /// told someone with a perfectly good `public_base_url` and an account
+    /// named `Main Account` to go set a config key that was already right.
+    pub fn callback_url(&self, connector: &str, account: &str) -> Result<String, CallbackGap> {
         for segment in [connector, account] {
-            crate::profile::validate_profile_name(segment).ok()?;
+            if crate::profile::validate_profile_name(segment).is_err() {
+                return Err(CallbackGap::UnroutableSegment(segment.to_string()));
+            }
         }
         let base = self
             .public_base_url
-            .as_deref()?
-            .trim()
-            .trim_end_matches('/');
+            .as_deref()
+            .map(|u| u.trim().trim_end_matches('/'))
+            .unwrap_or("");
         if base.is_empty() {
-            return None;
+            return Err(CallbackGap::NoPublicBase);
         }
-        Some(format!("{base}/hooks/{connector}/{account}"))
+        Ok(format!("{base}/hooks/{connector}/{account}"))
     }
+}
+
+/// Why no callback URL could be printed for a connector account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallbackGap {
+    /// `ingest.public_base_url` is unset, or set to nothing usable.
+    NoPublicBase,
+    /// The named connector or account is not a routable path segment, so no
+    /// hook URL could address it whatever the public base is.
+    UnroutableSegment(String),
 }

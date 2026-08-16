@@ -135,7 +135,15 @@ impl IngestState {
     /// is the failure this whole derivation exists to prevent. An absent
     /// config file is not an error and simply means no proxy is trusted.
     pub fn new() -> Result<Self, String> {
-        let cfg = GlobalConfig::load()?;
+        Self::from_config(&GlobalConfig::load()?)
+    }
+
+    /// The same state from a config the caller already loaded. The listener
+    /// startup path uses this so the whole of `run_ingest_server` reads
+    /// `config.yaml` exactly once: reading it twice made the proxy set and
+    /// the rest of the startup decisions come from two different files
+    /// whenever an edit landed between them.
+    pub fn from_config(cfg: &GlobalConfig) -> Result<Self, String> {
         Ok(Self::with_trusted_proxies(cfg.server.trusted_proxy_set()?))
     }
 
@@ -264,9 +272,12 @@ pub fn build_ingest_router(state: IngestState) -> Router {
 /// boxed error so the future is `Send` and the dashboard can co-start it with
 /// `tokio::spawn`.
 pub async fn run_ingest_server(bind: IpAddr, port: u16) -> Result<(), std::io::Error> {
-    // Config first, and loudly: a malformed proxy list must stop the listener
-    // rather than start one that mis-attributes every delivery.
-    let state = IngestState::new().map_err(std::io::Error::other)?;
+    // Config first, once, and loudly: a malformed proxy list must stop the
+    // listener rather than start one that mis-attributes every delivery, and
+    // every startup decision below comes from this one read rather than from
+    // whatever the file says a moment later.
+    let cfg = GlobalConfig::load().map_err(std::io::Error::other)?;
+    let state = IngestState::from_config(&cfg).map_err(std::io::Error::other)?;
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     let app = build_ingest_router(state);
     let host = match bind {
@@ -284,9 +295,7 @@ pub async fn run_ingest_server(bind: IpAddr, port: u16) -> Result<(), std::io::E
             "apb ingest: binding {bind} puts the hook endpoints directly on the network with no TLS of their own. The supported topology is a TLS-terminating reverse proxy on this host reaching a loopback bind; see docs/DEPLOYMENT.md"
         );
     }
-    if let Ok(cfg) = GlobalConfig::load()
-        && cfg.ingest.public_base_url.is_none()
-    {
+    if cfg.ingest.public_base_url.is_none() {
         println!(
             "apb ingest: ingest.public_base_url is not set, so apb cannot print the callback URL to register with a provider"
         );

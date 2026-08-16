@@ -124,6 +124,111 @@ fn doctor_reports_the_ingest_surface_of_a_webhook_connector() {
     assert!(!out.contains('\u{2014}'), "no em-dashes: {out}");
 }
 
+/// The account directory a stored delivery would create, for tests that need
+/// the doctor to read something back.
+fn inbox_dir(cfg: &Path) -> std::path::PathBuf {
+    let dir = cfg.join("connector-inbox").join("echo-hooks").join("main");
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+#[test]
+fn doctor_reports_a_nonzero_pending_depth() {
+    let cfg = tempfile::tempdir().unwrap();
+    seed_connector(cfg.path());
+    std::fs::write(
+        cfg.path().join("config.yaml"),
+        "ingest:\n  enabled: true\n  public_base_url: https://hooks.example.com\n",
+    )
+    .unwrap();
+    // Two stored deliveries and no consumer cursor, so both are pending. The
+    // line has to carry the counts, not just its own name: the row that only
+    // asserted the name passed just as happily when the detail read "inbox
+    // unreadable".
+    std::fs::write(
+        inbox_dir(cfg.path()).join("events.jsonl"),
+        "{\"seq\":1,\"received_at\":1700000000000,\"provider_id\":\"e1\",\"body\":{}}\n{\"seq\":2,\"received_at\":1700000000001,\"provider_id\":\"e2\",\"body\":{}}\n",
+    )
+    .unwrap();
+
+    let (out, _err, _ok) = run(cfg.path(), &["connector", "doctor"]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("account `main`: inbox"))
+        .expect("inbox row");
+    assert!(
+        line.contains("2 pending of 2 stored"),
+        "the row carries the depth: {line}"
+    );
+    assert!(line.starts_with("[ok]"), "a readable inbox is ok: {line}");
+}
+
+#[test]
+fn doctor_warns_when_the_inbox_cannot_be_read() {
+    let cfg = tempfile::tempdir().unwrap();
+    seed_connector(cfg.path());
+    std::fs::write(
+        cfg.path().join("config.yaml"),
+        "ingest:\n  enabled: true\n  public_base_url: https://hooks.example.com\n",
+    )
+    .unwrap();
+    // A corrupt persisted counter makes `depth` fail, which is what the
+    // inbox row reports on.
+    std::fs::write(inbox_dir(cfg.path()).join("dropped.count"), "not-a-number").unwrap();
+
+    let (out, _err, _ok) = run(cfg.path(), &["connector", "doctor"]);
+    let line = out
+        .lines()
+        .find(|l| l.contains("account `main`: inbox"))
+        .expect("inbox row");
+    assert!(
+        line.contains("inbox unreadable"),
+        "the row says what is wrong: {line}"
+    );
+    assert!(
+        line.starts_with("[warn]"),
+        "an unreadable inbox is a warning, not a green line saying it is broken: {line}"
+    );
+    assert!(!out.contains('!'), "no exclamation marks: {out}");
+}
+
+/// The callback row names the real obstacle. It used to say
+/// `public_base_url is not set` for both of its `None` causes, so an operator
+/// with a correct base and an account name that cannot appear in a URL was
+/// sent to fix a config key that was already right.
+#[test]
+fn doctor_names_an_unroutable_account_rather_than_the_public_base_url() {
+    let cfg = tempfile::tempdir().unwrap();
+    seed_connector(cfg.path());
+    std::fs::write(
+        cfg.path()
+            .join("connector-config")
+            .join("echo-hooks.yaml"),
+        "accounts:\n  - name: Main Account\n    default: true\n    verify_token: \"{{env.APB_T}}\"\n    app_secret: \"{{env.APB_S}}\"\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cfg.path().join("config.yaml"),
+        "ingest:\n  enabled: true\n  public_base_url: https://hooks.example.com\n",
+    )
+    .unwrap();
+
+    let (out, _err, _ok) = run(cfg.path(), &["connector", "doctor"]);
+    let line = out
+        .lines()
+        .find(|l| l.contains(": callback"))
+        .expect("callback row");
+    assert!(
+        line.contains("not a routable path segment"),
+        "the segment is the problem, and the row says so: {line}"
+    );
+    assert!(
+        !line.contains("public_base_url is not set"),
+        "a base URL that is set must not be blamed: {line}"
+    );
+    assert!(line.starts_with("[warn]"), "was: {line}");
+}
+
 #[test]
 fn doctor_reports_no_drops_ok_when_nothing_was_dropped() {
     let cfg = tempfile::tempdir().unwrap();
@@ -222,13 +327,20 @@ fn doctor_warns_when_no_public_base_url_is_configured() {
     std::fs::write(cfg.path().join("config.yaml"), "ingest:\n  enabled: true\n").unwrap();
 
     let (out, _err, _ok) = run(cfg.path(), &["connector", "doctor"]);
+    // Located first, then asserted on: every doctor run against a fresh temp
+    // config already emits an unrelated `[warn] ... trust: not approved`, so
+    // a bare `contains("[warn]")` would pass with this row missing entirely.
+    let line = out
+        .lines()
+        .find(|l| l.contains("account `main`: callback"))
+        .expect("callback row");
     assert!(
-        out.contains("public_base_url"),
-        "the missing base URL is named: {out}"
+        line.contains("ingest.public_base_url is not set"),
+        "the missing base URL is named: {line}"
     );
     assert!(
-        out.contains("[warn]"),
-        "an unprintable callback URL is a warning, not a failure: {out}"
+        line.starts_with("[warn]"),
+        "an unprintable callback URL is a warning, not a failure: {line}"
     );
 }
 

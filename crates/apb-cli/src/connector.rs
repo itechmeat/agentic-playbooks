@@ -11,6 +11,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
+use apb_core::config::CallbackGap;
 use apb_core::connector::config::{self};
 use apb_core::connector::def::ConnectorDoc;
 use apb_core::connector::secrets;
@@ -705,39 +706,57 @@ fn push_ingest_checks(
             });
             continue;
         }
-        match ingest.callback_url(name, &account.name) {
-            Some(url) => checks.push(Check {
-                name: format!("connector `{name}` account `{}`: callback", account.name),
-                status: CheckStatus::Ok,
-                detail: format!("register this URL with the provider: {url}"),
-            }),
-            None => checks.push(Check {
-                name: format!("connector `{name}` account `{}`: callback", account.name),
-                status: CheckStatus::Warn,
-                detail:
-                    "ingest.public_base_url is not set in the global config, so the callback URL cannot be printed"
-                        .to_string(),
-            }),
-        }
+        // The two ways a callback URL can be missing get their own message:
+        // telling an operator whose `public_base_url` is correct to go set it
+        // sends them to fix a key that is already right.
+        let (status, detail) = match ingest.callback_url(name, &account.name) {
+            Ok(url) => (
+                CheckStatus::Ok,
+                format!("register this URL with the provider: {url}"),
+            ),
+            Err(CallbackGap::NoPublicBase) => (
+                CheckStatus::Warn,
+                "ingest.public_base_url is not set in the global config, so the callback URL cannot be printed"
+                    .to_string(),
+            ),
+            Err(CallbackGap::UnroutableSegment(segment)) => (
+                CheckStatus::Warn,
+                format!(
+                    "`{segment}` is not a routable path segment, so no hook URL can address this account whatever ingest.public_base_url says; rename it to lowercase letters, digits and hyphens"
+                ),
+            ),
+        };
+        checks.push(Check {
+            name: format!("connector `{name}` account `{}`: callback", account.name),
+            status,
+            detail,
+        });
 
         let inbox = apb_core::connector::inbox::Inbox::open(name, &account.name);
         let depth = inbox.as_ref().map_err(|e| e.to_string()).and_then(|i| {
             i.depth(apb_engine::connector::inbox::DEFAULT_CONSUMER)
                 .map_err(|e| e.to_string())
         });
-        let detail = match &depth {
-            Ok(d) if d.total == 0 => "no events received yet".to_string(),
-            Ok(d) => format!(
-                "{} pending of {} stored for consumer `{}`",
-                d.pending,
-                d.total,
-                apb_engine::connector::inbox::DEFAULT_CONSUMER
+        // An unreadable inbox is a warning, exactly like the dropped row
+        // below reporting the same error: a green line saying the inbox is
+        // broken is worse than no line at all, because a scan for
+        // `[warn]`/`[fail]` walks straight past it.
+        let (status, detail) = match &depth {
+            Ok(d) if d.total == 0 => (CheckStatus::Ok, "no events received yet".to_string()),
+            Ok(d) => (
+                CheckStatus::Ok,
+                format!(
+                    "{} pending of {} stored for consumer `{}`",
+                    d.pending,
+                    d.total,
+                    apb_engine::connector::inbox::DEFAULT_CONSUMER
+                ),
             ),
-            Err(e) => format!("inbox unreadable: {e}"),
+            Err(e) => (CheckStatus::Warn, format!("inbox unreadable: {e}")),
         };
         checks.push(Check {
             name: format!("connector `{name}` account `{}`: inbox", account.name),
-            status: CheckStatus::Ok,
+            status,
             detail,
         });
 
