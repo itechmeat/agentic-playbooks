@@ -61,6 +61,8 @@ mod schema_migrate_config_test;
 mod schema_migrate_test;
 #[path = "suite/schema_test.rs"]
 mod schema_test;
+#[path = "suite/server_auth_test.rs"]
+mod server_auth_test;
 #[path = "suite/validate_duration_test.rs"]
 mod validate_duration_test;
 #[path = "suite/validate_goal_test.rs"]

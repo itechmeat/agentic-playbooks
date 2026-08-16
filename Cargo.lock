@@ -129,6 +129,8 @@ dependencies = [
 name = "apb-core"
 version = "0.19.0"
 dependencies = [
+ "base64 0.22.1",
+ "getrandom 0.3.4",
  "globset",
  "jsonschema",
  "libc",
@@ -139,6 +141,7 @@ dependencies = [
  "serde_yaml_ng",
  "sha2",
  "shell-words",
+ "subtle",
  "tempfile",
  "thiserror",
  "uuid",

@@ -34,6 +34,13 @@ jsonschema = { version = "0.49", default-features = false }
 shell-words = "1"
 lettre = { version = "0.11", default-features = false, features = ["builder", "smtp-transport", "rustls-tls", "hostname"] }
 globset = "0.4"
+# Server-mode API keys and session tokens (spec 2026-08-16-server-mode-design):
+# CSPRNG bytes, unpadded base64url encoding, and a constant-time comparison for
+# everything derived from a secret. No password-hash crate: these are 256-bit
+# random tokens, not user-chosen passwords.
+base64 = "0.22"
+getrandom = "0.3"
+subtle = "2.6"
 # Native IMAP execution for the `imap` connector function kind (spec 3.2, wave
 # 2): blocking client over a plaintext or rustls stream, silent-read discipline
 # (BODY.PEEK, EXAMINE) enforced by the engine.
