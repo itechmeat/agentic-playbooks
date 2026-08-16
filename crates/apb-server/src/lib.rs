@@ -189,10 +189,17 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     // The path is handed to the auth state so it can notice the file changing:
     // issuing a first key or revoking a compromised one takes effect on a
     // running dashboard without a restart.
-    let auth = std::sync::Arc::new(
-        auth::AuthState::new(Some(auth_path), auth_file.keys, &global_cfg.server)
-            .map_err(std::io::Error::other)?,
-    );
+    let mut auth_state = auth::AuthState::new(Some(auth_path), auth_file.keys, &global_cfg.server)
+        .map_err(std::io::Error::other)?;
+    // check_bind_allowed only checks the bind/key precondition once, at
+    // startup. On a non-loopback bind, require_keys keeps it enforced for the
+    // life of the process: if the key set empties out later (the last key
+    // revoked while the server is running), the auth middleware fails closed
+    // instead of silently falling back to the keyless pass-through.
+    if !bind.is_loopback() {
+        auth_state = auth_state.require_keys(bind);
+    }
+    let auth = std::sync::Arc::new(auth_state);
     let auth_enabled = auth.enabled();
     let state = AppState::new_global_with_auth(auth);
     let cfg = apb_core::config::config_dir()

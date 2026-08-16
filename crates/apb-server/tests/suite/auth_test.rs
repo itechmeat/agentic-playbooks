@@ -471,3 +471,83 @@ async fn a_bearer_key_is_accepted_at_the_websocket_upgrade() {
         .unwrap();
     assert_ne!(res.status(), StatusCode::UNAUTHORIZED);
 }
+
+/// `check_bind_allowed` only enforces "non-loopback needs a key" once, at
+/// startup. A server that starts that way but ends up with zero keys (either
+/// because it was misconfigured, or because the last key was revoked while
+/// running, see the transition test below) must fail closed rather than fall
+/// back to the keyless pass-through: an RCE-equivalent panel reachable from
+/// the network with no credential at all.
+#[tokio::test]
+async fn a_key_requiring_server_refuses_every_request_when_the_key_set_is_empty() {
+    let dir = seed();
+    let auth = Arc::new(
+        AuthState::new(None, Vec::new(), &ServerConfig::default())
+            .unwrap()
+            .require_keys("0.0.0.0".parse().unwrap()),
+    );
+    let state = AppState::new(dir.path().to_path_buf()).with_auth(auth);
+
+    let (status, body) = send(
+        &state,
+        Request::get("/api/projects").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "auth");
+}
+
+#[tokio::test]
+async fn revoking_the_last_key_on_a_key_requiring_server_stops_the_keyless_pass_through() {
+    let dir = seed();
+    let keydir = tempfile::tempdir().unwrap();
+    let path = keydir.path().join("server-auth.yaml");
+    let (key, record) = server_auth::issue_into(&path).unwrap();
+    let file = server_auth::load_from(&path).unwrap();
+    let auth = Arc::new(
+        AuthState::new(Some(path.clone()), file.keys, &ServerConfig::default())
+            .unwrap()
+            .require_keys("0.0.0.0".parse().unwrap()),
+    );
+    let state = AppState::new(dir.path().to_path_buf()).with_auth(auth);
+
+    let bearer = |k: &str| {
+        Request::get("/api/runs")
+            .header("authorization", format!("Bearer {k}"))
+            .body(Body::empty())
+            .unwrap()
+    };
+
+    let (status, _) = send(&state, bearer(&key)).await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "the only key works while it is live"
+    );
+
+    server_auth::revoke_in(&path, &record.id).unwrap();
+
+    // The stale-but-cached key is still what a bearer attempt with it forces
+    // a (content-hash) reload against, which is what drops the in-memory key
+    // count to zero as a side effect of this one request; the ordinary
+    // "unauthenticated" 401 path answers it either way.
+    let (status, _) = send(&state, bearer(&key)).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+
+    // The real regression check: once the key set is empty, a request that
+    // carries NO credential at all must still be refused. Under the bug this
+    // fix closes, `auth.enabled()` reading false here would take the
+    // keyless-pass-through branch and this would come back 200.
+    let (status, body) = send(
+        &state,
+        Request::get("/api/projects").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "an empty key set on a key-requiring server refuses rather than passing \
+         through: {body}"
+    );
+    assert_eq!(body["error"], "auth");
+}
