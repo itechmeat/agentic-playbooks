@@ -33,11 +33,14 @@
     usageCardState,
     type ConnectorStats,
   } from '../lib/connectorstats'
+  import { fetchConnectorInbox, fetchConnectorInboxEvents } from '../lib/api'
+  import type { ConnectorInbox, InboxEventRow } from '../lib/connectorinbox'
   import { renderMarkdown } from '../lib/markdown'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
   import ConnectorPlaygroundPanel from '$lib/components/ConnectorPlaygroundPanel.svelte'
+  import ConnectorInboxPanel from '$lib/components/ConnectorInboxPanel.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
@@ -64,6 +67,11 @@
   // Tracked apart from `stats === null` so that a failed request is not read
   // as "this connector has no recorded calls".
   let statsFailed = $state(false)
+  let inbox = $state<ConnectorInbox | null>(null)
+  let inboxLoaded = $state(false)
+  let inboxFailed = $state(false)
+  let inboxEvents = $state<InboxEventRow[]>([])
+  let inboxEventsAccount = $state('')
   let approving = $state<string | null>(null) // account name, or '' for the connector itself
   let probing = $state<string | null>(null)
   let probeResults = $state<Record<string, HealthcheckResult>>({})
@@ -124,6 +132,37 @@
     }
   }
 
+  // Read-only and best-effort, like the usage stats: a failure here must not
+  // blank out the rest of the page.
+  async function loadInbox(token: number) {
+    try {
+      const i = await fetchConnectorInbox(name)
+      if (token !== loadToken) return
+      inbox = i
+      inboxFailed = false
+    } catch {
+      if (token === loadToken) {
+        inbox = null
+        inboxFailed = true
+      }
+    } finally {
+      if (token === loadToken) inboxLoaded = true
+    }
+  }
+
+  // Listing one account's events fetches their metadata and their bodies in
+  // one call, but the panel keeps each body collapsed until that event is
+  // expanded on its own, so nothing a stranger wrote lands on screen by
+  // accident.
+  async function expandInbox(account: string) {
+    try {
+      inboxEvents = await fetchConnectorInboxEvents(name, account)
+      inboxEventsAccount = account
+    } catch (e) {
+      toast.error('Failed to load inbox events', { description: String(e) })
+    }
+  }
+
   $effect(() => {
     void name
     void workspace
@@ -132,15 +171,22 @@
     statsLoaded = false
     stats = null
     statsFailed = false
+    inboxLoaded = false
+    inbox = null
+    inboxFailed = false
+    inboxEvents = []
+    inboxEventsAccount = ''
     probeResults = {}
     unknownName = false
     forceOffered = false
     const token = ++loadToken
     load(token)
     loadStats(token)
+    loadInbox(token)
     return subscribeChanges(() => {
       load(token)
       loadStats(token)
+      loadInbox(token)
     })
   })
 
@@ -558,6 +604,16 @@
           </Card.Content>
         </Card.Root>
       {/if}
+
+      <ConnectorInboxPanel
+        {name}
+        {inbox}
+        loaded={inboxLoaded}
+        failed={inboxFailed}
+        events={inboxEvents}
+        eventsAccount={inboxEventsAccount}
+        onExpand={expandInbox}
+      />
 
       <!-- The playground actually invokes the connector, so it needs both the
            installed files and at least one function to offer. -->

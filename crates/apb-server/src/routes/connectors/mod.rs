@@ -1,9 +1,11 @@
 //! Connector endpoints: listing, install lifecycle, the public view, usage
 //! stats, and the three call-path endpoints (healthcheck, call, approve).
 
+pub mod inbox;
 pub mod stats;
 pub mod view;
 
+pub(crate) use inbox::{inbox_events_handler, inbox_handler};
 pub(crate) use stats::connector_stats_handler;
 pub(crate) use view::{InstallState, connector_public};
 

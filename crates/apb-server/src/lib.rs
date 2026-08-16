@@ -106,6 +106,14 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::connectors::connector_stats_handler),
         )
         .route(
+            "/api/connectors/{name}/inbox",
+            get(routes::connectors::inbox_handler),
+        )
+        .route(
+            "/api/connectors/{name}/inbox/{account}/events",
+            get(routes::connectors::inbox_events_handler),
+        )
+        .route(
             "/api/connectors/{name}/healthcheck/{account}",
             post(routes::connectors::healthcheck_connector_handler),
         )

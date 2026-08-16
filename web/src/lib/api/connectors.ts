@@ -14,6 +14,7 @@ import type {
 import type { AvailableConnector, InstallResult, UninstallResult } from '../connectorinstall'
 import type { ConnectorFunctionStat, ConnectorStats } from '../connectorstats'
 import type { PlayCallResult } from '../connectorplay'
+import type { ConnectorInbox, ConnectorInboxAccount, InboxEventRow } from '../connectorinbox'
 import { getJson, jsonHeaders, qs, requestJson } from './http'
 
 // dashboard types in `./connectors` are camelCase, so the mapping happens
@@ -272,3 +273,57 @@ export const callConnector = (name: string, req: PlayCallRequest, workspace = ''
       full: req.full,
     } satisfies PlayCallRequestDto),
   })
+
+interface ConnectorInboxAccountDto {
+  account: string
+  pending: number
+  total: number
+  cursor: number
+  last_received_at: number | null
+  callback_url: string | null
+}
+
+interface ConnectorInboxDto {
+  connector: string
+  has_webhook: boolean
+  public_base_url_set: boolean
+  accounts: ConnectorInboxAccountDto[]
+}
+
+const toInboxAccount = (d: ConnectorInboxAccountDto): ConnectorInboxAccount => ({
+  account: d.account,
+  pending: d.pending,
+  total: d.total,
+  cursor: d.cursor,
+  lastReceivedAt: d.last_received_at,
+  callbackUrl: d.callback_url,
+})
+
+// GET /api/connectors/{name}/inbox: counts and the callback URL per account.
+// Carries no event body and no provider id; the panel asks for those
+// separately and only when the operator expands an account.
+export const fetchConnectorInbox = (name: string) =>
+  getJson<ConnectorInboxDto>(`${conn(name)}/inbox`).then(
+    (d): ConnectorInbox => ({
+      connector: d.connector,
+      hasWebhook: d.has_webhook,
+      publicBaseUrlSet: d.public_base_url_set,
+      accounts: d.accounts.map(toInboxAccount),
+    }),
+  )
+
+interface InboxEventDto {
+  seq: number
+  received_at: number
+  body: unknown
+}
+
+// GET /api/connectors/{name}/inbox/{account}/events: the stored payloads.
+// The one call in the dashboard that returns delivered content, made only on
+// an explicit expand, and rendered behind an untrusted-content notice.
+export const fetchConnectorInboxEvents = (name: string, account: string, limit = 20) =>
+  getJson<{ events: InboxEventDto[] }>(
+    `${conn(name)}/inbox/${encodeURIComponent(account)}/events${qs({ limit: String(limit) })}`,
+  ).then((d): InboxEventRow[] =>
+    d.events.map((e) => ({ seq: e.seq, receivedAt: e.received_at, body: e.body })),
+  )
