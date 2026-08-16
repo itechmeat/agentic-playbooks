@@ -58,7 +58,7 @@ keys:
 
 - `issue() -> (String, KeyRecord)`: 32 bytes from the OS CSPRNG (`getrandom`), unpadded base64url, prefixed `apb_`. The plaintext key is returned for one-time printing and never persisted or logged. Refuses to create a third key: the caller must revoke one first (two active keys are the rotation window, not a key-management system).
 - `verify(presented: &str) -> Option<key_id>`: SHA-256 of the presented string compared against every stored hash with `subtle::ConstantTimeEq`. No plain `==` on any secret-derived bytes anywhere in this feature.
-- The server does not hold the key set as a permanent startup snapshot: it re-reads `server-auth.yaml` when the file's mtime or size changes, checked on every auth failure and at most once per minute on the hot path. Issuing a first key or revoking a compromised key therefore takes effect without restarting the dashboard.
+- The server does not hold the key set as a permanent startup snapshot: it re-stats `server-auth.yaml` before every bearer-key verification (a failure-triggered reload alone cannot catch revocation, because a revoked key still verifies against the stale set and never fails), plus a throttled once-per-minute check on the ordinary request path so a first key turns auth on without a restart. Cost accounting: bearer-authenticated requests pay one stat syscall each; session-cookie and unauthenticated requests stay filesystem-free. Issue and revoke therefore take effect on the very next bearer request.
 - CLI surface, new `apb server` command group:
   - `apb server key issue` prints the key once with a short warning that it will not be shown again.
   - `apb server key list` prints id and created_at only.
