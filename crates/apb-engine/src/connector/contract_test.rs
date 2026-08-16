@@ -420,8 +420,14 @@ fn json_subset(expected: &Value, actual: &Value) -> bool {
 /// Matches an `inbox` expectation. Fully offline and filesystem-free: the
 /// case's inline `seed` becomes an in-memory event list, and the op runs
 /// against it through the same argument validation
-/// (`connector::inbox::build`) and the same envelope builders a live call
-/// uses, so a contract test asserts exactly what an agent would receive.
+/// (`connector::inbox::build`), the same envelope builders and the same
+/// `response_pick` projection a live call uses, so a contract test asserts
+/// exactly what an agent would receive.
+///
+/// The projection is not optional for that claim to hold. Without it a
+/// connector declaring `response_pick: [events]` on an `op: read` function
+/// would have its case assert a `cursor` the runner rendered and every live
+/// caller never sees.
 ///
 /// The store itself is not exercised here, deliberately: its own concurrency,
 /// dedupe and retention behavior is covered by `apb-core`'s unit tests, and
@@ -498,6 +504,14 @@ fn eval_inbox(function: &FunctionSpec, args: &Value, expected: &InboxExpect) -> 
             let pending = seeded.iter().filter(|e| e.seq > expected.acked).count() as u64;
             crate::connector::inbox::depth_envelope(pending)
         }
+    };
+    // Exactly what `InboxCall::send` does with the same list, so a case that
+    // passes here describes the envelope a live call returns rather than the
+    // one that exists a line before the projection.
+    let envelope = if function.response_pick.is_empty() {
+        envelope
+    } else {
+        crate::connector::call::encode::project(&envelope, &function.response_pick)
     };
 
     if let Some(want) = &expected.events {

@@ -33,6 +33,18 @@ cases:
         acked: 2
         events: [3]
         cursor: 2
+  # `response_pick: [events]` is a strict subset of the read envelope, so this
+  # case can assert `events` and must not be able to assert `cursor`: the
+  # projection is part of what a live caller receives.
+  - function: inbox_read_events_only
+    args: { consumer: worker }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: e1, body: { text: first } }
+          - { provider_id: e2, body: { text: second } }
+        events: [1, 2]
   - function: inbox_ack
     args: { consumer: worker, up_to_seq: 2 }
     expect:

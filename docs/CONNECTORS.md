@@ -175,15 +175,25 @@ only fields outside `auth` besides the smtp and imap passwords where
 `secret: true`. Everything else in the block is a literal. The block is part
 of the connector folder, so editing it changes the connector digest and drops
 its recorded trust, which is what stops a shared config from quietly
-redirecting or weakening verification.
+redirecting or weakening verification for anything a run does. The inbound
+listener is guarded by the signature itself rather than by that digest: it
+reads the manifest directly, because hashing a connector folder per delivery
+would put unbounded work on a route strangers can call.
 
-The three ops: `read` returns `{events: [{seq, received_at, body}], cursor}`
-without moving anything, `ack` takes `up_to_seq` and moves a named consumer's
-cursor forward only, and `peek_depth` returns `{pending}`. Delivery is
-at-least-once with an explicit acknowledgement, because a reader that stops
-mid-thought must not lose what it was holding. A read takes an optional
-`consumer` (default `default`) and `limit` (default 50, capped at 500);
-different consumers keep independent cursors over the same events.
+The three ops: `read` returns
+`{events: [{seq, received_at, body}], cursor, truncated}` without moving
+anything, `ack` takes `up_to_seq` and moves a named consumer's cursor forward
+only, and `peek_depth` returns `{pending}`. Delivery is at-least-once with an
+explicit acknowledgement, because a reader that stops mid-thought must not
+lose what it was holding. A read takes an optional `consumer` (default
+`default`) and `limit` (default 50, capped at 500); different consumers keep
+independent cursors over the same events.
+
+A read is also capped at 1 MiB of events, the same ceiling an HTTP response
+body has. Past it the newest events are left for the next read and
+`truncated` is `true`: the oldest pending events are the ones a consumer has
+to see to make progress, so it processes what it got, acks that `seq`, and
+reads on.
 
 Received events are stored per connector and per account under
 `<config-dir>/connector-inbox/<connector>/<account>/`, at mode 0600, outside

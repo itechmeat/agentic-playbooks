@@ -28,8 +28,42 @@ fn the_echo_hooks_fixture_passes_its_own_contract_tests() {
         .map(|r| format!("{}: {}", r.function, r.detail))
         .collect();
     assert!(failures.is_empty(), "cases failed: {failures:?}");
-    assert_eq!(report.results.len(), 6);
+    assert_eq!(report.results.len(), 7);
     assert!(report.all_passed());
+}
+
+/// The runner applies `response_pick` exactly as the live executor does, so a
+/// case cannot assert a field the projection removes.
+///
+/// This is the parity that was missing: `inbox_read_events_only` picks
+/// `[events]`, so a live caller never receives `cursor`. A case asserting
+/// `cursor: 0` used to pass against the unprojected envelope while every real
+/// call disagreed with it.
+#[test]
+fn a_case_asserting_a_field_response_pick_removes_fails() {
+    let (doc, _) = fixture();
+    let tests = TestsDoc::from_yaml(
+        "cases:\n  - function: inbox_read_events_only\n    expect:\n      inbox:\n        op: read\n        seed:\n          - { provider_id: e1, body: {} }\n        events: [1]\n        cursor: 0\n",
+    )
+    .unwrap();
+    let report = run_tests(&doc, &tests);
+    assert!(
+        !report.all_passed(),
+        "a projected-away field must not be assertable"
+    );
+    assert!(
+        report.results[0].detail.contains("cursor"),
+        "the failure names the field the projection removed: {}",
+        report.results[0].detail
+    );
+
+    // The same expectation against the function that picks the whole envelope
+    // still passes, so the projection is what made the difference.
+    let tests = TestsDoc::from_yaml(
+        "cases:\n  - function: inbox_read\n    expect:\n      inbox:\n        op: read\n        seed:\n          - { provider_id: e1, body: {} }\n        events: [1]\n        cursor: 0\n",
+    )
+    .unwrap();
+    assert!(run_tests(&doc, &tests).all_passed());
 }
 
 #[test]

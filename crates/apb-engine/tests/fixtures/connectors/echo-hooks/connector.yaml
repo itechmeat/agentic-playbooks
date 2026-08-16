@@ -34,6 +34,21 @@ functions:
         note: read the next ten events for the worker consumer
     inbox:
       op: read
+  # Picks a strict subset of the read envelope, unlike `inbox_read` above,
+  # which picks all of it. Without a projecting function here, the contract
+  # runner's `response_pick` step would be a no-op in every fixture case and
+  # could silently stop being applied.
+  - name: inbox_read_events_only
+    description: Read pending inbound events without the cursor or the truncation flag.
+    read_only: true
+    response_pick: [events]
+    args_schema:
+      type: object
+      properties:
+        consumer: { type: string }
+        limit: { type: integer }
+    inbox:
+      op: read
   - name: inbox_ack
     description: Advance the consumer cursor after processing events.
     args_schema:

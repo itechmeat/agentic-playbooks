@@ -29,6 +29,16 @@ pub const DEFAULT_LIMIT: usize = 50;
 /// Hard ceiling on `limit`. A larger request is clamped rather than refused:
 /// the caller gets a page and a cursor, which is the contract either way.
 pub const MAX_LIMIT: usize = 500;
+/// Ceiling on the serialized size of one read envelope's events, the same
+/// 1 MiB the HTTP kind caps a response body at (`call::BODY_CAP`).
+///
+/// `limit` alone does not bound anything useful: 500 events of the 256 KiB
+/// the ingest listener allows each is ~128 MiB, and even the default limit of
+/// 50 is ~12.8 MiB. Every byte of it is provider-written, which under this
+/// feature's threat model means written by arbitrary internet users, so
+/// handing an agent an unbounded quantity of it while every other connector
+/// kind is capped is the wrong asymmetry.
+pub const READ_BYTE_CAP: usize = 1024 * 1024;
 
 /// A gated, argument-checked inbox call ready to run against the local
 /// store.
@@ -188,23 +198,46 @@ impl InboxCall {
     }
 }
 
-/// `{ events: [{ seq, received_at, body }], cursor }`.
+/// `{ events: [{ seq, received_at, body }], cursor, truncated }`.
 ///
 /// `provider_id` is deliberately not in the envelope: it is a dedupe
 /// identity, not information the reader needs, and leaving it out keeps one
 /// less provider-controlled string flowing toward an agent.
+///
+/// Events are dropped from the newest end once [`READ_BYTE_CAP`] is reached,
+/// and `truncated` says so. Newest-end, because the oldest pending events are
+/// the ones a consumer must see to make progress: it processes what it got,
+/// acks that seq, and the next read starts where this one stopped. Dropping
+/// the oldest instead would hand back a page the consumer cannot ack past,
+/// and the same tail would come back forever.
+///
+/// The first event is always included, whatever its size. An inbox that
+/// answers "no events" while holding one is worse than one that is briefly
+/// over its cap, and it would be unackable: the same reasoning as the store's
+/// retention floor. In practice this cannot happen, since the ingest listener
+/// caps a single delivery at 256 KiB.
+///
+/// `truncated` is always present, false included, mirroring the imap kind: a
+/// reader should not have to know that an absent flag means "all of it".
 pub fn read_envelope(events: &[InboxEvent], cursor: u64) -> Value {
-    let rows: Vec<Value> = events
-        .iter()
-        .map(|e| {
-            json!({
-                "seq": e.seq,
-                "received_at": e.received_at,
-                "body": e.body,
-            })
-        })
-        .collect();
-    json!({ "events": rows, "cursor": cursor })
+    let mut rows: Vec<Value> = Vec::new();
+    let mut bytes: usize = 0;
+    let mut truncated = false;
+    for event in events {
+        let row = json!({
+            "seq": event.seq,
+            "received_at": event.received_at,
+            "body": event.body,
+        });
+        let size = serde_json::to_string(&row).map(|s| s.len()).unwrap_or(0);
+        if !rows.is_empty() && bytes.saturating_add(size) > READ_BYTE_CAP {
+            truncated = true;
+            break;
+        }
+        bytes = bytes.saturating_add(size);
+        rows.push(row);
+    }
+    json!({ "events": rows, "cursor": cursor, "truncated": truncated })
 }
 
 /// `{ acked_up_to }`.

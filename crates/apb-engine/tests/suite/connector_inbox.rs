@@ -212,6 +212,58 @@ fn read_ack_and_depth_go_through_the_grant_gate() {
     }
 }
 
+/// The read envelope carries a byte cap and says when it hit one.
+///
+/// `limit` bounds the event count, not the bytes: 500 events of the 256 KiB
+/// the ingest listener allows each is ~128 MiB of provider-written content
+/// handed to an agent in one call, while every other connector kind stops at
+/// the 1 MiB `BODY_CAP` and marks the result truncated. Events go from the
+/// newest end, so the oldest pending ones stay visible and the consumer can
+/// ack forward instead of being handed the same unackable page forever.
+#[test]
+fn an_oversize_read_is_capped_from_the_newest_end_and_flagged() {
+    use apb_core::connector::inbox::InboxEvent;
+    use apb_engine::connector::inbox::{READ_BYTE_CAP, read_envelope};
+
+    let filler = "x".repeat(64 * 1024);
+    let events: Vec<InboxEvent> = (1..=40u64)
+        .map(|seq| InboxEvent {
+            seq,
+            received_at: 1_700_000_000_000,
+            provider_id: format!("m{seq}"),
+            body: serde_json::json!({ "pad": filler }),
+        })
+        .collect();
+
+    let envelope = read_envelope(&events, 0);
+    assert_eq!(envelope["truncated"], true, "the cut is reported");
+    let rows = envelope["events"].as_array().unwrap();
+    assert!(
+        rows.len() < events.len(),
+        "something was actually dropped: {} of {}",
+        rows.len(),
+        events.len()
+    );
+    assert_eq!(rows[0]["seq"], 1, "the oldest pending event is kept");
+    assert_eq!(
+        rows.last().unwrap()["seq"],
+        rows.len() as u64,
+        "the kept events are the contiguous oldest run, not a sample"
+    );
+    let rendered = serde_json::to_string(&envelope).unwrap().len();
+    assert!(
+        rendered < READ_BYTE_CAP + 128 * 1024,
+        "the envelope stays within a row of the cap: {rendered}"
+    );
+
+    // Under the cap nothing is cut, and the flag is still present so a reader
+    // never has to infer "all of it" from an absent field.
+    let small = read_envelope(&events[..2], 7);
+    assert_eq!(small["truncated"], false);
+    assert_eq!(small["events"].as_array().unwrap().len(), 2);
+    assert_eq!(small["cursor"], 7);
+}
+
 #[test]
 fn every_reached_inbox_call_logs_one_connectorcall_event_without_a_body() {
     let _lock = common::env_lock();
