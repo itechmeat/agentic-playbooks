@@ -6,7 +6,9 @@ import {
   PROJECT_FILTER_KEY,
   createProjectFilterStore,
   filterByProject,
+  filterProfilesByProject,
   projectOptions,
+  projectScopeItems,
   type StorageLike,
 } from './projectfilter'
 import ProjectFilter from './components/ProjectFilter.svelte'
@@ -68,6 +70,51 @@ describe('filterByProject', () => {
 
   it('falls back to all items for an unknown id', () => {
     expect(filterByProject(items, 'ws-gone')).toEqual(items)
+  })
+})
+
+describe('filterProfilesByProject', () => {
+  const items = [
+    { workspace_id: 'ws-a', scope: 'project', id: '1' },
+    { workspace_id: 'ws-b', scope: 'project', id: '2' },
+    { workspace_id: '_', scope: 'global', id: '3' },
+  ]
+
+  it('returns all items for ALL_PROJECTS', () => {
+    expect(filterProfilesByProject(items, ALL_PROJECTS)).toEqual(items)
+  })
+
+  it('keeps global rows and matching-project rows, drops other projects', () => {
+    expect(filterProfilesByProject(items, 'ws-a')).toEqual([
+      { workspace_id: 'ws-a', scope: 'project', id: '1' },
+      { workspace_id: '_', scope: 'global', id: '3' },
+    ])
+  })
+
+  it('falls back to all items for an unknown project id', () => {
+    expect(filterProfilesByProject(items, 'ws-gone')).toEqual(items)
+  })
+})
+
+describe('projectScopeItems', () => {
+  it('drops global rows and keeps project-scope rows, contributing no option for global', () => {
+    const items = [
+      { workspace_id: 'ws-a', scope: 'project', id: '1' },
+      { workspace_id: '_', scope: 'global', id: '2' },
+      { workspace_id: 'ws-b', scope: 'project', id: '3' },
+    ]
+    expect(projectScopeItems(items)).toEqual([
+      { workspace_id: 'ws-a', scope: 'project', id: '1' },
+      { workspace_id: 'ws-b', scope: 'project', id: '3' },
+    ])
+  })
+
+  it('returns an empty array when every row is global-scope', () => {
+    const items = [
+      { workspace_id: '_', scope: 'global', id: '1' },
+      { workspace_id: '_', scope: 'global', id: '2' },
+    ]
+    expect(projectScopeItems(items)).toEqual([])
   })
 })
 

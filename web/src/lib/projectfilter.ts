@@ -87,3 +87,30 @@ export function filterByProject<T extends { workspace_id: string }>(
   if (!known) return items
   return items.filter((item) => item.workspace_id === selected)
 }
+
+/**
+ * Client-side filter by selected workspace_id for scope-aware rows (profiles).
+ * Global-scope rows always pass through, since a global profile applies to
+ * every project. Returns all items when selected is ALL_PROJECTS or an
+ * unknown id among the project-scope rows - intentionally mirroring
+ * `filterByProject`'s existing "unknown id falls back to all items" behavior,
+ * scoped here to the project-scope subset rather than every row.
+ */
+export function filterProfilesByProject<T extends { scope: string; workspace_id: string }>(
+  items: T[],
+  selected: string,
+): T[] {
+  if (selected === ALL_PROJECTS) return items
+  const known = items.some((item) => item.scope !== 'global' && item.workspace_id === selected)
+  if (!known) return items
+  return items.filter((item) => item.scope === 'global' || item.workspace_id === selected)
+}
+
+/**
+ * Rows that carry their own project identity (scope !== 'global'). Used to
+ * build the project-filter selector options: global-scope rows have no
+ * project of their own and would otherwise inject a bogus workspace option.
+ */
+export function projectScopeItems<T extends { scope: string }>(items: T[]): T[] {
+  return items.filter((item) => item.scope !== 'global')
+}

@@ -1,8 +1,10 @@
 <script lang="ts">
   import { ApiError, deleteProfile, fetchProfiles, type ProfileSummary } from '../lib/api'
+  import { filterProfilesByProject, projectFilter, projectScopeItems } from '../lib/projectfilter'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
+  import ProjectFilter from '$lib/components/ProjectFilter.svelte'
   import { Button } from '$lib/components/ui/button'
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
@@ -23,11 +25,16 @@
   let confirmOpen = $state(false)
   let forceOpen = $state(false)
 
+  // Options come from project-scope rows only; global rows have no project
+  // identity of their own and would otherwise add a bogus option.
+  const projectScopeProfiles = $derived(projectScopeItems(items))
+  const filtered = $derived(filterProfilesByProject(items, $projectFilter))
+
   // Profiles grouped by owning project, plus a `global` group for the shared
   // global-scope store.
   const groups = $derived.by(() => {
     const m = new Map<string, { key: string; project: string; items: ProfileSummary[] }>()
-    for (const p of items) {
+    for (const p of filtered) {
       const k = p.scope === 'global' ? '@global' : p.workspace_id || '_'
       const label = p.scope === 'global' ? 'global' : p.project || 'this project'
       if (!m.has(k)) m.set(k, { key: k, project: label, items: [] })
@@ -102,6 +109,7 @@
 
 <PageScroll>
   <div class="mx-auto w-full max-w-4xl px-4 py-6">
+    <ProjectFilter items={projectScopeProfiles} />
     {#if !loaded}
       <div class="flex flex-col gap-3">
         {#each Array(3) as _, i (i)}<Skeleton class="h-20 w-full" />{/each}
