@@ -46,6 +46,10 @@ pub struct GlobalConfig {
     /// Server-deployment knobs (spec 2026-08-16-server-mode-design). Absent
     /// section means the historical behavior: loopback bind, no proxy trust.
     pub server: ServerConfig,
+    /// Inbound webhook listener (spec 2026-08-16-webhook-ingest-design).
+    /// Absent section means disabled, which is the historical behavior: apb
+    /// opens no inbound port unless an operator asks for one.
+    pub ingest: IngestConfig,
 }
 
 /// Transport used to communicate with the agent (spec 7.2).
@@ -446,5 +450,70 @@ impl ServerConfig {
             .as_deref()
             .map(|u| u.trim().starts_with("https://"))
             .unwrap_or(false)
+    }
+}
+
+/// The port the ingest listener binds when nothing overrides it. Adjacent to
+/// the dashboard's 7321 so the pair is easy to remember and to firewall.
+pub const DEFAULT_INGEST_PORT: u16 = 7322;
+
+/// Optional `ingest:` section of the global config (spec
+/// 2026-08-16-webhook-ingest-design). The listener it configures is a
+/// separate socket with a separate router carrying only the hook routes: a
+/// tunnel or proxy pointed at this port is structurally incapable of
+/// reaching the dashboard API.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IngestConfig {
+    /// Whether `apb dashboard` co-starts the ingest listener, and whether
+    /// `apb ingest` will run at all. Off by default: an inbound port is an
+    /// explicit decision.
+    pub enabled: bool,
+    /// IP address to bind. Loopback by default, because the supported
+    /// topology puts a TLS-terminating reverse proxy on the same host. An
+    /// unparseable value is a startup error, never a silent fallback.
+    pub bind: Option<String>,
+    /// Port to bind. `None` means [`DEFAULT_INGEST_PORT`].
+    pub port: Option<u16>,
+    /// Public origin the provider reaches the hooks at, e.g.
+    /// `https://hooks.example.com`. Used only to print the exact callback URL
+    /// an operator pastes into a provider console; apb never fetches it.
+    pub public_base_url: Option<String>,
+}
+
+impl IngestConfig {
+    /// Bind precedence: flag, then `ingest.bind`, then loopback.
+    pub fn resolve_bind(&self, flag: Option<&str>) -> Result<IpAddr, String> {
+        match flag.or(self.bind.as_deref()) {
+            None => Ok(DEFAULT_BIND),
+            Some(raw) => raw
+                .trim()
+                .parse::<IpAddr>()
+                .map_err(|e| format!("invalid ingest bind address `{raw}`: {e}")),
+        }
+    }
+
+    /// Port precedence: flag, then `ingest.port`, then the default.
+    pub fn resolve_port(&self, flag: Option<u16>) -> u16 {
+        flag.or(self.port).unwrap_or(DEFAULT_INGEST_PORT)
+    }
+
+    /// The exact URL to register with a provider for one connector account,
+    /// or `None` when no public base is configured or either segment could
+    /// not be routed. Building it here rather than in each caller keeps the
+    /// doctor, the dashboard and the docs from drifting apart on the path.
+    pub fn callback_url(&self, connector: &str, account: &str) -> Option<String> {
+        for segment in [connector, account] {
+            crate::profile::validate_profile_name(segment).ok()?;
+        }
+        let base = self
+            .public_base_url
+            .as_deref()?
+            .trim()
+            .trim_end_matches('/');
+        if base.is_empty() {
+            return None;
+        }
+        Some(format!("{base}/hooks/{connector}/{account}"))
     }
 }

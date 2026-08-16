@@ -277,3 +277,118 @@ fn trusted_proxies_parse_into_a_set() {
         "CIDR is not supported in v1: {err}"
     );
 }
+
+#[test]
+fn ingest_section_loads_and_defaults() {
+    let _lock = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", dir.path());
+    }
+
+    // No ingest section: disabled, loopback, port 7322, no public base URL.
+    std::fs::write(dir.path().join("config.yaml"), "port: 7321\n").unwrap();
+    let cfg = GlobalConfig::load().unwrap();
+    assert!(!cfg.ingest.enabled, "ingest is opt-in");
+    assert_eq!(cfg.ingest.bind, None);
+    assert_eq!(cfg.ingest.port, None);
+    assert_eq!(cfg.ingest.public_base_url, None);
+
+    let yaml = "ingest:\n  enabled: true\n  bind: \"127.0.0.1\"\n  port: 7400\n  public_base_url: https://hooks.example.com\n";
+    std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+    let cfg = GlobalConfig::load().unwrap();
+    assert!(cfg.ingest.enabled);
+    assert_eq!(cfg.ingest.bind.as_deref(), Some("127.0.0.1"));
+    assert_eq!(cfg.ingest.port, Some(7400));
+    assert_eq!(
+        cfg.ingest.public_base_url.as_deref(),
+        Some("https://hooks.example.com")
+    );
+
+    // A typo inside the section is a hard error, like every other section.
+    std::fs::write(dir.path().join("config.yaml"), "ingest:\n  enbaled: true\n").unwrap();
+    let broken = GlobalConfig::load();
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+    assert!(
+        broken.is_err(),
+        "a typo in the ingest section must not be ignored"
+    );
+}
+
+#[test]
+fn ingest_bind_and_port_precedence() {
+    use apb_core::config::{DEFAULT_INGEST_PORT, IngestConfig};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let empty = IngestConfig::default();
+    assert_eq!(
+        empty.resolve_bind(None).unwrap(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "the ingest listener sits behind a reverse proxy on the same host by default"
+    );
+    assert_eq!(empty.resolve_port(None), DEFAULT_INGEST_PORT);
+    assert_eq!(DEFAULT_INGEST_PORT, 7322);
+
+    let configured = IngestConfig {
+        bind: Some("0.0.0.0".to_string()),
+        port: Some(7400),
+        ..Default::default()
+    };
+    assert_eq!(
+        configured.resolve_bind(None).unwrap(),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    );
+    assert_eq!(configured.resolve_port(None), 7400);
+    assert_eq!(
+        configured.resolve_bind(Some("127.0.0.1")).unwrap(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "the flag wins over the config"
+    );
+    assert_eq!(configured.resolve_port(Some(9000)), 9000);
+
+    let bad = IngestConfig {
+        bind: Some("not-an-ip".to_string()),
+        ..Default::default()
+    };
+    let err = bad.resolve_bind(None).unwrap_err();
+    assert!(
+        err.contains("not-an-ip"),
+        "the error names the value: {err}"
+    );
+    assert!(!err.contains('!'), "no exclamation marks: {err}");
+}
+
+#[test]
+fn callback_url_is_printable_only_with_a_public_base() {
+    use apb_core::config::IngestConfig;
+
+    let none = IngestConfig::default();
+    assert_eq!(none.callback_url("whatsapp", "main"), None);
+
+    let configured = IngestConfig {
+        public_base_url: Some("https://hooks.example.com/".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        configured.callback_url("whatsapp", "main").as_deref(),
+        Some("https://hooks.example.com/hooks/whatsapp/main"),
+        "a trailing slash on the base must not double up"
+    );
+
+    let no_slash = IngestConfig {
+        public_base_url: Some("https://hooks.example.com".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        no_slash.callback_url("whatsapp", "main").as_deref(),
+        Some("https://hooks.example.com/hooks/whatsapp/main")
+    );
+
+    // Segments that could not be routed are refused rather than printed as a
+    // URL nobody could register.
+    assert_eq!(no_slash.callback_url("../evil", "main"), None);
+    assert_eq!(no_slash.callback_url("whatsapp", "Not An Account"), None);
+}
