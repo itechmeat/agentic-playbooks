@@ -75,7 +75,9 @@ impl CallError {
 /// A successful call result (spec section 8). HTTP and mock carry
 /// `status`/`truncated` (plus the `link`/`picked` HTTP extras); smtp carries
 /// only a body (spec 4.2: `{ ok: true, body: { accepted, from, subject } }`
-/// for send, `{ verified: true }` for verify).
+/// for send, `{ verified: true }` for verify); inbox carries the fixed
+/// envelope of a local store read, with the same `picked` flag HTTP uses
+/// (spec 2026-08-16-webhook-ingest-design).
 #[derive(Debug)]
 pub enum CallOk {
     Http {
@@ -91,13 +93,20 @@ pub enum CallOk {
     Smtp {
         body: Value,
     },
+    Inbox {
+        body: Value,
+        /// True when `response_pick` was applied to the envelope.
+        picked: bool,
+    },
 }
 
 impl CallOk {
     /// The `{ "ok": true, ... }` success JSON, shaped per kind. HTTP keeps the
     /// full `status`/`body`/`truncated` shape and appends `link`/`picked`
     /// exactly as before (link only when present, picked only when true);
-    /// smtp emits just `{ ok, body }`.
+    /// smtp emits just `{ ok, body }`; inbox emits `{ ok, body }` plus the
+    /// same `picked` marker HTTP uses, and never a status (no request left
+    /// the machine).
     pub(crate) fn to_success_json(&self) -> Value {
         match self {
             CallOk::Http {
@@ -122,13 +131,20 @@ impl CallOk {
                 value
             }
             CallOk::Smtp { body } => json!({ "ok": true, "body": body }),
+            CallOk::Inbox { body, picked } => {
+                let mut value = json!({ "ok": true, "body": body });
+                if *picked {
+                    value["picked"] = json!(true);
+                }
+                value
+            }
         }
     }
 
     /// The response body regardless of shape (test/inspection accessor).
     pub fn body(&self) -> &Value {
         match self {
-            CallOk::Http { body, .. } | CallOk::Smtp { body } => body,
+            CallOk::Http { body, .. } | CallOk::Smtp { body } | CallOk::Inbox { body, .. } => body,
         }
     }
 }

@@ -60,6 +60,8 @@ mod connector_gitlab;
 mod connector_healthcheck;
 #[path = "suite/connector_imap.rs"]
 mod connector_imap;
+#[path = "suite/connector_inbox.rs"]
+mod connector_inbox;
 #[path = "suite/connector_manifest.rs"]
 mod connector_manifest;
 #[path = "suite/connector_play_call.rs"]
