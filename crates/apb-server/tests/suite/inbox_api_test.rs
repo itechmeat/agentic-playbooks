@@ -180,6 +180,42 @@ async fn unknown_names_and_traversal_are_404() {
 }
 
 #[tokio::test]
+async fn the_events_endpoint_skips_events_every_consumer_has_acked() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = set_var("APB_CONFIG_DIR", cfg.path());
+    apb_core::registry::init_project(root.path()).unwrap();
+    seed(cfg.path());
+
+    // The one consumer of this account has read and acked the first two of
+    // the three seeded events. Only the genuinely pending tail (seq 3) must
+    // come back: the summary route reports `pending: 1` for this state (via
+    // the same `default` cursor), and the events list must agree with it
+    // rather than replaying already-consumed history for up to the 30-day
+    // retention window.
+    let inbox = apb_core::connector::inbox::Inbox::at(
+        &cfg.path().join("connector-inbox"),
+        "echo-hooks",
+        "main",
+    )
+    .unwrap();
+    inbox.ack("default", 2).unwrap();
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/connectors/echo-hooks/inbox/main/events").await;
+    assert_eq!(status, StatusCode::OK);
+    let events = json["events"].as_array().unwrap();
+    assert_eq!(
+        events.len(),
+        1,
+        "acked events are skipped, only the pending tail remains: {json}"
+    );
+    assert_eq!(events[0]["seq"], 3);
+    assert_eq!(events[0]["body"]["text"], "m3");
+}
+
+#[tokio::test]
 async fn the_events_limit_is_clamped() {
     let _lock = crate::common::env_lock().await;
     let cfg = tempfile::tempdir().unwrap();

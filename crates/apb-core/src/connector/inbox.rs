@@ -38,6 +38,14 @@ pub const EVENTS_FILE: &str = "events.jsonl";
 pub const DEDUPE_FILE: &str = "dedupe.idx";
 /// The named consumer cursors.
 pub const CURSORS_FILE: &str = "cursors.yaml";
+/// The persisted dropped-delivery counter: a plain decimal integer, no
+/// newline required. Deliberately not part of `events.jsonl` or any other
+/// structured file - it is a single number the ingest handler bumps once per
+/// drop, and a doctor or dashboard reads back across process boundaries, so
+/// the in-process `IngestState` counter (which does not survive a restart or
+/// cross a second `apb dashboard`/`apb ingest` process) is never the
+/// operator-visible source of truth.
+pub const DROPPED_FILE: &str = "dropped.count";
 /// Lock file serializing every read-modify-write on one account directory.
 const INBOX_LOCK: &str = "inbox.lock";
 /// How many recently seen provider ids the dedupe index keeps. Large enough
@@ -90,6 +98,12 @@ pub struct Depth {
     pub total: u64,
     pub cursor: u64,
     pub last_received_at: Option<u64>,
+    /// Deliveries this account's accept cap has dropped, from the persisted
+    /// counter (`note_dropped`/`dropped_count`), not the in-process one: the
+    /// doctor and the dashboard route both read `depth` for their per-account
+    /// row, and this must be visible from whichever process asks, not only
+    /// the one that happened to reject the delivery.
+    pub dropped: u64,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -268,12 +282,14 @@ impl Inbox {
     pub fn depth(&self, consumer: &str) -> Result<Depth, InboxError> {
         check_consumer(consumer)?;
         let cursor = self.cursor(consumer)?;
+        let dropped = self.dropped_count()?;
         let (Some(first), Some(last)) = (self.first_event()?, self.last_event()?) else {
             return Ok(Depth {
                 pending: 0,
                 total: 0,
                 cursor,
                 last_received_at: None,
+                dropped,
             });
         };
         // A cursor may point below the surviving range after retention took
@@ -284,7 +300,31 @@ impl Inbox {
             total: last.seq - first.seq + 1,
             cursor,
             last_received_at: Some(last.received_at),
+            dropped,
         })
+    }
+
+    /// Increments the persisted dropped-delivery counter for this account and
+    /// returns the new total. Called from the ingest accept-cap path (spec
+    /// 2026-08-16-webhook-ingest-design): a delivery over the accept cap is
+    /// answered 200 and dropped without a stored event, so this is the only
+    /// record it leaves behind. Under the same directory lock as every other
+    /// mutation, so a burst of concurrent drops still counts each one exactly
+    /// once.
+    pub fn note_dropped(&self) -> Result<u64, InboxError> {
+        std::fs::create_dir_all(&self.dir).map_err(|e| self.io(&e))?;
+        let _lock = lock_dir(&self.dir, INBOX_LOCK).map_err(|e| self.io(&e))?;
+        let count = self.read_dropped()? + 1;
+        self.write_dropped(count)?;
+        Ok(count)
+    }
+
+    /// The persisted dropped-delivery count, or 0 when nothing has ever been
+    /// dropped for this account. Reads no lock, matching `cursor` and
+    /// `depth`: an approximate answer under a concurrent drop is fine for a
+    /// probe and a dashboard panel.
+    pub fn dropped_count(&self) -> Result<u64, InboxError> {
+        self.read_dropped()
     }
 
     /// Every stored event, oldest first.
@@ -318,8 +358,11 @@ impl Inbox {
 
     /// The lowest cursor across every known consumer, or 0 when none exists.
     /// An event at or below it has been acknowledged by everyone, which is
-    /// what makes it a retention candidate before anything unacked.
-    fn min_cursor(&self) -> Result<u64, InboxError> {
+    /// what makes it a retention candidate before anything unacked. Public so
+    /// a caller outside this module (the dashboard's events route) can filter
+    /// a raw event list down to the same "still pending for someone" set that
+    /// retention itself protects, without re-reading `cursors.yaml` by hand.
+    pub fn min_cursor(&self) -> Result<u64, InboxError> {
         let cursors = self.read_cursors()?;
         Ok(cursors.consumers.values().copied().min().unwrap_or(0))
     }
@@ -468,6 +511,26 @@ impl Inbox {
         let yaml = serde_yaml_ng::to_string(cursors)
             .map_err(|e| InboxError::Corrupt(self.path_str(CURSORS_FILE), e.to_string()))?;
         atomic_write_private(&self.dir.join(CURSORS_FILE), yaml.as_bytes()).map_err(|e| self.io(&e))
+    }
+
+    /// The dropped counter's stored value, or 0 when the file is absent. A
+    /// present-but-unparsable file is corruption, not an absent counter, so
+    /// it is reported rather than silently reset to 0.
+    fn read_dropped(&self) -> Result<u64, InboxError> {
+        let path = self.dir.join(DROPPED_FILE);
+        match std::fs::read_to_string(&path) {
+            Ok(raw) => raw
+                .trim()
+                .parse::<u64>()
+                .map_err(|e| InboxError::Corrupt(path.display().to_string(), e.to_string())),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(0),
+            Err(e) => Err(self.io(&e)),
+        }
+    }
+
+    fn write_dropped(&self, count: u64) -> Result<(), InboxError> {
+        atomic_write_private(&self.dir.join(DROPPED_FILE), count.to_string().as_bytes())
+            .map_err(|e| self.io(&e))
     }
 
     /// Appends one line to a file in the account directory, creating it 0600

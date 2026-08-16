@@ -93,6 +93,7 @@ fn account_row(
         "total": depth.total,
         "cursor": depth.cursor,
         "last_received_at": depth.last_received_at,
+        "dropped": depth.dropped,
         "callback_url": ingest.callback_url(connector, account),
     })
 }
@@ -101,7 +102,11 @@ fn account_row(
 /// oldest first, capped at `limit`. This is the deliberate exception to
 /// "bodies are never returned": an operator inspecting what a provider
 /// actually sent needs to see it, and the dashboard marks it as untrusted
-/// content when it renders it.
+/// content when it renders it. Filtered to `seq > min_cursor` (the lowest
+/// cursor across every consumer of the account, the same basis retention
+/// uses to decide what is safe to drop) so a long-acked event that retention
+/// simply has not gotten around to deleting yet cannot show up here while
+/// the summary route reports it as no longer pending.
 pub(crate) async fn inbox_events_handler(
     AxPath((name, account)): AxPath<(String, String)>,
     Query(q): Query<EventsQuery>,
@@ -131,8 +136,13 @@ pub(crate) async fn inbox_events_handler(
     let depth = inbox
         .depth(apb_engine::connector::inbox::DEFAULT_CONSUMER)
         .unwrap_or_default();
+    // No cursors yet (a fresh inbox nobody has read from) means `min_cursor`
+    // is 0, so every retained event is still pending - the same case the
+    // summary route treats as "nothing acknowledged yet".
+    let min_cursor = inbox.min_cursor().unwrap_or(0);
     let rows: Vec<serde_json::Value> = events
         .iter()
+        .filter(|e| e.seq > min_cursor)
         .take(limit)
         .map(|e| {
             // The provider id is a dedupe identity, not information the
