@@ -34,15 +34,19 @@ pub const MAX_LIMIT: usize = 500;
 /// store.
 #[derive(Debug)]
 pub struct InboxCall {
-    pub connector: String,
-    pub account: String,
-    pub op: InboxOp,
-    pub consumer: String,
-    pub limit: usize,
-    pub up_to_seq: u64,
+    connector: String,
+    account: String,
+    op: InboxOp,
+    consumer: String,
+    // `pub(crate)`, not private: the offline contract-test runner
+    // (`contract_test.rs`, same crate) replays these against its expected
+    // envelope without going through the network-free `send()` path, the way
+    // it already does for `SmtpCall`/`ImapCall` inputs it re-renders.
+    pub(crate) limit: usize,
+    pub(crate) up_to_seq: u64,
     /// The effective `response_pick` projection; empty when the function
     /// declares none or `--full` bypasses it.
-    pub response_pick: Vec<String>,
+    response_pick: Vec<String>,
 }
 
 /// Either a dry-run description or a call to run, mirroring
