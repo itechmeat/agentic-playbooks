@@ -7,12 +7,27 @@ use apb_core::registry::init_project;
 /// Starts the single, global dashboard for the machine. There is no
 /// project-scoped server: the dashboard aggregates every registered project,
 /// so it does not bind to (or initialize) the current directory.
+///
+/// When `ingest.enabled` is true the inbound webhook listener starts in the
+/// same process on its own socket with its own router (spec
+/// 2026-08-16-webhook-ingest-design). Same process, two listeners: the
+/// separation that matters is the router, not the process.
 pub(crate) fn dashboard(bind: IpAddr, port: u16, no_open: bool) -> ExitCode {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     if !no_open {
         let _ = open::that_detached(browse_url(bind, port));
     }
-    match rt.block_on(apb_server::run_server(bind, port)) {
+    let result = rt.block_on(async move {
+        let ingest = spawn_ingest_if_enabled();
+        let served = apb_server::run_server(bind, port).await;
+        // The dashboard is the lifecycle owner: when it stops, so does the
+        // listener it co-started.
+        if let Some(handle) = ingest {
+            handle.abort();
+        }
+        served
+    });
+    match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             if error_looks_like_addr_in_use(&e) {
@@ -20,6 +35,77 @@ pub(crate) fn dashboard(bind: IpAddr, port: u16, no_open: bool) -> ExitCode {
                 eprintln!("{}", format_port_in_use_error(port, holders.as_deref()));
             } else {
                 eprintln!("dashboard failed: {e}");
+            }
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// Resolves the ingest bind and port from the global config plus optional
+/// flags. Shared by `apb ingest` and the dashboard co-start so the two can
+/// never disagree about where the listener lives.
+fn ingest_binding(bind: Option<&str>, port: Option<u16>) -> Result<(IpAddr, u16), String> {
+    let cfg = apb_core::config::GlobalConfig::load()?;
+    Ok((
+        cfg.ingest.resolve_bind(bind)?,
+        cfg.ingest.resolve_port(port),
+    ))
+}
+
+/// Spawns the ingest listener when the config asks for it. Best effort by
+/// design: a misconfigured ingest section must not stop the dashboard from
+/// starting, so a failure is reported and the dashboard continues without an
+/// inbound path.
+fn spawn_ingest_if_enabled() -> Option<tokio::task::JoinHandle<()>> {
+    let cfg = apb_core::config::GlobalConfig::load().ok()?;
+    if !cfg.ingest.enabled {
+        return None;
+    }
+    let (bind, port) = match ingest_binding(None, None) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("apb ingest: not started: {e}");
+            return None;
+        }
+    };
+    Some(tokio::spawn(async move {
+        if let Err(e) = apb_server::ingest::run_ingest_server(bind, port).await {
+            eprintln!("apb ingest: listener stopped: {e}");
+        }
+    }))
+}
+
+/// `apb ingest`: the inbound webhook listener on its own, for a headless
+/// deployment that runs no dashboard. Same implementation the dashboard
+/// co-starts, so the two paths cannot drift.
+pub(crate) fn ingest_cmd(bind: Option<&str>, port: Option<u16>) -> ExitCode {
+    let (bind, port) = match ingest_binding(bind, port) {
+        Ok(pair) => pair,
+        Err(e) => {
+            eprintln!("ingest failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    // Running the command is the intent, so a disabled config does not block
+    // it; but `apb dashboard` will not co-start the listener until the flag
+    // is set, and an operator who does not hear that will be surprised later.
+    if apb_core::config::GlobalConfig::load()
+        .map(|c| !c.ingest.enabled)
+        .unwrap_or(false)
+    {
+        println!(
+            "apb ingest: ingest.enabled is false in the global config, so `apb dashboard` will not start this listener on its own"
+        );
+    }
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    match rt.block_on(apb_server::ingest::run_ingest_server(bind, port)) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            if error_looks_like_addr_in_use(&e) {
+                let holders = lookup_port_holders(port);
+                eprintln!("{}", format_port_in_use_error(port, holders.as_deref()));
+            } else {
+                eprintln!("ingest failed: {e}");
             }
             ExitCode::from(2)
         }
@@ -278,6 +364,23 @@ mod tests {
             "http://[::1]:7321",
             "IPv6 hosts are bracketed"
         );
+    }
+
+    #[test]
+    fn ingest_binding_falls_back_to_loopback_and_the_default_port() {
+        use apb_core::config::{DEFAULT_INGEST_PORT, IngestConfig};
+        use std::net::{IpAddr, Ipv4Addr};
+
+        // `ingest_binding` reads the global config, which a unit test must
+        // not depend on, so the precedence itself is asserted against the
+        // config type it delegates to.
+        let cfg = IngestConfig::default();
+        assert_eq!(
+            cfg.resolve_bind(None).unwrap(),
+            IpAddr::V4(Ipv4Addr::LOCALHOST)
+        );
+        assert_eq!(cfg.resolve_port(None), DEFAULT_INGEST_PORT);
+        assert_eq!(cfg.resolve_port(Some(7400)), 7400);
     }
 
     #[test]

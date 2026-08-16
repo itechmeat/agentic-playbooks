@@ -27,7 +27,7 @@ use crate::run::{
     run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
 };
 use crate::selfupdate::run_self_update;
-use crate::serve::{ask_server_cmd, dashboard, dev_cmd, mcp_cmd};
+use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
 use crate::server::{ServerAction, server_cmd};
 use crate::suggestions::{SuggestionsAction, suggestions_cmd};
 use crate::util::{resolve_bind, resolve_port};
@@ -205,6 +205,17 @@ enum Command {
         #[arg(long)]
         no_open: bool,
     },
+    /// Start only the inbound webhook listener (headless deployments). The
+    /// dashboard co-starts it by itself when `ingest.enabled` is true.
+    Ingest {
+        /// IP address to bind: the flag overrides `ingest.bind` in the global
+        /// config, default 127.0.0.1 (behind a reverse proxy on the same host).
+        #[arg(long)]
+        bind: Option<String>,
+        /// Port: the flag overrides `ingest.port`, default 7322.
+        #[arg(long)]
+        port: Option<u16>,
+    },
     /// Manage server mode: the API keys that authenticate a networked dashboard
     Server {
         #[command(subcommand)]
@@ -374,6 +385,7 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+        Some(Command::Ingest { bind, port }) => ingest_cmd(bind.as_deref(), port),
         Some(Command::Server { action }) => server_cmd(action),
         Some(Command::Dev { no_open }) => dev_cmd(root, no_open),
         Some(Command::Mcp) => mcp_cmd(&root),

@@ -26,12 +26,12 @@ apb-engine = { version = "0.19.0", path = "../apb-engine" }
 apb-mcp = { version = "0.19.0", path = "../apb-mcp" }
 cliclack = "0.5.5"
 axoupdater = { version = "0.10.0", default-features = false, features = ["github_releases", "blocking"] }
+serde_yaml_ng.workspace = true
 
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
 tempfile = "3.27.0"
-serde_yaml_ng.workspace = true
 jsonschema.workspace = true
 # Process-group signalling and liveness checks in the detached-driver suite,
 # as syscalls rather than `kill` subprocesses: `kill -9 -<pgid>` is accepted by

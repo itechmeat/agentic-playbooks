@@ -476,6 +476,13 @@ fn doctor_cmd(root: &Path) -> ExitCode {
     let trust = TrustStore::load();
     let mut checks: Vec<Check> = Vec::new();
 
+    // The ingest section is advisory here: a machine with no listener still
+    // has connectors that can receive, and a doctor must describe both.
+    let ingest = apb_core::config::GlobalConfig::load()
+        .map(|c| c.ingest)
+        .unwrap_or_default();
+    let mut any_webhook = false;
+
     for name in &names {
         let loaded = match store::load(name) {
             Ok(l) => l,
@@ -493,6 +500,9 @@ fn doctor_cmd(root: &Path) -> ExitCode {
             status: CheckStatus::Ok,
             detail: format!("parses; digest {}", loaded.digest),
         });
+        if loaded.doc.webhook.is_some() {
+            any_webhook = true;
+        }
 
         let accounts = match config::load_merged(root, name) {
             Ok(a) => a,
@@ -504,6 +514,7 @@ fn doctor_cmd(root: &Path) -> ExitCode {
                 });
                 push_connector_trust_check(&mut checks, &trust, name, &loaded.digest);
                 push_healthcheck_check(&mut checks, name, &loaded);
+                push_ingest_checks(&mut checks, &ingest, name, &loaded, &[]);
                 continue;
             }
         };
@@ -572,7 +583,10 @@ fn doctor_cmd(root: &Path) -> ExitCode {
         }
 
         push_healthcheck_check(&mut checks, name, &loaded);
+        push_ingest_checks(&mut checks, &ingest, name, &loaded, &accounts);
     }
+
+    push_listener_checks(&mut checks, &ingest, any_webhook);
 
     let mut has_failure = false;
     for c in &checks {
@@ -642,6 +656,168 @@ fn push_healthcheck_check(checks: &mut Vec<Check>, name: &str, loaded: &LoadedCo
         name: format!("connector `{name}`: healthcheck"),
         status: CheckStatus::Ok,
         detail,
+    });
+}
+
+/// Ingest rows for one connector: whether it can receive at all, and per
+/// account the exact callback URL and the pending inbox depth. Shown whether
+/// or not this machine runs a listener, because a connector's ability to
+/// receive is a property of the connector, not of the local config.
+fn push_ingest_checks(
+    checks: &mut Vec<Check>,
+    ingest: &apb_core::config::IngestConfig,
+    name: &str,
+    loaded: &LoadedConnector,
+    accounts: &[config::Account],
+) {
+    let Some(hook) = &loaded.doc.webhook else {
+        return;
+    };
+    let functions = loaded.doc.inbox_functions();
+    let challenge = match hook.challenge {
+        Some(_) => "a verification challenge",
+        None => "no verification challenge",
+    };
+    checks.push(Check {
+        name: format!("connector `{name}`: ingest"),
+        status: CheckStatus::Ok,
+        detail: format!(
+            "receives signed deliveries on header `{}` with {challenge}; inbox functions: {}",
+            hook.signature.header,
+            functions.join(", ")
+        ),
+    });
+
+    // A hook URL is `/hooks/{connector}/{account}` with no workspace segment,
+    // so only a globally configured account can ever receive a delivery. An
+    // account that exists only in the project config looks fine everywhere
+    // else in apb and is silently unreachable here, which is exactly the kind
+    // of thing a doctor exists to say out loud.
+    let addressable = global_account_names(name);
+    for account in accounts {
+        if !addressable.iter().any(|g| g == &account.name) {
+            checks.push(Check {
+                name: format!("connector `{name}` account `{}`: callback", account.name),
+                status: CheckStatus::Warn,
+                detail:
+                    "this account is defined only in the project connector-config; a hook URL carries no workspace, so no delivery can address it. Move it to the global connector-config to receive events"
+                        .to_string(),
+            });
+            continue;
+        }
+        match ingest.callback_url(name, &account.name) {
+            Some(url) => checks.push(Check {
+                name: format!("connector `{name}` account `{}`: callback", account.name),
+                status: CheckStatus::Ok,
+                detail: format!("register this URL with the provider: {url}"),
+            }),
+            None => checks.push(Check {
+                name: format!("connector `{name}` account `{}`: callback", account.name),
+                status: CheckStatus::Warn,
+                detail:
+                    "ingest.public_base_url is not set in the global config, so the callback URL cannot be printed"
+                        .to_string(),
+            }),
+        }
+
+        let depth = apb_core::connector::inbox::Inbox::open(name, &account.name)
+            .and_then(|inbox| inbox.depth(apb_engine::connector::inbox::DEFAULT_CONSUMER));
+        let detail = match depth {
+            Ok(d) if d.total == 0 => "no events received yet".to_string(),
+            Ok(d) => format!(
+                "{} pending of {} stored for consumer `{}`",
+                d.pending,
+                d.total,
+                apb_engine::connector::inbox::DEFAULT_CONSUMER
+            ),
+            Err(e) => format!("inbox unreadable: {e}"),
+        };
+        checks.push(Check {
+            name: format!("connector `{name}` account `{}`: inbox", account.name),
+            status: CheckStatus::Ok,
+            detail,
+        });
+    }
+}
+
+/// Account names defined in the GLOBAL connector-config file for `name`.
+/// These are the only accounts a delivery can name, which is why the doctor
+/// compares the merged list against them rather than just listing it.
+/// Best effort: an unreadable or unparsable file yields an empty list, and
+/// the config row above has already reported that failure.
+fn global_account_names(name: &str) -> Vec<String> {
+    let Some(path) = config::global_config_path(name) else {
+        return Vec::new();
+    };
+    let Ok(raw) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let Ok(file) = serde_yaml_ng::from_str::<config::AccountsFile>(&raw) else {
+        return Vec::new();
+    };
+    file.accounts.into_iter().map(|a| a.name).collect()
+}
+
+/// Machine-wide ingest rows: whether the configured listener answers, and
+/// whether running one makes any sense on this machine. Only shown when
+/// ingest is enabled, so a machine that never asked for an inbound port is
+/// not told about one.
+fn push_listener_checks(
+    checks: &mut Vec<Check>,
+    ingest: &apb_core::config::IngestConfig,
+    any_webhook: bool,
+) {
+    if !ingest.enabled {
+        return;
+    }
+    let (status, detail) = match ingest.resolve_bind(None) {
+        Ok(bind) => {
+            let port = ingest.resolve_port(None);
+            let addr = std::net::SocketAddr::new(bind, port);
+            match std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_millis(500))
+            {
+                Ok(_) => (CheckStatus::Ok, format!("listening on {addr}")),
+                Err(e) => (
+                    CheckStatus::Warn,
+                    format!(
+                        "nothing is listening on {addr} ({e}); start it with `apb ingest` or `apb dashboard`"
+                    ),
+                ),
+            }
+        }
+        Err(e) => (CheckStatus::Fail, e),
+    };
+    checks.push(Check {
+        name: "ingest: listener".to_string(),
+        status,
+        detail,
+    });
+
+    let (status, detail) = if any_webhook {
+        (
+            CheckStatus::Ok,
+            "at least one installed connector declares a webhook block".to_string(),
+        )
+    } else {
+        (
+            CheckStatus::Warn,
+            "ingest is enabled but no installed connector declares a webhook block, so the listener can accept nothing".to_string(),
+        )
+    };
+    checks.push(Check {
+        name: "ingest: config".to_string(),
+        status,
+        detail,
+    });
+
+    // Accounts are read globally at delivery time: the hook path carries no
+    // workspace, so a project-scoped account cannot be addressed.
+    checks.push(Check {
+        name: "ingest: accounts".to_string(),
+        status: CheckStatus::Ok,
+        detail:
+            "deliveries resolve accounts from the global connector-config only; a project account cannot be addressed by a hook URL"
+                .to_string(),
     });
 }
 
@@ -1204,7 +1380,7 @@ Then verify the whole picture:
 apb connector doctor
 ```
 
-It reports manifest, config, env resolution, and trust status for every connector and account. Every check for `{name}` should be clean. This command makes no network call, so a clean report is necessary but not sufficient.
+It reports manifest, config, env resolution, and trust status for every connector and account. Every check for `{name}` should be clean. This command makes no network call, so a clean report is necessary but not sufficient. When a connector declares a webhook block, doctor also prints its callback URL per account, the pending inbox depth, and whether the local ingest listener answers.
 
 ## Step 6: verify against the real service
 
