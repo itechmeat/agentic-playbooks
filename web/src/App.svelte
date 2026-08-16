@@ -10,12 +10,24 @@
   import { Toaster } from '$lib/components/ui/sonner'
   import { connectorRouteName, decodeSegment } from '$lib/route'
   import { ModeWatcher } from 'mode-watcher'
+  import Login from './pages/Login.svelte'
+  import { auth, refreshAuthStatus } from '$lib/auth'
 
   let hash = $state(location.hash)
   $effect(() => {
     const onHash = () => (hash = location.hash)
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
+  })
+
+  // Server mode: the app renders normally until the server says a credential
+  // is required and this browser lacks one. Starting permissive keeps the
+  // local, keyless dashboard from flashing a login screen on every load; a
+  // 401 from any request flips the same store immediately.
+  let authState = $state({ required: false, authenticated: true, checked: false })
+  $effect(() => auth.subscribe((v) => (authState = v)))
+  $effect(() => {
+    void refreshAuthStatus()
   })
 
   // One dynamic import per page. Grouped by component, so a route that shares
@@ -76,7 +88,9 @@
      would have to be cast to `any` and would check nothing. Every arm carries
      all three branches: a chunk in flight, and a chunk that never arrives,
      would otherwise both render nothing and leave the route silently blank. -->
-{#if route.page === 'new'}
+{#if authState.required && !authState.authenticated}
+  <Login />
+{:else if route.page === 'new'}
   {#await loadPlaybookEdit()}
     <ChunkPending />
   {:then { default: Page }}
