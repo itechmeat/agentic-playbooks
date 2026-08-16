@@ -12,6 +12,8 @@ mod common;
 mod answer_api_test;
 #[path = "suite/api_test.rs"]
 mod api_test;
+#[path = "suite/auth_test.rs"]
+mod auth_test;
 #[path = "suite/bind_interlock_test.rs"]
 mod bind_interlock_test;
 #[path = "suite/connectors_api_test.rs"]

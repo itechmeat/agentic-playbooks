@@ -9,6 +9,7 @@
 //! frontend. This module wires them into a router and runs the server.
 
 pub mod assets;
+pub mod auth;
 pub mod lock;
 pub mod routes;
 pub mod state;
@@ -136,6 +137,13 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/ws", get(ws::ws_handler))
         .fallback(assets::static_handler)
+        // The gate wraps everything, including the static fallback, so that
+        // ClientCtx is present on every request. Exempt paths are decided
+        // inside the middleware, not by leaving routes outside the layer.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::auth_middleware,
+        ))
         .with_state(state)
 }
 
@@ -171,10 +179,19 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     // permitted at all, and (from Task 4 on) whether auth is enforced. A
     // malformed file is a startup error rather than a silent "no keys", so a
     // typo can never quietly open the server.
-    let auth_file = apb_core::server_auth::load()?;
+    let global_cfg = apb_core::config::GlobalConfig::load().map_err(std::io::Error::other)?;
+    let auth_path = apb_core::server_auth::auth_file_path()?;
+    let auth_file = apb_core::server_auth::load_from(&auth_path)?;
     check_bind_allowed(bind, auth_file.keys.len()).map_err(std::io::Error::other)?;
-
-    let state = AppState::new_global();
+    // The path is handed to the auth state so it can notice the file changing:
+    // issuing a first key or revoking a compromised one takes effect on a
+    // running dashboard without a restart.
+    let auth = std::sync::Arc::new(
+        auth::AuthState::new(Some(auth_path), auth_file.keys, &global_cfg.server)
+            .map_err(std::io::Error::other)?,
+    );
+    let auth_enabled = auth.enabled();
+    let state = AppState::new_global_with_auth(auth);
     let cfg = apb_core::config::config_dir()
         .ok_or_else(|| std::io::Error::other("no config dir for the global server lock"))?;
     std::fs::create_dir_all(&cfg)?;
@@ -200,6 +217,20 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
         "apb dashboard (global): http://{}:{port}",
         display_host(bind)
     );
+    if auth_enabled {
+        println!("authentication is on: sign in with a key from `apb server key issue`");
+    }
+    if let Some(url) = global_cfg.server.public_base_url.as_deref() {
+        println!("public address: {url}");
+    }
+    // Behind a proxy with no trusted peer configured, every client arrives as
+    // the proxy's own address, so all of them share one rate-limit key and a
+    // single attacker can exhaust the failure budget for everyone.
+    if global_cfg.server.public_base_url.is_some() && global_cfg.server.trusted_proxies.is_empty() {
+        eprintln!(
+            "apb dashboard: server.public_base_url is set but server.trusted_proxies is empty; every client will share the proxy's IP as one rate-limit key. Add the proxy's address to server.trusted_proxies (see docs/DEPLOYMENT.md)"
+        );
+    }
     // ConnectInfo carries the socket peer address into every request, which the
     // auth layer needs for rate-limit keying and for deciding whether a
     // forwarded header came from a trusted proxy.
