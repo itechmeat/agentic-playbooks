@@ -1,10 +1,19 @@
 // The fetch layer every api module shares: JSON request/response handling,
 // a single place where a failed response becomes a readable Error, and the
 // two URL builders that keep ids escaped.
+//
+// Every request carries the CSRF marker header, and every 401 flips the shared
+// auth store so the app can show the login screen instead of a toast nobody
+// can act on. Both live in `../auth`, which imports nothing from here.
+
+import { apiHeaders, markUnauthenticated } from '../auth'
 
 export async function getJson<T>(url: string): Promise<T> {
-  const res = await fetch(url)
-  if (!res.ok) throw new ApiError(`${url}: HTTP ${res.status}`, res.status)
+  const res = await fetch(url, { headers: apiHeaders() })
+  if (!res.ok) {
+    if (res.status === 401) markUnauthenticated()
+    throw new ApiError(`${url}: HTTP ${res.status}`, res.status)
+  }
   return res.json() as Promise<T>
 }
 
@@ -26,8 +35,10 @@ export class ApiError extends Error {
 }
 
 export async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
-  const res = await fetch(url, init)
+  const headers = apiHeaders(init.headers as Record<string, string> | undefined)
+  const res = await fetch(url, { ...init, headers })
   if (!res.ok) {
+    if (res.status === 401) markUnauthenticated()
     const err = await errorMessage(res)
     throw new ApiError(err.message, res.status, err.code, err.detail)
   }

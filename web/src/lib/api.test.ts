@@ -30,19 +30,22 @@ function jsonResponse(body: unknown, status = 200) {
   })
 }
 
+const H = { 'x-requested-with': 'apb-dashboard' }
+const JSON_H = { 'content-type': 'application/json', 'x-requested-with': 'apb-dashboard' }
+
 describe('fetchPlaybook', () => {
   it('GETs /api/playbooks/{id} without version', async () => {
     const detail = { id: 'demo', version: '1.0.1', yaml: '', playbook: { id: 'demo', name: 'D', nodes: [], edges: [] }, layout: null, validation: [] }
     fetchMock.mockResolvedValueOnce(jsonResponse(detail))
     await fetchPlaybook('demo')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo', { headers: H })
   })
 
   it('appends ?version= when version is provided', async () => {
     const detail = { id: 'demo', version: '1.0.0', yaml: '', playbook: { id: 'demo', name: 'D', nodes: [], edges: [] }, layout: null, validation: [] }
     fetchMock.mockResolvedValueOnce(jsonResponse(detail))
     await fetchPlaybook('demo', '', '1.0.0')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?version=1.0.0')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?version=1.0.0', { headers: H })
   })
 
   it('encodes version with special characters', async () => {
@@ -50,14 +53,14 @@ describe('fetchPlaybook', () => {
     // `+` is URI-reserved: encodeURIComponent turns it into %2B, so this asserts
     // the query value is actually percent-encoded (a hyphen would pass through).
     await fetchPlaybook('demo', '', '1.0.0+build')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?version=1.0.0%2Bbuild')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?version=1.0.0%2Bbuild', { headers: H })
   })
 
   it('adds ?workspace= to select a project on the global dashboard', async () => {
     const detail = { id: 'demo', version: '1.0.0', yaml: '', playbook: { id: 'demo', name: 'D', nodes: [], edges: [] }, layout: null, validation: [] }
     fetchMock.mockResolvedValueOnce(jsonResponse(detail))
     await fetchPlaybook('demo', 'ws-abc', '1.0.0')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?workspace=ws-abc&version=1.0.0')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo?workspace=ws-abc&version=1.0.0', { headers: H })
   })
 })
 
@@ -68,7 +71,7 @@ describe('postAnswer', () => {
     expect(result).toEqual({ posted_seq: 0 })
     expect(fetchMock).toHaveBeenCalledWith('/api/runs/run-1/answer', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_H,
       body: JSON.stringify({ node: 'ask', answer: 'left' }),
     })
   })
@@ -108,7 +111,7 @@ describe('createPlaybook', () => {
     expect(result).toEqual({ id: 'demo', version: '1.0.1' })
     expect(fetchMock).toHaveBeenCalledWith('/api/playbooks', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_H,
       body: JSON.stringify({ id: 'demo', yaml: 'id: demo\n' }),
     })
   })
@@ -128,7 +131,7 @@ describe('updatePlaybook', () => {
     expect(result).toEqual({ id: 'demo', version: '1.0.2' })
     expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo', {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_H,
       body: JSON.stringify({ yaml: 'id: demo\nnodes: []\n' }),
     })
   })
@@ -145,7 +148,7 @@ describe('deletePlaybook', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ trashed: '.apb/trash/demo' }))
     const result = await deletePlaybook('demo')
     expect(result).toEqual({ trashed: '.apb/trash/demo' })
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo', { method: 'DELETE' })
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo', { method: 'DELETE', headers: H })
   })
 })
 
@@ -156,7 +159,7 @@ describe('saveLayout', () => {
     await saveLayout('demo', '1.0.0', layout)
     expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/demo/layout?version=1.0.0', {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_H,
       body: JSON.stringify({ layout }),
     })
   })
@@ -172,14 +175,14 @@ describe('input draft', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: 'x' }))
     const got = await fetchInputDraft('p')
     expect(got).toEqual({ instruction: 'x' })
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft', { headers: H })
 
     fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: 'hi' }))
     const saved = await saveInputDraft('p', 'hi')
     expect(saved).toEqual({ instruction: 'hi' })
     expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft', {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_H,
       body: JSON.stringify({ instruction: 'hi' }),
     })
   })
@@ -187,13 +190,13 @@ describe('input draft', () => {
   it('adds ?workspace= to select a project on the global dashboard', async () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: null }))
     await fetchInputDraft('p', 'ws-abc')
-    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft?workspace=ws-abc')
+    expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft?workspace=ws-abc', { headers: H })
 
     fetchMock.mockResolvedValueOnce(jsonResponse({ instruction: null }))
     await saveInputDraft('p', 'hi', 'ws-abc')
     expect(fetchMock).toHaveBeenCalledWith('/api/playbooks/p/input-draft?workspace=ws-abc', {
       method: 'PUT',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_H,
       body: JSON.stringify({ instruction: 'hi' }),
     })
   })
@@ -214,6 +217,7 @@ describe('fetchDiff', () => {
     expect(result).toEqual(diff)
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/playbooks/demo/diff?from=1.0.0&to=1.0.1',
+      { headers: H },
     )
   })
 })
@@ -230,7 +234,7 @@ describe('callConnector', () => {
     })
     expect(fetchMock).toHaveBeenCalledWith('/api/connectors/mock-tracker/call', {
       method: 'POST',
-      headers: { 'content-type': 'application/json' },
+      headers: JSON_H,
       body: JSON.stringify({
         function: 'list_items',
         account: 'acct1',
@@ -264,5 +268,16 @@ describe('callConnector', () => {
       '/api/connectors/mock-tracker/call?workspace=ws-abc',
       expect.objectContaining({ method: 'POST' }),
     )
+  })
+})
+
+describe('401 handling', () => {
+  it('flips the auth store and still throws an ApiError', async () => {
+    const { auth } = await import('./auth')
+    const { get } = await import('svelte/store')
+    auth.set({ required: false, authenticated: true, checked: false })
+    fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'auth' }, 401))
+    await expect(fetchPlaybook('demo')).rejects.toThrow(/HTTP 401/)
+    expect(get(auth)).toEqual({ required: true, authenticated: false, checked: true })
   })
 })
