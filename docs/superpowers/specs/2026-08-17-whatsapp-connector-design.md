@@ -18,11 +18,11 @@ Deployment context: the receiving half only works when apb runs in the server-mo
 
 Base path is `{{account.base_url}}/{{account.graph_version}}`.
 
-- `send_text`, `send_template`, `send_media`, `mark_read`: `POST /{{account.phone_number_id}}/messages` with the typed body per Meta's envelope (`messaging_product: whatsapp`, `to`, `type`, ...). `send_text` uses `body: "{{args.message_body}}"` (the full typed body object passed by the caller, so no field leakage), same pattern as the twenty connector's typed bodies.
+- `send_text`, `send_template`, `send_media`, `mark_read`: `POST /{{account.phone_number_id}}/messages` with the typed body per Meta's envelope (`messaging_product: whatsapp`, `to`, `type`, ...). `send_text`, `send_template` and `mark_read` fix their envelope in the connector (the message type is baked into the body template, filling only the caller-supplied fields), so a `send_text` grant cannot be used to send a template: the grant boundary is per-function and must not be defeated by a single full-body passthrough. Only `send_media` uses a full-body passthrough (`body: "{{args.media}}"`), because the media object's JSON key must equal the dynamic `type` (image/video/document/audio) and a static template cannot express a key that varies at call time.
 - Template management on the WABA id: `list_templates` (`GET /{{account.waba_id}}/message_templates`, read_only, response_pick over name/status/category/language), `create_template` (`POST`), `delete_template` (`DELETE ?name=`).
 - Business profile: `get_business_profile` (`GET /{{account.phone_number_id}}/whatsapp_business_profile`, read_only), `update_business_profile` (`POST`).
 - Phone numbers: `list_phone_numbers` (`GET /{{account.waba_id}}/phone_numbers`, read_only), `get_phone_number` (`GET /{{account.phone_number_id}}`, read_only, the healthcheck).
-- Media: `upload_media` (`POST /{{account.phone_number_id}}/media`), `get_media_url` (`GET /{{media_id}}`, read_only), `delete_media` (`DELETE /{{media_id}}`).
+- Media: `get_media_url` (`GET /{{media_id}}`, read_only), `delete_media` (`DELETE /{{media_id}}`). Uploading is out of scope: `POST /{phone_number_id}/media` is multipart/form-data with a binary file part, and the connector schema expresses only JSON bodies or form-urlencoded fields, no multipart. Media is therefore sent by a hosted `link` (Meta fetches and caches it) or by a media `id` obtained out of band; the docs state this.
 - Healthcheck: `get_phone_number`, extracting `verified_name` and `quality_rating` via response_pick. Read-only, no side effects, proves both token validity and that the configured phone_number_id belongs to it.
 
 Every read_only function carries a non-empty `response_pick` (the official-connector gate requires it).
