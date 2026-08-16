@@ -45,6 +45,13 @@ pub const MAX_BODY_BYTES: usize = 256 * 1024;
 /// with a 200 and a counter rather than a 500, so a provider stops retrying
 /// instead of queueing days of redelivery against a busy account.
 pub const ACCEPT_RATE_PER_MIN: u32 = 600;
+/// Length of the accept window, anchored at the first accept in it rather
+/// than a calendar boundary, for the same reason as `FAILURE_WINDOW_MS`: a
+/// burst straddling a minute edge must not get two budgets (a calendar-minute
+/// window let a retry storm land ~1200 appends in 200ms by crossing the
+/// boundary). Same 60s length, so "per minute" in `ACCEPT_RATE_PER_MIN`'s
+/// name stays accurate.
+pub const ACCEPT_WINDOW_MS: u128 = 60_000;
 /// Rejected deliveries from one client address inside one window before that
 /// address is refused outright. Same value and same rolling-window shape as
 /// the dashboard's `auth::MAX_FAILURES_PER_WINDOW`, keyed and logged
@@ -54,33 +61,46 @@ pub const MAX_FAILURES_PER_WINDOW: u32 = 10;
 /// a calendar boundary, so a burst straddling a minute edge cannot get two
 /// budgets.
 pub const FAILURE_WINDOW_MS: u128 = 60_000;
-/// Bound on the failure map, mirroring `auth::MAX_RATE_LIMIT_ENTRIES`: an
-/// attacker rotating source addresses must not be able to grow it without
-/// limit.
+/// Bound on the rolling-window maps, mirroring `auth::MAX_RATE_LIMIT_ENTRIES`:
+/// an attacker rotating source addresses (failures) or hammering many
+/// accounts (accepts) must not be able to grow either one without limit.
 pub const MAX_RATE_LIMIT_ENTRIES: usize = 4096;
 
-/// The counters, all rolled by comparison rather than by a timer. Accepts are
-/// keyed by calendar minute per account (a coarse cap on a bounded key set);
-/// failures use the rolling `(window_start_ms, count)` pair the dashboard's
-/// limiter uses, over an unbounded key set that therefore needs pruning.
+/// Prunes one rolling `(window_start_ms, count)` map: drops every entry whose
+/// window has expired, and clears the map outright when it has grown past
+/// `MAX_RATE_LIMIT_ENTRIES`. Clearing rather than evicting is deliberate,
+/// since the alternative is an LRU whose eviction order an attacker chooses.
+/// Shared by both `Windows` maps so the accept window gets exactly the same
+/// shape as the failure window, not a lookalike with its own bugs.
+fn prune_window<K: Eq + std::hash::Hash>(
+    map: &mut HashMap<K, (u128, u32)>,
+    now_ms: u128,
+    window_ms: u128,
+) {
+    map.retain(|_, (start, _)| now_ms.saturating_sub(*start) < window_ms);
+    if map.len() > MAX_RATE_LIMIT_ENTRIES {
+        map.clear();
+    }
+}
+
+/// The counters, all rolled by comparison rather than by a timer. Both maps
+/// use the same rolling `(window_start_ms, count)` shape, anchored at the
+/// first event in the window rather than a calendar boundary: `accepts` is
+/// keyed per account, `failures` per client address.
 #[derive(Debug, Default)]
 struct Windows {
-    accepts: HashMap<String, (u64, u32)>,
+    accepts: HashMap<String, (u128, u32)>,
     failures: HashMap<IpAddr, (u128, u32)>,
     dropped: HashMap<String, u64>,
 }
 
 impl Windows {
-    /// Drops expired failure windows, and clears the map outright when it has
-    /// grown past its cap. Copied from `auth::RateLimiter::prune`: clearing
-    /// rather than evicting is deliberate, since the alternative is an LRU
-    /// that an attacker chooses the eviction order of.
     fn prune_failures(&mut self, now_ms: u128) {
-        self.failures
-            .retain(|_, (start, _)| now_ms.saturating_sub(*start) < FAILURE_WINDOW_MS);
-        if self.failures.len() > MAX_RATE_LIMIT_ENTRIES {
-            self.failures.clear();
-        }
+        prune_window(&mut self.failures, now_ms, FAILURE_WINDOW_MS);
+    }
+
+    fn prune_accepts(&mut self, now_ms: u128) {
+        prune_window(&mut self.accepts, now_ms, ACCEPT_WINDOW_MS);
     }
 }
 
@@ -160,14 +180,21 @@ impl IngestState {
     }
 
     /// Whether one more append is allowed for this account in the current
-    /// minute. Counts the drop when it is not.
+    /// rolling window. Counts the drop when it is not. Mirrors
+    /// `note_failure`: prune first, anchor the window at the first accept,
+    /// and restart it once it has expired. Anchoring at first-use rather than
+    /// a calendar minute matters here specifically: a calendar-minute window
+    /// let a burst straddling the boundary get two separate budgets back to
+    /// back (~1200 appends in 200ms), which is exactly the retry-storm case
+    /// this cap exists to bound.
     fn allow_accept(&self, connector: &str, account: &str) -> bool {
         let key = pair(connector, account);
-        let minute = current_minute();
+        let now = apb_core::clock::now_ms();
         let mut guard = self.windows.lock().unwrap_or_else(|e| e.into_inner());
-        let entry = guard.accepts.entry(key.clone()).or_insert((minute, 0));
-        if entry.0 != minute {
-            *entry = (minute, 0);
+        guard.prune_accepts(now);
+        let entry = guard.accepts.entry(key.clone()).or_insert((now, 0));
+        if now.saturating_sub(entry.0) >= ACCEPT_WINDOW_MS {
+            *entry = (now, 0);
         }
         if entry.1 >= ACCEPT_RATE_PER_MIN {
             *guard.dropped.entry(key).or_insert(0) += 1;
@@ -210,10 +237,6 @@ impl IngestState {
 
 fn pair(connector: &str, account: &str) -> String {
     format!("{connector}/{account}")
-}
-
-fn current_minute() -> u64 {
-    apb_core::clock::now_ms_u64() / 60_000
 }
 
 /// The whole ingest surface. Three routes and no fallback: an unknown path is
@@ -348,7 +371,9 @@ async fn get_hook_handler(
 }
 
 /// `POST /hooks/{connector}/{account}`: one delivery. Verify, append, answer
-/// 200 with an empty body. Nothing slower than that happens on this path.
+/// 200 with an empty body. Secret resolution and signature verification run
+/// on the blocking pool (`spawn_blocking`), never inline on this async task;
+/// nothing else on this path does any real work.
 async fn post_hook_handler(
     State(state): State<IngestState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -371,26 +396,55 @@ async fn post_hook_handler(
     let Some((doc, acct)) = resolve_target(&connector, &account) else {
         return flat(StatusCode::NOT_FOUND);
     };
+    // Cloned out before `doc` moves into the blocking closure below: this is
+    // the only piece of it still needed afterward (`dedupe_path`).
     let hook = doc
         .webhook
-        .as_ref()
+        .clone()
         .expect("resolve_target checked the block");
 
     let presented = headers
         .get(hook.signature.header.as_str())
         .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let Some(secret) = render_from_account(&hook.signature.secret, &doc, &acct) else {
-        state.note_failure(client);
-        log_rejected(client, &connector, &account);
-        return flat(StatusCode::UNAUTHORIZED);
-    };
-    // Over the exact bytes received: never a reparsed or reserialized body,
-    // which would change them and break the MAC.
-    if !webhook::verify_signature_hex(&secret, &body, presented, &hook.signature.prefix) {
-        state.note_failure(client);
-        log_rejected(client, &connector, &account);
-        return flat(StatusCode::UNAUTHORIZED);
+        .unwrap_or("")
+        .to_string();
+    let secret_template = hook.signature.secret.clone();
+    let prefix = hook.signature.prefix.clone();
+    // Secret resolution can run a `{{cmd:...}}` reference, which shells out
+    // and is polled with a blocking sleep for up to `CMD_SECRET_TIMEOUT`
+    // (10s). That must never run on a tokio worker thread: this whole path is
+    // reachable by an unauthenticated caller sending a bad-signature POST, so
+    // without `spawn_blocking` a handful of concurrent requests could starve
+    // every other request on the runtime, including `/healthz`.
+    // `spawn_blocking` moves the closure (and everything it captures - the
+    // secret value included) onto the blocking pool and back only carries out
+    // the `bool`/`None` verdict, so the resolved secret never crosses back
+    // into async code at all.
+    let verify_body = body.clone();
+    let verified = tokio::task::spawn_blocking(move || {
+        let secret = render_from_account(&secret_template, &doc, &acct)?;
+        // Over the exact bytes received: never a reparsed or reserialized
+        // body, which would change them and break the MAC.
+        Some(webhook::verify_signature_hex(
+            &secret,
+            &verify_body,
+            &presented,
+            &prefix,
+        ))
+    })
+    .await;
+    match verified {
+        Ok(Some(true)) => {}
+        Ok(Some(false) | None) => {
+            state.note_failure(client);
+            log_rejected(client, &connector, &account);
+            return flat(StatusCode::UNAUTHORIZED);
+        }
+        Err(_) => {
+            // The blocking task panicked (should not happen on this path);
+            // fail closed rather than silently treat it as verified.
+            return flat(StatusCode::INTERNAL_SERVER_ERROR);
+        }
     }
 
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
@@ -432,8 +486,8 @@ fn resolve_target(connector: &str, account: &str) -> Option<(ConnectorDoc, Accou
         }
         apb_core::profile::validate_profile_name(segment).ok()?;
     }
-    let loaded = store::load(connector).ok()?;
-    loaded.doc.webhook.as_ref()?;
+    let doc = load_connector_doc(connector)?;
+    doc.webhook.as_ref()?;
     // Global accounts only: the hook path carries no workspace segment, so a
     // project-scoped account has no unambiguous project root at delivery
     // time, and picking one arbitrarily would silently change which secret
@@ -442,7 +496,27 @@ fn resolve_target(connector: &str, account: &str) -> Option<(ConnectorDoc, Accou
     let raw = std::fs::read_to_string(path).ok()?;
     let file: AccountsFile = serde_yaml_ng::from_str(&raw).ok()?;
     let acct = file.accounts.into_iter().find(|a| a.name == account)?;
-    Some((loaded.doc, acct))
+    Some((doc, acct))
+}
+
+/// Reads and parses one connector's manifest directly, deliberately skipping
+/// `store::load`'s whole-folder `content::tree_digest`. That digest exists so
+/// the dashboard can tell whether an approved connector's content changed
+/// since it was trusted (`content.rs`, connector approval) - a decision that
+/// belongs to the dashboard's approval flow, never to ingest. The signature
+/// on the request is the authentication here; a trust digest is not read or
+/// checked on this path at all. Every delivery reaches this call, including
+/// ones the accept cap is about to drop (`resolve_target` runs first), so
+/// hashing the whole connector directory - `connector.yaml`, `PUBLIC.md`, and
+/// any other files alongside them - per request would put real, unbounded-by-
+/// account-config CPU work on a path an unauthenticated caller can trigger at
+/// will. `connector` was already validated as a plain `[a-z0-9-]` slug by
+/// `resolve_target`, so joining it into a path here carries no traversal
+/// risk.
+fn load_connector_doc(name: &str) -> Option<ConnectorDoc> {
+    let base = store::connectors_dir()?;
+    let yaml = std::fs::read_to_string(base.join(name).join("connector.yaml")).ok()?;
+    ConnectorDoc::from_yaml(&yaml, name).ok()
 }
 
 /// Renders one webhook template against the account, resolving only the

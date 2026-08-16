@@ -359,7 +359,10 @@ async fn the_per_account_accept_cap_drops_with_a_200() {
     let cfg = tempfile::tempdir().unwrap();
     let _guards = setup(cfg.path());
     // One state across the whole burst: the window lives in the state, not
-    // in the router.
+    // in the router. The accept window is anchored at the first accept
+    // (rolling, the same shape the failure limiter uses), not at a calendar
+    // minute boundary, so this burst gets exactly one budget regardless of
+    // when in the real minute it happens to run.
     let state = fresh_state();
 
     for i in 0..(ACCEPT_RATE_PER_MIN + 5) {
@@ -500,6 +503,36 @@ async fn the_failure_limiter_and_the_log_key_on_the_forwarded_ip_behind_a_truste
         res.status(),
         StatusCode::UNAUTHORIZED,
         "an untrusted peer keys on its socket address, whatever it forwards"
+    );
+}
+
+#[tokio::test]
+async fn a_client_blocked_by_the_failure_limiter_stays_blocked_even_with_a_valid_signature() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let _guards = setup(cfg.path());
+    let body = br#"{"id":"evt-1"}"#;
+    let state = fresh_state();
+
+    // Exhaust the failure budget with bad signatures.
+    for _ in 0..=apb_server::ingest::MAX_FAILURES_PER_WINDOW {
+        let app = build_ingest_router(state.clone());
+        let (status, _) = send(app, post(body, Some("sha256=deadbeef"))).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    // `peer_allowed` is checked before the signature is ever verified, so a
+    // now-blocked client stays blocked for the rest of the window no matter
+    // what it presents next - including a signature that would otherwise
+    // verify. If the order were ever flipped (verify first, block second),
+    // this request would slip through as a 200.
+    let app = build_ingest_router(state.clone());
+    let (status, text) = send(app, post(body, Some(&signed(body)))).await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert!(text.is_empty());
+    assert!(
+        inbox_events(cfg.path()).is_empty(),
+        "nothing was ever stored for the blocked client"
     );
 }
 
