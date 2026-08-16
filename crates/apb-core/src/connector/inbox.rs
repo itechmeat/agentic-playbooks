@@ -194,6 +194,20 @@ impl Inbox {
         self.append_with(provider_id, body, &Retention::default())
     }
 
+    /// Whether `provider_id` is already in the dedupe index, read without
+    /// taking the directory lock (like `cursor` and `depth`).
+    ///
+    /// Advisory by construction: `append_with` re-checks under the lock and
+    /// remains the authority, so a racing concurrent append can still turn a
+    /// `false` here into an `Appended::Duplicate` there. It exists so a caller
+    /// can decide something *before* the append without changing what gets
+    /// stored - the ingest listener uses it to keep a provider's retry storm
+    /// on one message from spending the per-account accept budget that new
+    /// deliveries need.
+    pub fn is_duplicate(&self, provider_id: &str) -> Result<bool, InboxError> {
+        Ok(self.read_dedupe()?.iter().any(|id| id == provider_id))
+    }
+
     /// Appends one delivery, then enforces `retention`. Everything happens
     /// under one directory lock: the dedupe check, the `seq` derivation, the
     /// append itself, and the retention rewrite. A duplicate provider id
@@ -203,6 +217,21 @@ impl Inbox {
         provider_id: &str,
         body: &Value,
         retention: &Retention,
+    ) -> Result<Appended, InboxError> {
+        self.append_bounded(provider_id, body, retention, DEDUPE_WINDOW)
+    }
+
+    /// `append_with` with an explicit dedupe-index bound, the way `retention`
+    /// is already explicit. Production always passes [`DEDUPE_WINDOW`]; the
+    /// seam exists so a test can prove the index rolls at its bound without
+    /// writing ten thousand events (that test is quadratic in the bound, and
+    /// at the real value it dominated the whole crate's suite).
+    pub fn append_bounded(
+        &self,
+        provider_id: &str,
+        body: &Value,
+        retention: &Retention,
+        dedupe_window: usize,
     ) -> Result<Appended, InboxError> {
         std::fs::create_dir_all(&self.dir).map_err(|e| self.io(&e))?;
         let _lock = lock_dir(&self.dir, INBOX_LOCK).map_err(|e| self.io(&e))?;
@@ -224,8 +253,8 @@ impl Inbox {
         self.append_line(EVENTS_FILE, &line)?;
 
         seen.push(provider_id.to_string());
-        if seen.len() > DEDUPE_WINDOW {
-            let excess = seen.len() - DEDUPE_WINDOW;
+        if seen.len() > dedupe_window {
+            let excess = seen.len() - dedupe_window;
             seen.drain(..excess);
         }
         self.write_dedupe(&seen)?;

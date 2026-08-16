@@ -120,9 +120,19 @@ fn a_duplicate_provider_id_is_not_appended() {
     assert_eq!(events[0].body["n"], 1, "the first delivery is the one kept");
 }
 
+/// The index rolls at its bound, asserted through `append_bounded`'s explicit
+/// window rather than at the production [`DEDUPE_WINDOW`].
+///
+/// Each append rewrites the whole index, so the loop is quadratic in the
+/// window: at 10 000 this one test took over a minute and accounted for most
+/// of the crate's suite. The behavior under test is the drain arithmetic,
+/// which does not care what the number is, so the window is a parameter and
+/// the production value is asserted separately (below) to be the one the
+/// production entry point passes.
 #[test]
 fn the_dedupe_index_is_bounded() {
     use apb_core::connector::inbox::DEDUPE_WINDOW;
+    const WINDOW: usize = 32;
     let dir = tempfile::tempdir().unwrap();
     let box_ = inbox(&dir);
     // A generous retention keeps every event, so only the index rolls.
@@ -130,17 +140,31 @@ fn the_dedupe_index_is_bounded() {
         max_bytes: 64 * 1024 * 1024,
         max_age_ms: u64::MAX,
     };
-    for i in 0..(DEDUPE_WINDOW + 5) {
-        box_.append_with(&format!("m{i}"), &json!({"i": i}), &keep)
+    for i in 0..(WINDOW + 5) {
+        box_.append_bounded(&format!("m{i}"), &json!({"i": i}), &keep, WINDOW)
             .unwrap();
     }
     let raw = std::fs::read_to_string(box_.dir().join("dedupe.idx")).unwrap();
     let lines = raw.lines().filter(|l| !l.trim().is_empty()).count();
-    assert_eq!(
-        lines, DEDUPE_WINDOW,
-        "the index holds the last {DEDUPE_WINDOW}"
-    );
+    assert_eq!(lines, WINDOW, "the index holds the last {WINDOW}");
     assert!(!raw.contains("m0\n"), "the oldest ids rolled out");
+    assert!(raw.contains("m36\n"), "and the newest ones stayed");
+
+    // The production window is far above anything this test writes, so an
+    // ordinary `append` never rolls here: the parameterization is a test seam,
+    // not a behavior change.
+    const _: () = assert!(DEDUPE_WINDOW > WINDOW * 100);
+    let fresh = tempfile::tempdir().unwrap();
+    let plain = inbox(&fresh);
+    for i in 0..(WINDOW + 5) {
+        plain.append(&format!("m{i}"), &json!({"i": i})).unwrap();
+    }
+    let raw = std::fs::read_to_string(plain.dir().join("dedupe.idx")).unwrap();
+    assert_eq!(
+        raw.lines().filter(|l| !l.trim().is_empty()).count(),
+        WINDOW + 5,
+        "the default entry point keeps everything below its own bound"
+    );
 }
 
 #[test]

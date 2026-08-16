@@ -531,11 +531,39 @@ async fn the_failure_limiter_and_the_log_key_on_the_forwarded_ip_behind_a_truste
         assert_eq!(res.status(), StatusCode::UNAUTHORIZED);
     }
 
-    // A different forwarded sender is unaffected: a good delivery from it
-    // still succeeds, which is exactly what would break if the limiter keyed
-    // on the proxy address.
-    let req = Request::post(format!("/hooks/{CONNECTOR}/{ACCOUNT}"))
+    // Which address the budget landed on is observed through the challenge
+    // handshake, not through a delivery: a valid signature is accepted
+    // whatever the limiter thinks (see
+    // `a_tripped_failure_limiter_still_accepts_a_validly_signed_delivery`),
+    // so a POST cannot tell a blocked address from an allowed one. A GET
+    // carries no signature, so the limiter is the only thing standing between
+    // a correct token and its echo.
+    let challenge = format!("hub.mode=subscribe&hub.verify_token={TOKEN}&hub.challenge=1158201444");
+    let blocked = Request::get(format!("/hooks/{CONNECTOR}/{ACCOUNT}?{challenge}"))
+        .header("X-Forwarded-For", "203.0.113.9")
+        .body(Body::empty())
+        .unwrap();
+    let res = send_from(build_ingest_router(state.clone()), blocked, PEER).await;
+    assert_eq!(
+        res.status(),
+        StatusCode::UNAUTHORIZED,
+        "the budget landed on the forwarded sender"
+    );
+
+    // A different forwarded sender is unaffected, which is exactly what would
+    // break if the limiter keyed on the proxy address: one bad sender behind
+    // a same-host proxy would lock out every provider.
+    let other = Request::get(format!("/hooks/{CONNECTOR}/{ACCOUNT}?{challenge}"))
         .header("X-Forwarded-For", "198.51.100.4")
+        .body(Body::empty())
+        .unwrap();
+    let res = send_from(build_ingest_router(state.clone()), other, PEER).await;
+    assert_eq!(res.status(), StatusCode::OK);
+
+    // And a delivery from the blocked forwarded sender still lands, because
+    // it is validly signed.
+    let req = Request::post(format!("/hooks/{CONNECTOR}/{ACCOUNT}"))
+        .header("X-Forwarded-For", "203.0.113.9")
         .header("X-Hub-Signature-256", signed(body))
         .body(Body::from(body.to_vec()))
         .unwrap();
@@ -553,10 +581,9 @@ async fn the_failure_limiter_and_the_log_key_on_the_forwarded_ip_behind_a_truste
             .unwrap();
         send_from(build_ingest_router(untrusted.clone()), req, PEER).await;
     }
-    let req = Request::post(format!("/hooks/{CONNECTOR}/{ACCOUNT}"))
+    let req = Request::get(format!("/hooks/{CONNECTOR}/{ACCOUNT}?{challenge}"))
         .header("X-Forwarded-For", "198.51.100.4")
-        .header("X-Hub-Signature-256", signed(body))
-        .body(Body::from(body.to_vec()))
+        .body(Body::empty())
         .unwrap();
     let res = send_from(build_ingest_router(untrusted), req, PEER).await;
     assert_eq!(
@@ -566,8 +593,18 @@ async fn the_failure_limiter_and_the_log_key_on_the_forwarded_ip_behind_a_truste
     );
 }
 
+/// The failure limiter guards the rejection path only (spec
+/// 2026-08-16-webhook-ingest-design: "a tripped limiter never rejects a
+/// validly signed delivery").
+///
+/// This is the property the documented topology depends on. Behind a
+/// same-host TLS proxy with `server.trusted_proxies` unset, every delivery is
+/// attributed to the proxy's loopback address, so eleven bad-signature POSTs
+/// from anywhere on the internet would otherwise block every provider for the
+/// rest of the window and the events would be lost past the provider's retry
+/// budget.
 #[tokio::test]
-async fn a_client_blocked_by_the_failure_limiter_stays_blocked_even_with_a_valid_signature() {
+async fn a_tripped_failure_limiter_still_accepts_a_validly_signed_delivery() {
     let _lock = crate::common::env_lock().await;
     let cfg = tempfile::tempdir().unwrap();
     let _guards = setup(cfg.path());
@@ -581,19 +618,112 @@ async fn a_client_blocked_by_the_failure_limiter_stays_blocked_even_with_a_valid
         assert_eq!(status, StatusCode::UNAUTHORIZED);
     }
 
-    // `peer_allowed` is checked before the signature is ever verified, so a
-    // now-blocked client stays blocked for the rest of the window no matter
-    // what it presents next - including a signature that would otherwise
-    // verify. If the order were ever flipped (verify first, block second),
-    // this request would slip through as a 200.
     let app = build_ingest_router(state.clone());
     let (status, text) = send(app, post(body, Some(&signed(body)))).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a valid signature is accepted whatever the limiter thinks of this address"
+    );
     assert!(text.is_empty());
+    assert_eq!(
+        inbox_events(cfg.path()).len(),
+        1,
+        "and the delivery is actually stored"
+    );
+
+    // What the tripped limiter does buy: a request from the same address that
+    // carries nothing which could verify is refused without resolving a
+    // secret or hashing anything.
+    for signature in [None, Some("sha256=deadbeef"), Some("not-even-prefixed")] {
+        let app = build_ingest_router(state.clone());
+        let (status, text) = send(app, post(br#"{"id":"evt-2"}"#, signature)).await;
+        assert_eq!(status, StatusCode::UNAUTHORIZED, "signature {signature:?}");
+        assert!(text.is_empty(), "the refusal carries no detail: {text}");
+    }
+    assert_eq!(
+        inbox_events(cfg.path()).len(),
+        1,
+        "nothing more was stored for the blocked client"
+    );
+}
+
+/// The Critical of the final review: a webhook secret that resolves to the
+/// empty string must authenticate nobody.
+///
+/// An env var that exists but is empty (`APB_INGEST_TEST_APP_SECRET=`) makes
+/// `resolve_var` return `Some("")`, which every layer above it reads as a
+/// successfully resolved secret. `HMAC-SHA256` takes a zero-length key, so
+/// without a guard the correct signature is one any caller on the internet
+/// can compute.
+#[tokio::test]
+async fn an_empty_resolved_secret_authenticates_nobody() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let _guards = setup(cfg.path());
+    let _empty = set_var(SECRET_VAR, "");
+
+    let body = br#"{"id":"evt-1"}"#;
+    let forged = format!(
+        "sha256={}",
+        apb_core::connector::webhook::hmac_sha256_hex(b"", body)
+    );
+    for signature in [
+        Some(forged.as_str()),
+        Some("sha256=0000000000000000000000000000000000000000000000000000000000000000"),
+        None,
+    ] {
+        let app = build_ingest_router(fresh_state());
+        let (status, text) = send(app, post(body, signature)).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "an empty secret is a flat refusal, signature {signature:?}"
+        );
+        assert!(text.is_empty(), "no detail is disclosed: {text}");
+    }
     assert!(
         inbox_events(cfg.path()).is_empty(),
-        "nothing was ever stored for the blocked client"
+        "nothing is stored under an empty secret"
     );
+}
+
+/// The accept cap is charged for a genuinely new delivery only.
+///
+/// Charging it before the dedupe decision let a provider's retry storm on one
+/// message spend the whole per-minute budget, after which new deliveries were
+/// dropped with a 200 the provider reads as "accepted" and never retries:
+/// permanent, silent loss. The spec and SECURITY.md both describe the cap as
+/// bounding accepted appends, and this is what makes that true.
+#[tokio::test]
+async fn a_retry_storm_on_one_message_does_not_spend_the_accept_budget() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let _guards = setup(cfg.path());
+    let state = fresh_state();
+
+    let first = br#"{"id":"evt-1"}"#;
+    let sig = signed(first);
+    // Far more redeliveries of one message than the whole budget.
+    for _ in 0..(ACCEPT_RATE_PER_MIN + 50) {
+        let app = build_ingest_router(state.clone());
+        let (status, _) = send(app, post(first, Some(&sig))).await;
+        assert_eq!(status, StatusCode::OK, "a retry is acknowledged");
+    }
+    assert_eq!(
+        state.dropped(CONNECTOR, ACCOUNT),
+        0,
+        "a duplicate is not a drop: it appends nothing, so it costs nothing"
+    );
+
+    // A genuinely new delivery still lands, which is the whole point.
+    let second = br#"{"id":"evt-2"}"#;
+    let app = build_ingest_router(state.clone());
+    let (status, _) = send(app, post(second, Some(&signed(second)))).await;
+    assert_eq!(status, StatusCode::OK);
+    let events = inbox_events(cfg.path());
+    assert_eq!(events.len(), 2, "the new delivery was stored, not dropped");
+    assert_eq!(events[1].provider_id, "evt-2");
 }
 
 // `common.rs` documents that any test mutating process env (here,

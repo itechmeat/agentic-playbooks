@@ -15,9 +15,15 @@
 //!
 //! Request order for a delivery: validate both path segments, resolve the
 //! connector and account (unknown pair is a flat 404), read the raw body with
-//! an explicit cap, verify the signature over those exact bytes, then append
-//! and answer 200 with an empty body. No run starts, no agent is spawned, and
-//! the body is never logged.
+//! an explicit cap, verify the signature over those exact bytes, decide
+//! whether it is a redelivery, charge the accept cap only if it is not, then
+//! append and answer 200 with an empty body. No run starts, no agent is
+//! spawned, and the body is never logged.
+//!
+//! A valid signature is accepted whatever the per-IP failure limiter thinks:
+//! the limiter guards the rejection path only, because the documented
+//! topology attributes every delivery to one proxy address and a stranger's
+//! bad signatures must not be able to cost a provider its events.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::net::{IpAddr, SocketAddr};
@@ -204,10 +210,11 @@ impl IngestState {
         true
     }
 
-    /// Whether this client is still allowed to be wrong. Called before the
-    /// expensive work so a flood of bad signatures costs almost nothing.
-    /// Mirrors `auth::RateLimiter::is_blocked`: over budget only while the
-    /// window that recorded the failures is still open.
+    /// Whether this client is still allowed to be wrong. Consulted only on
+    /// the rejection path (a request carrying nothing that could verify), so
+    /// a tripped limiter never refuses a validly signed delivery. Mirrors
+    /// `auth::RateLimiter::is_blocked`: over budget only while the window that
+    /// recorded the failures is still open.
     fn peer_allowed(&self, client: IpAddr) -> bool {
         let now = apb_core::clock::now_ms();
         let guard = self.windows.lock().unwrap_or_else(|e| e.into_inner());
@@ -370,10 +377,22 @@ async fn get_hook_handler(
     }
 }
 
-/// `POST /hooks/{connector}/{account}`: one delivery. Verify, append, answer
-/// 200 with an empty body. Secret resolution and signature verification run
-/// on the blocking pool (`spawn_blocking`), never inline on this async task;
-/// nothing else on this path does any real work.
+/// `POST /hooks/{connector}/{account}`: one delivery. Verify, dedupe, append,
+/// answer 200 with an empty body. Secret resolution and signature
+/// verification run on the blocking pool (`spawn_blocking`), never inline on
+/// this async task; nothing else on this path does any real work.
+///
+/// Two orderings on this path are load-bearing and were both got wrong once:
+///
+///   * the failure limiter never refuses a validly signed delivery (spec
+///     2026-08-16-webhook-ingest-design). It is consulted only where a
+///     refusal was going to happen anyway, so a flood attributed to one
+///     address (behind a same-host proxy with no `server.trusted_proxies`,
+///     that is every address) cannot cost a provider its events;
+///   * the accept cap is charged for a genuinely new delivery only, after
+///     the dedupe decision. Charging it earlier let a retry storm on one
+///     message spend the whole budget and silently drop new deliveries with
+///     a 200 the provider reads as "accepted".
 async fn post_hook_handler(
     State(state): State<IngestState>,
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
@@ -382,9 +401,6 @@ async fn post_hook_handler(
     body: Bytes,
 ) -> Response {
     let client = state.client_ip(&headers, peer.ip());
-    if !state.peer_allowed(client) {
-        return flat(StatusCode::UNAUTHORIZED);
-    }
     // The `DefaultBodyLimit` layer is what actually refuses an oversize
     // request, and it does so before this handler runs: reaching this line
     // means the body is already buffered and already within the cap. The
@@ -410,6 +426,23 @@ async fn post_hook_handler(
         .to_string();
     let secret_template = hook.signature.secret.clone();
     let prefix = hook.signature.prefix.clone();
+    // The only place the failure limiter refuses anything on this path, and
+    // it refuses only what could not have verified anyway: a client already
+    // over its budget that presents no signature, or one that is not even
+    // shaped like a digest this scheme could accept (wrong prefix, wrong
+    // length, non-hex). Deciding that needs no secret, so this costs nothing.
+    //
+    // The tradeoff is deliberate: a flooding address that sends well-formed
+    // hex still pays a full secret resolution and HMAC per request. Refusing
+    // it earlier is the only thing that would make the flood cheap, and it is
+    // exactly what would drop a validly signed delivery from an address a
+    // shared proxy attributes the flood to. Losing a provider's events is the
+    // worse failure, so the CPU is the price and the accept cap plus the body
+    // limit bound the rest.
+    if !state.peer_allowed(client) && !webhook::signature_is_well_formed(&presented, &prefix) {
+        log_rejected(client, &connector, &account);
+        return flat(StatusCode::UNAUTHORIZED);
+    }
     // Secret resolution can run a `{{cmd:...}}` reference, which shells out
     // and is polled with a blocking sleep for up to `CMD_SECRET_TIMEOUT`
     // (10s). That must never run on a tokio worker thread: this whole path is
@@ -423,6 +456,17 @@ async fn post_hook_handler(
     let verify_body = body.clone();
     let verified = tokio::task::spawn_blocking(move || {
         let secret = render_from_account(&secret_template, &doc, &acct)?;
+        // An empty resolved secret is a hard verification failure, not a
+        // secret. `resolve_var` returns `Some("")` for an env var that exists
+        // but is empty (`APP_SECRET=` in `secrets.env`, `export
+        // APP_SECRET="$UNSET"` in a wrapper), and `HMAC-SHA256` accepts a
+        // zero-length key, so treating that as resolved would let anyone on
+        // the internet sign a delivery. `verify_signature_hex` refuses it too;
+        // it is refused here as well so the misconfiguration cannot be one
+        // call site away from authenticating a stranger.
+        if secret.is_empty() {
+            return None;
+        }
         // Over the exact bytes received: never a reparsed or reserialized
         // body, which would change them and break the MAC.
         Some(webhook::verify_signature_hex(
@@ -453,6 +497,32 @@ async fn post_hook_handler(
         return flat(StatusCode::BAD_REQUEST);
     };
 
+    let id = webhook::dedupe_id(&parsed, &body, hook.dedupe_path.as_deref());
+    let Ok(store) = Inbox::open(&connector, &account) else {
+        return flat(StatusCode::INTERNAL_SERVER_ERROR);
+    };
+
+    // Dedupe first, and before the accept cap. A redelivery of something
+    // already stored appends nothing, so it must not spend the budget either:
+    // a provider retry storm on one message would otherwise burn the whole
+    // per-minute cap and make apb drop *new* deliveries with a 200, which the
+    // provider reads as "accepted" and never retries. Those events would be
+    // gone for good. A duplicate is a success from the provider's point of
+    // view: it delivered, apb has it, and the retry must stop.
+    //
+    // `is_duplicate` reads no lock and `append` re-checks under one, so two
+    // identical deliveries racing each other can still cost one budget slot
+    // between them. That is a bounded, one-per-race cost rather than the
+    // unbounded one this ordering removes.
+    match store.is_duplicate(&id) {
+        Ok(true) => return flat(StatusCode::OK),
+        Ok(false) => {}
+        Err(e) => {
+            eprintln!("apb ingest_store_error connector={connector} account={account}: {e}");
+            return flat(StatusCode::INTERNAL_SERVER_ERROR);
+        }
+    }
+
     // Over the cap: drop with a 200 and a counter, so the provider stops
     // retrying rather than filling the disk twice over. `allow_accept` bumps
     // the in-process counter (kept for tests that read `state.dropped`
@@ -462,21 +532,13 @@ async fn post_hook_handler(
     // Best effort: a failure to persist must not turn an already-rejected
     // delivery into a 500 for a request that was never going to be stored.
     if !state.allow_accept(&connector, &account) {
-        if let Ok(store) = Inbox::open(&connector, &account)
-            && let Err(e) = store.note_dropped()
-        {
+        if let Err(e) = store.note_dropped() {
             eprintln!("apb ingest_store_error connector={connector} account={account}: {e}");
         }
         return flat(StatusCode::OK);
     }
 
-    let id = webhook::dedupe_id(&parsed, &body, hook.dedupe_path.as_deref());
-    let Ok(store) = Inbox::open(&connector, &account) else {
-        return flat(StatusCode::INTERNAL_SERVER_ERROR);
-    };
     match store.append(&id, &parsed) {
-        // A duplicate is a success from the provider's point of view: it
-        // delivered, apb has it, and the retry must stop.
         Ok(Appended::Stored(_)) | Ok(Appended::Duplicate) => flat(StatusCode::OK),
         Err(e) => {
             // The error text names paths and io failures, never a body.

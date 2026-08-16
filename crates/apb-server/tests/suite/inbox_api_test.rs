@@ -108,6 +108,10 @@ async fn the_inbox_endpoint_reports_depth_and_the_callback_url() {
     assert_eq!(accounts[0]["account"], "main");
     assert_eq!(accounts[0]["pending"], 3);
     assert_eq!(accounts[0]["total"], 3);
+    assert_eq!(
+        accounts[0]["dropped"], 0,
+        "the persisted dropped counter is part of the payload even at zero"
+    );
     assert!(accounts[0]["last_received_at"].as_u64().unwrap() > 0);
     assert_eq!(
         accounts[0]["callback_url"],
@@ -213,6 +217,38 @@ async fn the_events_endpoint_skips_events_every_consumer_has_acked() {
     );
     assert_eq!(events[0]["seq"], 3);
     assert_eq!(events[0]["body"]["text"], "m3");
+}
+
+/// Silent truncation is not acceptable (spec 2026-08-16-webhook-ingest-design),
+/// so the accept cap's persisted counter has to reach the panel through this
+/// route. Asserted here at the HTTP layer, not only at the store: the panel
+/// reads this JSON and nothing else.
+#[tokio::test]
+async fn the_inbox_endpoint_reports_the_persisted_dropped_counter() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = set_var("APB_CONFIG_DIR", cfg.path());
+    apb_core::registry::init_project(root.path()).unwrap();
+    seed(cfg.path());
+
+    let inbox = apb_core::connector::inbox::Inbox::at(
+        &cfg.path().join("connector-inbox"),
+        "echo-hooks",
+        "main",
+    )
+    .unwrap();
+    for _ in 0..4 {
+        inbox.note_dropped().unwrap();
+    }
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/connectors/echo-hooks/inbox").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json["accounts"][0]["dropped"], 4,
+        "the drop count the doctor sees is the one the panel sees: {json}"
+    );
 }
 
 #[tokio::test]

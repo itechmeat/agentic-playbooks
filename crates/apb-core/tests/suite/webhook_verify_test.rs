@@ -85,6 +85,49 @@ fn verify_accepts_the_prefixed_header_and_rejects_everything_else() {
     ));
 }
 
+/// An empty resolved secret must verify nothing at all.
+///
+/// `HMAC-SHA256` accepts a zero-length key, so without an explicit guard the
+/// expected digest is one any caller can compute: the key is public by
+/// construction. An operator reaches that state by ordinary means (an
+/// `APP_SECRET=` line in `secrets.env`, `Environment=APP_SECRET=` in a
+/// systemd unit, `export APP_SECRET="$SOMETHING_UNSET"` in a wrapper), and
+/// `required: true` on the account field is satisfied by a present-but-empty
+/// value, so nothing else in the chain refuses it. The challenge path already
+/// refuses an empty configured token for the same reason.
+#[test]
+fn an_empty_secret_verifies_nothing() {
+    let body = br#"{"id":"evt-1"}"#;
+    // The signature an attacker would send: the correct HMAC under the empty
+    // key, which is exactly what a naive implementation would compute and
+    // accept.
+    let forged = format!("sha256={}", webhook::hmac_sha256_hex(b"", body));
+    assert!(
+        !webhook::verify_signature_hex("", body, &forged, "sha256="),
+        "an empty secret must not accept the digest of the empty key"
+    );
+    // And nothing else verifies under it either, well-formed or not.
+    for presented in [
+        "sha256=0000000000000000000000000000000000000000000000000000000000000000",
+        "sha256=",
+        "",
+        "deadbeef",
+    ] {
+        assert!(
+            !webhook::verify_signature_hex("", body, presented, "sha256="),
+            "empty secret, presented {presented:?}"
+        );
+    }
+    // The shape check is secret-free, so it is unaffected: it says only that
+    // this value could be a digest, never that it verifies.
+    assert!(webhook::signature_is_well_formed(&forged, "sha256="));
+    assert!(!webhook::signature_is_well_formed(
+        "sha256=nothex",
+        "sha256="
+    ));
+    assert!(!webhook::signature_is_well_formed("", "sha256="));
+}
+
 fn hub(mode: &str, token: &str, challenge: &str) -> BTreeMap<String, String> {
     BTreeMap::from([
         (HUB_MODE.to_string(), mode.to_string()),

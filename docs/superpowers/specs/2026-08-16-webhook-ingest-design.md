@@ -82,7 +82,7 @@ webhook:
 - The referenced fields (`verify_token`, `app_secret`) must exist in `account_fields` and be `secret: true`; the validator enforces this.
 - `dedupe_path` missing means dedupe falls back to the SHA-256 of the raw body.
 - The dedupe walker is a small array-aware helper in apb-core, deliberately separate from the engine's response_pick walker: core cannot depend on the engine crate, and response_pick's documented maps-only semantics must not change for existing connectors. The two notations stay distinct on purpose; the engine walker remains maps-only.
-- The webhook block is covered by the connector tree digest, and the secret references by the account digest, so editing either drops trust. This is the property that stops a shared config from silently weakening verification.
+- The webhook block is covered by the connector tree digest, and the secret references by the account digest, so editing either drops trust for run-time connector calls (the manifest snapshot path, `store::load`). The ingest listener itself deliberately does not consult the trust digest: it reads the global `connector.yaml` directly (a signature-authenticated inbound path resolved per request, not a run-scoped grant), so trust-drop is not the mechanism guarding it. The signature is the authentication for ingest; the digest coverage protects the run-time read path, not the listener.
 
 ## Connector schema: the inbox function kind
 

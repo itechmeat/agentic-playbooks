@@ -1,7 +1,15 @@
 //! The whole-folder tree digest covers the webhook block, so editing the
 //! signature header, the prefix, or the secret reference drops the
-//! connector's recorded trust. This is the property that stops a shared
-//! config from silently weakening verification.
+//! connector's recorded trust on the run-time path (the manifest snapshot
+//! taken through `store::load`).
+//!
+//! Scope, deliberately: this says nothing about the ingest listener. That
+//! path reads `connector.yaml` directly and never consults a trust digest,
+//! because hashing the whole connector folder per delivery would put unbounded
+//! CPU on a route an unauthenticated caller can trigger at will. The signature
+//! is the authentication for an inbound delivery; the digest coverage asserted
+//! here protects the read path a run takes, not the listener (spec
+//! 2026-08-16-webhook-ingest-design, webhook block).
 
 use apb_core::content::{TreeLimits, tree_digest};
 
