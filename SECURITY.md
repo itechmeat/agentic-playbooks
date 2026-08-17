@@ -68,6 +68,10 @@ connector grants and filesystem access. Inbox content is the first apb input
 authored by arbitrary internet users, not by the operator, so give
 inbox-reading nodes the narrowest `functions:` allowlist and the smallest
 `max_calls` budget that still works, and do not pair an inbox read with a
-grant you would not hand a stranger. Stored bodies are kept at mode 0600
+grant you would not hand a stranger. Size that budget knowing it is counted
+per executor attempt, not per run: retries, fallback steps, and the question
+and answer rounds of an interactive node each get a fresh count, so the
+containment a grant actually provides for one visit is `attempts x max_calls`.
+Stored bodies are kept at mode 0600
 under the global config directory and are never written to a run's event log
 or to stdout.

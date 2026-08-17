@@ -1000,10 +1000,9 @@ functions:
 /// which lands on disk before the agent - and therefore before any
 /// `apb connector call` subprocess it spawns - does any work.
 fn journal_attempt_started(run_dir: &Path, attempt: u32) {
-    let mut log = match apb_engine::event::EventLog::open(run_dir) {
-        Ok(log) => log,
-        Err(_) => apb_engine::event::EventLog::create(run_dir).unwrap(),
-    };
+    // `open` creates `events.jsonl` when it is absent, so it covers both the
+    // first attempt and every later one.
+    let mut log = apb_engine::event::EventLog::open(run_dir).unwrap();
     log.append(EventPayload::AttemptStarted {
         node: NODE.to_string(),
         attempt,
@@ -1122,7 +1121,7 @@ fn max_calls_budget_resets_on_a_new_node_visit_without_attempts() {
         false,
     );
     assert!(ok1);
-    let (_v2, ok2) = call(
+    let (v2, ok2) = call(
         run.path(),
         root.path(),
         "ping",
@@ -1131,6 +1130,13 @@ fn max_calls_budget_resets_on_a_new_node_visit_without_attempts() {
         false,
     );
     assert!(!ok2, "the visit's budget is spent");
+    // A script node has no attempt, so the message must name the visit rather
+    // than invent an attempt the node never had.
+    let msg2 = v2["error"]["message"].as_str().unwrap();
+    assert!(
+        msg2.contains("in this visit to the node") && !msg2.contains("attempt"),
+        "a node with no attempts should be told about its visit: {msg2}"
+    );
 
     let mut log = apb_engine::event::EventLog::open(run.path()).unwrap();
     log.append(EventPayload::NodeStarted {
@@ -1148,6 +1154,21 @@ fn max_calls_budget_resets_on_a_new_node_visit_without_attempts() {
         false,
     );
     assert!(ok3, "a new node visit starts a fresh budget: {v3}");
+
+    let (v4, ok4) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(!ok4, "the second visit has its own one-call budget: {v4}");
+    let msg4 = v4["error"]["message"].as_str().unwrap();
+    assert!(
+        msg4.contains("earlier visits") && !msg4.contains("attempt"),
+        "the excluded calls belong to earlier visits, not attempts: {msg4}"
+    );
 }
 
 #[test]

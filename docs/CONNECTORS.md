@@ -131,11 +131,21 @@ pattern as `skills`:
 `read_only: true`, resolved at run start and frozen in the manifest grant, so a
 later connector edit cannot widen a running grant. `max_calls` is a safety budget
 against a looping agent, not a rate limiter; exceeding it returns a `permission`
-error. The budget is counted per executor attempt: a retry or a fallback step
-starts a fresh count, because an executor that died mid-node is not the looping
-agent the budget exists to stop. For a node kind that runs no executor (a script
-node), the count restarts on each visit to the node instead. The binding is part of the playbook YAML and is covered by the playbook
-digest, so grants need no separate approval.
+error.
+
+The budget is counted **per executor attempt**, not per run and not per node
+visit: a retry or a fallback step starts a fresh count, because an executor that
+died mid-node is not the looping agent the budget exists to stop. Size the
+number with that multiplier in mind. The worst case for a single visit to the
+node is `attempts x max_calls`, where `attempts` counts the retries
+(`max_retries`) and every step of the fallback chain. An interactive node
+multiplies it further: each question and answer round re-spawns the agent, so
+each round is a new attempt with a fresh count even when nothing failed. For a
+node kind that runs no executor (a script node) there are no attempts, so the
+count restarts on each visit to the node instead.
+
+The binding is part of the playbook YAML and is covered by the playbook digest,
+so grants need no separate approval.
 
 A binding whose `accounts` allowlist is empty has no account to select, so every
 call fails at account selection. The connectors block in the agent's prompt

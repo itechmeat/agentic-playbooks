@@ -368,21 +368,22 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
     // grant, so a second connector granted to the same node must not consume
     // this connector's budget.
     if let Some(limit) = grant.max_calls {
-        let prior = prior_call_count(req.run_dir, req.node_id, req.connector);
+        let prior = prior_calls(req.run_dir, req.node_id, req.connector);
         if prior.current >= limit as u64 {
             let earlier = match prior.earlier {
                 0 => String::new(),
                 n => format!(
-                    "; {n} call(s) made by an earlier attempt of this node are not counted \
-                     against this one"
+                    "; {n} call(s) made by {} of this node are not counted against it",
+                    prior.unit.earlier_phrase()
                 ),
             };
             return Err(CallError::new(
                 CallErrorCode::Permission,
                 format!(
-                    "node `{}` reached its max_calls budget of {limit} for connector `{}` \
-                     in this attempt{earlier}",
-                    req.node_id, req.connector
+                    "node `{}` reached its max_calls budget of {limit} for connector `{}`{}{earlier}",
+                    req.node_id,
+                    req.connector,
+                    prior.unit.current_phrase()
                 ),
             ));
         }
@@ -936,13 +937,50 @@ fn prepare_play_call(
     )
 }
 
+/// Which anchor the budget scan floored at, and therefore what window the
+/// budget is counted over. A script node runs no executor and emits no
+/// `AttemptStarted`, so its unit is the node visit rather than the attempt;
+/// `Ungrounded` is the pre-anchor case where every call for the grant counts.
+#[derive(Clone, Copy)]
+enum BudgetUnit {
+    Attempt,
+    Visit,
+    Ungrounded,
+}
+
+impl BudgetUnit {
+    /// Names the window in the enforcement message, as a trailing clause.
+    /// Empty for `Ungrounded`: there is no window to name.
+    fn current_phrase(self) -> &'static str {
+        match self {
+            Self::Attempt => " in this attempt",
+            Self::Visit => " in this visit to the node",
+            Self::Ungrounded => "",
+        }
+    }
+
+    /// Names what the floor excluded. Plural: several earlier attempts or
+    /// visits aggregate into one `earlier` count. Unreachable for `Ungrounded`
+    /// (a zero floor leaves nothing before it), which is why it reads
+    /// generically.
+    fn earlier_phrase(self) -> &'static str {
+        match self {
+            Self::Attempt => "earlier attempts",
+            Self::Visit => "earlier visits",
+            Self::Ungrounded => "earlier work",
+        }
+    }
+}
+
 /// Prior `ConnectorCall` events for one `(node_id, connector)` grant, split at
-/// the current attempt's floor: `current` is what the budget is judged against,
-/// `earlier` is what previous attempts of the same node spent and is reported
-/// but never charged.
+/// the current window's floor: `current` is what the budget is judged against,
+/// `earlier` is what previous attempts (or visits) of the same node spent and
+/// is reported but never charged. `unit` says which of the two the floor found,
+/// so the enforcement message never invents an attempt a script node never had.
 struct PriorCalls {
     current: u64,
     earlier: u64,
+    unit: BudgetUnit,
 }
 
 /// Counts prior `ConnectorCall` events for this `(node_id, connector)` grant,
@@ -954,10 +992,10 @@ struct PriorCalls {
 ///
 /// The scan starts at [`attempt_floor`], so an executor that died with the
 /// budget spent does not hand its successor a guaranteed `Permission` failure.
-fn prior_call_count(run_dir: &Path, node_id: &str, connector: &str) -> PriorCalls {
+fn prior_calls(run_dir: &Path, node_id: &str, connector: &str) -> PriorCalls {
     crate::event::read_all(run_dir)
         .map(|events| {
-            let floor = attempt_floor(&events, node_id);
+            let (floor, unit) = attempt_floor(&events, node_id);
             let is_call = |e: &crate::event::Event| {
                 matches!(
                     &e.payload,
@@ -968,15 +1006,18 @@ fn prior_call_count(run_dir: &Path, node_id: &str, connector: &str) -> PriorCall
             PriorCalls {
                 current: events[floor..].iter().filter(|e| is_call(e)).count() as u64,
                 earlier: events[..floor].iter().filter(|e| is_call(e)).count() as u64,
+                unit,
             }
         })
         .unwrap_or(PriorCalls {
             current: 0,
             earlier: 0,
+            unit: BudgetUnit::Ungrounded,
         })
 }
 
-/// Index of the first event belonging to the node's current executor attempt.
+/// Index of the first event belonging to the node's current executor attempt,
+/// with the [`BudgetUnit`] that index means.
 ///
 /// The budget bounds playbook logic, not executor liveness: a retry or a
 /// fallback step is a new executor that never made the dead one's calls, so the
@@ -985,24 +1026,28 @@ fn prior_call_count(run_dir: &Path, node_id: &str, connector: &str) -> PriorCall
 /// the adapter invokes immediately after the child process exists and before
 /// any of its work runs (`scheduler/node.rs`), while `EventLog::append` writes
 /// and flushes one line - so an `apb connector call` subprocess spawned by that
-/// agent always sees it.
+/// agent always sees it. That guarantee is one of write ORDER, not of
+/// construction: if the anchor were ever missing the floor would fall back to
+/// the visit (or to zero), which counts strictly more calls, so the failure
+/// direction is the stricter, pre-fix behavior and never a wider budget.
 ///
 /// `NodeKind::Script` never emits `AttemptStarted`, so the fallback is the last
 /// `NodeStarted`, the per-visit floor `scheduler/cache.rs` already uses. With
 /// neither anchor on disk the floor is 0 and every call for the grant counts.
-fn attempt_floor(events: &[crate::event::Event], node_id: &str) -> usize {
-    events
-        .iter()
-        .rposition(
-            |e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == node_id),
-        )
-        .or_else(|| {
-            events.iter().rposition(
-                |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == node_id),
-            )
-        })
-        .map(|i| i + 1)
-        .unwrap_or(0)
+fn attempt_floor(events: &[crate::event::Event], node_id: &str) -> (usize, BudgetUnit) {
+    let attempt = events.iter().rposition(
+        |e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == node_id),
+    );
+    if let Some(i) = attempt {
+        return (i + 1, BudgetUnit::Attempt);
+    }
+    let visit = events.iter().rposition(
+        |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == node_id),
+    );
+    match visit {
+        Some(i) => (i + 1, BudgetUnit::Visit),
+        None => (0, BudgetUnit::Ungrounded),
+    }
 }
 
 /// Loads the snapshotted `ConnectorDoc` from `run_dir/connectors/<name>.yaml`.
