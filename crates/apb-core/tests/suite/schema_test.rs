@@ -200,11 +200,39 @@ edges:
 "#;
 
 /// A `human_review` node without `prompt:` parses fine (the field is
-/// optional) and carries `None`.
+/// optional), carries `None`, and - because a prompt-less playbook is
+/// re-serialized on real paths (`versioning::playbook_yaml_for_version`,
+/// `playbook_create`'s canonical write, the run-snapshot writer) - must NOT
+/// grow a `prompt: null` line on round-trip (review fix round 1: the field
+/// needs `skip_serializing_if`, not just `#[serde(default)]`, or every
+/// existing prompt-less `human_review` node in a playbook picks one up the
+/// next time it is written).
 #[test]
 fn human_review_without_prompt_is_none() {
     let playbook = Playbook::from_yaml(HUMAN_REVIEW_NO_PROMPT_WF).unwrap();
     match &playbook.node("gate").unwrap().kind {
+        NodeKind::HumanReview { prompt, .. } => assert_eq!(*prompt, None),
+        other => panic!("expected human_review, got {other:?}"),
+    }
+
+    // Check the `gate` node's own mapping only - the playbook's `done` node is
+    // a `finish` node whose *own* `prompt` field (a distinct, pre-existing,
+    // out-of-scope field) legitimately serializes as `prompt: null` today, so
+    // a whole-document substring check would false-positive on that sibling.
+    let yaml = serde_yaml_ng::to_string(&playbook).unwrap();
+    let value: serde_yaml_ng::Value = serde_yaml_ng::from_str(&yaml).unwrap();
+    let gate_node = value["nodes"]
+        .as_sequence()
+        .unwrap()
+        .iter()
+        .find(|n| n["id"].as_str() == Some("gate"))
+        .expect("gate node must be present");
+    assert!(
+        gate_node.as_mapping().unwrap().get("prompt").is_none(),
+        "a prompt-less human_review node must not emit a `prompt` key, got:\n{yaml}"
+    );
+    let reparsed = Playbook::from_yaml(&yaml).unwrap();
+    match &reparsed.node("gate").unwrap().kind {
         NodeKind::HumanReview { prompt, .. } => assert_eq!(*prompt, None),
         other => panic!("expected human_review, got {other:?}"),
     }

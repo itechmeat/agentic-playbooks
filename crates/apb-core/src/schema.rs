@@ -834,7 +834,7 @@ pub enum NodeKind {
         /// rendered into the owner-facing review instruction above the
         /// options. Template placeholders inside are NOT rendered - the text
         /// is surfaced literally, same as the option strings themselves.
-        #[serde(default)]
+        #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
     },
     Wait {
