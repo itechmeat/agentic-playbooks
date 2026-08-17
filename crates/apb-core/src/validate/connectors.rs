@@ -14,11 +14,18 @@ use super::*;
 /// `functions` list entry that is empty or repeated within one binding. V26
 /// (error): `max_calls` is 0 (a binding that can never be called).
 ///
-/// V42 (error): a node grants inbox functions of a connector whose manifest
+/// V42 (error) covers two cases, both about a binding that cannot do what it
+/// says. First, a node grants inbox functions of a connector whose manifest
 /// carries no `webhook` block, so no delivery could ever reach the inbox it
-/// intends to read. The manifest-internal version of this rule lives in
+/// intends to read. The manifest-internal version of that rule lives in
 /// `ConnectorDoc::from_yaml`; V42 catches the case where an installed
-/// connector lost its block after a playbook was authored against it.
+/// connector lost its block after a playbook was authored against it. Second,
+/// and in practice more often, a node binds a connector that is installed but
+/// whose manifest no longer loads at all. That case is not inbox-specific (a
+/// node binding the connector purely for HTTP functions is equally broken) and
+/// its message says so; it is checked first because a manifest that failed to
+/// load carries no function list, so whether the binding reaches an inbox
+/// function cannot be determined. See `check_inbox_binding`.
 /// V43 (error): a node grants inbox functions of a connector whose webhook
 /// block references account fields that a selectable account does not
 /// define, so a delivery to that account could never be verified. The

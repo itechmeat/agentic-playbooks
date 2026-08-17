@@ -92,7 +92,11 @@ where
             Err(e) if is_connection_error(&e) => continue,
             // Anything else (fd exhaustion, buffer exhaustion) needs a moment
             // before retrying, or the loop spins hot against a failing syscall.
-            Err(_) => {
+            // Say so: a listener degrading under fd exhaustion is otherwise
+            // invisible, and `axum::serve` logged this before its own backoff.
+            // The sleep that follows rate-limits this to one line per second.
+            Err(e) => {
+                eprintln!("apb listener: accept error, retrying shortly: {e}");
                 tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
                 continue;
             }
