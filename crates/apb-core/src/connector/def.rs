@@ -1079,14 +1079,19 @@ fn validate_imap_templates(
 }
 
 /// Validates the placeholders in the `webhook` block (spec
-/// 2026-08-16-webhook-ingest-design). `verify_token` and `signature.secret`
-/// are the third deliberate exemption to the auth-only secret rule, after
-/// `SmtpConnection.password` and `ImapConnection.password`: `account.*` and
-/// `secret.*` are allowed there, `args.*` is not (no call args exist at
-/// ingest time), and the reserved `{{auth}}` marker is a function-url-only
-/// construct rejected everywhere here. Every other field of the block is a
-/// literal the ingest listener compares byte for byte, so any placeholder in
-/// it is an authoring error rather than a value that would be rendered.
+/// 2026-08-16-webhook-ingest-design). `signature.secret` and `verify_token`
+/// are the HMAC key and the challenge token the ingest listener authenticates
+/// deliveries with, so each must be exactly one `{{secret.<field>}}`
+/// placeholder naming a `secret: true` account field, with no surrounding
+/// literal text. A literal value, an `{{account.*}}` non-secret field, an
+/// `{{args.*}}` placeholder (no call args exist at ingest time), an unknown
+/// namespace, or more than one placeholder is rejected: any of them would let
+/// a public connector ship a publicly known key and accept attacker-signed
+/// deliveries. This is stricter than the `SmtpConnection.password` /
+/// `ImapConnection.password` exemptions on purpose, because those are outbound
+/// credentials while these guard an internet-facing accept decision. Every
+/// other field of the block is a literal the ingest listener compares byte for
+/// byte, so any placeholder in it is an authoring error.
 fn validate_webhook_templates(
     hook: &WebhookSpec,
     connector: &str,
@@ -1095,19 +1100,28 @@ fn validate_webhook_templates(
     use crate::connector::template::{Namespace, placeholders};
 
     let secret_bearing = [
-        Some(hook.signature.secret.as_str()),
-        hook.verify_token.as_deref(),
+        ("signature.secret", Some(hook.signature.secret.as_str())),
+        ("verify_token", hook.verify_token.as_deref()),
     ];
-    for template in secret_bearing.into_iter().flatten() {
-        for (ns, name) in placeholders(template)? {
-            reject_auth(ns, &format!("connector `{connector}` webhook"))?;
-            if ns == Namespace::Args {
-                return Err(ConnectorError::Invalid(format!(
-                    "args placeholders are not allowed in the webhook block of connector `{connector}`"
-                )));
-            }
-            fields.check(ns, &name)?;
+    for (label, template) in secret_bearing {
+        let Some(template) = template else { continue };
+        let found = placeholders(template)?;
+        let sole_secret = match found.as_slice() {
+            [(Namespace::Secret, name)] => Some(name.as_str()),
+            _ => None,
+        };
+        let Some(name) = sole_secret else {
+            return Err(ConnectorError::Invalid(format!(
+                "connector `{connector}` webhook `{label}` must be exactly one `{{{{secret.<field>}}}}` placeholder naming a `secret: true` account field"
+            )));
+        };
+        if template != format!("{{{{secret.{name}}}}}") {
+            return Err(ConnectorError::Invalid(format!(
+                "connector `{connector}` webhook `{label}` must be exactly one `{{{{secret.<field>}}}}` placeholder with no surrounding text"
+            )));
         }
+        // Confirms the named field exists and is declared `secret: true`.
+        fields.check(Namespace::Secret, name)?;
     }
 
     let literals = [
@@ -1931,12 +1945,12 @@ functions:
     }
 
     #[test]
-    fn webhook_secret_placeholders_are_the_third_exemption() {
-        // The two secret-carrying fields accept `{{secret.*}}`.
+    fn webhook_secret_placeholders_must_be_a_sole_secret_reference() {
+        // The proper shape: each field is exactly one `{{secret.<field>}}`
+        // naming a `secret: true` account field.
         assert!(ConnectorDoc::from_yaml(WEBHOOK_YAML, "echo-hooks").is_ok());
 
-        // A secret placeholder naming a non-secret field is rejected, exactly
-        // like the smtp and imap password fields.
+        // A secret placeholder naming a non-secret field is rejected.
         let non_secret = WEBHOOK_YAML.replace(
             "  - name: app_secret\n    required: true\n    secret: true",
             "  - name: app_secret\n    required: true",
@@ -1953,18 +1967,56 @@ functions:
             .to_string();
         assert!(err.contains("nope"), "was: {err}");
 
-        // `{{account.*}}` is allowed (a non-secret token is a bad idea but a
-        // legal one); `{{args.*}}` and `{{auth}}` are not.
+        // A literal HMAC key is rejected: a public connector must not ship a
+        // publicly known key that anyone could sign a delivery with.
+        let literal = WEBHOOK_YAML.replace("\"{{secret.app_secret}}\"", "\"hunter2\"");
+        let err = ConnectorDoc::from_yaml(&literal, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signature.secret"), "was: {err}");
+
+        // An `{{account.*}}` non-secret field is now rejected (it used to be
+        // allowed): a non-secret token defeats the whole point.
+        let with_account = WEBHOOK_YAML.replace("{{secret.app_secret}}", "{{account.app_secret}}");
+        let err = ConnectorDoc::from_yaml(&with_account, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signature.secret"), "was: {err}");
+
+        // `{{args.*}}` and `{{auth}}` remain rejected.
         let with_args = WEBHOOK_YAML.replace("{{secret.app_secret}}", "{{args.app_secret}}");
         let err = ConnectorDoc::from_yaml(&with_args, "echo-hooks")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("args"), "was: {err}");
+        assert!(err.contains("signature.secret"), "was: {err}");
         let with_auth = WEBHOOK_YAML.replace("{{secret.verify_token}}", "{{auth}}");
         let err = ConnectorDoc::from_yaml(&with_auth, "echo-hooks")
             .unwrap_err()
             .to_string();
-        assert!(err.contains("auth"), "was: {err}");
+        assert!(err.contains("verify_token"), "was: {err}");
+
+        // Surrounding literal text around the placeholder is rejected: the
+        // value must be the sole placeholder, not embedded in a template.
+        let embedded = WEBHOOK_YAML.replace(
+            "\"{{secret.app_secret}}\"",
+            "\"sha256={{secret.app_secret}}\"",
+        );
+        let err = ConnectorDoc::from_yaml(&embedded, "echo-hooks")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("signature.secret"), "was: {err}");
+
+        // The shipped whatsapp connector already uses the proper shape.
+        let repo_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("workspace root");
+        let wa = repo_root.join("connectors/whatsapp/connector.yaml");
+        let raw = std::fs::read_to_string(&wa).expect("read whatsapp connector.yaml");
+        assert!(
+            ConnectorDoc::from_yaml(&raw, "whatsapp").is_ok(),
+            "shipped whatsapp connector must still validate"
+        );
     }
 
     #[test]
