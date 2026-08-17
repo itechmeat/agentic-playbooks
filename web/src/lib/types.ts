@@ -166,6 +166,12 @@ export interface RunDetail {
   // Why a failed run ended, as folded from the journal's last RunError
   // (`node \`x\`: reason`). Null unless the run is failed.
   failure_reason?: string | null
+  // Whether a process is really driving this run: true / false when the run
+  // carries a drive claim, null when it carries none at all (a finished run,
+  // and every run before the claim is written). `run_status` and `nodes`
+  // already account for it - `nodes` can read `lost` for an attempt whose
+  // process is gone.
+  driver_alive?: boolean | null
   nodes: Record<string, string>
   outputs: Record<string, string>
   instruction: string | null

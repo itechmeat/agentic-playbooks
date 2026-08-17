@@ -308,6 +308,28 @@ fn post_review_on_the_pending_gate_is_accepted() {
 }
 
 #[test]
+fn post_review_with_a_torn_journal_tail_still_accepts_the_decision() {
+    // The drive appends `events.jsonl` a line at a time, so a decision posted
+    // while it writes can find a half-written last line. That says nothing
+    // about whether the gate is waiting, and refusing the decision over it
+    // would be a brand new way to lose a valid one: `post_review` did not read
+    // the journal at all before the node check existed.
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    let events_path = dir.path().join("events.jsonl");
+    let complete = fs::read_to_string(&events_path).unwrap();
+    fs::write(
+        &events_path,
+        format!("{complete}{{\"seq\":9,\"ts\":9,\"type\":\"node_star"),
+    )
+    .unwrap();
+    assert!(apb_engine::event::read_all(dir.path()).is_err());
+
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+    let channel = fs::read_to_string(dir.path().join("reviews.jsonl")).unwrap();
+    assert!(channel.contains("approved"), "got: {channel}");
+}
+
+#[test]
 fn post_review_without_a_run_snapshot_stays_permissive() {
     // Pre-snapshot runs carry no playbook.yaml, so there is nothing to
     // validate the node against. Those keep the old accept-everything

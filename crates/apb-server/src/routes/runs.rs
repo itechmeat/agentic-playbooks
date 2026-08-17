@@ -28,10 +28,14 @@ pub(crate) async fn list_runs_handler(
             };
             // The project name comes from the registry when the requested
             // workspace is one of the enumerated ones; a pinned-root harness
-            // has no name to give, exactly as in the aggregate.
+            // has no name to give, exactly as in the aggregate. Matched on the
+            // workspace id, never on the path: `resolve_root` canonicalizes
+            // and the registry stores the path as it was registered, so on any
+            // symlinked root (every macOS `/var` temp dir, for one) a path
+            // comparison would silently drop the name.
             let project = enumerate_workspaces(&state)
                 .into_iter()
-                .find(|(_, _, r)| *r == root)
+                .find(|(wid, _, _)| wid == ws)
                 .map(|(_, name, _)| name)
                 .unwrap_or_default();
             vec![(ws.to_string(), project, root)]

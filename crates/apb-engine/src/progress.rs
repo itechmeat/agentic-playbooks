@@ -764,20 +764,12 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     // the decision arrives. Keying on Running would miss that whole window (and
     // would linger while Running after the decision), so count the events here.
     // A wait node does reach Running while it blocks, so it keeps that check.
+    // The counters themselves live in `event` (issue #103.1), shared with the
+    // decision channel's own pending check, so the two surfaces cannot drift
+    // on what "pending" means.
     let review_pending = |id: &str| {
-        let requested = events
-            .iter()
-            .filter(
-                |e| matches!(&e.payload, EventPayload::ReviewRequested { node, .. } if node == id),
-            )
-            .count();
-        let decided = events
-            .iter()
-            .filter(
-                |e| matches!(&e.payload, EventPayload::ReviewDecided { node, .. } if node == id),
-            )
-            .count();
-        requested > decided
+        crate::event::review_requested_count(events, id)
+            > crate::event::review_decided_count(events, id)
     };
     let waiting = playbook.nodes.iter().find_map(|n| match &n.kind {
         NodeKind::HumanReview { .. } if review_pending(&n.id) => {

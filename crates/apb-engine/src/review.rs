@@ -42,9 +42,16 @@ pub struct ReviewEntry {
 /// events for the node. So a caller that was told a gate is pending can always
 /// decide it, and nothing else is accepted.
 ///
-/// A run with no playbook snapshot (pre-snapshot runs, and the bare run dirs
-/// the channel's own tests build) has nothing to validate against, so it keeps
-/// the old accept-everything behavior rather than failing undecidably.
+/// Both reads are "cannot judge means accept". A run with no playbook snapshot
+/// (pre-snapshot runs, and the bare run dirs the channel's own tests build) has
+/// nothing to validate against, and a journal that will not read - most
+/// plausibly a torn trailing line the drive is in the middle of appending -
+/// cannot answer whether the gate is pending. `post_review` never read
+/// `events.jsonl` at all before this check existed, so failing the write on
+/// either would be a new way for a perfectly valid decision to be refused,
+/// in exactly the live-run race this change set removes elsewhere. Rejecting a
+/// decision is reserved for a journal that positively says the gate is not
+/// waiting.
 fn check_review_target(run_dir: &Path, node: &str) -> Result<(), EngineError> {
     use apb_core::schema::NodeKind;
 
@@ -61,7 +68,9 @@ fn check_review_target(run_dir: &Path, node: &str) -> Result<(), EngineError> {
         )));
     }
 
-    let events = crate::event::read_all(run_dir)?;
+    let Ok(events) = crate::event::read_all(run_dir) else {
+        return Ok(());
+    };
     if crate::event::review_requested_count(&events, node)
         <= crate::event::review_decided_count(&events, node)
     {

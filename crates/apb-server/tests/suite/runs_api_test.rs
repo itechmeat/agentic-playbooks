@@ -698,15 +698,26 @@ async fn lists_runs_filters_by_workspace() {
     let app = build_router(AppState::new_global());
     let (status, json) = get_json(app, "/api/runs").await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(json.as_array().unwrap().len(), 2, "aggregate: {json}");
+    let aggregate = json.as_array().unwrap().clone();
+    assert_eq!(aggregate.len(), 2, "aggregate: {json}");
+    let project_a = aggregate
+        .iter()
+        .find(|r| r["workspace_id"] == serde_json::json!(id_a))
+        .expect("project a listed in the aggregate")["project"]
+        .clone();
+    assert!(project_a.is_string() && project_a != serde_json::json!(""));
 
-    // Scoped: only that project's runs.
+    // Scoped: only that project's runs, stamped identically to the aggregate.
+    // `project` in particular: it is looked up by workspace id, not by path,
+    // because `resolve_root` canonicalizes while the registry keeps the path
+    // as registered (every macOS temp root is a `/var` symlink).
     let app = build_router(AppState::new_global());
     let (status, json) = get_json(app, &format!("/api/runs?workspace={id_a}")).await;
     assert_eq!(status, StatusCode::OK);
     let rows = json.as_array().unwrap();
     assert_eq!(rows.len(), 1, "scoped listing: {json}");
     assert_eq!(rows[0]["workspace_id"], serde_json::json!(id_a));
+    assert_eq!(rows[0]["project"], project_a, "scoped listing: {json}");
     assert_eq!(rows[0]["playbook"], "noagent");
 
     // An unknown workspace stays strict, exactly like the detail endpoint.
