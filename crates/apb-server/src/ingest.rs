@@ -80,6 +80,14 @@ pub const MAX_RATE_LIMIT_ENTRIES: usize = 4096;
 /// could pin the blocking pool. The window is short so a rotated secret takes
 /// effect within seconds, and the value is still never logged or returned.
 pub const SECRET_CACHE_TTL_MS: u128 = 10_000;
+/// How long a FAILED resolution (unresolvable, or resolving to empty) is
+/// remembered. Shorter than the success TTL on purpose: this is a
+/// misconfiguration, and an operator who fixes the env var or the command
+/// should see deliveries verify again within a few seconds rather than waiting
+/// out the full success window. Remembering it at all is what keeps a broken
+/// `{{cmd:...}}` reference from re-entering `spawn_blocking` on every request
+/// and burning up to `CMD_SECRET_TIMEOUT` each time.
+pub const NEGATIVE_CACHE_TTL_MS: u128 = 3_000;
 
 /// Prunes one rolling `(window_start_ms, count)` map: drops every entry whose
 /// window has expired, then, if it is still past `MAX_RATE_LIMIT_ENTRIES`,
@@ -136,18 +144,26 @@ impl Windows {
     }
 }
 
-/// One cached webhook secret and when it was resolved. Its `Debug` redacts the
-/// value so an accidental debug-print of [`IngestState`] cannot leak a secret.
+/// One cached resolution outcome and when it was taken. `secret: None` is a
+/// remembered failure (unresolvable or empty), kept for the shorter
+/// [`NEGATIVE_CACHE_TTL_MS`]. Its `Debug` redacts the value so an accidental
+/// debug-print of [`IngestState`] cannot leak a secret.
 #[derive(Clone)]
 struct CachedSecret {
-    secret: Arc<str>,
+    secret: Option<Arc<str>>,
     resolved_at: u128,
 }
 
 impl std::fmt::Debug for CachedSecret {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("CachedSecret")
-            .field("secret", &"<redacted>")
+            .field(
+                "secret",
+                match self.secret {
+                    Some(_) => &"<redacted>",
+                    None => &"<unresolved>",
+                },
+            )
             .field("resolved_at", &self.resolved_at)
             .finish()
     }
@@ -303,18 +319,25 @@ impl IngestState {
         entry.1 = entry.1.saturating_add(1);
     }
 
-    /// A still-fresh cached secret for `key`, or `None`.
-    fn cached_secret(&self, key: &str, now: u128) -> Option<Arc<str>> {
+    /// The cached outcome for `key` while it is still fresh. The outer option
+    /// is "was there a usable cache entry"; the inner one is the outcome itself,
+    /// where `None` is a remembered failure (see [`NEGATIVE_CACHE_TTL_MS`]).
+    /// Successes and failures carry different TTLs, so each entry is judged
+    /// against the one that applies to it.
+    fn cached_secret(&self, key: &str, now: u128) -> Option<Option<Arc<str>>> {
         let guard = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
-        guard.get(key).and_then(|c| {
-            (now.saturating_sub(c.resolved_at) < SECRET_CACHE_TTL_MS).then(|| c.secret.clone())
-        })
+        let entry = guard.get(key)?;
+        let ttl = match entry.secret {
+            Some(_) => SECRET_CACHE_TTL_MS,
+            None => NEGATIVE_CACHE_TTL_MS,
+        };
+        (now.saturating_sub(entry.resolved_at) < ttl).then(|| entry.secret.clone())
     }
 
-    /// Stores a freshly resolved secret for `key`. The map is bounded by the
-    /// number of configured accounts; it is cleared defensively if it ever
-    /// grows past the shared cap, matching the rolling-window maps.
-    fn store_secret(&self, key: String, secret: Arc<str>, now: u128) {
+    /// Stores a resolution outcome for `key`, success or failure. The map is
+    /// bounded by the number of configured accounts; it is cleared defensively
+    /// if it ever grows past the shared cap, matching the rolling-window maps.
+    fn store_secret(&self, key: String, secret: Option<Arc<str>>, now: u128) {
         let mut guard = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
         if guard.len() > MAX_RATE_LIMIT_ENTRIES {
             guard.clear();
@@ -348,6 +371,12 @@ impl IngestState {
     /// `verify:` for a challenge token) as well as the connector/account pair,
     /// so the two never collide in the cache even when the same account field
     /// backs both.
+    /// A failed or empty resolution is remembered too, for the shorter
+    /// [`NEGATIVE_CACHE_TTL_MS`]. Without that, a misconfigured
+    /// `{{cmd:...}}`-backed secret re-entered `spawn_blocking` on every request
+    /// and could burn up to `CMD_SECRET_TIMEOUT` (10s) each time; the
+    /// singleflight gate bounded that to one blocking task per key, but requests
+    /// still queued on the gate holding connections open.
     async fn resolve_cached(
         &self,
         cache_key: String,
@@ -355,27 +384,25 @@ impl IngestState {
         acct: Account,
         template: String,
     ) -> Option<Arc<str>> {
-        if let Some(value) = self.cached_secret(&cache_key, apb_core::clock::now_ms()) {
-            return Some(value);
+        if let Some(outcome) = self.cached_secret(&cache_key, apb_core::clock::now_ms()) {
+            return outcome;
         }
         // Singleflight: one resolver per cache key at a time. Whoever loses the
-        // race waits here and then reads the value the winner cached.
+        // race waits here and then reads the outcome the winner cached.
         let gate = self.secret_gate(&cache_key);
         let _held = gate.lock().await;
-        if let Some(value) = self.cached_secret(&cache_key, apb_core::clock::now_ms()) {
-            return Some(value);
+        if let Some(outcome) = self.cached_secret(&cache_key, apb_core::clock::now_ms()) {
+            return outcome;
         }
         let resolved =
             tokio::task::spawn_blocking(move || render_from_account(&template, &doc, &acct))
                 .await
                 .ok()
-                .flatten()?;
-        if resolved.is_empty() {
-            return None;
-        }
-        let value: Arc<str> = Arc::from(resolved.as_str());
-        self.store_secret(cache_key, value.clone(), apb_core::clock::now_ms());
-        Some(value)
+                .flatten()
+                .filter(|value| !value.is_empty());
+        let outcome: Option<Arc<str>> = resolved.map(|value| Arc::from(value.as_str()));
+        self.store_secret(cache_key, outcome.clone(), apb_core::clock::now_ms());
+        outcome
     }
 
     /// The webhook signature secret for one account, resolved at most once per

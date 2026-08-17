@@ -942,3 +942,59 @@ async fn repeated_unknown_pair_requests_are_eventually_rate_limited() {
         "a peer over its failure budget is refused rather than answered forever"
     );
 }
+
+/// A FAILING secret resolution is remembered too, so a misconfigured
+/// `{{cmd:...}}` secret does not re-enter spawn_blocking (and burn up to
+/// CMD_SECRET_TIMEOUT) on every request. Uses a secret command that appends one
+/// byte to a counter file and then exits non-zero, so resolution fails every
+/// time it actually runs; the counter proves it ran once across several
+/// deliveries, and every delivery is still refused.
+#[cfg(unix)]
+#[tokio::test]
+async fn a_failing_secret_resolution_is_negatively_cached() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+
+    let cdir = cfg.path().join("connectors").join(CONNECTOR);
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join("connector.yaml"), CONNECTOR_YAML).unwrap();
+
+    let counter = cfg.path().join("failed-resolve-count");
+    let adir = cfg.path().join("connector-config");
+    std::fs::create_dir_all(&adir).unwrap();
+    std::fs::write(
+        adir.join(format!("{CONNECTOR}.yaml")),
+        format!(
+            "accounts:\n  - name: {ACCOUNT}\n    default: true\n    verify_token: \"tok\"\n    app_secret: \"{{{{cmd:sh -c 'printf x >> {counter}; exit 1'}}}}\"\n",
+            counter = counter.display(),
+        ),
+    )
+    .unwrap();
+    let _cfg_guard = set_var("APB_CONFIG_DIR", cfg.path());
+
+    // One shared state, so the negative cache persists across deliveries.
+    let state = fresh_state();
+    for i in 0..5 {
+        let body = format!(r#"{{"id":"evt-{i}"}}"#).into_bytes();
+        // A well-formed but unverifiable signature, so the request reaches
+        // secret resolution rather than being refused on shape alone.
+        let sig = format!("sha256={}", "a".repeat(64));
+        let app = build_ingest_router(state.clone());
+        let (status, _) = send(app, post(&body, Some(&sig))).await;
+        assert_eq!(
+            status,
+            StatusCode::UNAUTHORIZED,
+            "delivery {i} is refused: an unresolvable secret verifies nobody"
+        );
+    }
+
+    let invocations = std::fs::read(&counter).map(|b| b.len()).unwrap_or(0);
+    assert_eq!(
+        invocations, 1,
+        "the failing secret command ran once within the negative-cache TTL, not once per request"
+    );
+    assert!(
+        inbox_events(cfg.path()).is_empty(),
+        "nothing is stored under an unresolvable secret"
+    );
+}

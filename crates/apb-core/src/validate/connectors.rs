@@ -81,8 +81,9 @@ pub(crate) fn check_connectors(
     }
 }
 
-/// V42 and V43 for one binding. Does nothing unless the binding actually
-/// reaches at least one inbox function of a known connector.
+/// V42 and V43 for one binding, plus the unloadable-manifest case they share.
+/// Does nothing unless the connector is known and either failed to load or the
+/// binding actually reaches at least one of its inbox functions.
 fn check_inbox_binding(
     node_id: &str,
     b: &crate::schema::ConnectorBinding,
@@ -92,18 +93,26 @@ fn check_inbox_binding(
     let Some(facts) = ctx.connectors.get(&b.name) else {
         return;
     };
-    // An installed connector whose manifest no longer loads cannot be relied
-    // on. The manifest-internal rule in `ConnectorDoc::from_yaml` rejects an
-    // inbox function that has lost its `webhook` block, which makes the whole
+    // An installed connector whose manifest no longer loads cannot be relied on
+    // for anything, inbox or otherwise. This deliberately runs BEFORE the
+    // inbox-reach check below, because a manifest that failed to load carries
+    // no function list: there is no way to tell whether the binding would have
+    // reached an inbox function, so deferring the check would simply lose it.
+    // The manifest-internal rule in `ConnectorDoc::from_yaml` rejects an inbox
+    // function that has lost its `webhook` block, which makes the whole
     // manifest stop loading; without preserving that as a fact the connector
     // would vanish from the map and V42 would stay silent on the very case it
-    // exists for. Flag the binding here instead.
+    // exists for.
+    //
+    // The message is therefore connector-generic rather than inbox-specific: a
+    // node binding this connector purely for HTTP functions is equally broken,
+    // and telling it the inbox is unreliable would be a false explanation.
     if let Some(err) = &facts.load_error {
         r.error(
             "V42",
             Some(node_id),
             format!(
-                "node `{node_id}` binds connector `{}`, which is installed but its manifest no longer loads, so its inbox cannot be relied on: {err}",
+                "node `{node_id}` binds connector `{}`, which is installed but its manifest no longer loads, so none of its functions can be relied on: {err}",
                 b.name
             ),
         );
