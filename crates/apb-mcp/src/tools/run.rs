@@ -293,6 +293,29 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     if let Some(obj) = base.as_object_mut() {
         obj.insert("duration_table".into(), json!(table));
     }
+
+    // #102.2 product decision: the goal (`statement` + `criteria`) is never
+    // evaluated by the engine - no consumer checks a `marker` or `script`
+    // check against the run result. Surface it verbatim anyway, labeled as
+    // an unevaluated contract, so a supervisor reading the report can check
+    // it by hand instead of having to go find the playbook definition.
+    // Absent when the playbook snapshot has no `goal` block at all, rather
+    // than a null placeholder.
+    if let Some(goal) = pb.as_ref().and_then(|p| p.goal.as_ref()) {
+        let mut goal_json = serde_json::to_value(goal).unwrap_or(Value::Null);
+        if let Some(goal_obj) = goal_json.as_object_mut() {
+            goal_obj.insert(
+                "note".into(),
+                json!(
+                    "this goal is not evaluated by the engine: criteria are not checked against the run result. A supervisor must confirm them by hand."
+                ),
+            );
+        }
+        if let Some(obj) = base.as_object_mut() {
+            obj.insert("goal".into(), goal_json);
+        }
+    }
+
     Ok(base)
 }
 
@@ -515,6 +538,67 @@ mod progress_tests {
         let a = table.iter().find(|e| e["node"] == "a").unwrap();
         assert_eq!(a["expected_seconds"], 100);
         assert_eq!(a["measured_seconds"], 5);
+    }
+
+    /// #102.2 product decision: the goal is never evaluated by the engine, but
+    /// `run_report` surfaces it verbatim so a supervisor can check it by hand.
+    /// The report must label it as an unevaluated contract, not present it as
+    /// a verdict.
+    #[test]
+    fn run_report_includes_goal_labeled_unevaluated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\n\
+             goal:\n  statement: \"the invoice is filed and sent for approval\"\n  \
+             criteria:\n    - description: \"invoice appears in the tracking sheet\"\n      \
+             check: { type: marker, marker: FILED }\n\
+             nodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi }\n  \
+             - { id: f, type: finish, outcome: success }\n\
+             edges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+        let out = run_report(tmp.path(), "r1").unwrap();
+        let goal = out.get("goal").expect("goal block must be present");
+        assert_eq!(
+            goal["statement"],
+            "the invoice is filed and sent for approval"
+        );
+        let criteria = goal["criteria"].as_array().unwrap();
+        assert_eq!(
+            criteria[0]["description"],
+            "invoice appears in the tracking sheet"
+        );
+        assert_eq!(criteria[0]["check"]["type"], "marker");
+        assert_eq!(criteria[0]["check"]["marker"], "FILED");
+        // Labeled as an unevaluated contract, not a pass/fail verdict.
+        let note = goal["note"].as_str().expect("goal note must be a string");
+        assert!(note.contains("not evaluated"));
+    }
+
+    /// A playbook snapshot with no `goal` block emits no `goal` key at all,
+    /// rather than a null or empty placeholder.
+    #[test]
+    fn run_report_omits_goal_when_playbook_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n").unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+        let out = run_report(tmp.path(), "r1").unwrap();
+        assert!(out.get("goal").is_none());
     }
 
     /// Issue #42 finding 3: `run_status` must expose the terminal error for a

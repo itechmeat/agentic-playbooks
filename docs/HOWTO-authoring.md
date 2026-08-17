@@ -323,8 +323,12 @@ a V13 validation error:
 - `run.instruction` - the run's input prompt (see below).
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
-- `run.hooks.*` - the payload last posted to a `wait` node's webhook, by key
-  (`run.hooks.<key>`).
+- `run.hooks.*` - the relative signal URL for a `wait` node's hook key
+  (`run.hooks.<key>` renders `/api/hooks/<run-id>/<secret>`). Posting to that
+  URL only unblocks the wait; the request body is discarded, not stored or
+  rendered anywhere. This is a different "hooks" from a connector's inbound
+  event inbox, whose delivery bodies are kept and read with `inbox_read` (see
+  CONNECTORS.md, "Receiving events (webhooks and the inbox)").
 
 An unresolvable reference (an unknown param, a node id that is not in the
 playbook, a namespace outside this list) fails validation before the
@@ -948,7 +952,8 @@ validates its playbooks.
   - `check: { type: manual }` (default when omitted): a person confirms the
     criterion.
   - `check: { type: marker, marker: <string> }`: the marker string is
-    expected in the run result.
+    expected in the run result. Marker matching is not wired into run
+    verdicts yet; the field records the contract, same as `script` below.
   - `check: { type: script, path: <relative path> }`: a check script
     confirms the criterion. Script execution is not wired into run verdicts
     yet; the field records the contract.
