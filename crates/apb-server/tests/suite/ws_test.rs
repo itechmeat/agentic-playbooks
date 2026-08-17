@@ -40,3 +40,53 @@ async fn ws_route_exists() {
         .unwrap();
     assert_ne!(res.status(), StatusCode::NOT_FOUND);
 }
+
+/// A well-formed upgrade handshake, optionally carrying an `Origin`.
+fn upgrade_request(origin: Option<&str>) -> axum::http::Request<axum::body::Body> {
+    use axum::body::Body;
+    use axum::http::Request;
+    let mut b = Request::get("/api/ws")
+        .header("host", "example.com")
+        .header("connection", "upgrade")
+        .header("upgrade", "websocket")
+        .header("sec-websocket-version", "13")
+        .header("sec-websocket-key", "dGhlIHNhbXBsZSBub25jZQ==");
+    if let Some(o) = origin {
+        b = b.header("origin", o);
+    }
+    b.body(Body::empty()).unwrap()
+}
+
+#[tokio::test]
+async fn ws_upgrade_rejects_a_cross_origin_handshake() {
+    use axum::http::StatusCode;
+    use tower::ServiceExt;
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+
+    // A mismatched Origin is refused before the upgrade.
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let res = app
+        .oneshot(upgrade_request(Some("http://evil.example")))
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+
+    // A same-origin Origin passes the origin gate and reaches the upgrade
+    // extractor. Under `oneshot` there is no upgradable connection, so that
+    // extractor answers 426 rather than 101; the point here is only that the
+    // origin gate did not refuse it.
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let res = app
+        .oneshot(upgrade_request(Some("http://example.com")))
+        .await
+        .unwrap();
+    assert_ne!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
+
+    // An absent Origin (a non-browser client) also passes the origin gate.
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let res = app.oneshot(upgrade_request(None)).await.unwrap();
+    assert_ne!(res.status(), StatusCode::FORBIDDEN);
+    assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
+}
