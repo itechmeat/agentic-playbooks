@@ -95,7 +95,7 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
     // Same live overlay as `run_status` (issue #45 finding 9): a live open
     // attempt must not report as interrupted here either.
     let nodes = crate::liveness::reported_node_statuses(&events);
-    let run_status = crate::liveness::reported_run_status(&events);
+    let run_status = crate::liveness::reported_run_status(&run_dir, run_id, &events);
 
     let wakes: Vec<serde_json::Value> = events
         .iter()

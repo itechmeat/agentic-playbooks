@@ -124,7 +124,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let node_times = apb_engine::liveness::node_times(&events);
     let driver_alive = apb_engine::liveness::driver_alive(&dir, run_id);
     let nodes = apb_engine::liveness::reported_node_statuses(&events);
-    let run_status = apb_engine::liveness::reported_run_status(&events);
+    let run_status = apb_engine::liveness::reported_run_status(&dir, run_id, &events);
     let progress = apb_engine::progress::from_run_dir(&dir, &events);
     // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
     // nodes, Task 8): callers that only care about the pending question
@@ -148,9 +148,10 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
             apb_engine::event::EventPayload::ChildRunStarted { node_id, run_id } => {
                 let child_dir = dir.parent().map(|p| p.join(run_id));
                 let status = child_dir
-                    .and_then(|d| read_all(&d).ok())
-                    .map(|ev| {
-                        apb_engine::liveness::reported_run_status(&ev)
+                    .as_ref()
+                    .and_then(|d| read_all(d).ok().map(|ev| (d.clone(), ev)))
+                    .map(|(d, ev)| {
+                        apb_engine::liveness::reported_run_status(&d, run_id, &ev)
                             .as_str()
                             .to_string()
                     })

@@ -65,12 +65,13 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             crate::liveness::driver_alive(&entry.path(), &run_id),
             Some(false)
         );
+        let status = crate::liveness::reported_run_status(&entry.path(), &run_id, &events)
+            .as_str()
+            .into();
         out.push(RunSummary {
             run_id,
             playbook,
-            status: crate::liveness::reported_run_status(&events)
-                .as_str()
-                .into(),
+            status,
             started_ts,
             progress,
             parent_run,

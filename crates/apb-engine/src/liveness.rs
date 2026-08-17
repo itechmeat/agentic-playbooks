@@ -633,10 +633,36 @@ pub fn live_open_nodes(events: &[Event]) -> BTreeSet<String> {
 /// An open attempt with a live pid forces `running` even when the pure fold
 /// said `interrupted` (issue #45 finding 9). Terminal and paused pure-fold
 /// outcomes are left alone.
-pub fn reported_run_status(events: &[Event]) -> crate::state::RunStatus {
+///
+/// A second repair (issue #102.4 cause B) covers a run parked on a wait/signal
+/// park - a `wait_for` node, a pending `human_review`, a pending question, or a
+/// supervisor wake. None of those spawn an agent process, so `live_open_nodes`
+/// has no probeable pid to point at and the finding-9 repair above can never
+/// fire for them: whatever left the pure fold `Interrupted` (an open attempt
+/// elsewhere in the run whose pid was never journaled, and so is never reaped -
+/// see `only_a_provably_dead_attempt_is_reapable`) stands forever, even while
+/// the run is legitimately parked and being actively driven. When the run is
+/// currently waiting on a node (`progress::from_run_dir`'s `waiting_on`) and
+/// nothing else in the journal is provably dead (`lost_nodes` empty) and the
+/// driver claim for this run is still alive, that open work IS the park, not a
+/// crash, so this also re-promotes to `running`. `lost_nodes` itself is
+/// unchanged by this - a genuinely dead attempt still blocks the repair.
+pub fn reported_run_status(
+    run_dir: &Path,
+    run_id: &str,
+    events: &[Event],
+) -> crate::state::RunStatus {
     use crate::state::RunStatus;
     let pure = RunState::fold(events).run_status;
-    if matches!(pure, RunStatus::Interrupted) && !live_open_nodes(events).is_empty() {
+    if !matches!(pure, RunStatus::Interrupted) {
+        return pure;
+    }
+    if !live_open_nodes(events).is_empty() {
+        return RunStatus::Running;
+    }
+    let parked_on_wait = lost_nodes(events).is_empty()
+        && crate::progress::from_run_dir(run_dir, events).is_some_and(|p| p.waiting_on.is_some());
+    if parked_on_wait && driver_is_live(run_dir, run_id) {
         return RunStatus::Running;
     }
     pure
@@ -1255,9 +1281,13 @@ mod tests {
             RunState::fold(&events).nodes.get("a"),
             Some(&NodeStatus::Interrupted)
         );
-        // Live reporting re-promotes.
+        // Live reporting re-promotes. No run dir is needed for this path: the
+        // live-open-attempt repair returns before ever consulting progress or
+        // the driver claim, so an unused tempdir stands in for "no run dir on
+        // disk yet".
+        let dir = tempfile::tempdir().unwrap();
         assert_eq!(
-            reported_run_status(&events),
+            reported_run_status(dir.path(), "any-run", &events),
             crate::state::RunStatus::Running
         );
         assert_eq!(
@@ -1266,6 +1296,173 @@ mod tests {
         );
         assert!(live_open_nodes(&events).contains("a"));
         assert!(!lost_nodes(&events).contains("a"));
+    }
+
+    /// Writes a minimal run snapshot (`playbook.yaml`) so `progress::from_run_dir`
+    /// can resolve a `wait` node's status, plus a `driver.pid` naming the given
+    /// pid as the run's live driver claim.
+    fn write_wait_run_snapshot(run_dir: &Path, driver_pid: u32) {
+        std::fs::create_dir_all(run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: a, type: agent_task, profile: x, prompt: "go" }
+  - { id: w, type: wait, wait_for: { type: webhook, key: k }, timeout_seconds: 3600 }
+edges:
+  - { from: a, to: w }
+"#,
+        )
+        .unwrap();
+        apb_core::fsutil::atomic_write(
+            &crate::driver::driver_pid_path(run_dir),
+            driver_pid.to_string().as_bytes(),
+        )
+        .unwrap();
+    }
+
+    /// Issue #102.4 cause B: a run whose only open work is a wait/signal park
+    /// has no agent process for `live_open_nodes` to point at, so the finding-9
+    /// repair above never fires for it and the pure `Interrupted` used to
+    /// stand. Here node `a`'s attempt is left open with an unknowable pid (the
+    /// shape a spawn path that never journals a pid leaves behind - never
+    /// reaped, per `only_a_provably_dead_attempt_is_reapable`), while the run
+    /// has genuinely moved on to node `w`, parked waiting for its webhook, with
+    /// a live driver still polling it. The widened repair must read that as
+    /// `Running`, not `Interrupted`.
+    #[test]
+    fn a_run_parked_on_a_wait_with_a_live_driver_reports_running() {
+        let events = vec![
+            ev(
+                0,
+                1000,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                2000,
+                EventPayload::NodeStarted {
+                    node: "a".into(),
+                    attempt: 1,
+                },
+            ),
+            ev(2, 2500, attempt_started("a", 1, None)),
+            ev(
+                3,
+                3000,
+                EventPayload::NodeStarted {
+                    node: "w".into(),
+                    attempt: 1,
+                },
+            ),
+            ev(
+                4,
+                3100,
+                EventPayload::WaitStarted {
+                    node: "w".into(),
+                    kind: "webhook".into(),
+                },
+            ),
+        ];
+        // Pure fold: an unresolved, unreapable open attempt on `a` still forces
+        // the whole run Interrupted, even though the drive has moved on to `w`.
+        assert_eq!(
+            RunState::fold(&events).run_status,
+            crate::state::RunStatus::Interrupted
+        );
+        // No live pid anywhere in the journal: the finding-9 repair cannot fire.
+        assert!(live_open_nodes(&events).is_empty());
+        assert!(lost_nodes(&events).is_empty());
+
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        write_wait_run_snapshot(&run_dir, std::process::id());
+
+        assert_eq!(
+            reported_run_status(&run_dir, "r1", &events),
+            crate::state::RunStatus::Running,
+            "a run parked on a wait with a live driver must report running, not interrupted"
+        );
+    }
+
+    /// Companion to the test above: no regression of driverless discovery.
+    /// Same shape - an unresolved attempt on `a`, the run parked at wait node
+    /// `w` - but with NO driver claim at all (`driver.pid` absent). The widened
+    /// repair must not fire: a wait park with a dead/absent driver is exactly
+    /// the driverless run `driver_alive`/`driver_dead` exists to surface, and
+    /// this repair must not paper over it.
+    #[test]
+    fn a_run_parked_on_a_wait_with_no_driver_still_reports_interrupted() {
+        let events = vec![
+            ev(
+                0,
+                1000,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                2000,
+                EventPayload::NodeStarted {
+                    node: "a".into(),
+                    attempt: 1,
+                },
+            ),
+            ev(2, 2500, attempt_started("a", 1, None)),
+            ev(
+                3,
+                3000,
+                EventPayload::NodeStarted {
+                    node: "w".into(),
+                    attempt: 1,
+                },
+            ),
+            ev(
+                4,
+                3100,
+                EventPayload::WaitStarted {
+                    node: "w".into(),
+                    kind: "webhook".into(),
+                },
+            ),
+        ];
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: a, type: agent_task, profile: x, prompt: "go" }
+  - { id: w, type: wait, wait_for: { type: webhook, key: k }, timeout_seconds: 3600 }
+edges:
+  - { from: a, to: w }
+"#,
+        )
+        .unwrap();
+        // No driver.pid at all: nothing claims to be driving this run.
+        assert_eq!(driver_alive(&run_dir, "r1"), None);
+
+        assert_eq!(
+            reported_run_status(&run_dir, "r1", &events),
+            crate::state::RunStatus::Interrupted,
+            "a wait park with no live driver must not be repaired to running"
+        );
     }
 
     /// Issue #45 finding 10: a child with no driver.pid but a live parent

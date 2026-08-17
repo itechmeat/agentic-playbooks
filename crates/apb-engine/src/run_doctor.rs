@@ -62,7 +62,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     }
     let events = read_all(&run_dir)?;
 
-    let mut checks = vec![run_check(&events), nodes_check(&events)];
+    let mut checks = vec![run_check(&run_dir, run_id, &events), nodes_check(&events)];
     checks.extend(failure_reason_check(&events));
     checks.extend(supervisor_wait_check(&events));
     checks.extend(attempt_checks(&events));
@@ -84,8 +84,8 @@ pub fn has_failure(checks: &[RunCheck]) -> bool {
 /// the two bad terminal outcomes warn: a run that is still going, paused, or
 /// succeeded is not a problem to be reported. `interrupted` warns too - it is
 /// exactly the state a crashed driver leaves.
-fn run_check(events: &[Event]) -> RunCheck {
-    let status = liveness::reported_run_status(events);
+fn run_check(run_dir: &Path, run_id: &str, events: &[Event]) -> RunCheck {
+    let status = liveness::reported_run_status(run_dir, run_id, events);
     let level = match status {
         RunStatus::Failed | RunStatus::Aborted | RunStatus::Interrupted => WARN,
         _ => OK,
