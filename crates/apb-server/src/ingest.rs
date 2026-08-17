@@ -82,19 +82,30 @@ pub const MAX_RATE_LIMIT_ENTRIES: usize = 4096;
 pub const SECRET_CACHE_TTL_MS: u128 = 10_000;
 
 /// Prunes one rolling `(window_start_ms, count)` map: drops every entry whose
-/// window has expired, and clears the map outright when it has grown past
-/// `MAX_RATE_LIMIT_ENTRIES`. Clearing rather than evicting is deliberate,
-/// since the alternative is an LRU whose eviction order an attacker chooses.
+/// window has expired, then, if it is still past `MAX_RATE_LIMIT_ENTRIES`,
+/// evicts the least-established entries (lowest count first, oldest as the
+/// tie-break) until it is back at the cap. Evicting rather than clearing is
+/// deliberate: clearing the whole map let an address-rotating attacker push it
+/// past the cap and reset every still-in-window counter, including the block on
+/// their own address - exactly the adversary the cap exists to bound. Shedding
+/// the fresh single-hit rows a flood adds keeps a blocked address blocked.
 /// Shared by both `Windows` maps so the accept window gets exactly the same
 /// shape as the failure window, not a lookalike with its own bugs.
-fn prune_window<K: Eq + std::hash::Hash>(
+fn prune_window<K: Eq + std::hash::Hash + Clone>(
     map: &mut HashMap<K, (u128, u32)>,
     now_ms: u128,
     window_ms: u128,
 ) {
     map.retain(|_, (start, _)| now_ms.saturating_sub(*start) < window_ms);
-    if map.len() > MAX_RATE_LIMIT_ENTRIES {
-        map.clear();
+    while map.len() > MAX_RATE_LIMIT_ENTRIES {
+        let Some(victim) = map
+            .iter()
+            .min_by_key(|(_, (start, count))| (*count, *start))
+            .map(|(k, _)| k.clone())
+        else {
+            break;
+        };
+        map.remove(&victim);
     }
 }
 
@@ -848,4 +859,35 @@ fn resolve_reference(raw: &str) -> Option<String> {
         return secrets::resolve_cmd(&cmd, secrets::CMD_SECRET_TIMEOUT).ok();
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::Ipv6Addr;
+
+    /// Overflowing the cap evicts the fresh single-hit rows a flood adds and
+    /// keeps a blocked address's counter intact, rather than clearing the whole
+    /// map (which would reset the attacker's own in-window block).
+    #[test]
+    fn prune_window_keeps_a_blocked_row_and_evicts_low_count_ones() {
+        let mut map: HashMap<IpAddr, (u128, u32)> = HashMap::new();
+        let now = 1_000u128;
+        let target: IpAddr = "203.0.113.7".parse().unwrap();
+        map.insert(target, (now, MAX_FAILURES_PER_WINDOW + 5));
+
+        let base: u128 = 0x2001_0db8_0000_0000_0000_0000_0000_0000;
+        for i in 0..(MAX_RATE_LIMIT_ENTRIES as u128 + 50) {
+            map.insert(IpAddr::V6(Ipv6Addr::from(base + i)), (now, 1));
+        }
+
+        prune_window(&mut map, now, FAILURE_WINDOW_MS);
+
+        assert!(map.len() <= MAX_RATE_LIMIT_ENTRIES, "back within the cap");
+        assert_eq!(
+            map.get(&target).map(|(_, c)| *c),
+            Some(MAX_FAILURES_PER_WINDOW + 5),
+            "the blocked target survives the overflow with its counter intact"
+        );
+    }
 }

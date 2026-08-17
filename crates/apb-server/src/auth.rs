@@ -184,8 +184,21 @@ impl RateLimiter {
     fn prune(&mut self, now_ms: u128) {
         self.windows
             .retain(|_, (start, _)| now_ms.saturating_sub(*start) < FAILURE_WINDOW_MS);
-        if self.windows.len() > MAX_RATE_LIMIT_ENTRIES {
-            self.windows.clear();
+        // Evict the least-established entries (lowest count first, oldest as the
+        // tie-break) instead of clearing the whole map. Clearing let an
+        // address-rotating attacker overflow the map and reset their own
+        // in-window block; shedding the fresh single-hit rows a flood adds keeps
+        // a blocked address blocked.
+        while self.windows.len() > MAX_RATE_LIMIT_ENTRIES {
+            let Some(victim) = self
+                .windows
+                .iter()
+                .min_by_key(|(_, (start, count))| (*count, *start))
+                .map(|(k, _)| *k)
+            else {
+                break;
+            };
+            self.windows.remove(&victim);
         }
     }
 }
@@ -1064,6 +1077,34 @@ mod tests {
         assert!(
             !limiter.is_blocked("198.51.100.4".parse().unwrap(), 1_500),
             "the block is per client IP"
+        );
+    }
+
+    /// Overflowing the entry cap must not reset a still-in-window blocked IP.
+    /// The old clear-all let an address-rotating attacker flush their own block
+    /// by pushing the map past the cap; evicting the least-established rows
+    /// keeps the blocked address blocked.
+    #[test]
+    fn overflowing_the_limiter_does_not_reset_a_blocked_ip() {
+        let mut limiter = RateLimiter::default();
+        let now = 1_000u128;
+        let target: IpAddr = "203.0.113.7".parse().unwrap();
+        for _ in 0..=MAX_FAILURES_PER_WINDOW {
+            limiter.record_failure(target, now);
+        }
+        assert!(limiter.is_blocked(target, now), "the target starts blocked");
+
+        // A flood of distinct fresh addresses (one failure each), the way an
+        // IPv6-rotating attacker would push the map past the cap.
+        let base: u128 = 0x2001_0db8_0000_0000_0000_0000_0000_0000;
+        for i in 0..(MAX_RATE_LIMIT_ENTRIES as u128 + 50) {
+            let ip = IpAddr::V6(std::net::Ipv6Addr::from(base + i));
+            limiter.record_failure(ip, now);
+        }
+
+        assert!(
+            limiter.is_blocked(target, now),
+            "overflowing the cap must not reset a still-in-window blocked IP"
         );
     }
 }
