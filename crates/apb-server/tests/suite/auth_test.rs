@@ -133,10 +133,12 @@ async fn a_session_cookie_authenticates_and_writes_need_the_csrf_header() {
     let (_key, state) = authed(dir.path().to_path_buf());
     let token = server_auth::random_token().unwrap();
     {
-        state
-            .auth
-            .sessions()
-            .insert(server_auth::hash_hex(&token), apb_core::clock::now_ms());
+        let key_id = state.auth.live_key_ids().into_iter().next().unwrap();
+        state.auth.sessions().insert(
+            server_auth::hash_hex(&token),
+            apb_core::clock::now_ms(),
+            key_id,
+        );
     }
     let cookie = format!("{SESSION_COOKIE}={token}");
 
@@ -235,7 +237,7 @@ async fn eleven_failures_in_a_window_earn_a_429() {
 }
 
 #[tokio::test]
-async fn a_tripped_limiter_blocks_even_a_valid_key_for_the_window() {
+async fn a_valid_key_still_works_when_the_limiter_is_tripped() {
     let dir = seed();
     let (key, state) = authed(dir.path().to_path_buf());
 
@@ -250,7 +252,7 @@ async fn a_tripped_limiter_blocks_even_a_valid_key_for_the_window() {
     .await;
     assert_eq!(status, StatusCode::OK);
 
-    // Burn the budget from the same client IP.
+    // Burn the budget from the same client IP with unauthenticated requests.
     for _ in 0..11 {
         send(
             &state,
@@ -259,10 +261,19 @@ async fn a_tripped_limiter_blocks_even_a_valid_key_for_the_window() {
         .await;
     }
 
-    // The block is evaluated before the credential is read, so a correct key
-    // does not escape it. This is deliberate: a guesser who lands on the right
-    // value must not be rewarded with instant access.
+    // An unauthenticated request from this IP is now blocked.
     let (status, body) = send(
+        &state,
+        Request::get("/api/runs").body(Body::empty()).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(body["error"], "rate_limited");
+
+    // But a valid key is verified first and always passes, whatever the
+    // limiter's state: a bad-request flood from a shared NAT/proxy IP must not
+    // lock out a legitimate operator behind it.
+    let (status, _) = send(
         &state,
         Request::get("/api/runs")
             .header("authorization", format!("Bearer {key}"))
@@ -270,8 +281,68 @@ async fn a_tripped_limiter_blocks_even_a_valid_key_for_the_window() {
             .unwrap(),
     )
     .await;
-    assert_eq!(status, StatusCode::TOO_MANY_REQUESTS);
-    assert_eq!(body["error"], "rate_limited");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a valid key escapes the tripped limiter"
+    );
+}
+
+#[tokio::test]
+async fn a_session_stops_authenticating_once_its_minting_key_is_revoked() {
+    let dir = seed();
+    // Keep the key file alive so the auth state can reload it after a revoke.
+    // Two keys, so revoking the one that minted the session leaves auth
+    // enabled (otherwise a zero-key set would flip the dashboard back to its
+    // keyless pass-through and mask the revocation).
+    let keydir = tempfile::tempdir().unwrap();
+    let path = keydir.path().join("server-auth.yaml");
+    let (_key_a, record_a) = server_auth::issue_into(&path).unwrap();
+    let (_key_b, _record_b) = server_auth::issue_into(&path).unwrap();
+    let file = server_auth::load_from(&path).unwrap();
+    let auth =
+        Arc::new(AuthState::new(Some(path.clone()), file.keys, &ServerConfig::default()).unwrap());
+    let state = AppState::new(dir.path().to_path_buf()).with_auth(auth.clone());
+
+    // Mint a session bound to key A (as login does).
+    let token = server_auth::random_token().unwrap();
+    {
+        auth.sessions().insert(
+            server_auth::hash_hex(&token),
+            apb_core::clock::now_ms(),
+            record_a.id.clone(),
+        );
+    }
+    let cookie = format!("{SESSION_COOKIE}={token}");
+
+    // The session authenticates while its key is live.
+    let (status, _) = send(
+        &state,
+        Request::get("/api/runs")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "a fresh session authenticates");
+
+    // Revoke key A on disk and force the key set to reflect it, the way any
+    // bearer request or the once-a-minute background check would. Key B stays,
+    // so auth remains enabled.
+    server_auth::revoke_in(&path, &record_a.id).unwrap();
+    auth.maybe_reload(apb_core::clock::now_ms(), true);
+
+    // The session no longer authenticates: it cannot outlive its key.
+    let (status, body) = send(
+        &state,
+        Request::get("/api/runs")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"], "auth");
 }
 
 #[tokio::test]
@@ -317,10 +388,12 @@ async fn every_response_denies_framing() {
 
     // A CSRF rejection is also produced before the handler runs.
     let token = server_auth::random_token().unwrap();
-    state
-        .auth
-        .sessions()
-        .insert(server_auth::hash_hex(&token), apb_core::clock::now_ms());
+    let key_id = state.auth.live_key_ids().into_iter().next().unwrap();
+    state.auth.sessions().insert(
+        server_auth::hash_hex(&token),
+        apb_core::clock::now_ms(),
+        key_id,
+    );
     let res = build_router(state.clone())
         .oneshot(
             Request::post("/api/connectors/demo/call")
@@ -435,10 +508,12 @@ async fn a_session_cookie_is_accepted_at_the_websocket_upgrade() {
     let (_key, state) = authed(dir.path().to_path_buf());
     let token = server_auth::random_token().unwrap();
     {
-        state
-            .auth
-            .sessions()
-            .insert(server_auth::hash_hex(&token), apb_core::clock::now_ms());
+        let key_id = state.auth.live_key_ids().into_iter().next().unwrap();
+        state.auth.sessions().insert(
+            server_auth::hash_hex(&token),
+            apb_core::clock::now_ms(),
+            key_id,
+        );
     }
     // A plain GET cannot complete an upgrade, so the assertion is about the
     // gate: with a session cookie the request reaches the ws handler (which

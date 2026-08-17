@@ -72,29 +72,36 @@ pub(crate) async fn login_handler(
             .into_response();
     }
     let now = apb_core::clock::now_ms();
-    let blocked = {
-        let failures = auth.failures();
-        failures.is_blocked(ctx.ip, now)
+    // Verify the key first: a valid key always logs in, even from an IP whose
+    // failure budget is spent, so a bad-request flood from a shared NAT/proxy
+    // cannot lock out a legitimate operator behind it. verify_key_with_reload
+    // force-reloads the key file on every attempt (not only after a failure),
+    // so an operator who has just issued the very first key can sign in
+    // immediately without restarting the dashboard.
+    let key_id = match auth.verify_key_with_reload(body.key.trim(), now) {
+        Some(id) => id,
+        None => {
+            // A bad key: only now consult and feed the limiter, so repeated
+            // guessing from one IP is still throttled.
+            let blocked = {
+                let failures = auth.failures();
+                failures.is_blocked(ctx.ip, now)
+            };
+            if blocked {
+                return rate_limited();
+            }
+            let over_budget = {
+                let mut failures = auth.failures();
+                failures.record_failure(ctx.ip, now)
+            };
+            log_auth_failure(ctx.ip, "/api/auth/login");
+            return if over_budget {
+                rate_limited()
+            } else {
+                crate::auth::unauthorized()
+            };
+        }
     };
-    if blocked {
-        return rate_limited();
-    }
-    // verify_key_with_reload force-reloads the key file on every bearer
-    // verification (not only after a failure), so an operator who has just
-    // issued the very first key can sign in immediately without restarting
-    // the dashboard.
-    if auth.verify_key_with_reload(body.key.trim(), now).is_none() {
-        let over_budget = {
-            let mut failures = auth.failures();
-            failures.record_failure(ctx.ip, now)
-        };
-        log_auth_failure(ctx.ip, "/api/auth/login");
-        return if over_budget {
-            rate_limited()
-        } else {
-            crate::auth::unauthorized()
-        };
-    }
     let token = match server_auth::random_token() {
         Ok(t) => t,
         Err(e) => {
@@ -107,7 +114,7 @@ pub(crate) async fn login_handler(
     };
     {
         let mut sessions = auth.sessions();
-        sessions.insert(server_auth::hash_hex(&token), now);
+        sessions.insert(server_auth::hash_hex(&token), now, key_id);
     }
     let res = Json(serde_json::json!({ "authenticated": true })).into_response();
     with_cookie(res, &session_cookie(&token, ctx.https))

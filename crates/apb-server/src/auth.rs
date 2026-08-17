@@ -55,51 +55,85 @@ pub const FAILURE_WINDOW_MS: u128 = 60_000;
 /// cannot grow it without limit.
 pub const MAX_RATE_LIMIT_ENTRIES: usize = 4096;
 
+/// One live browser session: when it was last seen (for the sliding TTL) and
+/// the id of the API key that minted it. Binding the session to its key is
+/// what lets a revoked key take its sessions down with it: without the id, a
+/// session outlives the key that authorized it for the full seven-day sliding
+/// window, so revoking a compromised key would not actually log the attacker
+/// out.
+#[derive(Debug, Clone)]
+struct SessionEntry {
+    last_seen: u128,
+    key_id: String,
+}
+
 /// Live browser sessions, keyed by the SHA-256 of the session token. The raw
 /// token exists only in the cookie; a memory dump of the server yields
 /// nothing usable. Sessions are deliberately not persisted: a restart returns
 /// the operator to the login screen, which is cheap and removes a state file.
 #[derive(Default)]
 pub struct SessionStore {
-    entries: HashMap<String, u128>,
+    entries: HashMap<String, SessionEntry>,
 }
 
 impl SessionStore {
-    /// Registers a new session at `now_ms`, pruning expired entries and
-    /// evicting the least recently used one when the store is full.
-    pub fn insert(&mut self, token_hash: String, now_ms: u128) {
+    /// Registers a new session at `now_ms`, bound to the id of the key that
+    /// minted it, pruning expired entries and evicting the least recently used
+    /// one when the store is full.
+    pub fn insert(&mut self, token_hash: String, now_ms: u128, key_id: String) {
         self.prune(now_ms);
         if self.entries.len() >= MAX_SESSIONS {
             let oldest = self
                 .entries
                 .iter()
-                .min_by_key(|(_, seen)| **seen)
+                .min_by_key(|(_, e)| e.last_seen)
                 .map(|(k, _)| k.clone());
             if let Some(k) = oldest {
                 self.entries.remove(&k);
             }
         }
-        self.entries.insert(token_hash, now_ms);
+        self.entries.insert(
+            token_hash,
+            SessionEntry {
+                last_seen: now_ms,
+                key_id,
+            },
+        );
     }
 
-    /// Whether the hash names a live session, refreshing its sliding TTL. An
-    /// expired entry is removed on the way out.
-    pub fn touch(&mut self, token_hash: &str, now_ms: u128) -> bool {
-        match self.entries.get(token_hash).copied() {
-            Some(seen) if now_ms.saturating_sub(seen) < SESSION_TTL_MS => {
-                self.entries.insert(token_hash.to_string(), now_ms);
-                true
+    /// The id of the key that minted the session, when the hash names a live
+    /// one, refreshing its sliding TTL. An expired entry is removed on the way
+    /// out. The caller checks whether that key is still live and drops the
+    /// session if it is not.
+    pub fn touch(&mut self, token_hash: &str, now_ms: u128) -> Option<String> {
+        match self.entries.get(token_hash).cloned() {
+            Some(e) if now_ms.saturating_sub(e.last_seen) < SESSION_TTL_MS => {
+                self.entries.insert(
+                    token_hash.to_string(),
+                    SessionEntry {
+                        last_seen: now_ms,
+                        key_id: e.key_id.clone(),
+                    },
+                );
+                Some(e.key_id)
             }
             Some(_) => {
                 self.entries.remove(token_hash);
-                false
+                None
             }
-            None => false,
+            None => None,
         }
     }
 
     pub fn remove(&mut self, token_hash: &str) {
         self.entries.remove(token_hash);
+    }
+
+    /// Drops every session minted by a key that is no longer in `live_ids`.
+    /// Called when the key set reloads, so a revoked key takes its sessions
+    /// with it rather than leaving them valid for the sliding window.
+    pub fn retain_live_keys(&mut self, live_ids: &BTreeSet<String>) {
+        self.entries.retain(|_, e| live_ids.contains(&e.key_id));
     }
 
     pub fn len(&self) -> usize {
@@ -112,7 +146,7 @@ impl SessionStore {
 
     fn prune(&mut self, now_ms: u128) {
         self.entries
-            .retain(|_, seen| now_ms.saturating_sub(*seen) < SESSION_TTL_MS);
+            .retain(|_, e| now_ms.saturating_sub(e.last_seen) < SESSION_TTL_MS);
     }
 }
 
@@ -338,6 +372,33 @@ impl AuthState {
         } else {
             self.reload_by_stamp(path, now_ms);
         }
+        // A reload may have dropped a key; take its sessions down with it, so
+        // revoking a compromised key does not leave week-long sessions behind.
+        self.evict_dead_key_sessions();
+    }
+
+    /// Drops every live session whose minting key is no longer in the key set.
+    /// Acquires the two locks in sequence, never nested, so it cannot deadlock
+    /// against the request path (which also takes sessions then keys in turn).
+    fn evict_dead_key_sessions(&self) {
+        let live: BTreeSet<String> = {
+            let set = self.key_set();
+            set.keys.iter().map(|k| k.id.clone()).collect()
+        };
+        self.sessions().retain_live_keys(&live);
+    }
+
+    /// Whether `id` names a key currently in the live set. A browser session
+    /// is only as valid as the key that minted it: the request path checks
+    /// this on every cookie validation so a revoked key's sessions stop
+    /// authenticating as soon as the key set reflects the revocation.
+    pub fn key_id_is_live(&self, id: &str) -> bool {
+        self.key_set().keys.iter().any(|k| k.id == id)
+    }
+
+    /// The ids of every key currently in the live set, in load order.
+    pub fn live_key_ids(&self) -> Vec<String> {
+        self.key_set().keys.iter().map(|k| k.id.clone()).collect()
     }
 
     /// The throttled, once-a-minute path: a bare `stat`, no file read. Good
@@ -538,12 +599,17 @@ pub fn evaluate(auth: &AuthState, headers: &HeaderMap, now_ms: u128) -> Credenti
     }
     if let Some(token) = cookie_value(headers, SESSION_COOKIE) {
         let hash = server_auth::hash_hex(&token);
-        let live = {
+        let key_id = {
             let mut sessions = auth.sessions();
             sessions.touch(&hash, now_ms)
         };
-        if live {
-            return Credential::Cookie;
+        if let Some(key_id) = key_id {
+            if auth.key_id_is_live(&key_id) {
+                return Credential::Cookie;
+            }
+            // The key that minted this session has been revoked: drop the
+            // session so it cannot outlive the credential that authorized it.
+            auth.sessions().remove(&hash);
         }
     }
     Credential::None
@@ -704,26 +770,34 @@ pub async fn auth_middleware(
         return deny_framing(next.run(req).await);
     }
 
-    let blocked = {
-        let failures = auth.failures();
-        failures.is_blocked(ctx.ip, now)
-    };
-    if blocked {
-        return deny_framing(rate_limited());
-    }
-
+    // Verify first, then rate-limit. A valid bearer key or session cookie
+    // always passes, whatever the limiter's state for this IP: the failure
+    // limiter exists to blunt online guessing of a 256-bit key, not to lock
+    // out legitimate users, and blocking before verifying would let eleven bad
+    // requests from a shared NAT/proxy address 429 every real operator behind
+    // it. The limiter is consulted and fed only when the credential is absent
+    // or invalid, so a guesser (whose every attempt is invalid) is still
+    // counted and eventually throttled.
     let credential = evaluate(&auth, req.headers(), now);
     let res = match credential {
         Credential::None => {
-            let over_budget = {
-                let mut failures = auth.failures();
-                failures.record_failure(ctx.ip, now)
+            let blocked = {
+                let failures = auth.failures();
+                failures.is_blocked(ctx.ip, now)
             };
-            log_auth_failure(ctx.ip, &path);
-            if over_budget {
+            if blocked {
                 rate_limited()
             } else {
-                unauthorized()
+                let over_budget = {
+                    let mut failures = auth.failures();
+                    failures.record_failure(ctx.ip, now)
+                };
+                log_auth_failure(ctx.ip, &path);
+                if over_budget {
+                    rate_limited()
+                } else {
+                    unauthorized()
+                }
             }
         }
         Credential::Cookie if !is_safe_method(&method) && !has_csrf_marker(req.headers()) => {
@@ -834,21 +908,41 @@ mod tests {
     #[test]
     fn sessions_expire_and_evict() {
         let mut store = SessionStore::default();
-        store.insert("a".to_string(), 0);
-        assert!(store.touch("a", 1_000));
+        store.insert("a".to_string(), 0, "k1".to_string());
+        assert_eq!(store.touch("a", 1_000).as_deref(), Some("k1"));
         assert!(
-            !store.touch("a", SESSION_TTL_MS + 2_000),
+            store.touch("a", SESSION_TTL_MS + 2_000).is_none(),
             "a session past its sliding TTL is dead"
         );
         assert!(store.is_empty(), "and is dropped on the way out");
 
         for i in 0..MAX_SESSIONS {
-            store.insert(format!("s{i}"), 1_000 + i as u128);
+            store.insert(format!("s{i}"), 1_000 + i as u128, "k1".to_string());
         }
         assert_eq!(store.len(), MAX_SESSIONS);
-        store.insert("newest".to_string(), 9_999_999);
+        store.insert("newest".to_string(), 9_999_999, "k1".to_string());
         assert_eq!(store.len(), MAX_SESSIONS, "the cap holds");
-        assert!(!store.touch("s0", 9_999_999), "the oldest was evicted");
+        assert!(
+            store.touch("s0", 9_999_999).is_none(),
+            "the oldest was evicted"
+        );
+    }
+
+    #[test]
+    fn a_session_dies_with_the_key_that_minted_it() {
+        let mut store = SessionStore::default();
+        store.insert("sess".to_string(), 0, "key-a".to_string());
+        // While key-a is live the session validates.
+        let mut live = BTreeSet::new();
+        live.insert("key-a".to_string());
+        store.retain_live_keys(&live);
+        assert_eq!(store.touch("sess", 1_000).as_deref(), Some("key-a"));
+        // Revoke key-a: it leaves the live set, so the session is dropped.
+        store.retain_live_keys(&BTreeSet::new());
+        assert!(
+            store.touch("sess", 2_000).is_none(),
+            "a session must not outlive the key that minted it"
+        );
     }
 
     /// Locks in that only a presented bearer credential forces a key reload.
