@@ -320,31 +320,33 @@ impl IngestState {
         guard.entry(key.to_string()).or_default().clone()
     }
 
-    /// The webhook secret for one account, resolved at most once per
-    /// [`SECRET_CACHE_TTL_MS`] and with concurrent misses for one account
-    /// collapsed to a single resolution. Returns `None` when the secret is
-    /// unresolvable or resolves to empty, which is a hard verification failure
-    /// (an empty key would let anyone sign a delivery). The expensive
-    /// resolution (which may shell out for a `{{cmd:...}}` reference) runs on
-    /// the blocking pool, never on a tokio worker.
-    async fn webhook_secret(
+    /// One webhook template resolved at most once per [`SECRET_CACHE_TTL_MS`],
+    /// with concurrent misses for one cache key collapsed to a single
+    /// resolution and the expensive resolution (which may shell out for a
+    /// `{{cmd:...}}` reference) run on the blocking pool, never on a tokio
+    /// worker. Returns `None` when the value is unresolvable or resolves to
+    /// empty.
+    ///
+    /// `cache_key` carries the field role (`sig:` for a signature secret,
+    /// `verify:` for a challenge token) as well as the connector/account pair,
+    /// so the two never collide in the cache even when the same account field
+    /// backs both.
+    async fn resolve_cached(
         &self,
-        connector: &str,
-        account: &str,
+        cache_key: String,
         doc: ConnectorDoc,
         acct: Account,
         template: String,
     ) -> Option<Arc<str>> {
-        let key = pair(connector, account);
-        if let Some(secret) = self.cached_secret(&key, apb_core::clock::now_ms()) {
-            return Some(secret);
+        if let Some(value) = self.cached_secret(&cache_key, apb_core::clock::now_ms()) {
+            return Some(value);
         }
-        // Singleflight: one resolver per account at a time. Whoever loses the
+        // Singleflight: one resolver per cache key at a time. Whoever loses the
         // race waits here and then reads the value the winner cached.
-        let gate = self.secret_gate(&key);
+        let gate = self.secret_gate(&cache_key);
         let _held = gate.lock().await;
-        if let Some(secret) = self.cached_secret(&key, apb_core::clock::now_ms()) {
-            return Some(secret);
+        if let Some(value) = self.cached_secret(&cache_key, apb_core::clock::now_ms()) {
+            return Some(value);
         }
         let resolved =
             tokio::task::spawn_blocking(move || render_from_account(&template, &doc, &acct))
@@ -354,9 +356,54 @@ impl IngestState {
         if resolved.is_empty() {
             return None;
         }
-        let secret: Arc<str> = Arc::from(resolved.as_str());
-        self.store_secret(key, secret.clone(), apb_core::clock::now_ms());
-        Some(secret)
+        let value: Arc<str> = Arc::from(resolved.as_str());
+        self.store_secret(cache_key, value.clone(), apb_core::clock::now_ms());
+        Some(value)
+    }
+
+    /// The webhook signature secret for one account, resolved at most once per
+    /// [`SECRET_CACHE_TTL_MS`]. Returns `None` when the secret is unresolvable
+    /// or resolves to empty, which is a hard verification failure (an empty key
+    /// would let anyone sign a delivery).
+    async fn webhook_secret(
+        &self,
+        connector: &str,
+        account: &str,
+        doc: ConnectorDoc,
+        acct: Account,
+        template: String,
+    ) -> Option<Arc<str>> {
+        self.resolve_cached(
+            format!("sig:{}", pair(connector, account)),
+            doc,
+            acct,
+            template,
+        )
+        .await
+    }
+
+    /// The challenge verify token for one account, resolved through the same
+    /// cached, singleflighted, blocking-pool machinery as the signature secret.
+    /// The GET challenge handshake used to resolve this inline on the async
+    /// worker, so an unauthenticated challenge flood against a `{{cmd:...}}`
+    /// verify token could shell out per request and pin the shared runtime the
+    /// dashboard also runs on. Returns `None` when the token is unresolvable or
+    /// empty, which the caller treats as a verification failure.
+    async fn challenge_token(
+        &self,
+        connector: &str,
+        account: &str,
+        doc: ConnectorDoc,
+        acct: Account,
+        template: String,
+    ) -> Option<Arc<str>> {
+        self.resolve_cached(
+            format!("verify:{}", pair(connector, account)),
+            doc,
+            acct,
+            template,
+        )
+        .await
     }
 }
 
@@ -464,13 +511,21 @@ async fn get_hook_handler(
     if hook.challenge != Some(ChallengeDialect::MetaHub) {
         return flat(StatusCode::NOT_FOUND);
     }
-    let Some(template) = hook.verify_token.as_deref() else {
+    let Some(template) = hook.verify_token.clone() else {
         return flat(StatusCode::NOT_FOUND);
     };
-    let Some(token) = render_from_account(template, &doc, &acct) else {
+    // Resolve the verify token through the same cached, singleflighted,
+    // blocking-pool machinery as the signature secret. Resolving it inline on
+    // this async task let an unauthenticated challenge flood against a
+    // `{{cmd:...}}` token shell out per request and pin the shared runtime the
+    // dashboard also runs on.
+    let Some(token) = state
+        .challenge_token(&connector, &account, doc, acct, template)
+        .await
+    else {
         // The token could not be resolved (a missing env var, a failing
-        // command). The operator sees this through `apb connector doctor`;
-        // the caller sees a flat refusal.
+        // command) or resolved to empty. The operator sees this through
+        // `apb connector doctor`; the caller sees a flat refusal.
         state.note_failure(client);
         log_rejected(client, &connector, &account);
         return flat(StatusCode::FORBIDDEN);

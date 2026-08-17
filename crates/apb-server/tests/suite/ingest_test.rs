@@ -824,3 +824,81 @@ async fn the_webhook_secret_is_resolved_at_most_once_within_the_ttl() {
         "all five distinct deliveries were stored"
     );
 }
+
+/// The challenge verify token is resolved at most once per account within the
+/// cache TTL, not on every GET. Without the cache an unauthenticated challenge
+/// flood against a `{{cmd:...}}` verify token would shell out per request and
+/// pin the shared runtime. Uses a token command that appends one byte to a
+/// counter file on each invocation, asserts it ran once across several
+/// challenge GETs, and confirms the handshake still echoes on a token match and
+/// refuses on a mismatch.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_challenge_token_is_resolved_at_most_once_within_the_ttl() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+
+    let cdir = cfg.path().join("connectors").join(CONNECTOR);
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join("connector.yaml"), CONNECTOR_YAML).unwrap();
+
+    // The token command appends a byte to this file on every invocation.
+    let counter = cfg.path().join("token-resolve-count");
+    let cmd_token = "verify-token-value";
+    let adir = cfg.path().join("connector-config");
+    std::fs::create_dir_all(&adir).unwrap();
+    std::fs::write(
+        adir.join(format!("{CONNECTOR}.yaml")),
+        format!(
+            "accounts:\n  - name: {ACCOUNT}\n    default: true\n    verify_token: \"{{{{cmd:sh -c 'printf x >> {counter}; printf %s {cmd_token}'}}}}\"\n    app_secret: \"{{{{env.{SECRET_VAR}}}}}\"\n",
+            counter = counter.display(),
+        ),
+    )
+    .unwrap();
+    let _cfg_guard = set_var("APB_CONFIG_DIR", cfg.path());
+    let _secret_guard = set_var(SECRET_VAR, SECRET);
+
+    // One shared state, so its token cache persists across challenge GETs.
+    let state = fresh_state();
+
+    let matching = format!(
+        "/hooks/{CONNECTOR}/{ACCOUNT}?hub.mode=subscribe&hub.verify_token={cmd_token}&hub.challenge=42"
+    );
+    for _ in 0..5 {
+        let app = build_ingest_router(state.clone());
+        let res = send_from(
+            app,
+            Request::get(&matching).body(Body::empty()).unwrap(),
+            PEER,
+        )
+        .await;
+        assert_eq!(res.status(), StatusCode::OK, "a matching token is echoed");
+        let bytes = res.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(String::from_utf8_lossy(&bytes), "42");
+    }
+
+    // A mismatch is still refused, and still against the cached token (no fresh
+    // resolution), so the counter stays at one.
+    let app = build_ingest_router(state.clone());
+    let (status, text) = send(
+        app,
+        Request::get(format!(
+            "/hooks/{CONNECTOR}/{ACCOUNT}?hub.mode=subscribe&hub.verify_token=wrong&hub.challenge=42"
+        ))
+        .body(Body::empty())
+        .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "a mismatched token is refused"
+    );
+    assert!(text.is_empty(), "no detail is disclosed: {text}");
+
+    let invocations = std::fs::read(&counter).map(|b| b.len()).unwrap_or(0);
+    assert_eq!(
+        invocations, 1,
+        "the token command ran once within the TTL, not once per challenge GET"
+    );
+}
