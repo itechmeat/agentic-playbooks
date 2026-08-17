@@ -157,7 +157,7 @@ fn dedupe_is_time_based_and_survives_a_flood_within_the_window() {
     // Still deduped inside the window, no matter how many followed it (a
     // count-based window would have rolled it out already).
     assert!(
-        box_.is_duplicate("keep").unwrap(),
+        box_.is_duplicate_at("keep", t0 + 900, WINDOW_MS).unwrap(),
         "an id seen now is still deduped after many later distinct deliveries"
     );
     assert_eq!(
@@ -178,7 +178,9 @@ fn dedupe_is_time_based_and_survives_a_flood_within_the_window() {
     )
     .unwrap();
     assert!(
-        !box_.is_duplicate("keep").unwrap(),
+        !box_
+            .is_duplicate_at("keep", t0 + WINDOW_MS + 1, WINDOW_MS)
+            .unwrap(),
         "evicted only after the age window passes"
     );
     assert!(
@@ -195,6 +197,52 @@ fn dedupe_is_time_based_and_survives_a_flood_within_the_window() {
             Appended::Stored(_)
         ),
         "a genuinely fresh delivery past the window is accepted again"
+    );
+}
+
+/// The advisory `is_duplicate` honors the same age window as the authoritative
+/// `append_bounded`: an entry older than the window is not treated as a
+/// duplicate by either. Before this, `is_duplicate` matched a digest anywhere
+/// in the index, so a redelivery of an old id long after a quiet period was
+/// answered "duplicate" even though `append_bounded` would have stored it.
+#[test]
+fn is_duplicate_honors_the_age_window_like_append_bounded() {
+    const WINDOW_MS: u64 = 10_000;
+    const CAP: usize = 10_000;
+    let keep = Retention {
+        max_bytes: 64 * 1024 * 1024,
+        max_age_ms: u64::MAX,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let box_ = inbox(&dir);
+    let t0 = 1_000_000u64;
+
+    box_.append_bounded("old", &json!({"k": 0}), &keep, WINDOW_MS, CAP, t0)
+        .unwrap();
+
+    // Inside the window: a duplicate to the advisory check, exactly as it is to
+    // the authority.
+    assert!(
+        box_.is_duplicate_at("old", t0 + WINDOW_MS - 1, WINDOW_MS)
+            .unwrap(),
+        "an id inside the window is advised as a duplicate"
+    );
+
+    // Past the window, and WITHOUT any intervening append to prune the index:
+    // the entry is still physically present, but neither path counts it. This
+    // is the exact case the old anywhere-match `is_duplicate` got wrong.
+    let past = t0 + WINDOW_MS;
+    assert!(
+        !box_.is_duplicate_at("old", past, WINDOW_MS).unwrap(),
+        "an id past the window is not advised as a duplicate"
+    );
+    assert!(
+        matches!(
+            box_.append_bounded("old", &json!({"k": 1}), &keep, WINDOW_MS, CAP, past)
+                .unwrap(),
+            Appended::Stored(_)
+        ),
+        "and the authority stores it, so the two agree"
     );
 }
 
@@ -226,12 +274,14 @@ fn the_dedupe_index_size_cap_rolls_and_stores_only_digests() {
     let raw = std::fs::read_to_string(box_.dir().join("dedupe.idx")).unwrap();
     let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
     assert_eq!(lines.len(), CAP, "the index holds the last {CAP}");
+    let now = 1000 + (CAP + 5) as u64;
     assert!(
-        !box_.is_duplicate("m0").unwrap(),
+        !box_.is_duplicate_at("m0", now, NO_AGE_EVICTION).unwrap(),
         "the oldest id rolled out"
     );
     assert!(
-        box_.is_duplicate(&format!("m{}", CAP + 4)).unwrap(),
+        box_.is_duplicate_at(&format!("m{}", CAP + 4), now, NO_AGE_EVICTION)
+            .unwrap(),
         "the newest id stayed"
     );
     for line in &lines {

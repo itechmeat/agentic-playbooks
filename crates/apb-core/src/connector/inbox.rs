@@ -225,8 +225,29 @@ impl Inbox {
     /// caller passes the raw provider id and this hashes it the same way the
     /// authoritative append does.
     pub fn is_duplicate(&self, provider_id: &str) -> Result<bool, InboxError> {
+        self.is_duplicate_at(provider_id, crate::clock::now_ms_u64(), DEDUPE_RETENTION_MS)
+    }
+
+    /// [`is_duplicate`](Self::is_duplicate) with the clock and age window made
+    /// explicit, the way `append_bounded` already exposes them. The shared
+    /// [`dedupe_hit`] helper it uses is the same one `append_bounded` uses, so
+    /// the advisory check and the authority never disagree on which entries are
+    /// still live: an entry past [`DEDUPE_RETENTION_MS`] is not a duplicate in
+    /// either, so a genuinely fresh redelivery long after a quiet period is
+    /// stored rather than silently answered as an already-seen 200.
+    pub fn is_duplicate_at(
+        &self,
+        provider_id: &str,
+        now: u64,
+        dedupe_retention_ms: u64,
+    ) -> Result<bool, InboxError> {
         let key = dedupe_key(provider_id);
-        Ok(self.read_dedupe()?.iter().any(|e| e.id == key))
+        Ok(dedupe_hit(
+            &self.read_dedupe()?,
+            &key,
+            now,
+            dedupe_retention_ms,
+        ))
     }
 
     /// Appends one delivery, then enforces `retention`. Everything happens
@@ -275,11 +296,9 @@ impl Inbox {
         let mut seen = self.read_dedupe()?;
         // A still-live prior sighting deduplicates; an entry past the age
         // window does not, so a genuinely fresh delivery long after the window
-        // is accepted while a replay inside it is refused.
-        if seen
-            .iter()
-            .any(|e| e.id == key && now.saturating_sub(e.at) < dedupe_retention_ms)
-        {
+        // is accepted while a replay inside it is refused. `is_duplicate` reads
+        // the same helper, so the advisory pre-check agrees with this authority.
+        if dedupe_hit(&seen, &key, now, dedupe_retention_ms) {
             return Ok(Appended::Duplicate);
         }
 
@@ -714,6 +733,18 @@ impl DedupeEntry {
 /// entry the same fixed 64-char width.
 fn dedupe_key(provider_id: &str) -> String {
     crate::content::sha256_hex(provider_id.as_bytes())
+}
+
+/// Whether `entries` holds a still-live sighting of `key`: a matching digest
+/// whose age at `now` is within `dedupe_retention_ms`. Shared by the
+/// authoritative `append_bounded` and the advisory `is_duplicate` so both agree
+/// that an entry past the window is not a duplicate; without this, a
+/// redelivery of an old id long after a quiet period read as a duplicate in the
+/// advisory check while the authority would have stored it.
+fn dedupe_hit(entries: &[DedupeEntry], key: &str, now: u64, dedupe_retention_ms: u64) -> bool {
+    entries
+        .iter()
+        .any(|e| e.id == key && now.saturating_sub(e.at) < dedupe_retention_ms)
 }
 
 /// The serialized size of one event's line, including its newline. Used by
