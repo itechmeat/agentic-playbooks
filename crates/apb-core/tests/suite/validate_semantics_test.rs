@@ -76,6 +76,24 @@ fn v09_condition_not_covering_outcomes() {
 }
 
 #[test]
+fn v09_still_fires_when_on_failure_is_not_route() {
+    // defaults.on_failure exempts V39 (the warning off a non-condition node)
+    // because Stop and Node(_) already dispose of an unrouted failure. V09
+    // must stay strict regardless: a condition node's edges are its whole
+    // routing surface, not a fallback path off a failure.
+    let bad = VALID
+        .replace(
+            "  - { from: check, to: fix,  condition: { type: node_status, node: lint, equals: failure } }\n",
+            "",
+        )
+        .replace(
+            "defaults:\n  profile: architect",
+            "defaults:\n  profile: architect\n  on_failure: stop",
+        );
+    assert!(error_codes(&bad).contains(&"V09"));
+}
+
+#[test]
 fn v10_condition_references_downstream_only_node() {
     // the condition references a node that can't be reached before check
     let bad = VALID.replace(

@@ -206,11 +206,7 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
         // check_conditions never sees that shape (validate() only calls this
         // inside `if r.is_valid()`). `covered` therefore never needs to also
         // treat an unconditional edge as coverage.
-        if uses_node_status
-            && covered.len() < 2
-            && !has_fallback
-            && matches!(playbook.defaults.on_failure, FailurePolicy::Route)
-        {
+        if uses_node_status && covered.len() < 2 && !has_fallback {
             match is_condition {
                 true => r.error(
                     "V09",
@@ -218,6 +214,13 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
                     "condition edges must cover both success and failure or declare a fallback edge"
                         .into(),
                 ),
+                // Both Stop and Node(_) already dispose of an unrouted
+                // failure; only Route (the default) leaves it unhandled, so
+                // only Route makes the missing-failure branch a real gap.
+                // V09 stays strict regardless of the policy: a condition
+                // node's edges are its whole routing surface, not a fallback
+                // path off a failure that would otherwise be an engine error.
+                false if !matches!(playbook.defaults.on_failure, FailurePolicy::Route) => {}
                 false => r.warn(
                     "V39",
                     Some(&n.id),
