@@ -288,7 +288,8 @@ fn prompt_template(kind: &NodeKind) -> Option<&str> {
 }
 
 /// Journals a missing-input anomaly for every `nodes.<id>.output|report` a node's
-/// template reads that ACTUALLY renders empty (spec 2026-08-05 section 1.5).
+/// template reads whose SOURCE has no text to give it (spec 2026-08-05 section
+/// 1.5): for a bare read that is exactly the set that renders empty.
 ///
 /// The read still renders as an empty string, byte for byte: an agent-task cache
 /// key is derived from the rendered prompt, so changing the rendering would move
@@ -296,13 +297,21 @@ fn prompt_template(kind: &NodeKind) -> Option<&str> {
 /// legitimately reference both branches. What was missing was any trace at all -
 /// an agent got a prompt with a hole in it and nothing said so.
 ///
-/// The criterion is emptiness of the RENDERED value, not the source's status,
-/// which is what makes the event's claim true by construction. `resolve` reads
-/// `state.outputs` unconditionally and the fold records an output for every
-/// terminal status, so a `defaults.on_failure` handler reading its failed
-/// source - the canonical handler pattern - receives real text and is no anomaly,
-/// while a source that finished with an empty output is one whatever its status
-/// was.
+/// The criterion is the source's RECORDED OUTPUT, not its status, which is what
+/// makes the event's claim true by construction. `resolve` reads `state.outputs`
+/// unconditionally and the fold records an output for every terminal status, so
+/// a `defaults.on_failure` handler reading its failed source - the canonical
+/// handler pattern - receives real text and is no anomaly, while a source that
+/// finished with an empty output is one whatever its status was.
+///
+/// One rendering-empty case is deliberately NOT reported: a read carrying a
+/// top-level field selector (`nodes.<id>.output.<field>`) whose source DID
+/// record non-empty output that the projection cannot read - not JSON, not an
+/// object, an absent field, a null/array/object value. There the source did its
+/// job and the hole is in the agreement about the output's shape, which is the
+/// author's contract with the agent rather than a gap in the graph; reporting it
+/// would make the anomaly's "the source has nothing to give you" claim false.
+/// The source-side half of such a read is reported exactly like a bare one.
 ///
 /// One anomaly per node execution (not per attempt), listing every hole with the
 /// reason it is one, journaled through the same `WakeRaised { Anomaly }`

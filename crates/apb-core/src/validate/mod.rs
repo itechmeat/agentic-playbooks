@@ -744,6 +744,25 @@ edges:
         );
     }
 
+    /// The other half of the widening: a field selector must not manufacture a
+    /// warning where the bare read has none. `b` runs strictly after `a` on a
+    /// linear chain, so the 4-part read is as safely ordered as the 3-part one.
+    #[test]
+    fn a_field_selector_read_in_chain_order_is_clean() {
+        assert_no_v38(&pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b needs {{nodes.a.output.verdict}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: b }
+  - { from: b, to: done }"#,
+        ));
+    }
+
     /// The barrier-less diamond's merge point is an implicit all-join (Task 1),
     /// so it waits for both branches: reading both is safe.
     #[test]

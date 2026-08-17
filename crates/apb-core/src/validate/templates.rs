@@ -34,7 +34,11 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
                 // of the `output_field` edge condition (spec 2026-08-05 section
                 // 2.5). Only `.output` / `.report` carry that payload, and only
                 // ONE field: a deeper path is not a namespace this grammar knows.
-                ["nodes", nid, "output" | "report", _field] => nodes.contains(nid),
+                // An empty segment (a trailing dot) names no field at all and is
+                // the typo this rule exists to catch, so it stays unresolvable.
+                ["nodes", nid, "output" | "report", field] => {
+                    nodes.contains(nid) && !field.trim().is_empty()
+                }
                 ["run", "instruction" | "context"] => true,
                 ["run", "hooks", key] => hooks.contains(key),
                 _ => false,
@@ -116,12 +120,20 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
         for cap in template_refs(text) {
             let parts: Vec<&str> = cap.split('.').collect();
             let (source, field) = match parts.as_slice() {
-                // A field selector (`nodes.<id>.output.<field>`) races with the
-                // source exactly like the bare read, so both arities are the
-                // rule's business; the message names the read without the
+                // Both arities below are the rule's business: a field selector
+                // (`nodes.<id>.output.<field>`) races with the source exactly
+                // like the bare read. The message names the read WITHOUT the
                 // selector, which is the part the ordering advice is about.
-                ["nodes", source, field @ ("output" | "report")]
-                | ["nodes", source, field @ ("output" | "report"), _] => (*source, *field),
+                ["nodes", source, field @ ("output" | "report")] => (*source, *field),
+                // An empty selector names no field, so it renders nothing
+                // whatever the ordering is: already a V13 error, and this rule
+                // defers to V13 rather than piling a warning on an error (the
+                // same call the unknown-source check below makes).
+                ["nodes", source, field @ ("output" | "report"), selector]
+                    if !selector.trim().is_empty() =>
+                {
+                    (*source, *field)
+                }
                 // Any other namespace is V13's business, not this rule's.
                 _ => continue,
             };

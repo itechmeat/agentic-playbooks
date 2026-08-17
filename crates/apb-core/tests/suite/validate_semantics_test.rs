@@ -231,6 +231,15 @@ fn v13_rejects_a_nested_field_path_and_an_unknown_node_with_a_selector() {
         error_codes(&nested).contains(&"V13"),
         "a nested field path must not resolve"
     );
+    // A trailing dot names no field at all: the typo class V13 exists to catch,
+    // rejected like every other empty dotted segment in this repo.
+    for reference in ["{{nodes.lint.output.}}", "{{nodes.lint.output. }}"] {
+        let empty = VALID.replace("{{nodes.lint.output}}", reference);
+        assert!(
+            error_codes(&empty).contains(&"V13"),
+            "`{reference}` names no field and must not resolve"
+        );
+    }
     // The selector does not weaken the node-existence check.
     let ghost = VALID.replace("{{nodes.lint.output}}", "{{nodes.ghost.output.verdict}}");
     assert!(

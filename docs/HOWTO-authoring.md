@@ -312,8 +312,9 @@ a V13 validation error:
   render verbatim; booleans and numbers render as their JSON text (`true`, `3`).
   Everything it cannot read renders as the empty string and never fails the node:
   output that is not JSON or not a JSON object, an absent field, and a value that
-  is null, an array or an object. One field only, never a path: `.output.a.b` is
-  not a valid reference and fails validation like any other unknown namespace.
+  is null, an array or an object. One field only, never a path, and never empty:
+  `.output.a.b` and a trailing `.output.` are not valid references and fail
+  validation like any other unknown namespace.
 - `nodes.<id>.review_note` - the reviewer's note from a `human_review` node's
   decision.
 - `nodes.<id>.rejected_output` - the agent report text a `success_check`
@@ -331,27 +332,31 @@ playbook can be saved or run, rather than silently rendering empty at run
 time.
 
 Whether a reference resolves and whether it has a value yet are separate
-questions. A template that reads `nodes.<id>.output` or `nodes.<id>.report`
-(with or without a field selector) where nothing in the graph orders `<id>`
-before the reading node is validator warning
-**V38**: across un-joined parallel branches that value may render empty. The
-remedy is to route the read behind `<id>` itself, or behind a node that already
-joins both branches (see "Joining parallel branches"). Adding `join: all` to the
-reader does nothing when the reader has a single incoming edge, which is the
-common shape this warning catches. A loop-carried read, where both nodes sit in
-one cycle, is not flagged: there the previous pass supplies the value.
+questions. A template that reads `nodes.<id>.output` or `nodes.<id>.report` (with
+or without a field selector) where nothing in the graph orders `<id>` before the
+reading node is validator warning **V38**: across un-joined parallel branches
+that value may render empty. The remedy is to route the read behind `<id>`
+itself, or behind a node that already joins both branches (see "Joining parallel
+branches"). Adding `join: all` to the reader does nothing when the reader has a
+single incoming edge, which is the common shape this warning catches. A
+loop-carried read, where both nodes sit in one cycle, is not flagged: there the
+previous pass supplies the value.
 
 At run time the same hole is observable rather than silent. When a node executes
-and one of its `nodes.<id>.output|report` references renders empty, the run
-journals a missing-input anomaly naming every empty reference and why it is empty
-(`never ran`, the source's own status, or `<status> with empty output`), and in a
-supervised run that anomaly wakes the supervisor. The criterion is the rendered
-value, never the source's status: a reference is reported only when the source
-has no recorded output at all or its output is the empty string (a
-field-selector read counts as a read of that source's output). So an
-`on_failure` handler reading the failure it handles stays silent, because a
-failed node's own text is recorded and does render, while a source that succeeded
-with nothing to say is caught. One anomaly per node execution lists all of that
+and one of its `nodes.<id>.output|report` references has no source text to fill
+it, the run journals a missing-input anomaly naming every such reference and why
+it is empty (`never ran`, the source's own status, or `<status> with empty
+output`), and in a supervised run that anomaly wakes the supervisor. The
+criterion is the source's recorded output, never its status: a reference is
+reported only when the source has no recorded output at all or its output is the
+empty string. So an `on_failure` handler reading the failure it handles stays
+silent, because a failed node's own text is recorded and does render, while a
+source that succeeded with nothing to say is caught. A field-selector read is
+reported on that same source-side criterion; what it does NOT report is a
+selector that could not project a field out of output the source really did
+produce (not JSON, not an object, a missing field, a null/array/object value),
+because there the source did give its text and the mismatch is in the agreed
+shape of it, not in the graph. One anomaly per node execution lists all of that
 node's holes. A finish node composing an answer is checked the same way; a node
 served from the cache is not, because neither its execution nor its capture runs.
 
