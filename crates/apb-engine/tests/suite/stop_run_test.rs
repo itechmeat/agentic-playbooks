@@ -541,6 +541,45 @@ fn seed_single_chunk(root: &Path) {
     fs::write(scripts.join("hold.sh"), hold_script(root)).unwrap();
 }
 
+/// A fan-out into a `join: any` merge, capped so the losing branch is queued
+/// behind an admission gate instead of started and then killed. This is the
+/// OTHER cancelled write-off site (the batch admission loop's join:any
+/// short-circuit, `scheduler.rs`'s `cancel_now` branch) - no `stop_run` is
+/// ever posted here, the run completes on its own.
+const CAPPED_ANY_BATCH: &str = r#"
+schema: 1
+id: stopany
+name: Stop Any
+version: 1.0.0
+defaults:
+  max_parallel: 2
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: c, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: m, type: prompt, prompt: "merged" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: start, to: c }
+  - { from: a, to: m, join: any }
+  - { from: b, to: m, join: any }
+  - { from: c, to: m, join: any }
+  - { from: m, to: done }
+"#;
+
+fn seed_any_batch(root: &Path) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/stopany/1.0.0");
+    let scripts = vdir.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(vdir.join("playbook.yaml"), CAPPED_ANY_BATCH).unwrap();
+    fs::write(root.join(".apb/playbooks/stopany/current"), "1.0.0").unwrap();
+    fs::write(scripts.join("nap.sh"), "sleep 0.3\n").unwrap();
+}
+
 /// External review, finding 1: an abort landing while the FINAL (here: only)
 /// chunk of a batch is in flight is observed by no admission gate, because
 /// `stopped`/`halted` are set exclusively BEFORE a chunk runs. The batch tail
@@ -819,12 +858,117 @@ fn a_paused_batch_resumes_and_runs_the_deferred_members() {
     }
 }
 
-/// #77(D): one journal shape. Every cancelled member has a paired NodeStarted
-/// before its NodeFinished, and every such finish carries `output: "cancelled"`.
-/// The pairing is what `cache::verify_connector_calls`,
+/// #90: the Pause counterpart of `a_stop_during_the_last_chunk_of_a_batch_still_aborts_the_run`.
+/// A pause landing while the FINAL (here: only) chunk of a batch is in flight
+/// is observed by no admission gate either - `halt`/`run_cancel` are read only
+/// BEFORE a chunk is admitted - so this exercises the batch tail's own `halt`
+/// read (`scheduler.rs`'s `stop_now` check) rather than the gate. Unlike the
+/// abort twin, `post_supervisor_command` does not kill anything: the members
+/// already in flight (`a`, `b`) run to their own completion once released, and
+/// what the pause actually defers is the run's own continuation past the
+/// batch - the merge node `m` and `done` - which a resume must then run to a
+/// real finish.
+///
+/// Bounded by construction, not by a sleep: exactly as the abort twin,
+/// `hold.sh` blocks until the test writes `release`, and the release happens
+/// only after the pause is provably in `control.jsonl` while the only chunk is
+/// still mid-flight.
+#[cfg(unix)]
+#[test]
+fn a_pause_during_the_last_chunk_of_a_batch_still_pauses_and_resume_completes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_single_chunk(dir.path());
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stoplast", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "stoplast-");
+    poll_until("the only chunk to start", || {
+        dir.path().join("chunk1_started").is_file().then_some(())
+    });
+    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    fs::write(dir.path().join("release"), "go").unwrap();
+
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"))
+        .expect("a paused batch must not fail the drive");
+    assert_eq!(
+        res.outcome,
+        RunStatus::Paused,
+        "a pause during the last chunk must pause the run, not fail or abort it"
+    );
+
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RunError { .. })),
+        "the pause must not be reported through a RunError"
+    );
+    assert!(
+        matches!(
+            events.last().map(|e| &e.payload),
+            Some(EventPayload::RunPaused { .. })
+        ),
+        "the journal must end with RunPaused, got {:?}",
+        events.last().map(|e| &e.payload)
+    );
+    assert_eq!(
+        RunState::fold(&events).run_status,
+        RunStatus::Paused,
+        "the folded run state must read paused"
+    );
+    // Both members already ran to their own end - a pause only halts
+    // admission, it does not kill anything already in flight.
+    for n in ["a", "b"] {
+        assert_eq!(
+            finish_status(&events, n),
+            "succeeded",
+            "member {n} must not be killed by a pause, only the continuation past it is deferred"
+        );
+    }
+    // Premise of the test, asserted so a collapsed race fails loudly instead of
+    // passing vacuously: the merge really had not run yet, because the batch
+    // tail short-circuited straight back to the top-of-loop pause before
+    // advancing the frontier past the batch.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::NodeFinished { node, .. } if node == "m")),
+        "a paused run must not have reached the merge node yet: the resume still has to run it"
+    );
+
+    let resumed = resume(dir.path(), &run_id, None).expect("a paused run must resume");
+    assert_eq!(
+        resumed.outcome,
+        RunStatus::Succeeded,
+        "the resume must run the deferred continuation to completion"
+    );
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        finish_status(&events, "m"),
+        "succeeded",
+        "the merge node deferred by the pause must actually run on resume"
+    );
+}
+
+/// #77(D)/#89: one journal shape. Every cancelled member has a paired
+/// NodeStarted before its NodeFinished, and every such finish carries
+/// `output: "cancelled"`. The pairing is what `cache::verify_connector_calls`,
 /// `journal::current_visit_start_seq`, `progress::node_durations_seconds` and
 /// the interactive re-entry guard all assume; the single output text is what a
-/// `{{nodes.<id>.output}}` read renders on both paths.
+/// `{{nodes.<id>.output}}` read renders on every path.
+///
+/// Checked against two fixtures that hit different write-off sites: the abort
+/// path below (`run_cancel` in `scheduler.rs`'s admission loop, killing
+/// members already in flight and writing off the ones still queued) and a
+/// join:any batch that resolves on its own with no `stop_run` posted at all
+/// (`cancel_now` in the same admission loop - a distinct site, since a batch
+/// can be write-off-cancelled without ever being aborted).
 #[cfg(unix)]
 #[test]
 fn a_cancelled_member_journals_a_paired_start_and_a_cancelled_output() {
@@ -846,36 +990,14 @@ fn a_cancelled_member_journals_a_paired_start_and_a_cancelled_output() {
         .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
 
     let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
-    let cancelled: Vec<(usize, String, String)> = events
-        .iter()
-        .enumerate()
-        .filter_map(|(i, e)| match &e.payload {
-            EventPayload::NodeFinished {
-                node,
-                status,
-                output,
-                ..
-            } if status == "cancelled" => Some((i, node.clone(), output.clone())),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !cancelled.is_empty(),
-        "the abort fixture must produce at least one cancelled member"
-    );
-    for (at, node, output) in cancelled {
-        assert!(
-            events[..at].iter().any(|e| matches!(
-                &e.payload,
-                EventPayload::NodeStarted { node: n, .. } if *n == node
-            )),
-            "cancelled member {node} has no preceding NodeStarted"
-        );
-        assert_eq!(
-            output, "cancelled",
-            "both cancel paths must render the same output text for {node}"
-        );
-    }
+    common::assert_paired_cancelled_shape(&events, "the abort fixture");
+
+    let any_dir = tempfile::tempdir().unwrap();
+    seed_any_batch(any_dir.path());
+    let res = run(any_dir.path(), "stopany", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let any_events = read_all(&any_dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    common::assert_paired_cancelled_shape(&any_events, "the join:any fixture");
 }
 
 /// An unknown run id is a not-found error, not a silently created directory.
@@ -1065,6 +1187,137 @@ fn a_stop_queued_behind_a_retry_still_aborts_the_run() {
         RunState::fold(&events).run_status,
         RunStatus::Aborted,
         "and the folded run must read aborted"
+    );
+}
+
+/// #91's Pause twin: a Pause must also reach the run even when an operator
+/// left an unconsumable command queued ahead of it.
+///
+/// `run_cancel` (the flag the Abort salvage arm gates on) is Abort-only by
+/// contract (`stop.rs:28-38`), so a Pause queued behind a Retry hit neither
+/// the loop (the Retry breaks the scan without advancing the cursor) nor the
+/// salvage (never gated on Pause at all): `blocked_by` was set, `run_cancel`
+/// stayed false, and the scan fell through to `Proceed` - the run kept
+/// executing nodes despite the operator's pause request.
+///
+/// Unlike the Abort twin, this does not lean on killing a mid-flight process:
+/// a Pause never touches `cancel` (stop.rs:31-33), so it cannot interrupt a
+/// running node the way an Abort does - it only takes effect at the next
+/// top-of-loop boundary. The fixture is therefore two agent nodes in a row:
+/// `work` finishes on its own (a brief, deterministic sleep gives the test a
+/// window to queue the Retry and the Pause while it is still running), and
+/// the boundary scan before `next` would start is where the salvage must
+/// fire. If it does not, `next` runs and the run reaches `done` instead of
+/// pausing.
+#[cfg(unix)]
+#[test]
+fn a_pause_queued_behind_a_retry_still_pauses_the_run() {
+    const WF_TWO_STEPS: &str = r#"
+schema: 1
+id: pauseretry
+name: Pause Retry
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "do" }
+  - { id: next, type: agent_task, prompt: "do more" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: next, condition: { type: node_status, node: work, equals: success } }
+  - { from: next, to: done, condition: { type: node_status, node: next, equals: success } }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let vdir = dir.path().join(".apb/playbooks/pauseretry/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), WF_TWO_STEPS).unwrap();
+    fs::write(
+        dir.path().join(".apb/playbooks/pauseretry/current"),
+        "1.0.0",
+    )
+    .unwrap();
+    common::seed_main(dir.path());
+    let marker = dir.path().join("agent_running.marker");
+    let prog = dir.path().join("brief.sh");
+    fs::write(
+        &prog,
+        format!(
+            "#!/bin/sh\ntouch '{m}'\nsleep 1\necho done\n",
+            m = marker.display()
+        ),
+    )
+    .unwrap();
+    set_executable(&prog);
+    let _env = AgentEnv::set(&prog.to_string_lossy());
+
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "pauseretry", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "pauseretry-");
+    poll_until("the stub agent to start", || marker.is_file().then_some(()));
+
+    // Ordering is the whole point: the Retry lands FIRST, so the scan breaks
+    // on it and never reaches the Pause behind it via the normal loop. Both
+    // are posted while `work` is still in its one-second sleep, so they are
+    // provably queued before the next top-of-loop boundary runs.
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Retry {
+            node: "work".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
+    let res = res.expect("a pause must stop the drive cleanly, not fail it with an error");
+    assert_eq!(
+        res.outcome,
+        RunStatus::Paused,
+        "a pause queued behind a retry must still pause, not keep running"
+    );
+
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        matches!(
+            events.last().map(|e| &e.payload),
+            Some(EventPayload::RunPaused { .. })
+        ),
+        "the journal must end with RunPaused, got {:?}",
+        events.last().map(|e| &e.payload)
+    );
+    assert_eq!(
+        RunState::fold(&events).run_status,
+        RunStatus::Paused,
+        "and the folded run must read paused"
+    );
+    assert!(
+        !events.iter().any(
+            |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "next")
+        ),
+        "the pause must land before `next` starts, not after"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |e| matches!(&e.payload, EventPayload::SupervisorAction { action, node, .. }
+                if action == "retry_superseded_by_stop" && node.as_deref() == Some("work"))
+            )
+            .count(),
+        1,
+        "the discarded retry must be journaled, not dropped silently"
     );
 }
 

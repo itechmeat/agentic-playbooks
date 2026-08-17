@@ -584,7 +584,8 @@ impl<'de> Deserialize<'de> for FunctionsAllow {
 /// A node's binding of one connector (spec 2026-07-18-connectors-design
 /// section 5): the connector folder name, an optional restriction to a
 /// subset of configured accounts (`None` - all accounts), the functions grant
-/// (`FunctionsAllow`), and an optional per-run call budget. Accepted in YAML
+/// (`FunctionsAllow`), and an optional call budget counted per executor
+/// attempt (`apb-engine`'s `connector::call::attempt_floor`). Accepted in YAML
 /// as a bare string (shorthand, everything else default) or as an object.
 /// Structural checks (name format, duplicates, empty/duplicate list entries,
 /// `max_calls == 0`) are validator V23-V26; FS-dependent checks (connector
@@ -829,6 +830,12 @@ pub enum NodeKind {
     },
     HumanReview {
         options: Vec<String>,
+        /// Optional guidance shown to the reviewer at the gate (issue #102.9),
+        /// rendered into the owner-facing review instruction above the
+        /// options. Template placeholders inside are NOT rendered - the text
+        /// is surfaced literally, same as the option strings themselves.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
     Wait {
         wait_for: WaitFor,
@@ -970,6 +977,35 @@ pub enum EdgeCondition {
         field: String,
         equals: String,
     },
+}
+
+/// One top-level field of a node output that parses as a JSON object, as the
+/// string an [`EdgeCondition::OutputField`] compares against and a
+/// `{{nodes.<id>.output.<field>}}` template renders (spec 2026-08-05 section
+/// 2.5). `None` for every shape that cannot be read as one unambiguous string:
+/// output that is not JSON, JSON that is not an object, an absent field, and a
+/// value that is null, an array or an object. A string is taken verbatim; a bool
+/// and a number take their JSON textual form (`true`, `3`, `3.5`).
+///
+/// Total by construction, because neither a routing decision nor a prompt render
+/// may panic on whatever an agent happened to print: for the edge an unreadable
+/// output simply means the condition does not apply, and for a template it
+/// renders as the empty string, exactly like every other unresolved reference.
+///
+/// Lives beside the variant so the two consumers (edge selection in
+/// `apb-engine::parallel`, template rendering in `apb-engine::context`) and the
+/// validator grammar that admits the template form share one definition of what
+/// "one top-level field" means.
+pub fn output_field_value(output: &str, field: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
+    match parsed.as_object()?.get(field)? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            None
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]

@@ -92,10 +92,16 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
 
     let context = std::fs::read_to_string(run_dir.join("context.md")).unwrap_or_default();
 
-    // Same live overlay as `run_status` (issue #45 finding 9): a live open
-    // attempt must not report as interrupted here either.
+    // Same live overlay as `run_status` (issue #45 finding 9, and issue
+    // #102.4 cause B for a wait/signal park): a live open attempt, or a run
+    // parked on a wait with a live driver, must not report as interrupted
+    // here either. `progress` is computed once and reused below for the
+    // pending-gate fields.
     let nodes = crate::liveness::reported_node_statuses(&events);
-    let run_status = crate::liveness::reported_run_status(&events);
+    let progress = crate::progress::from_run_dir(&run_dir, &events);
+    let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
+    let driver_alive = crate::liveness::driver_alive(&run_dir, run_id);
+    let run_status = crate::liveness::reported_run_status(&events, waiting, driver_alive);
 
     let wakes: Vec<serde_json::Value> = events
         .iter()
@@ -134,7 +140,7 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
     // The pending human-review gate, if any (issue #42 finding 4): the observer
     // sees it through `supervisor_run_inspect` too, not only `run_status`, so a
     // gate is never surfaced in one supervisor path but hidden in the other.
-    let progress = crate::progress::from_run_dir(&run_dir, &events);
+    // `progress` was already computed above for the parked-on-wait overlay.
     let pending_review = progress.as_ref().and_then(|p| p.pending_review.clone());
     let pending_supervisor = progress.as_ref().and_then(|p| p.pending_supervisor.clone());
 

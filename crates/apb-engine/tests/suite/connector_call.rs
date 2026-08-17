@@ -995,6 +995,182 @@ functions:
     assert_eq!(v3["status"], serde_json::json!(200));
 }
 
+/// Journals one `AttemptStarted` for `NODE` into the run's event log, standing
+/// in for the drive's spawn-time journaling (`scheduler/node.rs` `on_spawn`),
+/// which lands on disk before the agent - and therefore before any
+/// `apb connector call` subprocess it spawns - does any work.
+fn journal_attempt_started(run_dir: &Path, attempt: u32) {
+    // `open` creates `events.jsonl` when it is absent, so it covers both the
+    // first attempt and every later one.
+    let mut log = apb_engine::event::EventLog::open(run_dir).unwrap();
+    log.append(EventPayload::AttemptStarted {
+        node: NODE.to_string(),
+        attempt,
+        agent: "test-agent".to_string(),
+        soul_delivery: None,
+        skills_mode: None,
+        pid: None,
+        spawn_ms: None,
+    })
+    .unwrap();
+}
+
+#[test]
+fn max_calls_budget_resets_for_a_fallback_attempt() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_run(
+        run.path(),
+        vec![account("https://unused.example")],
+        &["acct1"],
+        &["ping"],
+        Some(1),
+    );
+
+    // Attempt 1: the primary executor spends the whole one-call budget and then
+    // dies (no HTTP: `ping` is a canned mock).
+    journal_attempt_started(run.path(), 1);
+    let (v1, ok1) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok1, "first call of attempt 1 should succeed: {v1}");
+    let (v2, ok2) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(!ok2, "the budget is spent within attempt 1: {v2}");
+    assert_eq!(v2["error"]["code"], serde_json::json!("permission"));
+    let msg2 = v2["error"]["message"].as_str().unwrap();
+    assert!(
+        msg2.contains("this attempt"),
+        "the message should blame the current attempt: {msg2}"
+    );
+
+    // Attempt 2 (the fallback step): a fresh executor gets a fresh budget.
+    journal_attempt_started(run.path(), 2);
+    let (v3, ok3) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(
+        ok3,
+        "a fallback attempt must not inherit the dead attempt's spent budget: {v3}"
+    );
+    assert_eq!(v3["status"], serde_json::json!(200));
+
+    // The second attempt's own budget is still enforced, and the rejection now
+    // says the earlier attempt's calls were not held against it.
+    let (v4, ok4) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(!ok4, "attempt 2 has its own one-call budget: {v4}");
+    let msg4 = v4["error"]["message"].as_str().unwrap();
+    assert!(
+        msg4.contains("this attempt") && msg4.contains("earlier attempt"),
+        "the message should separate this attempt from earlier ones: {msg4}"
+    );
+}
+
+#[test]
+fn max_calls_budget_resets_on_a_new_node_visit_without_attempts() {
+    let _lock = common::env_lock();
+    let run = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    seed_run(
+        run.path(),
+        vec![account("https://unused.example")],
+        &["acct1"],
+        &["ping"],
+        Some(1),
+    );
+
+    // A script node never emits `AttemptStarted`, so the floor falls back to the
+    // node visit: a second loop iteration gets its budget back.
+    let mut log = apb_engine::event::EventLog::create(run.path()).unwrap();
+    log.append(EventPayload::NodeStarted {
+        node: NODE.to_string(),
+        attempt: 1,
+    })
+    .unwrap();
+    drop(log);
+    let (_v1, ok1) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok1);
+    let (v2, ok2) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(!ok2, "the visit's budget is spent");
+    // A script node has no attempt, so the message must name the visit rather
+    // than invent an attempt the node never had.
+    let msg2 = v2["error"]["message"].as_str().unwrap();
+    assert!(
+        msg2.contains("in this visit to the node") && !msg2.contains("attempt"),
+        "a node with no attempts should be told about its visit: {msg2}"
+    );
+
+    let mut log = apb_engine::event::EventLog::open(run.path()).unwrap();
+    log.append(EventPayload::NodeStarted {
+        node: NODE.to_string(),
+        attempt: 1,
+    })
+    .unwrap();
+    drop(log);
+    let (v3, ok3) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(ok3, "a new node visit starts a fresh budget: {v3}");
+
+    let (v4, ok4) = call(
+        run.path(),
+        root.path(),
+        "ping",
+        None,
+        serde_json::json!({}),
+        false,
+    );
+    assert!(!ok4, "the second visit has its own one-call budget: {v4}");
+    let msg4 = v4["error"]["message"].as_str().unwrap();
+    assert!(
+        msg4.contains("earlier visits") && !msg4.contains("attempt"),
+        "the excluded calls belong to earlier visits, not attempts: {msg4}"
+    );
+}
+
 #[test]
 fn path_auth_renders_token_into_path_segment_keeping_colon() {
     let _lock = common::env_lock();

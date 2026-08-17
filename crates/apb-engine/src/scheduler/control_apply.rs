@@ -196,48 +196,64 @@ pub(crate) fn scan_control(
         }
     }
 
-    // A stop that the scan above cannot reach. The watcher reads the raw
-    // control file and so DOES see an Abort queued behind an unconsumable
+    // A terminal command (Abort or Pause) that the scan above cannot reach.
+    // The watcher (`StopWatcher`, stop.rs) reads the raw control file and so
+    // DOES see a terminal entry queued behind an unconsumable
     // Retry/ContinueFrom; the scan stops short of it and never applies it.
-    // The flag then stayed latched for the rest of the drive: every later
-    // node returned `Cancelled` instantly, `Cancelled` is neither Unknown
-    // nor Interrupted, so it fell through to edge selection, matched
-    // nothing, and the drive failed with "has no outgoing edge" - which
-    // `drive_prepared` stamped as run_finished(failed). An operator who
-    // asked for a stop got a FAILED run.
+    // For Abort specifically, `run_cancel` then stayed latched for the rest
+    // of the drive: every later node returned `Cancelled` instantly,
+    // `Cancelled` is neither Unknown nor Interrupted, so it fell through to
+    // edge selection, matched nothing, and the drive failed with "has no
+    // outgoing edge" - which `drive_prepared` stamped as run_finished(failed).
+    // An operator who asked for a stop got a FAILED run. A queued Pause had
+    // it worse: nothing gates on it at all (`run_cancel` is Abort-only, see
+    // `stop.rs:28-38`), so the scan fell straight through to `Proceed` and
+    // the run kept executing despite the pause request.
     //
-    // The flag being set is proof that an Abort is pending, so finalize as
-    // aborted here instead - and consume the abort properly, cursor and
-    // all. Skipping the cursor forward past the Retry is what the scalar
-    // cursor forces (see `write_control_cursor`), and it is the right
-    // trade here: the run is stopping, so a queued Retry has nothing left
-    // to retry. What it must not be is silent, hence the
+    // `blocked_by` being set is proof a Retry/ContinueFrom is stuck; find the
+    // first terminal entry (Abort or Pause, whichever comes first in seq
+    // order) anywhere in the pending tail and salvage it instead - consuming
+    // it properly, cursor and all. Skipping the cursor forward past the
+    // Retry is what the scalar cursor forces (see `write_control_cursor`),
+    // and it is the right trade here: the run is stopping, so a queued Retry
+    // has nothing left to retry. What it must not be is silent, hence the
     // `retry_superseded_by_stop` record ahead of the terminal event. NOT
-    // advancing would be far worse than losing the Retry: this arm does
-    // not consume anything, so every later resume would re-enter it and
-    // append another RunAborted, forever.
+    // advancing would be far worse than losing the Retry: this arm would not
+    // consume anything, so every later resume would re-enter it and append
+    // another terminal event, forever.
     //
-    // If the Abort is not in `pending_control` (the watcher saw an append
-    // that landed after our read), fall through rather than invent a seq:
-    // the next iteration re-reads control and this arm fires with the real
-    // entry in hand.
-    if let Some(blocked_node) = blocked_by.as_ref()
-        && run_cancel.load(Ordering::SeqCst)
-        && let Some((abort_seq, reason)) = pending_control.iter().find_map(|e| match &e.cmd {
-            Control::Abort { reason } => Some((e.seq, reason.clone())),
+    // `run_cancel` is kept as belt-and-braces for the Abort case (it is set
+    // synchronously by `stop_run` before this scan can even run again) but
+    // must not gate Pause, which has no equivalent flag.
+    //
+    // If neither terminal kind is in `pending_control` (the watcher saw an
+    // append that landed after our read), fall through rather than invent a
+    // seq: the next iteration re-reads control and this arm fires with the
+    // real entry in hand.
+    if let Some(blocked_node) = blocked_by.as_ref() {
+        let salvage = pending_control.iter().find_map(|e| match &e.cmd {
+            Control::Abort { reason } => Some((e.seq, RunStatus::Aborted, reason.clone())),
+            Control::Pause => Some((e.seq, RunStatus::Paused, "supervisor pause".to_string())),
             _ => None,
-        })
-    {
-        log.append(EventPayload::SupervisorAction {
-            action: "retry_superseded_by_stop".into(),
-            node: Some(blocked_node.clone()),
-            detail: format!(
-                "a pending stop was applied before this command could be consumed, so it was discarded: {reason}"
-            ),
-        })?;
-        log.append(EventPayload::RunAborted { reason })?;
-        write_control_cursor(run_dir, abort_seq)?;
-        return Ok(ControlScan::Terminal(RunStatus::Aborted));
+        });
+        if let Some((terminal_seq, status, reason)) = salvage
+            && (status != RunStatus::Aborted || run_cancel.load(Ordering::SeqCst))
+        {
+            log.append(EventPayload::SupervisorAction {
+                action: "retry_superseded_by_stop".into(),
+                node: Some(blocked_node.clone()),
+                detail: format!(
+                    "a pending stop was applied before this command could be consumed, so it was discarded: {reason}"
+                ),
+            })?;
+            match status {
+                RunStatus::Aborted => log.append(EventPayload::RunAborted { reason })?,
+                RunStatus::Paused => log.append(EventPayload::RunPaused { reason })?,
+                _ => unreachable!("salvage only ever produces Aborted or Paused"),
+            };
+            write_control_cursor(run_dir, terminal_seq)?;
+            return Ok(ControlScan::Terminal(status));
+        }
     }
 
     if patch_applied {

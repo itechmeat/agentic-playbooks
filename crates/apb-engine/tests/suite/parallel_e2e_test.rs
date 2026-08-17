@@ -1,3 +1,4 @@
+use crate::common;
 use std::fs;
 use std::path::Path;
 
@@ -651,6 +652,7 @@ fn an_any_win_does_not_drop_a_pending_join_elsewhere() {
                 if node == "fb" && status == "cancelled")),
         "the losing branch of the race is still cancelled"
     );
+    common::assert_paired_cancelled_shape(&events, "the any-win race with a pending sibling join");
 }
 
 #[test]

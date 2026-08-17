@@ -67,8 +67,16 @@ nodes:
 ```
 
 `functions` is an explicit list or the string `read_only`; `accounts` allowlists
-which configured accounts the node may use; `max_calls` is an optional per-node
-budget. The binding is covered by the playbook digest, but the connector folder
+which configured accounts the node may use; `max_calls` is an optional call
+budget counted per executor attempt, not per run, so the worst case for one
+visit to the node is `attempts x max_calls`. Every spawn counts: `max_retries
++ 1` attempts per step of the fallback chain, plus the infrastructure-retry
+backoff steps (two more by default, and they do not advance `max_retries`),
+plus one per question and answer round under `reprompt` or `resume` interaction
+(not under `live`, which spans every round in one attempt). A script node runs
+no executor, so its count restarts per visit instead.
+
+The binding is covered by the playbook digest, but the connector folder
 and each account are digest-pinned separately and must be approved before a run.
 Installing connectors, configuring accounts, secrets, trust, and the
 `apb connector` CLI are covered in CONNECTORS.md.
@@ -298,6 +306,15 @@ a V13 validation error:
 - `nodes.<id>.output` - the node's output text.
 - `nodes.<id>.report` - the same value as `.output` (an alias; both names
   resolve identically).
+- `nodes.<id>.output.<field>` (and `nodes.<id>.report.<field>`) - ONE top-level
+  field of that output when it parses as a JSON object, the template twin of the
+  `output_field` edge condition below and with exactly its semantics. Strings
+  render verbatim; booleans and numbers render as their JSON text (`true`, `3`).
+  Everything it cannot read renders as the empty string and never fails the node:
+  output that is not JSON or not a JSON object, an absent field, and a value that
+  is null, an array or an object. One field only, never a path, and never empty:
+  `.output.a.b` and a trailing `.output.` are not valid references and fail
+  validation like any other unknown namespace.
 - `nodes.<id>.review_note` - the reviewer's note from a `human_review` node's
   decision.
 - `nodes.<id>.rejected_output` - the agent report text a `success_check`
@@ -306,8 +323,12 @@ a V13 validation error:
 - `run.instruction` - the run's input prompt (see below).
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
-- `run.hooks.*` - the payload last posted to a `wait` node's webhook, by key
-  (`run.hooks.<key>`).
+- `run.hooks.*` - the relative signal URL for a `wait` node's hook key
+  (`run.hooks.<key>` renders `/api/hooks/<run-id>/<secret>`). Posting to that
+  URL only unblocks the wait; the request body is discarded, not stored or
+  rendered anywhere. This is a different "hooks" from a connector's inbound
+  event inbox, whose delivery bodies are kept and read with `inbox_read` (see
+  CONNECTORS.md, "Receiving events (webhooks and the inbox)").
 
 An unresolvable reference (an unknown param, a node id that is not in the
 playbook, a namespace outside this list) fails validation before the
@@ -315,25 +336,31 @@ playbook can be saved or run, rather than silently rendering empty at run
 time.
 
 Whether a reference resolves and whether it has a value yet are separate
-questions. A template that reads `nodes.<id>.output` or `nodes.<id>.report` where
-nothing in the graph orders `<id>` before the reading node is validator warning
-**V38**: across un-joined parallel branches that value may render empty. The
-remedy is to route the read behind `<id>` itself, or behind a node that already
-joins both branches (see "Joining parallel branches"). Adding `join: all` to the
-reader does nothing when the reader has a single incoming edge, which is the
-common shape this warning catches. A loop-carried read, where both nodes sit in
-one cycle, is not flagged: there the previous pass supplies the value.
+questions. A template that reads `nodes.<id>.output` or `nodes.<id>.report` (with
+or without a field selector) where nothing in the graph orders `<id>` before the
+reading node is validator warning **V38**: across un-joined parallel branches
+that value may render empty. The remedy is to route the read behind `<id>`
+itself, or behind a node that already joins both branches (see "Joining parallel
+branches"). Adding `join: all` to the reader does nothing when the reader has a
+single incoming edge, which is the common shape this warning catches. A
+loop-carried read, where both nodes sit in one cycle, is not flagged: there the
+previous pass supplies the value.
 
 At run time the same hole is observable rather than silent. When a node executes
-and one of its `nodes.<id>.output|report` references renders empty, the run
-journals a missing-input anomaly naming every empty reference and why it is empty
-(`never ran`, the source's own status, or `<status> with empty output`), and in a
-supervised run that anomaly wakes the supervisor. The criterion is the rendered
-value, never the source's status: a reference is reported only when the source
-has no recorded output at all or its output is the empty string. So an
-`on_failure` handler reading the failure it handles stays silent, because a
-failed node's own text is recorded and does render, while a source that succeeded
-with nothing to say is caught. One anomaly per node execution lists all of that
+and one of its `nodes.<id>.output|report` references has no source text to fill
+it, the run journals a missing-input anomaly naming every such reference and why
+it is empty (`never ran`, the source's own status, or `<status> with empty
+output`), and in a supervised run that anomaly wakes the supervisor. The
+criterion is the source's recorded output, never its status: a reference is
+reported only when the source has no recorded output at all or its output is the
+empty string. So an `on_failure` handler reading the failure it handles stays
+silent, because a failed node's own text is recorded and does render, while a
+source that succeeded with nothing to say is caught. A field-selector read is
+reported on that same source-side criterion; what it does NOT report is a
+selector that could not project a field out of output the source really did
+produce (not JSON, not an object, a missing field, a null/array/object value),
+because there the source did give its text and the mismatch is in the agreed
+shape of it, not in the graph. One anomaly per node execution lists all of that
 node's holes. A finish node composing an answer is checked the same way; a node
 served from the cache is not, because neither its execution nor its capture runs.
 
@@ -348,6 +375,16 @@ A `human_review` node pauses the run for a human decision:
 `options` is a required list of strings: the choices a reviewer can pick.
 `review_decide` records one of them as the node's decision, plus a free-form
 note (available downstream as `{{nodes.review.review_note}}`).
+
+An optional `prompt` gives the reviewer guidance, shown above the options in
+the owner-facing instruction and in the web review panel:
+
+```yaml
+- { id: review, type: human_review, options: [approve, reject], prompt: "Check the changelog before deciding." }
+```
+
+`prompt` is plain text: template placeholders inside it (`{{...}}`) are not
+rendered and are surfaced literally, same as the option strings.
 
 An edge's `condition` gates traversal on one of four types:
 
@@ -367,7 +404,9 @@ An edge's `condition` gates traversal on one of four types:
   (no substring, no case folding). Anything unreadable is simply a non-match:
   output that is not a JSON object, a missing field, or a value that is null,
   an array or an object. Booleans and numbers compare by their JSON text
-  (`true`, `3`).
+  (`true`, `3`). The same projection is available inside a prompt as
+  `{{nodes.<id>.output.<field>}}` (see "Template variables"), so a downstream
+  node can quote one field of a verdict instead of the whole JSON blob.
 
 ```yaml
 edges:
@@ -913,7 +952,8 @@ validates its playbooks.
   - `check: { type: manual }` (default when omitted): a person confirms the
     criterion.
   - `check: { type: marker, marker: <string> }`: the marker string is
-    expected in the run result.
+    expected in the run result. Marker matching is not wired into run
+    verdicts yet; the field records the contract, same as `script` below.
   - `check: { type: script, path: <relative path> }`: a check script
     confirms the criterion. Script execution is not wired into run verdicts
     yet; the field records the contract.

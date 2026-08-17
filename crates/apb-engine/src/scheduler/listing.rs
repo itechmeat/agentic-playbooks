@@ -61,16 +61,16 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         let parent_run = cfg.as_ref().and_then(|c| c.parent_run.clone());
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
         let superseded_by = cfg.as_ref().and_then(|c| c.superseded_by.clone());
-        let driver_dead = matches!(
-            crate::liveness::driver_alive(&entry.path(), &run_id),
-            Some(false)
-        );
+        let driver_alive_status = crate::liveness::driver_alive(&entry.path(), &run_id);
+        let driver_dead = matches!(driver_alive_status, Some(false));
+        let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
+        let status = crate::liveness::reported_run_status(&events, waiting, driver_alive_status)
+            .as_str()
+            .into();
         out.push(RunSummary {
             run_id,
             playbook,
-            status: crate::liveness::reported_run_status(&events)
-                .as_str()
-                .into(),
+            status,
             started_ts,
             progress,
             parent_run,

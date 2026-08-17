@@ -27,4 +27,24 @@ describe('pendingReviews', () => {
     ]
     expect(pendingReviews(events)).toEqual([{ node: 'gate', options: ['a'] }])
   })
+
+  // issue #102.9: the gate's optional prompt is carried through to the
+  // review panel, shown above the options.
+  it('carries the gate prompt when present', () => {
+    const events = [
+      ev(0, 'review_requested', {
+        node: 'gate',
+        options: ['approved', 'rejected'],
+        prompt: 'Check the changelog before deciding.',
+      }),
+    ]
+    expect(pendingReviews(events)).toEqual([
+      { node: 'gate', options: ['approved', 'rejected'], prompt: 'Check the changelog before deciding.' },
+    ])
+  })
+
+  it('omits prompt when the gate has none', () => {
+    const events = [ev(0, 'review_requested', { node: 'gate', options: ['a'] })]
+    expect(pendingReviews(events)).toEqual([{ node: 'gate', options: ['a'] }])
+  })
 })

@@ -27,6 +27,32 @@ fn seed(root: &Path) {
     fs::write(root.join(".apb/playbooks/noagent/current"), "1.0.0").unwrap();
 }
 
+/// A playbook with a `script` node: the only kind (besides `agent_task`,
+/// `finish`-with-prompt, and `playbook`) that takes the workdir lock
+/// (`NodeKind::takes_workdir_lock`), so starting it is the minimal shape that
+/// exercises `workdir::acquire` at all.
+const SCRIPTED: &str = r#"
+schema: 1
+id: scripted
+name: Scripted
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/work.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done }
+"#;
+
+fn seed_scripted(root: &Path) {
+    apb_core::registry::init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/scripted/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), SCRIPTED).unwrap();
+    fs::write(root.join(".apb/playbooks/scripted/current"), "1.0.0").unwrap();
+}
+
 #[test]
 fn run_then_inspect() {
     let dir = tempfile::tempdir().unwrap();
@@ -63,6 +89,38 @@ fn run_then_inspect() {
     let ev2 = run_events(dir.path(), &run_id, Some(2)).unwrap();
     let first_seq = ev2["events"][0]["seq"].as_u64().unwrap();
     assert!(first_seq >= 2);
+}
+
+/// #102.5: a workdir already held by a live write-run must surface as a
+/// `Conflict` (agent-actionable retry hint), not the generic `Engine` bucket
+/// that a client cannot distinguish from a hard failure.
+#[test]
+fn playbook_run_workdir_busy_is_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_scripted(dir.path());
+    // Holds the workdir lock under this test process's own (live) pid for the
+    // duration of the call below.
+    let _guard = apb_engine::workdir::acquire(dir.path(), false)
+        .unwrap()
+        .unwrap();
+    let err = playbook_run(
+        dir.path(),
+        "scripted",
+        None,
+        BTreeMap::new(),
+        None,
+        None,
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, apb_mcp::tools::ToolError::Conflict(_)),
+        "expected Conflict, got {err:?}"
+    );
 }
 
 #[test]
@@ -312,6 +370,47 @@ fn run_status_exposes_pending_review_block_for_a_gate() {
         .expect("how_to_decide is a string");
     assert!(how_to.contains("apb review"), "got: {how_to}");
     assert!(how_to.contains("review_decide"), "got: {how_to}");
+}
+
+/// issue #102.9: a gate's optional `prompt:` field is surfaced in the
+/// `pending_review` block, both as its own field and rendered into
+/// `instruction` above the options, so `run_status` gives an agent relaying
+/// the gate everything it needs in one line.
+const REVIEW_GATE_PROMPT_PB: &str = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: gate, type: human_review, title: "Approve the release", options: [approved, rejected], prompt: "Check the changelog before deciding." }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: gate }
+  - { from: gate, to: f }
+"#;
+
+#[test]
+fn run_status_pending_review_carries_the_gate_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = bare_run_dir(dir.path(), "r-gate-prompt");
+    fs::write(run_dir.join("playbook.yaml"), REVIEW_GATE_PROMPT_PB).unwrap();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n\
+         {\"seq\":1,\"ts\":0,\"type\":\"review_requested\",\"node\":\"gate\",\"options\":[\"approved\",\"rejected\"]}\n",
+    )
+    .unwrap();
+
+    let status = run_status(dir.path(), "r-gate-prompt").unwrap();
+    let pr = &status["pending_review"];
+    assert_eq!(pr["prompt"], "Check the changelog before deciding.");
+    let instruction = pr["instruction"].as_str().expect("instruction is a string");
+    assert!(
+        instruction.contains("Check the changelog before deciding."),
+        "got: {instruction}"
+    );
 }
 
 /// Null path: a run dir with events.jsonl but no playbook.yaml snapshot (e.g.

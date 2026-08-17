@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::graphutil::{adjacency, reachable_from, sccs};
+use crate::schema::StatusEq;
 
 pub(crate) fn check_unique_ids(playbook: &Playbook, r: &mut ValidationReport) {
     let mut seen = HashSet::new();
@@ -167,6 +168,14 @@ pub(crate) fn check_reachability(playbook: &Playbook, r: &mut ValidationReport) 
 
 pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
     let adj = adjacency(playbook);
+    // Mirrors check_cross_branch_reads / templates.rs: the on_failure handler
+    // is entered from anywhere in the graph, with no drawn edge describing
+    // what preceded it, and both Stop and Node(_) already dispose of an
+    // unrouted failure (only Route leaves it unhandled).
+    let failure_handler = match &playbook.defaults.on_failure {
+        FailurePolicy::Node(target) => Some(target.as_str()),
+        _ => None,
+    };
     for n in &playbook.nodes {
         // A conditional edge is legal off any node kind since output_field
         // routing shipped, and the same two mistakes are possible there: a
@@ -192,6 +201,12 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
         let uses_node_status = out
             .iter()
             .any(|e| matches!(e.condition, Some(EdgeCondition::NodeStatus { .. })));
+        // An unconditional edge alongside a conditional one from the same
+        // node is already a V34 duplicate-route error (check_edges), which
+        // runs before this check and makes the report invalid, so
+        // check_conditions never sees that shape (validate() only calls this
+        // inside `if r.is_valid()`). `covered` therefore never needs to also
+        // treat an unconditional edge as coverage.
         if uses_node_status && covered.len() < 2 && !has_fallback {
             match is_condition {
                 true => r.error(
@@ -200,6 +215,19 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
                     "condition edges must cover both success and failure or declare a fallback edge"
                         .into(),
                 ),
+                // Both Stop and Node(_) already dispose of an unrouted
+                // failure; only Route (the default) leaves it unhandled, so
+                // only Route makes the missing-failure branch a real gap.
+                // The policy covers the FAILURE outcome and nothing else,
+                // though: a fan-out that routes failure but not success leaves
+                // success with no route at all, which no policy disposes of,
+                // so the suppression applies only when failure is the sole
+                // uncovered outcome (adding it would complete the coverage).
+                // V09 stays strict regardless of the policy: a condition
+                // node's edges are its whole routing surface, not a fallback
+                // path off a failure that would otherwise be an engine error.
+                false if !matches!(playbook.defaults.on_failure, FailurePolicy::Route)
+                    && covered.contains(&StatusEq::Success) => {}
                 false => r.warn(
                     "V39",
                     Some(&n.id),
@@ -232,6 +260,10 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
                                 n.id
                             ),
                         ),
+                        // The on_failure handler is entered from anywhere in
+                        // the graph, so no drawn edge describes what
+                        // preceded it: this would otherwise be a false V40.
+                        false if Some(n.id.as_str()) == failure_handler => {}
                         false => r.warn(
                             "V40",
                             Some(&n.id),

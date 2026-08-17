@@ -3,9 +3,9 @@ use std::path::Path;
 
 use apb_core::registry::{Registry, init_project};
 use apb_core::versioning::{
-    VersioningError, create_patch_version, create_version, delete_playbook, list_trash,
-    next_minor_version, next_patch_version, read_provenance, restore_playbook, save_layout,
-    version_diff,
+    VersioningError, create_patch_version, create_version, create_version_with_override,
+    delete_playbook, list_trash, next_minor_version, next_patch_version, read_provenance,
+    restore_playbook, save_layout, version_diff,
 };
 
 const VALID: &str = include_str!("../fixtures/valid.yaml");
@@ -521,4 +521,75 @@ fn version_diff_rejects_missing_and_unsafe() {
 
     let err = version_diff(dir.path(), "implement-task", "../evil", "1.0.0").unwrap_err();
     assert!(matches!(err, VersioningError::NotFound(_)));
+}
+
+#[test]
+fn create_version_with_override_honors_a_free_version() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+
+    // implement-task is already at 1.0.0; the ordinary auto-assign scheme
+    // would compute 1.1.0 next, but an explicit free override must win.
+    let assigned = create_version_with_override(
+        dir.path(),
+        "implement-task",
+        VALID,
+        None,
+        Some("9.9.9"),
+        true,
+    )
+    .unwrap();
+    assert_eq!(assigned, "9.9.9");
+}
+
+#[test]
+fn create_version_with_override_errors_when_the_version_is_taken() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+
+    let err = create_version_with_override(
+        dir.path(),
+        "implement-task",
+        VALID,
+        None,
+        Some("1.0.0"),
+        true,
+    )
+    .unwrap_err();
+    let VersioningError::Conflict(msg) = err else {
+        panic!("expected Conflict, got {err:?}");
+    };
+    assert!(msg.contains("implement-task"), "got: {msg}");
+    assert!(msg.contains("1.0.0"), "got: {msg}");
+}
+
+#[test]
+fn create_version_with_override_rejects_invalid_semver_cleanly() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+
+    let err = create_version_with_override(
+        dir.path(),
+        "implement-task",
+        VALID,
+        None,
+        Some("not-semver"),
+        true,
+    )
+    .unwrap_err();
+    let VersioningError::Conflict(msg) = err else {
+        panic!("expected Conflict, got {err:?}");
+    };
+    assert!(msg.contains("not-semver"), "got: {msg}");
+}
+
+#[test]
+fn create_version_with_override_none_keeps_auto_assign() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+
+    let assigned =
+        create_version_with_override(dir.path(), "implement-task", VALID, None, None, true)
+            .unwrap();
+    assert_eq!(assigned, "1.1.0");
 }

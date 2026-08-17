@@ -62,21 +62,11 @@ impl<'a> Journal<'a> {
     }
 }
 
-pub(crate) fn review_decided_count(events: &[Event], node: &str) -> usize {
-    events
-        .iter()
-        .filter(|e| matches!(&e.payload, EventPayload::ReviewDecided { node: n, .. } if n == node))
-        .count()
-}
-
-pub(crate) fn review_requested_count(events: &[Event], node: &str) -> usize {
-    events
-        .iter()
-        .filter(
-            |e| matches!(&e.payload, EventPayload::ReviewRequested { node: n, .. } if n == node),
-        )
-        .count()
-}
+// The two review counters live in `event` (issue #103.1): the decision
+// channel validates against exactly the same predicate before it accepts a
+// decision, and it must not reach up into the scheduler to do so. Re-exported
+// here so the drive loop keeps naming them alongside the question counters.
+pub(crate) use crate::event::{review_decided_count, review_requested_count};
 
 /// How many `QuestionAsked` events a node already carries. Mirrors
 /// `review_requested_count`: drive declares a question once per suspension and

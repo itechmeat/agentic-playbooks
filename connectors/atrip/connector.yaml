@@ -811,15 +811,17 @@ functions:
       Accept-Encoding: gzip
     body:
       ancillaryCategory: "{{args.ancillary_category}}"
+      ticketOrderNo: "{{args.ticket_order_no}}"
     args_schema:
       type: object
       properties:
         ancillary_category: { type: string, enum: ["BAGGAGE"], description: "currently only BAGGAGE is supported (vendor field ancillaryCategory)" }
+        ticket_order_no: { type: string, description: "vendor field ticketOrderNo" }
+      required: [ticket_order_no]
       additionalProperties: true
-      description: "the referenced docs name only ancillaryCategory for this endpoint; the order-identifying field is not stated and is left to additionalProperties."
     examples:
-      - args: { ancillary_category: "BAGGAGE" }
-        note: "operates against an existing order; consult the vendor docs for the exact order-identifying field."
+      - args: { ancillary_category: "BAGGAGE", ticket_order_no: "TKT-1001" }
+        note: "operates against an existing order."
     response_pick: [status]
 
   - name: post_booking_ancillary_order
@@ -836,15 +838,30 @@ functions:
       Accept-Encoding: gzip
     body:
       ancillaryCategory: "{{args.ancillary_category}}"
+      sessionId: "{{args.session_id}}"
+      ticketOrderNo: "{{args.ticket_order_no}}"
+      passengers: "{{args.passengers}}"
     args_schema:
       type: object
       properties:
         ancillary_category: { type: string, enum: ["BAGGAGE"], description: "currently only BAGGAGE is supported (vendor field ancillaryCategory)" }
+        session_id: { type: string, description: "vendor field sessionId" }
+        ticket_order_no: { type: string, description: "vendor field ticketOrderNo" }
+        passengers:
+          type: array
+          items:
+            type: object
+            properties:
+              name: { type: string }
+              type: { type: string, description: "passenger type, e.g. ADT/CHD/INF" }
+              gender: { type: string }
+              documents: { type: array, items: { type: object } }
+            required: [name, type, gender]
+      required: [session_id, ticket_order_no, passengers]
       additionalProperties: true
-      description: "the referenced docs name only ancillaryCategory for this endpoint; the order-identifying field is not stated and is left to additionalProperties."
     examples:
-      - args: { ancillary_category: "BAGGAGE" }
-        note: "constraints beyond standard refund/void rules are not documented; consult the vendor docs for the exact order-identifying field before use."
+      - args: { ancillary_category: "BAGGAGE", session_id: "sess-abc123", ticket_order_no: "TKT-1001", passengers: [{ name: "John Doe", type: "ADT", gender: "M" }] }
+        note: "constraints beyond standard refund/void rules are not documented."
 
   - name: balance
     description: >-

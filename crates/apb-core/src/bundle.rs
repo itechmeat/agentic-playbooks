@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::registry::{Registry, RegistryError};
-use crate::versioning::{VersioningError, create_version, save_layout};
+use crate::versioning::{VersioningError, create_version_with_override, save_layout};
 
 /// Errors for exporting/importing a playbook as a single file.
 #[derive(Debug, thiserror::Error)]
@@ -67,9 +67,16 @@ pub fn export_bundle(
 }
 
 /// Imports a bundle into a project: creates a NEW playbook version under its
-/// id following the project's versioning scheme (does not force the version
-/// from the bundle, to avoid collisions), validates it, and, if present, saves
-/// the layout under the assigned version. Returns the assigned version.
+/// id, validates it, and, if present, saves the layout under the assigned
+/// version. Returns the assigned version.
+///
+/// The bundle's `version` field is honored when it is free (not already used
+/// by this playbook): the imported version is created with that exact
+/// number. When it is already taken, the import fails with a
+/// `VersioningError::Conflict` naming the collision rather than silently
+/// assigning a different version. When the bundle carries no version (an
+/// empty string), the project's normal auto-assign scheme applies, same as
+/// before this field was honored.
 pub fn import_bundle(
     root: &Path,
     bundle: &PlaybookBundle,
@@ -84,7 +91,19 @@ pub fn import_bundle(
     if bundle.id.trim().is_empty() {
         return Err(BundleError::Format("bundle has empty id".to_string()));
     }
-    let assigned = create_version(root, &bundle.id, &bundle.playbook, None, make_current)?;
+    let version_override = if bundle.version.trim().is_empty() {
+        None
+    } else {
+        Some(bundle.version.as_str())
+    };
+    let assigned = create_version_with_override(
+        root,
+        &bundle.id,
+        &bundle.playbook,
+        None,
+        version_override,
+        make_current,
+    )?;
     if let Some(layout) = &bundle.layout {
         let layout_yaml =
             serde_yaml_ng::to_string(layout).map_err(|e| BundleError::Yaml(e.to_string()))?;

@@ -6,7 +6,7 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use apb_core::schema::{Edge, EdgeCondition, Playbook, StatusEq};
+use apb_core::schema::{Edge, EdgeCondition, Playbook, StatusEq, output_field_value};
 
 use crate::state::{NodeStatus, RunState};
 
@@ -56,29 +56,6 @@ fn status_matches(node_status: NodeStatus, equals: StatusEq) -> bool {
     match equals {
         StatusEq::Success => node_status == NodeStatus::Succeeded,
         StatusEq::Failure => matches!(node_status, NodeStatus::Failed | NodeStatus::TimedOut),
-    }
-}
-
-/// One top-level field of a node output that parses as a JSON object, as the
-/// string an `output_field` condition compares against (spec 2026-08-05 section
-/// 2.5). `None` for every shape that cannot be read as one unambiguous string:
-/// output that is not JSON, JSON that is not an object, an absent field, and a
-/// value that is null, an array or an object. A string is taken verbatim; a bool
-/// and a number take their JSON textual form (`true`, `3`, `3.5`).
-///
-/// Total by construction, because a routing decision must never panic on
-/// whatever an agent happened to print: an unreadable output simply means the
-/// edge does not apply, and the graph's fallback (or the no-edge behavior)
-/// decides, exactly as it does for a node with no output at all.
-fn output_field_value(output: &str, field: &str) -> Option<String> {
-    let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
-    match parsed.as_object()?.get(field)? {
-        serde_json::Value::String(s) => Some(s.clone()),
-        serde_json::Value::Bool(b) => Some(b.to_string()),
-        serde_json::Value::Number(n) => Some(n.to_string()),
-        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
-            None
-        }
     }
 }
 

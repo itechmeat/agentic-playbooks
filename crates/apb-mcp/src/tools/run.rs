@@ -113,19 +113,26 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
     let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
     let state = RunState::fold(&events);
-    // Liveness overlay (Task 9 / issue #45 findings 9 and 10). The pure fold
-    // is replayable from the journal alone; these read the process table (and
-    // parent-drive markers) at request time, which is precisely why they are
-    // applied here rather than folded into `RunState`.
+    // Liveness overlay (Task 9 / issue #45 findings 9 and 10; issue #102.4
+    // cause B). The pure fold is replayable from the journal alone; these
+    // read the process table (and parent-drive markers) at request time,
+    // which is precisely why they are applied here rather than folded into
+    // `RunState`.
     //
     // `reported_*` re-promotes a live open attempt from the pure-fold
-    // `interrupted` crash shape back to `running`, and maps a dead attempt
-    // pid to `lost`. `driver_alive` also understands parent-driven children.
+    // `interrupted` crash shape back to `running`, and a run parked on a
+    // wait/signal park with a live driver the same way, and maps a dead
+    // attempt pid to `lost`. `driver_alive` also understands parent-driven
+    // children - `reported_run_status` is a pure function of the journal plus
+    // these two already-computed facts, precisely so a sub-playbook child
+    // (which never writes its own `driver.pid`) is asked about through
+    // `driver_alive`, not a plain pid check.
     let node_times = apb_engine::liveness::node_times(&events);
     let driver_alive = apb_engine::liveness::driver_alive(&dir, run_id);
     let nodes = apb_engine::liveness::reported_node_statuses(&events);
-    let run_status = apb_engine::liveness::reported_run_status(&events);
     let progress = apb_engine::progress::from_run_dir(&dir, &events);
+    let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
+    let run_status = apb_engine::liveness::reported_run_status(&events, waiting, driver_alive);
     // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
     // nodes, Task 8): callers that only care about the pending question
     // (`run_answer`'s caller, the web) do not have to drill into `progress`.
@@ -148,9 +155,19 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
             apb_engine::event::EventPayload::ChildRunStarted { node_id, run_id } => {
                 let child_dir = dir.parent().map(|p| p.join(run_id));
                 let status = child_dir
-                    .and_then(|d| read_all(&d).ok())
-                    .map(|ev| {
-                        apb_engine::liveness::reported_run_status(&ev)
+                    .as_ref()
+                    .and_then(|d| read_all(d).ok().map(|ev| (d.clone(), ev)))
+                    .map(|(d, ev)| {
+                        // A sub-playbook child never writes its own
+                        // `driver.pid` (it writes `driven_by` and follows its
+                        // parent's drive claim), so this must go through the
+                        // parent-aware `driver_alive`, not a plain pid check -
+                        // otherwise a perfectly healthy, parent-driven child
+                        // parked on a wait reads driverless forever.
+                        let waiting = apb_engine::progress::from_run_dir(&d, &ev)
+                            .is_some_and(|p| p.waiting_on.is_some());
+                        let child_driver_alive = apb_engine::liveness::driver_alive(&d, run_id);
+                        apb_engine::liveness::reported_run_status(&ev, waiting, child_driver_alive)
                             .as_str()
                             .to_string()
                     })
@@ -276,6 +293,29 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     if let Some(obj) = base.as_object_mut() {
         obj.insert("duration_table".into(), json!(table));
     }
+
+    // #102.2 product decision: the goal (`statement` + `criteria`) is never
+    // evaluated by the engine - no consumer checks a `marker` or `script`
+    // check against the run result. Surface it verbatim anyway, labeled as
+    // an unevaluated contract, so a supervisor reading the report can check
+    // it by hand instead of having to go find the playbook definition.
+    // Absent when the playbook snapshot has no `goal` block at all, rather
+    // than a null placeholder.
+    if let Some(goal) = pb.as_ref().and_then(|p| p.goal.as_ref()) {
+        let mut goal_json = serde_json::to_value(goal).unwrap_or(Value::Null);
+        if let Some(goal_obj) = goal_json.as_object_mut() {
+            goal_obj.insert(
+                "note".into(),
+                json!(
+                    "this goal is not evaluated by the engine: criteria are not checked against the run result. A supervisor must confirm them by hand."
+                ),
+            );
+        }
+        if let Some(obj) = base.as_object_mut() {
+            obj.insert("goal".into(), goal_json);
+        }
+    }
+
     Ok(base)
 }
 
@@ -498,6 +538,67 @@ mod progress_tests {
         let a = table.iter().find(|e| e["node"] == "a").unwrap();
         assert_eq!(a["expected_seconds"], 100);
         assert_eq!(a["measured_seconds"], 5);
+    }
+
+    /// #102.2 product decision: the goal is never evaluated by the engine, but
+    /// `run_report` surfaces it verbatim so a supervisor can check it by hand.
+    /// The report must label it as an unevaluated contract, not present it as
+    /// a verdict.
+    #[test]
+    fn run_report_includes_goal_labeled_unevaluated() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\n\
+             goal:\n  statement: \"the invoice is filed and sent for approval\"\n  \
+             criteria:\n    - description: \"invoice appears in the tracking sheet\"\n      \
+             check: { type: marker, marker: FILED }\n\
+             nodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi }\n  \
+             - { id: f, type: finish, outcome: success }\n\
+             edges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n",
+        )
+        .unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+        let out = run_report(tmp.path(), "r1").unwrap();
+        let goal = out.get("goal").expect("goal block must be present");
+        assert_eq!(
+            goal["statement"],
+            "the invoice is filed and sent for approval"
+        );
+        let criteria = goal["criteria"].as_array().unwrap();
+        assert_eq!(
+            criteria[0]["description"],
+            "invoice appears in the tracking sheet"
+        );
+        assert_eq!(criteria[0]["check"]["type"], "marker");
+        assert_eq!(criteria[0]["check"]["marker"], "FILED");
+        // Labeled as an unevaluated contract, not a pass/fail verdict.
+        let note = goal["note"].as_str().expect("goal note must be a string");
+        assert!(note.contains("not evaluated"));
+    }
+
+    /// A playbook snapshot with no `goal` block emits no `goal` key at all,
+    /// rather than a null or empty placeholder.
+    #[test]
+    fn run_report_omits_goal_when_playbook_has_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(run_dir.join("playbook.yaml"),
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n").unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n",
+        )
+        .unwrap();
+        let out = run_report(tmp.path(), "r1").unwrap();
+        assert!(out.get("goal").is_none());
     }
 
     /// Issue #42 finding 3: `run_status` must expose the terminal error for a

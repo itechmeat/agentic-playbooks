@@ -244,22 +244,30 @@ cases:
 
   - function: post_booking_ancillary_search
     account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
-    args: { ancillary_category: BAGGAGE }
+    args: { ancillary_category: BAGGAGE, ticket_order_no: TKT-1001 }
     expect:
       method: POST
       url: "https://api.example.net/postBookingAncillarySearch.do"
       body_contains:
         ancillaryCategory: BAGGAGE
+        ticketOrderNo: TKT-1001
 
   # --- post_booking_ancillary_order: EFFECTFUL, spends money ---------------
   - function: post_booking_ancillary_order
     account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
-    args: { ancillary_category: BAGGAGE }
+    args:
+      ancillary_category: BAGGAGE
+      session_id: sess-abc123
+      ticket_order_no: TKT-1001
+      passengers: [{ name: "John Doe", type: ADT, gender: M }]
     expect:
       method: POST
       url: "https://api.example.net/postBookingAncillaryOrder.do"
       body_contains:
         ancillaryCategory: BAGGAGE
+        sessionId: sess-abc123
+        ticketOrderNo: TKT-1001
+        passengers: [{ name: "John Doe", type: ADT, gender: M }]
 
   - function: route_export
     account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }

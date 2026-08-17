@@ -2,6 +2,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use apb_core::schema::output_field_value;
+
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
 use crate::state::ReviewDecision;
@@ -467,7 +469,11 @@ pub(crate) fn reads_recorded_context(text: &str) -> bool {
 }
 
 /// Every `nodes.<id>.output` / `nodes.<id>.report` reference in `text`, as
-/// `(reference, node id)` pairs in the order they appear, deduplicated.
+/// `(reference, node id)` pairs in the order they appear, deduplicated. A read
+/// carrying a top-level field selector counts: whatever field it names, a source
+/// with no recorded output leaves the same hole in the prompt as the bare read.
+/// (A source that DID produce output the selector cannot project is not reported
+/// here, because the criterion this feeds is the source's recorded output.)
 ///
 /// [`resolve`] is total: an unknown node renders as an empty string, which is
 /// what keeps a legitimate either-or read from failing a node - and also what
@@ -481,7 +487,8 @@ pub(crate) fn reads_recorded_context(text: &str) -> bool {
 pub(crate) fn node_output_refs(text: &str) -> Vec<(String, String)> {
     let mut out: Vec<(String, String)> = Vec::new();
     for key in template_refs(text) {
-        if let ["nodes", id, "output" | "report"] = key.split('.').collect::<Vec<&str>>().as_slice()
+        if let ["nodes", id, "output" | "report"] | ["nodes", id, "output" | "report", _] =
+            key.split('.').collect::<Vec<&str>>().as_slice()
         {
             let pair = (key.to_string(), (*id).to_string());
             if !out.contains(&pair) {
@@ -512,6 +519,16 @@ fn resolve(
         ["nodes", id, "output"] | ["nodes", id, "report"] => {
             outputs.get(*id).cloned().unwrap_or_default()
         }
+        // ONE top-level field of an output that parses as a JSON object, with
+        // the exact `output_field` edge-condition semantics (spec 2026-08-05
+        // section 2.5) through the one shared projection. Every shape it cannot
+        // read - no output, not JSON, not an object, an absent field, a null,
+        // array or object value - renders as the empty string, like every other
+        // reference `resolve` cannot fill.
+        ["nodes", id, "output" | "report", field] => outputs
+            .get(*id)
+            .and_then(|output| output_field_value(output, field))
+            .unwrap_or_default(),
         ["nodes", id, "review_note"] => {
             reviews.get(*id).map(|r| r.note.clone()).unwrap_or_default()
         }
@@ -546,6 +563,32 @@ mod tests {
         assert_eq!(
             instruction_section(Some("  stay within budget  ")),
             "## run instruction\n\nstay within budget\n\n"
+        );
+    }
+
+    // `node_output_refs` is `pub(crate)`, so it is covered here rather than from
+    // the integration-test binary. It feeds the missing-input anomaly, which must
+    // see a field-selector read as the same hole as the bare read: the source's
+    // recorded output is what fills either of them.
+    #[test]
+    fn node_output_refs_include_a_field_selector_read() {
+        assert_eq!(
+            node_output_refs("{{nodes.a.output.verdict}} {{nodes.b.report}}"),
+            vec![
+                ("nodes.a.output.verdict".to_string(), "a".to_string()),
+                ("nodes.b.report".to_string(), "b".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn node_output_refs_ignore_other_namespaces_and_deeper_paths() {
+        assert!(
+            node_output_refs(
+                "{{params.task}} {{nodes.a.review_note}} {{nodes.a.review_note.x}} \
+                 {{nodes.a.output.a.b}} {{run.context}}"
+            )
+            .is_empty()
         );
     }
 

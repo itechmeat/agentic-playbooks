@@ -309,6 +309,7 @@ fn a_stop_cancels_the_branches_that_will_never_run() {
         Some("cancelled"),
         "the branch left in the frontier must be journaled, not left pending: {events:?}"
     );
+    common::assert_paired_cancelled_shape(&events, "the stop-on-unhandled-failure frontier cancel");
 }
 
 /// The form these playbooks actually want: the negative finish node keeps

@@ -501,6 +501,79 @@ fn child_pin_carries_connector_map() {
     }
 }
 
+// --- issue #102.1: the ungated seam walks children too ---------------------
+
+/// The seam the dashboard and the CLI call instead of the full `check_run`
+/// gate must return the SAME child pins `check_run` computes, so a parent that
+/// delegates to a connector-binding child can start on those paths. Neither
+/// path checks playbook-digest or profile-bundle trust for the PARENT, so the
+/// seam must not impose it on the children either: here the parent's digest is
+/// deliberately left unapproved and the walk still succeeds.
+#[test]
+fn ungated_seam_returns_child_pins_with_the_child_connector_map() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path(), "https://first.example.com");
+    approve_connector();
+    approve_accounts(root.path(), &parsed_playbook());
+    write_pb_named(root.path(), PARENT_ID, parent_yaml());
+
+    let parent = Playbook::from_yaml(parent_yaml()).unwrap();
+    let ((connectors, accounts), children) = apb_mcp::policy::connector_permit_maps_with_children(
+        root.path(),
+        &parent,
+        &Origin::Project { workspace_id: None },
+        PARENT_ID,
+    )
+    .expect("the seam permits");
+
+    assert!(
+        connectors.is_empty() && accounts.is_empty(),
+        "the parent binds no connectors of its own"
+    );
+    let child = children.get("c").expect("child pinned at node c");
+    let loaded = store::load(CONNECTOR_NAME).unwrap();
+    assert_eq!(
+        child.connectors.get(CONNECTOR_NAME),
+        Some(&loaded.digest),
+        "the child pin carries the child's verified connector map"
+    );
+    assert!(
+        child
+            .connector_accounts
+            .contains_key(&account_trust_id(CONNECTOR_NAME, "acct1")),
+        "the child pin carries the child's verified account map"
+    );
+}
+
+/// Connector trust is never bypassable, for a child exactly as for a parent:
+/// the seam refuses when the child's connector digest is not approved.
+#[test]
+fn ungated_seam_refuses_an_untrusted_child_connector() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path(), "https://first.example.com");
+    write_pb_named(root.path(), PARENT_ID, parent_yaml());
+
+    let parent = Playbook::from_yaml(parent_yaml()).unwrap();
+    let refusal = apb_mcp::policy::connector_permit_maps_with_children(
+        root.path(),
+        &parent,
+        &Origin::Project { workspace_id: None },
+        PARENT_ID,
+    )
+    .unwrap_err();
+    assert_eq!(refusal["policy"], "untrusted_connector_requires_approve");
+    assert!(
+        refusal["connectors"]
+            .as_array()
+            .is_some_and(|c| c.iter().any(|n| n == CONNECTOR_NAME)),
+        "names the child's untrusted connector: {refusal}"
+    );
+}
+
 // --- finding 11: a bound connector with zero accounts warns, not refuses ----
 
 const ZERO_PB_ID: &str = "conn-zero";

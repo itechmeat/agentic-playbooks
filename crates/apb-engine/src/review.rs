@@ -27,8 +27,88 @@ pub struct ReviewEntry {
     pub cmd: ReviewCommand,
 }
 
+/// Rejects a decision that names something other than a currently pending gate
+/// of this run (issue #103.1).
+///
+/// The check lives here rather than in any one caller because `post_review` is
+/// the single entry point of every decision surface (`apb review`, MCP
+/// `review_decide`, `POST /api/runs/{id}/review`): before this, all three
+/// happily wrote a decision for a node that does not exist, is not a gate, or
+/// has no open request, returned a `posted_seq` that looks like success, and
+/// left a record no drive would ever consume.
+///
+/// "Pending" is the same predicate every reporting surface already uses
+/// (`progress::compute_with`): more `ReviewRequested` than `ReviewDecided`
+/// events for the node. So a caller that was told a gate is pending can always
+/// decide it, and nothing else is accepted. A pending gate whose decision is
+/// already queued in the channel is no longer waiting for one, so the check
+/// counts the channel too and refuses the duplicate.
+///
+/// Both reads are "cannot judge means accept". A run with no playbook snapshot
+/// (pre-snapshot runs, and the bare run dirs the channel's own tests build) has
+/// nothing to validate against, and a journal that will not read - most
+/// plausibly a torn trailing line the drive is in the middle of appending -
+/// cannot answer whether the gate is pending. `post_review` never read
+/// `events.jsonl` at all before this check existed, so failing the write on
+/// either would be a new way for a perfectly valid decision to be refused,
+/// in exactly the live-run race this change set removes elsewhere. Rejecting a
+/// decision is reserved for a journal that positively says the gate is not
+/// waiting.
+fn check_review_target(run_dir: &Path, node: &str) -> Result<(), EngineError> {
+    use apb_core::schema::NodeKind;
+
+    let Some(playbook) = crate::progress::load_run_playbook(run_dir) else {
+        return Ok(());
+    };
+    let is_gate = playbook
+        .node(node)
+        .is_some_and(|n| matches!(n.kind, NodeKind::HumanReview { .. }));
+    if !is_gate {
+        return Err(EngineError::NotFound(format!(
+            "node `{node}` is not a human_review node of this run's playbook `{}`",
+            playbook.id
+        )));
+    }
+
+    let Ok(events) = crate::event::read_all(run_dir) else {
+        return Ok(());
+    };
+    let requested = crate::event::review_requested_count(&events, node);
+    let decided = crate::event::review_decided_count(&events, node);
+    if requested <= decided {
+        return Err(EngineError::Conflict(format!(
+            "node `{node}` has no review decision pending"
+        )));
+    }
+
+    // The journal alone cannot see a decision that is already sitting in the
+    // channel and has not been folded into a `ReviewDecided` event yet, so
+    // requested-vs-decided would accept a second decision for the same open
+    // request. The drive consumes the `decided`-th record for the node
+    // (`scheduler.rs`, the HumanReview arm), which is exactly the count this
+    // reads back: everything past that is queued and unconsumed. Once the
+    // queue already answers every outstanding request, another decision is
+    // not an answer, it is a stale extra a cyclic gate would consume on its
+    // NEXT visit without anyone confirming it.
+    let Ok(queued) = read_reviews_after(run_dir, None) else {
+        return Ok(());
+    };
+    let unconsumed = queued
+        .iter()
+        .filter(|e| e.cmd.node == node)
+        .count()
+        .saturating_sub(decided);
+    if unconsumed >= requested - decided {
+        return Err(EngineError::Conflict(format!(
+            "a decision is already queued for node `{node}`"
+        )));
+    }
+    Ok(())
+}
+
 pub fn post_review(run_dir: &Path, cmd: ReviewCommand) -> Result<u64, EngineError> {
     std::fs::create_dir_all(run_dir)?;
+    check_review_target(run_dir, &cmd.node)?;
 
     let seq = read_reviews_after(run_dir, None)?.len() as u64;
 

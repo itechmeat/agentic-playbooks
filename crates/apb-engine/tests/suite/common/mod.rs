@@ -6,6 +6,8 @@
 use std::path::Path;
 use std::sync::{Mutex, MutexGuard};
 
+use apb_engine::event::{Event, EventPayload};
+
 /// One process-wide lock serializing every test that mutates shared env
 /// (`APB_AGENT_CMD`, `APB_CONFIG_DIR`, `HOME`, `PATH`,
 /// `APB_SUPERVISOR_HEARTBEAT_MS`, `APB_TEST_DUMP`, ...). Before consolidation
@@ -56,6 +58,47 @@ pub fn seed_profile(root: &Path, name: &str, agent: &str, model: &str, fallbacks
 /// Profile `main` under the stub agent (a single executor, no fallbacks).
 pub fn seed_main(root: &Path) {
     seed_profile(root, "main", "claude-code", "haiku", &[]);
+}
+
+/// The one journal shape every cancellation write-off must produce (#89): a
+/// paired `NodeStarted` immediately before the cancelled `NodeFinished`, and
+/// `output: "cancelled"` on that finish. Shared across `stop_run_test`,
+/// `failure_stop_test` and `parallel_e2e_test` because each pins the same
+/// invariant against a different write-off site in `apb-engine`'s scheduler
+/// (the batch admission loop's two cases, `stop_on_unhandled_failure`'s
+/// frontier cancel, and `advance_frontier`'s join:any sibling cancel) - one
+/// assertion for one shape rather than four near-duplicates.
+pub fn assert_paired_cancelled_shape(events: &[Event], fixture: &str) {
+    let cancelled: Vec<(usize, String, String)> = events
+        .iter()
+        .enumerate()
+        .filter_map(|(i, e)| match &e.payload {
+            EventPayload::NodeFinished {
+                node,
+                status,
+                output,
+                ..
+            } if status == "cancelled" => Some((i, node.clone(), output.clone())),
+            _ => None,
+        })
+        .collect();
+    assert!(
+        !cancelled.is_empty(),
+        "{fixture} must produce at least one cancelled member"
+    );
+    for (at, node, output) in cancelled {
+        assert!(
+            events[..at].iter().any(|e| matches!(
+                &e.payload,
+                EventPayload::NodeStarted { node: n, .. } if *n == node
+            )),
+            "{fixture}: cancelled member {node} has no preceding NodeStarted"
+        );
+        assert_eq!(
+            output, "cancelled",
+            "{fixture}: both cancel paths must render the same output text for {node}"
+        );
+    }
 }
 
 // --- Ephemeral one-shot HTTP server (shared with the connector-call tests) ---

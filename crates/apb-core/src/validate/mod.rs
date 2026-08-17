@@ -715,6 +715,54 @@ edges:
         );
     }
 
+    /// A field selector does not change what the read races with: the reader
+    /// still needs `a` to have finished, so the 4-part form must warn exactly
+    /// like the bare `nodes.a.output`.
+    #[test]
+    fn v38_read_of_a_parallel_sibling_with_a_field_selector_warns() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b needs {{nodes.a.output.verdict}}" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: j }
+  - { from: b, to: j }
+  - { from: j, to: done }"#,
+        );
+        let found = v38(&pb);
+        assert_eq!(found.len(), 1, "expected exactly one V38, got {found:?}");
+        assert_eq!(found[0].0.as_deref(), Some("b"), "V38 owner is the reader");
+        assert!(
+            found[0].1.contains("nodes.a.output"),
+            "V38 must name the reference, got: {found:?}"
+        );
+    }
+
+    /// The other half of the widening: a field selector must not manufacture a
+    /// warning where the bare read has none. `b` runs strictly after `a` on a
+    /// linear chain, so the 4-part read is as safely ordered as the 3-part one.
+    #[test]
+    fn a_field_selector_read_in_chain_order_is_clean() {
+        assert_no_v38(&pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b needs {{nodes.a.output.verdict}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: a, to: b }
+  - { from: b, to: done }"#,
+        ));
+    }
+
     /// The barrier-less diamond's merge point is an implicit all-join (Task 1),
     /// so it waits for both branches: reading both is safe.
     #[test]
@@ -1388,5 +1436,167 @@ edges:
         );
         let c = codes(&pb);
         assert!(c.is_empty(), "expected a clean playbook, got {c:?}");
+    }
+
+    /// #88a: the issue asked for an unconditional edge to "count as V39
+    /// coverage" for a `node_status` fan-out that only names `success`. That
+    /// shape is already unreachable: an unconditional non-fallback edge
+    /// alongside a conditional non-fallback edge out of the same node is a
+    /// V34 duplicate-route error (`check_duplicate_route_edges`), and V34
+    /// runs before `check_conditions` even starts (`validate` only calls it
+    /// inside `if r.is_valid()`, which V34 as an error makes false). So the
+    /// author sees V34, never V39, and `covered` does not need to also treat
+    /// an unconditional edge as a covering branch.
+    #[test]
+    fn v34_fires_instead_of_v39_for_an_unconditional_edge_beside_a_node_status_fan_out() {
+        let pb = pb_yaml(
+            r#"
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: verify, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: verify }
+  - { from: verify, to: done, condition: { type: node_status, node: verify, equals: success } }
+  - { from: verify, to: aborted }"#,
+        );
+        let c = codes(&pb);
+        assert!(
+            c.iter()
+                .any(|(code, sev)| *code == "V34" && *sev == Severity::Error),
+            "expected V34 for the unconditional/conditional shadow, got {c:?}"
+        );
+        assert!(
+            !c.iter().any(|(code, _)| *code == "V39"),
+            "check_conditions must not run once V34 has made the report invalid, got {c:?}"
+        );
+    }
+
+    /// #88b: `defaults.on_failure: stop` already handles any node whose
+    /// failure has no explicit edge, so the "missing failure branch" warning
+    /// would be false. Mirrors the V38 precedent at
+    /// `v38_silent_for_the_on_failure_handler`.
+    #[test]
+    fn v39_silent_when_on_failure_is_stop() {
+        let pb = pb_yaml(
+            r#"
+defaults: { on_failure: stop, profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: verify, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: verify }
+  - { from: verify, to: done, condition: { type: node_status, node: verify, equals: success } }"#,
+        );
+        let c = codes(&pb);
+        assert!(
+            !c.iter().any(|(code, _)| *code == "V39"),
+            "on_failure: stop already handles an unrouted failure, V39 must stay silent, got {c:?}"
+        );
+    }
+
+    /// #88b: same as above, but the policy routes to a node instead of
+    /// stopping. Both `Stop` and `Node(_)` handle an unrouted failure; only
+    /// `Route` (the default) leaves it unhandled.
+    #[test]
+    fn v39_silent_when_on_failure_routes_to_a_node() {
+        let pb = pb_yaml(
+            r#"
+defaults: { on_failure: h, profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: verify, type: agent_task, prompt: hi }
+  - { id: h, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: verify }
+  - { from: s, to: h }
+  - { from: verify, to: done, condition: { type: node_status, node: verify, equals: success } }
+  - { from: h, to: done }"#,
+        );
+        let c = codes(&pb);
+        assert!(
+            !c.iter().any(|(code, _)| *code == "V39"),
+            "on_failure routing to a node already handles an unrouted failure, V39 must stay silent, got {c:?}"
+        );
+    }
+
+    /// The `on_failure` policy disposes of an unrouted FAILURE and nothing
+    /// else, so it may only silence the missing-failure branch. A fan-out that
+    /// covers failure but not success leaves the success outcome with no route
+    /// at all, which no policy handles, and must still warn under `stop` (and
+    /// equally under a node policy).
+    #[test]
+    fn v39_still_fires_when_success_is_the_uncovered_outcome() {
+        let pb = pb_yaml(
+            r#"
+defaults: { on_failure: stop, profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: verify, type: agent_task, prompt: hi }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: verify }
+  - { from: verify, to: aborted, condition: { type: node_status, node: verify, equals: failure } }"#,
+        );
+        let c = codes(&pb);
+        assert!(
+            c.contains(&("V39", Severity::Warning)),
+            "an uncovered success outcome is not disposed of by on_failure, V39 should warn, got {c:?}"
+        );
+    }
+
+    /// Positive counterpart to the two silence tests above: an explicit
+    /// `route` policy (the default) leaves the failure unhandled, so V39 must
+    /// not be over-suppressed.
+    #[test]
+    fn v39_still_fires_when_on_failure_is_route() {
+        let pb = pb_yaml(
+            r#"
+defaults: { on_failure: route, profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: verify, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: verify }
+  - { from: verify, to: done, condition: { type: node_status, node: verify, equals: success } }"#,
+        );
+        let c = codes(&pb);
+        assert!(
+            c.contains(&("V39", Severity::Warning)),
+            "an explicit route policy must not be over-suppressed, V39 should still warn, got {c:?}"
+        );
+    }
+
+    /// #88b: the `on_failure` handler is entered from anywhere in the graph,
+    /// so no drawn edge describes what preceded it, and a condition on the
+    /// handler reading another node must not be told that node "cannot
+    /// execute before" it. Mirrors the V38 precedent at
+    /// `v38_silent_for_the_on_failure_handler`.
+    #[test]
+    fn v40_silent_for_the_on_failure_handler() {
+        let pb = pb_yaml(
+            r#"
+defaults: { on_failure: h, profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: agent_task, prompt: hi }
+  - { id: h, type: agent_task, prompt: hi }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: h }
+  - { from: a, to: done }
+  - { from: h, to: done, condition: { type: output_field, node: a, field: verdict, equals: ok } }"#,
+        );
+        let c = codes(&pb);
+        assert!(
+            !c.iter().any(|(code, _)| *code == "V40"),
+            "the on_failure handler is entered from anywhere, no drawn edge describes what preceded it, V40 must stay silent, got {c:?}"
+        );
     }
 }

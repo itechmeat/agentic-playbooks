@@ -16,40 +16,58 @@ use apb_engine::{
 
 use crate::util::open_registry;
 
-/// Resolves the two connector permit maps for a playbook before it runs
+/// Resolves the two connector permit maps for a playbook, plus the verified
+/// pins of every `type: playbook` child it delegates to, before it runs
 /// through the CLI (foreground `apb run` and the `__drive-supervised` child
-/// alike). A playbook without any connector binding never calls the gate and
-/// gets the same empty maps `RunOptions` always defaulted to; this is what
-/// keeps a non-connector playbook's behavior byte-for-byte unchanged.
+/// alike). A playbook that binds no connector and has no sub-playbook node
+/// gets the same empty maps and `None` pins `RunOptions` always defaulted to;
+/// this is what keeps such a playbook's behavior byte-for-byte unchanged.
 ///
-/// For a connector-binding playbook this is the same seam the dashboard's
-/// `run_playbook_handler` uses (`apb-server/src/lib.rs`) and the same trust
-/// gate an MCP-started run goes through (`policy::check_run`): without it the
-/// engine would see empty `expected_connectors`/`expected_connector_accounts`
-/// and refuse ANY connector-binding run with the opaque "connector bindings
+/// This is the same seam the dashboard's `run_playbook_handler` uses
+/// (`apb-server/src/routes/playbooks.rs`) and the same trust gate an
+/// MCP-started run goes through (`policy::check_run`): without it the engine
+/// would see empty `expected_connectors`/`expected_connector_accounts` and
+/// refuse ANY connector-binding run with the opaque "connector bindings
 /// present but no connector permit" message, even though nothing was actually
-/// checked. On `Err` this returns a ready-to-print, actionable message (see
-/// `connector_refusal_message`) instead of the raw refusal JSON.
+/// checked - and, one level down (issue #102.1), a child spawned without a pin
+/// would die with exactly that message the moment a parent delegated to a
+/// connector-binding sub-playbook. Both walks happen in ONE gate pass and are
+/// never reimplemented here (anti-TOCTOU). On `Err` this returns a
+/// ready-to-print, actionable message (see `connector_refusal_message`)
+/// instead of the raw refusal JSON.
 fn connector_permits_for(
     root: &Path,
     name: &str,
     version: Option<&str>,
-) -> Result<apb_mcp::policy::ConnectorPermitMaps, String> {
+) -> Result<PlaybookRunPermits, String> {
     let reg = Registry::open(root).map_err(|e| format!("no project here: {e} (run `apb init`)"))?;
     let loaded = reg
         .load(name, version)
         .map_err(|e| format!("cannot load playbook `{name}`: {e}"))?;
-    let binds = loaded
-        .playbook
-        .nodes
-        .iter()
-        .any(|n| !n.kind.connector_bindings().is_empty());
-    if !binds {
-        return Ok((BTreeMap::new(), BTreeMap::new()));
-    }
-    apb_mcp::policy::connector_permit_maps(root, &loaded.playbook)
-        .map_err(|refusal| connector_refusal_message(&refusal))
+    let ((connectors, accounts), children) = apb_mcp::policy::connector_permit_maps_with_children(
+        root,
+        &loaded.playbook,
+        &apb_core::scope::Origin::Project { workspace_id: None },
+        name,
+    )
+    .map_err(|refusal| connector_refusal_message(&refusal))?;
+    // No sub-playbook node means no pin to carry: keep `None` so nothing
+    // changes for a playbook without children.
+    Ok((
+        connectors,
+        accounts,
+        (!children.is_empty()).then_some(children),
+    ))
 }
+
+/// What a CLI run start needs from the gate: the two connector permit maps and
+/// the sub-playbook pins (`None` when the playbook has no `type: playbook`
+/// node), handed to `RunOptions` verbatim.
+type PlaybookRunPermits = (
+    BTreeMap<String, String>,
+    BTreeMap<String, String>,
+    Option<BTreeMap<String, apb_engine::run_config::ChildExpectation>>,
+);
 
 /// Turns a connector-gate refusal (see `apb_mcp::policy::check_run`'s
 /// connector step) into an actionable CLI message: names the policy code and,
@@ -410,9 +428,9 @@ pub(crate) fn run_cmd(
             continued_from.as_deref(),
         );
     }
-    let (expected_connectors, expected_connector_accounts) =
+    let (expected_connectors, expected_connector_accounts, expected_children) =
         match connector_permits_for(root, name, version) {
-            Ok(maps) => maps,
+            Ok(permits) => permits,
             Err(msg) => {
                 eprintln!("run failed: {msg}");
                 return ExitCode::from(2);
@@ -433,7 +451,7 @@ pub(crate) fn run_cmd(
         parent_run: None,
         continued_from,
         depth: 0,
-        expected_children: None,
+        expected_children,
         expected_connectors,
         expected_connector_accounts,
         cache,
@@ -577,9 +595,9 @@ pub(crate) fn drive_supervised_child(
             }
         }
     }
-    let (expected_connectors, expected_connector_accounts) =
+    let (expected_connectors, expected_connector_accounts, expected_children) =
         match connector_permits_for(root, name, version) {
-            Ok(maps) => maps,
+            Ok(permits) => permits,
             Err(msg) => {
                 let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
                 return ExitCode::from(2);
@@ -600,7 +618,7 @@ pub(crate) fn drive_supervised_child(
         parent_run: None,
         continued_from,
         depth: 0,
-        expected_children: None,
+        expected_children,
         expected_connectors,
         expected_connector_accounts,
         cache: Default::default(),

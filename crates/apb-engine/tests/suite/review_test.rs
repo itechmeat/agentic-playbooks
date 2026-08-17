@@ -45,6 +45,22 @@ edges:
   - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
 "#;
 
+const WF_REVIEW_PROMPT: &str = r#"
+schema: 1
+id: rev
+name: Review
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, title: "Approve the release", options: [approved, rejected], prompt: "Check the changelog before deciding." }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
 const WF_OUTPUT_MATCH: &str = r#"
 schema: 1
 id: rev
@@ -156,20 +172,22 @@ fn human_review_entry_event_carries_instruction_and_options() {
     let rx = run_in_background(dir.path());
     let run_dir = latest_run_dir(dir.path());
     // Wait for the gate to declare itself, then inspect the entry event.
-    let (options, title, instruction) = poll_until("review_requested with instruction", || {
-        read_all(&run_dir)
-            .ok()?
-            .into_iter()
-            .find_map(|e| match e.payload {
-                EventPayload::ReviewRequested {
-                    node,
-                    options,
-                    title,
-                    instruction,
-                } if node == "gate" => Some((options, title, instruction)),
-                _ => None,
-            })
-    });
+    let (options, title, instruction, prompt) =
+        poll_until("review_requested with instruction", || {
+            read_all(&run_dir)
+                .ok()?
+                .into_iter()
+                .find_map(|e| match e.payload {
+                    EventPayload::ReviewRequested {
+                        node,
+                        options,
+                        title,
+                        instruction,
+                        prompt,
+                    } if node == "gate" => Some((options, title, instruction, prompt)),
+                    _ => None,
+                })
+        });
     assert_eq!(
         options,
         vec!["approved".to_string(), "rejected".to_string()]
@@ -185,7 +203,46 @@ fn human_review_entry_event_carries_instruction_and_options() {
     assert!(instruction.contains("rejected"), "got: {instruction}");
     assert!(instruction.contains("apb review"), "got: {instruction}");
     assert!(instruction.contains("review_decide"), "got: {instruction}");
+    // No `prompt:` on this fixture's gate node.
+    assert_eq!(prompt, None);
     // Do not leave the run hanging: decide and let it finish.
+    decide(dir.path(), &run_dir, "approved");
+    let result = wait_result(&rx);
+    assert_eq!(result.outcome, RunStatus::Succeeded);
+}
+
+/// issue #102.9: a `human_review` node's optional `prompt:` field is carried
+/// on the `ReviewRequested` event, both as its own field and folded into the
+/// owner-facing `instruction`, so a supervising agent sees the gate's
+/// guidance above the options.
+#[test]
+fn human_review_entry_event_carries_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), WF_REVIEW_PROMPT);
+    let rx = run_in_background(dir.path());
+    let run_dir = latest_run_dir(dir.path());
+    let (instruction, prompt) = poll_until("review_requested with prompt", || {
+        read_all(&run_dir)
+            .ok()?
+            .into_iter()
+            .find_map(|e| match e.payload {
+                EventPayload::ReviewRequested {
+                    node,
+                    instruction,
+                    prompt,
+                    ..
+                } if node == "gate" => Some((instruction, prompt)),
+                _ => None,
+            })
+    });
+    assert_eq!(
+        prompt.as_deref(),
+        Some("Check the changelog before deciding.")
+    );
+    assert!(
+        instruction.contains("Check the changelog before deciding."),
+        "got: {instruction}"
+    );
     decide(dir.path(), &run_dir, "approved");
     let result = wait_result(&rx);
     assert_eq!(result.outcome, RunStatus::Succeeded);
@@ -200,4 +257,190 @@ fn output_match_routes_on_substring() {
     fs::write(scripts.join("build.sh"), "echo 'BUILD OK'\n").unwrap();
     let result = run(dir.path(), "rev", None, RunOptions::default()).unwrap();
     assert_eq!(result.outcome, RunStatus::Succeeded);
+}
+
+// --- node validation (#103.1) ----------------------------------------------
+//
+// `post_review` is the single entry point every decision surface uses (the
+// `apb review` CLI, MCP `review_decide`, the HTTP endpoint), so the check that
+// the decided node is really a pending gate of THIS run lives there rather
+// than in any one caller. These cases build the run dir by hand: the shapes
+// under test (a node that is not a gate, a gate with no open request) are
+// exactly the ones a live drive never produces, and a hand-built journal pins
+// them without racing one.
+
+/// A run dir carrying the given playbook snapshot plus the given journal.
+fn synthetic_run_dir(yaml: &str, payloads: &[EventPayload]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("playbook.yaml"), yaml).unwrap();
+    if !payloads.is_empty() {
+        let mut log = apb_engine::event::EventLog::open(dir.path()).unwrap();
+        for p in payloads {
+            log.append(p.clone()).unwrap();
+        }
+    }
+    dir
+}
+
+fn review_requested(node: &str) -> EventPayload {
+    EventPayload::ReviewRequested {
+        node: node.into(),
+        options: vec!["approved".into(), "rejected".into()],
+        title: None,
+        instruction: String::new(),
+        prompt: None,
+    }
+}
+
+fn decide_on(run_dir: &Path, node: &str) -> Result<u64, apb_engine::EngineError> {
+    post_review(
+        run_dir,
+        ReviewCommand {
+            node: node.into(),
+            decision: "approved".into(),
+            note: String::new(),
+        },
+    )
+}
+
+#[test]
+fn post_review_on_an_unknown_node_is_not_found() {
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    let err = decide_on(dir.path(), "ghost").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::NotFound(_)),
+        "an unknown node must be NotFound, got: {err:?}"
+    );
+    assert!(
+        !dir.path().join("reviews.jsonl").exists(),
+        "a rejected decision must not be written to the channel"
+    );
+}
+
+#[test]
+fn post_review_on_a_node_that_is_not_a_gate_is_not_found() {
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    let err = decide_on(dir.path(), "start").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::NotFound(_)),
+        "a non-human_review node must be NotFound, got: {err:?}"
+    );
+}
+
+#[test]
+fn post_review_on_a_gate_that_is_not_pending_is_a_conflict() {
+    // The gate exists but nothing has requested a decision on it yet.
+    let dir = synthetic_run_dir(WF_REVIEW, &[]);
+    let err = decide_on(dir.path(), "gate").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::Conflict(_)),
+        "a gate with no open request must be Conflict, got: {err:?}"
+    );
+
+    // Already decided: the request is consumed, so a second decision is a
+    // conflict too.
+    let dir = synthetic_run_dir(
+        WF_REVIEW,
+        &[
+            review_requested("gate"),
+            EventPayload::ReviewDecided {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: String::new(),
+            },
+        ],
+    );
+    let err = decide_on(dir.path(), "gate").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::Conflict(_)),
+        "an already-decided gate must be Conflict, got: {err:?}"
+    );
+}
+
+#[test]
+fn post_review_on_the_pending_gate_is_accepted() {
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+    let channel = fs::read_to_string(dir.path().join("reviews.jsonl")).unwrap();
+    assert!(channel.contains("approved"), "got: {channel}");
+}
+
+#[test]
+fn post_review_with_a_torn_journal_tail_still_accepts_the_decision() {
+    // The drive appends `events.jsonl` a line at a time, so a decision posted
+    // while it writes can find a half-written last line. That says nothing
+    // about whether the gate is waiting, and refusing the decision over it
+    // would be a brand new way to lose a valid one: `post_review` did not read
+    // the journal at all before the node check existed.
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    let events_path = dir.path().join("events.jsonl");
+    let complete = fs::read_to_string(&events_path).unwrap();
+    fs::write(
+        &events_path,
+        format!("{complete}{{\"seq\":9,\"ts\":9,\"type\":\"node_star"),
+    )
+    .unwrap();
+    assert!(apb_engine::event::read_all(dir.path()).is_err());
+
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+    let channel = fs::read_to_string(dir.path().join("reviews.jsonl")).unwrap();
+    assert!(channel.contains("approved"), "got: {channel}");
+}
+
+#[test]
+fn a_second_decision_for_the_same_pending_gate_is_a_conflict() {
+    // The journal alone cannot see a decision that is already sitting in
+    // `reviews.jsonl` and has not been folded into a `ReviewDecided` event
+    // yet, so a naive requested-vs-decided check accepts a second decision for
+    // the same open request. On a cyclic gate the drive would then consume
+    // that stale extra record on the NEXT visit without asking anyone.
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+
+    let err = decide_on(dir.path(), "gate").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::Conflict(_)),
+        "a second decision for one pending request must be Conflict, got: {err:?}"
+    );
+    let channel = fs::read_to_string(dir.path().join("reviews.jsonl")).unwrap();
+    assert_eq!(
+        channel.lines().count(),
+        1,
+        "the refused decision must not be appended, got: {channel}"
+    );
+}
+
+#[test]
+fn a_new_request_after_the_queued_decision_is_consumed_accepts_a_new_decision() {
+    // The cyclic-gate case the queued check must not break: once the drive has
+    // consumed the queued decision (a `ReviewDecided` event) and the gate asks
+    // again, the new request is genuinely open and a fresh decision belongs in
+    // the channel.
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+
+    let mut log = apb_engine::event::EventLog::open(dir.path()).unwrap();
+    log.append(EventPayload::ReviewDecided {
+        node: "gate".into(),
+        decision: "approved".into(),
+        note: String::new(),
+    })
+    .unwrap();
+    log.append(review_requested("gate")).unwrap();
+    drop(log);
+
+    assert_eq!(
+        decide_on(dir.path(), "gate").unwrap(),
+        1,
+        "a re-requested cyclic gate must accept a fresh decision"
+    );
+}
+
+#[test]
+fn post_review_without_a_run_snapshot_stays_permissive() {
+    // Pre-snapshot runs carry no playbook.yaml, so there is nothing to
+    // validate the node against. Those keep the old accept-everything
+    // behavior rather than becoming undecidable.
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
 }

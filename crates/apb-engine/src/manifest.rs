@@ -90,7 +90,8 @@ pub struct ManifestConnector {
 }
 
 /// A single node's grant against one connector: which accounts, which
-/// functions, and an optional per-run call budget.
+/// functions, and an optional call budget counted per executor attempt
+/// (`connector::call::attempt_floor`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ManifestConnectorGrant {
     pub connector: String,

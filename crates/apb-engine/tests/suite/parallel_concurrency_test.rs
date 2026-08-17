@@ -351,8 +351,10 @@ fn max_parallel_two_admits_the_third_branch_after_the_first_chunk() {
 }
 
 // The queued half of join:any cancellation: the race is decided by the first
-// chunk, so the branch that never got a slot must not be started at all - and it
-// must not be left looking pending either.
+// chunk, so the branch that never got a slot must never be SPAWNED (its
+// process tree never runs) - but it still gets the paired write-off
+// NodeStarted/NodeFinished journal shape, so it is not left looking pending
+// either.
 const CAPPED_ANY: &str = r#"
 schema: 1
 id: capany
@@ -385,18 +387,22 @@ fn a_queued_branch_is_cancelled_when_an_any_join_is_already_won() {
     assert_eq!(res.outcome, RunStatus::Succeeded);
 
     let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    // A queued branch now gets a paired NodeStarted (the unified cancelled
+    // journal shape), so `!NodeStarted` is no longer the honest property.
+    // What this pins instead is the pairing itself: the queued branch's
+    // NodeStarted is immediately followed - nothing interleaved - by its own
+    // cancelled NodeFinished.
+    let started_at = events
+        .iter()
+        .position(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "c"))
+        .unwrap_or_else(|| panic!("queued branch c has no NodeStarted"));
     assert!(
-        !events
-            .iter()
-            .any(|e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "c")),
-        "the queued branch must never be admitted after the any-join was won"
-    );
-    assert!(
-        events.iter().any(|e| matches!(
-            &e.payload,
-            EventPayload::NodeFinished { node, status, .. } if node == "c" && status == "cancelled"
-        )),
-        "the queued branch must be journaled cancelled, like a killed sibling"
+        matches!(
+            events.get(started_at + 1).map(|e| &e.payload),
+            Some(EventPayload::NodeFinished { node, status, .. }) if node == "c" && status == "cancelled"
+        ),
+        "queued branch c's NodeStarted must be immediately followed by its own cancelled NodeFinished, got {:?}",
+        events.get(started_at + 1).map(|e| &e.payload)
     );
     finished_at(&events, "m");
 }

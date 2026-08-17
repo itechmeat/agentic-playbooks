@@ -76,6 +76,24 @@ fn v09_condition_not_covering_outcomes() {
 }
 
 #[test]
+fn v09_still_fires_when_on_failure_is_not_route() {
+    // defaults.on_failure exempts V39 (the warning off a non-condition node)
+    // because Stop and Node(_) already dispose of an unrouted failure. V09
+    // must stay strict regardless: a condition node's edges are its whole
+    // routing surface, not a fallback path off a failure.
+    let bad = VALID
+        .replace(
+            "  - { from: check, to: fix,  condition: { type: node_status, node: lint, equals: failure } }\n",
+            "",
+        )
+        .replace(
+            "defaults:\n  profile: architect",
+            "defaults:\n  profile: architect\n  on_failure: stop",
+        );
+    assert!(error_codes(&bad).contains(&"V09"));
+}
+
+#[test]
 fn v10_condition_references_downstream_only_node() {
     // the condition references a node that can't be reached before check
     let bad = VALID.replace(
@@ -190,6 +208,65 @@ fn v13_accepts_nodes_rejected_output_reference() {
 }
 
 #[test]
+fn v13_accepts_a_top_level_field_selector_on_output_and_report() {
+    // `{{nodes.<id>.output.<field>}}` projects ONE top-level field of a node
+    // output that parses as a JSON object, with the exact `output_field` edge
+    // condition semantics. `.report` is the same alias it always was, so the
+    // selector must be accepted on both spellings.
+    for reference in [
+        "{{nodes.lint.output.verdict}}",
+        "{{nodes.lint.report.verdict}}",
+    ] {
+        let good = VALID.replace("{{nodes.lint.output}}", reference);
+        assert!(
+            !error_codes(&good).contains(&"V13"),
+            "`{reference}` must resolve at save time"
+        );
+    }
+}
+
+#[test]
+fn v13_rejects_a_field_selector_on_a_non_output_namespace() {
+    // Only `.output` / `.report` carry a JSON payload the engine can project a
+    // field out of; a review note and a rejected report are plain text.
+    for reference in [
+        "{{nodes.lint.review_note.verdict}}",
+        "{{nodes.lint.rejected_output.verdict}}",
+    ] {
+        let bad = VALID.replace("{{nodes.lint.output}}", reference);
+        assert!(
+            error_codes(&bad).contains(&"V13"),
+            "`{reference}` must not resolve"
+        );
+    }
+}
+
+#[test]
+fn v13_rejects_a_nested_field_path_and_an_unknown_node_with_a_selector() {
+    // ONE top-level field, never a path: five parts stays unresolvable.
+    let nested = VALID.replace("{{nodes.lint.output}}", "{{nodes.lint.output.a.b}}");
+    assert!(
+        error_codes(&nested).contains(&"V13"),
+        "a nested field path must not resolve"
+    );
+    // A trailing dot names no field at all: the typo class V13 exists to catch,
+    // rejected like every other empty dotted segment in this repo.
+    for reference in ["{{nodes.lint.output.}}", "{{nodes.lint.output. }}"] {
+        let empty = VALID.replace("{{nodes.lint.output}}", reference);
+        assert!(
+            error_codes(&empty).contains(&"V13"),
+            "`{reference}` names no field and must not resolve"
+        );
+    }
+    // The selector does not weaken the node-existence check.
+    let ghost = VALID.replace("{{nodes.lint.output}}", "{{nodes.ghost.output.verdict}}");
+    assert!(
+        error_codes(&ghost).contains(&"V13"),
+        "an unknown node must not resolve even with a field selector"
+    );
+}
+
+#[test]
 fn v13_message_includes_variable_and_known_namespaces() {
     let bad = VALID.replace("{{params.task}}", "{{outputs.plan}}");
     let playbook = Playbook::from_yaml(&bad).unwrap();
@@ -207,8 +284,8 @@ fn v13_message_includes_variable_and_known_namespaces() {
     assert!(
         issue.message.contains(
             "known namespaces: params.*, nodes.<id>.output, nodes.<id>.report, \
-             nodes.<id>.review_note, nodes.<id>.rejected_output, run.instruction, \
-             run.context, run.hooks.*"
+             nodes.<id>.output.<field>, nodes.<id>.report.<field>, nodes.<id>.review_note, \
+             nodes.<id>.rejected_output, run.instruction, run.context, run.hooks.*"
         ),
         "message must carry the exact known-namespaces suffix: {}",
         issue.message

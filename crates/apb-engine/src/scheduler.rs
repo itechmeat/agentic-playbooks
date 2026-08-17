@@ -137,11 +137,15 @@ fn stop_on_unhandled_failure(
     frontier: &mut Vec<String>,
 ) -> Result<RunStatus, EngineError> {
     for pending in std::mem::take(frontier) {
+        log.append(EventPayload::NodeStarted {
+            node: pending.clone(),
+            attempt: 1,
+        })?;
         log.append(EventPayload::NodeFinished {
             node: pending,
             status: "cancelled".into(),
             attempt: 1,
-            output: String::new(),
+            output: "cancelled".into(),
             artifacts: Vec::new(),
         })?;
     }
@@ -153,6 +157,38 @@ fn stop_on_unhandled_failure(
         outcome: "failed".into(),
     })?;
     Ok(RunStatus::Failed)
+}
+
+/// The one write-off shape shared by both admission-time stop checks in the
+/// batch loop below (`run_cancel` and `cancel_now`): every member of `chunk`
+/// gets a `NodeStarted` immediately followed by a `NodeFinished` with
+/// `status: "cancelled"` and `output: "cancelled"`, and the same pair is
+/// recorded into `batch_results` so the batch tail's own bookkeeping sees it.
+/// `"cancelled"` output text matches what a member killed mid-flight writes,
+/// so both paths render the same `{{nodes.<id>.output}}`, and the paired
+/// start is what `cache::verify_connector_calls`, `journal::current_visit_start_seq`,
+/// `progress::node_durations_seconds` and the interactive re-entry guard all
+/// assume a finish is preceded by.
+fn write_off_cancelled(
+    log: &mut EventLog,
+    batch_results: &mut Vec<(String, NodeStatus, String)>,
+    chunk: &[String],
+) -> Result<(), EngineError> {
+    for n in chunk {
+        log.append(EventPayload::NodeStarted {
+            node: n.clone(),
+            attempt: 1,
+        })?;
+        log.append(EventPayload::NodeFinished {
+            node: n.clone(),
+            status: NodeStatus::Cancelled.as_str().into(),
+            attempt: 1,
+            output: "cancelled".into(),
+            artifacts: Vec::new(),
+        })?;
+        batch_results.push((n.clone(), NodeStatus::Cancelled, "cancelled".into()));
+    }
+    Ok(())
 }
 
 /// The minimal generated closing message a finish-with-prompt falls back to
@@ -771,14 +807,16 @@ fn drive_inner(
                     // wrong shape here still ends the run as stopped.
                     let cancel_now = cancel.load(Ordering::Relaxed);
                     // Admission-time re-check, against BOTH stop signals, kept
-                    // as separate cases even though both write a queued member
-                    // off as cancelled: `run_cancel` (a run-level Abort) gets
-                    // Task 9's unified cancelled shape below, while `cancel`
-                    // (a batch-local join:any already won - unrelated to a
-                    // run-level stop, and not this task's subject) keeps its
-                    // pre-Task-9 shape exactly, so
-                    // `a_queued_branch_is_cancelled_when_an_any_join_is_already_won`
-                    // stays green with its existing (unweakened) assertions.
+                    // as two separate `if` arms even though both now write a
+                    // queued member off with the IDENTICAL paired-cancelled
+                    // shape (`write_off_cancelled` below): `run_cancel` (a
+                    // run-level Abort) and `cancel` (a batch-local join:any
+                    // already won) are different REASONS a member never gets
+                    // admitted, and `a_stop_during_a_batch_does_not_admit_the_queued_chunks`
+                    // / `a_queued_branch_is_cancelled_when_an_any_join_is_already_won`
+                    // each pin one reason on its own fixture - merging the two
+                    // conditions into one `if` would blur which fixture
+                    // exercises which trigger.
                     //
                     // `run_cancel` has to be read here: an `Abort` posted while
                     // an earlier chunk was running is not visible to this loop
@@ -794,31 +832,7 @@ fn drive_inner(
                     // tree. This gate only has to write off the members not
                     // yet admitted.
                     if run_cancel.load(Ordering::SeqCst) {
-                        for n in chunk {
-                            // Paired start: four consumers assume a finish is
-                            // preceded by one (the cache's connector-call
-                            // window, the journal's visit window, the progress
-                            // duration table, and the interactive re-entry
-                            // guard). `"cancelled"` is the same output text the
-                            // killed path writes, so both paths render the same
-                            // `{{nodes.<id>.output}}`.
-                            log.append(EventPayload::NodeStarted {
-                                node: n.clone(),
-                                attempt: 1,
-                            })?;
-                            log.append(EventPayload::NodeFinished {
-                                node: n.clone(),
-                                status: NodeStatus::Cancelled.as_str().into(),
-                                attempt: 1,
-                                output: "cancelled".into(),
-                                artifacts: Vec::new(),
-                            })?;
-                            batch_results.push((
-                                n.clone(),
-                                NodeStatus::Cancelled,
-                                "cancelled".into(),
-                            ));
-                        }
+                        write_off_cancelled(log, &mut batch_results, chunk)?;
                         continue;
                     }
                     // A batch-local join:any that an earlier chunk already
@@ -831,23 +845,17 @@ fn drive_inner(
                     // skip when its own any-join is ready) would be
                     // finer-grained than the kill itself, which stops every
                     // running member regardless of which join it feeds; one
-                    // rule for both is the point. Unchanged by Task 9: no
-                    // `NodeStarted`, empty output - the two other cancelled
-                    // shapes in this file (`advance_frontier`'s join:any
-                    // sibling cancel and `stop_on_unhandled_failure`'s frontier
-                    // cancel, both for nodes that never entered a batch at
-                    // all) are left alone the same way.
+                    // rule for both is the point. Same `write_off_cancelled`
+                    // shape as the `run_cancel` arm above. The other two
+                    // cancelled write-offs in the codebase - one in this file
+                    // above (`stop_on_unhandled_failure`'s frontier cancel,
+                    // hit on a declared-fatal failure rather than a stop) and
+                    // one in `node.rs` (`advance_frontier`'s join:any sibling
+                    // cancel, for nodes that never entered a batch) - use the
+                    // same paired shape now too, for the same paired-start
+                    // consumers.
                     if cancel_now {
-                        for n in chunk {
-                            log.append(EventPayload::NodeFinished {
-                                node: n.clone(),
-                                status: NodeStatus::Cancelled.as_str().into(),
-                                attempt: 1,
-                                output: String::new(),
-                                artifacts: Vec::new(),
-                            })?;
-                            batch_results.push((n.clone(), NodeStatus::Cancelled, String::new()));
-                        }
+                        write_off_cancelled(log, &mut batch_results, chunk)?;
                         continue;
                     }
                     // A pause: no NEW work, and NOTHING is written off. A paused
@@ -1225,7 +1233,7 @@ fn drive_inner(
         // the node-cache branch sets it (captured on a store, replayed on a
         // hit); every other branch leaves it empty.
         let mut node_artifacts: Vec<apb_core::cache::ArtifactRef> = Vec::new();
-        let (status, output) = if let NodeKind::HumanReview { options } = &node_kind {
+        let (status, output) = if let NodeKind::HumanReview { options, prompt } = &node_kind {
             let events = read_all(run_dir)?;
             let decided = review_decided_count(&events, &current);
             let for_current: Vec<_> = read_reviews_after(run_dir, None)?
@@ -1252,13 +1260,18 @@ fn drive_inner(
                 // options are, and how to answer.
                 if review_requested_count(&events, &current) <= decided {
                     let title = playbook.node(&current).and_then(|n| n.title.clone());
-                    let instruction =
-                        crate::progress::review_instruction(&current, title.as_deref(), options);
+                    let instruction = crate::progress::review_instruction(
+                        &current,
+                        title.as_deref(),
+                        options,
+                        prompt.as_deref(),
+                    );
                     log.append(EventPayload::ReviewRequested {
                         node: current.clone(),
                         options: options.clone(),
                         title,
                         instruction,
+                        prompt: prompt.clone(),
                     })?;
                 }
                 std::thread::sleep(AWAIT_CONTROL_POLL);

@@ -469,6 +469,129 @@ fn setup_run_fixture(dir: &Path) {
     seed_profile_main(dir);
 }
 
+// --- run: connector permits for a `type: playbook` child (issue #102.1) ----
+//
+// The CLI used to walk only the TOP-LEVEL nodes for connector bindings and
+// pass `expected_children: None`, so a parent that delegates to a
+// connector-binding child spawned that child with empty permit maps and the
+// child died fail-closed with "connector bindings present but no connector
+// permit". The fix computes the child pins in the SAME gate pass as the
+// parent's connector maps and threads them onto `expected_children`.
+
+const RUN_PARENT_ID: &str = "conn-parent";
+
+/// A parent whose sub-playbook node `c` runs the connector-binding child
+/// `conn-pb`. The parent itself binds no connectors.
+fn run_parent_yaml() -> String {
+    format!(
+        r#"schema: 2
+id: {RUN_PARENT_ID}
+name: {RUN_PARENT_ID}
+version: 1.0.0
+nodes:
+  - {{ id: s, type: start }}
+  - {{ id: c, type: playbook, playbook: {RUN_PLAYBOOK_ID} }}
+  - {{ id: f, type: finish, outcome: success }}
+edges:
+  - {{ from: s, to: c }}
+  - {{ from: c, to: f }}
+"#
+    )
+}
+
+fn write_run_parent(dir: &Path) {
+    let vdir = dir.join(".apb/playbooks").join(RUN_PARENT_ID).join("1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), run_parent_yaml()).unwrap();
+    fs::write(
+        dir.join(".apb/playbooks")
+            .join(RUN_PARENT_ID)
+            .join("current"),
+        "1.0.0",
+    )
+    .unwrap();
+}
+
+#[test]
+fn run_of_a_parent_delegating_to_a_connector_binding_child_succeeds() {
+    let dir = tempfile::tempdir().unwrap();
+    setup_run_fixture(dir.path());
+    write_run_parent(dir.path());
+    let stub = make_stub_agent(dir.path());
+
+    apb_ok(dir.path(), &["connector", "approve", "widget"]);
+    apb_ok(
+        dir.path(),
+        &["connector", "approve", "widget", "--account", "default"],
+    );
+
+    let out = playbook_env(
+        dir.path(),
+        &["run", RUN_PARENT_ID],
+        &[
+            ("WIDGET_TOKEN", "shh-secret-value"),
+            ("APB_AGENT_CMD", stub.to_str().unwrap()),
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        out.status.success() && stdout.contains("succeeded"),
+        "a parent delegating to an approved connector-binding child should run to completion: \
+         stdout={stdout} stderr={stderr}"
+    );
+    // The parent's own outcome is not enough: a failed sub-playbook node still
+    // walks its unconditional edge to `finish`, so the run reports success
+    // while the child died. The event log is what proves the child ran.
+    let run_id = stdout
+        .split_whitespace()
+        .nth(1)
+        .expect("run id in `run <id> finished: ...`");
+    let events = fs::read_to_string(
+        dir.path()
+            .join(".apb/runs")
+            .join(run_id)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        !events.contains("connector bindings present but no connector permit"),
+        "the child must inherit a computed connector permit: {events}"
+    );
+    assert!(
+        events.contains(r#""node":"c","status":"succeeded""#),
+        "the sub-playbook node must succeed: {events}"
+    );
+}
+
+#[test]
+fn run_of_a_parent_refuses_when_the_child_connector_is_untrusted() {
+    let dir = tempfile::tempdir().unwrap();
+    setup_run_fixture(dir.path());
+    write_run_parent(dir.path());
+    // Neither the connector tree digest nor the account digest is approved:
+    // the child's connector trust is gated exactly like the parent's would be,
+    // and the refusal happens before the run starts.
+    let out = playbook_env(
+        dir.path(),
+        &["run", RUN_PARENT_ID],
+        &[("WIDGET_TOKEN", "shh-secret-value")],
+    );
+    assert!(
+        !out.status.success(),
+        "an untrusted child connector must refuse the parent run"
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("untrusted_connector_requires_approve"),
+        "stderr should name the refusal policy code: {stderr}"
+    );
+    assert!(
+        stderr.contains("apb connector approve"),
+        "stderr should point at `apb connector approve`: {stderr}"
+    );
+}
+
 #[test]
 fn run_refuses_unapproved_connector_binding_playbook_with_actionable_message() {
     let dir = tempfile::tempdir().unwrap();

@@ -52,6 +52,12 @@
       case 'timed_out':
         return 'border-destructive'
       case 'interrupted':
+      // A node whose attempt process is provably gone while the node never
+      // reported a verdict (issue #85.4). The run detail now reports it, and
+      // it needs at least the attention an interrupted node gets: without an
+      // arm here the most actionable state on the canvas rendered as the
+      // neutral default.
+      case 'lost':
       case 'unknown':
         return 'border-warning'
       default:
