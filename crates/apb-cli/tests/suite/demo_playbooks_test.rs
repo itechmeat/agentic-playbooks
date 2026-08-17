@@ -149,6 +149,11 @@ fn setup(dir: &Path) -> std::path::PathBuf {
         "slack",
         "accounts:\n  - name: default\n    api_base: https://slack.com/api\n    token: \"{{env.DEMO_SLACK_TOKEN}}\"\n",
     );
+    install_and_approve(
+        &root,
+        "whatsapp",
+        "accounts:\n  - name: default\n    base_url: https://graph.facebook.com\n    graph_version: v23.0\n    phone_number_id: \"100000000000000\"\n    waba_id: \"200000000000000\"\n    access_token: \"{{env.DEMO_WHATSAPP_ACCESS_TOKEN}}\"\n    app_secret: \"{{env.DEMO_WHATSAPP_APP_SECRET}}\"\n    verify_token: \"{{env.DEMO_WHATSAPP_VERIFY_TOKEN}}\"\n",
+    );
 
     seed_profile_main(&root);
     root
@@ -227,5 +232,24 @@ fn inbox_triage_demo_playbook_validates() {
     assert!(
         stdout.contains("inbox-triage: OK"),
         "inbox-triage should validate cleanly: {stdout}"
+    );
+}
+
+#[test]
+fn whatsapp_inbox_demo_playbook_validates() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = setup(dir.path());
+    register_playbook(
+        &root,
+        "whatsapp-inbox",
+        "1.0.0",
+        &repo_playbook_yaml("whatsapp-inbox.yaml"),
+    );
+
+    let out = apb_ok(&root, &["validate", "whatsapp-inbox"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("whatsapp-inbox: OK"),
+        "whatsapp-inbox should validate cleanly: {stdout}"
     );
 }

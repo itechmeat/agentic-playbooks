@@ -13,7 +13,7 @@
 
 mod account;
 mod auth;
-mod encode;
+pub(crate) mod encode;
 mod response;
 
 use account::{account_selection_error, select_account, select_live_account};
@@ -206,6 +206,13 @@ enum PreparedCall {
         account: String,
         call: Box<crate::connector::imap::ImapCall>,
     },
+    // Boxed for the same reason: an inbox call carries its resolved consumer
+    // and paging state. Like smtp and imap it has no HTTP status, and unlike
+    // all three others it resolves no secret at all.
+    Inbox {
+        account: String,
+        call: Box<crate::connector::inbox::InboxCall>,
+    },
 }
 
 /// An HTTP call ready to send.
@@ -247,27 +254,31 @@ impl PreparedCall {
             PreparedCall::Http(h) => &h.account,
             PreparedCall::Smtp { account, .. } => account,
             PreparedCall::Imap { account, .. } => account,
+            PreparedCall::Inbox { account, .. } => account,
         }
     }
 
     /// The pre-auth URL / endpoint for the event log; `""` for a mock, the
-    /// pre-auth URL for HTTP, `smtp://host:port` for smtp.
+    /// pre-auth URL for HTTP, `smtp://host:port` for smtp, and
+    /// `inbox://<connector>/<account>` for inbox.
     fn pre_auth_url(&self) -> String {
         match self {
             PreparedCall::Mock { .. } => String::new(),
             PreparedCall::Http(h) => h.pre_auth_url.clone(),
             PreparedCall::Smtp { call, .. } => call.endpoint(),
             PreparedCall::Imap { call, .. } => call.endpoint(),
+            PreparedCall::Inbox { call, .. } => call.endpoint(),
         }
     }
 
     /// SMTP-only event metadata (subject, recipient count). `(None, None)` for
-    /// HTTP and mock, which record neither.
+    /// every other kind, which record neither.
     fn event_extra(&self) -> (Option<String>, Option<u32>) {
         match self {
             PreparedCall::Mock { .. } | PreparedCall::Http(_) => (None, None),
             PreparedCall::Smtp { call, .. } => call.event_extra(),
             PreparedCall::Imap { call, .. } => call.event_extra(),
+            PreparedCall::Inbox { call, .. } => call.event_extra(),
         }
     }
 
@@ -285,6 +296,9 @@ impl PreparedCall {
             // An imap call likewise has no HTTP status; the event log records
             // only the endpoint (spec 3.4: no subjects).
             PreparedCall::Imap { call, .. } => (call.send(), None),
+            // An inbox call never leaves the machine, so there is no status
+            // and nothing to redact.
+            PreparedCall::Inbox { call, .. } => (call.send(), None),
         }
     }
 }
@@ -567,6 +581,34 @@ fn build_prepared(
             status: mock.status,
             body: mock.body.clone(),
         })));
+    }
+
+    // 6b. Inbox: a local store read or cursor move. Terminates before secret
+    // resolution on purpose - the read path needs no credential, so it must
+    // not cause one to be resolved (or a `{{cmd:...}}` helper to be run) as a
+    // side effect of being called.
+    if let Some(spec) = &function.inbox {
+        return match crate::connector::inbox::build(
+            spec,
+            &doc.name,
+            &account_name,
+            args,
+            // `--full` bypasses the projection (spec 4.5), like HTTP.
+            if full {
+                Vec::new()
+            } else {
+                function.response_pick.clone()
+            },
+            dry_run,
+        )? {
+            crate::connector::inbox::InboxBuild::DryRun(v) => Ok(Prepared::DryRun(v)),
+            crate::connector::inbox::InboxBuild::Call(call) => {
+                Ok(Prepared::Call(Box::new(PreparedCall::Inbox {
+                    account: account_name,
+                    call,
+                })))
+            }
+        };
     }
 
     // 7. Secrets: resolve every env-ref field. Skipped entirely for a dry-run.

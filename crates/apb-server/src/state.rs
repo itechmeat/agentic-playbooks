@@ -3,6 +3,7 @@ use std::sync::Arc;
 
 use apb_core::projects::{self, ProjectAccessError};
 use apb_core::versioning::VersioningError;
+use axum::extract::FromRef;
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
@@ -18,6 +19,10 @@ pub struct AppState {
     /// pinned root, a request that omits `workspace` falls back to it.
     pub root: Option<Arc<PathBuf>>,
     pub events: broadcast::Sender<String>,
+    /// Server-mode authentication (spec 2026-08-16-server-mode-design).
+    /// Disabled by default, which is exactly today's local behavior;
+    /// `run_server` attaches a populated state when keys exist.
+    pub auth: Arc<crate::auth::AuthState>,
 }
 
 impl AppState {
@@ -27,6 +32,7 @@ impl AppState {
         Self {
             root: Some(Arc::new(root)),
             events,
+            auth: Arc::new(crate::auth::AuthState::disabled()),
         }
     }
 
@@ -34,7 +40,37 @@ impl AppState {
     /// per request from the registry.
     pub fn new_global() -> Self {
         let (events, _) = broadcast::channel(64);
-        Self { root: None, events }
+        Self {
+            root: None,
+            events,
+            auth: Arc::new(crate::auth::AuthState::disabled()),
+        }
+    }
+
+    /// The global dashboard with server-mode auth attached.
+    pub fn new_global_with_auth(auth: Arc<crate::auth::AuthState>) -> Self {
+        let (events, _) = broadcast::channel(64);
+        Self {
+            root: None,
+            events,
+            auth,
+        }
+    }
+
+    /// Attaches an auth state to an existing one. The shape the tests use.
+    pub fn with_auth(mut self, auth: Arc<crate::auth::AuthState>) -> Self {
+        self.auth = auth;
+        self
+    }
+}
+
+/// Lets an axum handler extract just the auth substate (`State<Arc<AuthState>>`)
+/// instead of the whole `AppState`. This is what keeps `crate::auth` from
+/// needing to import `AppState` back: the dependency only runs one way,
+/// `state -> auth`, so the two modules do not cycle.
+impl FromRef<AppState> for Arc<crate::auth::AuthState> {
+    fn from_ref(state: &AppState) -> Self {
+        state.auth.clone()
     }
 }
 

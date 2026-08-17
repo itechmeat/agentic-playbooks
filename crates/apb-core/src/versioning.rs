@@ -732,6 +732,7 @@ pub fn create_draft_in(
     let ctx = ValidationContext {
         profiles: reg.profiles(),
         playbook_origin: origin,
+        connectors: crate::connector::resolve::validation_facts(),
     };
     let report = validate(&playbook, &ctx);
     let errors: Vec<Issue> = report

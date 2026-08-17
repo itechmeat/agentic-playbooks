@@ -5,6 +5,24 @@
   import PlayCircle from '@lucide/svelte/icons/play-circle'
   import UserCog from '@lucide/svelte/icons/user-cog'
   import Plug from '@lucide/svelte/icons/plug'
+  import LogOut from '@lucide/svelte/icons/log-out'
+  import { Button } from '$lib/components/ui/button'
+  import { authState, logout } from '$lib/auth.svelte'
+
+  // The control appears only in server mode: on a keyless local dashboard
+  // there is no session to end and the item would be dead weight.
+  const authSnapshot = authState()
+  let loggingOut = $state(false)
+
+  async function doLogout() {
+    if (loggingOut) return
+    loggingOut = true
+    try {
+      await logout()
+    } finally {
+      loggingOut = false
+    }
+  }
 
   let {
     active = '',
@@ -57,5 +75,11 @@
   {/if}
   <div class="ml-auto flex items-center gap-2">
     {#if actions}{@render actions()}{/if}
+    {#if authSnapshot.required && authSnapshot.authenticated}
+      <Button variant="ghost" size="sm" disabled={loggingOut} onclick={doLogout}>
+        <LogOut class="size-4" />
+        <span class="hidden sm:inline">Log out</span>
+      </Button>
+    {/if}
   </div>
 </header>

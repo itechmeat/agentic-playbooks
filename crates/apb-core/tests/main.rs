@@ -37,6 +37,8 @@ mod detect_test;
 mod doctor_test;
 #[path = "suite/fsutil_test.rs"]
 mod fsutil_test;
+#[path = "suite/inbox_store_test.rs"]
+mod inbox_store_test;
 #[path = "suite/instruction_draft_test.rs"]
 mod instruction_draft_test;
 #[path = "suite/interactive_howto_example_test.rs"]
@@ -61,10 +63,14 @@ mod schema_migrate_config_test;
 mod schema_migrate_test;
 #[path = "suite/schema_test.rs"]
 mod schema_test;
+#[path = "suite/server_auth_test.rs"]
+mod server_auth_test;
 #[path = "suite/validate_duration_test.rs"]
 mod validate_duration_test;
 #[path = "suite/validate_goal_test.rs"]
 mod validate_goal_test;
+#[path = "suite/validate_inbox_test.rs"]
+mod validate_inbox_test;
 #[path = "suite/validate_profiles_test.rs"]
 mod validate_profiles_test;
 #[path = "suite/validate_semantics_test.rs"]
@@ -75,3 +81,7 @@ mod validate_structure_test;
 mod versioning_test;
 #[path = "suite/versions_provenance_test.rs"]
 mod versions_provenance_test;
+#[path = "suite/webhook_digest_test.rs"]
+mod webhook_digest_test;
+#[path = "suite/webhook_verify_test.rs"]
+mod webhook_verify_test;

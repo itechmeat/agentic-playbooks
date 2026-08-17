@@ -12,8 +12,18 @@ mod common;
 mod answer_api_test;
 #[path = "suite/api_test.rs"]
 mod api_test;
+#[path = "suite/auth_endpoints_test.rs"]
+mod auth_endpoints_test;
+#[path = "suite/auth_test.rs"]
+mod auth_test;
+#[path = "suite/bind_interlock_test.rs"]
+mod bind_interlock_test;
 #[path = "suite/connectors_api_test.rs"]
 mod connectors_api_test;
+#[path = "suite/inbox_api_test.rs"]
+mod inbox_api_test;
+#[path = "suite/ingest_test.rs"]
+mod ingest_test;
 #[path = "suite/input_draft_api_test.rs"]
 mod input_draft_api_test;
 #[path = "suite/meta_api_test.rs"]

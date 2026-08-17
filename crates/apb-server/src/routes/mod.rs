@@ -2,6 +2,7 @@
 //! request/response shapes only it uses; anything shared between families
 //! lives in [`crate::state`].
 
+pub mod auth;
 pub mod connectors;
 pub mod meta;
 pub mod playbooks;

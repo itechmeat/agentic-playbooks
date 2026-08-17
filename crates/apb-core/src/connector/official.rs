@@ -167,7 +167,7 @@ mod tests {
             names,
             vec![
                 "asana", "atrip", "discord", "github", "gitlab", "imap", "sentry", "slack", "smtp",
-                "telegram", "twenty", "youtrack", "zulip",
+                "telegram", "twenty", "whatsapp", "youtrack", "zulip",
             ],
             "the embedded official connector set changed; update this list deliberately"
         );

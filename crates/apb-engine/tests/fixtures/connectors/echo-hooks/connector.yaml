@@ -1,0 +1,74 @@
+# A fake ingest-only connector used exclusively by the test suite. It is not
+# an official connector and must never be added to the pinned list in
+# apb_core::connector::official, nor to the repository `connectors/` folder.
+name: echo-hooks
+version: 0.1.0
+webhook:
+  challenge: meta_hub
+  verify_token: "{{secret.verify_token}}"
+  signature:
+    scheme: hmac_sha256_hex
+    header: X-Hub-Signature-256
+    prefix: "sha256="
+    secret: "{{secret.app_secret}}"
+  dedupe_path: id
+account_fields:
+  - name: verify_token
+    required: true
+    secret: true
+  - name: app_secret
+    required: true
+    secret: true
+functions:
+  - name: inbox_read
+    description: Read pending inbound events without consuming them.
+    read_only: true
+    response_pick: [events, cursor]
+    args_schema:
+      type: object
+      properties:
+        consumer: { type: string }
+        limit: { type: integer }
+    examples:
+      - args: { consumer: worker, limit: 10 }
+        note: read the next ten events for the worker consumer
+    inbox:
+      op: read
+  # Picks a strict subset of the read envelope, unlike `inbox_read` above,
+  # which picks all of it. Without a projecting function here, the contract
+  # runner's `response_pick` step would be a no-op in every fixture case and
+  # could silently stop being applied.
+  - name: inbox_read_events_only
+    description: Read pending inbound events without the cursor or the truncation flag.
+    read_only: true
+    response_pick: [events]
+    args_schema:
+      type: object
+      properties:
+        consumer: { type: string }
+        limit: { type: integer }
+    inbox:
+      op: read
+  - name: inbox_ack
+    description: Advance the consumer cursor after processing events.
+    args_schema:
+      type: object
+      properties:
+        consumer: { type: string }
+        up_to_seq: { type: integer }
+      required: [up_to_seq]
+    examples:
+      - args: { consumer: worker, up_to_seq: 2 }
+        note: acknowledge everything through seq 2
+    inbox:
+      op: ack
+  - name: inbox_depth
+    description: How many inbound events are still pending for a consumer.
+    read_only: true
+    response_pick: [pending]
+    args_schema:
+      type: object
+      properties:
+        consumer: { type: string }
+    inbox:
+      op: peek_depth

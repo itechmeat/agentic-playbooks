@@ -1,15 +1,22 @@
 //! The dashboard HTTP API: an axum router over the local `.apb` state, with
-//! the built svelte frontend embedded as static assets.
+//! the built svelte frontend embedded as static assets, plus a second,
+//! structurally separate ingest listener for inbound provider webhooks.
 //!
 //! The surface is split by resource. [`routes`] holds one module per API
 //! family (playbooks, runs, profiles, connectors, and the small read-only
 //! `meta` endpoints); [`state`] holds the shared [`AppState`] plus the
 //! request-scoped project resolution every handler starts from; [`ws`] is the
 //! event stream the dashboard subscribes to; [`assets`] serves the embedded
-//! frontend. This module wires them into a router and runs the server.
+//! frontend. [`ingest`] is a separate router on a separate socket carrying
+//! only the hook routes, so a proxy pointed at it cannot reach anything here.
+//! This module wires the dashboard router together and runs the server.
 
 pub mod assets;
+pub mod auth;
+mod httpserve;
+pub mod ingest;
 pub mod lock;
+mod ratelimit;
 pub mod routes;
 pub mod state;
 pub mod watch;
@@ -17,12 +24,16 @@ pub mod ws;
 
 use axum::Router;
 use axum::routing::{get, post, put};
+use std::net::IpAddr;
 
 pub use state::AppState;
 
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/api/health", get(routes::meta::health))
+        .route("/api/auth/login", post(routes::auth::login_handler))
+        .route("/api/auth/logout", post(routes::auth::logout_handler))
+        .route("/api/auth/status", get(routes::auth::status_handler))
         .route("/api/projects", get(routes::meta::list_projects_handler))
         .route(
             "/api/playbooks",
@@ -97,6 +108,14 @@ pub fn build_router(state: AppState) -> Router {
             get(routes::connectors::connector_stats_handler),
         )
         .route(
+            "/api/connectors/{name}/inbox",
+            get(routes::connectors::inbox_handler),
+        )
+        .route(
+            "/api/connectors/{name}/inbox/{account}/events",
+            get(routes::connectors::inbox_events_handler),
+        )
+        .route(
             "/api/connectors/{name}/healthcheck/{account}",
             post(routes::connectors::healthcheck_connector_handler),
         )
@@ -135,7 +154,36 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/api/ws", get(ws::ws_handler))
         .fallback(assets::static_handler)
+        // The gate wraps everything, including the static fallback, so that
+        // ClientCtx is present on every request. Exempt paths are decided
+        // inside the middleware, not by leaving routes outside the layer.
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::auth_middleware,
+        ))
         .with_state(state)
+}
+
+/// Startup interlock (spec 2026-08-16-server-mode-design): binding anywhere
+/// but the loopback interface requires at least one issued API key. This is a
+/// hard error and not a warning, because the API can start runs and make
+/// authenticated connector calls, which makes an open bind equivalent to
+/// remote code execution.
+pub fn check_bind_allowed(bind: IpAddr, key_count: usize) -> Result<(), String> {
+    if bind.is_loopback() || key_count > 0 {
+        return Ok(());
+    }
+    Err(format!(
+        "refusing to bind {bind}: no API key is configured, so the dashboard would be reachable from the network without authentication. Issue one with `apb server key issue`, or keep the default 127.0.0.1 bind"
+    ))
+}
+
+/// The host part of the dashboard URL for a bind address, with IPv6 bracketed.
+fn display_host(bind: IpAddr) -> String {
+    match bind {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => format!("[{v6}]"),
+    }
 }
 
 /// Runs the global, machine-wide dashboard: one server, no project binding.
@@ -143,8 +191,31 @@ pub fn build_router(state: AppState) -> Router {
 /// registry; project-specific requests carry `?workspace=<id>`. A single
 /// instance lock lives in the config dir so two global dashboards cannot race
 /// on the same port.
-pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
-    let state = AppState::new_global();
+pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::error::Error>> {
+    // The key file decides two things at once: whether the requested bind is
+    // permitted at all, and (from Task 4 on) whether auth is enforced. A
+    // malformed file is a startup error rather than a silent "no keys", so a
+    // typo can never quietly open the server.
+    let global_cfg = apb_core::config::GlobalConfig::load().map_err(std::io::Error::other)?;
+    let auth_path = apb_core::server_auth::auth_file_path()?;
+    let auth_file = apb_core::server_auth::load_from(&auth_path)?;
+    check_bind_allowed(bind, auth_file.keys.len()).map_err(std::io::Error::other)?;
+    // The path is handed to the auth state so it can notice the file changing:
+    // issuing a first key or revoking a compromised one takes effect on a
+    // running dashboard without a restart.
+    let mut auth_state = auth::AuthState::new(Some(auth_path), auth_file.keys, &global_cfg.server)
+        .map_err(std::io::Error::other)?;
+    // check_bind_allowed only checks the bind/key precondition once, at
+    // startup. On a non-loopback bind, require_keys keeps it enforced for the
+    // life of the process: if the key set empties out later (the last key
+    // revoked while the server is running), the auth middleware fails closed
+    // instead of silently falling back to the keyless pass-through.
+    if !bind.is_loopback() {
+        auth_state = auth_state.require_keys(bind);
+    }
+    let auth = std::sync::Arc::new(auth_state);
+    let auth_enabled = auth.enabled();
+    let state = AppState::new_global_with_auth(auth);
     let cfg = apb_core::config::config_dir()
         .ok_or_else(|| std::io::Error::other("no config dir for the global server lock"))?;
     std::fs::create_dir_all(&cfg)?;
@@ -152,7 +223,7 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
     // mutual exclusion (a second server on the same port fails here), so if it
     // fails we must return without having written a lock that no cleanup path
     // would then remove.
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", port)).await?;
+    let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     let _lock = lock::write_global_lock(&cfg, port)?;
     // Real-time updates across all projects: a filesystem watcher broadcasts
     // change pings on the shared channel that the dashboard's WebSocket relays.
@@ -166,10 +237,34 @@ pub async fn run_server(port: u16) -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     let app = build_router(state);
-    println!("apb dashboard (global): http://127.0.0.1:{port}");
-    let result = axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
-        .await;
+    println!(
+        "apb dashboard (global): http://{}:{port}",
+        display_host(bind)
+    );
+    if auth_enabled {
+        println!("authentication is on: sign in with a key from `apb server key issue`");
+    }
+    if let Some(url) = global_cfg.server.public_base_url.as_deref() {
+        println!("public address: {url}");
+    }
+    // Behind a proxy with no trusted peer configured, every client arrives as
+    // the proxy's own address, so all of them share one rate-limit key and a
+    // single attacker can exhaust the failure budget for everyone.
+    if global_cfg.server.public_base_url.is_some() && global_cfg.server.trusted_proxies.is_empty() {
+        eprintln!(
+            "apb dashboard: server.public_base_url is set but server.trusted_proxies is empty; every client will share the proxy's IP as one rate-limit key. Add the proxy's address to server.trusted_proxies (see docs/DEPLOYMENT.md)"
+        );
+    }
+    // ConnectInfo carries the socket peer address into every request, which the
+    // auth layer needs for rate-limit keying and for deciding whether a
+    // forwarded header came from a trusted proxy.
+    let result = httpserve::serve_with_header_timeout(
+        listener,
+        app,
+        httpserve::HEADER_READ_TIMEOUT,
+        shutdown_signal(),
+    )
+    .await;
     // Remove the lock both on normal shutdown and after catching a signal.
     lock::remove_global_lock(&cfg)?;
     result?;

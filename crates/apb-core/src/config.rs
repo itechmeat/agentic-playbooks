@@ -1,4 +1,5 @@
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
+use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -42,6 +43,13 @@ pub struct GlobalConfig {
     /// named constants in `crate::dismiss`; a project `.apb/config.yaml` may
     /// override either key for its own project.
     pub suggestions: SuggestionSettings,
+    /// Server-deployment knobs (spec 2026-08-16-server-mode-design). Absent
+    /// section means the historical behavior: loopback bind, no proxy trust.
+    pub server: ServerConfig,
+    /// Inbound webhook listener (spec 2026-08-16-webhook-ingest-design).
+    /// Absent section means disabled, which is the historical behavior: apb
+    /// opens no inbound port unless an operator asks for one.
+    pub ingest: IngestConfig,
 }
 
 /// Transport used to communicate with the agent (spec 7.2).
@@ -383,4 +391,146 @@ pub fn project_suggestion_settings(root: &Path) -> Result<SuggestionSettings, St
     let parsed: ProjectSuggestionsFile = serde_yaml_ng::from_str(&raw)
         .map_err(|e| format!("invalid project config `{}`: {e}", path.display()))?;
     Ok(parsed.suggestions)
+}
+
+/// The address the dashboard binds when no flag is given. Loopback, because a
+/// server that anyone on the network can reach must be an explicit decision.
+pub const DEFAULT_BIND: IpAddr = IpAddr::V4(Ipv4Addr::LOCALHOST);
+
+/// Optional `server:` section of the global config (spec
+/// 2026-08-16-server-mode-design). Every key is optional: an operator who
+/// never touches the section keeps today's loopback-only behavior.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct ServerConfig {
+    /// IP address to bind, parsed at startup. `0.0.0.0` for a server
+    /// deployment. An unparseable value is a startup error, never a silent
+    /// fallback to loopback.
+    pub bind: Option<String>,
+    /// Public origin the dashboard is reached at, e.g.
+    /// `https://apb.example.com`. Used to print absolute URLs and to decide
+    /// whether the session cookie carries the `Secure` attribute.
+    pub public_base_url: Option<String>,
+    /// Exact peer IPs whose `X-Forwarded-For` and `X-Forwarded-Proto` headers
+    /// are believed. No CIDR ranges in v1: a reverse proxy has one address.
+    /// Forwarded headers are never used for an authentication decision, only
+    /// for rate-limit keying and logging.
+    pub trusted_proxies: Vec<String>,
+}
+
+impl ServerConfig {
+    /// Bind precedence: `--bind` flag, then `server.bind`, then loopback.
+    pub fn resolve_bind(&self, flag: Option<&str>) -> Result<IpAddr, String> {
+        match flag.or(self.bind.as_deref()) {
+            None => Ok(DEFAULT_BIND),
+            Some(raw) => raw
+                .trim()
+                .parse::<IpAddr>()
+                .map_err(|e| format!("invalid bind address `{raw}`: {e}")),
+        }
+    }
+
+    /// `trusted_proxies` as parsed addresses. A CIDR range or any other
+    /// unparseable entry is an error rather than a silently ignored line.
+    pub fn trusted_proxy_set(&self) -> Result<BTreeSet<IpAddr>, String> {
+        let mut out = BTreeSet::new();
+        for raw in &self.trusted_proxies {
+            let addr = raw.trim().parse::<IpAddr>().map_err(|e| {
+                format!("invalid server.trusted_proxies entry `{raw}`: {e} (exact IP addresses only, no CIDR ranges)")
+            })?;
+            out.insert(addr);
+        }
+        Ok(out)
+    }
+
+    /// Whether the configured public origin is https, which is one of the two
+    /// signals that make the session cookie `Secure`.
+    pub fn public_scheme_is_https(&self) -> bool {
+        self.public_base_url
+            .as_deref()
+            .map(|u| u.trim().starts_with("https://"))
+            .unwrap_or(false)
+    }
+}
+
+/// The port the ingest listener binds when nothing overrides it. Adjacent to
+/// the dashboard's 7321 so the pair is easy to remember and to firewall.
+pub const DEFAULT_INGEST_PORT: u16 = 7322;
+
+/// Optional `ingest:` section of the global config (spec
+/// 2026-08-16-webhook-ingest-design). The listener it configures is a
+/// separate socket with a separate router carrying only the hook routes: a
+/// tunnel or proxy pointed at this port is structurally incapable of
+/// reaching the dashboard API.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct IngestConfig {
+    /// Whether `apb dashboard` co-starts the ingest listener. Off by default:
+    /// an inbound port is an explicit decision. It does not gate `apb ingest`,
+    /// which runs when it is asked to and prints an advisory noting that the
+    /// dashboard will not start the same listener on its own.
+    pub enabled: bool,
+    /// IP address to bind. Loopback by default, because the supported
+    /// topology puts a TLS-terminating reverse proxy on the same host. An
+    /// unparseable value is a startup error, never a silent fallback.
+    pub bind: Option<String>,
+    /// Port to bind. `None` means [`DEFAULT_INGEST_PORT`].
+    pub port: Option<u16>,
+    /// Public origin the provider reaches the hooks at, e.g.
+    /// `https://hooks.example.com`. Used only to print the exact callback URL
+    /// an operator pastes into a provider console; apb never fetches it.
+    pub public_base_url: Option<String>,
+}
+
+impl IngestConfig {
+    /// Bind precedence: flag, then `ingest.bind`, then loopback.
+    pub fn resolve_bind(&self, flag: Option<&str>) -> Result<IpAddr, String> {
+        match flag.or(self.bind.as_deref()) {
+            None => Ok(DEFAULT_BIND),
+            Some(raw) => raw
+                .trim()
+                .parse::<IpAddr>()
+                .map_err(|e| format!("invalid ingest bind address `{raw}`: {e}")),
+        }
+    }
+
+    /// Port precedence: flag, then `ingest.port`, then the default.
+    pub fn resolve_port(&self, flag: Option<u16>) -> u16 {
+        flag.or(self.port).unwrap_or(DEFAULT_INGEST_PORT)
+    }
+
+    /// The exact URL to register with a provider for one connector account.
+    /// Building it here rather than in each caller keeps the doctor, the
+    /// dashboard and the docs from drifting apart on the path.
+    ///
+    /// The two ways it can fail are separate values rather than one `None`,
+    /// because an operator is told what to fix: a doctor that collapsed them
+    /// told someone with a perfectly good `public_base_url` and an account
+    /// named `Main Account` to go set a config key that was already right.
+    pub fn callback_url(&self, connector: &str, account: &str) -> Result<String, CallbackGap> {
+        for segment in [connector, account] {
+            if crate::profile::validate_profile_name(segment).is_err() {
+                return Err(CallbackGap::UnroutableSegment(segment.to_string()));
+            }
+        }
+        let base = self
+            .public_base_url
+            .as_deref()
+            .map(|u| u.trim().trim_end_matches('/'))
+            .unwrap_or("");
+        if base.is_empty() {
+            return Err(CallbackGap::NoPublicBase);
+        }
+        Ok(format!("{base}/hooks/{connector}/{account}"))
+    }
+}
+
+/// Why no callback URL could be printed for a connector account.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CallbackGap {
+    /// `ingest.public_base_url` is unset, or set to nothing usable.
+    NoPublicBase,
+    /// The named connector or account is not a routable path segment, so no
+    /// hook URL could address it whatever the public base is.
+    UnroutableSegment(String),
 }

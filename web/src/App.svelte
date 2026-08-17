@@ -10,12 +10,25 @@
   import { Toaster } from '$lib/components/ui/sonner'
   import { connectorRouteName, decodeSegment } from '$lib/route'
   import { ModeWatcher } from 'mode-watcher'
+  import Login from './pages/Login.svelte'
+  import { authState, refreshAuthStatus } from '$lib/auth.svelte'
 
   let hash = $state(location.hash)
   $effect(() => {
     const onHash = () => (hash = location.hash)
     window.addEventListener('hashchange', onHash)
     return () => window.removeEventListener('hashchange', onHash)
+  })
+
+  // Server mode: nothing routed renders until the first status read lands
+  // (`authSnapshot.checked`) — otherwise the store's optimistic default
+  // (authenticated: true) would let a protected page flash on first paint
+  // and fire 401ing requests before the real answer arrives. Once checked,
+  // show the login screen when the server requires a credential this browser
+  // does not have, else the routed page below.
+  const authSnapshot = authState()
+  $effect(() => {
+    void refreshAuthStatus()
   })
 
   // One dynamic import per page. Grouped by component, so a route that shares
@@ -76,7 +89,11 @@
      would have to be cast to `any` and would check nothing. Every arm carries
      all three branches: a chunk in flight, and a chunk that never arrives,
      would otherwise both render nothing and leave the route silently blank. -->
-{#if route.page === 'new'}
+{#if !authSnapshot.checked}
+  <ChunkPending />
+{:else if authSnapshot.required && !authSnapshot.authenticated}
+  <Login />
+{:else if route.page === 'new'}
   {#await loadPlaybookEdit()}
     <ChunkPending />
   {:then { default: Page }}

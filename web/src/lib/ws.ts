@@ -1,3 +1,5 @@
+import { refreshAuthStatus } from './auth.svelte'
+
 // Subscribe to server change events over the dashboard WebSocket. Filesystem
 // events are chatty and arrive steadily (~every few hundred ms) while a run
 // streams, so a plain debounce is wrong twice over: too short and it does not
@@ -14,10 +16,21 @@ export function subscribeChanges(cb: () => void, minIntervalMs = 600): () => voi
   let last = 0
   let timer: ReturnType<typeof setTimeout> | undefined
   let closed = false
+  let opened = false
   const fire = () => {
     if (closed) return
     last = performance.now()
     cb()
+  }
+  ws.onopen = () => {
+    opened = true
+  }
+  // A socket that closes without ever opening was refused at the upgrade, and
+  // in server mode the usual reason is an absent or expired session. Re-read
+  // the auth status rather than retrying blind against a gate that will keep
+  // refusing.
+  ws.onclose = () => {
+    if (!opened && !closed) void refreshAuthStatus()
   }
   ws.onmessage = () => {
     if (closed) return

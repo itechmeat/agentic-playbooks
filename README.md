@@ -117,6 +117,7 @@ apb review          decide a pending human_review node
 apb answer <run> <t> answer an interactive node's pending question (--node)
 apb dashboard       web UI (port 7321)
 apb mcp             stdio MCP server for coding agents
+apb server key      issue / list / revoke the keys that protect a networked dashboard
 ```
 
 Profiles and environment:
@@ -187,14 +188,33 @@ apb dev                       # Vite HMR + API from the source tree
 
 More: [docs/INSTALL.md](docs/INSTALL.md), [docs/MCP.md](docs/MCP.md),
 [docs/PROFILES.md](docs/PROFILES.md), [docs/CONNECTORS.md](docs/CONNECTORS.md),
-[docs/HOST-INTEGRATION.md](docs/HOST-INTEGRATION.md).
+[docs/HOST-INTEGRATION.md](docs/HOST-INTEGRATION.md),
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
 
 ## Security
 
 > [!WARNING]
 > Playbooks can execute local scripts and invoke coding agents. Treat third-party
-> playbooks and imported bundles as executable code. Review them before running,
-> and do not expose `apb dashboard` or `apb mcp` to untrusted users or networks.
+> playbooks and imported bundles as executable code, and review them before running.
+
+By default the dashboard binds `127.0.0.1` with no authentication, which is safe
+only because nothing off the machine can reach it. To run it on a server, issue
+an authorization key and put it behind a reverse proxy that terminates TLS:
+
+```sh
+apb server key issue     # printed once, stored only as a hash
+apb dashboard --no-open  # keep the loopback bind, let the proxy reach it
+```
+
+With at least one key present, every `/api` route requires either
+`Authorization: Bearer apb_...` or a session cookie obtained by signing in
+through the dashboard. Binding a non-loopback address with no key configured is
+refused at startup. The full runbook, including Caddy and nginx examples, a
+systemd unit, and a fail2ban filter, is in
+[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md).
+
+Do not expose `apb mcp` to untrusted users; it speaks stdio and has no
+authentication of its own.
 
 Please report suspected vulnerabilities privately as described in
 [SECURITY.md](SECURITY.md).

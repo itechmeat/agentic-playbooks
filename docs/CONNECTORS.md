@@ -140,6 +140,97 @@ marks such a binding as not callable (no accounts configured, calls will fail
 until an account is added, use the fallback path) while still listing its
 functions, so the agent routes around it instead of retrying doomed calls.
 
+## Receiving events (webhooks and the inbox)
+
+Some services never answer a poll: they push. A connector that receives
+declares a document-level `webhook:` block saying how a delivery is
+authenticated, plus one or more `inbox` functions saying how a playbook reads
+what arrived.
+
+```yaml
+webhook:
+  challenge: meta_hub                     # optional, only dialect in v1
+  verify_token: "{{secret.verify_token}}" # required when challenge is set
+  signature:
+    scheme: hmac_sha256_hex               # only scheme in v1
+    header: X-Hub-Signature-256
+    prefix: "sha256="
+    secret: "{{secret.app_secret}}"
+  dedupe_path: entry.0.id                 # optional dot path to the provider's own id
+functions:
+  - name: inbox_read
+    description: Read pending inbound events without consuming them.
+    read_only: true
+    response_pick: [events, cursor]
+    inbox: { op: read }
+  - name: inbox_ack
+    description: Advance the consumer cursor after processing.
+    inbox: { op: ack }
+```
+
+The block and the inbox functions require each other: a manifest with one and
+not the other does not load. `verify_token` and `signature.secret` are the
+only fields outside `auth` besides the smtp and imap passwords where
+`{{secret.*}}` is allowed, and both must name an account field declared
+`secret: true`. Everything else in the block is a literal. The block is part
+of the connector folder, so editing it changes the connector digest and drops
+its recorded trust, which is what stops a shared config from quietly
+redirecting or weakening verification for anything a run does. The inbound
+listener is guarded by the signature itself rather than by that digest: it
+reads the manifest directly, because hashing a connector folder per delivery
+would put unbounded work on a route strangers can call.
+
+The three ops: `read` returns
+`{events: [{seq, received_at, body}], cursor, truncated}` without moving
+anything, `ack` takes `up_to_seq` and moves a named consumer's cursor forward
+only, and `peek_depth` returns `{pending}`. Delivery is at-least-once with an
+explicit acknowledgement, because a reader that stops mid-thought must not
+lose what it was holding. A read takes an optional `consumer` (default
+`default`) and `limit` (default 50, capped at 500); different consumers keep
+independent cursors over the same events.
+
+A read is also capped at 1 MiB of events, the same ceiling an HTTP response
+body has. Past it the newest events are left for the next read and
+`truncated` is `true`: the oldest pending events are the ones a consumer has
+to see to make progress, so it processes what it got, acks that `seq`, and
+reads on.
+
+Received events are stored per connector and per account under
+`<config-dir>/connector-inbox/<connector>/<account>/`, at mode 0600, outside
+any run: messages arrive between runs and are not lost because nothing was
+executing. A per-account cap of 50 MB or 30 days, whichever hits first, keeps
+the store bounded; acknowledged events are dropped first, and only the size
+cap ever drops an unacknowledged one.
+
+An inbound delivery never starts a run. A playbook consumes the inbox by
+polling it, an `inbox_read` call inside a loop or behind a wait node, and
+acknowledging what it processed.
+
+**Inbox content is untrusted.** It is written by whoever can reach the
+callback URL, which is the first apb input not authored by the operator. The
+node prompt says so to the agent, and the dashboard marks it when it renders
+it, but the real protection is the grant: give an inbox-reading node the
+narrowest `functions:` allowlist and a `max_calls` budget it can live with,
+and never let the same node hold a write-capable grant it would not want a
+stranger to steer.
+
+Two validator rules cover the playbook side. **V42**: a node grants inbox
+functions of a connector with no webhook block, so nothing could ever be
+delivered. **V43**: a node grants them on an account that does not define the
+fields the webhook block references, so a delivery could not be verified.
+
+Accepted deliveries are capped per account at 600 appends in a rolling 60
+second window; beyond the cap a delivery is dropped with a 200 (so the
+provider stops retrying) and counted in a persisted per-account dropped
+counter, visible in `apb connector doctor` and the dashboard's inbox panel.
+Deliveries only ever resolve against accounts defined in the global
+`connector-config`, never a project-scoped account, because the hook path
+carries no workspace segment.
+
+To run the listener, see docs/DEPLOYMENT.md. `apb connector doctor` prints
+the exact callback URL per account, the pending depth, and whether the local
+listener answers.
+
 ## The `apb connector` CLI
 
 ```text
@@ -159,10 +250,10 @@ a call without executing it, or the dashboard healthcheck to probe an account.
 
 ## Official connectors
 
-Thirteen official connectors ship inside the `apb` binary and install with
+Fourteen official connectors ship inside the `apb` binary and install with
 `apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`,
 `asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`, `slack`, `atrip`,
-`twenty`. Installing
+`twenty`, `whatsapp`. Installing
 from the binary records trust for the
 connector's tree digest in the same action, since the bytes are already
 part of the binary you are running; `apb connector install --from-dir
@@ -411,6 +502,45 @@ connector's 0.1 surface. The `healthcheck` is `list_companies`, which
 renders with zero arguments and succeeds against any key that can read
 companies.
 
+### whatsapp
+
+Account fields: `base_url` (`https://graph.facebook.com`), `graph_version`
+(an account field rather than a hardcoded segment because Meta supports each
+Graph API version for about two years; documented current value `v23.0`),
+`phone_number_id`, `waba_id` (all required, non-secret), `access_token`
+(required, secret), and `app_secret`, `verify_token` (both secret, optional -
+required only on an account that receives). Create the access token as a
+System User permanent token under the Meta Business Suite with the
+`whatsapp_business_messaging` and `whatsapp_business_management`
+permissions, set to Never expire; `phone_number_id` and `waba_id` are both
+visible on the Meta app's WhatsApp > API Setup page. Sending works from any
+install with a token; receiving has no polling endpoint on Meta's side and
+needs the server-mode plus webhook-ingest topology, a document-level
+`webhook` block (`challenge: meta_hub`, `hmac_sha256_hex` signature over
+`X-Hub-Signature-256`) whose `verify_token` and `app_secret` are the two
+account fields above. Covers send (`send_text`, `send_template`,
+`send_media`, `mark_read`), template management (`list_templates`,
+`create_template`, `delete_template`), business profile
+(`get_business_profile`, `update_business_profile`), phone numbers
+(`list_phone_numbers`, `get_phone_number`), media (`get_media_url`,
+`delete_media`), and receiving (`inbox_read`, `inbox_ack`,
+`inbox_peek_depth`). 16 functions in total. A plain `send_text` only
+succeeds inside the 24-hour customer-service window opened by the
+recipient's last inbound message; outside that window Meta rejects it with
+error 131047 and `send_template` is required instead to re-initiate contact,
+a rule the connector cannot enforce since it is per-recipient runtime state
+on Meta's side. `delete_template` and `delete_media` are HARD,
+unrecoverable deletes, unlike this connector family's twenty sibling, where
+every delete is reversible. `send_media` is a full-body passthrough (the
+media object's JSON key varies with the message type), so a grant of it can
+in practice send any message type, not only media. Uploading binary media
+is out of scope: Meta's upload endpoint is multipart/form-data with a
+binary file part, which this connector's schema cannot express, so media is
+sent by a hosted `link` or by a media `id` obtained out of band. The
+`healthcheck` is `get_phone_number`, which takes no arguments (its `fields`
+query is a fixed literal so the no-arg probe stays self-sufficient) and
+proves the token is valid and that `phone_number_id` belongs to it.
+
 ### Demo playbooks
 
 `examples/playbooks/sentry-triage.yaml` and
@@ -420,10 +550,18 @@ telegram, smtp, and sentry connectors end to end;
 `examples/playbooks/release-heartbeat.yaml` exercises gitlab,
 youtrack, and slack (checking the latest pipeline, posting a summary,
 and filing an issue on failure; `trigger_pipeline` is deliberately
-absent from its grants). All four double as reference examples for
-grant allowlists and `max_calls`. They validate in CI against fake
-accounts and are not run against real services there; run them
-manually once your own accounts are configured and approved.
+absent from its grants). `examples/playbooks/whatsapp-inbox.yaml`
+exercises whatsapp: it sends a greeting, then reads one batch of
+pending inbox events, drafts and sends a reply for each, and
+acknowledges the batch; its `read_inbox` node prompt marks inbox
+content as untrusted external input. That pass is single-shot by
+design (a cycle back to `read_inbox` needs a bounding condition node
+or a `max_traversals` edge); a real deployment wraps the poll in such
+a loop, or simply runs this playbook on a schedule. All five double as
+reference examples for grant allowlists and `max_calls`. They validate
+in CI against fake accounts and are not run against real services
+there; run them manually once your own accounts are configured and
+approved.
 
 ### Coverage note
 

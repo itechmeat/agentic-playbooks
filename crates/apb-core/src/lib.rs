@@ -22,6 +22,7 @@ pub mod registry;
 pub mod schema;
 pub mod schema_migrate;
 pub mod scope;
+pub mod server_auth;
 pub mod skills;
 pub mod store;
 pub mod trust;

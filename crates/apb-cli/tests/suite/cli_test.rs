@@ -95,7 +95,9 @@ fn dashboard_is_visible_and_serve_alias_parses() {
         .success()
         .stdout(predicate::str::contains("dashboard"))
         .stdout(predicate::str::contains("Start the web dashboard"))
-        .stdout(predicate::str::contains("  serve").not());
+        // Trailing space distinguishes the alias from the unrelated `server`
+        // command, which also starts with the substring "serve".
+        .stdout(predicate::str::contains("  serve ").not());
 
     // Hidden alias still resolves to the same command (help works).
     playbook()

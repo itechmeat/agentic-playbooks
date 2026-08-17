@@ -243,8 +243,20 @@ pub(crate) async fn post_hook_handler(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
     // The secret must match one of this run's hooks (otherwise 404 - a
-    // foreign or incorrect secret must not accept the signal).
-    let Some((key, _)) = hooks.iter().find(|(_, s)| *s == &secret) else {
+    // foreign or incorrect secret must not accept the signal). Only the
+    // comparison changes: a plain `==` leaks a live secret's bytes through
+    // response timing, so each candidate is compared in constant time. The
+    // first-match semantics of the previous `find` are preserved exactly,
+    // including the break, so a run whose hooks somehow share a secret still
+    // signals the same key it always did.
+    let mut matched: Option<&String> = None;
+    for (key, candidate) in hooks.iter() {
+        if apb_core::server_auth::ct_eq_str(candidate, &secret) {
+            matched = Some(key);
+            break;
+        }
+    }
+    let Some(key) = matched else {
         return (StatusCode::NOT_FOUND, "not found").into_response();
     };
     match apb_engine::post_signal(&run_dir, apb_engine::SignalCommand { key: key.clone() }) {

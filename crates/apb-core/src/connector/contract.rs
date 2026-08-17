@@ -7,8 +7,9 @@
 //!
 //! `Expectation` is one struct with all optional fields (not an untagged enum)
 //! so `deny_unknown_fields` actually applies (serde ignores it inside untagged
-//! variants); `resolve` discriminates by shape - `imap` -> imap, `envelope` ->
-//! smtp, `status`/`body` -> mock, otherwise HTTP (`method` + `url`).
+//! variants); `resolve` discriminates by shape - `inbox` -> inbox, `imap` ->
+//! imap, `envelope` -> smtp, `status`/`body` -> mock, otherwise HTTP
+//! (`method` + `url`).
 //!
 //! Envelope semantics (cross-slice obligation 5): every `Envelope` field is
 //! optional so the empty `envelope: {}` form (used by slice 5 for smtp `verify`
@@ -46,8 +47,8 @@ pub struct TestCase {
 }
 
 /// The expected rendered result. Shape-discriminated by `resolve`: exactly one
-/// of the imap (`imap`), HTTP (`method` + `url`), smtp (`envelope`), or mock
-/// (`status` + `body`) shapes.
+/// of the inbox (`inbox`), imap (`imap`), HTTP (`method` + `url`), smtp
+/// (`envelope`), or mock (`status` + `body`) shapes.
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Expectation {
@@ -72,6 +73,8 @@ pub struct Expectation {
     pub body: Option<Value>,
     #[serde(default)]
     pub imap: Option<ImapExpect>,
+    #[serde(default)]
+    pub inbox: Option<InboxExpect>,
 }
 
 /// The smtp envelope a case asserts. Every field is optional (cross-slice
@@ -101,6 +104,48 @@ pub struct ImapExpect {
     pub params_contains: Option<BTreeMap<String, String>>,
 }
 
+/// One inline event a case seeds into the fixture inbox before the op runs
+/// (spec 2026-08-16-webhook-ingest-design). Seeded in list order, so the
+/// first entry becomes seq 1.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboxSeed {
+    pub provider_id: String,
+    #[serde(default)]
+    pub body: Value,
+}
+
+/// The inbox expectation a case asserts (spec
+/// 2026-08-16-webhook-ingest-design): the op the rendered call must use, the
+/// events the case seeds, the cursor position before the op, and whichever
+/// parts of the returned envelope the case chooses to pin. Every assertion
+/// field is optional, following the `envelope` precedent: an absent field is
+/// not asserted, so a case can check only the part it cares about.
+#[derive(Debug, Clone, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct InboxExpect {
+    pub op: String,
+    /// Events present in the inbox before the op, oldest first.
+    #[serde(default)]
+    pub seed: Vec<InboxSeed>,
+    /// The consumer's cursor before the op. Zero (the default) means the
+    /// consumer has acknowledged nothing.
+    #[serde(default)]
+    pub acked: u64,
+    /// Expected `events[].seq`, in order, for an `op: read` case.
+    #[serde(default)]
+    pub events: Option<Vec<u64>>,
+    /// Expected `cursor` for an `op: read` case.
+    #[serde(default)]
+    pub cursor: Option<u64>,
+    /// Expected `acked_up_to` for an `op: ack` case.
+    #[serde(default)]
+    pub acked_up_to: Option<u64>,
+    /// Expected `pending` for an `op: peek_depth` case.
+    #[serde(default)]
+    pub pending: Option<u64>,
+}
+
 /// The resolved, shape-typed view of an `Expectation`, borrowed from it.
 pub enum ExpectKind<'a> {
     Http {
@@ -116,6 +161,7 @@ pub enum ExpectKind<'a> {
         body: &'a Value,
     },
     Imap(&'a ImapExpect),
+    Inbox(&'a InboxExpect),
 }
 
 impl Expectation {
@@ -124,6 +170,9 @@ impl Expectation {
     /// `method` and `url`). An incomplete shape is an error naming what is
     /// missing.
     pub fn resolve(&self) -> Result<ExpectKind<'_>, String> {
+        if let Some(inbox) = &self.inbox {
+            return Ok(ExpectKind::Inbox(inbox));
+        }
         if let Some(imap) = &self.imap {
             return Ok(ExpectKind::Imap(imap));
         }
@@ -141,7 +190,7 @@ impl Expectation {
             return Ok(ExpectKind::Mock { status, body });
         }
         let method = self.method.as_deref().ok_or_else(|| {
-            "expectation must be imap (`imap`), http (`method` + `url`), smtp (`envelope`), or mock (`status` + `body`)".to_string()
+            "expectation must be inbox (`inbox`), imap (`imap`), http (`method` + `url`), smtp (`envelope`), or mock (`status` + `body`)".to_string()
         })?;
         let url = self
             .url
@@ -303,5 +352,100 @@ cases:
     fn imap_expect_unknown_key_rejected() {
         let yaml = "cases:\n  - function: f\n    expect:\n      imap: { op: x, bogus: 1 }\n";
         assert!(TestsDoc::from_yaml(yaml).is_err());
+    }
+
+    // -- inbox expectation (spec 2026-08-16-webhook-ingest-design) --
+
+    #[test]
+    fn inbox_expect_parses_and_resolves() {
+        let yaml = r#"
+cases:
+  - function: inbox_read
+    args: { consumer: worker }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: m1, body: { n: 1 } }
+          - { provider_id: m2, body: { n: 2 } }
+        events: [1, 2]
+        cursor: 0
+"#;
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        match doc.cases[0].expect.resolve().unwrap() {
+            ExpectKind::Inbox(inbox) => {
+                assert_eq!(inbox.op, "read");
+                assert_eq!(inbox.seed.len(), 2);
+                assert_eq!(inbox.seed[0].provider_id, "m1");
+                assert_eq!(inbox.seed[1].body["n"], 2);
+                assert_eq!(inbox.events.as_deref(), Some(&[1u64, 2u64][..]));
+                assert_eq!(inbox.cursor, Some(0));
+                assert_eq!(
+                    inbox.acked, 0,
+                    "the pre-op cursor defaults to nothing acked"
+                );
+            }
+            _ => panic!("an inbox expectation must resolve to inbox"),
+        }
+    }
+
+    #[test]
+    fn inbox_ack_and_depth_expectations_resolve() {
+        let yaml = r#"
+cases:
+  - function: inbox_ack
+    args: { up_to_seq: 2 }
+    expect:
+      inbox:
+        op: ack
+        seed:
+          - { provider_id: m1, body: {} }
+          - { provider_id: m2, body: {} }
+        acked_up_to: 2
+  - function: inbox_depth
+    expect:
+      inbox:
+        op: peek_depth
+        seed:
+          - { provider_id: m1, body: {} }
+        acked: 0
+        pending: 1
+"#;
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        match doc.cases[0].expect.resolve().unwrap() {
+            ExpectKind::Inbox(inbox) => assert_eq!(inbox.acked_up_to, Some(2)),
+            _ => panic!("ack case must resolve to inbox"),
+        }
+        match doc.cases[1].expect.resolve().unwrap() {
+            ExpectKind::Inbox(inbox) => {
+                assert_eq!(inbox.pending, Some(1));
+                assert!(inbox.events.is_none(), "a depth case asserts no event list");
+            }
+            _ => panic!("depth case must resolve to inbox"),
+        }
+    }
+
+    #[test]
+    fn inbox_expect_unknown_key_rejected() {
+        let yaml = "cases:\n  - function: f\n    expect:\n      inbox: { op: read, bogus: 1 }\n";
+        assert!(TestsDoc::from_yaml(yaml).is_err());
+        let seed = "cases:\n  - function: f\n    expect:\n      inbox:\n        op: read\n        seed:\n          - { provider_id: m1, body: {}, bogus: 1 }\n";
+        assert!(TestsDoc::from_yaml(seed).is_err());
+    }
+
+    #[test]
+    fn inbox_wins_the_shape_discrimination() {
+        // `Expectation` has no `deny_unknown_fields`-style mutual exclusion
+        // between `inbox` and `imap` (both are plain sibling `Option`
+        // fields), so a case co-declaring both parses. `resolve` checks
+        // `inbox` first, so it wins over the co-declared `imap` block; this
+        // pins that ordering as deliberate and documented rather than
+        // incidental.
+        let yaml = "cases:\n  - function: f\n    expect:\n      inbox: { op: read }\n      imap: { op: search }\n";
+        let doc = TestsDoc::from_yaml(yaml).unwrap();
+        assert!(matches!(
+            doc.cases[0].expect.resolve().unwrap(),
+            ExpectKind::Inbox(_)
+        ));
     }
 }

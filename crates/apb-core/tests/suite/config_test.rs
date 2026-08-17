@@ -171,3 +171,249 @@ fn project_suggestion_settings_read_the_project_config() {
     let s = apb_core::config::project_suggestion_settings(bare.path()).unwrap();
     assert_eq!(s.hard_ttl_days, None);
 }
+
+#[test]
+fn server_section_loads_and_defaults() {
+    let _lock = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", dir.path());
+    }
+
+    // A config with no server section keeps every default.
+    std::fs::write(dir.path().join("config.yaml"), "port: 7321\n").unwrap();
+    let cfg = GlobalConfig::load().unwrap();
+    assert_eq!(cfg.server.bind, None);
+    assert_eq!(cfg.server.public_base_url, None);
+    assert!(cfg.server.trusted_proxies.is_empty());
+
+    let yaml = "port: 7321\nserver:\n  bind: \"0.0.0.0\"\n  public_base_url: https://apb.example.com\n  trusted_proxies: [\"127.0.0.1\", \"10.0.0.7\"]\n";
+    std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+    let cfg = GlobalConfig::load().unwrap();
+    assert_eq!(cfg.server.bind.as_deref(), Some("0.0.0.0"));
+    assert_eq!(
+        cfg.server.public_base_url.as_deref(),
+        Some("https://apb.example.com")
+    );
+    assert_eq!(cfg.server.trusted_proxies.len(), 2);
+    assert!(cfg.server.public_scheme_is_https());
+
+    // An unknown key inside the section is a hard error, like every other
+    // section in this file.
+    std::fs::write(dir.path().join("config.yaml"), "server:\n  bnid: 0.0.0.0\n").unwrap();
+    let broken = GlobalConfig::load();
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+    assert!(
+        broken.is_err(),
+        "a typo in the server section must not be ignored"
+    );
+}
+
+#[test]
+fn bind_precedence_is_flag_then_config_then_loopback() {
+    use apb_core::config::ServerConfig;
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let empty = ServerConfig::default();
+    assert_eq!(
+        empty.resolve_bind(None).unwrap(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "no flag and no config means loopback"
+    );
+    assert_eq!(
+        empty.resolve_bind(Some("0.0.0.0")).unwrap(),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    );
+
+    let configured = ServerConfig {
+        bind: Some("10.0.0.5".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        configured.resolve_bind(None).unwrap(),
+        "10.0.0.5".parse::<IpAddr>().unwrap()
+    );
+    assert_eq!(
+        configured.resolve_bind(Some("127.0.0.1")).unwrap(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "the flag wins over the config"
+    );
+
+    let bad = ServerConfig {
+        bind: Some("not-an-ip".to_string()),
+        ..Default::default()
+    };
+    let err = bad.resolve_bind(None).unwrap_err();
+    assert!(
+        err.contains("not-an-ip"),
+        "the error names the value: {err}"
+    );
+    assert!(!err.contains('!'), "no exclamation marks: {err}");
+}
+
+#[test]
+fn trusted_proxies_parse_into_a_set() {
+    use apb_core::config::ServerConfig;
+    use std::net::IpAddr;
+
+    let cfg = ServerConfig {
+        trusted_proxies: vec!["127.0.0.1".to_string(), " 10.0.0.7 ".to_string()],
+        ..Default::default()
+    };
+    let set = cfg.trusted_proxy_set().unwrap();
+    assert!(set.contains(&"127.0.0.1".parse::<IpAddr>().unwrap()));
+    assert!(set.contains(&"10.0.0.7".parse::<IpAddr>().unwrap()));
+
+    let cidr = ServerConfig {
+        trusted_proxies: vec!["10.0.0.0/8".to_string()],
+        ..Default::default()
+    };
+    let err = cidr.trusted_proxy_set().unwrap_err();
+    assert!(
+        err.contains("10.0.0.0/8"),
+        "CIDR is not supported in v1: {err}"
+    );
+}
+
+#[test]
+fn ingest_section_loads_and_defaults() {
+    let _lock = crate::common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", dir.path());
+    }
+
+    // No ingest section: disabled, loopback, port 7322, no public base URL.
+    std::fs::write(dir.path().join("config.yaml"), "port: 7321\n").unwrap();
+    let cfg = GlobalConfig::load().unwrap();
+    assert!(!cfg.ingest.enabled, "ingest is opt-in");
+    assert_eq!(cfg.ingest.bind, None);
+    assert_eq!(cfg.ingest.port, None);
+    assert_eq!(cfg.ingest.public_base_url, None);
+
+    let yaml = "ingest:\n  enabled: true\n  bind: \"127.0.0.1\"\n  port: 7400\n  public_base_url: https://hooks.example.com\n";
+    std::fs::write(dir.path().join("config.yaml"), yaml).unwrap();
+    let cfg = GlobalConfig::load().unwrap();
+    assert!(cfg.ingest.enabled);
+    assert_eq!(cfg.ingest.bind.as_deref(), Some("127.0.0.1"));
+    assert_eq!(cfg.ingest.port, Some(7400));
+    assert_eq!(
+        cfg.ingest.public_base_url.as_deref(),
+        Some("https://hooks.example.com")
+    );
+
+    // A typo inside the section is a hard error, like every other section.
+    std::fs::write(dir.path().join("config.yaml"), "ingest:\n  enbaled: true\n").unwrap();
+    let broken = GlobalConfig::load();
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+    assert!(
+        broken.is_err(),
+        "a typo in the ingest section must not be ignored"
+    );
+}
+
+#[test]
+fn ingest_bind_and_port_precedence() {
+    use apb_core::config::{DEFAULT_INGEST_PORT, IngestConfig};
+    use std::net::{IpAddr, Ipv4Addr};
+
+    let empty = IngestConfig::default();
+    assert_eq!(
+        empty.resolve_bind(None).unwrap(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "the ingest listener sits behind a reverse proxy on the same host by default"
+    );
+    assert_eq!(empty.resolve_port(None), DEFAULT_INGEST_PORT);
+    assert_eq!(DEFAULT_INGEST_PORT, 7322);
+
+    let configured = IngestConfig {
+        bind: Some("0.0.0.0".to_string()),
+        port: Some(7400),
+        ..Default::default()
+    };
+    assert_eq!(
+        configured.resolve_bind(None).unwrap(),
+        IpAddr::V4(Ipv4Addr::UNSPECIFIED)
+    );
+    assert_eq!(configured.resolve_port(None), 7400);
+    assert_eq!(
+        configured.resolve_bind(Some("127.0.0.1")).unwrap(),
+        IpAddr::V4(Ipv4Addr::LOCALHOST),
+        "the flag wins over the config"
+    );
+    assert_eq!(configured.resolve_port(Some(9000)), 9000);
+
+    let bad = IngestConfig {
+        bind: Some("not-an-ip".to_string()),
+        ..Default::default()
+    };
+    let err = bad.resolve_bind(None).unwrap_err();
+    assert!(
+        err.contains("not-an-ip"),
+        "the error names the value: {err}"
+    );
+    assert!(!err.contains('!'), "no exclamation marks: {err}");
+}
+
+#[test]
+fn callback_url_is_printable_only_with_a_public_base() {
+    use apb_core::config::{CallbackGap, IngestConfig};
+
+    let none = IngestConfig::default();
+    assert_eq!(
+        none.callback_url("whatsapp", "main"),
+        Err(CallbackGap::NoPublicBase)
+    );
+    // A base that trims to nothing is the same gap, not a URL of slashes.
+    let blank = IngestConfig {
+        public_base_url: Some("   ".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        blank.callback_url("whatsapp", "main"),
+        Err(CallbackGap::NoPublicBase)
+    );
+
+    let configured = IngestConfig {
+        public_base_url: Some("https://hooks.example.com/".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        configured.callback_url("whatsapp", "main").as_deref(),
+        Ok("https://hooks.example.com/hooks/whatsapp/main"),
+        "a trailing slash on the base must not double up"
+    );
+
+    let no_slash = IngestConfig {
+        public_base_url: Some("https://hooks.example.com".to_string()),
+        ..Default::default()
+    };
+    assert_eq!(
+        no_slash.callback_url("whatsapp", "main").as_deref(),
+        Ok("https://hooks.example.com/hooks/whatsapp/main")
+    );
+
+    // Segments that could not be routed are refused rather than printed as a
+    // URL nobody could register, and they are refused for their own reason:
+    // the caller reports what to fix, and it is not the public base.
+    assert_eq!(
+        no_slash.callback_url("../evil", "main"),
+        Err(CallbackGap::UnroutableSegment("../evil".to_string()))
+    );
+    assert_eq!(
+        no_slash.callback_url("whatsapp", "Not An Account"),
+        Err(CallbackGap::UnroutableSegment("Not An Account".to_string()))
+    );
+    // Including when the public base is missing too: the segment is named
+    // first, because no base would make that account addressable.
+    assert_eq!(
+        none.callback_url("whatsapp", "Not An Account"),
+        Err(CallbackGap::UnroutableSegment("Not An Account".to_string()))
+    );
+}

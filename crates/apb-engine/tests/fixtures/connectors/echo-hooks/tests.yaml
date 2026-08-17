@@ -1,0 +1,76 @@
+cases:
+  - function: inbox_read
+    args: { consumer: worker }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: e1, body: { text: first } }
+          - { provider_id: e2, body: { text: second } }
+          - { provider_id: e3, body: { text: third } }
+        events: [1, 2, 3]
+        cursor: 0
+  - function: inbox_read
+    args: { consumer: worker, limit: 2 }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: e1, body: { text: first } }
+          - { provider_id: e2, body: { text: second } }
+          - { provider_id: e3, body: { text: third } }
+        events: [1, 2]
+        cursor: 0
+  - function: inbox_read
+    args: { consumer: worker }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: e1, body: { text: first } }
+          - { provider_id: e2, body: { text: second } }
+          - { provider_id: e3, body: { text: third } }
+        acked: 2
+        events: [3]
+        cursor: 2
+  # `response_pick: [events]` is a strict subset of the read envelope, so this
+  # case can assert `events` and must not be able to assert `cursor`: the
+  # projection is part of what a live caller receives.
+  - function: inbox_read_events_only
+    args: { consumer: worker }
+    expect:
+      inbox:
+        op: read
+        seed:
+          - { provider_id: e1, body: { text: first } }
+          - { provider_id: e2, body: { text: second } }
+        events: [1, 2]
+  - function: inbox_ack
+    args: { consumer: worker, up_to_seq: 2 }
+    expect:
+      inbox:
+        op: ack
+        seed:
+          - { provider_id: e1, body: {} }
+          - { provider_id: e2, body: {} }
+        acked_up_to: 2
+  - function: inbox_ack
+    args: { consumer: worker, up_to_seq: 1 }
+    expect:
+      inbox:
+        op: ack
+        seed:
+          - { provider_id: e1, body: {} }
+          - { provider_id: e2, body: {} }
+        acked: 2
+        acked_up_to: 2
+  - function: inbox_depth
+    args: { consumer: worker }
+    expect:
+      inbox:
+        op: peek_depth
+        seed:
+          - { provider_id: e1, body: {} }
+          - { provider_id: e2, body: {} }
+        acked: 1
+        pending: 1
