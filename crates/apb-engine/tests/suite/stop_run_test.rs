@@ -1068,6 +1068,137 @@ fn a_stop_queued_behind_a_retry_still_aborts_the_run() {
     );
 }
 
+/// #91's Pause twin: a Pause must also reach the run even when an operator
+/// left an unconsumable command queued ahead of it.
+///
+/// `run_cancel` (the flag the Abort salvage arm gates on) is Abort-only by
+/// contract (`stop.rs:28-38`), so a Pause queued behind a Retry hit neither
+/// the loop (the Retry breaks the scan without advancing the cursor) nor the
+/// salvage (never gated on Pause at all): `blocked_by` was set, `run_cancel`
+/// stayed false, and the scan fell through to `Proceed` - the run kept
+/// executing nodes despite the operator's pause request.
+///
+/// Unlike the Abort twin, this does not lean on killing a mid-flight process:
+/// a Pause never touches `cancel` (stop.rs:31-33), so it cannot interrupt a
+/// running node the way an Abort does - it only takes effect at the next
+/// top-of-loop boundary. The fixture is therefore two agent nodes in a row:
+/// `work` finishes on its own (a brief, deterministic sleep gives the test a
+/// window to queue the Retry and the Pause while it is still running), and
+/// the boundary scan before `next` would start is where the salvage must
+/// fire. If it does not, `next` runs and the run reaches `done` instead of
+/// pausing.
+#[cfg(unix)]
+#[test]
+fn a_pause_queued_behind_a_retry_still_pauses_the_run() {
+    const WF_TWO_STEPS: &str = r#"
+schema: 1
+id: pauseretry
+name: Pause Retry
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: agent_task, prompt: "do" }
+  - { id: next, type: agent_task, prompt: "do more" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: next, condition: { type: node_status, node: work, equals: success } }
+  - { from: next, to: done, condition: { type: node_status, node: next, equals: success } }
+"#;
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let vdir = dir.path().join(".apb/playbooks/pauseretry/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), WF_TWO_STEPS).unwrap();
+    fs::write(
+        dir.path().join(".apb/playbooks/pauseretry/current"),
+        "1.0.0",
+    )
+    .unwrap();
+    common::seed_main(dir.path());
+    let marker = dir.path().join("agent_running.marker");
+    let prog = dir.path().join("brief.sh");
+    fs::write(
+        &prog,
+        format!(
+            "#!/bin/sh\ntouch '{m}'\nsleep 1\necho done\n",
+            m = marker.display()
+        ),
+    )
+    .unwrap();
+    set_executable(&prog);
+    let _env = AgentEnv::set(&prog.to_string_lossy());
+
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "pauseretry", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "pauseretry-");
+    poll_until("the stub agent to start", || marker.is_file().then_some(()));
+
+    // Ordering is the whole point: the Retry lands FIRST, so the scan breaks
+    // on it and never reaches the Pause behind it via the normal loop. Both
+    // are posted while `work` is still in its one-second sleep, so they are
+    // provably queued before the next top-of-loop boundary runs.
+    post_supervisor_command(
+        dir.path(),
+        &run_id,
+        Control::Retry {
+            node: "work".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
+    let res = res.expect("a pause must stop the drive cleanly, not fail it with an error");
+    assert_eq!(
+        res.outcome,
+        RunStatus::Paused,
+        "a pause queued behind a retry must still pause, not keep running"
+    );
+
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        matches!(
+            events.last().map(|e| &e.payload),
+            Some(EventPayload::RunPaused { .. })
+        ),
+        "the journal must end with RunPaused, got {:?}",
+        events.last().map(|e| &e.payload)
+    );
+    assert_eq!(
+        RunState::fold(&events).run_status,
+        RunStatus::Paused,
+        "and the folded run must read paused"
+    );
+    assert!(
+        !events.iter().any(
+            |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "next")
+        ),
+        "the pause must land before `next` starts, not after"
+    );
+    assert_eq!(
+        events
+            .iter()
+            .filter(
+                |e| matches!(&e.payload, EventPayload::SupervisorAction { action, node, .. }
+                if action == "retry_superseded_by_stop" && node.as_deref() == Some("work"))
+            )
+            .count(),
+        1,
+        "the discarded retry must be journaled, not dropped silently"
+    );
+}
+
 /// The stop that supersedes a queued Retry must be CONSUMED, not merely
 /// applied. The arm that finalizes a run whose pending Abort the scan cannot
 /// reach writes the control cursor like every other applied command, so the
