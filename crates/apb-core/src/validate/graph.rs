@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::graphutil::{adjacency, reachable_from, sccs};
+use crate::schema::StatusEq;
 
 pub(crate) fn check_unique_ids(playbook: &Playbook, r: &mut ValidationReport) {
     let mut seen = HashSet::new();
@@ -217,10 +218,16 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
                 // Both Stop and Node(_) already dispose of an unrouted
                 // failure; only Route (the default) leaves it unhandled, so
                 // only Route makes the missing-failure branch a real gap.
+                // The policy covers the FAILURE outcome and nothing else,
+                // though: a fan-out that routes failure but not success leaves
+                // success with no route at all, which no policy disposes of,
+                // so the suppression applies only when failure is the sole
+                // uncovered outcome (adding it would complete the coverage).
                 // V09 stays strict regardless of the policy: a condition
                 // node's edges are its whole routing surface, not a fallback
                 // path off a failure that would otherwise be an engine error.
-                false if !matches!(playbook.defaults.on_failure, FailurePolicy::Route) => {}
+                false if !matches!(playbook.defaults.on_failure, FailurePolicy::Route)
+                    && covered.contains(&StatusEq::Success) => {}
                 false => r.warn(
                     "V39",
                     Some(&n.id),

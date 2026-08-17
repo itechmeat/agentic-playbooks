@@ -388,6 +388,55 @@ fn post_review_with_a_torn_journal_tail_still_accepts_the_decision() {
 }
 
 #[test]
+fn a_second_decision_for_the_same_pending_gate_is_a_conflict() {
+    // The journal alone cannot see a decision that is already sitting in
+    // `reviews.jsonl` and has not been folded into a `ReviewDecided` event
+    // yet, so a naive requested-vs-decided check accepts a second decision for
+    // the same open request. On a cyclic gate the drive would then consume
+    // that stale extra record on the NEXT visit without asking anyone.
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+
+    let err = decide_on(dir.path(), "gate").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::Conflict(_)),
+        "a second decision for one pending request must be Conflict, got: {err:?}"
+    );
+    let channel = fs::read_to_string(dir.path().join("reviews.jsonl")).unwrap();
+    assert_eq!(
+        channel.lines().count(),
+        1,
+        "the refused decision must not be appended, got: {channel}"
+    );
+}
+
+#[test]
+fn a_new_request_after_the_queued_decision_is_consumed_accepts_a_new_decision() {
+    // The cyclic-gate case the queued check must not break: once the drive has
+    // consumed the queued decision (a `ReviewDecided` event) and the gate asks
+    // again, the new request is genuinely open and a fresh decision belongs in
+    // the channel.
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+
+    let mut log = apb_engine::event::EventLog::open(dir.path()).unwrap();
+    log.append(EventPayload::ReviewDecided {
+        node: "gate".into(),
+        decision: "approved".into(),
+        note: String::new(),
+    })
+    .unwrap();
+    log.append(review_requested("gate")).unwrap();
+    drop(log);
+
+    assert_eq!(
+        decide_on(dir.path(), "gate").unwrap(),
+        1,
+        "a re-requested cyclic gate must accept a fresh decision"
+    );
+}
+
+#[test]
 fn post_review_without_a_run_snapshot_stays_permissive() {
     // Pre-snapshot runs carry no playbook.yaml, so there is nothing to
     // validate the node against. Those keep the old accept-everything

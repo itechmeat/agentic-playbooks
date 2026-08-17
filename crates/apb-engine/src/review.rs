@@ -40,7 +40,9 @@ pub struct ReviewEntry {
 /// "Pending" is the same predicate every reporting surface already uses
 /// (`progress::compute_with`): more `ReviewRequested` than `ReviewDecided`
 /// events for the node. So a caller that was told a gate is pending can always
-/// decide it, and nothing else is accepted.
+/// decide it, and nothing else is accepted. A pending gate whose decision is
+/// already queued in the channel is no longer waiting for one, so the check
+/// counts the channel too and refuses the duplicate.
 ///
 /// Both reads are "cannot judge means accept". A run with no playbook snapshot
 /// (pre-snapshot runs, and the bare run dirs the channel's own tests build) has
@@ -71,11 +73,34 @@ fn check_review_target(run_dir: &Path, node: &str) -> Result<(), EngineError> {
     let Ok(events) = crate::event::read_all(run_dir) else {
         return Ok(());
     };
-    if crate::event::review_requested_count(&events, node)
-        <= crate::event::review_decided_count(&events, node)
-    {
+    let requested = crate::event::review_requested_count(&events, node);
+    let decided = crate::event::review_decided_count(&events, node);
+    if requested <= decided {
         return Err(EngineError::Conflict(format!(
             "node `{node}` has no review decision pending"
+        )));
+    }
+
+    // The journal alone cannot see a decision that is already sitting in the
+    // channel and has not been folded into a `ReviewDecided` event yet, so
+    // requested-vs-decided would accept a second decision for the same open
+    // request. The drive consumes the `decided`-th record for the node
+    // (`scheduler.rs`, the HumanReview arm), which is exactly the count this
+    // reads back: everything past that is queued and unconsumed. Once the
+    // queue already answers every outstanding request, another decision is
+    // not an answer, it is a stale extra a cyclic gate would consume on its
+    // NEXT visit without anyone confirming it.
+    let Ok(queued) = read_reviews_after(run_dir, None) else {
+        return Ok(());
+    };
+    let unconsumed = queued
+        .iter()
+        .filter(|e| e.cmd.node == node)
+        .count()
+        .saturating_sub(decided);
+    if unconsumed >= requested - decided {
+        return Err(EngineError::Conflict(format!(
+            "a decision is already queued for node `{node}`"
         )));
     }
     Ok(())

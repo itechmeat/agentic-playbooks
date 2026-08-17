@@ -1524,6 +1524,31 @@ edges:
         );
     }
 
+    /// The `on_failure` policy disposes of an unrouted FAILURE and nothing
+    /// else, so it may only silence the missing-failure branch. A fan-out that
+    /// covers failure but not success leaves the success outcome with no route
+    /// at all, which no policy handles, and must still warn under `stop` (and
+    /// equally under a node policy).
+    #[test]
+    fn v39_still_fires_when_success_is_the_uncovered_outcome() {
+        let pb = pb_yaml(
+            r#"
+defaults: { on_failure: stop, profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: verify, type: agent_task, prompt: hi }
+  - { id: aborted, type: finish, outcome: failure }
+edges:
+  - { from: s, to: verify }
+  - { from: verify, to: aborted, condition: { type: node_status, node: verify, equals: failure } }"#,
+        );
+        let c = codes(&pb);
+        assert!(
+            c.contains(&("V39", Severity::Warning)),
+            "an uncovered success outcome is not disposed of by on_failure, V39 should warn, got {c:?}"
+        );
+    }
+
     /// Positive counterpart to the two silence tests above: an explicit
     /// `route` policy (the default) leaves the failure unhandled, so V39 must
     /// not be over-suppressed.

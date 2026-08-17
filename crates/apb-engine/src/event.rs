@@ -733,9 +733,10 @@ pub fn read_all(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
 /// field report describes.
 ///
 /// Only the tail is forgiven. An unparsable line with any further line after
-/// it is real corruption, and skipping it would hand the caller a journal with
-/// a silent hole. Reserved for read-only reporting surfaces; engine consumers
-/// stay on [`read_all`].
+/// it - a blank line included, since a torn append leaves no line behind it at
+/// all - is real corruption, and skipping it would hand the caller a journal
+/// with a silent hole. Reserved for read-only reporting surfaces; engine
+/// consumers stay on [`read_all`].
 pub fn read_all_lossy_tail(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
     read_events(run_dir, true)
 }
@@ -751,11 +752,14 @@ fn read_events(run_dir: &Path, tolerate_torn_tail: bool) -> Result<Vec<Event>, E
     let mut torn: Option<EngineError> = None;
     for line in BufReader::new(File::open(&path)?).lines() {
         let line = line?;
-        if line.trim().is_empty() {
-            continue;
-        }
+        // Any further line at all proves the stored candidate was not the
+        // tail, a blank one included: only end-of-file makes a torn line
+        // forgivable, so this must run before the blank-line skip.
         if let Some(e) = torn.take() {
             return Err(e);
+        }
+        if line.trim().is_empty() {
+            continue;
         }
         match serde_json::from_str::<Event>(&line) {
             Ok(ev) => out.push(ev),
@@ -1132,6 +1136,49 @@ mod tests {
         )
         .unwrap();
         assert!(read_all_lossy_tail(dir.path()).is_err());
+    }
+
+    #[test]
+    fn read_all_lossy_tail_errors_when_a_blank_line_follows_the_torn_one() {
+        // A blank line IS a further line: the unparsable one is then not the
+        // tail a concurrent append leaves behind, it is a hole in the middle of
+        // the journal. Forgiving it would hide real corruption behind the
+        // read-only reporting surfaces.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":2,"type":"node_star"#,
+                "\n",
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert!(
+            read_all_lossy_tail(dir.path()).is_err(),
+            "a torn line followed by a blank line is not a tolerable torn tail"
+        );
+    }
+
+    #[test]
+    fn read_all_lossy_tail_still_forgives_a_torn_line_ended_by_a_newline() {
+        // The other side of the same rule: a complete-looking newline after the
+        // torn line, with nothing at all after it, is still the tail.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":2,"type":"node_star"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let events = read_all_lossy_tail(dir.path()).unwrap();
+        assert_eq!(events.len(), 1);
     }
 
     #[test]
