@@ -59,7 +59,7 @@ export const NODE_FIELDS = {
   },
   max_calls: {
     label: 'Max calls',
-    hint: 'Upper bound on calls to this connector within one executor attempt, not for the whole run. Each retry, each fallback step, and each question and answer round of an interactive node is a new attempt with a fresh count, so the worst case for one visit is attempts times this number. Empty means no cap.',
+    hint: 'Upper bound on calls to this connector within one executor attempt, not for the whole run. Every spawn starts a fresh count: each retry, each fallback step, each infrastructure retry (two by default, on top of max retries), and, under reprompt or resume interaction but not live, each question and answer round. The worst case for one visit is attempts times this number. Empty means no cap.',
   },
   runner: {
     label: 'Runner',

@@ -68,10 +68,13 @@ nodes:
 
 `functions` is an explicit list or the string `read_only`; `accounts` allowlists
 which configured accounts the node may use; `max_calls` is an optional call
-budget counted per executor attempt, not per run: a retry, a fallback step, and
-every question and answer round of an interactive node each start a fresh count,
-so the worst case for one visit to the node is `attempts x max_calls`. A script
-node runs no executor, so its count restarts per visit instead.
+budget counted per executor attempt, not per run, so the worst case for one
+visit to the node is `attempts x max_calls`. Every spawn counts: `max_retries
++ 1` attempts per step of the fallback chain, plus the infrastructure-retry
+backoff steps (two more by default, and they do not advance `max_retries`),
+plus one per question and answer round under `reprompt` or `resume` interaction
+(not under `live`, which spans every round in one attempt). A script node runs
+no executor, so its count restarts per visit instead.
 
 The binding is covered by the playbook digest, but the connector folder
 and each account are digest-pinned separately and must be approved before a run.

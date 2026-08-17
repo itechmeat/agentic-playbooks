@@ -137,12 +137,17 @@ The budget is counted **per executor attempt**, not per run and not per node
 visit: a retry or a fallback step starts a fresh count, because an executor that
 died mid-node is not the looping agent the budget exists to stop. Size the
 number with that multiplier in mind. The worst case for a single visit to the
-node is `attempts x max_calls`, where `attempts` counts the retries
-(`max_retries`) and every step of the fallback chain. An interactive node
-multiplies it further: each question and answer round re-spawns the agent, so
-each round is a new attempt with a fresh count even when nothing failed. For a
-node kind that runs no executor (a script node) there are no attempts, so the
-count restarts on each visit to the node instead.
+node is `attempts x max_calls`, and `attempts` means every spawn, not every
+`max_retries`: each step of the fallback chain is worth `max_retries + 1`
+attempts plus the infrastructure-retry backoff steps, two more by default. An
+infrastructure retry (an executor that failed to start or died on transport)
+does not advance the node retry counter, but it is a fresh spawn, so it does
+get a fresh count. An interactive node in `reprompt` or `resume` mode
+multiplies it further: each question and answer round re-invokes the agent, so
+each round is a new attempt with a fresh count even when nothing failed. Under
+`interaction: live` it does not, because one long-lived attempt spans every
+round. For a node kind that runs no executor (a script node) there are no
+attempts, so the count restarts on each visit to the node instead.
 
 The binding is part of the playbook YAML and is covered by the playbook digest,
 so grants need no separate approval.

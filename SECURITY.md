@@ -69,9 +69,10 @@ authored by arbitrary internet users, not by the operator, so give
 inbox-reading nodes the narrowest `functions:` allowlist and the smallest
 `max_calls` budget that still works, and do not pair an inbox read with a
 grant you would not hand a stranger. Size that budget knowing it is counted
-per executor attempt, not per run: retries, fallback steps, and the question
-and answer rounds of an interactive node each get a fresh count, so the
-containment a grant actually provides for one visit is `attempts x max_calls`.
-Stored bodies are kept at mode 0600
-under the global config directory and are never written to a run's event log
-or to stdout.
+per executor attempt, not per run: the containment a grant actually provides
+for one visit is `attempts x max_calls`, where `attempts` is every spawn -
+`max_retries + 1` per fallback step, plus the infrastructure-retry backoff
+steps (two more by default, which do not advance `max_retries`), plus one per
+question and answer round under `reprompt` or `resume` interaction. Stored
+bodies are kept at mode 0600 under the global config directory and are never
+written to a run's event log or to stdout.
