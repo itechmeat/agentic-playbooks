@@ -764,3 +764,63 @@ async fn a_non_json_body_is_refused_after_the_signature_verifies() {
     assert!(text.is_empty());
     assert!(inbox_events(cfg.path()).is_empty());
 }
+
+/// The webhook secret is resolved at most once per account within the cache
+/// TTL, not on every request. Without the cache a flooding client sending
+/// well-formed but bogus signatures would re-run a `{{cmd:...}}` secret
+/// (spawn_blocking, up to 10s) per request. Uses a secret command that appends
+/// one byte to a counter file each time it runs, then asserts it ran once
+/// across several distinct deliveries that all reach signature verification.
+#[cfg(unix)]
+#[tokio::test]
+async fn the_webhook_secret_is_resolved_at_most_once_within_the_ttl() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+
+    let cdir = cfg.path().join("connectors").join(CONNECTOR);
+    std::fs::create_dir_all(&cdir).unwrap();
+    std::fs::write(cdir.join("connector.yaml"), CONNECTOR_YAML).unwrap();
+
+    // The secret command appends a byte to this file on every invocation.
+    let counter = cfg.path().join("resolve-count");
+    let cmd_secret = "cmd-secret-value";
+    let adir = cfg.path().join("connector-config");
+    std::fs::create_dir_all(&adir).unwrap();
+    std::fs::write(
+        adir.join(format!("{CONNECTOR}.yaml")),
+        format!(
+            "accounts:\n  - name: {ACCOUNT}\n    default: true\n    verify_token: \"tok\"\n    app_secret: \"{{{{cmd:sh -c 'printf x >> {counter}; printf %s {cmd_secret}'}}}}\"\n",
+            counter = counter.display(),
+        ),
+    )
+    .unwrap();
+    let _cfg_guard = set_var("APB_CONFIG_DIR", cfg.path());
+
+    // One shared state, so its secret cache persists across deliveries.
+    let state = fresh_state();
+    let sign = |body: &[u8]| {
+        format!(
+            "sha256={}",
+            apb_core::connector::webhook::hmac_sha256_hex(cmd_secret.as_bytes(), body)
+        )
+    };
+
+    for i in 0..5 {
+        let body = format!(r#"{{"id":"evt-{i}"}}"#).into_bytes();
+        let sig = sign(&body);
+        let app = build_ingest_router(state.clone());
+        let (status, _) = send(app, post(&body, Some(&sig))).await;
+        assert_eq!(status, StatusCode::OK, "delivery {i} is accepted");
+    }
+
+    let invocations = std::fs::read(&counter).map(|b| b.len()).unwrap_or(0);
+    assert_eq!(
+        invocations, 1,
+        "the secret command ran once within the TTL, not once per request"
+    );
+    assert_eq!(
+        inbox_events(cfg.path()).len(),
+        5,
+        "all five distinct deliveries were stored"
+    );
+}

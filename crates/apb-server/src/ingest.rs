@@ -71,6 +71,15 @@ pub const FAILURE_WINDOW_MS: u128 = 60_000;
 /// an attacker rotating source addresses (failures) or hammering many
 /// accounts (accepts) must not be able to grow either one without limit.
 pub const MAX_RATE_LIMIT_ENTRIES: usize = 4096;
+/// How long a resolved webhook secret is cached per account. Caching it for a
+/// few seconds is a deliberate, bounded exception to the codebase's "never
+/// cache a secret" rule: without it a flooding client that sends well-formed
+/// but bogus signatures would trigger a fresh secret resolution per request,
+/// and a `{{cmd:...}}` secret shells out under `spawn_blocking` for up to
+/// `CMD_SECRET_TIMEOUT` (10s), so a handful of concurrent bad-signature POSTs
+/// could pin the blocking pool. The window is short so a rotated secret takes
+/// effect within seconds, and the value is still never logged or returned.
+pub const SECRET_CACHE_TTL_MS: u128 = 10_000;
 
 /// Prunes one rolling `(window_start_ms, count)` map: drops every entry whose
 /// window has expired, and clears the map outright when it has grown past
@@ -110,10 +119,29 @@ impl Windows {
     }
 }
 
+/// One cached webhook secret and when it was resolved. Its `Debug` redacts the
+/// value so an accidental debug-print of [`IngestState`] cannot leak a secret.
+#[derive(Clone)]
+struct CachedSecret {
+    secret: Arc<str>,
+    resolved_at: u128,
+}
+
+impl std::fmt::Debug for CachedSecret {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CachedSecret")
+            .field("secret", &"<redacted>")
+            .field("resolved_at", &self.resolved_at)
+            .finish()
+    }
+}
+
 /// Everything the ingest listener keeps between requests: rate windows, drop
-/// counters, and the proxy addresses whose forwarded headers are believed.
-/// Connector manifests, accounts and secrets are read per request so an edit
-/// takes effect immediately and no secret is ever cached.
+/// counters, the proxy addresses whose forwarded headers are believed, and a
+/// short-lived per-account secret cache. Connector manifests and accounts are
+/// still read per request so an edit takes effect immediately; the resolved
+/// secret is cached only for [`SECRET_CACHE_TTL_MS`] to keep a bad-signature
+/// flood from re-resolving it (and re-shelling-out) on every request.
 #[derive(Debug, Clone, Default)]
 pub struct IngestState {
     windows: Arc<Mutex<Windows>>,
@@ -122,6 +150,13 @@ pub struct IngestState {
     /// proxy configuration because it sits behind the same proxy, and it is
     /// resolved once at construction like every other startup decision.
     trusted_proxies: Arc<BTreeSet<IpAddr>>,
+    /// Resolved webhook secrets, keyed per `connector/account`, each with a
+    /// short TTL. Only valid pairs reach resolution (an unknown pair is a 404
+    /// first), so this is bounded by the number of configured accounts.
+    secrets: Arc<Mutex<HashMap<String, CachedSecret>>>,
+    /// Per-account singleflight gates, so concurrent cache misses for one
+    /// account collapse to a single resolution rather than a thundering herd.
+    secret_gates: Arc<Mutex<HashMap<String, Arc<tokio::sync::Mutex<()>>>>>,
 }
 
 impl IngestState {
@@ -153,6 +188,8 @@ impl IngestState {
         IngestState {
             windows: Arc::default(),
             trusted_proxies: Arc::new(trusted),
+            secrets: Arc::default(),
+            secret_gates: Arc::default(),
         }
     }
 
@@ -247,6 +284,79 @@ impl IngestState {
             *entry = (now, 0);
         }
         entry.1 = entry.1.saturating_add(1);
+    }
+
+    /// A still-fresh cached secret for `key`, or `None`.
+    fn cached_secret(&self, key: &str, now: u128) -> Option<Arc<str>> {
+        let guard = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
+        guard.get(key).and_then(|c| {
+            (now.saturating_sub(c.resolved_at) < SECRET_CACHE_TTL_MS).then(|| c.secret.clone())
+        })
+    }
+
+    /// Stores a freshly resolved secret for `key`. The map is bounded by the
+    /// number of configured accounts; it is cleared defensively if it ever
+    /// grows past the shared cap, matching the rolling-window maps.
+    fn store_secret(&self, key: String, secret: Arc<str>, now: u128) {
+        let mut guard = self.secrets.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.len() > MAX_RATE_LIMIT_ENTRIES {
+            guard.clear();
+        }
+        guard.insert(
+            key,
+            CachedSecret {
+                secret,
+                resolved_at: now,
+            },
+        );
+    }
+
+    /// The singleflight gate for one account, created on first use.
+    fn secret_gate(&self, key: &str) -> Arc<tokio::sync::Mutex<()>> {
+        let mut guard = self.secret_gates.lock().unwrap_or_else(|e| e.into_inner());
+        if guard.len() > MAX_RATE_LIMIT_ENTRIES {
+            guard.clear();
+        }
+        guard.entry(key.to_string()).or_default().clone()
+    }
+
+    /// The webhook secret for one account, resolved at most once per
+    /// [`SECRET_CACHE_TTL_MS`] and with concurrent misses for one account
+    /// collapsed to a single resolution. Returns `None` when the secret is
+    /// unresolvable or resolves to empty, which is a hard verification failure
+    /// (an empty key would let anyone sign a delivery). The expensive
+    /// resolution (which may shell out for a `{{cmd:...}}` reference) runs on
+    /// the blocking pool, never on a tokio worker.
+    async fn webhook_secret(
+        &self,
+        connector: &str,
+        account: &str,
+        doc: ConnectorDoc,
+        acct: Account,
+        template: String,
+    ) -> Option<Arc<str>> {
+        let key = pair(connector, account);
+        if let Some(secret) = self.cached_secret(&key, apb_core::clock::now_ms()) {
+            return Some(secret);
+        }
+        // Singleflight: one resolver per account at a time. Whoever loses the
+        // race waits here and then reads the value the winner cached.
+        let gate = self.secret_gate(&key);
+        let _held = gate.lock().await;
+        if let Some(secret) = self.cached_secret(&key, apb_core::clock::now_ms()) {
+            return Some(secret);
+        }
+        let resolved =
+            tokio::task::spawn_blocking(move || render_from_account(&template, &doc, &acct))
+                .await
+                .ok()
+                .flatten()?;
+        if resolved.is_empty() {
+            return None;
+        }
+        let secret: Arc<str> = Arc::from(resolved.as_str());
+        self.store_secret(key, secret.clone(), apb_core::clock::now_ms());
+        Some(secret)
     }
 }
 
@@ -452,52 +562,35 @@ async fn post_hook_handler(
         log_rejected(client, &connector, &account);
         return flat(StatusCode::UNAUTHORIZED);
     }
-    // Secret resolution can run a `{{cmd:...}}` reference, which shells out
-    // and is polled with a blocking sleep for up to `CMD_SECRET_TIMEOUT`
-    // (10s). That must never run on a tokio worker thread: this whole path is
-    // reachable by an unauthenticated caller sending a bad-signature POST, so
-    // without `spawn_blocking` a handful of concurrent requests could starve
-    // every other request on the runtime, including `/healthz`.
-    // `spawn_blocking` moves the closure (and everything it captures - the
-    // secret value included) onto the blocking pool and back only carries out
-    // the `bool`/`None` verdict, so the resolved secret never crosses back
-    // into async code at all.
+    // Resolve the secret once per account and cache it for a short window,
+    // rather than resolving it on every request. Secret resolution can run a
+    // `{{cmd:...}}` reference, which shells out and is polled with a blocking
+    // sleep for up to `CMD_SECRET_TIMEOUT` (10s); this path is reachable by an
+    // unauthenticated caller sending a bad-signature POST, so re-resolving it
+    // per request would let a flood of well-formed-but-bogus signatures start
+    // hundreds of blocking processes. `webhook_secret` runs that resolution on
+    // the blocking pool, caches the result for `SECRET_CACHE_TTL_MS`, and
+    // collapses concurrent misses for one account to a single resolution. A
+    // validly signed delivery is still always accepted, because the secret it
+    // is checked against is the same one, cached or freshly resolved. An
+    // empty or unresolvable secret is a hard failure (`None`): `HMAC-SHA256`
+    // accepts a zero-length key, so treating an empty secret as usable would
+    // let anyone on the internet sign a delivery.
     let verify_body = body.clone();
-    let verified = tokio::task::spawn_blocking(move || {
-        let secret = render_from_account(&secret_template, &doc, &acct)?;
-        // An empty resolved secret is a hard verification failure, not a
-        // secret. `resolve_var` returns `Some("")` for an env var that exists
-        // but is empty (`APP_SECRET=` in `secrets.env`, `export
-        // APP_SECRET="$UNSET"` in a wrapper), and `HMAC-SHA256` accepts a
-        // zero-length key, so treating that as resolved would let anyone on
-        // the internet sign a delivery. `verify_signature_hex` refuses it too;
-        // it is refused here as well so the misconfiguration cannot be one
-        // call site away from authenticating a stranger.
-        if secret.is_empty() {
-            return None;
-        }
-        // Over the exact bytes received: never a reparsed or reserialized
-        // body, which would change them and break the MAC.
-        Some(webhook::verify_signature_hex(
-            &secret,
-            &verify_body,
-            &presented,
-            &prefix,
-        ))
-    })
-    .await;
-    match verified {
-        Ok(Some(true)) => {}
-        Ok(Some(false) | None) => {
-            state.note_failure(client);
-            log_rejected(client, &connector, &account);
-            return flat(StatusCode::UNAUTHORIZED);
-        }
-        Err(_) => {
-            // The blocking task panicked (should not happen on this path);
-            // fail closed rather than silently treat it as verified.
-            return flat(StatusCode::INTERNAL_SERVER_ERROR);
-        }
+    let verified = match state
+        .webhook_secret(&connector, &account, doc, acct, secret_template)
+        .await
+    {
+        // HMAC over the exact bytes received (never a reparsed or reserialized
+        // body, which would change them and break the MAC). Cheap next to the
+        // resolution above and bounded by `MAX_BODY_BYTES`, so it runs inline.
+        Some(secret) => webhook::verify_signature_hex(&secret, &verify_body, &presented, &prefix),
+        None => false,
+    };
+    if !verified {
+        state.note_failure(client);
+        log_rejected(client, &connector, &account);
+        return flat(StatusCode::UNAUTHORIZED);
     }
 
     let Ok(parsed) = serde_json::from_slice::<serde_json::Value>(&body) else {
@@ -653,8 +746,9 @@ fn render_from_account(template: &str, doc: &ConnectorDoc, account: &Account) ->
 /// `<config_dir>/secrets.env`. `resolve_var` also consults a project
 /// `.apb/secrets.env` under the root it is given, and the config dir has no
 /// such file, so that step is a no-op by construction. The resolved value is
-/// used inside one request and dropped; it is never cached, logged, or
-/// returned.
+/// never logged or returned to a caller; the ingest handler caches it per
+/// account for [`SECRET_CACHE_TTL_MS`] only (see [`IngestState::webhook_secret`])
+/// so a bad-signature flood cannot re-run this resolution on every request.
 fn resolve_reference(raw: &str) -> Option<String> {
     let root = apb_core::config::config_dir()?;
     if let Some(var) = secrets::parse_env_ref(raw) {
