@@ -75,6 +75,7 @@ fn review_decide_validates_the_node_against_the_run_snapshot() {
         options: vec!["approved".into(), "rejected".into()],
         title: None,
         instruction: String::new(),
+        prompt: None,
     })
     .unwrap();
     let res = review_decide(dir.path(), "r1", "gate", "approved", "").unwrap();

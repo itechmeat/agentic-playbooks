@@ -45,6 +45,22 @@ edges:
   - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
 "#;
 
+const WF_REVIEW_PROMPT: &str = r#"
+schema: 1
+id: rev
+name: Review
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, title: "Approve the release", options: [approved, rejected], prompt: "Check the changelog before deciding." }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
 const WF_OUTPUT_MATCH: &str = r#"
 schema: 1
 id: rev
@@ -156,20 +172,22 @@ fn human_review_entry_event_carries_instruction_and_options() {
     let rx = run_in_background(dir.path());
     let run_dir = latest_run_dir(dir.path());
     // Wait for the gate to declare itself, then inspect the entry event.
-    let (options, title, instruction) = poll_until("review_requested with instruction", || {
-        read_all(&run_dir)
-            .ok()?
-            .into_iter()
-            .find_map(|e| match e.payload {
-                EventPayload::ReviewRequested {
-                    node,
-                    options,
-                    title,
-                    instruction,
-                } if node == "gate" => Some((options, title, instruction)),
-                _ => None,
-            })
-    });
+    let (options, title, instruction, prompt) =
+        poll_until("review_requested with instruction", || {
+            read_all(&run_dir)
+                .ok()?
+                .into_iter()
+                .find_map(|e| match e.payload {
+                    EventPayload::ReviewRequested {
+                        node,
+                        options,
+                        title,
+                        instruction,
+                        prompt,
+                    } if node == "gate" => Some((options, title, instruction, prompt)),
+                    _ => None,
+                })
+        });
     assert_eq!(
         options,
         vec!["approved".to_string(), "rejected".to_string()]
@@ -185,7 +203,46 @@ fn human_review_entry_event_carries_instruction_and_options() {
     assert!(instruction.contains("rejected"), "got: {instruction}");
     assert!(instruction.contains("apb review"), "got: {instruction}");
     assert!(instruction.contains("review_decide"), "got: {instruction}");
+    // No `prompt:` on this fixture's gate node.
+    assert_eq!(prompt, None);
     // Do not leave the run hanging: decide and let it finish.
+    decide(dir.path(), &run_dir, "approved");
+    let result = wait_result(&rx);
+    assert_eq!(result.outcome, RunStatus::Succeeded);
+}
+
+/// issue #102.9: a `human_review` node's optional `prompt:` field is carried
+/// on the `ReviewRequested` event, both as its own field and folded into the
+/// owner-facing `instruction`, so a supervising agent sees the gate's
+/// guidance above the options.
+#[test]
+fn human_review_entry_event_carries_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), WF_REVIEW_PROMPT);
+    let rx = run_in_background(dir.path());
+    let run_dir = latest_run_dir(dir.path());
+    let (instruction, prompt) = poll_until("review_requested with prompt", || {
+        read_all(&run_dir)
+            .ok()?
+            .into_iter()
+            .find_map(|e| match e.payload {
+                EventPayload::ReviewRequested {
+                    node,
+                    instruction,
+                    prompt,
+                    ..
+                } if node == "gate" => Some((instruction, prompt)),
+                _ => None,
+            })
+    });
+    assert_eq!(
+        prompt.as_deref(),
+        Some("Check the changelog before deciding.")
+    );
+    assert!(
+        instruction.contains("Check the changelog before deciding."),
+        "got: {instruction}"
+    );
     decide(dir.path(), &run_dir, "approved");
     let result = wait_result(&rx);
     assert_eq!(result.outcome, RunStatus::Succeeded);
@@ -231,6 +288,7 @@ fn review_requested(node: &str) -> EventPayload {
         options: vec!["approved".into(), "rejected".into()],
         title: None,
         instruction: String::new(),
+        prompt: None,
     }
 }
 

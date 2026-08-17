@@ -26,6 +26,7 @@ fn fold_records_review_decision() {
                 options: vec!["approved".into(), "rejected".into()],
                 title: None,
                 instruction: String::new(),
+                prompt: None,
             },
         ),
         ev(

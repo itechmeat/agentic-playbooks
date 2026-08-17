@@ -1233,7 +1233,7 @@ fn drive_inner(
         // the node-cache branch sets it (captured on a store, replayed on a
         // hit); every other branch leaves it empty.
         let mut node_artifacts: Vec<apb_core::cache::ArtifactRef> = Vec::new();
-        let (status, output) = if let NodeKind::HumanReview { options } = &node_kind {
+        let (status, output) = if let NodeKind::HumanReview { options, prompt } = &node_kind {
             let events = read_all(run_dir)?;
             let decided = review_decided_count(&events, &current);
             let for_current: Vec<_> = read_reviews_after(run_dir, None)?
@@ -1260,13 +1260,18 @@ fn drive_inner(
                 // options are, and how to answer.
                 if review_requested_count(&events, &current) <= decided {
                     let title = playbook.node(&current).and_then(|n| n.title.clone());
-                    let instruction =
-                        crate::progress::review_instruction(&current, title.as_deref(), options);
+                    let instruction = crate::progress::review_instruction(
+                        &current,
+                        title.as_deref(),
+                        options,
+                        prompt.as_deref(),
+                    );
                     log.append(EventPayload::ReviewRequested {
                         node: current.clone(),
                         options: options.clone(),
                         title,
                         instruction,
+                        prompt: prompt.clone(),
                     })?;
                 }
                 std::thread::sleep(AWAIT_CONTROL_POLL);

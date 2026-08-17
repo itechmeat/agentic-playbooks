@@ -372,6 +372,47 @@ fn run_status_exposes_pending_review_block_for_a_gate() {
     assert!(how_to.contains("review_decide"), "got: {how_to}");
 }
 
+/// issue #102.9: a gate's optional `prompt:` field is surfaced in the
+/// `pending_review` block, both as its own field and rendered into
+/// `instruction` above the options, so `run_status` gives an agent relaying
+/// the gate everything it needs in one line.
+const REVIEW_GATE_PROMPT_PB: &str = r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: gate, type: human_review, title: "Approve the release", options: [approved, rejected], prompt: "Check the changelog before deciding." }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: gate }
+  - { from: gate, to: f }
+"#;
+
+#[test]
+fn run_status_pending_review_carries_the_gate_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = bare_run_dir(dir.path(), "r-gate-prompt");
+    fs::write(run_dir.join("playbook.yaml"), REVIEW_GATE_PROMPT_PB).unwrap();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n\
+         {\"seq\":1,\"ts\":0,\"type\":\"review_requested\",\"node\":\"gate\",\"options\":[\"approved\",\"rejected\"]}\n",
+    )
+    .unwrap();
+
+    let status = run_status(dir.path(), "r-gate-prompt").unwrap();
+    let pr = &status["pending_review"];
+    assert_eq!(pr["prompt"], "Check the changelog before deciding.");
+    let instruction = pr["instruction"].as_str().expect("instruction is a string");
+    assert!(
+        instruction.contains("Check the changelog before deciding."),
+        "got: {instruction}"
+    );
+}
+
 /// Null path: a run dir with events.jsonl but no playbook.yaml snapshot (e.g.
 /// a legacy run whose snapshot was never captured) must report
 /// `"progress": null`, not omit the key or error.

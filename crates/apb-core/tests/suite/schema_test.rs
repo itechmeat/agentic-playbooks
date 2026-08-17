@@ -134,3 +134,78 @@ fn outputs_extract_parses_and_round_trips_and_omits_when_absent() {
         Some("node_output")
     );
 }
+
+const HUMAN_REVIEW_PROMPT_WF: &str = r#"
+schema: 2
+id: rev
+name: Review
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, options: [approve, reject], prompt: "Check the changelog before deciding." }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done }
+"#;
+
+/// issue #102.9: `human_review.prompt` is optional guidance for the reviewer,
+/// parses when set, is absent (not an error) when omitted, and round-trips
+/// through YAML unchanged.
+#[test]
+fn human_review_prompt_parses_and_round_trips() {
+    let playbook = Playbook::from_yaml(HUMAN_REVIEW_PROMPT_WF).unwrap();
+    match &playbook.node("gate").unwrap().kind {
+        NodeKind::HumanReview { options, prompt } => {
+            assert_eq!(options, &vec!["approve".to_string(), "reject".to_string()]);
+            assert_eq!(
+                prompt.as_deref(),
+                Some("Check the changelog before deciding.")
+            );
+        }
+        other => panic!("expected human_review, got {other:?}"),
+    }
+
+    let yaml = serde_yaml_ng::to_string(&playbook).unwrap();
+    assert!(
+        yaml.contains("Check the changelog before deciding."),
+        "prompt must round-trip, got:\n{yaml}"
+    );
+    let reparsed = Playbook::from_yaml(&yaml).unwrap();
+    match &reparsed.node("gate").unwrap().kind {
+        NodeKind::HumanReview { prompt, .. } => {
+            assert_eq!(
+                prompt.as_deref(),
+                Some("Check the changelog before deciding.")
+            );
+        }
+        other => panic!("expected human_review, got {other:?}"),
+    }
+}
+
+const HUMAN_REVIEW_NO_PROMPT_WF: &str = r#"
+schema: 2
+id: rev
+name: Review
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, options: [approve, reject] }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: done }
+"#;
+
+/// A `human_review` node without `prompt:` parses fine (the field is
+/// optional) and carries `None`.
+#[test]
+fn human_review_without_prompt_is_none() {
+    let playbook = Playbook::from_yaml(HUMAN_REVIEW_NO_PROMPT_WF).unwrap();
+    match &playbook.node("gate").unwrap().kind {
+        NodeKind::HumanReview { prompt, .. } => assert_eq!(*prompt, None),
+        other => panic!("expected human_review, got {other:?}"),
+    }
+}

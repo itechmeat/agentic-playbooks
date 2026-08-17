@@ -75,6 +75,12 @@ pub struct PendingReview {
     /// The decision mechanics alone (apb review CLI / review_decide MCP tool),
     /// for callers that render options and mechanics separately.
     pub how_to_decide: String,
+    /// Optional guidance from the node's `prompt` (issue #102.9), for callers
+    /// that render it separately from `instruction` (the web review panel
+    /// shows it above the options). Already folded into `instruction` too.
+    /// Template placeholders inside are NOT rendered - literal text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
 }
 
 /// The decision mechanics for a human-review gate: how an owner (or an agent
@@ -93,7 +99,17 @@ pub fn review_how_to_decide(node_id: &str) -> String {
 /// decisions, and appending `review_how_to_decide`. Shared by the
 /// `ReviewRequested` event and the `run_status` `pending_review` block so the
 /// two never drift.
-pub fn review_instruction(node_id: &str, title: Option<&str>, options: &[String]) -> String {
+///
+/// `prompt` is the node's optional `prompt:` field (issue #102.9): free-form
+/// author guidance for the reviewer, surfaced verbatim ahead of the options.
+/// Template placeholders inside `prompt` are NOT rendered here - they are
+/// carried through as literal text, exactly like the option strings.
+pub fn review_instruction(
+    node_id: &str,
+    title: Option<&str>,
+    options: &[String],
+    prompt: Option<&str>,
+) -> String {
     let label = title
         .map(str::trim)
         .filter(|t| !t.is_empty())
@@ -103,25 +119,40 @@ pub fn review_instruction(node_id: &str, title: Option<&str>, options: &[String]
     } else {
         options.join(", ")
     };
+    let guidance = prompt
+        .map(str::trim)
+        .filter(|p| !p.is_empty())
+        .map(|p| format!(" {p}"))
+        .unwrap_or_default();
     format!(
-        "The run is paused at the human-review gate \"{label}\" and needs your decision. \
+        "The run is paused at the human-review gate \"{label}\" and needs your decision.{guidance} \
          Available decisions: {opts}. {}",
         review_how_to_decide(node_id)
     )
 }
 
-/// Assembles the `PendingReview` block for a gate node from its id, title, and
-/// options, reusing `review_instruction` so the instruction matches the event.
-pub fn pending_review(node_id: &str, title: Option<&str>, options: &[String]) -> PendingReview {
+/// Assembles the `PendingReview` block for a gate node from its id, title,
+/// options, and optional prompt (issue #102.9), reusing `review_instruction`
+/// so the instruction matches the event.
+pub fn pending_review(
+    node_id: &str,
+    title: Option<&str>,
+    options: &[String],
+    prompt: Option<&str>,
+) -> PendingReview {
     PendingReview {
         node: node_id.to_string(),
         title: title
             .map(str::trim)
             .filter(|t| !t.is_empty())
             .map(str::to_string),
-        instruction: review_instruction(node_id, title, options),
+        instruction: review_instruction(node_id, title, options, prompt),
         options: options.to_vec(),
         how_to_decide: review_how_to_decide(node_id),
+        prompt: prompt
+            .map(str::trim)
+            .filter(|p| !p.is_empty())
+            .map(str::to_string),
     }
 }
 
@@ -790,9 +821,12 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     let pending_review = match (&waiting_on, waiting_kind) {
         (Some(id), Some(WaitingKind::HumanReview)) => {
             playbook.node(id).and_then(|n| match &n.kind {
-                NodeKind::HumanReview { options } => {
-                    Some(pending_review(id, n.title.as_deref(), options))
-                }
+                NodeKind::HumanReview { options, prompt } => Some(pending_review(
+                    id,
+                    n.title.as_deref(),
+                    options,
+                    prompt.as_deref(),
+                )),
                 _ => None,
             })
         }
@@ -1124,6 +1158,61 @@ edges:
         .unwrap()
     }
 
+    fn review_pb_with_prompt() -> Playbook {
+        Playbook::from_yaml(
+            r#"
+schema: 2
+id: p
+name: p
+version: 1.0.0
+defaults: { profile: x }
+nodes:
+  - { id: s, type: start }
+  - { id: r, type: human_review, options: [approve, reject], prompt: "Check the changelog first." }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: r }
+  - { from: r, to: f }
+"#,
+        )
+        .unwrap()
+    }
+
+    /// issue #102.9: `compute`'s `pending_review` block carries the gate
+    /// node's optional `prompt`, both as its own field and folded into
+    /// `instruction` ahead of the options list.
+    #[test]
+    fn pending_review_carries_the_gate_prompt() {
+        let pb = review_pb_with_prompt();
+        let events = vec![
+            ev(
+                0,
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+            ),
+            ev(
+                1,
+                EventPayload::ReviewRequested {
+                    node: "r".into(),
+                    options: vec!["approve".into(), "reject".into()],
+                    title: None,
+                    instruction: String::new(),
+                    prompt: Some("Check the changelog first.".into()),
+                },
+            ),
+        ];
+        let p = compute(&pb, &events);
+        let pr = p.pending_review.expect("pending_review must be Some");
+        assert_eq!(pr.prompt.as_deref(), Some("Check the changelog first."));
+        assert!(
+            pr.instruction.contains("Check the changelog first."),
+            "got: {}",
+            pr.instruction
+        );
+    }
+
     #[test]
     fn pending_human_review_waits_with_kind() {
         let pb = review_pb();
@@ -1145,6 +1234,7 @@ edges:
                     options: vec!["approve".into(), "reject".into()],
                     title: None,
                     instruction: String::new(),
+                    prompt: None,
                 },
             ),
         ];
@@ -1171,6 +1261,7 @@ edges:
                     options: vec!["approve".into(), "reject".into()],
                     title: None,
                     instruction: String::new(),
+                    prompt: None,
                 },
             ),
             ev(
@@ -1306,6 +1397,7 @@ edges:
                     options: vec!["approve".into(), "reject".into()],
                     title: None,
                     instruction: String::new(),
+                    prompt: None,
                 },
             ),
         ];

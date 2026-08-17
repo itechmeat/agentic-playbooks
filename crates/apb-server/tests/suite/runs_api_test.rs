@@ -82,6 +82,22 @@ edges:
   - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
 "#;
 
+const GATE_PROMPT: &str = r#"
+schema: 1
+id: gated
+name: Gated
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, options: [approved, rejected], prompt: "Check the changelog first." }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
 /// A run dir carrying the gate playbook's snapshot plus the given journal,
 /// built by hand under an existing project. The review-validation cases need
 /// exact journal shapes (a gate with an open request, a gate without one) that
@@ -92,9 +108,18 @@ fn seed_gate_run(
     run_id: &str,
     payloads: &[apb_engine::event::EventPayload],
 ) {
+    seed_gate_run_yaml(root, run_id, GATE, payloads);
+}
+
+fn seed_gate_run_yaml(
+    root: &std::path::Path,
+    run_id: &str,
+    yaml: &str,
+    payloads: &[apb_engine::event::EventPayload],
+) {
     let run_dir = root.join(".apb/runs").join(run_id);
     fs::create_dir_all(&run_dir).unwrap();
-    fs::write(run_dir.join("playbook.yaml"), GATE).unwrap();
+    fs::write(run_dir.join("playbook.yaml"), yaml).unwrap();
     let mut log = apb_engine::event::EventLog::open(&run_dir).unwrap();
     log.append(apb_engine::event::EventPayload::RunStarted {
         playbook: "gated".into(),
@@ -112,6 +137,7 @@ fn review_requested(node: &str) -> apb_engine::event::EventPayload {
         options: vec!["approved".into(), "rejected".into()],
         title: None,
         instruction: String::new(),
+        prompt: None,
     }
 }
 
@@ -160,6 +186,36 @@ async fn post_review_writes_channel() {
     let channel =
         fs::read_to_string(dir.path().join(".apb/runs/gate-1").join("reviews.jsonl")).unwrap();
     assert!(channel.contains("approved"));
+}
+
+/// issue #102.9: the run detail's `progress.pending_review` block carries the
+/// gate node's optional `prompt:` field, on the same terms it already carries
+/// `options` (the HTTP surface reads `apb_engine::progress::from_run_dir`
+/// directly, so this is the same struct MCP `run_status` reports).
+#[tokio::test]
+async fn get_run_detail_exposes_pending_review_prompt() {
+    let dir = seed_with_run();
+    let prompt = apb_engine::event::EventPayload::ReviewRequested {
+        node: "gate".into(),
+        options: vec!["approved".into(), "rejected".into()],
+        title: None,
+        instruction: String::new(),
+        prompt: Some("Check the changelog first.".into()),
+    };
+    seed_gate_run_yaml(dir.path(), "gate-2", GATE_PROMPT, &[prompt]);
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs/gate-2").await;
+    assert_eq!(status, StatusCode::OK);
+    let pr = &json["progress"]["pending_review"];
+    assert_eq!(pr["node"], "gate");
+    assert_eq!(pr["prompt"], "Check the changelog first.");
+    assert!(
+        pr["instruction"]
+            .as_str()
+            .unwrap()
+            .contains("Check the changelog first."),
+        "got: {pr}"
+    );
 }
 
 /// #103.1: a decision for a node that is not a `human_review` node of this

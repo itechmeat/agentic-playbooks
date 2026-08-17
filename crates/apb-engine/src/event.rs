@@ -263,6 +263,13 @@ pub enum EventPayload {
         /// knowing an action is expected. Empty for old logs. Additive.
         #[serde(default)]
         instruction: String,
+        /// The gate node's optional `prompt:` field, copied from the playbook
+        /// (issue #102.9): free-form guidance for the reviewer, already
+        /// folded into `instruction` but also carried on its own so a reader
+        /// (the web review panel) can render it separately, above the
+        /// options. `None` for a promptless node and for old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        prompt: Option<String>,
     },
     ReviewDecided {
         node: String,

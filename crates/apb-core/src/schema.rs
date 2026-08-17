@@ -830,6 +830,12 @@ pub enum NodeKind {
     },
     HumanReview {
         options: Vec<String>,
+        /// Optional guidance shown to the reviewer at the gate (issue #102.9),
+        /// rendered into the owner-facing review instruction above the
+        /// options. Template placeholders inside are NOT rendered - the text
+        /// is surfaced literally, same as the option strings themselves.
+        #[serde(default)]
+        prompt: Option<String>,
     },
     Wait {
         wait_for: WaitFor,

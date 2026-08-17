@@ -357,6 +357,16 @@ A `human_review` node pauses the run for a human decision:
 `review_decide` records one of them as the node's decision, plus a free-form
 note (available downstream as `{{nodes.review.review_note}}`).
 
+An optional `prompt` gives the reviewer guidance, shown above the options in
+the owner-facing instruction and in the web review panel:
+
+```yaml
+- { id: review, type: human_review, options: [approve, reject], prompt: "Check the changelog before deciding." }
+```
+
+`prompt` is plain text: template placeholders inside it (`{{...}}`) are not
+rendered and are surfaced literally, same as the option strings.
+
 An edge's `condition` gates traversal on one of four types:
 
 - `node_status { node, equals: success|failure }` - matches when the named

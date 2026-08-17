@@ -176,8 +176,11 @@
         </Card.Header>
         <Card.Content class="flex flex-col gap-3">
           {#each pending as pr (pr.node)}
-            <div class="flex flex-wrap items-center gap-2">
+            <div class="flex flex-col gap-1">
               <span class="font-mono text-xs">{pr.node}</span>
+              {#if pr.prompt}
+                <pre class="whitespace-pre-wrap break-words text-sm">{pr.prompt}</pre>
+              {/if}
               <div class="flex flex-wrap gap-1">
                 {#each pr.options as opt (opt)}
                   <Button
