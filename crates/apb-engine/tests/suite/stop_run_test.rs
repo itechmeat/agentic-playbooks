@@ -858,6 +858,104 @@ fn a_paused_batch_resumes_and_runs_the_deferred_members() {
     }
 }
 
+/// #90: the Pause counterpart of `a_stop_during_the_last_chunk_of_a_batch_still_aborts_the_run`.
+/// A pause landing while the FINAL (here: only) chunk of a batch is in flight
+/// is observed by no admission gate either - `halt`/`run_cancel` are read only
+/// BEFORE a chunk is admitted - so this exercises the batch tail's own `halt`
+/// read (`scheduler.rs`'s `stop_now` check) rather than the gate. Unlike the
+/// abort twin, `post_supervisor_command` does not kill anything: the members
+/// already in flight (`a`, `b`) run to their own completion once released, and
+/// what the pause actually defers is the run's own continuation past the
+/// batch - the merge node `m` and `done` - which a resume must then run to a
+/// real finish.
+///
+/// Bounded by construction, not by a sleep: exactly as the abort twin,
+/// `hold.sh` blocks until the test writes `release`, and the release happens
+/// only after the pause is provably in `control.jsonl` while the only chunk is
+/// still mid-flight.
+#[cfg(unix)]
+#[test]
+fn a_pause_during_the_last_chunk_of_a_batch_still_pauses_and_resume_completes_it() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_single_chunk(dir.path());
+    let root = dir.path().to_path_buf();
+    let (tx, rx) = mpsc::channel::<Result<RunResult, EngineError>>();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "stoplast", None, RunOptions::default()));
+    });
+
+    let run_id = find_run_id(dir.path(), "stoplast-");
+    poll_until("the only chunk to start", || {
+        dir.path().join("chunk1_started").is_file().then_some(())
+    });
+    post_supervisor_command(dir.path(), &run_id, Control::Pause).unwrap();
+    fs::write(dir.path().join("release"), "go").unwrap();
+
+    let res = rx
+        .recv_timeout(ABORT_DEADLINE)
+        .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"))
+        .expect("a paused batch must not fail the drive");
+    assert_eq!(
+        res.outcome,
+        RunStatus::Paused,
+        "a pause during the last chunk must pause the run, not fail or abort it"
+    );
+
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let events = read_all(&run_dir).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RunError { .. })),
+        "the pause must not be reported through a RunError"
+    );
+    assert!(
+        matches!(
+            events.last().map(|e| &e.payload),
+            Some(EventPayload::RunPaused { .. })
+        ),
+        "the journal must end with RunPaused, got {:?}",
+        events.last().map(|e| &e.payload)
+    );
+    assert_eq!(
+        RunState::fold(&events).run_status,
+        RunStatus::Paused,
+        "the folded run state must read paused"
+    );
+    // Both members already ran to their own end - a pause only halts
+    // admission, it does not kill anything already in flight.
+    for n in ["a", "b"] {
+        assert_eq!(
+            finish_status(&events, n),
+            "succeeded",
+            "member {n} must not be killed by a pause, only the continuation past it is deferred"
+        );
+    }
+    // Premise of the test, asserted so a collapsed race fails loudly instead of
+    // passing vacuously: the merge really had not run yet, because the batch
+    // tail short-circuited straight back to the top-of-loop pause before
+    // advancing the frontier past the batch.
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::NodeFinished { node, .. } if node == "m")),
+        "a paused run must not have reached the merge node yet: the resume still has to run it"
+    );
+
+    let resumed = resume(dir.path(), &run_id, None).expect("a paused run must resume");
+    assert_eq!(
+        resumed.outcome,
+        RunStatus::Succeeded,
+        "the resume must run the deferred continuation to completion"
+    );
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        finish_status(&events, "m"),
+        "succeeded",
+        "the merge node deferred by the pause must actually run on resume"
+    );
+}
+
 /// #77(D)/#89: one journal shape. Every cancelled member has a paired
 /// NodeStarted before its NodeFinished, and every such finish carries
 /// `output: "cancelled"`. The pairing is what `cache::verify_connector_calls`,
