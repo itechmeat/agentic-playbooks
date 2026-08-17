@@ -979,6 +979,35 @@ pub enum EdgeCondition {
     },
 }
 
+/// One top-level field of a node output that parses as a JSON object, as the
+/// string an [`EdgeCondition::OutputField`] compares against and a
+/// `{{nodes.<id>.output.<field>}}` template renders (spec 2026-08-05 section
+/// 2.5). `None` for every shape that cannot be read as one unambiguous string:
+/// output that is not JSON, JSON that is not an object, an absent field, and a
+/// value that is null, an array or an object. A string is taken verbatim; a bool
+/// and a number take their JSON textual form (`true`, `3`, `3.5`).
+///
+/// Total by construction, because neither a routing decision nor a prompt render
+/// may panic on whatever an agent happened to print: for the edge an unreadable
+/// output simply means the condition does not apply, and for a template it
+/// renders as the empty string, exactly like every other unresolved reference.
+///
+/// Lives beside the variant so the two consumers (edge selection in
+/// `apb-engine::parallel`, template rendering in `apb-engine::context`) and the
+/// validator grammar that admits the template form share one definition of what
+/// "one top-level field" means.
+pub fn output_field_value(output: &str, field: &str) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(output).ok()?;
+    match parsed.as_object()?.get(field)? {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Null | serde_json::Value::Array(_) | serde_json::Value::Object(_) => {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StatusEq {

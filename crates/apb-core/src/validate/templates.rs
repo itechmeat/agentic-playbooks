@@ -30,6 +30,11 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
                     nid,
                     "output" | "report" | "review_note" | "rejected_output",
                 ] => nodes.contains(nid),
+                // One top-level field of a JSON-object output, the template twin
+                // of the `output_field` edge condition (spec 2026-08-05 section
+                // 2.5). Only `.output` / `.report` carry that payload, and only
+                // ONE field: a deeper path is not a namespace this grammar knows.
+                ["nodes", nid, "output" | "report", _field] => nodes.contains(nid),
                 ["run", "instruction" | "context"] => true,
                 ["run", "hooks", key] => hooks.contains(key),
                 _ => false,
@@ -75,7 +80,8 @@ pub(crate) fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
 }
 
 /// V38 (warning): a template reads `nodes.<id>.output` or `nodes.<id>.report`
-/// where the graph does not order `<id>` before the reading node. At run time
+/// (with or without a top-level field selector) where the graph does not order
+/// `<id>` before the reading node. At run time
 /// such a read renders as an empty string rather than failing the node (spec
 /// 2026-08-05, 1.5), so the mistake is otherwise invisible until an agent gets a
 /// prompt with a hole in it.
@@ -110,7 +116,12 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
         for cap in template_refs(text) {
             let parts: Vec<&str> = cap.split('.').collect();
             let (source, field) = match parts.as_slice() {
-                ["nodes", source, field @ ("output" | "report")] => (*source, *field),
+                // A field selector (`nodes.<id>.output.<field>`) races with the
+                // source exactly like the bare read, so both arities are the
+                // rule's business; the message names the read without the
+                // selector, which is the part the ordering advice is about.
+                ["nodes", source, field @ ("output" | "report")]
+                | ["nodes", source, field @ ("output" | "report"), _] => (*source, *field),
                 // Any other namespace is V13's business, not this rule's.
                 _ => continue,
             };
@@ -142,8 +153,9 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
 /// hitting an unresolved template sees the full set of valid forms, not just
 /// the one they got wrong.
 pub(crate) const V13_KNOWN_NAMESPACES: &str = "; known namespaces: params.*, nodes.<id>.output, \
-    nodes.<id>.report, nodes.<id>.review_note, nodes.<id>.rejected_output, run.instruction, \
-    run.context, run.hooks.*";
+    nodes.<id>.report, nodes.<id>.output.<field>, nodes.<id>.report.<field>, \
+    nodes.<id>.review_note, nodes.<id>.rejected_output, run.instruction, run.context, \
+    run.hooks.*";
 
 pub(crate) fn template_refs(text: &str) -> Vec<String> {
     // no regex dependency: manual scan for {{ ... }}

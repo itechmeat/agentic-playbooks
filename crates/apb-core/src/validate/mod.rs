@@ -715,6 +715,35 @@ edges:
         );
     }
 
+    /// A field selector does not change what the read races with: the reader
+    /// still needs `a` to have finished, so the 4-part form must warn exactly
+    /// like the bare `nodes.a.output`.
+    #[test]
+    fn v38_read_of_a_parallel_sibling_with_a_field_selector_warns() {
+        let pb = pb_yaml(
+            r#"
+nodes:
+  - { id: s, type: start }
+  - { id: a, type: prompt, prompt: "a" }
+  - { id: b, type: prompt, prompt: "b needs {{nodes.a.output.verdict}}" }
+  - { id: j, type: prompt, prompt: "j" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: s, to: a }
+  - { from: s, to: b }
+  - { from: a, to: j }
+  - { from: b, to: j }
+  - { from: j, to: done }"#,
+        );
+        let found = v38(&pb);
+        assert_eq!(found.len(), 1, "expected exactly one V38, got {found:?}");
+        assert_eq!(found[0].0.as_deref(), Some("b"), "V38 owner is the reader");
+        assert!(
+            found[0].1.contains("nodes.a.output"),
+            "V38 must name the reference, got: {found:?}"
+        );
+    }
+
     /// The barrier-less diamond's merge point is an implicit all-join (Task 1),
     /// so it waits for both branches: reading both is safe.
     #[test]

@@ -121,6 +121,65 @@ fn build_context_for_render_has_no_instruction_section_when_absent() {
     );
 }
 
+/// `{{nodes.<id>.output.<field>}}` projects ONE top-level field of a node
+/// output that parses as a JSON object, with the exact `output_field` edge
+/// condition semantics. `.report` is the same alias it is for the bare form.
+#[test]
+fn renders_a_top_level_field_selector_on_output_and_report() {
+    let mut outputs = BTreeMap::new();
+    outputs.insert(
+        "verify".to_string(),
+        r#"{"verdict":"failed","count":3,"ok":true}"#.to_string(),
+    );
+    let out = render(
+        "V: {{nodes.verify.output.verdict}} | C: {{nodes.verify.output.count}} | \
+         O: {{nodes.verify.report.ok}}",
+        &BTreeMap::new(),
+        None,
+        &outputs,
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        "",
+    );
+    assert_eq!(out, "V: failed | C: 3 | O: true");
+}
+
+/// Every shape the projection cannot read renders as the empty string, never an
+/// error: a node with no output, an output that is not JSON, JSON that is not an
+/// object, an absent field, and a value with no unambiguous string form.
+#[test]
+fn a_field_selector_renders_empty_for_every_unreadable_shape() {
+    let mut outputs = BTreeMap::new();
+    outputs.insert("prose".to_string(), "all checks failed".to_string());
+    outputs.insert("arr".to_string(), r#"["failed"]"#.to_string());
+    outputs.insert(
+        "obj".to_string(),
+        r#"{"verdict":null,"nested":{"a":1},"list":[1],"other":"x"}"#.to_string(),
+    );
+    for (text, why) in [
+        ("[{{nodes.ghost.output.verdict}}]", "node never ran"),
+        ("[{{nodes.prose.output.verdict}}]", "output is not JSON"),
+        ("[{{nodes.arr.output.verdict}}]", "JSON is not an object"),
+        ("[{{nodes.obj.output.missing}}]", "absent field"),
+        ("[{{nodes.obj.output.verdict}}]", "null value"),
+        ("[{{nodes.obj.output.nested}}]", "object value"),
+        ("[{{nodes.obj.output.list}}]", "array value"),
+    ] {
+        let out = render(
+            text,
+            &BTreeMap::new(),
+            None,
+            &outputs,
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            &BTreeMap::new(),
+            "",
+        );
+        assert_eq!(out, "[]", "{why} must render empty, got {out}");
+    }
+}
+
 #[test]
 fn unknown_refs_become_empty() {
     let out = render(

@@ -306,6 +306,14 @@ a V13 validation error:
 - `nodes.<id>.output` - the node's output text.
 - `nodes.<id>.report` - the same value as `.output` (an alias; both names
   resolve identically).
+- `nodes.<id>.output.<field>` (and `nodes.<id>.report.<field>`) - ONE top-level
+  field of that output when it parses as a JSON object, the template twin of the
+  `output_field` edge condition below and with exactly its semantics. Strings
+  render verbatim; booleans and numbers render as their JSON text (`true`, `3`).
+  Everything it cannot read renders as the empty string and never fails the node:
+  output that is not JSON or not a JSON object, an absent field, and a value that
+  is null, an array or an object. One field only, never a path: `.output.a.b` is
+  not a valid reference and fails validation like any other unknown namespace.
 - `nodes.<id>.review_note` - the reviewer's note from a `human_review` node's
   decision.
 - `nodes.<id>.rejected_output` - the agent report text a `success_check`
@@ -323,8 +331,9 @@ playbook can be saved or run, rather than silently rendering empty at run
 time.
 
 Whether a reference resolves and whether it has a value yet are separate
-questions. A template that reads `nodes.<id>.output` or `nodes.<id>.report` where
-nothing in the graph orders `<id>` before the reading node is validator warning
+questions. A template that reads `nodes.<id>.output` or `nodes.<id>.report`
+(with or without a field selector) where nothing in the graph orders `<id>`
+before the reading node is validator warning
 **V38**: across un-joined parallel branches that value may render empty. The
 remedy is to route the read behind `<id>` itself, or behind a node that already
 joins both branches (see "Joining parallel branches"). Adding `join: all` to the
@@ -338,7 +347,8 @@ journals a missing-input anomaly naming every empty reference and why it is empt
 (`never ran`, the source's own status, or `<status> with empty output`), and in a
 supervised run that anomaly wakes the supervisor. The criterion is the rendered
 value, never the source's status: a reference is reported only when the source
-has no recorded output at all or its output is the empty string. So an
+has no recorded output at all or its output is the empty string (a
+field-selector read counts as a read of that source's output). So an
 `on_failure` handler reading the failure it handles stays silent, because a
 failed node's own text is recorded and does render, while a source that succeeded
 with nothing to say is caught. One anomaly per node execution lists all of that
@@ -385,7 +395,9 @@ An edge's `condition` gates traversal on one of four types:
   (no substring, no case folding). Anything unreadable is simply a non-match:
   output that is not a JSON object, a missing field, or a value that is null,
   an array or an object. Booleans and numbers compare by their JSON text
-  (`true`, `3`).
+  (`true`, `3`). The same projection is available inside a prompt as
+  `{{nodes.<id>.output.<field>}}` (see "Template variables"), so a downstream
+  node can quote one field of a verdict instead of the whole JSON blob.
 
 ```yaml
 edges:
