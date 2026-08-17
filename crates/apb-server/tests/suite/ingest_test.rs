@@ -5,7 +5,9 @@
 //! store, the account config and the inbox all resolve through
 //! `APB_CONFIG_DIR`, which is process-wide.
 
-use apb_server::ingest::{ACCEPT_RATE_PER_MIN, IngestState, MAX_BODY_BYTES, build_ingest_router};
+use apb_server::ingest::{
+    ACCEPT_RATE_PER_MIN, IngestState, MAX_BODY_BYTES, MAX_FAILURES_PER_WINDOW, build_ingest_router,
+};
 use axum::body::Body;
 use axum::extract::ConnectInfo;
 use axum::http::{Request, Response, StatusCode};
@@ -900,5 +902,43 @@ async fn the_challenge_token_is_resolved_at_most_once_within_the_ttl() {
     assert_eq!(
         invocations, 1,
         "the token command ran once within the TTL, not once per challenge GET"
+    );
+}
+
+/// Repeated unknown-pair requests from one address are eventually
+/// rate-limited. The unknown-pair 404 used to record no failure, so the
+/// filesystem resolve it triggers was bounded only by bandwidth; each 404 now
+/// counts toward the peer's failure window, so a probe from one IP is
+/// eventually refused with a 401 rather than answered forever.
+#[tokio::test]
+async fn repeated_unknown_pair_requests_are_eventually_rate_limited() {
+    let _lock = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let _guards = setup(cfg.path());
+
+    // One shared state, so the failure window accumulates across requests.
+    let state = fresh_state();
+    let body = br#"{"id":"evt-1"}"#;
+
+    let mut statuses = Vec::new();
+    for _ in 0..(MAX_FAILURES_PER_WINDOW + 2) {
+        let app = build_ingest_router(state.clone());
+        let req = Request::post("/hooks/echo-hooks/nope")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_vec()))
+            .unwrap();
+        let (status, _) = send(app, req).await;
+        statuses.push(status);
+    }
+
+    assert_eq!(
+        statuses[0],
+        StatusCode::NOT_FOUND,
+        "the first unknown-pair request is a flat 404"
+    );
+    assert_eq!(
+        *statuses.last().unwrap(),
+        StatusCode::UNAUTHORIZED,
+        "a peer over its failure budget is refused rather than answered forever"
     );
 }

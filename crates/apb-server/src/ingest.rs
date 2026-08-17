@@ -501,7 +501,16 @@ async fn get_hook_handler(
     if !state.peer_allowed(client) {
         return flat(StatusCode::UNAUTHORIZED);
     }
-    let Some((doc, acct)) = resolve_target(&connector, &account) else {
+    let Some((doc, acct)) = resolve_target_blocking(connector.clone(), account.clone()).await
+    else {
+        // An unknown (connector, account) pair. Count it toward the failure
+        // window: the filesystem work resolve does (canonicalize, manifest and
+        // accounts read/parse) is otherwise unbounded work an unauthenticated
+        // caller can trigger at will, and an uncounted 404 also lets a probe
+        // hammer that path forever. Once the peer is over budget the top
+        // `peer_allowed` check refuses it.
+        state.note_failure(client);
+        log_rejected(client, &connector, &account);
         return flat(StatusCode::NOT_FOUND);
     };
     let hook = doc
@@ -583,8 +592,20 @@ async fn post_hook_handler(
     if body.len() > MAX_BODY_BYTES {
         return flat(StatusCode::PAYLOAD_TOO_LARGE);
     }
-    let Some((doc, acct)) = resolve_target(&connector, &account) else {
-        return flat(StatusCode::NOT_FOUND);
+    let Some((doc, acct)) = resolve_target_blocking(connector.clone(), account.clone()).await
+    else {
+        // An unknown (connector, account) pair. Count it toward the failure
+        // window (the filesystem resolve above is the expensive part an
+        // unauthenticated caller can trigger), and refuse a peer already over
+        // budget with a 401 so a probe of the resolve path is eventually
+        // throttled rather than bounded only by bandwidth.
+        state.note_failure(client);
+        log_rejected(client, &connector, &account);
+        return flat(if state.peer_allowed(client) {
+            StatusCode::NOT_FOUND
+        } else {
+            StatusCode::UNAUTHORIZED
+        });
     };
     // Cloned out before `doc` moves into the blocking closure below: this is
     // the only piece of it still needed afterward (`dedupe_path`).
@@ -703,6 +724,20 @@ async fn post_hook_handler(
             flat(StatusCode::INTERNAL_SERVER_ERROR)
         }
     }
+}
+
+/// [`resolve_target`] on the blocking pool. Its work is all synchronous
+/// filesystem IO (canonicalize, connector.yaml read and parse, accounts read
+/// and parse) reachable by an unauthenticated caller on every request, so it
+/// must not run inline on a tokio worker shared with the dashboard.
+async fn resolve_target_blocking(
+    connector: String,
+    account: String,
+) -> Option<(ConnectorDoc, Account)> {
+    tokio::task::spawn_blocking(move || resolve_target(&connector, &account))
+        .await
+        .ok()
+        .flatten()
 }
 
 /// The connector manifest and the account a delivery names, or `None` when
