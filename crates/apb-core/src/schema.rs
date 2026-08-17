@@ -584,7 +584,8 @@ impl<'de> Deserialize<'de> for FunctionsAllow {
 /// A node's binding of one connector (spec 2026-07-18-connectors-design
 /// section 5): the connector folder name, an optional restriction to a
 /// subset of configured accounts (`None` - all accounts), the functions grant
-/// (`FunctionsAllow`), and an optional per-run call budget. Accepted in YAML
+/// (`FunctionsAllow`), and an optional call budget counted per executor
+/// attempt (`apb-engine`'s `connector::call::attempt_floor`). Accepted in YAML
 /// as a bare string (shorthand, everything else default) or as an object.
 /// Structural checks (name format, duplicates, empty/duplicate list entries,
 /// `max_calls == 0`) are validator V23-V26; FS-dependent checks (connector

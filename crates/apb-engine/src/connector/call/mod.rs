@@ -364,15 +364,24 @@ fn prepare(req: &CallRequest) -> Result<Prepared, CallError> {
         })?;
 
     // 3. max_calls budget: count prior ConnectorCall events for this
-    // (node, connector) grant. The budget is per grant, so a second connector
-    // granted to the same node must not consume this connector's budget.
+    // (node, connector) grant, from the current attempt only. The budget is per
+    // grant, so a second connector granted to the same node must not consume
+    // this connector's budget.
     if let Some(limit) = grant.max_calls {
         let prior = prior_call_count(req.run_dir, req.node_id, req.connector);
-        if prior >= limit as u64 {
+        if prior.current >= limit as u64 {
+            let earlier = match prior.earlier {
+                0 => String::new(),
+                n => format!(
+                    "; {n} call(s) made by an earlier attempt of this node are not counted \
+                     against this one"
+                ),
+            };
             return Err(CallError::new(
                 CallErrorCode::Permission,
                 format!(
-                    "node `{}` reached its max_calls budget of {limit} for connector `{}`",
+                    "node `{}` reached its max_calls budget of {limit} for connector `{}` \
+                     in this attempt{earlier}",
                     req.node_id, req.connector
                 ),
             ));
@@ -927,26 +936,72 @@ fn prepare_play_call(
     )
 }
 
+/// Prior `ConnectorCall` events for one `(node_id, connector)` grant, split at
+/// the current attempt's floor: `current` is what the budget is judged against,
+/// `earlier` is what previous attempts of the same node spent and is reported
+/// but never charged.
+struct PriorCalls {
+    current: u64,
+    earlier: u64,
+}
+
 /// Counts prior `ConnectorCall` events for this `(node_id, connector)` grant,
 /// of any outcome (spec 6 step 4 max_calls). Filtering by connector too keeps
 /// each grant's budget independent when one node is granted several connectors.
 /// A read failure yields 0 (fail open on the budget count is safe: the event
 /// log only grows, and a genuinely-hit budget still trips on the next call once
 /// the log reads again).
-fn prior_call_count(run_dir: &Path, node_id: &str, connector: &str) -> u64 {
+///
+/// The scan starts at [`attempt_floor`], so an executor that died with the
+/// budget spent does not hand its successor a guaranteed `Permission` failure.
+fn prior_call_count(run_dir: &Path, node_id: &str, connector: &str) -> PriorCalls {
     crate::event::read_all(run_dir)
         .map(|events| {
-            events
-                .iter()
-                .filter(|e| {
-                    matches!(
-                        &e.payload,
-                        EventPayload::ConnectorCall { node_id: n, connector: c, .. }
-                            if n == node_id && c == connector
-                    )
-                })
-                .count() as u64
+            let floor = attempt_floor(&events, node_id);
+            let is_call = |e: &crate::event::Event| {
+                matches!(
+                    &e.payload,
+                    EventPayload::ConnectorCall { node_id: n, connector: c, .. }
+                        if n == node_id && c == connector
+                )
+            };
+            PriorCalls {
+                current: events[floor..].iter().filter(|e| is_call(e)).count() as u64,
+                earlier: events[..floor].iter().filter(|e| is_call(e)).count() as u64,
+            }
         })
+        .unwrap_or(PriorCalls {
+            current: 0,
+            earlier: 0,
+        })
+}
+
+/// Index of the first event belonging to the node's current executor attempt.
+///
+/// The budget bounds playbook logic, not executor liveness: a retry or a
+/// fallback step is a new executor that never made the dead one's calls, so the
+/// scan floors at the last `AttemptStarted` for the node. That event is durable
+/// before the count can be read - the drive journals it from `on_spawn`, which
+/// the adapter invokes immediately after the child process exists and before
+/// any of its work runs (`scheduler/node.rs`), while `EventLog::append` writes
+/// and flushes one line - so an `apb connector call` subprocess spawned by that
+/// agent always sees it.
+///
+/// `NodeKind::Script` never emits `AttemptStarted`, so the fallback is the last
+/// `NodeStarted`, the per-visit floor `scheduler/cache.rs` already uses. With
+/// neither anchor on disk the floor is 0 and every call for the grant counts.
+fn attempt_floor(events: &[crate::event::Event], node_id: &str) -> usize {
+    events
+        .iter()
+        .rposition(
+            |e| matches!(&e.payload, EventPayload::AttemptStarted { node, .. } if node == node_id),
+        )
+        .or_else(|| {
+            events.iter().rposition(
+                |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == node_id),
+            )
+        })
+        .map(|i| i + 1)
         .unwrap_or(0)
 }
 

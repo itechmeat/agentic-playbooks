@@ -122,7 +122,7 @@ pattern as `skills`:
     - name: telegram
       accounts: [team-bot]            # optional allowlist; absent = all
       functions: [send_message]       # optional allowlist; absent = all
-      max_calls: 50                   # optional per-node call budget (across retries)
+      max_calls: 50                   # optional call budget, per executor attempt
     - name: github
       functions: read_only            # shorthand: every read_only function
 ```
@@ -131,7 +131,10 @@ pattern as `skills`:
 `read_only: true`, resolved at run start and frozen in the manifest grant, so a
 later connector edit cannot widen a running grant. `max_calls` is a safety budget
 against a looping agent, not a rate limiter; exceeding it returns a `permission`
-error. The binding is part of the playbook YAML and is covered by the playbook
+error. The budget is counted per executor attempt: a retry or a fallback step
+starts a fresh count, because an executor that died mid-node is not the looping
+agent the budget exists to stop. For a node kind that runs no executor (a script
+node), the count restarts on each visit to the node instead. The binding is part of the playbook YAML and is covered by the playbook
 digest, so grants need no separate approval.
 
 A binding whose `accounts` allowlist is empty has no account to select, so every

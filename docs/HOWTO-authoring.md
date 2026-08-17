@@ -67,8 +67,9 @@ nodes:
 ```
 
 `functions` is an explicit list or the string `read_only`; `accounts` allowlists
-which configured accounts the node may use; `max_calls` is an optional per-node
-budget. The binding is covered by the playbook digest, but the connector folder
+which configured accounts the node may use; `max_calls` is an optional call
+budget counted per executor attempt, so a retry or a fallback step starts a
+fresh count. The binding is covered by the playbook digest, but the connector folder
 and each account are digest-pinned separately and must be approved before a run.
 Installing connectors, configuring accounts, secrets, trust, and the
 `apb connector` CLI are covered in CONNECTORS.md.
