@@ -346,6 +346,17 @@ ban the proxy instead of the sender. With the key set, the listener attributes
 a delivery to the rightmost `X-Forwarded-For` entry, which is the one the
 proxy itself appended.
 
+Requests naming a connector or account that does not exist count toward that
+same failure budget, because resolving a hook target reads and parses the
+connector manifest and the accounts file, and an unauthenticated probe must not
+get that work for free. One consequence is worth knowing before you see it: on a
+shared budget (no `trusted_proxies`), roughly ten unknown-pair probes inside a
+minute can make the subscription handshake return 401 for every sender until the
+window rolls. Signed deliveries are unaffected and are never refused by the
+budget, so no events are lost; a provider re-verifying a webhook during that
+window would simply need to retry. Setting `trusted_proxies` gives each sender
+its own budget and removes the interaction entirely.
+
 ```yaml
 server:
   trusted_proxies: ["127.0.0.1"]
@@ -385,6 +396,18 @@ retry for a limited window and then give up. apb cannot change that: it has
 no way to ask for a redelivery, and nothing buffers on its behalf while the
 machine is asleep, the tunnel is down, or the service is restarting. If the
 events matter, run the listener somewhere that stays up.
+
+**Duplicate suppression is bounded, in two ways worth knowing.** A redelivery is
+recognized by a rolling per-account index of recently seen provider ids, evicted
+by age against a 24 hour window with a 10000-entry size cap behind it. On a busy
+account the size cap binds first: at the 600-per-minute accept cap the index
+turns over in roughly 17 minutes, so the real window there is minutes rather than
+a day. And on the first start after an upgrade, index entries written by an older
+build are dropped because they carry no timestamp, so each account has a one-time
+window in which a redelivery could be stored twice until the index refills. Both
+are self-correcting and neither weakens signature verification, which is what
+authenticates a delivery; they matter only if a playbook treats a repeated inbox
+event as an instruction to act twice.
 
 ## Notes and limits
 
