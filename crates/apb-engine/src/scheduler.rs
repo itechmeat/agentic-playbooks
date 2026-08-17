@@ -137,11 +137,15 @@ fn stop_on_unhandled_failure(
     frontier: &mut Vec<String>,
 ) -> Result<RunStatus, EngineError> {
     for pending in std::mem::take(frontier) {
+        log.append(EventPayload::NodeStarted {
+            node: pending.clone(),
+            attempt: 1,
+        })?;
         log.append(EventPayload::NodeFinished {
             node: pending,
             status: "cancelled".into(),
             attempt: 1,
-            output: String::new(),
+            output: "cancelled".into(),
             artifacts: Vec::new(),
         })?;
     }
@@ -831,22 +835,33 @@ fn drive_inner(
                     // skip when its own any-join is ready) would be
                     // finer-grained than the kill itself, which stops every
                     // running member regardless of which join it feeds; one
-                    // rule for both is the point. Unchanged by Task 9: no
-                    // `NodeStarted`, empty output - the two other cancelled
-                    // shapes in this file (`advance_frontier`'s join:any
-                    // sibling cancel and `stop_on_unhandled_failure`'s frontier
-                    // cancel, both for nodes that never entered a batch at
-                    // all) are left alone the same way.
+                    // rule for both is the point. Same paired shape as the
+                    // `run_cancel` branch above: a `NodeStarted` immediately
+                    // before the cancelled `NodeFinished`, output
+                    // `"cancelled"` in both the event and the batch result.
+                    // The other two cancelled write-offs in this file
+                    // (`advance_frontier`'s join:any sibling cancel in
+                    // `node.rs` and `stop_on_unhandled_failure`'s frontier
+                    // cancel below) use the same shape now, for the same
+                    // paired-start consumers.
                     if cancel_now {
                         for n in chunk {
+                            log.append(EventPayload::NodeStarted {
+                                node: n.clone(),
+                                attempt: 1,
+                            })?;
                             log.append(EventPayload::NodeFinished {
                                 node: n.clone(),
                                 status: NodeStatus::Cancelled.as_str().into(),
                                 attempt: 1,
-                                output: String::new(),
+                                output: "cancelled".into(),
                                 artifacts: Vec::new(),
                             })?;
-                            batch_results.push((n.clone(), NodeStatus::Cancelled, String::new()));
+                            batch_results.push((
+                                n.clone(),
+                                NodeStatus::Cancelled,
+                                "cancelled".into(),
+                            ));
                         }
                         continue;
                     }

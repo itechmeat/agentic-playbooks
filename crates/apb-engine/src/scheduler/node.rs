@@ -2598,11 +2598,15 @@ pub(crate) fn advance_frontier(
                 // taken whole, so anything not re-pushed here is simply lost.
                 true => frontier.push(other),
                 false => {
+                    log.append(EventPayload::NodeStarted {
+                        node: other.clone(),
+                        attempt: 1,
+                    })?;
                     log.append(EventPayload::NodeFinished {
                         node: other.clone(),
                         status: "cancelled".into(),
                         attempt: 1,
-                        output: String::new(),
+                        output: "cancelled".into(),
                         artifacts: Vec::new(),
                     })?;
                     raced_out.push(other);

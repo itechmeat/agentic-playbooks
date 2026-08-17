@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use apb_core::registry::init_project;
 use apb_engine::control::{Control, read_control_after, read_control_cursor};
 use apb_engine::error::EngineError;
-use apb_engine::event::{EventLog, EventPayload, read_all};
+use apb_engine::event::{Event, EventLog, EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, RunResult, post_supervisor_command, resume, run};
 use apb_engine::state::{RunState, RunStatus};
 use apb_engine::stop::{StopOutcome, stop_run};
@@ -541,6 +541,45 @@ fn seed_single_chunk(root: &Path) {
     fs::write(scripts.join("hold.sh"), hold_script(root)).unwrap();
 }
 
+/// A fan-out into a `join: any` merge, capped so the losing branch is queued
+/// behind an admission gate instead of started and then killed. This is the
+/// OTHER cancelled write-off site (the batch admission loop's join:any
+/// short-circuit, `scheduler.rs`'s `cancel_now` branch) - no `stop_run` is
+/// ever posted here, the run completes on its own.
+const CAPPED_ANY_BATCH: &str = r#"
+schema: 1
+id: stopany
+name: Stop Any
+version: 1.0.0
+defaults:
+  max_parallel: 2
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: c, type: script, script: "scripts/nap.sh", runner: sh }
+  - { id: m, type: prompt, prompt: "merged" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: start, to: c }
+  - { from: a, to: m, join: any }
+  - { from: b, to: m, join: any }
+  - { from: c, to: m, join: any }
+  - { from: m, to: done }
+"#;
+
+fn seed_any_batch(root: &Path) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/stopany/1.0.0");
+    let scripts = vdir.join("scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(vdir.join("playbook.yaml"), CAPPED_ANY_BATCH).unwrap();
+    fs::write(root.join(".apb/playbooks/stopany/current"), "1.0.0").unwrap();
+    fs::write(scripts.join("nap.sh"), "sleep 0.3\n").unwrap();
+}
+
 /// External review, finding 1: an abort landing while the FINAL (here: only)
 /// chunk of a batch is in flight is observed by no admission gate, because
 /// `stopped`/`halted` are set exclusively BEFORE a chunk runs. The batch tail
@@ -819,12 +858,19 @@ fn a_paused_batch_resumes_and_runs_the_deferred_members() {
     }
 }
 
-/// #77(D): one journal shape. Every cancelled member has a paired NodeStarted
-/// before its NodeFinished, and every such finish carries `output: "cancelled"`.
-/// The pairing is what `cache::verify_connector_calls`,
+/// #77(D)/#89: one journal shape. Every cancelled member has a paired
+/// NodeStarted before its NodeFinished, and every such finish carries
+/// `output: "cancelled"`. The pairing is what `cache::verify_connector_calls`,
 /// `journal::current_visit_start_seq`, `progress::node_durations_seconds` and
 /// the interactive re-entry guard all assume; the single output text is what a
-/// `{{nodes.<id>.output}}` read renders on both paths.
+/// `{{nodes.<id>.output}}` read renders on every path.
+///
+/// Checked against two fixtures that hit different write-off sites: the abort
+/// path below (`run_cancel` in `scheduler.rs`'s admission loop, killing
+/// members already in flight and writing off the ones still queued) and a
+/// join:any batch that resolves on its own with no `stop_run` posted at all
+/// (`cancel_now` in the same admission loop - a distinct site, since a batch
+/// can be write-off-cancelled without ever being aborted).
 #[cfg(unix)]
 #[test]
 fn a_cancelled_member_journals_a_paired_start_and_a_cancelled_output() {
@@ -846,6 +892,17 @@ fn a_cancelled_member_journals_a_paired_start_and_a_cancelled_output() {
         .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
 
     let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
+    assert_paired_cancelled_shape(&events, "the abort fixture");
+
+    let any_dir = tempfile::tempdir().unwrap();
+    seed_any_batch(any_dir.path());
+    let res = run(any_dir.path(), "stopany", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let any_events = read_all(&any_dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_paired_cancelled_shape(&any_events, "the join:any fixture");
+}
+
+fn assert_paired_cancelled_shape(events: &[Event], fixture: &str) {
     let cancelled: Vec<(usize, String, String)> = events
         .iter()
         .enumerate()
@@ -861,7 +918,7 @@ fn a_cancelled_member_journals_a_paired_start_and_a_cancelled_output() {
         .collect();
     assert!(
         !cancelled.is_empty(),
-        "the abort fixture must produce at least one cancelled member"
+        "{fixture} must produce at least one cancelled member"
     );
     for (at, node, output) in cancelled {
         assert!(
@@ -869,11 +926,11 @@ fn a_cancelled_member_journals_a_paired_start_and_a_cancelled_output() {
                 &e.payload,
                 EventPayload::NodeStarted { node: n, .. } if *n == node
             )),
-            "cancelled member {node} has no preceding NodeStarted"
+            "{fixture}: cancelled member {node} has no preceding NodeStarted"
         );
         assert_eq!(
             output, "cancelled",
-            "both cancel paths must render the same output text for {node}"
+            "{fixture}: both cancel paths must render the same output text for {node}"
         );
     }
 }
