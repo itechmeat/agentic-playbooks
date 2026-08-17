@@ -28,7 +28,7 @@ use std::time::{Duration, Instant};
 use apb_core::registry::init_project;
 use apb_engine::control::{Control, read_control_after, read_control_cursor};
 use apb_engine::error::EngineError;
-use apb_engine::event::{Event, EventLog, EventPayload, read_all};
+use apb_engine::event::{EventLog, EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, RunResult, post_supervisor_command, resume, run};
 use apb_engine::state::{RunState, RunStatus};
 use apb_engine::stop::{StopOutcome, stop_run};
@@ -892,47 +892,14 @@ fn a_cancelled_member_journals_a_paired_start_and_a_cancelled_output() {
         .unwrap_or_else(|_| panic!("the drive did not return within {ABORT_DEADLINE:?}"));
 
     let events = read_all(&dir.path().join(".apb/runs").join(&run_id)).unwrap();
-    assert_paired_cancelled_shape(&events, "the abort fixture");
+    common::assert_paired_cancelled_shape(&events, "the abort fixture");
 
     let any_dir = tempfile::tempdir().unwrap();
     seed_any_batch(any_dir.path());
     let res = run(any_dir.path(), "stopany", None, RunOptions::default()).unwrap();
     assert_eq!(res.outcome, RunStatus::Succeeded);
     let any_events = read_all(&any_dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
-    assert_paired_cancelled_shape(&any_events, "the join:any fixture");
-}
-
-fn assert_paired_cancelled_shape(events: &[Event], fixture: &str) {
-    let cancelled: Vec<(usize, String, String)> = events
-        .iter()
-        .enumerate()
-        .filter_map(|(i, e)| match &e.payload {
-            EventPayload::NodeFinished {
-                node,
-                status,
-                output,
-                ..
-            } if status == "cancelled" => Some((i, node.clone(), output.clone())),
-            _ => None,
-        })
-        .collect();
-    assert!(
-        !cancelled.is_empty(),
-        "{fixture} must produce at least one cancelled member"
-    );
-    for (at, node, output) in cancelled {
-        assert!(
-            events[..at].iter().any(|e| matches!(
-                &e.payload,
-                EventPayload::NodeStarted { node: n, .. } if *n == node
-            )),
-            "{fixture}: cancelled member {node} has no preceding NodeStarted"
-        );
-        assert_eq!(
-            output, "cancelled",
-            "{fixture}: both cancel paths must render the same output text for {node}"
-        );
-    }
+    common::assert_paired_cancelled_shape(&any_events, "the join:any fixture");
 }
 
 /// An unknown run id is a not-found error, not a silently created directory.

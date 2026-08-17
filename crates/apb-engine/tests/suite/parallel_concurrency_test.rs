@@ -351,8 +351,10 @@ fn max_parallel_two_admits_the_third_branch_after_the_first_chunk() {
 }
 
 // The queued half of join:any cancellation: the race is decided by the first
-// chunk, so the branch that never got a slot must not be started at all - and it
-// must not be left looking pending either.
+// chunk, so the branch that never got a slot must never be SPAWNED (its
+// process tree never runs) - but it still gets the paired write-off
+// NodeStarted/NodeFinished journal shape, so it is not left looking pending
+// either.
 const CAPPED_ANY: &str = r#"
 schema: 1
 id: capany
