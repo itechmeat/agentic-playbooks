@@ -105,16 +105,20 @@ fn prune_window<K: Eq + std::hash::Hash + Clone>(
     window_ms: u128,
 ) {
     map.retain(|_, (start, _)| now_ms.saturating_sub(*start) < window_ms);
-    // Ordering: (already over budget, count, window start). Rows past the
-    // failure budget sort last and are evicted only when nothing else is left.
-    // On count alone a flood that drives many rotated addresses to exactly the
-    // budget would tie with a blocked row, and the oldest-start tie-break would
-    // then pick the blocked one, since a blocked row always has the oldest
-    // start.
+    // Rows past the failure budget are evicted only when nothing else is left,
+    // and inside that class the freshest block goes first, so a flood of newly
+    // blocked rows cannot shed an established one. See
+    // `crate::ratelimit::eviction_key` for why the age term flips there. This
+    // limiter does keep counting past the budget (`note_failure` has no
+    // is-blocked short-circuit ahead of it), so the count term already separates
+    // a real offender here; the shared ordering covers the boundary case where a
+    // flood ties with it.
     while map.len() > MAX_RATE_LIMIT_ENTRIES {
         let Some(victim) = map
             .iter()
-            .min_by_key(|(_, (start, count))| (*count > MAX_FAILURES_PER_WINDOW, *count, *start))
+            .min_by_key(|(_, (start, count))| {
+                crate::ratelimit::eviction_key(*start, *count, MAX_FAILURES_PER_WINDOW)
+            })
             .map(|(k, _)| k.clone())
         else {
             break;
@@ -959,6 +963,38 @@ mod tests {
             map.get(&target).map(|(_, c)| *c),
             Some(MAX_FAILURES_PER_WINDOW + 1),
             "an equal-count flood must not evict the blocked row it ties with"
+        );
+    }
+
+    /// The mirror of the dashboard limiter's case: every flood row is itself
+    /// blocked and pinned at the same count as the established block, so the
+    /// blocked term and the count term both tie and only the flipped age term
+    /// separates them. This limiter keeps counting past the budget, so a real
+    /// offender here usually separates on count alone; this pins the boundary
+    /// where it does not.
+    #[test]
+    fn a_flood_of_equally_blocked_rows_does_not_evict_the_established_block() {
+        let mut map: HashMap<IpAddr, (u128, u32)> = HashMap::new();
+        let early = 1_000u128;
+        let later = early + 1;
+        let target: IpAddr = "203.0.113.7".parse().unwrap();
+        map.insert(target, (early, MAX_FAILURES_PER_WINDOW + 1));
+
+        let base: u128 = 0x2001_0db8_0000_0000_0000_0000_0000_0000;
+        for i in 0..(MAX_RATE_LIMIT_ENTRIES as u128 + 50) {
+            map.insert(
+                IpAddr::V6(Ipv6Addr::from(base + i)),
+                (later, MAX_FAILURES_PER_WINDOW + 1),
+            );
+        }
+
+        prune_window(&mut map, later, FAILURE_WINDOW_MS);
+
+        assert!(map.len() <= MAX_RATE_LIMIT_ENTRIES, "back within the cap");
+        assert_eq!(
+            map.get(&target).map(|(_, c)| *c),
+            Some(MAX_FAILURES_PER_WINDOW + 1),
+            "a flood of equally blocked rows must shed its own fresh blocks"
         );
     }
 }

@@ -188,19 +188,27 @@ impl RateLimiter {
         // map. Clearing let an address-rotating attacker overflow the map and
         // reset their own in-window block.
         //
-        // The ordering is (already-blocked, count, window start). Blocked rows
-        // sort last and are only evicted when nothing else is left: on count
-        // alone, a flood that drives 4096 rotated addresses to exactly the
-        // budget would tie with a blocked row, and the oldest-start tie-break
-        // then picks the blocked one, since a blocked row always has the oldest
-        // start. Below that, lowest count goes first (the fresh single-hit rows
-        // a flood adds), with the oldest start as the tie-break.
+        // The ordering is (already-blocked, count, age term). Blocked rows sort
+        // last and are only evicted when nothing else is left. Below that,
+        // lowest count goes first (the fresh single-hit rows a flood adds), with
+        // the oldest start as the tie-break.
+        //
+        // The age term FLIPS inside the blocked class, and that is the whole
+        // point. This limiter never calls `record_failure` once a row is
+        // blocked: `auth_middleware` and the login handler both answer 429 on
+        // `is_blocked` and return, so a blocked row is pinned at exactly
+        // MAX_FAILURES_PER_WINDOW + 1 forever. Every blocked row therefore ties
+        // on both leading terms, and an oldest-first tie-break would evict the
+        // established block, which is always the oldest, letting an attacker
+        // clear their own block by flooding rotated addresses to the same count.
+        // Within the blocked class the FRESHEST block is evicted first instead,
+        // so the established one survives a flood of newly blocked rows.
         while self.windows.len() > MAX_RATE_LIMIT_ENTRIES {
             let Some(victim) = self
                 .windows
                 .iter()
                 .min_by_key(|(_, (start, count))| {
-                    (*count > MAX_FAILURES_PER_WINDOW, *count, *start)
+                    crate::ratelimit::eviction_key(*start, *count, MAX_FAILURES_PER_WINDOW)
                 })
                 .map(|(k, _)| *k)
             else {
@@ -1039,6 +1047,27 @@ mod tests {
         );
     }
 
+    /// Issues a key whose id is not an all-digit string, revoking and retrying
+    /// until it gets one.
+    ///
+    /// A `KeyRecord` serializes to a fixed-width record, which is what makes a
+    /// revoke-then-issue reproduce the same file length. The one exception is
+    /// the id: it is the first 8 hex chars of the hash, and when those happen to
+    /// be all digits the YAML writer quotes the value to preserve its string
+    /// type, adding two bytes. Two keys that disagree on that make the file
+    /// lengths differ for a reason that has nothing to do with what these tests
+    /// are about, so the ids are pinned to the unquoted form instead of the
+    /// same-length precondition being left to a coin flip.
+    fn issue_unquoted_id(path: &std::path::Path) -> (String, apb_core::server_auth::KeyRecord) {
+        loop {
+            let (key, record) = server_auth::issue_into(path).unwrap();
+            if !record.id.bytes().all(|b| b.is_ascii_digit()) {
+                return (key, record);
+            }
+            server_auth::revoke_in(path, &record.id).unwrap();
+        }
+    }
+
     /// A same-length content change inside the same mtime tick is exactly
     /// what `(mtime, len)` alone cannot see: `KeyRecord` serializes to a
     /// fixed-width record, so a revoke immediately followed by an issue - the
@@ -1051,7 +1080,7 @@ mod tests {
     fn a_same_length_change_within_one_mtime_tick_is_still_caught_by_the_forced_reload() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("server-auth.yaml");
-        let (key_a, record_a) = server_auth::issue_into(&path).unwrap();
+        let (key_a, record_a) = issue_unquoted_id(&path);
         let file = server_auth::load_from(&path).unwrap();
         let auth = AuthState::new(
             Some(path.clone()),
@@ -1064,7 +1093,7 @@ mod tests {
         let original_len = std::fs::metadata(&path).unwrap().len();
 
         server_auth::revoke_in(&path, &record_a.id).unwrap();
-        let (key_b, _record_b) = server_auth::issue_into(&path).unwrap();
+        let (key_b, _record_b) = issue_unquoted_id(&path);
         assert_eq!(
             std::fs::metadata(&path).unwrap().len(),
             original_len,
@@ -1166,6 +1195,54 @@ mod tests {
         assert!(
             limiter.is_blocked(target, later),
             "an equal-count flood must not evict the blocked row it ties with"
+        );
+    }
+
+    /// The case the previous test just missed, and the one that actually
+    /// mattered. This limiter stops counting the moment a row crosses the
+    /// budget: `auth_middleware` and the login handler both answer 429 on
+    /// `is_blocked` and return without recording. Every blocked row is therefore
+    /// pinned at exactly MAX_FAILURES_PER_WINDOW + 1, so a flood driven one step
+    /// FURTHER than the previous test (to blocked, not merely to the budget)
+    /// ties with the victim on both the blocked term and the count term. Only
+    /// the flipped age term inside the blocked class separates them.
+    #[test]
+    fn a_flood_of_equally_blocked_rows_does_not_evict_the_established_block() {
+        let mut limiter = RateLimiter::default();
+        let target: IpAddr = "203.0.113.7".parse().unwrap();
+        let early = 1_000u128;
+        let later = early + 1;
+
+        // Built directly rather than through `record_failure`, so every row is
+        // already at the pinned blocked count when the eviction runs. Driving
+        // them up one call at a time would let each in-progress row be evicted
+        // as the lowest-count entry before it ever reached the threshold, which
+        // is correct behavior but would exercise a different case than the tie
+        // this test is about.
+        //
+        // The target is the oldest row in the map: the exact one an
+        // oldest-first tie-break would have picked.
+        limiter
+            .windows
+            .insert(target, (early, MAX_FAILURES_PER_WINDOW + 1));
+        let base: u128 = 0x2001_0db8_0000_0000_0000_0000_0000_0000;
+        for i in 0..(MAX_RATE_LIMIT_ENTRIES as u128 + 50) {
+            limiter.windows.insert(
+                IpAddr::V6(std::net::Ipv6Addr::from(base + i)),
+                (later, MAX_FAILURES_PER_WINDOW + 1),
+            );
+        }
+
+        limiter.prune(later);
+
+        assert!(
+            limiter.windows.len() <= MAX_RATE_LIMIT_ENTRIES,
+            "back within the cap"
+        );
+        assert!(
+            limiter.is_blocked(target, later),
+            "a flood of equally blocked rows must shed its own fresh blocks, \
+             never the established one"
         );
     }
 }

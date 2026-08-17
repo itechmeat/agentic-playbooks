@@ -16,6 +16,7 @@ pub mod auth;
 mod httpserve;
 pub mod ingest;
 pub mod lock;
+mod ratelimit;
 pub mod routes;
 pub mod state;
 pub mod watch;
