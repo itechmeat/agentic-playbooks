@@ -120,51 +120,203 @@ fn a_duplicate_provider_id_is_not_appended() {
     assert_eq!(events[0].body["n"], 1, "the first delivery is the one kept");
 }
 
-/// The index rolls at its bound, asserted through `append_bounded`'s explicit
-/// window rather than at the production [`DEDUPE_WINDOW`].
+/// Dedupe retention is time-based, not count-based: an id stays deduped for
+/// the whole age window regardless of how many distinct deliveries follow it,
+/// and is evicted only once the window has passed. The old count window forgot
+/// an id after a fixed number of later deliveries, reopening a replay gap.
 ///
-/// Each append rewrites the whole index, so the loop is quadratic in the
-/// window: at 10 000 this one test took over a minute and accounted for most
-/// of the crate's suite. The behavior under test is the drain arithmetic,
-/// which does not care what the number is, so the window is a parameter and
-/// the production value is asserted separately (below) to be the one the
-/// production entry point passes.
+/// `append_bounded` makes the window, the size cap and the wall clock explicit
+/// so this drives eviction deterministically rather than sleeping.
 #[test]
-fn the_dedupe_index_is_bounded() {
-    use apb_core::connector::inbox::DEDUPE_WINDOW;
-    const WINDOW: usize = 32;
-    let dir = tempfile::tempdir().unwrap();
-    let box_ = inbox(&dir);
-    // A generous retention keeps every event, so only the index rolls.
+fn dedupe_is_time_based_and_survives_a_flood_within_the_window() {
+    const WINDOW_MS: u64 = 10_000;
+    const CAP: usize = 10_000;
     let keep = Retention {
         max_bytes: 64 * 1024 * 1024,
         max_age_ms: u64::MAX,
     };
-    for i in 0..(WINDOW + 5) {
-        box_.append_bounded(&format!("m{i}"), &json!({"i": i}), &keep, WINDOW)
-            .unwrap();
-    }
-    let raw = std::fs::read_to_string(box_.dir().join("dedupe.idx")).unwrap();
-    let lines = raw.lines().filter(|l| !l.trim().is_empty()).count();
-    assert_eq!(lines, WINDOW, "the index holds the last {WINDOW}");
-    assert!(!raw.contains("m0\n"), "the oldest ids rolled out");
-    assert!(raw.contains("m36\n"), "and the newest ones stayed");
+    let dir = tempfile::tempdir().unwrap();
+    let box_ = inbox(&dir);
+    let t0 = 1_000_000u64;
 
-    // The production window is far above anything this test writes, so an
-    // ordinary `append` never rolls here: the parameterization is a test seam,
-    // not a behavior change.
-    const _: () = assert!(DEDUPE_WINDOW > WINDOW * 100);
-    let fresh = tempfile::tempdir().unwrap();
-    let plain = inbox(&fresh);
-    for i in 0..(WINDOW + 5) {
-        plain.append(&format!("m{i}"), &json!({"i": i})).unwrap();
+    // Record "keep" at t0, then 500 distinct deliveries within the window.
+    box_.append_bounded("keep", &json!({"k": 0}), &keep, WINDOW_MS, CAP, t0)
+        .unwrap();
+    for i in 0..500u64 {
+        box_.append_bounded(
+            &format!("m{i}"),
+            &json!({"i": i}),
+            &keep,
+            WINDOW_MS,
+            CAP,
+            t0 + 1 + i,
+        )
+        .unwrap();
     }
-    let raw = std::fs::read_to_string(plain.dir().join("dedupe.idx")).unwrap();
+
+    // Still deduped inside the window, no matter how many followed it (a
+    // count-based window would have rolled it out already).
+    assert!(
+        box_.is_duplicate("keep").unwrap(),
+        "an id seen now is still deduped after many later distinct deliveries"
+    );
+    assert_eq!(
+        box_.append_bounded("keep", &json!({"k": 1}), &keep, WINDOW_MS, CAP, t0 + 900)
+            .unwrap(),
+        Appended::Duplicate,
+        "a redelivery inside the window is refused"
+    );
+
+    // One append past the age window prunes it; only then is it forgotten.
+    box_.append_bounded(
+        "tick",
+        &json!({}),
+        &keep,
+        WINDOW_MS,
+        CAP,
+        t0 + WINDOW_MS + 1,
+    )
+    .unwrap();
+    assert!(
+        !box_.is_duplicate("keep").unwrap(),
+        "evicted only after the age window passes"
+    );
+    assert!(
+        matches!(
+            box_.append_bounded(
+                "keep",
+                &json!({"k": 2}),
+                &keep,
+                WINDOW_MS,
+                CAP,
+                t0 + WINDOW_MS + 2
+            )
+            .unwrap(),
+            Appended::Stored(_)
+        ),
+        "a genuinely fresh delivery past the window is accepted again"
+    );
+}
+
+/// The size cap is a safety valve independent of age: with an effectively
+/// infinite window the index still rolls at the cap, oldest first. And every
+/// stored id is a fixed-size hex digest, never the raw provider id.
+#[test]
+fn the_dedupe_index_size_cap_rolls_and_stores_only_digests() {
+    const CAP: usize = 32;
+    const NO_AGE_EVICTION: u64 = u64::MAX;
+    let keep = Retention {
+        max_bytes: 64 * 1024 * 1024,
+        max_age_ms: u64::MAX,
+    };
+    let dir = tempfile::tempdir().unwrap();
+    let box_ = inbox(&dir);
+    for i in 0..(CAP + 5) {
+        box_.append_bounded(
+            &format!("m{i}"),
+            &json!({"i": i}),
+            &keep,
+            NO_AGE_EVICTION,
+            CAP,
+            1000 + i as u64,
+        )
+        .unwrap();
+    }
+
+    let raw = std::fs::read_to_string(box_.dir().join("dedupe.idx")).unwrap();
+    let lines: Vec<&str> = raw.lines().filter(|l| !l.trim().is_empty()).collect();
+    assert_eq!(lines.len(), CAP, "the index holds the last {CAP}");
+    assert!(
+        !box_.is_duplicate("m0").unwrap(),
+        "the oldest id rolled out"
+    );
+    assert!(
+        box_.is_duplicate(&format!("m{}", CAP + 4)).unwrap(),
+        "the newest id stayed"
+    );
+    for line in &lines {
+        let (ts, id) = line.split_once(' ').expect("`<ts> <digest>` per line");
+        assert!(ts.parse::<u64>().is_ok(), "a timestamp column: {ts}");
+        let hex = id
+            .strip_prefix("sha256:")
+            .unwrap_or_else(|| panic!("stored id is a sha256 digest, not a raw provider id: {id}"));
+        assert_eq!(hex.len(), 64, "fixed-size hex digest: {id}");
+        assert!(
+            hex.bytes().all(|b| b.is_ascii_hexdigit()),
+            "digest body is hex: {id}"
+        );
+    }
+}
+
+/// A provider id may contain a newline or be arbitrarily long: hashing it to a
+/// fixed-size digest before it reaches the newline-delimited index keeps the
+/// index uncorrupted and each append's rewrite bounded, while still deduping.
+#[test]
+fn dedupe_hashes_ids_so_a_newline_or_a_huge_id_is_safe() {
+    let dir = tempfile::tempdir().unwrap();
+    let box_ = inbox(&dir);
+
+    // An embedded newline neither corrupts the index nor defeats dedupe.
+    let nl_id = "abc\ndef";
+    assert!(matches!(
+        box_.append(nl_id, &json!({"n": 1})).unwrap(),
+        Appended::Stored(_)
+    ));
+    assert_eq!(
+        box_.append(nl_id, &json!({"n": 2})).unwrap(),
+        Appended::Duplicate,
+        "an id with a newline still dedupes"
+    );
+    let raw = std::fs::read_to_string(box_.dir().join("dedupe.idx")).unwrap();
     assert_eq!(
         raw.lines().filter(|l| !l.trim().is_empty()).count(),
-        WINDOW + 5,
-        "the default entry point keeps everything below its own bound"
+        1,
+        "the embedded newline did not add a phantom index line"
     );
+
+    // Two distinct long ids do not collide.
+    let a = "x".repeat(200_000);
+    let b = format!("{}y", "x".repeat(199_999));
+    assert!(matches!(
+        box_.append(&a, &json!({})).unwrap(),
+        Appended::Stored(_)
+    ));
+    assert!(
+        matches!(box_.append(&b, &json!({})).unwrap(), Appended::Stored(_)),
+        "a different long id is not treated as a duplicate"
+    );
+    assert_eq!(
+        box_.append(&a, &json!({})).unwrap(),
+        Appended::Duplicate,
+        "the first long id is still recognized"
+    );
+}
+
+/// An ack for a seq beyond the current head is clamped, never persisted above
+/// the head, so events that arrive later through that seq stay pending instead
+/// of being silently swallowed.
+#[test]
+fn ack_beyond_head_does_not_swallow_future_events() {
+    let dir = tempfile::tempdir().unwrap();
+    let box_ = inbox(&dir);
+    for i in 1..=3u32 {
+        box_.append(&format!("m{i}"), &json!({"i": i})).unwrap();
+    }
+    assert_eq!(
+        box_.ack("worker", 100).unwrap(),
+        3,
+        "ack clamps to the head rather than persisting a cursor above it"
+    );
+    box_.append("m4", &json!({"i": 4})).unwrap();
+    box_.append("m5", &json!({"i": 5})).unwrap();
+    let (pending, cursor) = box_.read("worker", 100).unwrap();
+    assert_eq!(cursor, 3);
+    assert_eq!(
+        pending.iter().map(|e| e.seq).collect::<Vec<_>>(),
+        vec![4, 5],
+        "events after the clamped ack are still delivered, not skipped"
+    );
+    assert_eq!(box_.depth("worker").unwrap().pending, 2);
 }
 
 #[test]
@@ -279,16 +431,14 @@ fn retention_never_empties_the_log_even_when_every_event_is_acked_and_expired() 
         box_.append_with(&format!("m{i}"), &json!({"i": i}), &keep)
             .unwrap();
     }
-    // `ack` takes any seq with no upper bound check, so a stale or
-    // optimistic ack can reach past every event that exists yet. That is
-    // exactly the shape that must not be allowed to wipe the log: the
-    // cursor here already covers the event this test is about to append.
-    let cursor_before = box_.ack("worker", 100).unwrap();
-    assert_eq!(cursor_before, 100);
+    // Ack the whole log up to its head. The cursor now covers every event
+    // that exists.
+    let cursor_before = box_.ack("worker", 3).unwrap();
+    assert_eq!(cursor_before, 3);
 
-    // (a) A zero-length age window makes every existing event, and even the
-    // one this very append creates, read as acked and expired. Retention
-    // must still keep the newest event rather than emptying events.jsonl.
+    // (a) A zero-length age window makes every event that predates this append
+    // read as acked and expired. Retention must still keep the newest event
+    // rather than emptying events.jsonl.
     let age_only = Retention {
         max_bytes: 64 * 1024 * 1024,
         max_age_ms: 0,
@@ -298,13 +448,11 @@ fn retention_never_empties_the_log_even_when_every_event_is_acked_and_expired() 
     assert_eq!(
         events.iter().map(|e| e.seq).collect::<Vec<_>>(),
         vec![4],
-        "the newest event survives even fully acked and expired"
+        "the newest event survives even after everything before it was acked and expired"
     );
 
     // (b) seq keeps counting up from the survivor: it does not restart at 1
-    // because the log was never actually emptied. Depth stays consistent
-    // with the pre-retention cursor even though that cursor now sits above
-    // every live seq.
+    // because the log was never actually emptied.
     assert_eq!(
         box_.append("m5", &json!({"i": 5})).unwrap(),
         Appended::Stored(5),
@@ -312,13 +460,13 @@ fn retention_never_empties_the_log_even_when_every_event_is_acked_and_expired() 
     );
     let depth = box_.depth("worker").unwrap();
     assert_eq!(
-        depth.cursor, 100,
-        "depth reports the pre-retention cursor as-is"
+        depth.cursor, 3,
+        "the cursor is where the clamped ack left it"
     );
     assert_eq!(depth.total, 2, "seqs 4 and 5 survive");
     assert_eq!(
-        depth.pending, 0,
-        "pending never goes negative even though the cursor exceeds every live seq"
+        depth.pending, 2,
+        "the cursor sits below the surviving range, so both survivors are pending"
     );
 }
 

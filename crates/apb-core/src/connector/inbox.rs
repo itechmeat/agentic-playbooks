@@ -8,7 +8,13 @@
 //!
 //! Three files per account, all 0600:
 //!   * `events.jsonl` - one `InboxEvent` per line, ordered by `seq`.
-//!   * `dedupe.idx`   - the last `DEDUPE_WINDOW` provider ids, one per line.
+//!   * `dedupe.idx`   - recently seen provider ids, time-indexed, one
+//!     `<received_at_ms> <digest_hex>` per line. The id is stored as a
+//!     fixed-size SHA-256 digest, never raw, so a provider-controlled scalar
+//!     can carry neither a newline (which would corrupt this newline-delimited
+//!     file) nor an unbounded length (which would make every append rewrite
+//!     megabytes). Entries are evicted by age against [`DEDUPE_RETENTION_MS`],
+//!     with [`DEDUPE_MAX_ENTRIES`] as a size safety cap.
 //!   * `cursors.yaml` - `consumer -> last acked seq`.
 //!
 //! Every mutation happens under `fsutil::lock_dir` on the account directory
@@ -48,10 +54,22 @@ pub const CURSORS_FILE: &str = "cursors.yaml";
 pub const DROPPED_FILE: &str = "dropped.count";
 /// Lock file serializing every read-modify-write on one account directory.
 const INBOX_LOCK: &str = "inbox.lock";
-/// How many recently seen provider ids the dedupe index keeps. Large enough
-/// to cover a provider's retry window, small enough to stay a cheap linear
-/// scan of a file that is a few hundred kilobytes at worst.
-pub const DEDUPE_WINDOW: usize = 10_000;
+/// How long a provider id stays in the dedupe index. Retention is time-based,
+/// not count-based: the old count window forgot an id after a fixed number of
+/// later deliveries with no time bound, so a captured signed delivery could be
+/// replayed once enough traffic had rolled it out. Sized to comfortably cover
+/// a provider's retry-and-signature-validity horizon (Meta retries a webhook
+/// for hours), so a replay inside that horizon is still recognized as a
+/// duplicate and refused.
+pub const DEDUPE_RETENTION_MS: u64 = 24 * 60 * 60 * 1000;
+/// Size safety cap on dedupe-index entries, independent of age: it bounds the
+/// file and the per-append rewrite even under a delivery flood that stays
+/// inside [`DEDUPE_RETENTION_MS`]. Age is the primary eviction; this only
+/// caps pathological volume, keeping the file a cheap linear scan and each
+/// append's rewrite bounded. An account whose real traffic exceeds this in a
+/// day sheds its oldest digests early, shortening their replay window rather
+/// than growing the file without bound.
+pub const DEDUPE_MAX_ENTRIES: usize = 10_000;
 
 /// One stored delivery. `body` is the payload exactly as parsed from the
 /// request; `provider_id` is the dedupe identity the connector's webhook
@@ -203,9 +221,12 @@ impl Inbox {
     /// can decide something *before* the append without changing what gets
     /// stored - the ingest listener uses it to keep a provider's retry storm
     /// on one message from spending the per-account accept budget that new
-    /// deliveries need.
+    /// deliveries need. The comparison is against the stored digest, so the
+    /// caller passes the raw provider id and this hashes it the same way the
+    /// authoritative append does.
     pub fn is_duplicate(&self, provider_id: &str) -> Result<bool, InboxError> {
-        Ok(self.read_dedupe()?.iter().any(|id| id == provider_id))
+        let key = dedupe_key(provider_id);
+        Ok(self.read_dedupe()?.iter().any(|e| e.id == key))
     }
 
     /// Appends one delivery, then enforces `retention`. Everything happens
@@ -218,33 +239,54 @@ impl Inbox {
         body: &Value,
         retention: &Retention,
     ) -> Result<Appended, InboxError> {
-        self.append_bounded(provider_id, body, retention, DEDUPE_WINDOW)
+        self.append_bounded(
+            provider_id,
+            body,
+            retention,
+            DEDUPE_RETENTION_MS,
+            DEDUPE_MAX_ENTRIES,
+            crate::clock::now_ms_u64(),
+        )
     }
 
-    /// `append_with` with an explicit dedupe-index bound, the way `retention`
-    /// is already explicit. Production always passes [`DEDUPE_WINDOW`]; the
-    /// seam exists so a test can prove the index rolls at its bound without
-    /// writing ten thousand events (that test is quadratic in the bound, and
-    /// at the real value it dominated the whole crate's suite).
+    /// `append_with` with the dedupe age window, size cap and wall-clock `now`
+    /// all made explicit, the way `retention` already is. Production passes
+    /// [`DEDUPE_RETENTION_MS`], [`DEDUPE_MAX_ENTRIES`] and the real clock; the
+    /// seam exists so a test can drive the time-based eviction deterministically
+    /// and prove the size cap rolls without writing ten thousand events.
+    ///
+    /// `now` stamps both the stored event's `received_at` and the dedupe entry,
+    /// so a duplicate is judged against the same clock the entry was recorded
+    /// with.
+    #[allow(clippy::too_many_arguments)]
     pub fn append_bounded(
         &self,
         provider_id: &str,
         body: &Value,
         retention: &Retention,
-        dedupe_window: usize,
+        dedupe_retention_ms: u64,
+        dedupe_max_entries: usize,
+        now: u64,
     ) -> Result<Appended, InboxError> {
         std::fs::create_dir_all(&self.dir).map_err(|e| self.io(&e))?;
         let _lock = lock_dir(&self.dir, INBOX_LOCK).map_err(|e| self.io(&e))?;
 
+        let key = dedupe_key(provider_id);
         let mut seen = self.read_dedupe()?;
-        if seen.iter().any(|id| id == provider_id) {
+        // A still-live prior sighting deduplicates; an entry past the age
+        // window does not, so a genuinely fresh delivery long after the window
+        // is accepted while a replay inside it is refused.
+        if seen
+            .iter()
+            .any(|e| e.id == key && now.saturating_sub(e.at) < dedupe_retention_ms)
+        {
             return Ok(Appended::Duplicate);
         }
 
         let seq = self.last_seq()? + 1;
         let event = InboxEvent {
             seq,
-            received_at: crate::clock::now_ms_u64(),
+            received_at: now,
             provider_id: provider_id.to_string(),
             body: body.clone(),
         };
@@ -252,9 +294,11 @@ impl Inbox {
             .map_err(|e| InboxError::Corrupt(self.path_str(EVENTS_FILE), e.to_string()))?;
         self.append_line(EVENTS_FILE, &line)?;
 
-        seen.push(provider_id.to_string());
-        if seen.len() > dedupe_window {
-            let excess = seen.len() - dedupe_window;
+        seen.push(DedupeEntry { at: now, id: key });
+        // Evict by age first, then apply the size safety cap oldest-first.
+        seen.retain(|e| now.saturating_sub(e.at) < dedupe_retention_ms);
+        if seen.len() > dedupe_max_entries {
+            let excess = seen.len() - dedupe_max_entries;
             seen.drain(..excess);
         }
         self.write_dedupe(&seen)?;
@@ -282,14 +326,23 @@ impl Inbox {
     /// Moves `consumer`'s cursor to `up_to_seq`, forward only, and returns
     /// where it ended up. An ack for an older seq is a no-op rather than an
     /// error: a retried ack must be harmless.
+    ///
+    /// The target is clamped to the current head under the lock. An ack past
+    /// the last stored seq must never persist: it would silently mark every
+    /// future event through that seq as already consumed, so a caller acking
+    /// `100` against a three-event log would swallow events 4..=100 the moment
+    /// they arrive, and retention would treat them as acknowledged. Clamping to
+    /// `last_seq` keeps an optimistic or stale ack bounded by what actually
+    /// exists while staying idempotent.
     pub fn ack(&self, consumer: &str, up_to_seq: u64) -> Result<u64, InboxError> {
         check_consumer(consumer)?;
         std::fs::create_dir_all(&self.dir).map_err(|e| self.io(&e))?;
         let _lock = lock_dir(&self.dir, INBOX_LOCK).map_err(|e| self.io(&e))?;
+        let target = up_to_seq.min(self.last_seq()?);
         let mut cursors = self.read_cursors()?;
         let entry = cursors.consumers.entry(consumer.to_string()).or_insert(0);
-        if up_to_seq > *entry {
-            *entry = up_to_seq;
+        if target > *entry {
+            *entry = target;
         }
         let moved = *entry;
         self.write_cursors(&cursors)?;
@@ -504,23 +557,27 @@ impl Inbox {
         atomic_write_private(&path, body.as_bytes()).map_err(|e| self.io(&e))
     }
 
-    fn read_dedupe(&self) -> Result<Vec<String>, InboxError> {
+    /// The dedupe index, oldest first. Each line is `<received_at_ms>
+    /// <digest_hex>`. A line that does not parse is skipped rather than
+    /// treated as corruption: the index is an advisory, self-healing
+    /// optimization (a lost entry only risks re-accepting one delivery), and
+    /// this also lets an older count-based `dedupe.idx` be superseded in place
+    /// without a migration step.
+    fn read_dedupe(&self) -> Result<Vec<DedupeEntry>, InboxError> {
         let path = self.dir.join(DEDUPE_FILE);
         match std::fs::read_to_string(&path) {
-            Ok(raw) => Ok(raw
-                .lines()
-                .filter(|l| !l.trim().is_empty())
-                .map(str::to_string)
-                .collect()),
+            Ok(raw) => Ok(raw.lines().filter_map(DedupeEntry::parse).collect()),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(Vec::new()),
             Err(e) => Err(self.io(&e)),
         }
     }
 
-    fn write_dedupe(&self, ids: &[String]) -> Result<(), InboxError> {
+    fn write_dedupe(&self, entries: &[DedupeEntry]) -> Result<(), InboxError> {
         let mut body = String::new();
-        for id in ids {
-            body.push_str(id);
+        for entry in entries {
+            body.push_str(&entry.at.to_string());
+            body.push(' ');
+            body.push_str(&entry.id);
             body.push('\n');
         }
         atomic_write_private(&self.dir.join(DEDUPE_FILE), body.as_bytes()).map_err(|e| self.io(&e))
@@ -618,6 +675,45 @@ impl Inbox {
     fn io(&self, e: &std::io::Error) -> InboxError {
         InboxError::Io(self.dir.display().to_string(), e.to_string())
     }
+}
+
+/// One dedupe-index entry: when the id was recorded (ms since epoch) and the
+/// id's fixed-size digest. The digest, never the raw id, is what the index
+/// stores and compares, so a provider-controlled scalar carries no structure
+/// (a newline, a huge length) into this newline-delimited file.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct DedupeEntry {
+    at: u64,
+    id: String,
+}
+
+impl DedupeEntry {
+    /// Parses one `<received_at_ms> <digest_hex>` line, or `None` if it does
+    /// not have that shape (an empty line, a malformed timestamp, or a legacy
+    /// count-based entry without a timestamp column).
+    fn parse(line: &str) -> Option<DedupeEntry> {
+        let line = line.trim();
+        if line.is_empty() {
+            return None;
+        }
+        let (at, id) = line.split_once(' ')?;
+        let at = at.parse::<u64>().ok()?;
+        if id.is_empty() {
+            return None;
+        }
+        Some(DedupeEntry {
+            at,
+            id: id.to_string(),
+        })
+    }
+}
+
+/// The stored dedupe identity of a provider id: its SHA-256 as lowercase hex.
+/// Hashing here is what makes the dedupe index safe against a
+/// provider-controlled id of any length or byte content, and gives every
+/// entry the same fixed 64-char width.
+fn dedupe_key(provider_id: &str) -> String {
+    crate::content::sha256_hex(provider_id.as_bytes())
 }
 
 /// The serialized size of one event's line, including its newline. Used by
