@@ -8,7 +8,7 @@
 
 **Tech Stack:** Rust workspace (edition 2024), axum, serde; YAML connector manifests.
 
-**Spec:** `docs/superpowers/specs/2026-08-17-field-reports-batch-recon.md` — the recon report. Every task below cites its section by item number (e.g. "recon 102.6"). The recon carries the verified file:line anchors, the fix shapes, and the adopted product decisions (its "product decision" table's proposed defaults are all adopted as-is). Implementers MUST read their cited recon section before coding.
+**Spec:** `docs/superpowers/specs/2026-08-17-field-reports-batch-recon.md` - the recon report. Every task below cites its section by item number (e.g. "recon 102.6"). The recon carries the verified file:line anchors, the fix shapes, and the adopted product decisions (its "product decision" table's proposed defaults are all adopted as-is). Implementers MUST read their cited recon section before coding.
 
 ## Global Constraints
 
