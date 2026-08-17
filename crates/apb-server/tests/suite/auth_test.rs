@@ -345,6 +345,73 @@ async fn a_session_stops_authenticating_once_its_minting_key_is_revoked() {
     assert_eq!(body["error"], "auth");
 }
 
+/// A cookie session minted by a key that is then revoked via a same-length,
+/// same-mtime-tick rewrite is rejected on its next use, with no bearer traffic
+/// and no explicit reload to trigger the content-hash check. The cookie path
+/// forces that reload itself; the throttled stat-only background reload cannot
+/// see a change the pinned `(mtime, len)` hides.
+#[tokio::test]
+async fn a_cookie_session_is_rejected_after_a_same_tick_revoke() {
+    let dir = seed();
+    let keydir = tempfile::tempdir().unwrap();
+    let path = keydir.path().join("server-auth.yaml");
+    let (_key_a, record_a) = server_auth::issue_into(&path).unwrap();
+    let file = server_auth::load_from(&path).unwrap();
+    let auth =
+        Arc::new(AuthState::new(Some(path.clone()), file.keys, &ServerConfig::default()).unwrap());
+    let state = AppState::new(dir.path().to_path_buf()).with_auth(auth.clone());
+
+    let original_mtime = std::fs::metadata(&path).unwrap().modified().unwrap();
+    let original_len = std::fs::metadata(&path).unwrap().len();
+
+    // Mint a session bound to key A (as login does).
+    let token = server_auth::random_token().unwrap();
+    auth.sessions().insert(
+        server_auth::hash_hex(&token),
+        apb_core::clock::now_ms(),
+        record_a.id.clone(),
+    );
+    let cookie = format!("{SESSION_COOKIE}={token}");
+
+    let (status, _) = send(
+        &state,
+        Request::get("/api/runs")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "a fresh session authenticates");
+
+    // Revoke A and issue B: a single-key file stays the same length. Pin the
+    // mtime back so `(mtime, len)` is unchanged, the exact case the stat-only
+    // reload cannot see. Nothing here calls maybe_reload; the cookie path must
+    // catch it on its own.
+    server_auth::revoke_in(&path, &record_a.id).unwrap();
+    let (_key_b, _record_b) = server_auth::issue_into(&path).unwrap();
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().len(),
+        original_len,
+        "a single-key file stays the same length across a revoke+issue"
+    );
+    let f = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    f.set_modified(original_mtime).unwrap();
+
+    let (status, body) = send(
+        &state,
+        Request::get("/api/runs")
+            .header("cookie", &cookie)
+            .body(Body::empty())
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "the revoked key's cookie session is rejected on its next use: {body}"
+    );
+}
+
 #[tokio::test]
 async fn the_websocket_upgrade_is_gated_like_every_other_api_route() {
     let dir = seed();

@@ -259,12 +259,13 @@ struct KeySet {
 /// to a fixed-width record and a revoke immediately followed by an issue can
 /// land inside the same mtime tick at the same file length (see
 /// [`content_hash_of`]). So a bearer credential check now costs one small
-/// file read, not just a stat - bearer checks are comparatively rare next to
-/// total traffic (session cookies never take this path), so that is a few
-/// hundred bytes read per credential check, not a hot-path cost; the
-/// parse-and-swap only runs when the hash actually changed. That is what
-/// makes issuing a first key or revoking a compromised one take effect on
-/// the very next request without a restart.
+/// file read, not just a stat - a few hundred bytes read per credential
+/// check, not a hot-path cost; the parse-and-swap only runs when the hash
+/// actually changed. A session-cookie check forces the same content-hash
+/// reload for the same reason (see `evaluate`): a cookie-only workload would
+/// otherwise never notice a same-tick revoke and could keep a revoked key's
+/// sessions alive. That is what makes issuing a first key or revoking a
+/// compromised one take effect on the very next request without a restart.
 pub struct AuthState {
     /// The key file to watch. `None` in tests that do not exercise reloading
     /// and in [`AuthState::disabled`]; reload checks are then no-ops.
@@ -604,6 +605,18 @@ pub fn evaluate(auth: &AuthState, headers: &HeaderMap, now_ms: u128) -> Credenti
             sessions.touch(&hash, now_ms)
         };
         if let Some(key_id) = key_id {
+            // Force one content-hash reload before trusting the session's key.
+            // A cookie-only workload never triggers the bearer path's forced
+            // reload, and the throttled stat-only background reload cannot
+            // notice a same-length revoke+issue that lands inside one mtime tick
+            // on a coarse-mtime filesystem (see `content_hash_of`). Without this
+            // the in-memory key set could stay stale indefinitely and keep a
+            // revoked key's browser sessions alive. This costs one small file
+            // read per cookie request; the reload re-parses only when the
+            // content hash actually changed, and it evicts dead-key sessions, so
+            // a genuine revoke has already dropped this session before the
+            // re-check.
+            auth.maybe_reload(now_ms, true);
             if auth.key_id_is_live(&key_id) {
                 return Credential::Cookie;
             }
