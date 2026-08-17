@@ -112,6 +112,36 @@ pub fn list() -> Vec<ConnectorSummary> {
     out
 }
 
+/// Every connector directory name under `connectors_dir()` whose folder name
+/// is a valid slug and holds a `connector.yaml`, sorted, WITHOUT parsing the
+/// manifest. Unlike [`list`], a directory whose manifest fails to parse is
+/// still reported here, so a caller (the playbook validator) can notice an
+/// installed-but-broken connector rather than have it vanish from the listing.
+pub fn installed_names() -> Vec<String> {
+    let Some(dir) = connectors_dir() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for entry in entries.filter_map(Result::ok) {
+        if !entry.file_type().map(|t| t.is_dir()).unwrap_or(false) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().to_string();
+        if crate::profile::validate_profile_name(&name).is_err() {
+            continue;
+        }
+        if !entry.path().join("connector.yaml").is_file() {
+            continue;
+        }
+        out.push(name);
+    }
+    out.sort();
+    out
+}
+
 /// Loads one connector by name: validates the name slug, resolves and
 /// containment-checks its directory under `connectors_dir()` exactly like
 /// `skills::resolve_skill` does, reads and parses `connector.yaml`, and

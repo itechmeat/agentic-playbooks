@@ -92,6 +92,23 @@ fn check_inbox_binding(
     let Some(facts) = ctx.connectors.get(&b.name) else {
         return;
     };
+    // An installed connector whose manifest no longer loads cannot be relied
+    // on. The manifest-internal rule in `ConnectorDoc::from_yaml` rejects an
+    // inbox function that has lost its `webhook` block, which makes the whole
+    // manifest stop loading; without preserving that as a fact the connector
+    // would vanish from the map and V42 would stay silent on the very case it
+    // exists for. Flag the binding here instead.
+    if let Some(err) = &facts.load_error {
+        r.error(
+            "V42",
+            Some(node_id),
+            format!(
+                "node `{node_id}` binds connector `{}`, which is installed but its manifest no longer loads, so its inbox cannot be relied on: {err}",
+                b.name
+            ),
+        );
+        return;
+    }
     if facts.inbox_functions.is_empty() && !facts.has_webhook {
         return;
     }

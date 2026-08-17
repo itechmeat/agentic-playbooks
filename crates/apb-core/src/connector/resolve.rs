@@ -337,6 +337,14 @@ pub struct ConnectorFacts {
     /// account no provider could ever reach, which is the opposite of what
     /// the rule is for.
     pub accounts: std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    /// Set when the connector is installed on disk but its manifest no longer
+    /// loads (`ConnectorDoc::from_yaml` rejected it). The other fields are then
+    /// empty defaults: nothing could be extracted. The real case this catches
+    /// is an inbox function whose `webhook` block was removed after the
+    /// playbook was authored, which makes the manifest fail its cross-field
+    /// checks and stop loading. Without this the connector would simply vanish
+    /// from the fact map and V42 could never fire on it.
+    pub load_error: Option<String>,
 }
 
 /// Collects [`ConnectorFacts`] for every installed connector.
@@ -344,19 +352,31 @@ pub struct ConnectorFacts {
 /// Takes no project root: the only accounts it reports are the global ones,
 /// because those are the only accounts an inbound delivery can name.
 ///
-/// Best effort by design, exactly like `store::list`: a connector whose
-/// manifest or account file does not parse is skipped rather than failing
-/// the whole validation, because a broken manifest already has its own error
-/// path and V42/V43 must not become a second, confusing report of it. A
-/// caller with no connector store simply gets an empty map, which makes both
+/// Best effort by design, but a manifest that no longer loads is preserved as
+/// a fact carrying its `load_error` rather than dropped: enumeration uses
+/// [`store::installed_names`], which lists a connector directory even when its
+/// manifest fails to parse, so V42 can still fire on an installed connector
+/// that lost the `webhook` block its inbox functions need. An account file
+/// that does not parse is still skipped (its accounts simply do not appear),
+/// and a caller with no connector store gets an empty map, which makes both
 /// rules silent.
 pub fn validation_facts() -> std::collections::BTreeMap<String, ConnectorFacts> {
     use crate::connector::template::{Namespace, placeholders};
 
     let mut out = std::collections::BTreeMap::new();
-    for summary in store::list() {
-        let Ok(loaded) = store::load(&summary.name) else {
-            continue;
+    for name in store::installed_names() {
+        let loaded = match store::load(&name) {
+            Ok(loaded) => loaded,
+            Err(e) => {
+                out.insert(
+                    name.clone(),
+                    ConnectorFacts {
+                        load_error: Some(e.to_string()),
+                        ..ConnectorFacts::default()
+                    },
+                );
+                continue;
+            }
         };
         let mut webhook_secret_fields: Vec<String> = Vec::new();
         if let Some(hook) = &loaded.doc.webhook {
@@ -378,7 +398,7 @@ pub fn validation_facts() -> std::collections::BTreeMap<String, ConnectorFacts> 
             webhook_secret_fields.dedup();
         }
         let mut accounts = std::collections::BTreeMap::new();
-        if let Some(path) = config::global_config_path(&summary.name)
+        if let Some(path) = config::global_config_path(&name)
             && let Ok(raw) = std::fs::read_to_string(path)
             && let Ok(file) = serde_yaml_ng::from_str::<config::AccountsFile>(&raw)
         {
@@ -390,12 +410,13 @@ pub fn validation_facts() -> std::collections::BTreeMap<String, ConnectorFacts> 
             }
         }
         out.insert(
-            summary.name.clone(),
+            name.clone(),
             ConnectorFacts {
                 has_webhook: loaded.doc.webhook.is_some(),
                 inbox_functions: loaded.doc.inbox_functions(),
                 webhook_secret_fields,
                 accounts,
+                load_error: None,
             },
         );
     }
@@ -850,6 +871,59 @@ accounts:
         write_project_account(root.path(), "mock-tracker", "not: [valid: yaml");
 
         assert!(all_referenced_env_names(root.path()).is_empty());
+    }
+
+    #[test]
+    fn validation_facts_preserves_a_load_failure_and_v42_fires_on_it() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        let _guard = set_config_dir(cfg.path());
+
+        // Install a connector whose manifest has an inbox function but no
+        // webhook block. `ConnectorDoc::from_yaml` rejects that pairing, so the
+        // connector is installed-but-unloadable: exactly the real case V42 must
+        // catch (a webhook block removed after a playbook was authored).
+        let dir = cfg.path().join("connectors").join("brokenhook");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("connector.yaml"),
+            "name: brokenhook\nversion: 0.1.0\nfunctions:\n  - name: inbox_read\n    description: read pending\n    read_only: true\n    response_pick: [events]\n    inbox:\n      op: read\n",
+        )
+        .unwrap();
+
+        // The manifest does not load on its own.
+        assert!(store::load("brokenhook").is_err());
+
+        // But the facts still carry it, with the load error preserved rather
+        // than the connector vanishing from the map.
+        let facts = validation_facts();
+        let broken = facts
+            .get("brokenhook")
+            .expect("an unloadable connector must still appear in the facts");
+        assert!(
+            broken.load_error.is_some(),
+            "the load failure must be preserved"
+        );
+
+        // A playbook binding that connector's inbox function is flagged V42.
+        let pb = crate::schema::Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - id: a\n    type: agent_task\n    prompt: hi\n    profile: x\n    connectors: [{ name: brokenhook, functions: [inbox_read] }]\nedges: []\n",
+        )
+        .unwrap();
+        let ctx = crate::validate::ValidationContext {
+            profiles: vec!["x".into()],
+            connectors: facts,
+            ..Default::default()
+        };
+        let report = crate::validate::validate(&pb, &ctx);
+        let v42 = report
+            .issues
+            .iter()
+            .find(|i| i.code == "V42")
+            .expect("V42 must fire on the installed-but-unloadable connector");
+        assert!(v42.message.contains("brokenhook"), "names the connector");
+        assert!(!v42.message.contains('!'), "no exclamation marks");
+        assert!(!v42.message.contains('\u{2014}'), "no em-dashes");
     }
 
     #[test]

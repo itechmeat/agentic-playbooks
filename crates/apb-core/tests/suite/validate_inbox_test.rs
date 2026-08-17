@@ -50,6 +50,7 @@ fn facts(has_webhook: bool, account_fields: &[&str]) -> BTreeMap<String, Connect
             inbox_functions: vec!["inbox_read".to_string(), "inbox_ack".to_string()],
             webhook_secret_fields: vec!["app_secret".to_string(), "verify_token".to_string()],
             accounts,
+            load_error: None,
         },
     )])
 }
