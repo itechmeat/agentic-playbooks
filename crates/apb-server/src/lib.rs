@@ -13,6 +13,7 @@
 
 pub mod assets;
 pub mod auth;
+mod httpserve;
 pub mod ingest;
 pub mod lock;
 pub mod routes;
@@ -22,7 +23,7 @@ pub mod ws;
 
 use axum::Router;
 use axum::routing::{get, post, put};
-use std::net::{IpAddr, SocketAddr};
+use std::net::IpAddr;
 
 pub use state::AppState;
 
@@ -256,11 +257,12 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     // ConnectInfo carries the socket peer address into every request, which the
     // auth layer needs for rate-limit keying and for deciding whether a
     // forwarded header came from a trusted proxy.
-    let result = axum::serve(
+    let result = httpserve::serve_with_header_timeout(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        app,
+        httpserve::HEADER_READ_TIMEOUT,
+        shutdown_signal(),
     )
-    .with_graceful_shutdown(shutdown_signal())
     .await;
     // Remove the lock both on normal shutdown and after catching a signal.
     lock::remove_global_lock(&cfg)?;

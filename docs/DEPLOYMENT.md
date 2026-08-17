@@ -67,6 +67,12 @@ Use `--bind 0.0.0.0` only when the proxy lives on another machine inside a
 private network. Binding any non-loopback address with zero keys configured is
 a startup error, not a warning.
 
+A reverse proxy is mandatory for any non-loopback bind of either listener: both
+set an http1 header-read timeout so a slowloris client cannot hold a socket open
+indefinitely, but neither caps concurrent connections in-process. Connection
+limiting, request-body timeouts, and TLS belong at the proxy, which is why the
+supported topology never exposes apb directly.
+
 ```sh
 apb dashboard --no-open                 # loopback, the default
 apb dashboard --no-open --bind 0.0.0.0  # requires at least one key

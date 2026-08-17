@@ -472,10 +472,16 @@ pub async fn run_ingest_server(bind: IpAddr, port: u16) -> Result<(), std::io::E
     // client address from it and, behind a configured trusted proxy, from the
     // rightmost X-Forwarded-For entry. That address is used only for
     // rate-limit keying and for the rejection log line; no authentication
-    // decision is ever made from a header a caller controls.
-    axum::serve(
+    // decision is ever made from a header a caller controls. The shared serve
+    // helper sets an http1 header-read timeout the raw `axum::serve` lacked, so
+    // a slowloris client on a directly exposed ingest bind cannot hold sockets
+    // open forever. This listener never shuts down on its own, so it passes a
+    // pending shutdown future.
+    crate::httpserve::serve_with_header_timeout(
         listener,
-        app.into_make_service_with_connect_info::<SocketAddr>(),
+        app,
+        crate::httpserve::HEADER_READ_TIMEOUT,
+        std::future::pending::<()>(),
     )
     .await
 }
