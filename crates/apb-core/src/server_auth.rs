@@ -132,7 +132,15 @@ pub fn load_from(path: &Path) -> Result<AuthFile, AuthError> {
     }
     let raw = std::fs::read_to_string(path)
         .map_err(|e| AuthError::Io(path.display().to_string(), e.to_string()))?;
-    let parsed: AuthFile = serde_yaml_ng::from_str(&raw)
+    parse_keys(&raw, path)
+}
+
+/// Parses key-file text that a caller already read. `path` only names the file
+/// in error messages. Exposed so a caller that must read the file for its own
+/// reasons (the server's content-hash reload, which hashes the raw text) can
+/// parse the bytes it already holds instead of reading the file a second time.
+pub fn parse_keys(raw: &str, path: &Path) -> Result<AuthFile, AuthError> {
+    let parsed: AuthFile = serde_yaml_ng::from_str(raw)
         .map_err(|e| AuthError::Invalid(path.display().to_string(), e.to_string()))?;
     for k in &parsed.keys {
         if k.sha256.len() != 64 || !k.sha256.bytes().all(|b| b.is_ascii_hexdigit()) {

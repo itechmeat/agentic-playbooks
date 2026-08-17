@@ -184,16 +184,24 @@ impl RateLimiter {
     fn prune(&mut self, now_ms: u128) {
         self.windows
             .retain(|_, (start, _)| now_ms.saturating_sub(*start) < FAILURE_WINDOW_MS);
-        // Evict the least-established entries (lowest count first, oldest as the
-        // tie-break) instead of clearing the whole map. Clearing let an
-        // address-rotating attacker overflow the map and reset their own
-        // in-window block; shedding the fresh single-hit rows a flood adds keeps
-        // a blocked address blocked.
+        // Evict the least-established entries instead of clearing the whole
+        // map. Clearing let an address-rotating attacker overflow the map and
+        // reset their own in-window block.
+        //
+        // The ordering is (already-blocked, count, window start). Blocked rows
+        // sort last and are only evicted when nothing else is left: on count
+        // alone, a flood that drives 4096 rotated addresses to exactly the
+        // budget would tie with a blocked row, and the oldest-start tie-break
+        // then picks the blocked one, since a blocked row always has the oldest
+        // start. Below that, lowest count goes first (the fresh single-hit rows
+        // a flood adds), with the oldest start as the tie-break.
         while self.windows.len() > MAX_RATE_LIMIT_ENTRIES {
             let Some(victim) = self
                 .windows
                 .iter()
-                .min_by_key(|(_, (start, count))| (*count, *start))
+                .min_by_key(|(_, (start, count))| {
+                    (*count > MAX_FAILURES_PER_WINDOW, *count, *start)
+                })
                 .map(|(k, _)| *k)
             else {
                 break;
@@ -445,28 +453,47 @@ impl AuthState {
     /// just its stat. A stat alone can miss a same-length, same-tick
     /// revoke-then-issue (see [`content_hash_of`]), and that is exactly the
     /// case this path exists to catch.
+    /// All of the filesystem work (the read, the hash, the stat and the parse)
+    /// happens OUTSIDE the keys mutex; the lock is taken only to compare the
+    /// hash and swap the result in. Holding it across a synchronous read put
+    /// blocking IO on a tokio worker while every other request path contended
+    /// on that same mutex, and this path now runs for cookie-authenticated
+    /// requests and for unauthenticated login attempts too, so the contention
+    /// window was widening rather than shrinking.
     fn reload_by_content(&self, path: &std::path::Path, now_ms: u128) {
-        let mut set = self.key_set();
-        set.last_check_ms = now_ms;
         let Some(raw) = std::fs::read_to_string(path).ok() else {
             // Unreadable or missing: keep the current key set and leave the
             // stamp/hash untouched, so a transient failure here does not mask
-            // a real change once the file becomes readable again.
+            // a real change once the file becomes readable again. The throttle
+            // is still stamped, so this cannot spin.
+            self.key_set().last_check_ms = now_ms;
             return;
         };
         let hash = server_auth::hash_hex(&raw);
-        if set.content_hash.as_deref() == Some(hash.as_str()) {
-            return;
+        {
+            let mut set = self.key_set();
+            set.last_check_ms = now_ms;
+            if set.content_hash.as_deref() == Some(hash.as_str()) {
+                return;
+            }
         }
-        match apb_core::server_auth::load_from(path) {
+        // Parse the bytes already in hand rather than re-reading the file: a
+        // second read could see different content than the hash was taken over.
+        let parsed = apb_core::server_auth::parse_keys(&raw, path);
+        let stamp = stamp_of(path);
+        let mut set = self.key_set();
+        match parsed {
             Ok(file) => {
                 set.keys = file.keys;
-                set.stamp = stamp_of(path);
+                set.stamp = stamp;
                 set.content_hash = Some(hash);
             }
             Err(e) => {
+                // A malformed file keeps the previous key set, exactly as the
+                // stamp path does: an editing slip must not open the server or
+                // lock the operator out.
                 eprintln!("apb dashboard: keeping the current keys, {e}");
-                set.stamp = stamp_of(path);
+                set.stamp = stamp;
                 set.content_hash = Some(hash);
             }
         }
@@ -1105,6 +1132,40 @@ mod tests {
         assert!(
             limiter.is_blocked(target, now),
             "overflowing the cap must not reset a still-in-window blocked IP"
+        );
+    }
+
+    /// The harder case: a flood that drives every rotated address to EXACTLY
+    /// the failure budget, so count alone no longer separates them from a
+    /// blocked row. Without the blocked-last term in the eviction ordering, the
+    /// oldest-start tie-break would evict the blocked row first, since a
+    /// blocked row is always the oldest.
+    #[test]
+    fn an_equal_count_flood_still_does_not_evict_a_blocked_row() {
+        let mut limiter = RateLimiter::default();
+        let target: IpAddr = "203.0.113.7".parse().unwrap();
+        // The blocked row is recorded FIRST, so it holds the oldest window
+        // start of every row in the map.
+        let early = 1_000u128;
+        for _ in 0..=MAX_FAILURES_PER_WINDOW {
+            limiter.record_failure(target, early);
+        }
+        assert!(limiter.is_blocked(target, early));
+
+        // Every flood row reaches exactly MAX_FAILURES_PER_WINDOW: at the
+        // budget, but not over it, so none of them is blocked.
+        let later = early + 1;
+        let base: u128 = 0x2001_0db8_0000_0000_0000_0000_0000_0000;
+        for i in 0..(MAX_RATE_LIMIT_ENTRIES as u128 + 50) {
+            let ip = IpAddr::V6(std::net::Ipv6Addr::from(base + i));
+            for _ in 0..MAX_FAILURES_PER_WINDOW {
+                limiter.record_failure(ip, later);
+            }
+        }
+
+        assert!(
+            limiter.is_blocked(target, later),
+            "an equal-count flood must not evict the blocked row it ties with"
         );
     }
 }

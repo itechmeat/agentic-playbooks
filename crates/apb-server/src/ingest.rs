@@ -97,10 +97,16 @@ fn prune_window<K: Eq + std::hash::Hash + Clone>(
     window_ms: u128,
 ) {
     map.retain(|_, (start, _)| now_ms.saturating_sub(*start) < window_ms);
+    // Ordering: (already over budget, count, window start). Rows past the
+    // failure budget sort last and are evicted only when nothing else is left.
+    // On count alone a flood that drives many rotated addresses to exactly the
+    // budget would tie with a blocked row, and the oldest-start tie-break would
+    // then pick the blocked one, since a blocked row always has the oldest
+    // start.
     while map.len() > MAX_RATE_LIMIT_ENTRIES {
         let Some(victim) = map
             .iter()
-            .min_by_key(|(_, (start, count))| (*count, *start))
+            .min_by_key(|(_, (start, count))| (*count > MAX_FAILURES_PER_WINDOW, *count, *start))
             .map(|(k, _)| k.clone())
         else {
             break;
@@ -894,6 +900,38 @@ mod tests {
             map.get(&target).map(|(_, c)| *c),
             Some(MAX_FAILURES_PER_WINDOW + 5),
             "the blocked target survives the overflow with its counter intact"
+        );
+    }
+
+    /// The harder case: every flood row sits at EXACTLY the failure budget, so
+    /// count alone no longer separates them from the blocked row. Without the
+    /// blocked-last term in the eviction ordering, the oldest-start tie-break
+    /// would evict the blocked row, which is always the oldest.
+    #[test]
+    fn an_equal_count_flood_does_not_evict_the_blocked_row() {
+        let mut map: HashMap<IpAddr, (u128, u32)> = HashMap::new();
+        let early = 1_000u128;
+        let later = early + 1;
+        let target: IpAddr = "203.0.113.7".parse().unwrap();
+        // Over the budget (blocked) and the oldest row in the map.
+        map.insert(target, (early, MAX_FAILURES_PER_WINDOW + 1));
+
+        let base: u128 = 0x2001_0db8_0000_0000_0000_0000_0000_0000;
+        for i in 0..(MAX_RATE_LIMIT_ENTRIES as u128 + 50) {
+            // At the budget, but not over it.
+            map.insert(
+                IpAddr::V6(Ipv6Addr::from(base + i)),
+                (later, MAX_FAILURES_PER_WINDOW),
+            );
+        }
+
+        prune_window(&mut map, later, FAILURE_WINDOW_MS);
+
+        assert!(map.len() <= MAX_RATE_LIMIT_ENTRIES, "back within the cap");
+        assert_eq!(
+            map.get(&target).map(|(_, c)| *c),
+            Some(MAX_FAILURES_PER_WINDOW + 1),
+            "an equal-count flood must not evict the blocked row it ties with"
         );
     }
 }
