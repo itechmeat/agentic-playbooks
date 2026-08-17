@@ -630,27 +630,50 @@ pub fn live_open_nodes(events: &[Event]) -> BTreeSet<String> {
 
 /// Run status for live reporting: pure fold plus the process-table overlay.
 ///
+/// Deliberately pure - a plain fold over `events` plus the two facts the
+/// caller already had to compute to answer any liveness question at all.
+/// Callers that only need the finding-9 repair may pass `waiting: false` and
+/// `driver_alive: None`, since neither is consulted unless the first repair
+/// already failed to explain a pure `Interrupted`.
+///
 /// An open attempt with a live pid forces `running` even when the pure fold
 /// said `interrupted` (issue #45 finding 9). Terminal and paused pure-fold
 /// outcomes are left alone.
 ///
 /// A second repair (issue #102.4 cause B) covers a run parked on a wait/signal
 /// park - a `wait_for` node, a pending `human_review`, a pending question, or a
-/// supervisor wake. None of those spawn an agent process, so `live_open_nodes`
-/// has no probeable pid to point at and the finding-9 repair above can never
-/// fire for them: whatever left the pure fold `Interrupted` (an open attempt
-/// elsewhere in the run whose pid was never journaled, and so is never reaped -
-/// see `only_a_provably_dead_attempt_is_reapable`) stands forever, even while
-/// the run is legitimately parked and being actively driven. When the run is
-/// currently waiting on a node (`progress::from_run_dir`'s `waiting_on`) and
-/// nothing else in the journal is provably dead (`lost_nodes` empty) and the
-/// driver claim for this run is still alive, that open work IS the park, not a
-/// crash, so this also re-promotes to `running`. `lost_nodes` itself is
-/// unchanged by this - a genuinely dead attempt still blocks the repair.
+/// supervisor wake. None of those has a live open attempt for `live_open_nodes`
+/// to point at (an agent-driven park's own attempt, if it had one, already
+/// journaled its finish before the park began), so the finding-9 repair above
+/// can never fire for them: whatever left the pure fold `Interrupted` (an open
+/// attempt elsewhere in the run whose pid was never journaled, and so is never
+/// reaped - see `only_a_provably_dead_attempt_is_reapable`) stands forever,
+/// even while the run is legitimately parked and being actively driven. When
+/// the caller reports the run is currently `waiting` on a node and nothing
+/// else in the journal is provably dead (`lost_nodes` empty) and `driver_alive`
+/// is `Some(true)`, that open work IS the park, not a crash, so this also
+/// re-promotes to `running`. `lost_nodes` itself is unchanged by this - a
+/// genuinely dead attempt still blocks the repair, and so does an absent or
+/// dead driver claim (`driver_alive` other than `Some(true)`).
+///
+/// `driver_alive` must be the caller's own `liveness::driver_alive(run_dir,
+/// run_id)` result (or the equivalent computed elsewhere), NOT
+/// `driver_is_live`/`driver_pid_is_live`: a sub-playbook child never writes
+/// its own `driver.pid` (it writes `driven_by`, and follows its parent's
+/// drive claim - see `driver_alive`'s own doc), so a plain pid check reads a
+/// perfectly healthy, parent-driven child as driverless and this repair would
+/// never fire for it.
+///
+/// This does NOT fix every transient `Interrupted` flicker a caller might see.
+/// A run genuinely mid-crash - the agent process just exited, `lost_nodes` is
+/// non-empty, but the drive thread is still running `success_check` and has
+/// not yet journaled `AttemptFinished` - is deliberately left `Interrupted`
+/// here: `lost_nodes` is by design unaffected by this change, and a
+/// wait/signal park is never what that shape actually is.
 pub fn reported_run_status(
-    run_dir: &Path,
-    run_id: &str,
     events: &[Event],
+    waiting: bool,
+    driver_alive: Option<bool>,
 ) -> crate::state::RunStatus {
     use crate::state::RunStatus;
     let pure = RunState::fold(events).run_status;
@@ -660,9 +683,9 @@ pub fn reported_run_status(
     if !live_open_nodes(events).is_empty() {
         return RunStatus::Running;
     }
-    let parked_on_wait = lost_nodes(events).is_empty()
-        && crate::progress::from_run_dir(run_dir, events).is_some_and(|p| p.waiting_on.is_some());
-    if parked_on_wait && driver_is_live(run_dir, run_id) {
+    let parked_on_wait =
+        waiting && lost_nodes(events).is_empty() && matches!(driver_alive, Some(true));
+    if parked_on_wait {
         return RunStatus::Running;
     }
     pure
@@ -1281,13 +1304,13 @@ mod tests {
             RunState::fold(&events).nodes.get("a"),
             Some(&NodeStatus::Interrupted)
         );
-        // Live reporting re-promotes. No run dir is needed for this path: the
-        // live-open-attempt repair returns before ever consulting progress or
-        // the driver claim, so an unused tempdir stands in for "no run dir on
-        // disk yet".
-        let dir = tempfile::tempdir().unwrap();
+        // Live reporting re-promotes. `waiting`/`driver_alive` are never
+        // consulted for this path: the live-open-attempt repair returns
+        // before either is read, which is exactly why the function takes them
+        // as plain facts rather than a run dir - a caller with neither on
+        // hand yet can still ask the question honestly.
         assert_eq!(
-            reported_run_status(dir.path(), "any-run", &events),
+            reported_run_status(&events, false, None),
             crate::state::RunStatus::Running
         );
         assert_eq!(
@@ -1299,9 +1322,10 @@ mod tests {
     }
 
     /// Writes a minimal run snapshot (`playbook.yaml`) so `progress::from_run_dir`
-    /// can resolve a `wait` node's status, plus a `driver.pid` naming the given
-    /// pid as the run's live driver claim.
-    fn write_wait_run_snapshot(run_dir: &Path, driver_pid: u32) {
+    /// can resolve a `wait` node's status, plus - when `driver_pid` is `Some` -
+    /// a `driver.pid` naming that pid as the run's driver claim. `None` leaves
+    /// no `driver.pid` at all, the "nothing claims to drive this run" shape.
+    fn write_wait_run_snapshot(run_dir: &Path, driver_pid: Option<u32>) {
         std::fs::create_dir_all(run_dir).unwrap();
         std::fs::write(
             run_dir.join("playbook.yaml"),
@@ -1319,25 +1343,22 @@ edges:
 "#,
         )
         .unwrap();
-        apb_core::fsutil::atomic_write(
-            &crate::driver::driver_pid_path(run_dir),
-            driver_pid.to_string().as_bytes(),
-        )
-        .unwrap();
+        if let Some(pid) = driver_pid {
+            apb_core::fsutil::atomic_write(
+                &crate::driver::driver_pid_path(run_dir),
+                pid.to_string().as_bytes(),
+            )
+            .unwrap();
+        }
     }
 
-    /// Issue #102.4 cause B: a run whose only open work is a wait/signal park
-    /// has no agent process for `live_open_nodes` to point at, so the finding-9
-    /// repair above never fires for it and the pure `Interrupted` used to
-    /// stand. Here node `a`'s attempt is left open with an unknowable pid (the
-    /// shape a spawn path that never journals a pid leaves behind - never
-    /// reaped, per `only_a_provably_dead_attempt_is_reapable`), while the run
-    /// has genuinely moved on to node `w`, parked waiting for its webhook, with
-    /// a live driver still polling it. The widened repair must read that as
-    /// `Running`, not `Interrupted`.
-    #[test]
-    fn a_run_parked_on_a_wait_with_a_live_driver_reports_running() {
-        let events = vec![
+    /// The event shape shared by every wait-park test below: node `a`'s
+    /// attempt is left open with an unknowable pid (the shape a spawn path
+    /// that never journals a pid leaves behind - never reaped, per
+    /// `only_a_provably_dead_attempt_is_reapable`), while the run has
+    /// genuinely moved on to node `w`, parked waiting for its webhook.
+    fn wait_park_events() -> Vec<Event> {
+        vec![
             ev(
                 0,
                 1000,
@@ -1371,7 +1392,21 @@ edges:
                     kind: "webhook".into(),
                 },
             ),
-        ];
+        ]
+    }
+
+    /// Issue #102.4 cause B: a run whose only open work is a wait/signal park
+    /// has no live open attempt for `live_open_nodes` to point at, so the
+    /// finding-9 repair above never fires for it and the pure `Interrupted`
+    /// used to stand. The widened repair must read this as `Running`.
+    ///
+    /// This is the exact predicate `reported_run_status` implements, pinned
+    /// directly against the pure `(waiting, driver_alive)` facts - the
+    /// disk-reading glue that PRODUCES those facts for a live driver is
+    /// pinned separately below (`a_run_parked_on_a_wait_reads_waiting_and_a_live_driver_from_disk`).
+    #[test]
+    fn a_run_parked_on_a_wait_with_a_live_driver_reports_running() {
+        let events = wait_park_events();
         // Pure fold: an unresolved, unreapable open attempt on `a` still forces
         // the whole run Interrupted, even though the drive has moved on to `w`.
         assert_eq!(
@@ -1382,86 +1417,87 @@ edges:
         assert!(live_open_nodes(&events).is_empty());
         assert!(lost_nodes(&events).is_empty());
 
-        let tmp = tempfile::tempdir().unwrap();
-        let run_dir = tmp.path().join(".apb/runs/r1");
-        write_wait_run_snapshot(&run_dir, std::process::id());
-
         assert_eq!(
-            reported_run_status(&run_dir, "r1", &events),
+            reported_run_status(&events, true, Some(true)),
             crate::state::RunStatus::Running,
             "a run parked on a wait with a live driver must report running, not interrupted"
         );
     }
 
-    /// Companion to the test above: no regression of driverless discovery.
-    /// Same shape - an unresolved attempt on `a`, the run parked at wait node
-    /// `w` - but with NO driver claim at all (`driver.pid` absent). The widened
-    /// repair must not fire: a wait park with a dead/absent driver is exactly
-    /// the driverless run `driver_alive`/`driver_dead` exists to surface, and
-    /// this repair must not paper over it.
+    /// The glue a real caller runs: `progress::from_run_dir` must actually
+    /// report `waiting_on` for the parked `w` node, and `liveness::driver_alive`
+    /// (the parent-aware check every call site is required to use - NOT
+    /// `driver_is_live`) must actually report the live driver claim as
+    /// `Some(true)`, so the facts fed into the pure predicate above are the
+    /// real ones a caller would compute.
     #[test]
-    fn a_run_parked_on_a_wait_with_no_driver_still_reports_interrupted() {
-        let events = vec![
-            ev(
-                0,
-                1000,
-                EventPayload::RunStarted {
-                    playbook: "p".into(),
-                    version: "1.0.0".into(),
-                },
-            ),
-            ev(
-                1,
-                2000,
-                EventPayload::NodeStarted {
-                    node: "a".into(),
-                    attempt: 1,
-                },
-            ),
-            ev(2, 2500, attempt_started("a", 1, None)),
-            ev(
-                3,
-                3000,
-                EventPayload::NodeStarted {
-                    node: "w".into(),
-                    attempt: 1,
-                },
-            ),
-            ev(
-                4,
-                3100,
-                EventPayload::WaitStarted {
-                    node: "w".into(),
-                    kind: "webhook".into(),
-                },
-            ),
-        ];
+    fn a_run_parked_on_a_wait_reads_waiting_and_a_live_driver_from_disk() {
+        let events = wait_park_events();
         let tmp = tempfile::tempdir().unwrap();
         let run_dir = tmp.path().join(".apb/runs/r1");
-        std::fs::create_dir_all(&run_dir).unwrap();
-        std::fs::write(
-            run_dir.join("playbook.yaml"),
-            r#"
-schema: 2
-id: p
-name: p
-version: 1.0.0
-defaults: { profile: x }
-nodes:
-  - { id: a, type: agent_task, profile: x, prompt: "go" }
-  - { id: w, type: wait, wait_for: { type: webhook, key: k }, timeout_seconds: 3600 }
-edges:
-  - { from: a, to: w }
-"#,
-        )
-        .unwrap();
-        // No driver.pid at all: nothing claims to be driving this run.
-        assert_eq!(driver_alive(&run_dir, "r1"), None);
+        write_wait_run_snapshot(&run_dir, Some(std::process::id()));
+
+        let waiting = crate::progress::from_run_dir(&run_dir, &events)
+            .is_some_and(|p| p.waiting_on.is_some());
+        assert!(waiting, "progress must report the run waiting on `w`");
+        let driver = driver_alive(&run_dir, "r1");
+        assert_eq!(driver, Some(true));
 
         assert_eq!(
-            reported_run_status(&run_dir, "r1", &events),
+            reported_run_status(&events, waiting, driver),
+            crate::state::RunStatus::Running
+        );
+    }
+
+    /// Companion: no regression of driverless discovery when NOTHING claims
+    /// to be driving the run at all (`driver.pid` absent, `driver_alive`
+    /// returns `None`). The widened repair must not fire: this is exactly the
+    /// driverless run `driver_alive`/`driver_dead` exists to surface.
+    #[test]
+    fn a_run_parked_on_a_wait_with_no_driver_claim_still_reports_interrupted() {
+        let events = wait_park_events();
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        write_wait_run_snapshot(&run_dir, None);
+
+        // No driver.pid at all: nothing claims to be driving this run.
+        let driver = driver_alive(&run_dir, "r1");
+        assert_eq!(driver, None);
+        let waiting = crate::progress::from_run_dir(&run_dir, &events)
+            .is_some_and(|p| p.waiting_on.is_some());
+
+        assert_eq!(
+            reported_run_status(&events, waiting, driver),
             crate::state::RunStatus::Interrupted,
-            "a wait park with no live driver must not be repaired to running"
+            "a wait park with no driver claim at all must not be repaired to running"
+        );
+    }
+
+    /// Companion: no regression of driverless discovery when a driver DID
+    /// claim this run and that claim is now provably dead - the arm the
+    /// pid-absent test above does not exercise. `u32::MAX` is a pid
+    /// `probeable_pid` rejects deterministically (out of `i32` range), so
+    /// `driver_alive` resolves it to `Some(false)`, not `None`.
+    #[test]
+    fn a_run_parked_on_a_wait_with_a_dead_driver_still_reports_interrupted() {
+        let events = wait_park_events();
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        write_wait_run_snapshot(&run_dir, Some(u32::MAX));
+
+        let driver = driver_alive(&run_dir, "r1");
+        assert_eq!(
+            driver,
+            Some(false),
+            "an impossible pid must resolve to a provably dead driver claim"
+        );
+        let waiting = crate::progress::from_run_dir(&run_dir, &events)
+            .is_some_and(|p| p.waiting_on.is_some());
+
+        assert_eq!(
+            reported_run_status(&events, waiting, driver),
+            crate::state::RunStatus::Interrupted,
+            "a wait park with a dead driver must not be repaired to running"
         );
     }
 

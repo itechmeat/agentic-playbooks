@@ -113,19 +113,26 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
     let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
     let state = RunState::fold(&events);
-    // Liveness overlay (Task 9 / issue #45 findings 9 and 10). The pure fold
-    // is replayable from the journal alone; these read the process table (and
-    // parent-drive markers) at request time, which is precisely why they are
-    // applied here rather than folded into `RunState`.
+    // Liveness overlay (Task 9 / issue #45 findings 9 and 10; issue #102.4
+    // cause B). The pure fold is replayable from the journal alone; these
+    // read the process table (and parent-drive markers) at request time,
+    // which is precisely why they are applied here rather than folded into
+    // `RunState`.
     //
     // `reported_*` re-promotes a live open attempt from the pure-fold
-    // `interrupted` crash shape back to `running`, and maps a dead attempt
-    // pid to `lost`. `driver_alive` also understands parent-driven children.
+    // `interrupted` crash shape back to `running`, and a run parked on a
+    // wait/signal park with a live driver the same way, and maps a dead
+    // attempt pid to `lost`. `driver_alive` also understands parent-driven
+    // children - `reported_run_status` is a pure function of the journal plus
+    // these two already-computed facts, precisely so a sub-playbook child
+    // (which never writes its own `driver.pid`) is asked about through
+    // `driver_alive`, not a plain pid check.
     let node_times = apb_engine::liveness::node_times(&events);
     let driver_alive = apb_engine::liveness::driver_alive(&dir, run_id);
     let nodes = apb_engine::liveness::reported_node_statuses(&events);
-    let run_status = apb_engine::liveness::reported_run_status(&dir, run_id, &events);
     let progress = apb_engine::progress::from_run_dir(&dir, &events);
+    let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
+    let run_status = apb_engine::liveness::reported_run_status(&events, waiting, driver_alive);
     // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
     // nodes, Task 8): callers that only care about the pending question
     // (`run_answer`'s caller, the web) do not have to drill into `progress`.
@@ -151,7 +158,16 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
                     .as_ref()
                     .and_then(|d| read_all(d).ok().map(|ev| (d.clone(), ev)))
                     .map(|(d, ev)| {
-                        apb_engine::liveness::reported_run_status(&d, run_id, &ev)
+                        // A sub-playbook child never writes its own
+                        // `driver.pid` (it writes `driven_by` and follows its
+                        // parent's drive claim), so this must go through the
+                        // parent-aware `driver_alive`, not a plain pid check -
+                        // otherwise a perfectly healthy, parent-driven child
+                        // parked on a wait reads driverless forever.
+                        let waiting = apb_engine::progress::from_run_dir(&d, &ev)
+                            .is_some_and(|p| p.waiting_on.is_some());
+                        let child_driver_alive = apb_engine::liveness::driver_alive(&d, run_id);
+                        apb_engine::liveness::reported_run_status(&ev, waiting, child_driver_alive)
                             .as_str()
                             .to_string()
                     })

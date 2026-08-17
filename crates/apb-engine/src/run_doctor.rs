@@ -80,12 +80,17 @@ pub fn has_failure(checks: &[RunCheck]) -> bool {
 }
 
 /// The live-reported run status (pure fold plus process-table overlay so a
-/// live open attempt never reads as interrupted - issue #45 finding 9). Only
-/// the two bad terminal outcomes warn: a run that is still going, paused, or
+/// live open attempt never reads as interrupted - issue #45 finding 9 - and a
+/// run parked on a wait/signal park with a live driver never reads as
+/// interrupted either - issue #102.4 cause B). Only the two bad terminal
+/// outcomes warn: a run that is still going, paused, parked and waiting, or
 /// succeeded is not a problem to be reported. `interrupted` warns too - it is
 /// exactly the state a crashed driver leaves.
 fn run_check(run_dir: &Path, run_id: &str, events: &[Event]) -> RunCheck {
-    let status = liveness::reported_run_status(run_dir, run_id, events);
+    let waiting =
+        crate::progress::from_run_dir(run_dir, events).is_some_and(|p| p.waiting_on.is_some());
+    let driver = liveness::driver_alive(run_dir, run_id);
+    let status = liveness::reported_run_status(events, waiting, driver);
     let level = match status {
         RunStatus::Failed | RunStatus::Aborted | RunStatus::Interrupted => WARN,
         _ => OK,
