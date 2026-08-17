@@ -557,6 +557,139 @@ async fn run_handler_starts_once_connector_and_account_are_approved() {
     assert!(json["run_id"].is_string(), "expected a run_id: {json}");
 }
 
+// --- run: connector permits for a `type: playbook` child (issue #102.1) ----
+//
+// The dashboard handler used to walk only the TOP-LEVEL nodes for connector
+// bindings and never set `expected_children`, so a parent that delegates to a
+// connector-binding child spawned that child with empty permit maps and the
+// child died fail-closed with "connector bindings present but no connector
+// permit". The handler now computes the child pins in the SAME gate pass and
+// threads them onto `opts.expected_children`.
+
+const PARENT_ID: &str = "conn-parent";
+
+/// A parent whose sub-playbook node `c` runs the connector-binding child
+/// `conn-pb`. The parent itself binds no connectors.
+fn parent_yaml() -> &'static str {
+    r#"schema: 2
+id: conn-parent
+name: conn-parent
+version: 1.0.0
+nodes:
+  - { id: s, type: start }
+  - { id: c, type: playbook, playbook: conn-pb }
+  - { id: f, type: finish, outcome: success }
+edges:
+  - { from: s, to: c }
+  - { from: c, to: f }
+"#
+}
+
+fn write_parent_pb(root: &Path) {
+    let vdir = root.join(".apb/playbooks").join(PARENT_ID).join("1.0.0");
+    std::fs::create_dir_all(&vdir).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), parent_yaml()).unwrap();
+    std::fs::write(
+        root.join(".apb/playbooks").join(PARENT_ID).join("current"),
+        "1.0.0",
+    )
+    .unwrap();
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn run_handler_pins_the_connector_permit_of_a_playbook_child() {
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g_cfg = setup(cfg.path(), root.path());
+    let _g_tok = set_var(TOKEN_VAR, "secret-value");
+    seed_profile_main(root.path());
+    write_pb(root.path());
+    write_parent_pb(root.path());
+    approve_connector_and_account(root.path(), "acct1");
+
+    let agent_path = root.path().join("ok-agent.sh");
+    std::fs::write(&agent_path, "#!/bin/sh\necho ok\n").unwrap();
+    let mut perms = std::fs::metadata(&agent_path).unwrap().permissions();
+    perms.set_mode(0o755);
+    std::fs::set_permissions(&agent_path, perms).unwrap();
+    let _g_agent = set_var("APB_AGENT_CMD", &agent_path);
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = post_json(
+        app,
+        &format!("/api/playbooks/{PARENT_ID}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a parent delegating to an approved connector-binding child must start: {json}"
+    );
+    let run_id = json["run_id"].as_str().expect("run_id");
+
+    // The pin is what the child spawn reads for its own permit maps. Without
+    // it the child would be spawned with empty maps and refused at prepare.
+    let cfg_yaml =
+        std::fs::read_to_string(root.path().join(".apb/runs").join(run_id).join("run.yaml"))
+            .expect("run.yaml written at prepare");
+    let run_cfg: apb_engine::run_config::RunConfig = serde_yaml_ng::from_str(&cfg_yaml).unwrap();
+    let children = run_cfg
+        .expected_children
+        .expect("the run permit must carry the child pins");
+    let child = children
+        .get("c")
+        .expect("pin for the sub-playbook node `c`");
+    let loaded = apb_core::connector::store::load(CONNECTOR).unwrap();
+    assert_eq!(
+        child.connectors.get(CONNECTOR),
+        Some(&loaded.digest),
+        "the child pin carries the child's verified connector map: {children:?}"
+    );
+    assert!(
+        child
+            .connector_accounts
+            .contains_key(&account_trust_id(CONNECTOR, "acct1")),
+        "the child pin carries the child's verified account map: {children:?}"
+    );
+}
+
+#[tokio::test]
+async fn run_handler_refuses_a_parent_whose_child_connector_is_untrusted() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let _g_tok = set_var(TOKEN_VAR, "secret-value");
+    seed_profile_main(root.path());
+    write_pb(root.path());
+    write_parent_pb(root.path());
+    // The child's connector and account are deliberately left unapproved: the
+    // child gets the same connector trust gate the parent would get.
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, refusal) = post_json(
+        app,
+        &format!("/api/playbooks/{PARENT_ID}/run"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "an untrusted child connector must refuse the parent run: {refusal}"
+    );
+    assert_eq!(
+        refusal["policy"],
+        serde_json::json!("untrusted_connector_requires_approve"),
+        "refusal: {refusal}"
+    );
+}
+
 // --- machine-wide (workspace-less) reads on the global server --------------
 
 /// Registers `root` in the machine-wide project registry the global server

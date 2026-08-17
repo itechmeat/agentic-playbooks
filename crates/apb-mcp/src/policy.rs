@@ -224,21 +224,15 @@ pub fn check_run(
         supervised,
     )?;
 
-    // Connector trust (spec 6 step 1, 7): resolve every bound connector,
-    // check env presence, and gate both connector and account digests. Unlike
-    // profile/playbook trust, `acknowledge_untrusted` does NOT bypass this -
-    // connector and account trust guard secret egress, not content taste.
-    // Returns the two permit maps handed to the engine verbatim, plus any
-    // consent-time warnings (finding 11: a bound connector with zero accounts).
-    let (connectors, connector_accounts, connector_warnings) =
-        check_connectors(root, &loaded.playbook, acknowledge_untrusted)?;
-
-    // Sub-playbook pins (spec C): walk the reference tree in the same gate pass,
-    // detect cycles, and trust-check each child's bundles alongside the parent's.
-    // The recursive effects union that this walk also accumulates is the user's
-    // consent surface, exposed through `preflight` (which shares this walk); the
-    // local run gate only needs the verified pins.
-    let tree = resolve_tree(
+    // Connector trust (spec 6 step 1, 7) for this playbook, then the
+    // sub-playbook pins (spec C) - ONE walk, shared verbatim with the ungated
+    // seam (`connector_permit_maps_with_children`), see `walk_connectors_and_tree`.
+    let GateWalk {
+        connectors,
+        connector_accounts,
+        warnings: connector_warnings,
+        tree,
+    } = walk_connectors_and_tree(
         root,
         &loaded.playbook,
         &wref.origin,
@@ -268,6 +262,108 @@ pub fn check_run(
     })
 }
 
+/// Public seam for the connector trust gate PLUS the sub-playbook pin walk
+/// (spec 6 step 1 and 7, spec C), for a caller that does not go through the
+/// full `check_run` policy gate but still must never start a run with an empty
+/// (and therefore vacuously-refusing, or worse silently-unverified) permit map:
+/// the dashboard's `POST /api/playbooks/{id}/run` handler in `apb-server` and
+/// the CLI's `apb run` / `__drive-supervised` paths, neither of which has an
+/// MCP tool call in front of it. Runs the EXACT SAME resolution and trust
+/// checks `check_run` runs for its own connector and children steps, in one
+/// pass, so a dashboard- or CLI-started run gets the identical
+/// connector/account trust decision an MCP-started run would - for the
+/// playbook itself AND for every `type: playbook` child it delegates to.
+/// Callers must never reimplement either walk at the call site - always come
+/// back through here (anti-TOCTOU: the map handed to the engine is exactly the
+/// map that was verified, never a recomputation).
+///
+/// `origin`/`playbook_id` identify the playbook being started; they drive
+/// `scope: auto` resolution of its children and cycle detection.
+///
+/// Trust semantics, deliberately matched to what these two paths already do
+/// for the playbook itself: they pass no `expected_digest` and no
+/// `expected_profile_bundles`, i.e. they do not gate playbook-digest or
+/// profile-bundle trust at all, so imposing that on a CHILD would make a child
+/// stricter than its own parent on the same path. The walk therefore runs with
+/// `acknowledge_untrusted: true`, exactly as `preflight` does: lifecycle
+/// (draft/retired), `requires`, cycles, and - because `check_connectors`
+/// deliberately ignores that flag - the full connector and account trust gate
+/// are all still enforced for every child. Connector trust guards secret
+/// egress and is never bypassable, on any path, at any depth.
+pub fn connector_permit_maps_with_children(
+    root: &Path,
+    playbook: &Playbook,
+    origin: &Origin,
+    playbook_id: &str,
+) -> Result<ConnectorPermitTree, Value> {
+    let walk = walk_connectors_and_tree(root, playbook, origin, playbook_id, true)?;
+    // The seam needs the maps and the pins; the consent-time warnings
+    // (finding 11) and the recursive effects union are surfaced by the full
+    // `check_run` gate and by `preflight`, so they are dropped here.
+    Ok((
+        (walk.connectors, walk.connector_accounts),
+        walk.tree.children,
+    ))
+}
+
+/// The two connector permit maps of a playbook plus the verified pins of its
+/// sub-playbook children, keyed by playbook-node id. The caller hands the maps
+/// to the engine as `expected_connectors`/`expected_connector_accounts` and the
+/// pins as `expected_children`, verbatim.
+pub type ConnectorPermitTree = (
+    ConnectorPermitMaps,
+    std::collections::BTreeMap<String, ChildExpectation>,
+);
+
+/// One pass of the two walks every run-start path needs: the connector trust
+/// gate for the playbook itself, then its sub-playbook tree. Kept as a single
+/// function so `check_run` and the ungated seam share ONE implementation and
+/// one refusal order (connector refusals before tree refusals), rather than
+/// two call sites that could drift apart.
+struct GateWalk {
+    connectors: std::collections::BTreeMap<String, String>,
+    connector_accounts: std::collections::BTreeMap<String, String>,
+    warnings: Vec<String>,
+    tree: TreeResolution,
+}
+
+fn walk_connectors_and_tree(
+    root: &Path,
+    playbook: &Playbook,
+    origin: &Origin,
+    playbook_id: &str,
+    acknowledge_untrusted: bool,
+) -> Result<GateWalk, Value> {
+    // Connector trust (spec 6 step 1, 7): resolve every bound connector, check
+    // env presence, and gate both connector and account digests. Unlike
+    // profile/playbook trust, `acknowledge_untrusted` does NOT bypass this -
+    // connector and account trust guard secret egress, not content taste.
+    // Yields the two permit maps handed to the engine verbatim, plus any
+    // consent-time warnings (finding 11: a bound connector with zero accounts).
+    let (connectors, connector_accounts, warnings) =
+        check_connectors(root, playbook, acknowledge_untrusted)?;
+    // Sub-playbook pins (spec C): walk the reference tree in the same pass,
+    // detect cycles, and trust-check each child's bundles alongside the
+    // parent's. The recursive effects union that this walk also accumulates is
+    // the user's consent surface, exposed through `preflight` (which shares the
+    // same walk); a run gate only needs the verified pins.
+    let tree = resolve_tree(root, playbook, origin, playbook_id, acknowledge_untrusted)?;
+    Ok(GateWalk {
+        connectors,
+        connector_accounts,
+        warnings,
+        tree,
+    })
+}
+
+/// The two permit maps plus the consent-time warnings (finding 11) that
+/// [`check_connectors`] produces in one pass.
+type ConnectorCheck = (
+    std::collections::BTreeMap<String, String>,
+    std::collections::BTreeMap<String, String>,
+    Vec<String>,
+);
+
 /// Connector trust gate (spec 6 step 1, 7). For a playbook that binds any
 /// connector: resolves every connector once, verifies every required secret
 /// env var resolves (early failure per spec 6 step 1), then gates both the
@@ -283,34 +379,6 @@ pub fn check_run(
 /// `base_url` can exfiltrate a token), so unlike playbook/profile trust they
 /// are never bypassable by an acknowledge. Approval happens out of band via
 /// the trust store (the CLI/UI approve flows).
-/// Public seam for the connector trust gate ALONE (spec 6 step 1, 7), for a
-/// caller that does not go through the full `check_run` policy gate but still
-/// must never start a connector-binding run with an empty (and therefore
-/// vacuously-refusing, or worse silently-unverified) permit map - the
-/// dashboard's `POST /api/playbooks/{id}/run` handler in `apb-server`, which
-/// has no MCP tool call in front of it. Runs the EXACT SAME resolution and
-/// trust checks `check_run` runs for its own connector step, so a
-/// dashboard-started run gets the identical connector/account trust decision
-/// an MCP-started run would. Callers must never reimplement this gate at the
-/// call site - always come back through here.
-pub fn connector_permit_maps(
-    root: &Path,
-    playbook: &Playbook,
-) -> Result<ConnectorPermitMaps, Value> {
-    // The public seam needs only the two maps; the consent-time warnings
-    // (finding 11) are surfaced by the full `check_run` gate, so drop them here.
-    let (connectors, accounts, _warnings) = check_connectors(root, playbook, false)?;
-    Ok((connectors, accounts))
-}
-
-/// The two permit maps plus the consent-time warnings (finding 11) that
-/// [`check_connectors`] produces in one pass.
-type ConnectorCheck = (
-    std::collections::BTreeMap<String, String>,
-    std::collections::BTreeMap<String, String>,
-    Vec<String>,
-);
-
 fn check_connectors(
     root: &Path,
     playbook: &Playbook,

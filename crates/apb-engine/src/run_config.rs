@@ -114,8 +114,11 @@ pub struct RunConfig {
     #[serde(default)]
     pub depth: usize,
     /// Verified sub-playbook pins from the policy gate, keyed by this run's
-    /// playbook-node id (spec C). `None` on the CLI path (no gate) -> children
-    /// resolve live without a drift check.
+    /// playbook-node id (spec C). `None` when the start path computed no pins
+    /// (a playbook with no `type: playbook` node, or a caller that never went
+    /// through a gate) -> children resolve live without a drift check. The MCP,
+    /// CLI and dashboard start paths all fill it in for a playbook that does
+    /// have children (issue #102.1).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expected_children: Option<BTreeMap<String, ChildExpectation>>,
     /// Verified connector tree digests from the policy gate, `name -> tree

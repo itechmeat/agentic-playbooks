@@ -2103,16 +2103,17 @@ pub(crate) fn run_playbook_node(
     };
 
     // Resolve the child reference. A gate pin (cfg.expected_children) fixes the
-    // scope + version verbatim (anti-TOCTOU); without a pin (CLI path) we live
-    // resolve with the same candidate order the policy gate uses: an explicit
-    // scope pins the origin, `auto` prefers the parent origin then global.
+    // scope + version verbatim (anti-TOCTOU); without a pin we live resolve
+    // with the same candidate order the policy gate uses: an explicit scope
+    // pins the origin, `auto` prefers the parent origin then global.
     use apb_core::profile::ProfileScope;
     use apb_core::scope::{Origin, PlaybookRef, scope_candidates};
-    // Fail-closed pins (review I4): `expected_children == None` is the ungated
-    // (CLI) path and lives-resolves. But a gated run (`Some(map)`) MUST carry a
-    // pin for every playbook node its permit walked; a missing entry means this
-    // node was outside the verified tree, so we FAIL the node rather than
-    // silently live-resolving unverified content.
+    // Fail-closed pins (review I4): `expected_children == None` is an ungated
+    // start (no start path computed pins for this run) and lives-resolves. But
+    // a gated run (`Some(map)`) MUST carry a pin for every playbook node its
+    // permit walked; a missing entry means this node was outside the verified
+    // tree, so we FAIL the node rather than silently live-resolving unverified
+    // content.
     let pin = match &cfg.expected_children {
         None => None,
         Some(map) => match map.get(node_id) {
@@ -2874,7 +2875,7 @@ mod tests {
         assert!(opts.allow_shared_workdir);
     }
 
-    /// An ungated (CLI, no pin) child resolves connectors live at prepare, so
+    /// An ungated (no pin) child resolves connectors live at prepare, so
     /// the spawn passes empty expected maps rather than an unverified pin.
     #[test]
     fn child_run_options_ungated_has_empty_connector_maps() {
