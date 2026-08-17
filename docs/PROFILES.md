@@ -98,6 +98,15 @@ approves its bundle. Any later edit to the profile or one of its skills changes
 the bundle, so the next run through the MCP gate reports
 `untrusted_profile_requires_acknowledge` until the user confirms.
 
+A run started from the dashboard or from `apb run` does not gate on playbook or
+profile-bundle trust at all: those paths pass no expected digest, so a changed
+bundle is pinned on first use rather than held for approval, and a sub-playbook
+child inherits the same posture as its parent instead of being stricter than the
+run that spawned it. Connector and account trust is the exception and is
+enforced on every path and at every depth, parent and child alike, because it
+guards where secrets are sent (see `docs/CONNECTORS.md`). Use the MCP gate when
+you want profile-bundle changes to require an explicit acknowledgement.
+
 Snapshot scope, honestly: a run snapshots `profile.yaml` and `SOUL.md` (plus the
 resolved invocation chain) into `runs/<id>/` and drives from that copy, so a
 live edit to the profile or SOUL after start does not affect a running or

@@ -694,7 +694,7 @@ connector inbox (already documented at `docs/HOWTO-authoring.md:901-904` and
 ### 102.8 - `apb import` ignores the bundle version
 
 **STATUS: still-present, but it is a deliberate design note, not an oversight.**
-`import_cmd` - `crates/apb-cli/src/manage.rs:266` (dispatch `main.rs:330`) → 
+`import_cmd` - `crates/apb-cli/src/manage.rs:266` (dispatch `main.rs:330`) →
 `apb_core::bundle::import_bundle`. Version assignment at
 `crates/apb-core/src/bundle.rs:87`: `create_version(root, &bundle.id, &bundle.playbook,
 None, make_current)?` - `bundle.version` is never read, and the `None` is
