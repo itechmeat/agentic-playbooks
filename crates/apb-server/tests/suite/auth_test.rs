@@ -15,6 +15,26 @@ use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
+/// Issues a key whose id is not an all-digit string, revoking and retrying
+/// until it gets one.
+///
+/// A `KeyRecord` serializes to a fixed-width record, which is what makes a
+/// revoke-then-issue reproduce the same file length. The one exception is the
+/// id: it is the first 8 hex chars of the hash, and when those happen to be all
+/// digits the YAML writer quotes the value to preserve its string type, adding
+/// two bytes. Two keys that disagree on that make the file lengths differ for a
+/// reason unrelated to what the same-tick test is about, so the ids are pinned
+/// to the unquoted form rather than the precondition being left to a coin flip.
+fn issue_unquoted_id(path: &std::path::Path) -> (String, apb_core::server_auth::KeyRecord) {
+    loop {
+        let (key, record) = server_auth::issue_into(path).unwrap();
+        if !record.id.bytes().all(|b| b.is_ascii_digit()) {
+            return (key, record);
+        }
+        server_auth::revoke_in(path, &record.id).unwrap();
+    }
+}
+
 /// A pinned-root state whose auth layer holds exactly one freshly issued key.
 /// The key file lives in a tempdir that is dropped immediately and the auth
 /// state is built with no watched path, so these tests never take the reload
@@ -355,7 +375,7 @@ async fn a_cookie_session_is_rejected_after_a_same_tick_revoke() {
     let dir = seed();
     let keydir = tempfile::tempdir().unwrap();
     let path = keydir.path().join("server-auth.yaml");
-    let (_key_a, record_a) = server_auth::issue_into(&path).unwrap();
+    let (_key_a, record_a) = issue_unquoted_id(&path);
     let file = server_auth::load_from(&path).unwrap();
     let auth =
         Arc::new(AuthState::new(Some(path.clone()), file.keys, &ServerConfig::default()).unwrap());
@@ -388,7 +408,7 @@ async fn a_cookie_session_is_rejected_after_a_same_tick_revoke() {
     // reload cannot see. Nothing here calls maybe_reload; the cookie path must
     // catch it on its own.
     server_auth::revoke_in(&path, &record_a.id).unwrap();
-    let (_key_b, _record_b) = server_auth::issue_into(&path).unwrap();
+    let (_key_b, _record_b) = issue_unquoted_id(&path);
     assert_eq!(
         std::fs::metadata(&path).unwrap().len(),
         original_len,
