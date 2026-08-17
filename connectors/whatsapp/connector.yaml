@@ -236,7 +236,8 @@ functions:
       (APPROVED or REJECTED) arrives later and is observable only by
       re-calling list_templates or via a message_template_status_update
       webhook, neither of which this function polls to completion.
-      template.category is one of authentication, marketing, utility;
+      template.category is one of AUTHENTICATION, MARKETING, UTILITY
+      (uppercase, as Meta's API requires);
       template.language is the template's locale code (e.g. en_US);
       template.components carries the header/body/footer/button
       definitions, forwarded verbatim (additionalProperties lives inside
@@ -255,14 +256,14 @@ functions:
           description: "the template definition; forwarded verbatim beyond the four required fields"
           properties:
             name: { type: string, description: "the template's name; must be unique per language on this WABA" }
-            category: { type: string, enum: [authentication, marketing, utility], description: "Meta's template category" }
+            category: { type: string, enum: [AUTHENTICATION, MARKETING, UTILITY], description: "Meta's template category (uppercase, as the API requires)" }
             language: { type: string, description: "locale code, e.g. en_US" }
             components: { type: array, items: { type: object, additionalProperties: true }, description: "header/body/footer/button definitions" }
           required: [name, category, language, components]
           additionalProperties: true
       required: [template]
     examples:
-      - args: { template: { name: "order_confirmation", category: "utility", language: "en_US", components: [{ type: "BODY", text: "Your order has shipped." }] } }
+      - args: { template: { name: "order_confirmation", category: "UTILITY", language: "en_US", components: [{ type: "BODY", text: "Your order has shipped." }] } }
         note: "the created template comes back with status PENDING; approval is observed later via list_templates or a webhook, not synchronously."
 
   - name: delete_template

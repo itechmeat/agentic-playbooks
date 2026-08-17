@@ -86,13 +86,13 @@ cases:
   - function: create_template
     account: { base_url: "https://graph.facebook.com", graph_version: "v23.0", phone_number_id: "100000000000000", waba_id: "200000000000000" }
     args:
-      template: { name: "order_confirmation", category: "utility", language: "en_US", components: [{ type: "BODY", text: "Your order has shipped." }] }
+      template: { name: "order_confirmation", category: "UTILITY", language: "en_US", components: [{ type: "BODY", text: "Your order has shipped." }] }
     expect:
       method: POST
       url: "https://graph.facebook.com/v23.0/200000000000000/message_templates"
       body_contains:
         name: "order_confirmation"
-        category: "utility"
+        category: "UTILITY"
         language: "en_US"
 
   - function: delete_template
