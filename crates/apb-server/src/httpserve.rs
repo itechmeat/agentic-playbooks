@@ -33,6 +33,24 @@ pub(crate) const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(20);
 /// How long in-flight connections are given to drain after a shutdown signal.
 const DRAIN_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How long the accept loop pauses after a non-connection accept error, so a
+/// failing syscall (fd or buffer exhaustion) is retried rather than spun on.
+/// Same value `axum::serve` uses.
+const ACCEPT_ERROR_BACKOFF: Duration = Duration::from_secs(1);
+
+/// Whether an accept error is the connection-class kind that means one peer
+/// went away rather than the process being out of resources. These are retried
+/// immediately; everything else backs off first. Matches the set
+/// `axum::serve` treats the same way.
+fn is_connection_error(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+    )
+}
+
 /// Serves `app` on `listener` with an http1 header-read timeout and WebSocket
 /// upgrades. When `shutdown` resolves the accept loop stops and in-flight
 /// connections are given [`DRAIN_TIMEOUT`] to finish. A listener that never
@@ -53,9 +71,31 @@ where
     let mut shutdown = std::pin::pin!(shutdown);
 
     loop {
-        let (stream, peer) = tokio::select! {
-            accepted = listener.accept() => accepted?,
+        let accepted = tokio::select! {
+            a = listener.accept() => a,
             _ = &mut shutdown => break,
+        };
+        // Mirror what `axum::serve` does, which this replaced: an accept error
+        // must never end the loop. `axum::serve` is documented as never
+        // returning an error, and its listener impl continues on a
+        // connection-class error and sleeps briefly on anything else. Losing
+        // that meant one EMFILE, ENFILE, ENOBUFS or ECONNABORTED killed the
+        // listener: the dashboard would exit, and a co-started ingest listener
+        // would die silently while the dashboard kept running, dropping webhook
+        // deliveries with no other signal. Since this module deliberately leaves
+        // the concurrent-connection cap to the reverse proxy, fd exhaustion
+        // under a connection flood is exactly the reachable case.
+        let (stream, peer) = match accepted {
+            Ok(v) => v,
+            // A peer that vanished mid-handshake. Routine under load, and the
+            // next accept is immediately useful, so retry without a pause.
+            Err(e) if is_connection_error(&e) => continue,
+            // Anything else (fd exhaustion, buffer exhaustion) needs a moment
+            // before retrying, or the loop spins hot against a failing syscall.
+            Err(_) => {
+                tokio::time::sleep(ACCEPT_ERROR_BACKOFF).await;
+                continue;
+            }
         };
         // `IntoMakeServiceWithConnectInfo` is always ready and infallible; the
         // service it yields bakes `ConnectInfo(peer)` in for the handlers, which
@@ -113,6 +153,42 @@ mod tests {
         // Give the accept loop a moment to start.
         tokio::time::sleep(Duration::from_millis(50)).await;
         (addr, tx)
+    }
+
+    /// The accept loop must never end on an accept error, so the classification
+    /// that decides retry-now vs back-off-then-retry is the piece worth pinning:
+    /// neither answer is "stop". Connection-class errors mean one peer went
+    /// away; resource errors (EMFILE, ENFILE, ENOBUFS) mean the process is
+    /// short and must pause before retrying. A full accept-error integration
+    /// test would need to exhaust the process fd table, which is inherently
+    /// flaky in a shared test binary, so the loop's non-return behavior is
+    /// covered by inspection plus this classification test.
+    #[test]
+    fn accept_errors_are_classified_but_never_fatal() {
+        use std::io::{Error, ErrorKind};
+        for kind in [
+            ErrorKind::ConnectionRefused,
+            ErrorKind::ConnectionAborted,
+            ErrorKind::ConnectionReset,
+        ] {
+            assert!(
+                is_connection_error(&Error::new(kind, "peer went away")),
+                "{kind:?} is a connection-class error, retried immediately"
+            );
+        }
+        // Resource exhaustion is the case that used to kill the listener. It is
+        // not connection-class, so it takes the back-off branch rather than the
+        // immediate retry, and in neither branch does the loop return.
+        for kind in [
+            ErrorKind::Other,
+            ErrorKind::OutOfMemory,
+            ErrorKind::PermissionDenied,
+        ] {
+            assert!(
+                !is_connection_error(&Error::new(kind, "resource exhausted")),
+                "{kind:?} backs off before retrying rather than retrying at once"
+            );
+        }
     }
 
     #[tokio::test]
