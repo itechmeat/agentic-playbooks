@@ -167,6 +167,14 @@ pub(crate) fn check_reachability(playbook: &Playbook, r: &mut ValidationReport) 
 
 pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
     let adj = adjacency(playbook);
+    // Mirrors check_cross_branch_reads / templates.rs: the on_failure handler
+    // is entered from anywhere in the graph, with no drawn edge describing
+    // what preceded it, and both Stop and Node(_) already dispose of an
+    // unrouted failure (only Route leaves it unhandled).
+    let failure_handler = match &playbook.defaults.on_failure {
+        FailurePolicy::Node(target) => Some(target.as_str()),
+        _ => None,
+    };
     for n in &playbook.nodes {
         // A conditional edge is legal off any node kind since output_field
         // routing shipped, and the same two mistakes are possible there: a
@@ -192,7 +200,17 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
         let uses_node_status = out
             .iter()
             .any(|e| matches!(e.condition, Some(EdgeCondition::NodeStatus { .. })));
-        if uses_node_status && covered.len() < 2 && !has_fallback {
+        // An unconditional edge alongside a conditional one from the same
+        // node is already a V34 duplicate-route error (check_edges), which
+        // runs before this check and makes the report invalid, so
+        // check_conditions never sees that shape (validate() only calls this
+        // inside `if r.is_valid()`). `covered` therefore never needs to also
+        // treat an unconditional edge as coverage.
+        if uses_node_status
+            && covered.len() < 2
+            && !has_fallback
+            && matches!(playbook.defaults.on_failure, FailurePolicy::Route)
+        {
             match is_condition {
                 true => r.error(
                     "V09",
@@ -232,6 +250,10 @@ pub(crate) fn check_conditions(playbook: &Playbook, r: &mut ValidationReport) {
                                 n.id
                             ),
                         ),
+                        // The on_failure handler is entered from anywhere in
+                        // the graph, so no drawn edge describes what
+                        // preceded it: this would otherwise be a false V40.
+                        false if Some(n.id.as_str()) == failure_handler => {}
                         false => r.warn(
                             "V40",
                             Some(&n.id),
