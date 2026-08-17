@@ -6,9 +6,39 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 use serde::Deserialize;
 
-pub(crate) async fn list_runs_handler(State(state): State<AppState>) -> impl IntoResponse {
+/// GET /api/runs: every reachable project's runs by default, or exactly one
+/// project's when `?workspace=<id>` is given (issue #103.2).
+///
+/// The aggregate stays the no-param default - that is what the dashboard
+/// calls. The filter exists because the listing stamps each row with its
+/// `workspace_id` while `GET /api/runs/{id}` requires that same id to resolve
+/// the run, so without it a caller could not narrow the listing to the
+/// workspace it was about to ask about. An unknown id is a 404 through
+/// `resolve_root`, exactly like the detail endpoint.
+pub(crate) async fn list_runs_handler(
+    State(state): State<AppState>,
+    Query(q): Query<WorkspaceQuery>,
+) -> impl IntoResponse {
+    let workspaces = match q.workspace.as_deref() {
+        None => enumerate_workspaces(&state),
+        Some(ws) => {
+            let root = match resolve_root(&state, Some(ws)) {
+                Ok(r) => r,
+                Err(e) => return e,
+            };
+            // The project name comes from the registry when the requested
+            // workspace is one of the enumerated ones; a pinned-root harness
+            // has no name to give, exactly as in the aggregate.
+            let project = enumerate_workspaces(&state)
+                .into_iter()
+                .find(|(_, _, r)| *r == root)
+                .map(|(_, name, _)| name)
+                .unwrap_or_default();
+            vec![(ws.to_string(), project, root)]
+        }
+    };
     let mut out: Vec<serde_json::Value> = Vec::new();
-    for (workspace_id, project, root) in enumerate_workspaces(&state) {
+    for (workspace_id, project, root) in workspaces {
         let Ok(list) = apb_engine::list_runs(&root) else {
             continue;
         };
@@ -40,7 +70,14 @@ pub(crate) async fn get_run_handler(
     if !run_dir.is_dir() {
         return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
     }
-    let events = match apb_engine::event::read_all(&run_dir) {
+    // Tolerant of a torn trailing line (issue #103.3): the drive appends to
+    // `events.jsonl` a line at a time, so a detail request that lands between
+    // the bytes of a line and its newline is a normal transient state of a
+    // live run. The strict `read_all` failed the whole request with a 500 in
+    // that window, which is what makes "every poll during execution failed"
+    // look like a broken body to a polling client. Only a read-only reporting
+    // surface may do this; the engine itself stays strict.
+    let events = match apb_engine::event::read_all_lossy_tail(&run_dir) {
         Ok(ev) => ev,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
@@ -96,11 +133,17 @@ pub(crate) async fn get_run_handler(
         .and_then(|reg| reg.load(&playbook_id, Some(&version)).ok())
         .and_then(|loaded| loaded.layout);
 
-    let nodes: std::collections::BTreeMap<String, String> = run_state
-        .nodes
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
-        .collect();
+    // Live reporting, on the same terms the run listing and MCP `run_status`
+    // already use (#85.4, #102.4 cause A). The pure fold calls every open
+    // attempt `interrupted`, so before this the detail view read a healthy
+    // in-flight run as interrupted while the run list beside it read running,
+    // and it never showed that a driverless run needs a resume at all.
+    // `driver_alive` is `liveness::driver_alive`, not a bare pid check: a
+    // sub-playbook child follows its parent's drive claim.
+    let driver_alive = apb_engine::liveness::driver_alive(&run_dir, &id);
+    let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
+    let run_status = apb_engine::liveness::reported_run_status(&events, waiting, driver_alive);
+    let nodes = apb_engine::liveness::reported_node_statuses(&events);
 
     // The run's hooks as map key -> relative path of the signal endpoint.
     let hooks: std::collections::BTreeMap<String, String> = apb_engine::read_hooks(&run_dir)
@@ -114,7 +157,7 @@ pub(crate) async fn get_run_handler(
     // a red run and no explanation, and the reason is only reachable through
     // `apb doctor --run` or an MCP call. Only for a failed run: a reason folded
     // from an earlier, recovered anomaly is not why the run ended.
-    let failure_reason = (run_state.run_status == apb_engine::state::RunStatus::Failed)
+    let failure_reason = (run_status == apb_engine::state::RunStatus::Failed)
         .then(|| {
             run_state
                 .failure_reason
@@ -127,8 +170,9 @@ pub(crate) async fn get_run_handler(
         "run_id": id,
         "playbook": playbook_id,
         "version": version,
-        "run_status": run_state.run_status.as_str(),
+        "run_status": run_status.as_str(),
         "failure_reason": failure_reason,
+        "driver_alive": driver_alive,
         "nodes": nodes,
         "outputs": run_state.outputs,
         "instruction": cfg.instruction,
@@ -174,8 +218,20 @@ pub(crate) async fn post_review_handler(
         decision: body.decision,
         note: body.note,
     };
+    // The engine owns the node check (issue #103.1), so MCP `review_decide`
+    // and the `apb review` CLI inherit it; this maps its two client-fault
+    // verdicts the way `run_playbook_handler` maps its own. Neither is a
+    // server fault: `NotFound` means the decided node is not a `human_review`
+    // node of this run's playbook, `Conflict` means no decision is pending
+    // on it.
     match apb_engine::post_review(&run_dir, cmd) {
         Ok(seq) => Json(serde_json::json!({ "posted_seq": seq })).into_response(),
+        Err(apb_engine::EngineError::NotFound(what)) => {
+            (StatusCode::NOT_FOUND, what).into_response()
+        }
+        Err(apb_engine::EngineError::Conflict(what)) => {
+            (StatusCode::CONFLICT, what).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

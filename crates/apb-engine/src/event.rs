@@ -684,20 +684,82 @@ pub fn raise_wake(
     Ok(())
 }
 
+/// How many decisions a gate has already had recorded. The drive consumes the
+/// N-th posted decision for a node once N of these exist.
+pub(crate) fn review_decided_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::ReviewDecided { node: n, .. } if n == node))
+        .count()
+}
+
+/// How many times a gate has asked for a decision. A gate is pending exactly
+/// while this exceeds [`review_decided_count`], which is what both the drive
+/// loop and `post_review`'s node validation judge against.
+pub(crate) fn review_requested_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::ReviewRequested { node: n, .. } if n == node),
+        )
+        .count()
+}
+
+/// The whole journal, strictly: any unparsable line at all is an error.
+///
+/// This is the engine's own contract and it does not change. Everything that
+/// decides on the journal (the drive loop, the folds, resume) must fail loudly
+/// rather than act on a log it could only read in part.
 pub fn read_all(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
+    read_events(run_dir, false)
+}
+
+/// The journal for a reader that may be racing the writer: identical to
+/// [`read_all`] except that a single unparsable LAST line is dropped instead
+/// of failing the read (issue #103.3).
+///
+/// `EventLog::append` writes one line at a time and a reader can open the file
+/// between the bytes of a line and its newline, so a torn tail is a normal
+/// transient state of a live run, not corruption. Before this, the HTTP run
+/// detail answered 500 for the whole request whenever it landed in that
+/// window, which is exactly the "every poll during execution failed" shape the
+/// field report describes.
+///
+/// Only the tail is forgiven. An unparsable line with any further line after
+/// it is real corruption, and skipping it would hand the caller a journal with
+/// a silent hole. Reserved for read-only reporting surfaces; engine consumers
+/// stay on [`read_all`].
+pub fn read_all_lossy_tail(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
+    read_events(run_dir, true)
+}
+
+fn read_events(run_dir: &Path, tolerate_torn_tail: bool) -> Result<Vec<Event>, EngineError> {
     let path = run_dir.join("events.jsonl");
     if !path.is_file() {
         return Ok(Vec::new());
     }
     let mut out = Vec::new();
+    // An unparsable line is only forgiven once nothing follows it, so the
+    // verdict is deferred: the next line proves it was not the tail.
+    let mut torn: Option<EngineError> = None;
     for line in BufReader::new(File::open(&path)?).lines() {
         let line = line?;
         if line.trim().is_empty() {
             continue;
         }
-        let ev: Event =
-            serde_json::from_str(&line).map_err(|e| EngineError::Yaml(e.to_string()))?;
-        out.push(ev);
+        if let Some(e) = torn.take() {
+            return Err(e);
+        }
+        match serde_json::from_str::<Event>(&line) {
+            Ok(ev) => out.push(ev),
+            Err(e) => {
+                let err = EngineError::Yaml(e.to_string());
+                if !tolerate_torn_tail {
+                    return Err(err);
+                }
+                torn = Some(err);
+            }
+        }
     }
     Ok(out)
 }
@@ -1007,5 +1069,83 @@ mod tests {
             }
             other => panic!("expected RunError, got {other:?}"),
         }
+    }
+
+    // --- torn-tail tolerance (#103.3) --------------------------------------
+
+    /// One complete event line plus a half-written one, which is exactly what
+    /// a reader sees while the drive is appending to `events.jsonl`.
+    fn torn_log(dir: &std::path::Path) {
+        std::fs::write(
+            dir.join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":2,"type":"node_star"#,
+            ),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn read_all_stays_strict_on_a_torn_final_line() {
+        // The engine's own consumers must keep failing loudly on a log they
+        // cannot read in full: this pins that the lossy variant below is an
+        // addition, not a relaxation of the strict contract.
+        let dir = tempfile::tempdir().unwrap();
+        torn_log(dir.path());
+        assert!(read_all(dir.path()).is_err());
+    }
+
+    #[test]
+    fn read_all_lossy_tail_drops_a_torn_final_line() {
+        let dir = tempfile::tempdir().unwrap();
+        torn_log(dir.path());
+        let events = read_all_lossy_tail(dir.path()).unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].seq, 0);
+    }
+
+    #[test]
+    fn read_all_lossy_tail_still_errors_on_a_malformed_middle_line() {
+        // Only the very last line can be torn by a concurrent append. An
+        // unparsable line with anything after it is real corruption, and
+        // silently skipping it would hand the caller a journal with a hole.
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":2,"type":"node_star"#,
+                "\n",
+                r#"{"seq":2,"ts":3,"type":"run_finished","outcome":"succeeded"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        assert!(read_all_lossy_tail(dir.path()).is_err());
+    }
+
+    #[test]
+    fn read_all_lossy_tail_reads_an_intact_log_exactly_like_read_all() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("events.jsonl"),
+            concat!(
+                r#"{"seq":0,"ts":1,"type":"run_started","playbook":"p","version":"1.0.0"}"#,
+                "\n",
+                r#"{"seq":1,"ts":3,"type":"run_finished","outcome":"succeeded"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
+        let strict = read_all(dir.path()).unwrap();
+        let lossy = read_all_lossy_tail(dir.path()).unwrap();
+        assert_eq!(strict.len(), 2);
+        assert_eq!(
+            serde_json::to_string(&strict).unwrap(),
+            serde_json::to_string(&lossy).unwrap()
+        );
     }
 }

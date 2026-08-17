@@ -27,8 +27,54 @@ pub struct ReviewEntry {
     pub cmd: ReviewCommand,
 }
 
+/// Rejects a decision that names something other than a currently pending gate
+/// of this run (issue #103.1).
+///
+/// The check lives here rather than in any one caller because `post_review` is
+/// the single entry point of every decision surface (`apb review`, MCP
+/// `review_decide`, `POST /api/runs/{id}/review`): before this, all three
+/// happily wrote a decision for a node that does not exist, is not a gate, or
+/// has no open request, returned a `posted_seq` that looks like success, and
+/// left a record no drive would ever consume.
+///
+/// "Pending" is the same predicate every reporting surface already uses
+/// (`progress::compute_with`): more `ReviewRequested` than `ReviewDecided`
+/// events for the node. So a caller that was told a gate is pending can always
+/// decide it, and nothing else is accepted.
+///
+/// A run with no playbook snapshot (pre-snapshot runs, and the bare run dirs
+/// the channel's own tests build) has nothing to validate against, so it keeps
+/// the old accept-everything behavior rather than failing undecidably.
+fn check_review_target(run_dir: &Path, node: &str) -> Result<(), EngineError> {
+    use apb_core::schema::NodeKind;
+
+    let Some(playbook) = crate::progress::load_run_playbook(run_dir) else {
+        return Ok(());
+    };
+    let is_gate = playbook
+        .node(node)
+        .is_some_and(|n| matches!(n.kind, NodeKind::HumanReview { .. }));
+    if !is_gate {
+        return Err(EngineError::NotFound(format!(
+            "node `{node}` is not a human_review node of this run's playbook `{}`",
+            playbook.id
+        )));
+    }
+
+    let events = crate::event::read_all(run_dir)?;
+    if crate::event::review_requested_count(&events, node)
+        <= crate::event::review_decided_count(&events, node)
+    {
+        return Err(EngineError::Conflict(format!(
+            "node `{node}` has no review decision pending"
+        )));
+    }
+    Ok(())
+}
+
 pub fn post_review(run_dir: &Path, cmd: ReviewCommand) -> Result<u64, EngineError> {
     std::fs::create_dir_all(run_dir)?;
+    check_review_target(run_dir, &cmd.node)?;
 
     let seq = read_reviews_after(run_dir, None)?.len() as u64;
 

@@ -201,3 +201,117 @@ fn output_match_routes_on_substring() {
     let result = run(dir.path(), "rev", None, RunOptions::default()).unwrap();
     assert_eq!(result.outcome, RunStatus::Succeeded);
 }
+
+// --- node validation (#103.1) ----------------------------------------------
+//
+// `post_review` is the single entry point every decision surface uses (the
+// `apb review` CLI, MCP `review_decide`, the HTTP endpoint), so the check that
+// the decided node is really a pending gate of THIS run lives there rather
+// than in any one caller. These cases build the run dir by hand: the shapes
+// under test (a node that is not a gate, a gate with no open request) are
+// exactly the ones a live drive never produces, and a hand-built journal pins
+// them without racing one.
+
+/// A run dir carrying the given playbook snapshot plus the given journal.
+fn synthetic_run_dir(yaml: &str, payloads: &[EventPayload]) -> tempfile::TempDir {
+    let dir = tempfile::tempdir().unwrap();
+    fs::write(dir.path().join("playbook.yaml"), yaml).unwrap();
+    if !payloads.is_empty() {
+        let mut log = apb_engine::event::EventLog::open(dir.path()).unwrap();
+        for p in payloads {
+            log.append(p.clone()).unwrap();
+        }
+    }
+    dir
+}
+
+fn review_requested(node: &str) -> EventPayload {
+    EventPayload::ReviewRequested {
+        node: node.into(),
+        options: vec!["approved".into(), "rejected".into()],
+        title: None,
+        instruction: String::new(),
+    }
+}
+
+fn decide_on(run_dir: &Path, node: &str) -> Result<u64, apb_engine::EngineError> {
+    post_review(
+        run_dir,
+        ReviewCommand {
+            node: node.into(),
+            decision: "approved".into(),
+            note: String::new(),
+        },
+    )
+}
+
+#[test]
+fn post_review_on_an_unknown_node_is_not_found() {
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    let err = decide_on(dir.path(), "ghost").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::NotFound(_)),
+        "an unknown node must be NotFound, got: {err:?}"
+    );
+    assert!(
+        !dir.path().join("reviews.jsonl").exists(),
+        "a rejected decision must not be written to the channel"
+    );
+}
+
+#[test]
+fn post_review_on_a_node_that_is_not_a_gate_is_not_found() {
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    let err = decide_on(dir.path(), "start").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::NotFound(_)),
+        "a non-human_review node must be NotFound, got: {err:?}"
+    );
+}
+
+#[test]
+fn post_review_on_a_gate_that_is_not_pending_is_a_conflict() {
+    // The gate exists but nothing has requested a decision on it yet.
+    let dir = synthetic_run_dir(WF_REVIEW, &[]);
+    let err = decide_on(dir.path(), "gate").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::Conflict(_)),
+        "a gate with no open request must be Conflict, got: {err:?}"
+    );
+
+    // Already decided: the request is consumed, so a second decision is a
+    // conflict too.
+    let dir = synthetic_run_dir(
+        WF_REVIEW,
+        &[
+            review_requested("gate"),
+            EventPayload::ReviewDecided {
+                node: "gate".into(),
+                decision: "approved".into(),
+                note: String::new(),
+            },
+        ],
+    );
+    let err = decide_on(dir.path(), "gate").unwrap_err();
+    assert!(
+        matches!(err, apb_engine::EngineError::Conflict(_)),
+        "an already-decided gate must be Conflict, got: {err:?}"
+    );
+}
+
+#[test]
+fn post_review_on_the_pending_gate_is_accepted() {
+    let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+    let channel = fs::read_to_string(dir.path().join("reviews.jsonl")).unwrap();
+    assert!(channel.contains("approved"), "got: {channel}");
+}
+
+#[test]
+fn post_review_without_a_run_snapshot_stays_permissive() {
+    // Pre-snapshot runs carry no playbook.yaml, so there is nothing to
+    // validate the node against. Those keep the old accept-everything
+    // behavior rather than becoming undecidable.
+    let dir = tempfile::tempdir().unwrap();
+    assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+}
