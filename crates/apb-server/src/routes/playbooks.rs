@@ -289,6 +289,13 @@ pub(crate) async fn run_playbook_handler(
         Err(apb_engine::EngineError::Invalid(what)) => {
             (StatusCode::UNPROCESSABLE_ENTITY, what).into_response()
         }
+        // #102.5: another write-run holds the workdir. The 5s hint mirrors
+        // `workdir::HANDOVER_WAIT`, which bounds only the handover race
+        // between a preparing process and its detached driver, not this
+        // caller's own retry - so it is an honest hint, not a guarantee.
+        Err(apb_engine::EngineError::WorkdirBusy(what)) => {
+            (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "5")], what).into_response()
+        }
         Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 }

@@ -21,6 +21,33 @@ edges:
   - { from: note, to: done }
 "#;
 
+/// A playbook with a `script` node: the only kind (besides `agent_task`,
+/// `finish`-with-prompt, and `playbook`) that takes the workdir lock
+/// (`NodeKind::takes_workdir_lock`), so starting it is the minimal shape that
+/// exercises `workdir::acquire` at all. The script never actually runs in the
+/// #102.5 busy-lock test below - `acquire` fails before execution reaches it.
+const SCRIPT_PLAYBOOK: &str = r#"
+schema: 1
+id: scripted
+name: Scripted
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/work.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done }
+"#;
+
+fn seed_script_playbook(root: &std::path::Path) {
+    apb_core::registry::init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/scripted/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), SCRIPT_PLAYBOOK).unwrap();
+    fs::write(root.join(".apb/playbooks/scripted/current"), "1.0.0").unwrap();
+}
+
 fn seed_run_in(root: &std::path::Path) {
     apb_core::registry::init_project(root).unwrap();
     let vdir = root.join(".apb/playbooks/noagent/1.0.0");
@@ -502,6 +529,37 @@ async fn post_playbook_run_continued_from_establishes_lineage() {
     let succ_cfg = apb_engine::run_config::read_run_config(&runs_dir.join(&second_id)).unwrap();
     assert_eq!(pred_cfg.superseded_by.as_deref(), Some(second_id.as_str()));
     assert_eq!(succ_cfg.continued_from.as_deref(), Some(first_id.as_str()));
+}
+
+/// #102.5: a second concurrent start against the same project workdir must
+/// not fall into the generic 500 bucket - it is a client-actionable "try
+/// again shortly", not a server fault. The lock is acquired the same way
+/// `run_background` acquires it (a live pid, this test process's own),
+/// deterministically, without racing a real second run.
+#[tokio::test]
+async fn post_playbook_run_workdir_busy_is_429_with_retry_after() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path());
+    let _guard = apb_engine::workdir::acquire(dir.path(), false)
+        .unwrap()
+        .unwrap();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let req = Request::builder()
+        .method("POST")
+        .uri("/api/playbooks/scripted/run")
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({})).unwrap(),
+        ))
+        .unwrap();
+    let res = app.oneshot(req).await.unwrap();
+    assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
+    assert_eq!(
+        res.headers()
+            .get("retry-after")
+            .map(|v| v.to_str().unwrap()),
+        Some("5")
+    );
 }
 
 #[tokio::test]

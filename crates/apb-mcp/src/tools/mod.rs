@@ -51,6 +51,10 @@ impl From<EngineError> for ToolError {
             EngineError::NotFound(m) => ToolError::NotFound(m),
             EngineError::Registry(RegistryError::NotFound(w)) => ToolError::NotFound(w),
             EngineError::Conflict(m) => ToolError::Conflict(m),
+            // A workdir held by another live write-run is a retry-actionable
+            // conflict, not a hard failure (#102.5): the caller can try again
+            // shortly instead of treating this like any other engine error.
+            EngineError::WorkdirBusy(m) => ToolError::Conflict(m),
             other => ToolError::Engine(other.to_string()),
         }
     }

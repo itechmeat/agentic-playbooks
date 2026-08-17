@@ -27,6 +27,32 @@ fn seed(root: &Path) {
     fs::write(root.join(".apb/playbooks/noagent/current"), "1.0.0").unwrap();
 }
 
+/// A playbook with a `script` node: the only kind (besides `agent_task`,
+/// `finish`-with-prompt, and `playbook`) that takes the workdir lock
+/// (`NodeKind::takes_workdir_lock`), so starting it is the minimal shape that
+/// exercises `workdir::acquire` at all.
+const SCRIPTED: &str = r#"
+schema: 1
+id: scripted
+name: Scripted
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/work.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: done }
+"#;
+
+fn seed_scripted(root: &Path) {
+    apb_core::registry::init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/scripted/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), SCRIPTED).unwrap();
+    fs::write(root.join(".apb/playbooks/scripted/current"), "1.0.0").unwrap();
+}
+
 #[test]
 fn run_then_inspect() {
     let dir = tempfile::tempdir().unwrap();
@@ -63,6 +89,38 @@ fn run_then_inspect() {
     let ev2 = run_events(dir.path(), &run_id, Some(2)).unwrap();
     let first_seq = ev2["events"][0]["seq"].as_u64().unwrap();
     assert!(first_seq >= 2);
+}
+
+/// #102.5: a workdir already held by a live write-run must surface as a
+/// `Conflict` (agent-actionable retry hint), not the generic `Engine` bucket
+/// that a client cannot distinguish from a hard failure.
+#[test]
+fn playbook_run_workdir_busy_is_conflict() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_scripted(dir.path());
+    // Holds the workdir lock under this test process's own (live) pid for the
+    // duration of the call below.
+    let _guard = apb_engine::workdir::acquire(dir.path(), false)
+        .unwrap()
+        .unwrap();
+    let err = playbook_run(
+        dir.path(),
+        "scripted",
+        None,
+        BTreeMap::new(),
+        None,
+        None,
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+        None,
+    )
+    .unwrap_err();
+    assert!(
+        matches!(err, apb_mcp::tools::ToolError::Conflict(_)),
+        "expected Conflict, got {err:?}"
+    );
 }
 
 #[test]
