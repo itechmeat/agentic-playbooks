@@ -122,6 +122,23 @@ pub fn create_version(
     base_version: Option<&str>,
     make_current: bool,
 ) -> Result<String, VersioningError> {
+    create_version_with_override(root, id, new_yaml, base_version, None, make_current)
+}
+
+/// Same as `create_version`, but when `version_override` is `Some`, that exact
+/// `major.minor.patch` is used instead of the computed next minor version,
+/// provided it is free. A `version_override` that is not valid semver, or
+/// that already exists for this playbook, is rejected with
+/// `VersioningError::Conflict` naming the problem. `version_override: None`
+/// keeps today's auto-assign behavior unchanged.
+pub fn create_version_with_override(
+    root: &Path,
+    id: &str,
+    new_yaml: &str,
+    base_version: Option<&str>,
+    version_override: Option<&str>,
+    make_current: bool,
+) -> Result<String, VersioningError> {
     if !is_safe_segment(id) {
         return Err(VersioningError::NotFound(id.to_string()));
     }
@@ -152,10 +169,26 @@ pub fn create_version(
         list_version_dirs(&playbook_dir)?
     };
 
-    let mut version = if is_new {
-        "1.0.0".to_string()
+    let (mut version, bump) = if let Some(v) = version_override {
+        if !is_safe_segment(v) {
+            return Err(VersioningError::NotFound(format!("{id}@{v}")));
+        }
+        if parse_version_triple(v).is_none() {
+            return Err(VersioningError::Conflict(format!("invalid version `{v}`")));
+        }
+        if existing.iter().any(|e| e.as_str() == v) {
+            return Err(VersioningError::Conflict(format!(
+                "version `{v}` already exists for playbook `{id}`"
+            )));
+        }
+        (v.to_string(), VersionBump::Fixed)
+    } else if is_new {
+        ("1.0.0".to_string(), VersionBump::Minor)
     } else {
-        next_minor_version(base.as_deref().unwrap_or("1.0.0"), &existing)
+        (
+            next_minor_version(base.as_deref().unwrap_or("1.0.0"), &existing),
+            VersionBump::Minor,
+        )
     };
 
     let mut playbook = Playbook::from_yaml(new_yaml).map_err(schema_err)?;
@@ -168,13 +201,8 @@ pub fn create_version(
         fs::create_dir_all(&playbook_dir)?;
     }
 
-    let version_path = commit_version_dir(
-        &playbook_dir,
-        &version,
-        &playbook,
-        base.as_deref(),
-        VersionBump::Minor,
-    )?;
+    let version_path =
+        commit_version_dir(&playbook_dir, &version, &playbook, base.as_deref(), bump)?;
     version = version_path
         .file_name()
         .unwrap_or_default()
@@ -913,6 +941,10 @@ fn playbook_yaml_for_version(
 enum VersionBump {
     Minor,
     Patch,
+    /// The version was pinned by an explicit override (see
+    /// `create_version_with_override`): a collision on rename is a hard
+    /// conflict, never silently bumped to the next free number.
+    Fixed,
 }
 
 fn commit_version_dir(
@@ -953,6 +985,15 @@ fn commit_version_dir(
                 version = match bump {
                     VersionBump::Minor => bump_minor(&version)?,
                     VersionBump::Patch => bump_patch(&version)?,
+                    VersionBump::Fixed => {
+                        let id = playbook_dir
+                            .file_name()
+                            .unwrap_or_default()
+                            .to_string_lossy();
+                        return Err(VersioningError::Conflict(format!(
+                            "version `{version}` already exists for playbook `{id}`"
+                        )));
+                    }
                 };
                 continue;
             }

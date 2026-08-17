@@ -125,7 +125,7 @@ Decomposition plan: docs/superpowers/plans/2026-07-10-workflows-cli-phase8.md (8
 - [x] **`apb doctor`** - environment diagnostics (agents, executors, profiles, runners). apb-core/doctor.rs (diagnose -> DoctorReport, Ok/Warn/Fail checks: config, registry, agent-binary PATH, runtime availability, playbook validity), CLI `apb doctor` with a return code. Runner registry and PATH helper moved into apb-core. Test doctor_test.
 - [x] **`apb dev`** - dev mode: API server on 7321 (Vite's proxy target) in the background + Vite HMR (`bun run dev` in web/) as a child process; clear error without web/ or bun.
 - [x] **Distribution** - GitHub Actions: CI (build web + clippy/test) and release (binaries for macOS arm64/x64 and Linux x64 on tag v*, web built before cargo because of rust-embed); docs/INSTALL.md (binaries / brew / cargo install, web-build requirement); brew formula template packaging/apb.rb.
-- [x] **Playbook export/import** - apb-core/bundle.rs (PlaybookBundle: raw playbook.yaml + layout as JSON), CLI `apb export`/`apb import` (import creates a new version per the project's scheme, validates, restores layout). Tests bundle_test, phase9_cli_test.
+- [x] **Playbook export/import** - apb-core/bundle.rs (PlaybookBundle: raw playbook.yaml + layout as JSON), CLI `apb export`/`apb import` (import creates a new version: honors the bundle's version when it is free, errors naming the conflict when it is taken, falls back to the project's auto-assign scheme when the bundle carries none; validates, restores layout). Tests bundle_test, phase9_cli_test.
 
 ## Follow-up on previously deferred items (after Phase 9)
 

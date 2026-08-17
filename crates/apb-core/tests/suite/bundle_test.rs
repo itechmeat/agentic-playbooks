@@ -111,3 +111,104 @@ fn import_rejects_unknown_schema() {
         "got: {err}"
     );
 }
+
+#[test]
+fn import_honors_bundle_version_1_0_0_on_a_fresh_id() {
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let bundle = PlaybookBundle {
+        apb_bundle: 1,
+        id: "va".to_string(),
+        version: "1.0.0".to_string(),
+        playbook: PLAYBOOK.to_string(),
+        layout: None,
+    };
+
+    let assigned = import_bundle(b.path(), &bundle, true).unwrap();
+    assert_eq!(assigned, "1.0.0");
+}
+
+#[test]
+fn import_honors_a_free_non_default_bundle_version() {
+    // Seed an existing playbook whose auto-assign scheme would never land on
+    // 9.9.9 next (it would compute 1.1.0). A free, non-sequential bundle
+    // version must still be honored exactly.
+    let b = tempfile::tempdir().unwrap();
+    seed(b.path());
+    let bundle = PlaybookBundle {
+        apb_bundle: 1,
+        id: "va".to_string(),
+        version: "9.9.9".to_string(),
+        playbook: PLAYBOOK.to_string(),
+        layout: None,
+    };
+
+    let assigned = import_bundle(b.path(), &bundle, true).unwrap();
+    assert_eq!(assigned, "9.9.9");
+}
+
+#[test]
+fn second_import_of_the_same_version_errors_naming_the_conflict() {
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let bundle = PlaybookBundle {
+        apb_bundle: 1,
+        id: "va".to_string(),
+        version: "1.0.0".to_string(),
+        playbook: PLAYBOOK.to_string(),
+        layout: None,
+    };
+
+    let first = import_bundle(b.path(), &bundle, true).unwrap();
+    assert_eq!(first, "1.0.0");
+
+    let err = import_bundle(b.path(), &bundle, true).unwrap_err();
+    assert!(
+        matches!(err, BundleError::Versioning(VersioningError::Conflict(_))),
+        "got {err:?}"
+    );
+    let msg = err.to_string();
+    assert!(msg.contains("va"), "expected id `va` named, got: {msg}");
+    assert!(
+        msg.contains("1.0.0"),
+        "expected version `1.0.0` named, got: {msg}"
+    );
+}
+
+#[test]
+fn version_less_bundle_auto_assigns_exactly_as_today() {
+    let b = tempfile::tempdir().unwrap();
+    seed(b.path());
+    let bundle = PlaybookBundle {
+        apb_bundle: 1,
+        id: "va".to_string(),
+        version: String::new(),
+        playbook: PLAYBOOK.to_string(),
+        layout: None,
+    };
+
+    // Seeded project already has `va` @ 1.0.0 current; a version-less bundle
+    // falls back to the ordinary next-minor auto-assign.
+    let assigned = import_bundle(b.path(), &bundle, true).unwrap();
+    assert_eq!(assigned, "1.1.0");
+}
+
+#[test]
+fn import_rejects_a_non_semver_bundle_version_cleanly() {
+    let b = tempfile::tempdir().unwrap();
+    init_project(b.path()).unwrap();
+    let bundle = PlaybookBundle {
+        apb_bundle: 1,
+        id: "va".to_string(),
+        version: "not-semver".to_string(),
+        playbook: PLAYBOOK.to_string(),
+        layout: None,
+    };
+
+    let err = import_bundle(b.path(), &bundle, true).unwrap_err();
+    assert!(
+        matches!(err, BundleError::Versioning(VersioningError::Conflict(_))),
+        "got {err:?}"
+    );
+    assert!(err.to_string().contains("not-semver"), "got: {err}");
+}
