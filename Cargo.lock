@@ -129,7 +129,7 @@ dependencies = [
 name = "apb-core"
 version = "0.20.0"
 dependencies = [
- "base64 0.22.1",
+ "base64 0.23.1",
  "getrandom 0.4.3",
  "globset",
  "hmac",
