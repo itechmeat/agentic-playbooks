@@ -14,8 +14,8 @@
   "devDependencies": {
     "@fontsource-variable/inter": "^5.3.0",
     "@internationalized/date": "^3.12.3",
-    "@lucide/svelte": "^1.30.0",
-    "@sveltejs/vite-plugin-svelte": "^7.1.2",
+    "@lucide/svelte": "^1.31.0",
+    "@sveltejs/vite-plugin-svelte": "^7.3.0",
     "@tailwindcss/vite": "^4.3.3",
     "@tsconfig/svelte": "^5.0.8",
     "@types/node": "^26.2.0",
@@ -23,9 +23,9 @@
     "clsx": "^2.1.1",
     "mode-watcher": "^1.1.0",
     "shadcn-svelte": "^1.5.0",
-    "svelte": "^5.56.8",
-    "svelte-check": "^4.7.5",
-    "svelte-sonner": "^1.1.0",
+    "svelte": "^5.56.9",
+    "svelte-check": "^4.7.6",
+    "svelte-sonner": "^1.2.1",
     "tailwind-merge": "^3.5.0",
     "tailwind-variants": "^3.3.1",
     "tailwindcss": "^4.3.3",
@@ -40,9 +40,9 @@
     "@codemirror/language": "^6.12.4",
     "@codemirror/state": "^6.7.1",
     "@codemirror/view": "^6.43.8",
-    "@dagrejs/dagre": "^3.1.0",
+    "@dagrejs/dagre": "^3.1.1",
     "@lezer/highlight": "^1.2.3",
-    "@xyflow/svelte": "^1.6.2",
+    "@xyflow/svelte": "^1.6.3",
     "yaml": "2.9.0"
   }
 }
