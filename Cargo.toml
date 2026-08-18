@@ -38,7 +38,7 @@ globset = "0.4"
 # CSPRNG bytes, unpadded base64url encoding, and a constant-time comparison for
 # everything derived from a secret. No password-hash crate: these are 256-bit
 # random tokens, not user-chosen passwords.
-base64 = "0.22"
+base64 = "0.23"
 getrandom = "0.4"
 subtle = "2.6"
 # Native IMAP execution for the `imap` connector function kind (spec 3.2, wave
