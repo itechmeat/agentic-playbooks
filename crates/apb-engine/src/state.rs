@@ -89,6 +89,18 @@ impl RunStatus {
             RunStatus::Interrupted => "interrupted",
         }
     }
+
+    /// Whether the journal has already recorded an outcome for this run.
+    /// `Interrupted` is deliberately not one: it is a fold of an unfinished
+    /// run whose driver went away, and a later terminal event still decides
+    /// it. Callers use this to avoid writing a SECOND outcome over one that
+    /// is already there, which would rewrite what the run actually did.
+    pub fn is_terminal(self) -> bool {
+        matches!(
+            self,
+            RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
+        )
+    }
 }
 
 /// A human_review node decision: the chosen option and the reviewer's note.
@@ -197,6 +209,10 @@ impl RunState {
                 }
                 EventPayload::RunPaused { .. } => s.run_status = RunStatus::Paused,
                 EventPayload::RunResumed { .. } => s.run_status = RunStatus::Running,
+                // A queued run is `Running` and stays that way: it was
+                // admitted, its parameters are on disk, and it is waiting for
+                // the workdir rather than for anybody to decide anything.
+                EventPayload::RunQueued { .. } => {}
                 EventPayload::RunFinished { outcome } => {
                     s.run_status = match outcome.as_str() {
                         "succeeded" => RunStatus::Succeeded,

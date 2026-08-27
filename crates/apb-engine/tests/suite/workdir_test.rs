@@ -1,7 +1,8 @@
 use apb_engine::error::EngineError;
 use apb_engine::run_config::{RunConfig, RunMode, read_run_config, write_run_config};
-use apb_engine::workdir::acquire;
+use apb_engine::workdir::{acquire, acquire_queued};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 #[test]
 fn run_config_round_trips() {
@@ -26,6 +27,7 @@ fn run_config_round_trips() {
         cache: Default::default(),
         mode: RunMode::Supervised,
         max_parallel: Some(2),
+        workdir_queue_wait_ms: Some(60_000),
     };
     write_run_config(dir.path(), &cfg).unwrap();
     let back = read_run_config(dir.path()).unwrap();
@@ -36,6 +38,10 @@ fn run_config_round_trips() {
     assert_eq!(back.mode, RunMode::Supervised);
     // Same for the concurrency cap (spec 2026-08-05 section 1.3).
     assert_eq!(back.max_parallel, Some(2));
+    // And for the workdir-queue ceiling: a detached driver of a queued run has
+    // no other way to learn that its wait is about another run finishing, not
+    // about a sub-millisecond lock handover.
+    assert_eq!(back.workdir_queue_wait_ms, Some(60_000));
 }
 
 #[test]
@@ -54,4 +60,73 @@ fn second_writer_is_refused_but_shared_allowed() {
     // after releasing the first lock, acquire is possible again
     drop(guard);
     assert!(acquire(root.path(), false).unwrap().is_some());
+}
+
+/// The queue's whole job: a start that would have been refused waits the
+/// holder out and then runs. Without this, an event that arrives while any
+/// other write-run holds the lock has nowhere to go.
+#[test]
+fn a_queued_waiter_takes_the_lock_once_the_holder_releases_it() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+    let guard = acquire(root.path(), false).unwrap().unwrap();
+    let held = std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_millis(400));
+        drop(guard);
+    });
+    let waited = acquire_queued(root.path(), Duration::from_secs(30), &mut || false)
+        .expect("the queue must outlast a holder that releases within the ceiling");
+    assert!(waited.is_some(), "the waiter must end up holding the lock");
+    held.join().unwrap();
+}
+
+/// A queue is not an unbounded promise. Running out is a real failure the
+/// caller can see, and it says which wait it was rather than repeating the
+/// generic "use worktree" hint on its own.
+#[test]
+fn a_queued_waiter_gives_up_when_the_ceiling_passes() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+    let _guard = acquire(root.path(), false).unwrap().unwrap();
+    match acquire_queued(root.path(), Duration::from_millis(300), &mut || false) {
+        Err(EngineError::WorkdirBusy(msg)) => {
+            assert!(
+                msg.contains("workdir queue"),
+                "the give-up must name the queue, got {msg}"
+            );
+        }
+        other => panic!("expected WorkdirBusy, got {other:?}"),
+    }
+}
+
+/// A stop posted against a queued run must not have to wait for an unrelated
+/// run to finish before it takes effect.
+#[test]
+fn a_queued_waiter_abandons_the_wait_when_the_run_is_stopped() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+    let _guard = acquire(root.path(), false).unwrap().unwrap();
+    let started = std::time::Instant::now();
+    match acquire_queued(root.path(), Duration::from_secs(300), &mut || true) {
+        Err(EngineError::WorkdirBusy(msg)) => {
+            assert!(
+                msg.contains("stopped"),
+                "the abandonment must say it was a stop, got {msg}"
+            );
+        }
+        other => panic!("expected WorkdirBusy, got {other:?}"),
+    }
+    assert!(
+        started.elapsed() < Duration::from_secs(30),
+        "a stopped waiter must not sit out the ceiling"
+    );
+}
+
+/// A free workdir is not a queue at all: nothing waits, nothing polls.
+#[test]
+fn a_free_workdir_is_taken_without_waiting() {
+    let root = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(root.path().join(".apb")).unwrap();
+    let guard = acquire_queued(root.path(), Duration::from_secs(300), &mut || false).unwrap();
+    assert!(guard.is_some());
 }

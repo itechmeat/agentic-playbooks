@@ -215,7 +215,8 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     }
     let auth = std::sync::Arc::new(auth_state);
     let auth_enabled = auth.enabled();
-    let state = AppState::new_global_with_auth(auth);
+    let state = AppState::new_global_with_auth(auth)
+        .with_workdir_queue_wait(global_cfg.server.workdir_queue_wait());
     let cfg = apb_core::config::config_dir()
         .ok_or_else(|| std::io::Error::other("no config dir for the global server lock"))?;
     std::fs::create_dir_all(&cfg)?;

@@ -1,6 +1,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::net::{IpAddr, Ipv4Addr};
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
@@ -416,9 +417,35 @@ pub struct ServerConfig {
     /// Forwarded headers are never used for an authentication decision, only
     /// for rate-limit keying and logging.
     pub trusted_proxies: Vec<String>,
+    /// How long a run start may sit in the workdir queue when another
+    /// write-run already holds the shared workdir lock, in seconds. `None`
+    /// gives [`DEFAULT_WORKDIR_QUEUE_WAIT_SECONDS`]; `0` turns queueing off
+    /// and restores the immediate refusal (HTTP 429), which is the right
+    /// setting only where the caller is a human who can retry.
+    pub workdir_queue_wait_seconds: Option<u64>,
 }
 
+/// How long an admitted run waits for the shared workdir by default.
+///
+/// Fifteen minutes is chosen against what actually holds the lock: one other
+/// write-run, which is bounded by its own node timeouts rather than by
+/// anything the queue can see. Long enough that an inbound event arriving
+/// mid-run is executed rather than discarded, short enough that a workdir
+/// wedged by a stuck holder surfaces as a failed run within the hour instead
+/// of a thread parked forever.
+pub const DEFAULT_WORKDIR_QUEUE_WAIT_SECONDS: u64 = 900;
+
 impl ServerConfig {
+    /// The workdir queue ceiling for run starts, or `None` when the operator
+    /// turned queueing off with an explicit `0`.
+    pub fn workdir_queue_wait(&self) -> Option<Duration> {
+        match self.workdir_queue_wait_seconds {
+            Some(0) => None,
+            Some(secs) => Some(Duration::from_secs(secs)),
+            None => Some(Duration::from_secs(DEFAULT_WORKDIR_QUEUE_WAIT_SECONDS)),
+        }
+    }
+
     /// Bind precedence: `--bind` flag, then `server.bind`, then loopback.
     pub fn resolve_bind(&self, flag: Option<&str>) -> Result<IpAddr, String> {
         match flag.or(self.bind.as_deref()) {

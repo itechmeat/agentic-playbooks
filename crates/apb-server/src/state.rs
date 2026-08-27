@@ -23,6 +23,14 @@ pub struct AppState {
     /// Disabled by default, which is exactly today's local behavior;
     /// `run_server` attaches a populated state when keys exist.
     pub auth: Arc<crate::auth::AuthState>,
+    /// How long a run start may wait for a busy workdir before the engine
+    /// gives up on it. `None` restores the historical immediate 429.
+    ///
+    /// Resolved once at startup from `server.workdir_queue_wait_seconds`
+    /// rather than read per request: the value decides how a run START
+    /// behaves, and a start whose semantics could change under it mid-flight
+    /// is the kind of thing an operator cannot reason about.
+    pub workdir_queue_wait: Option<std::time::Duration>,
 }
 
 impl AppState {
@@ -33,6 +41,7 @@ impl AppState {
             root: Some(Arc::new(root)),
             events,
             auth: Arc::new(crate::auth::AuthState::disabled()),
+            workdir_queue_wait: default_workdir_queue_wait(),
         }
     }
 
@@ -44,6 +53,7 @@ impl AppState {
             root: None,
             events,
             auth: Arc::new(crate::auth::AuthState::disabled()),
+            workdir_queue_wait: default_workdir_queue_wait(),
         }
     }
 
@@ -54,6 +64,7 @@ impl AppState {
             root: None,
             events,
             auth,
+            workdir_queue_wait: default_workdir_queue_wait(),
         }
     }
 
@@ -62,6 +73,20 @@ impl AppState {
         self.auth = auth;
         self
     }
+
+    /// Applies the operator's workdir-queue setting. `None` turns queueing
+    /// off, which is what `server.workdir_queue_wait_seconds: 0` asks for.
+    pub fn with_workdir_queue_wait(mut self, wait: Option<std::time::Duration>) -> Self {
+        self.workdir_queue_wait = wait;
+        self
+    }
+}
+
+/// The queue ceiling a state carries when nobody has configured one: the same
+/// value a default `ServerConfig` resolves to, so the pinned-root harness and
+/// a freshly installed dashboard behave alike.
+fn default_workdir_queue_wait() -> Option<std::time::Duration> {
+    apb_core::config::ServerConfig::default().workdir_queue_wait()
 }
 
 /// Lets an axum handler extract just the auth substate (`State<Arc<AuthState>>`)

@@ -587,19 +587,9 @@ async fn post_playbook_run_continued_from_establishes_lineage() {
     assert_eq!(succ_cfg.continued_from.as_deref(), Some(first_id.as_str()));
 }
 
-/// #102.5: a second concurrent start against the same project workdir must
-/// not fall into the generic 500 bucket - it is a client-actionable "try
-/// again shortly", not a server fault. The lock is acquired the same way
-/// `run_background` acquires it (a live pid, this test process's own),
-/// deterministically, without racing a real second run.
-#[tokio::test]
-async fn post_playbook_run_workdir_busy_is_429_with_retry_after() {
-    let dir = tempfile::tempdir().unwrap();
-    seed_script_playbook(dir.path());
-    let _guard = apb_engine::workdir::acquire(dir.path(), false)
-        .unwrap()
-        .unwrap();
-    let app = build_router(AppState::new(dir.path().to_path_buf()));
+/// Posts a start for the script playbook and returns the response.
+async fn post_script_run(state: AppState) -> axum::response::Response {
+    let app = build_router(state);
     let req = Request::builder()
         .method("POST")
         .uri("/api/playbooks/scripted/run")
@@ -608,13 +598,73 @@ async fn post_playbook_run_workdir_busy_is_429_with_retry_after() {
             serde_json::to_vec(&serde_json::json!({})).unwrap(),
         ))
         .unwrap();
-    let res = app.oneshot(req).await.unwrap();
+    app.oneshot(req).await.unwrap()
+}
+
+/// #102.5, revised: with queueing switched off, a second concurrent start
+/// against the same project workdir must not fall into the generic 500 bucket
+/// - it is a client-actionable "try again shortly", not a server fault. The
+/// lock is acquired the same way `run_background` acquires it (a live pid,
+/// this test process's own), deterministically, without racing a real second
+/// run.
+#[tokio::test]
+async fn post_playbook_run_workdir_busy_is_429_with_retry_after_when_queueing_is_off() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path());
+    let _guard = apb_engine::workdir::acquire(dir.path(), false)
+        .unwrap()
+        .unwrap();
+    let state = AppState::new(dir.path().to_path_buf()).with_workdir_queue_wait(None);
+    let res = post_script_run(state).await;
     assert_eq!(res.status(), StatusCode::TOO_MANY_REQUESTS);
     assert_eq!(
         res.headers()
             .get("retry-after")
             .map(|v| v.to_str().unwrap()),
         Some("5")
+    );
+}
+
+/// The defect this endpoint exists to not have: an inbound-event bridge posts
+/// an event, the workdir happens to be busy, and the refusal destroys the only
+/// copy of the event. By default the start is now ADMITTED - a run id comes
+/// back, the caller's parameters are on disk, and the run waits for the
+/// workdir instead of the event waiting for nobody.
+#[tokio::test]
+async fn post_playbook_run_on_a_busy_workdir_is_admitted_and_queued() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path());
+    let _guard = apb_engine::workdir::acquire(dir.path(), false)
+        .unwrap()
+        .unwrap();
+    let res = post_script_run(AppState::new(dir.path().to_path_buf())).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let run_id = body["run_id"]
+        .as_str()
+        .expect("a queued start still answers with a run id");
+
+    // The event the caller handed over survives the busy workdir: the run
+    // directory and the journal exist, and the journal says why nothing has
+    // started yet.
+    let run_dir = dir.path().join(".apb/runs").join(run_id);
+    assert!(
+        run_dir.is_dir(),
+        "the queued run must be persisted, not held in memory"
+    );
+    let events = apb_engine::event::read_all(&run_dir).unwrap();
+    assert!(
+        events.iter().any(|e| matches!(
+            &e.payload,
+            apb_engine::event::EventPayload::RunQueued { reason } if reason.contains("workdir")
+        )),
+        "a queued start must journal why it is waiting, got {events:?}"
+    );
+    // Queued is not paused: an admitted run reads as running to every observer.
+    assert_eq!(
+        apb_engine::state::RunState::fold(&events).run_status,
+        apb_engine::state::RunStatus::Running
     );
 }
 

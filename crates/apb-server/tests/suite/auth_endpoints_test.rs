@@ -189,6 +189,7 @@ async fn a_public_https_origin_makes_the_cookie_secure() {
         bind: None,
         public_base_url: Some("https://apb.example.com".to_string()),
         trusted_proxies: Vec::new(),
+        workdir_queue_wait_seconds: None,
     };
     let (key, state) = authed_with(dir.path().to_path_buf(), cfg);
     let (status, set_cookie, _) = send(&state, login_request(&key)).await;

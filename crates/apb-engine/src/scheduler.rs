@@ -32,7 +32,7 @@ use crate::run_config::{
 use crate::script::run_script;
 use crate::signals::read_signals_after;
 use crate::state::{NodeStatus, RunState, RunStatus};
-use crate::workdir::{acquire, acquire_handover};
+use crate::workdir::{acquire, acquire_handover_within, acquire_queued};
 
 /// Run mode: autonomous (as in phases 1-3, behavior unchanged) or supervised
 /// (the engine stops on a wake event and waits for a command). Defined in

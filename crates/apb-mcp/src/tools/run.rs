@@ -50,6 +50,10 @@ pub fn playbook_run(
         expected_connector_accounts,
         cache: Default::default(),
         max_parallel: None,
+        // Fail-fast on a busy workdir: this caller is a person waiting on the
+        // answer, who can retry, not an event source whose event dies with the
+        // refusal (see `RunOptions::workdir_queue_wait`).
+        workdir_queue_wait: None,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -99,6 +103,10 @@ pub fn playbook_run_background(
         expected_connector_accounts,
         cache: Default::default(),
         max_parallel: None,
+        // Fail-fast on a busy workdir: this caller is a person waiting on the
+        // answer, who can retry, not an event source whose event dies with the
+        // refusal (see `RunOptions::workdir_queue_wait`).
+        workdir_queue_wait: None,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -412,6 +420,10 @@ pub fn playbook_run_supervised(
         expected_connector_accounts,
         cache: Default::default(),
         max_parallel: None,
+        // Fail-fast on a busy workdir: this caller is a person waiting on the
+        // answer, who can retry, not an event source whose event dies with the
+        // refusal (see `RunOptions::workdir_queue_wait`).
+        workdir_queue_wait: None,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

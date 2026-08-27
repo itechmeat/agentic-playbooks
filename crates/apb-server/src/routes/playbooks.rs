@@ -209,6 +209,17 @@ pub(crate) struct RunBody {
 /// returns its run_id immediately, so the dashboard can jump straight to the
 /// run view. Mirrors the CLI/MCP background-run path.
 ///
+/// A start that finds the shared workdir already held by another write-run is
+/// QUEUED rather than refused (`server.workdir_queue_wait_seconds`, default
+/// 15 minutes): the run directory, the playbook snapshot and the caller's
+/// parameters are written, the run id comes back 200 as usual, and the engine
+/// claims the workdir when the holder releases it. This endpoint is what an
+/// inbound-event bridge posts to, and such a caller has nowhere to put a
+/// refusal - the event it was carrying is gone the moment the POST fails.
+/// Persisting the start IS the queue; there is no second event store. An
+/// operator who wants the old behavior back sets the wait to `0` and gets the
+/// 429 below.
+///
 /// A connector-binding playbook additionally needs its two connector permit
 /// maps computed server-side first (Task 15 review follow-up): the dashboard
 /// has no MCP tool call in front of it to run `policy::check_run`, so without
@@ -241,6 +252,11 @@ pub(crate) async fn run_playbook_handler(
         instruction: body.instruction,
         params: body.params,
         continued_from: body.continued_from,
+        // A busy workdir queues the start instead of refusing it (see the
+        // handler doc): the caller is answered with a run id and the run's
+        // parameters are already persisted, so nothing depends on the caller
+        // still being around when the engine frees up.
+        workdir_queue_wait: state.workdir_queue_wait,
         ..Default::default()
     };
 
@@ -289,9 +305,11 @@ pub(crate) async fn run_playbook_handler(
         Err(apb_engine::EngineError::Invalid(what)) => {
             (StatusCode::UNPROCESSABLE_ENTITY, what).into_response()
         }
-        // #102.5: another write-run holds the workdir. The 5s hint mirrors
-        // `workdir::HANDOVER_WAIT`, which bounds only the handover race
-        // between a preparing process and its detached driver, not this
+        // #102.5: another write-run holds the workdir. Only reachable now with
+        // queueing switched off (`server.workdir_queue_wait_seconds: 0`) - with
+        // the default the start is admitted and this arm never fires. The 5s
+        // hint mirrors `workdir::HANDOVER_WAIT`, which bounds only the handover
+        // race between a preparing process and its detached driver, not this
         // caller's own retry - so it is an honest hint, not a guarantee.
         Err(apb_engine::EngineError::WorkdirBusy(what)) => {
             (StatusCode::TOO_MANY_REQUESTS, [("retry-after", "5")], what).into_response()
