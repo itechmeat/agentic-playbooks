@@ -797,7 +797,8 @@ functions:
   - name: post_booking_ancillary_search
     description: >-
       Search post-ticketing ancillary (currently baggage only) options for an
-      existing order. Read-only; the research does not name this endpoint's
+      existing order, identified by ticketOrderNo or by airlinePNR plus
+      carrier. Read-only; the research does not name this endpoint's
       own response fields; only the connector-wide business-status
       convention (most .do calls return a status field in a 200 body) is
       projected below.
@@ -812,16 +813,37 @@ functions:
     body:
       ancillaryCategory: "{{args.ancillary_category}}"
       ticketOrderNo: "{{args.ticket_order_no}}"
+      airlinePNR: "{{args.airline_pnr}}"
+      carrier: "{{args.carrier}}"
+      paymentMethod: "{{args.payment_method}}"
+      fromSegments: "{{args.from_segments}}"
+      retSegments: "{{args.ret_segments}}"
     args_schema:
       type: object
       properties:
         ancillary_category: { type: string, enum: ["BAGGAGE"], description: "currently only BAGGAGE is supported (vendor field ancillaryCategory)" }
-        ticket_order_no: { type: string, description: "vendor field ticketOrderNo" }
-      required: [ticket_order_no]
+        ticket_order_no: { type: string, description: "the original (ticketed) order number, vendor field ticketOrderNo" }
+        airline_pnr: { type: string, description: "the AIRLINE record locator, vendor field airlinePNR - this is queryOrderDetails' airlineBookings[].airlinePnr, not the Atlas order pnrCode; passing the Atlas pnrCode here answers 704 'Query parameters don't match order records'" }
+        carrier: { type: string, description: "IATA code of the marketing airline, vendor field carrier; required whenever airline_pnr is used" }
+        payment_method: { type: integer, description: "preferred payment method (1 deposit, 3 vcc passthrough, 4 BYOA, 5 MoR), vendor field paymentMethod" }
+        from_segments:
+          type: array
+          items: { type: object }
+          description: "outbound segments, vendor field fromSegments; each item carries carrier, flightNumber, depAirport, arrAirport, depTime (yyyyMMddHHmm)"
+        ret_segments:
+          type: array
+          items: { type: object }
+          description: "inbound segments, vendor field retSegments; same item shape as fromSegments"
+      required: [ancillary_category]
+      oneOf:
+        - required: [ticket_order_no]
+        - required: [airline_pnr, carrier]
       additionalProperties: true
     examples:
       - args: { ancillary_category: "BAGGAGE", ticket_order_no: "TKT-1001" }
-        note: "operates against an existing order."
+        note: "operates against an existing order; the order must be ticketed and the departure still ahead. ticketOrderNo alone is a sufficient identifier."
+      - args: { ancillary_category: "BAGGAGE", airline_pnr: "PNR654321", carrier: "AA" }
+        note: "airline record locator plus carrier is the alternative identifier when the Atlas order number is not at hand. With no identifier at all Atlas answers 702 'airlinePNR and carrier are required'. An empty or null ancillaryProductElements means the fare simply offers no post-ticketing baggage - a normal status-0 outcome, not an error."
     response_pick: [status]
 
   - name: post_booking_ancillary_order
@@ -840,28 +862,43 @@ functions:
       ancillaryCategory: "{{args.ancillary_category}}"
       sessionId: "{{args.session_id}}"
       ticketOrderNo: "{{args.ticket_order_no}}"
+      airlinePNR: "{{args.airline_pnr}}"
+      carrier: "{{args.carrier}}"
       passengers: "{{args.passengers}}"
+      payment: "{{args.payment}}"
     args_schema:
       type: object
       properties:
         ancillary_category: { type: string, enum: ["BAGGAGE"], description: "currently only BAGGAGE is supported (vendor field ancillaryCategory)" }
-        session_id: { type: string, description: "vendor field sessionId" }
-        ticket_order_no: { type: string, description: "vendor field ticketOrderNo" }
+        session_id: { type: string, description: "identifier of the searched ancillary, from the post_booking_ancillary_search response (vendor field sessionId)" }
+        ticket_order_no: { type: string, description: "the original (ticketed) order number, vendor field ticketOrderNo" }
+        airline_pnr: { type: string, description: "airline record locator, vendor field airlinePNR; sent alongside carrier for parity with post_booking_ancillary_search" }
+        carrier: { type: string, description: "IATA code of the marketing airline, vendor field carrier" }
         passengers:
           type: array
+          description: "only the passengers buying the ancillary, vendor field passengers"
           items:
             type: object
             properties:
-              name: { type: string }
-              type: { type: string, description: "passenger type, e.g. ADT/CHD/INF" }
-              gender: { type: string }
-              documents: { type: array, items: { type: object } }
-            required: [name, type, gender]
+              name: { type: string, description: "passenger name as ticketed" }
+              passengerType: { type: integer, description: "vendor field passengerType: 0 adult, 1 child, 2 infant" }
+              ancillaries:
+                type: array
+                description: "the options this passenger is buying, vendor field ancillaries"
+                items:
+                  type: object
+                  properties:
+                    productCode: { type: string, description: "productCode of the chosen option, taken from the post_booking_ancillary_search response" }
+                    segmentIndex: { type: integer, description: "1-based index of the segment the option applies to" }
+                    quantity: { type: integer, description: "number of pieces" }
+                  required: [productCode, segmentIndex, quantity]
+            required: [name, passengerType, ancillaries]
+        payment: { type: object, description: "payment instruction, vendor field payment" }
       required: [session_id, ticket_order_no, passengers]
       additionalProperties: true
     examples:
-      - args: { ancillary_category: "BAGGAGE", session_id: "sess-abc123", ticket_order_no: "TKT-1001", passengers: [{ name: "John Doe", type: "ADT", gender: "M" }] }
-        note: "constraints beyond standard refund/void rules are not documented."
+      - args: { ancillary_category: "BAGGAGE", session_id: "sess-abc123", ticket_order_no: "TKT-1001", passengers: [{ name: "John Doe", passengerType: 0, ancillaries: [{ productCode: "bag-20kg", segmentIndex: 1, quantity: 1 }] }] }
+        note: "each baggage type can be added only once per passenger per segment across the whole booking flow, and within one connecting direction every segment must carry the same productCode. Baggage cannot be bought for infants."
 
   - name: balance
     description: >-
