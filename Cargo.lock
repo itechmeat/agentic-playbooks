@@ -104,7 +104,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apb"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "apb-core",
@@ -127,7 +127,7 @@ dependencies = [
 
 [[package]]
 name = "apb-core"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "base64 0.23.1",
  "getrandom 0.4.3",
@@ -150,7 +150,7 @@ dependencies = [
 
 [[package]]
 name = "apb-engine"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "apb-core",
  "base64 0.23.1",
@@ -174,7 +174,7 @@ dependencies = [
 
 [[package]]
 name = "apb-mcp"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "anyhow",
  "apb-core",
@@ -194,7 +194,7 @@ dependencies = [
 
 [[package]]
 name = "apb-server"
-version = "0.20.0"
+version = "0.20.1"
 dependencies = [
  "apb-core",
  "apb-engine",

@@ -252,6 +252,28 @@ cases:
         ancillaryCategory: BAGGAGE
         ticketOrderNo: TKT-1001
 
+  # The alternative identifier: airline record locator + carrier, with the
+  # optional pricing/routing context the endpoint also accepts.
+  - function: post_booking_ancillary_search
+    account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
+    args:
+      ancillary_category: BAGGAGE
+      airline_pnr: PNR654321
+      carrier: AA
+      payment_method: 1
+      from_segments: [{ carrier: AA, flightNumber: "100", depAirport: JFK, arrAirport: LAX, depTime: "202609011200" }]
+      ret_segments: [{ carrier: AA, flightNumber: "101", depAirport: LAX, arrAirport: JFK, depTime: "202609081200" }]
+    expect:
+      method: POST
+      url: "https://api.example.net/postBookingAncillarySearch.do"
+      body_contains:
+        ancillaryCategory: BAGGAGE
+        airlinePNR: PNR654321
+        carrier: AA
+        paymentMethod: 1
+        fromSegments: [{ carrier: AA, flightNumber: "100", depAirport: JFK, arrAirport: LAX, depTime: "202609011200" }]
+        retSegments: [{ carrier: AA, flightNumber: "101", depAirport: LAX, arrAirport: JFK, depTime: "202609081200" }]
+
   # --- post_booking_ancillary_order: EFFECTFUL, spends money ---------------
   - function: post_booking_ancillary_order
     account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
@@ -259,7 +281,10 @@ cases:
       ancillary_category: BAGGAGE
       session_id: sess-abc123
       ticket_order_no: TKT-1001
-      passengers: [{ name: "John Doe", type: ADT, gender: M }]
+      airline_pnr: PNR654321
+      carrier: AA
+      passengers: [{ name: "John Doe", passengerType: 0, ancillaries: [{ productCode: bag-20kg, segmentIndex: 1, quantity: 1 }] }]
+      payment: { paymentMethod: 1 }
     expect:
       method: POST
       url: "https://api.example.net/postBookingAncillaryOrder.do"
@@ -267,7 +292,10 @@ cases:
         ancillaryCategory: BAGGAGE
         sessionId: sess-abc123
         ticketOrderNo: TKT-1001
-        passengers: [{ name: "John Doe", type: ADT, gender: M }]
+        airlinePNR: PNR654321
+        carrier: AA
+        passengers: [{ name: "John Doe", passengerType: 0, ancillaries: [{ productCode: bag-20kg, segmentIndex: 1, quantity: 1 }] }]
+        payment: { paymentMethod: 1 }
 
   - function: route_export
     account: { client_id: cid-1, base_url: "https://api.example.net", search_base_url: "https://search.example.net" }
