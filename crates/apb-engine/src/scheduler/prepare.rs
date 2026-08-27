@@ -432,9 +432,27 @@ pub(crate) fn prepare_run_target(
     // in-process under the parent's lock. The single predicate FIXES review
     // I5: a Start + finish-with-prompt playbook runs an agent and now holds the
     // lock, which the old agent_task|script|playbook match missed.
+    //
+    // A busy workdir refuses the start outright unless the caller asked for the
+    // start to be QUEUED (`RunOptions::workdir_queue_wait`). Queueing splits the
+    // acquisition in two: preparation goes ahead without the lock, so the run
+    // directory, the snapshot and the caller's parameters are persisted and the
+    // run id can be answered immediately, and whoever drives the run claims the
+    // lock before the first node (`Prepared::claim_queued_workdir`). Nothing
+    // has been written yet at this point, so a refusal here still leaves no
+    // trace behind, exactly as before.
     let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
+    let mut queued_workdir = None;
+    let mut queued_reason = String::new();
     let guard = if is_write {
-        acquire(root, opts.allow_shared_workdir)?
+        match acquire(root, opts.allow_shared_workdir) {
+            Err(EngineError::WorkdirBusy(msg)) if opts.workdir_queue_wait.is_some() => {
+                queued_workdir = opts.workdir_queue_wait;
+                queued_reason = msg;
+                None
+            }
+            other => other?,
+        }
     } else {
         None
     };
@@ -524,6 +542,13 @@ pub(crate) fn prepare_run_target(
         mode: opts.mode,
         // Same reason as `mode`: the concurrency cap must survive a re-drive.
         max_parallel: opts.max_parallel,
+        // Persisted whenever the caller allowed queueing, not only when this
+        // start actually queued: a detached driver reads its lock ceiling from
+        // here, and the lock can go busy between this preparation and the
+        // driver reaching it.
+        workdir_queue_wait_ms: opts
+            .workdir_queue_wait
+            .map(|d| d.as_millis().min(u64::MAX as u128) as u64),
     };
     prep_try(&mut log, write_run_config(&run_dir, &cfg))?;
 
@@ -574,6 +599,13 @@ pub(crate) fn prepare_run_target(
         execution_root: Some(t.execution_root.to_string_lossy().into_owned()),
         profiles: profiles_prov,
     })?;
+    // Right after provenance, so a reader of the journal alone can tell an
+    // admitted-but-waiting run from one whose first node is simply slow.
+    if queued_workdir.is_some() {
+        log.append(EventPayload::RunQueued {
+            reason: queued_reason,
+        })?;
+    }
     if let Some(ref pred) = opts.continued_from {
         prep_try(
             &mut log,
@@ -588,6 +620,7 @@ pub(crate) fn prepare_run_target(
         log,
         cfg,
         guard,
+        queued_workdir,
         start_node,
         mode: opts.mode,
         supervisor_expected: opts.supervisor_expected,

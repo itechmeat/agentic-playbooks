@@ -100,10 +100,7 @@ impl StopOutcome {
 }
 
 fn is_terminal(status: RunStatus) -> bool {
-    matches!(
-        status,
-        RunStatus::Succeeded | RunStatus::Failed | RunStatus::Aborted
-    )
+    status.is_terminal()
 }
 
 /// Stops a run: posts `Control::Abort`, and - only when no process is driving

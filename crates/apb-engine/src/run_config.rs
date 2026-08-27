@@ -146,6 +146,16 @@ pub struct RunConfig {
     /// `Playbook.defaults.max_parallel` and then the engine default.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<usize>,
+    /// How long this run may wait for the shared workdir lock before it gives
+    /// up, in milliseconds. Persisted for the same reason `mode` is: a run
+    /// admitted into the workdir queue may be driven by a DETACHED process
+    /// that learns everything it knows from `runs/<id>`, and it must not
+    /// inherit the five-second handover ceiling for a wait that is about
+    /// another run finishing. `None` (including every config written before
+    /// this field existed) means the historical behavior: a busy workdir
+    /// refuses the start outright.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir_queue_wait_ms: Option<u64>,
 }
 
 pub fn write_run_config(run_dir: &Path, cfg: &RunConfig) -> Result<(), EngineError> {

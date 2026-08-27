@@ -87,6 +87,7 @@ server:
   bind: "127.0.0.1"
   public_base_url: "https://apb.example.com"
   trusted_proxies: ["127.0.0.1"]
+  workdir_queue_wait_seconds: 900
 ```
 
 `public_base_url` is the address the dashboard is reached at; when it is https,
@@ -106,6 +107,32 @@ Only the RIGHTMOST `X-Forwarded-For` entry is believed. A proxy appends its own
 view of the peer to whatever header the client sent, so the last entry is the
 only one the proxy wrote itself; leftmost entries are client-supplied and
 spoofable.
+
+### The workdir queue
+
+One project checkout has one write-run at a time: a run that writes to the
+workdir holds `.apb/workdir.lock` for its whole life, and that includes a run
+parked on a `wait` node. `workdir_queue_wait_seconds` decides what
+`POST /api/playbooks/{id}/run` does when it arrives during one of those.
+
+The default, 900 seconds, QUEUES the start: the run directory, the playbook
+snapshot and the request's run parameters are written, the run id comes back
+200 as usual, and the engine takes the workdir as soon as the holder releases
+it. The run is journaled `run_queued` until then and reads as running, not
+paused, because it is - it simply has not reached its first node. If the wait
+runs out, the run fails in its own journal with the reason, so the request that
+started it is still findable.
+
+Set it when a machine-driven caller posts to the endpoint. A webhook bridge
+turning inbound messages into runs has nowhere to put a refusal: the message it
+was carrying is destroyed the moment the POST fails, and no amount of retrying
+on the provider's side brings back an event apb answered and dropped.
+Persisting the start IS the queue - there is no second event store to keep in
+sync with the runs.
+
+`0` turns queueing off and restores the immediate `429` with a `Retry-After`
+hint. That is the right setting only where every caller is a human looking at
+the answer.
 
 ## 3. Reverse proxy
 

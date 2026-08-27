@@ -64,6 +64,18 @@ pub struct RunOptions {
     /// over it, and with neither set the engine uses
     /// [`crate::scheduler::DEFAULT_MAX_PARALLEL`].
     pub max_parallel: Option<usize>,
+    /// How long this start may wait for the shared workdir lock when another
+    /// write-run already holds it.
+    ///
+    /// `None` (the default) is the historical behavior: the start fails at
+    /// once with `WorkdirBusy` and the caller is left holding the request.
+    /// With a duration the start is ADMITTED instead - the run directory, the
+    /// playbook snapshot and the run parameters are written and the run id is
+    /// returned - and the wait for the lock happens in the drive phase, off
+    /// the caller's thread. That is the difference between an event source
+    /// being told "busy, your event is your problem" and its event being
+    /// persisted as a run that starts when the engine is free.
+    pub workdir_queue_wait: Option<Duration>,
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry
@@ -82,9 +94,80 @@ pub(crate) struct Prepared {
     // run handed to a detached driver passes the lock across by pid instead of
     // releasing it.
     pub(crate) guard: Option<crate::workdir::WorkdirGuard>,
+    /// Set when preparation deliberately did NOT take a lock the run needs,
+    /// because another write-run held it and the caller asked for the start to
+    /// be queued rather than refused. `guard` is `None` in that case for a
+    /// completely different reason than "this run writes nothing", which is
+    /// why the two cannot be collapsed into one field: whoever drives the run
+    /// has to claim the lock before the first node, and has this long to do it.
+    pub(crate) queued_workdir: Option<Duration>,
     pub(crate) start_node: String,
     pub(crate) mode: RunMode,
     pub(crate) supervisor_expected: bool,
+}
+
+impl Prepared {
+    /// Claims the workdir lock that preparation left untaken, waiting out the
+    /// run that holds it. A no-op for a preparation that already holds the lock
+    /// or needs none, so every drive path can call it unconditionally.
+    ///
+    /// A give-up is journaled before it is returned: the run directory and its
+    /// `run_started` already exist, so a queue that runs out has to close the
+    /// run out the same way any other start-time refusal does - otherwise the
+    /// admitted event would sit in a run that reads as `running` forever.
+    fn claim_queued_workdir(&mut self, root: &Path) -> Result<(), EngineError> {
+        let Some(wait) = self.queued_workdir.take() else {
+            return Ok(());
+        };
+        let run_dir = self.run_dir.clone();
+        let claimed = acquire_queued(root, wait, &mut || {
+            // A stop posted while the run sits in the queue must not have to
+            // wait for the workdir to free before it takes effect.
+            matches!(crate::control::pending_stop_seq(&run_dir), Ok(Some(_)))
+        });
+        match claimed {
+            Ok(guard) => {
+                self.guard = guard;
+                Ok(())
+            }
+            Err(e) => {
+                self.close_out_unclaimed(&run_dir, &e);
+                Err(e)
+            }
+        }
+    }
+
+    /// Writes the outcome of a run that was admitted and never got the
+    /// workdir. Two shapes, because the two give-ups are different events: a
+    /// stopped run is `run_aborted` (somebody asked for it), a ceiling that
+    /// passed is `run_error` plus `run_finished` (the engine gave up).
+    ///
+    /// Nothing is written over a journal that already has an outcome.
+    /// `stop_run` finalizes a run nothing is driving, which is exactly what a
+    /// queued run looks like from outside, so the stop that ended this wait
+    /// may well have recorded the abort already - and a second outcome would
+    /// rewrite what the run did.
+    fn close_out_unclaimed(&mut self, run_dir: &Path, e: &EngineError) {
+        let already_decided = read_all(run_dir)
+            .map(|events| RunState::fold(&events).run_status.is_terminal())
+            .unwrap_or(false);
+        if already_decided {
+            return;
+        }
+        if matches!(crate::control::pending_stop_seq(run_dir), Ok(Some(_))) {
+            let _ = self.log.append(EventPayload::RunAborted {
+                reason: e.to_string(),
+            });
+            return;
+        }
+        let _ = self.log.append(EventPayload::RunError {
+            node: None,
+            reason: e.to_string(),
+        });
+        let _ = self.log.append(EventPayload::RunFinished {
+            outcome: "failed".into(),
+        });
+    }
 }
 
 pub fn run(
@@ -94,6 +177,7 @@ pub fn run(
     opts: RunOptions,
 ) -> Result<RunResult, EngineError> {
     let mut p = prepare_run(root, id, version, opts)?;
+    p.claim_queued_workdir(root)?;
     // `p.guard` lives until the end of this function (dropped together with `p`
     // after drive returns) - the workdir lock is held for the whole synchronous run,
     // just as before the refactor.
@@ -127,6 +211,7 @@ pub fn run_resolved(
         origin_label: resolved.origin_label,
     };
     let mut p = prepare_run_target(&t, &resolved.id, Some(&resolved.version), opts)?;
+    p.claim_queued_workdir(&resolved.execution_root)?;
     drive(
         p.playbook.clone(),
         &p.run_dir,
@@ -232,6 +317,11 @@ pub(crate) fn prepare_supervised_background_target(
 /// `Running` forever for an external observer.
 pub fn drive_prepared(root: &Path, prepared: PreparedRun) -> Result<RunResult, EngineError> {
     let mut p = prepared.0;
+    // A run admitted into the workdir queue waits HERE, on the background
+    // thread, not on the caller's - the whole point of admitting it was that
+    // the caller (a webhook bridge, the dashboard) already has its run id and
+    // is gone. `claim_queued_workdir` journals its own failure.
+    p.claim_queued_workdir(root)?;
     let res = drive(
         p.playbook.clone(),
         &p.run_dir,
@@ -353,9 +443,20 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
     // Mirrors prepare's predicate. The parent held this lock through
     // preparation and handed it to us by pid, so we adopt rather than acquire
     // (a plain acquire would see our own live pid and call the workdir busy).
+    //
+    // A run admitted into the workdir queue stacks a second wait on top of the
+    // handover race: its parent never held the lock, so what this poll is
+    // really waiting out is the unrelated write-run that made the run queue.
+    // The persisted ceiling covers both; without it a queued detached run
+    // would give up after the five seconds meant for a sub-millisecond
+    // handover.
     let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let _guard = if is_write {
-        acquire_handover(root)?
+        let wait = cfg
+            .workdir_queue_wait_ms
+            .map(Duration::from_millis)
+            .unwrap_or_default();
+        acquire_handover_within(root, wait)?
     } else {
         None
     };

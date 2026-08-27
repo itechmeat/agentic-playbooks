@@ -275,3 +275,148 @@ fn run_background_holds_workdir_lock_for_the_whole_run() {
         },
     );
 }
+
+// The workdir queue, end to end. An inbound-event bridge posts an event while
+// some other write-run holds the lock; before this, the start was refused, the
+// bridge turned the refusal into a 502, and the event - the only copy of a
+// customer's message - was gone. Now the start is ADMITTED: the run directory
+// and the caller's parameters are persisted immediately, the journal says the
+// run is queued, and the run executes as soon as the holder lets go.
+#[test]
+fn a_queued_background_run_is_admitted_and_runs_once_the_workdir_frees() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_slowscript(dir.path());
+
+    // Stand in for the run that is already using the workdir. Acquired the same
+    // way `prepare` acquires it (a live pid, this process's own), so the queue
+    // is exercised deterministically rather than by racing a second real run.
+    let holder = acquire(dir.path(), false).unwrap().unwrap();
+
+    let opts = RunOptions {
+        workdir_queue_wait: Some(Duration::from_secs(60)),
+        ..Default::default()
+    };
+    let run_id = run_background(dir.path(), "slowscript", None, opts)
+        .expect("a busy workdir must queue the start, not refuse it");
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+
+    // Admission is what makes the event durable: everything the caller handed
+    // over is on disk before the lock is anywhere in sight.
+    assert!(run_dir.is_dir(), "a queued run must be persisted at once");
+    let queued = read_all(&run_dir).unwrap();
+    assert!(
+        queued
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::RunQueued { .. })),
+        "a queued start must journal why it has not begun, got {queued:?}"
+    );
+    // Queued is not paused: the run reads as running to every observer.
+    assert_eq!(RunState::fold(&queued).run_status, RunStatus::Running);
+    assert!(
+        !queued
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::NodeStarted { .. })),
+        "no node may start while another run holds the workdir"
+    );
+
+    drop(holder);
+
+    poll_until("the queued run to finish once the workdir freed", || {
+        let events = read_all(&run_dir).ok()?;
+        events
+            .iter()
+            .find(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+            .map(|_| ())
+    });
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        RunState::fold(&events).run_status,
+        RunStatus::Succeeded,
+        "a queued run must execute normally once it gets the workdir"
+    );
+}
+
+// The queue is bounded, and running out is a visible failure rather than a
+// thread parked forever. The run was already admitted, so it has to be closed
+// out in its own journal: an admitted event that never executes must still be
+// findable, with the reason attached.
+#[test]
+fn a_queued_background_run_that_never_gets_the_workdir_fails_in_its_own_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_slowscript(dir.path());
+    let _holder = acquire(dir.path(), false).unwrap().unwrap();
+
+    let opts = RunOptions {
+        workdir_queue_wait: Some(Duration::from_millis(300)),
+        ..Default::default()
+    };
+    let run_id = run_background(dir.path(), "slowscript", None, opts).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+
+    poll_until("the queued run to give up", || {
+        let events = read_all(&run_dir).ok()?;
+        events
+            .iter()
+            .find(|e| matches!(e.payload, EventPayload::RunFinished { .. }))
+            .map(|_| ())
+    });
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(RunState::fold(&events).run_status, RunStatus::Failed);
+    let reason = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::RunError { reason, .. } => Some(reason.clone()),
+            _ => None,
+        })
+        .expect("a queue that runs out must journal why");
+    assert!(
+        reason.contains("workdir queue"),
+        "the recorded reason must name the queue, got {reason}"
+    );
+}
+
+// Nothing changes for a caller that did not ask to be queued: a busy workdir
+// still refuses the start outright, before any run directory exists.
+#[test]
+fn without_a_queue_wait_a_busy_workdir_still_refuses_the_start() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_slowscript(dir.path());
+    let _holder = acquire(dir.path(), false).unwrap().unwrap();
+
+    match run_background(dir.path(), "slowscript", None, RunOptions::default()) {
+        Err(EngineError::WorkdirBusy(_)) => {}
+        other => panic!("expected WorkdirBusy without a queue wait, got {other:?}"),
+    }
+    let runs = dir.path().join(".apb/runs");
+    assert!(
+        !runs.is_dir() || fs::read_dir(&runs).unwrap().next().is_none(),
+        "a refused start must leave no run behind"
+    );
+}
+
+// A stop against a queued run must not have to wait for an unrelated run to
+// finish before it takes effect, and the run it ends is `aborted` rather than
+// `failed`: somebody asked for this outcome, the engine did not run out of
+// patience.
+#[test]
+fn a_stop_against_a_queued_run_ends_the_wait_and_records_an_abort() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_slowscript(dir.path());
+    let _holder = acquire(dir.path(), false).unwrap().unwrap();
+
+    let opts = RunOptions {
+        // Long enough that a give-up by ceiling cannot be what ends this wait.
+        workdir_queue_wait: Some(Duration::from_secs(600)),
+        ..Default::default()
+    };
+    let run_id = run_background(dir.path(), "slowscript", None, opts).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    run_cancel(dir.path(), &run_id).unwrap();
+
+    let status = poll_until("the queued run to end on the stop", || {
+        let events = read_all(&run_dir).ok()?;
+        let status = RunState::fold(&events).run_status;
+        status.is_terminal().then_some(status)
+    });
+    assert_eq!(status, RunStatus::Aborted);
+}

@@ -176,6 +176,22 @@ pub enum EventPayload {
     RunPaused {
         reason: String,
     },
+    /// The run was ADMITTED while another write-run held the shared workdir
+    /// lock, and its first node cannot start until that holder releases it.
+    ///
+    /// Not a `RunPaused`: paused is a resting state a human or a supervisor
+    /// has to act on, and every observer that watches for it (`apb runs`, the
+    /// supervisor wait, the dashboard) would report the run as stopped. A
+    /// queued run is running as far as its caller is concerned - it simply has
+    /// not reached node one yet - so this folds to nothing and leaves the
+    /// status at `Running`. The wait ends at the next event in the journal:
+    /// the first `NodeStarted` when the lock is granted, or `RunError` +
+    /// `RunFinished` when the queue wait runs out. `reason` carries the
+    /// blocking holder verbatim. Additive: old logs never carry the variant.
+    RunQueued {
+        #[serde(default)]
+        reason: String,
+    },
     /// A resume restarted the run from `from_node` (Task 3: resume rework).
     /// Folds to `Running`, replacing the old `RunPaused { reason: "resume
     /// from X" }` marker that used to leave the folded status stuck on paused

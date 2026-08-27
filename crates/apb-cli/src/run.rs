@@ -456,6 +456,10 @@ pub(crate) fn run_cmd(
         expected_connector_accounts,
         cache,
         max_parallel: None,
+        // Fail-fast on a busy workdir: this caller is a person waiting on the
+        // answer, who can retry, not an event source whose event dies with the
+        // refusal (see `RunOptions::workdir_queue_wait`).
+        workdir_queue_wait: None,
     };
     match run(root, name, version, opts) {
         Ok(res) => {
@@ -623,6 +627,10 @@ pub(crate) fn drive_supervised_child(
         expected_connector_accounts,
         cache: Default::default(),
         max_parallel: None,
+        // Fail-fast on a busy workdir: this caller is a person waiting on the
+        // answer, who can retry, not an event source whose event dies with the
+        // refusal (see `RunOptions::workdir_queue_wait`).
+        workdir_queue_wait: None,
     };
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,

@@ -889,6 +889,7 @@ mod tests {
             bind: None,
             public_base_url: public.map(|s| s.to_string()),
             trusted_proxies: vec![proxy.to_string()],
+            workdir_queue_wait_seconds: None,
         };
         AuthState::new(None, Vec::new(), &cfg).unwrap()
     }

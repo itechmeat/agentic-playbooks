@@ -417,3 +417,34 @@ fn callback_url_is_printable_only_with_a_public_base() {
         Err(CallbackGap::UnroutableSegment("Not An Account".to_string()))
     );
 }
+
+// The workdir-queue ceiling has three settings, and the difference between the
+// last two decides whether a machine-driven run start survives a busy engine.
+#[test]
+fn the_workdir_queue_wait_defaults_on_and_zero_turns_it_off() {
+    use apb_core::config::{DEFAULT_WORKDIR_QUEUE_WAIT_SECONDS, ServerConfig};
+    use std::time::Duration;
+
+    assert_eq!(
+        ServerConfig::default().workdir_queue_wait(),
+        Some(Duration::from_secs(DEFAULT_WORKDIR_QUEUE_WAIT_SECONDS)),
+        "an operator who never touches the section gets the queue, not a refusal"
+    );
+    assert_eq!(
+        ServerConfig {
+            workdir_queue_wait_seconds: Some(30),
+            ..Default::default()
+        }
+        .workdir_queue_wait(),
+        Some(Duration::from_secs(30))
+    );
+    assert_eq!(
+        ServerConfig {
+            workdir_queue_wait_seconds: Some(0),
+            ..Default::default()
+        }
+        .workdir_queue_wait(),
+        None,
+        "zero is the explicit opt-out back to the immediate refusal"
+    );
+}
