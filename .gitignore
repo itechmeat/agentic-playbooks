@@ -8,6 +8,7 @@ web/dist
 .apb/workspace.local
 .apb/backup-*/
 .apb/workdir.lock
+.apb/secrets.env
 .code-ranker/
 .ai-notes/
 # per-run scratch file overwritten by every branch-quality review run

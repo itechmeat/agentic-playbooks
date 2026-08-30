@@ -166,8 +166,8 @@ mod tests {
         assert_eq!(
             names,
             vec![
-                "asana", "atrip", "discord", "github", "gitlab", "imap", "sentry", "slack", "smtp",
-                "telegram", "twenty", "whatsapp", "youtrack", "zulip",
+                "amocrm", "asana", "atrip", "discord", "github", "gitlab", "imap", "sentry",
+                "slack", "smtp", "telegram", "twenty", "whatsapp", "youtrack", "zulip",
             ],
             "the embedded official connector set changed; update this list deliberately"
         );

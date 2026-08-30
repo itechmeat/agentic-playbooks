@@ -1,0 +1,2559 @@
+name: amocrm
+version: 0.1.0
+# amoCRM (amocrm.ru) and its international twin Kommo (kommo.com) expose the
+# same REST API v4 under https://<subdomain>.<tld>/api/v4/... base_url is
+# scheme plus host only, no trailing path; the account-specific Files API
+# host (drive_url) comes from get_account with=drive_url and is a second,
+# optional account field used only by list_files and get_file.
+#
+# Shared API facts, stated once here and in README.md rather than in every
+# function: the rate limit is 7 requests per second per integration (HTTP
+# 429 with Retry-After, no automatic retry in apb); an empty list result is
+# HTTP 204 with no body, not an empty array; list responses are HAL, the
+# items sit under _embedded.<collection> and the next page under
+# _links.next.href; page starts at 1 and limit caps at 250 (100 for
+# events, 50 for chat templates); filter[...] on leads, contacts, companies
+# and customers may need the paid filtering add-on (get_account with
+# is_api_filter_enabled says whether it is on); batch writes take an array
+# of records, 50 recommended and 250 hard cap, each record may carry a
+# request_id that is echoed back; v4 has no DELETE for leads, contacts,
+# companies, customers, tasks, notes, tags or catalog elements.
+#
+# Argument naming: call arguments are snake_case. Single-value filters are
+# exposed as filter_<field> (rendered filter[<field>]) and ranges as
+# filter_<field>_from / filter_<field>_to (rendered filter[<field>][from|to]);
+# a filter can take exactly one value because a query map cannot repeat a
+# key. Record bodies (record, records) are forwarded verbatim in amoCRM's
+# own JSON shape: custom_fields_values, _embedded, tags_to_add,
+# tags_to_delete, responsible_user_id, and so on.
+#
+# entity_type is the enum [leads, contacts, companies, customers] wherever
+# amoCRM's routes are symmetric (notes, tags, links, custom fields, files,
+# batch updates); one function replaces four.
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.access_token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: drive_url
+    required: false
+  - name: access_token
+    required: true
+    secret: true
+healthcheck: get_account
+functions:
+  # -- Account and dictionaries -------------------------------------------
+
+  - name: get_account
+    description: >-
+      Account settings and feature flags. with is a comma list from
+      amojo_id, users_groups, task_types, version, entity_names,
+      datetime_settings, drive_url, is_api_filter_enabled, invoices_settings.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/account"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. drive_url,is_api_filter_enabled,task_types" }
+      required: []
+    examples:
+      - args: { with: "drive_url,is_api_filter_enabled,task_types" }
+        note: "drive_url is the Files API host to copy into the drive_url account field; is_api_filter_enabled says whether filter_* arguments will work on leads, contacts, companies and customers."
+    response_pick: [id, name, subdomain, currency, country, drive_url, is_api_filter_enabled, _embedded]
+
+  - name: list_users
+    description: >-
+      List account users. with is a comma list from role, group, uuid,
+      amojo_id, user_rank. rights carries the per-entity access levels and
+      the is_admin / is_active flags.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/users"
+    query:
+      with: "{{args.with}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. role,group" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: { with: "role,group", limit: 50 }
+        note: "the route needs an admin token; a non-admin token answers HTTP 403 rather than a filtered list."
+    response_pick: [_embedded.users, _page, _links.next.href]
+
+  - name: get_user
+    description: >-
+      Get one user by id. with is a comma list from role, group, uuid,
+      amojo_id, user_rank.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/users/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "user id" }
+        with: { type: string, description: "comma-joined include list, e.g. role,group" }
+      required: [id]
+    examples:
+      - args: { id: 123, with: "role" }
+        note: "with is optional and dropped from the query when omitted."
+    response_pick: [id, name, email, rights.is_admin, rights.is_active]
+
+  - name: list_roles
+    description: >-
+      List the account's user roles. with accepts users to embed the members
+      of each role.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/roles"
+    query:
+      with: "{{args.with}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list; users is the only documented value" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: { with: "users" }
+        note: "roles here are the account's own permission sets; a user's is_admin flag is separate and comes from list_users."
+    response_pick: [_embedded.roles, _page, _links.next.href]
+
+  - name: list_event_types
+    description: >-
+      List the event types the account's event feed can emit, with their
+      localized labels.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/events/types"
+    query:
+      language_code: "{{args.language_code}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        language_code: { type: string, description: "label language, e.g. ru or en; the account language is used when omitted" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+      required: []
+    examples:
+      - args: { language_code: "ru" }
+        note: "every argument is optional and an omitted one is dropped from the query."
+    response_pick: [_embedded.events_types, _page, _links.next.href]
+
+  - name: list_loss_reasons
+    description: >-
+      List the lead loss reasons configured for the account. The route is
+      documented by Kommo only, not by the amoCRM reference, though amoCRM
+      itself emits it in the _links of a lead.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/loss_reasons"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: { limit: 50 }
+        note: "the ids returned here are the ones update_lead accepts as loss_reason_id when moving a lead to status_id 143."
+    response_pick: [_embedded.loss_reasons, _page, _links.next.href]
+
+  # -- Leads --------------------------------------------------------------
+
+  - name: list_leads
+    description: >-
+      List leads. filter_status_id needs filter_pipeline_id (rendered as one
+      filter[statuses][0] pair). with: catalog_elements, is_price_modified_by_robot,
+      loss_reason, contacts, only_deleted, source_id.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads"
+    query:
+      with: "{{args.with}}"
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[pipeline_id]: "{{args.filter_pipeline_id_only}}"
+      filter[statuses][0][pipeline_id]: "{{args.filter_pipeline_id}}"
+      filter[statuses][0][status_id]: "{{args.filter_status_id}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+      filter[closed_at][from]: "{{args.filter_closed_from}}"
+      filter[closed_at][to]: "{{args.filter_closed_to}}"
+      filter[price][from]: "{{args.filter_price_from}}"
+      filter[price][to]: "{{args.filter_price_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string }
+        query: { type: string, description: "full-text search over filled fields" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_name: { type: string }
+        filter_pipeline_id_only: { type: integer, description: "filter[pipeline_id] without a status; use filter_pipeline_id plus filter_status_id to filter by stage" }
+        filter_pipeline_id: { type: integer, description: "pipeline of the stage filter; pair with filter_status_id" }
+        filter_status_id: { type: integer, description: "stage id; 142 won, 143 lost" }
+        filter_responsible_user_id: { type: integer }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer }
+        filter_updated_from: { type: integer }
+        filter_updated_to: { type: integer }
+        filter_closed_from: { type: integer }
+        filter_closed_to: { type: integer }
+        filter_price_from: { type: integer }
+        filter_price_to: { type: integer }
+      required: []
+      dependentRequired:
+        filter_status_id: [filter_pipeline_id]
+    examples:
+      - args: { filter_pipeline_id: 100, filter_status_id: 200, limit: 50, order_updated_at: "desc" }
+        note: "every argument is optional and an omitted one is dropped from the query; an empty page is HTTP 204 with no body."
+    response_pick: [_embedded.leads, _page, _links.next.href]
+
+  - name: get_lead
+    description: >-
+      Get one lead by id. with: catalog_elements,
+      is_price_modified_by_robot, loss_reason, contacts, only_deleted,
+      source_id.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "lead id" }
+        with: { type: string, description: "comma-joined include list, e.g. contacts,loss_reason" }
+      required: [id]
+    examples:
+      - args: { id: 5, with: "contacts,loss_reason" }
+        note: "with is optional and dropped from the query when omitted."
+    response_pick: [id, name, price, status_id, pipeline_id, responsible_user_id, created_at, updated_at, closed_at, loss_reason_id, custom_fields_values, _embedded]
+
+  - name: create_leads
+    description: >-
+      EFFECTFUL. Create leads in one batch. Each record is amoCRM's lead
+      model (name, price, pipeline_id, status_id, responsible_user_id,
+      custom_fields_values, _embedded.tags/contacts/companies, request_id).
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Website order 1042", price: 15000, pipeline_id: 100, status_id: 200, request_id: "r1" }] }
+        note: "50 records per call is the vendor recommendation; request_id is echoed in _embedded.leads[].request_id."
+    response_pick: [_embedded.leads]
+
+  - name: update_lead
+    description: >-
+      EFFECTFUL. Update one lead by id. record is merged into the existing
+      lead: only the fields it names change. Keep the id in the id argument,
+      never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/leads/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "lead id" }
+        record: { type: object, additionalProperties: true, description: "lead field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 5, record: { status_id: 142, price: 20000 } }
+        note: "moving a lead to status_id 143 (lost) also accepts loss_reason_id inside record."
+    response_pick: [id, updated_at, request_id]
+
+  - name: update_leads
+    description: >-
+      EFFECTFUL. Update leads in one batch. Each record must carry the id of
+      the lead it updates plus the fields to change; every other field is
+      left untouched.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/leads"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ id: 5, price: 20000 }, { id: 6, status_id: 142 }] }
+        note: "a record without an id is rejected with HTTP 400; the response returns only the leads that changed."
+    response_pick: [_embedded.leads]
+
+  - name: create_leads_complex
+    description: >-
+      EFFECTFUL. Create leads together with one contact and one company
+      each, in a single call, under duplicate control unlike create_leads. At
+      most 50 per call; request_id comes back as an array of strings.
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads/complex"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Website order 1042", price: 15000, _embedded: { contacts: [{ first_name: "Ada", custom_fields_values: [] }] } }] }
+        note: "the response is a top-level array; merged is true when duplicate control attached the lead to an existing contact or company, and request_id then carries more than one element."
+    response_pick: [id, contact_id, company_id, request_id, merged]
+
+  # -- Unsorted -----------------------------------------------------------
+
+  - name: list_unsorted
+    description: >-
+      List unsorted incoming entities awaiting acceptance. with accepts
+      contacts, source_id. Each item carries the uid that accept_unsorted and
+      decline_unsorted take.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/unsorted"
+    query:
+      with: "{{args.with}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      filter[uid]: "{{args.filter_uid}}"
+      filter[category]: "{{args.filter_category}}"
+      filter[pipeline_id]: "{{args.filter_pipeline_id}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. contacts,source_id" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        filter_uid: { type: string, description: "one unsorted entity uid" }
+        filter_category: { type: string, enum: [chats, forms, sip, mail] }
+        filter_pipeline_id: { type: integer }
+      required: []
+    examples:
+      - args: { filter_category: "forms", limit: 20 }
+        note: "the uid of each item is the argument accept_unsorted and decline_unsorted take, not the lead id."
+    response_pick: [_embedded.unsorted, _page, _links.next.href]
+
+  - name: get_unsorted_summary
+    description: >-
+      Aggregate counts over the unsorted queue: totals, accepted, declined,
+      average sort time, and a per-category breakdown.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/unsorted/summary"
+    query:
+      filter[uid]: "{{args.filter_uid}}"
+      filter[pipeline_id]: "{{args.filter_pipeline_id}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+    args_schema:
+      type: object
+      properties:
+        filter_uid: { type: string, description: "one unsorted entity uid" }
+        filter_pipeline_id: { type: integer }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer, description: "unix seconds" }
+      required: []
+    examples:
+      - args: { filter_pipeline_id: 100, filter_created_from: 1700000000 }
+        note: "every argument is optional and an omitted one is dropped from the query."
+    response_pick: [total, accepted, declined, average_sort_time, categories]
+
+  - name: accept_unsorted
+    description: >-
+      EFFECTFUL. Accept one unsorted entity by uid, turning it into a lead
+      with its contact and company. user_id and status_id are both optional;
+      the account defaults apply when either is omitted.
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads/unsorted/{{args.uid}}/accept"
+    body:
+      user_id: "{{args.user_id}}"
+      status_id: "{{args.status_id}}"
+    args_schema:
+      type: object
+      properties:
+        uid: { type: string, description: "unsorted entity uid from list_unsorted" }
+        user_id: { type: integer, description: "user the accepted lead is assigned to" }
+        status_id: { type: integer, description: "stage the accepted lead lands in" }
+      required: [uid]
+    examples:
+      - args: { uid: "98b8fe2a0ec9f4a53c4b3b4e2d2c47f8", user_id: 7, status_id: 200 }
+        note: "an omitted user_id or status_id is dropped from the body rather than sent as null."
+    response_pick: [uid, pipeline_id, category, _embedded]
+
+  - name: decline_unsorted
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Reject one unsorted entity by uid. The entity
+      leaves the queue and no lead is created; there is no route to undo it.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/leads/unsorted/{{args.uid}}/decline"
+    body:
+      user_id: "{{args.user_id}}"
+    args_schema:
+      type: object
+      properties:
+        uid: { type: string, description: "unsorted entity uid from list_unsorted" }
+        user_id: { type: integer, description: "user the rejection is recorded for; amoCRM rejects the call with HTTP 400 when the account requires it and it is missing" }
+      required: [uid]
+    examples:
+      - args: { uid: "98b8fe2a0ec9f4a53c4b3b4e2d2c47f8", user_id: 7 }
+        note: "user_id travels in the body, which is unusual for a DELETE but is what this route expects; it is dropped when omitted."
+    response_pick: [uid, _links]
+
+  # -- Pipelines ----------------------------------------------------------
+
+  - name: list_pipelines
+    description: >-
+      List the lead pipelines of the account, each with its statuses
+      embedded. This route returns every pipeline at once and takes no
+      paging arguments.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/pipelines"
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "takes no arguments; _embedded.pipelines[]._embedded.statuses carries the stages of each pipeline."
+    response_pick: [_embedded.pipelines, _total_items]
+
+  - name: get_pipeline
+    description: >-
+      Get one lead pipeline by id, with its statuses embedded.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "pipeline id" }
+      required: [id]
+    examples:
+      - args: { id: 100 }
+        note: "an unknown pipeline id answers HTTP 404."
+    response_pick: [id, name, sort, is_main, _embedded.statuses]
+
+  - name: create_pipelines
+    description: >-
+      EFFECTFUL. Create lead pipelines in one batch. amoCRM's create
+      reference lists name, sort, is_main and is_unsorted_on, and a record
+      that omits them can answer HTTP 422; _embedded.statuses creates stages.
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads/pipelines"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Partner sales", sort: 20, is_main: false, is_unsorted_on: true }] }
+        note: "marking a new pipeline is_main demotes the previous main pipeline."
+    response_pick: [_embedded.pipelines]
+
+  - name: update_pipeline
+    description: >-
+      EFFECTFUL. Update one lead pipeline by id. record is merged: only the
+      fields it names change (name, sort, is_main, is_unsorted_on). amoCRM
+      answers with the whole pipeline; the pick keeps its scalar fields.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "pipeline id" }
+        record: { type: object, additionalProperties: true, description: "pipeline field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 100, record: { name: "Partner sales 2026" } }
+        note: "statuses are not edited here; use create_statuses, update_status and delete_status."
+    response_pick: [id, name, sort, is_main]
+
+  - name: delete_pipeline
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Delete one lead pipeline by id, together with
+      its statuses. amoCRM refuses with HTTP 400 while the pipeline still
+      holds leads, and refuses to delete the last pipeline of the account.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "pipeline id" }
+      required: [id]
+    examples:
+      - args: { id: 100 }
+        note: "answers HTTP 204 with no body on success; move or delete the leads it still holds first."
+
+  # -- Statuses -----------------------------------------------------------
+
+  - name: list_statuses
+    description: >-
+      List the statuses (stages) of one pipeline. with accepts descriptions
+      to embed each stage's description text.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.pipeline_id}}/statuses"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        pipeline_id: { type: integer, description: "pipeline id" }
+        with: { type: string, description: "comma-joined include list; descriptions is the only documented value" }
+      required: [pipeline_id]
+    examples:
+      - args: { pipeline_id: 100, with: "descriptions" }
+        note: "142 (won) and 143 (lost) are the two system statuses present in every pipeline."
+    response_pick: [_embedded.statuses, _total_items]
+
+  - name: create_statuses
+    description: >-
+      EFFECTFUL. Create statuses in one pipeline in a single batch. Each
+      record takes name plus the optional sort and color (one of amoCRM's
+      fixed stage colors, e.g. #fffeb2).
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.pipeline_id}}/statuses"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        pipeline_id: { type: integer, description: "pipeline id" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [pipeline_id, records]
+    examples:
+      - args: { pipeline_id: 100, records: [{ name: "Contract sent", sort: 50, color: "#fffeb2" }] }
+        note: "a color outside amoCRM's fixed palette is rejected with HTTP 400."
+    response_pick: [_embedded.statuses]
+
+  - name: update_status
+    description: >-
+      EFFECTFUL. Update one status of one pipeline. record is merged: only
+      the named fields change (name, sort, color), and 142 and 143 take only
+      name and color. amoCRM answers with the whole status; the pick keeps
+      its scalar fields.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.pipeline_id}}/statuses/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        pipeline_id: { type: integer, description: "pipeline id" }
+        id: { type: integer, description: "status id inside that pipeline" }
+        record: { type: object, additionalProperties: true, description: "status field map; only the named fields change" }
+      required: [pipeline_id, id, record]
+    examples:
+      - args: { pipeline_id: 100, id: 200, record: { name: "Contract signed" } }
+        note: "sort on a system status (142, 143) is rejected with HTTP 400."
+    response_pick: [id, name, sort, color]
+
+  - name: delete_status
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Delete one status of one pipeline. Leads
+      sitting in it move to the first status of the same pipeline. The
+      system statuses 142 and 143 cannot be deleted.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.pipeline_id}}/statuses/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        pipeline_id: { type: integer, description: "pipeline id" }
+        id: { type: integer, description: "status id inside that pipeline" }
+      required: [pipeline_id, id]
+    examples:
+      - args: { pipeline_id: 100, id: 200 }
+        note: "answers HTTP 204 with no body on success; deleting 142 or 143 is rejected with HTTP 400."
+
+  # -- Contacts -----------------------------------------------------------
+
+  - name: list_contacts
+    description: >-
+      List contacts. query is a full-text search over the filled fields;
+      the filter_* arguments need the paid filtering add-on. with:
+      catalog_elements, leads, customers.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/contacts"
+    query:
+      with: "{{args.with}}"
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+      filter[closest_task_at][from]: "{{args.filter_closest_task_from}}"
+      filter[closest_task_at][to]: "{{args.filter_closest_task_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. leads,customers" }
+        query: { type: string, description: "full-text search over filled fields" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_name: { type: string }
+        filter_responsible_user_id: { type: integer }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer }
+        filter_updated_from: { type: integer }
+        filter_updated_to: { type: integer }
+        filter_closest_task_from: { type: integer }
+        filter_closest_task_to: { type: integer }
+      required: []
+    examples:
+      - args: { query: "ivanov", limit: 50, order_updated_at: "desc" }
+        note: "query also matches phone and email values, so a phone number finds its contact without a filter."
+    response_pick: [_embedded.contacts, _page, _links.next.href]
+
+  - name: get_contact
+    description: >-
+      Get one contact by id. with: catalog_elements, leads, customers.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/contacts/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "contact id" }
+        with: { type: string, description: "comma-joined include list, e.g. leads,customers" }
+      required: [id]
+    examples:
+      - args: { id: 9, with: "leads" }
+        note: "with=leads embeds the linked leads under _embedded.leads."
+    response_pick: [id, name, first_name, last_name, responsible_user_id, created_at, updated_at, closest_task_at, custom_fields_values, _embedded]
+
+  - name: create_contacts
+    description: >-
+      EFFECTFUL. Create contacts in one batch. Each record is amoCRM's
+      contact model (name or first_name plus last_name, responsible_user_id,
+      custom_fields_values, _embedded.tags/companies, request_id).
+    method: POST
+    url: "{{account.base_url}}/api/v4/contacts"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ first_name: "Ada", last_name: "Ivanova", responsible_user_id: 7 }] }
+        note: "a record with neither name nor first_name is rejected with HTTP 400."
+    response_pick: [_embedded.contacts]
+
+  - name: update_contact
+    description: >-
+      EFFECTFUL. Update one contact by id. record is merged into the
+      existing contact: only the fields it names change. Keep the id in the
+      id argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/contacts/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "contact id" }
+        record: { type: object, additionalProperties: true, description: "contact field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 9, record: { first_name: "Ada", last_name: "Petrova" } }
+        note: "sending name overwrites first_name and last_name; send those two instead to keep them apart."
+    response_pick: [id, updated_at, request_id]
+
+  # -- Companies ----------------------------------------------------------
+
+  - name: list_companies
+    description: >-
+      List companies. query is a full-text search over the filled fields;
+      the filter_* arguments need the paid filtering add-on. with:
+      catalog_elements, leads, customers, contacts.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/companies"
+    query:
+      with: "{{args.with}}"
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+      filter[closest_task_at][from]: "{{args.filter_closest_task_from}}"
+      filter[closest_task_at][to]: "{{args.filter_closest_task_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. contacts,leads" }
+        query: { type: string, description: "full-text search over filled fields" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_name: { type: string }
+        filter_responsible_user_id: { type: integer }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer }
+        filter_updated_from: { type: integer }
+        filter_updated_to: { type: integer }
+        filter_closest_task_from: { type: integer }
+        filter_closest_task_to: { type: integer }
+      required: []
+    examples:
+      - args: { filter_name: "Acme", with: "contacts" }
+        note: "a company has one name field rather than first_name and last_name, so filter_name matches it exactly."
+    response_pick: [_embedded.companies, _page, _links.next.href]
+
+  - name: get_company
+    description: >-
+      Get one company by id. with: catalog_elements, leads, customers,
+      contacts.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/companies/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "company id" }
+        with: { type: string, description: "comma-joined include list, e.g. contacts,leads" }
+      required: [id]
+    examples:
+      - args: { id: 3, with: "contacts" }
+        note: "with=contacts embeds the contacts attached to the company."
+    response_pick: [id, name, responsible_user_id, created_at, updated_at, closest_task_at, custom_fields_values, _embedded]
+
+  - name: create_companies
+    description: >-
+      EFFECTFUL. Create companies in one batch. Each record is amoCRM's
+      company model (name, responsible_user_id, custom_fields_values,
+      _embedded.tags, request_id).
+    method: POST
+    url: "{{account.base_url}}/api/v4/companies"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Acme", responsible_user_id: 7 }] }
+        note: "amoCRM accepts a duplicate company name, so check list_companies with filter_name first."
+    response_pick: [_embedded.companies]
+
+  - name: update_company
+    description: >-
+      EFFECTFUL. Update one company by id. record is merged into the
+      existing company: only the fields it names change. Keep the id in the
+      id argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/companies/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "company id" }
+        record: { type: object, additionalProperties: true, description: "company field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 3, record: { name: "Acme LLC" } }
+        note: "linked contacts and leads are not editable here; use update_entities or link_entities for them."
+    response_pick: [id, updated_at, request_id]
+
+  # -- Batch updates ------------------------------------------------------
+
+  - name: update_entities
+    description: >-
+      EFFECTFUL. Batch update leads, contacts, companies or customers; each
+      record carries id plus the fields to change (tags_to_add and
+      tags_to_delete attach or detach tags by id or name).
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+            required: [id]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ id: 5, tags_to_add: [{ name: "vip" }] }] }
+        note: "the only tag attach path in v4; there is no separate endpoint."
+    response_pick: [_embedded]
+
+  # -- Customers ----------------------------------------------------------
+
+  - name: list_customers
+    description: >-
+      List customers (buyers); the account answers HTTP 402 when the tariff
+      has no customers. with: catalog_elements, contacts, companies.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers"
+    query:
+      with: "{{args.with}}"
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[status_id]: "{{args.filter_status_id}}"
+      filter[next_date][from]: "{{args.filter_next_date_from}}"
+      filter[next_date][to]: "{{args.filter_next_date_to}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+      filter[next_price][from]: "{{args.filter_next_price_from}}"
+      filter[next_price][to]: "{{args.filter_next_price_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. contacts,companies" }
+        query: { type: string, description: "full-text search over filled fields" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_name: { type: string }
+        filter_responsible_user_id: { type: integer }
+        filter_status_id: { type: integer, description: "customer status id from list_customer_statuses" }
+        filter_next_date_from: { type: integer, description: "unix seconds" }
+        filter_next_date_to: { type: integer }
+        filter_created_from: { type: integer }
+        filter_created_to: { type: integer }
+        filter_updated_from: { type: integer }
+        filter_updated_to: { type: integer }
+        filter_next_price_from: { type: integer }
+        filter_next_price_to: { type: integer }
+      required: []
+    examples:
+      - args: { filter_next_date_from: 1700000000, filter_next_date_to: 1700604800, limit: 50 }
+        note: "next_date is the expected repeat-sale date, so this range is the customers due in that window."
+    response_pick: [_embedded.customers, _page, _links.next.href]
+
+  - name: get_customer
+    description: >-
+      Get one customer by id; the account answers HTTP 402 when the tariff
+      has no customers. with: catalog_elements, contacts, companies.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "customer id" }
+        with: { type: string, description: "comma-joined include list, e.g. contacts,companies" }
+      required: [id]
+    examples:
+      - args: { id: 11, with: "contacts" }
+        note: "status_id here is a customer status from list_customer_statuses, not a lead pipeline stage."
+    response_pick: [id, name, next_date, next_price, status_id, responsible_user_id, created_at, updated_at, custom_fields_values, _embedded]
+
+  - name: create_customers
+    description: >-
+      EFFECTFUL. Create customers in one batch; the account answers HTTP 402
+      when the tariff has no customers. Each record takes name plus the
+      optional next_date, next_price, status_id, responsible_user_id.
+    method: POST
+    url: "{{account.base_url}}/api/v4/customers"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Acme repeat sales", next_date: 1700000000, next_price: 15000 }] }
+        note: "next_date is unix seconds and amoCRM stores it rounded to the start of that day."
+    response_pick: [_embedded.customers]
+
+  - name: update_customer
+    description: >-
+      EFFECTFUL. Update one customer by id; the account answers HTTP 402
+      when the tariff has no customers. record is merged into the existing
+      customer: only the fields it names change.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/customers/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "customer id" }
+        record: { type: object, additionalProperties: true, description: "customer field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 11, record: { next_price: 500, status_id: 5 } }
+        note: "status_id comes from list_customer_statuses and only applies while the account is in segments mode."
+    response_pick: [id, updated_at, request_id]
+
+  - name: list_customer_statuses
+    description: >-
+      List the customer statuses (the stages of the buyers pipeline); the
+      account answers HTTP 402 when the tariff has no customers. This route
+      returns every status at once and takes no paging arguments.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers/statuses"
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "takes no arguments; the ids listed here are the ones update_customer accepts as status_id."
+    response_pick: [_embedded.statuses, _total_items]
+
+  - name: list_customer_segments
+    description: >-
+      List the customer segments of the account; the account answers HTTP
+      402 when the tariff has no customers. Each segment carries its name,
+      color, available_products_price_type and custom_fields_values.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers/segments"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: { limit: 50 }
+        note: "segment membership is recomputed by amoCRM in the background, so it can lag a customer edit."
+    response_pick: [_embedded.segments, _page, _links.next.href]
+
+  - name: list_transactions
+    description: >-
+      List the purchases recorded for one customer; the account answers HTTP
+      402 when the tariff has no customers. Each transaction carries price,
+      comment and completed_at.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers/{{args.customer_id}}/transactions"
+    query:
+      filter[id]: "{{args.filter_id}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        customer_id: { type: integer, description: "customer id; part of the path" }
+        filter_id: { type: integer, description: "one transaction id" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: [customer_id]
+    examples:
+      - args: { customer_id: 11, limit: 50 }
+        note: "GET /api/v4/customers/transactions also exists but is not exposed here; this function lists one customer at a time."
+    response_pick: [_embedded.transactions, _page, _links.next.href]
+
+  - name: add_transactions
+    description: >-
+      EFFECTFUL. Add purchases to one customer in a batch; the account
+      answers HTTP 402 when the tariff has no customers. Each record takes
+      price plus the optional comment, completed_at and request_id.
+    method: POST
+    url: "{{account.base_url}}/api/v4/customers/{{args.customer_id}}/transactions"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        customer_id: { type: integer, description: "customer id; part of the path" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [customer_id, records]
+    examples:
+      - args: { customer_id: 11, records: [{ price: 15000, comment: "March renewal" }] }
+        note: "price is in the account currency and raises the customer's lifetime total."
+    response_pick: [_embedded.transactions]
+
+  - name: delete_transaction
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Delete one customer purchase by id; the
+      account answers HTTP 402 when the tariff has no customers. Its amount
+      leaves the customer totals and there is no route to undo it.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/customers/transactions/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "transaction id" }
+      required: [id]
+    examples:
+      - args: { id: 77 }
+        note: "the path carries no customer id, unlike list_transactions and add_transactions."
+
+  - name: set_customers_mode
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Enable or switch the customers mode; admin
+      only, changes account behaviour.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/customers/mode"
+    body:
+      mode: "{{args.mode}}"
+      is_enabled: "{{args.is_enabled}}"
+    args_schema:
+      type: object
+      properties:
+        mode: { type: string, enum: [segments, periodicity] }
+        is_enabled: { type: boolean, description: "turns the customers section on or off" }
+      required: [mode, is_enabled]
+    examples:
+      - args: { mode: "segments", is_enabled: true }
+        note: "switching an account that already has customers between the two modes rewrites how their stages are computed."
+    response_pick: [mode, is_enabled]
+
+  # -- Tasks --------------------------------------------------------------
+
+  - name: list_tasks
+    description: >-
+      List tasks. filter_entity_type pairs with filter_entity_id to list the
+      tasks of one record; filter_is_completed takes the integer 0 or 1
+      rather than a boolean.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/tasks"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[complete_till]: "{{args.order_complete_till}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[is_completed]: "{{args.filter_is_completed}}"
+      filter[task_type]: "{{args.filter_task_type}}"
+      filter[entity_type]: "{{args.filter_entity_type}}"
+      filter[entity_id]: "{{args.filter_entity_id}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_complete_till: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_responsible_user_id: { type: integer }
+        filter_is_completed: { type: integer, enum: [0, 1] }
+        filter_task_type: { type: integer, description: "task type id from get_account with=task_types" }
+        filter_entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        filter_entity_id: { type: integer }
+        filter_updated_from: { type: integer, description: "unix seconds" }
+        filter_updated_to: { type: integer }
+      required: []
+      dependentRequired:
+        filter_entity_id: [filter_entity_type]
+    examples:
+      - args: { filter_is_completed: 0, filter_responsible_user_id: 7, order_complete_till: "asc", limit: 50 }
+        note: "order[complete_till] is the deadline sort and exists only on this route, not on the entity lists."
+    response_pick: [_embedded.tasks, _page, _links.next.href]
+
+  - name: get_task
+    description: >-
+      Get one task by id, together with its result text once it has been
+      completed.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/tasks/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "task id" }
+      required: [id]
+    examples:
+      - args: { id: 40 }
+        note: "the route takes no with argument; entity_id and entity_type name the record the task hangs on."
+    response_pick: [id, text, task_type_id, entity_id, entity_type, responsible_user_id, complete_till, is_completed, result, created_at, updated_at]
+
+  - name: create_tasks
+    description: >-
+      EFFECTFUL. Create tasks in one batch. Each record takes text and
+      complete_till plus the optional task_type_id, entity_id, entity_type,
+      responsible_user_id and request_id.
+    method: POST
+    url: "{{account.base_url}}/api/v4/tasks"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ text: "Call back", complete_till: 1700003600, entity_id: 5, entity_type: "leads", task_type_id: 1 }] }
+        note: "entity_id and entity_type go together; a record with neither creates a task attached to nothing."
+    response_pick: [_embedded.tasks]
+
+  - name: update_task
+    description: >-
+      EFFECTFUL. Update one task by id. record is merged into the existing
+      task: only the fields it names change. Closing a task with a result
+      goes through complete_task.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/tasks/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "task id" }
+        record: { type: object, additionalProperties: true, description: "task field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 40, record: { complete_till: 1700090000 } }
+        note: "complete_till is unix seconds, so writing a later one reschedules the task."
+    response_pick: [id, updated_at, request_id]
+
+  - name: complete_task
+    description: >-
+      EFFECTFUL. Mark a task completed with a result text (PATCH is_completed
+      plus result.text).
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/tasks/{{args.id}}"
+    body:
+      is_completed: true
+      result:
+        text: "{{args.result_text}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer }
+        result_text: { type: string }
+      required: [id, result_text]
+    examples:
+      - args: { id: 40, result_text: "Called, agreed on a demo" }
+        note: "result.text is what closes the task; is_completed alone is accepted but leaves the task without a result."
+    response_pick: [id, is_completed, result]
+
+  # -- Notes --------------------------------------------------------------
+
+  - name: list_notes
+    description: >-
+      List the notes of one entity family. Without filter_entity_id the whole
+      family is listed, so pass it to read the notes of a single record.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[entity_id]: "{{args.filter_entity_id}}"
+      filter[note_type]: "{{args.filter_note_type}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer, description: "note id" }
+        filter_entity_id: { type: integer, description: "id of the record the notes hang on" }
+        filter_note_type: { type: string, enum: [common, call_in, call_out, service_message, extended_service_message, message_cashier, geolocation, sms_in, sms_out, attachment] }
+        filter_updated_from: { type: integer, description: "unix seconds" }
+        filter_updated_to: { type: integer }
+      required: [entity_type]
+    examples:
+      - args: { entity_type: "leads", filter_entity_id: 5, filter_note_type: "common", limit: 50 }
+        note: "notes are ordered by id ascending unless order_updated_at or order_id says otherwise."
+    response_pick: [_embedded.notes, _page, _links.next.href]
+
+  - name: get_note
+    description: >-
+      Get one note by id. note_type says which kind of note it is and params
+      carries the payload whose keys depend on that type.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "note id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 88 }
+        note: "note ids are scoped to one family, so the same id under another entity_type answers HTTP 404."
+    response_pick: [id, entity_id, note_type, params, is_pinned, responsible_user_id, created_by, created_at, updated_at]
+
+  - name: create_notes
+    description: >-
+      EFFECTFUL. Create notes on one entity family in one batch. note_type:
+      common, call_in, call_out, service_message, extended_service_message,
+      message_cashier, geolocation, sms_in, sms_out, attachment; params per
+      type (common: text; call_in/call_out: uniq, duration, source, link,
+      phone, call_responsible; service_message: service, text;
+      sms_in/sms_out: text, phone).
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              entity_id: { type: integer, description: "id of the record the note hangs on" }
+              note_type: { type: string, enum: [common, call_in, call_out, service_message, extended_service_message, message_cashier, geolocation, sms_in, sms_out, attachment] }
+              params: { type: object, additionalProperties: true, description: "payload for that note_type" }
+            required: [entity_id, note_type]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ entity_id: 5, note_type: "common", params: { text: "Called, agreed on a demo" } }] }
+        note: "a params key that the chosen note_type does not define is rejected with HTTP 400."
+    response_pick: [_embedded.notes]
+
+  - name: update_note
+    description: >-
+      EFFECTFUL. Update one note by id. record is merged into the existing
+      note: only the fields it names change, and params is replaced whole
+      rather than merged key by key.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "note id" }
+        record: { type: object, additionalProperties: true, description: "note field map; only the named fields change" }
+      required: [entity_type, id, record]
+    examples:
+      - args: { entity_type: "leads", id: 88, record: { params: { text: "Called, demo booked for Friday" } } }
+        note: "note_type cannot be changed after creation; only params and responsible_user_id are editable."
+    response_pick: [id, updated_at, request_id]
+
+  - name: pin_note
+    description: >-
+      EFFECTFUL. Pin one note to the top of its record feed. A record holds
+      one pinned note, so pinning a second one replaces the first.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes/{{args.id}}/pin"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "note id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 88 }
+        note: "the call takes no body and answers with the note itself, is_pinned now true."
+    response_pick: [id, is_pinned]
+
+  - name: unpin_note
+    description: >-
+      EFFECTFUL. Unpin one note, leaving it in the record feed in its normal
+      chronological place.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes/{{args.id}}/unpin"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "note id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 88 }
+        note: "unpinning a note that is not pinned answers HTTP 400."
+    response_pick: [id, is_pinned]
+
+  # -- Tags ---------------------------------------------------------------
+
+  - name: list_tags
+    description: >-
+      List the tags defined for one entity family. query is a substring match
+      over the tag name, filter_name an exact one.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/tags"
+    query:
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        query: { type: string, description: "substring of the tag name" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        filter_id: { type: integer, description: "tag id" }
+        filter_name: { type: string, description: "exact tag name" }
+      required: [entity_type]
+    examples:
+      - args: { entity_type: "contacts", query: "vip", limit: 50 }
+        note: "tags are per family, so the same name on leads and on contacts is two separate tags."
+    response_pick: [_embedded.tags, _page, _links.next.href]
+
+  - name: create_tags
+    description: >-
+      EFFECTFUL. Create tags for one entity family in one batch. Creating a
+      tag only defines it; attaching it to a record goes through
+      update_entities with tags_to_add.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/tags"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "tag name, unique within the family" }
+              color: { type: string, description: "hex colour without the hash, e.g. EBEBEB; amoCRM picks one when omitted" }
+            required: [name]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ name: "vip", color: "EBEBEB" }] }
+        note: "a name that already exists in the family answers with the existing tag rather than a duplicate."
+    response_pick: [_embedded.tags]
+
+  # -- Links --------------------------------------------------------------
+
+  - name: list_links
+    description: >-
+      List what one record is linked to. Both sides are named: entity_type
+      and entity_id in the route, the filter_to_* arguments narrow the far
+      side.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/links"
+    query:
+      filter[to_entity_id]: "{{args.filter_to_entity_id}}"
+      filter[to_entity_type]: "{{args.filter_to_entity_type}}"
+      filter[to_catalog_id]: "{{args.filter_to_catalog_id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record whose links are listed" }
+        filter_to_entity_id: { type: integer, description: "id on the far side of the link" }
+        filter_to_entity_type: { type: string, enum: [leads, contacts, companies, customers, catalog_elements] }
+        filter_to_catalog_id: { type: integer, description: "catalog the linked element belongs to; pair with filter_to_entity_type catalog_elements" }
+      required: [entity_type, entity_id]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, filter_to_entity_type: "contacts" }
+        note: "links are symmetric, so the same link is listed from either side of the pair."
+    response_pick: [_embedded.links]
+
+  - name: link_entities
+    description: >-
+      EFFECTFUL. Link one record to other records in one batch. metadata
+      takes is_main (main contact of a lead), quantity, catalog_id and
+      price_id (the last three for catalog_elements).
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/link"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record being linked from" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              to_entity_id: { type: integer }
+              to_entity_type: { type: string, enum: [leads, contacts, companies, customers, catalog_elements] }
+              metadata: { type: object, additionalProperties: true, description: "is_main, quantity, catalog_id, price_id" }
+            required: [to_entity_id, to_entity_type]
+            additionalProperties: true
+      required: [entity_type, entity_id, records]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, records: [{ to_entity_id: 9, to_entity_type: "contacts", metadata: { is_main: true } }] }
+        note: "linking a catalog element needs metadata.catalog_id; without it the record is rejected with HTTP 400."
+    response_pick: [_embedded.links]
+
+  - name: unlink_entities
+    description: >-
+      EFFECTFUL. Remove links between one record and others in one batch.
+      Only the link is removed; both records stay.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/unlink"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record being unlinked from" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              to_entity_id: { type: integer }
+              to_entity_type: { type: string, enum: [leads, contacts, companies, customers, catalog_elements] }
+              metadata: { type: object, additionalProperties: true, description: "catalog_id, needed to pick out one catalog element link" }
+            required: [to_entity_id, to_entity_type]
+            additionalProperties: true
+      required: [entity_type, entity_id, records]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, records: [{ to_entity_id: 9, to_entity_type: "contacts" }] }
+        note: "a link that does not exist is silently ignored rather than reported."
+
+  # -- Events -------------------------------------------------------------
+
+  - name: list_events
+    description: >-
+      List account events (the audit trail). filter_entity_id needs
+      filter_entity. Common types: lead_added, lead_status_changed,
+      lead_linked, task_added, task_completed, incoming_chat_message,
+      outgoing_chat_message, custom_field_value_changed,
+      entity_responsible_changed; list_event_types returns the full set.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/events"
+    query:
+      with: "{{args.with}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[entity]: "{{args.filter_entity}}"
+      filter[entity_id]: "{{args.filter_entity_id}}"
+      filter[type]: "{{args.filter_type}}"
+      filter[created_by]: "{{args.filter_created_by}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. contact_name,lead_name" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        filter_entity: { type: string, enum: [lead, contact, company, customer, task], description: "singular here, unlike the plural entity_type elsewhere" }
+        filter_entity_id: { type: integer, description: "id of the record; needs filter_entity" }
+        filter_type: { type: string, description: "one event type" }
+        filter_created_by: { type: integer, description: "user who caused the event" }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer }
+      required: []
+      dependentRequired:
+        filter_entity_id: [filter_entity]
+    examples:
+      - args: { filter_entity: "lead", filter_entity_id: 5, filter_type: "lead_status_changed", limit: 50 }
+        note: "filter[type] takes exactly one type, so sweeping several types needs one call each."
+    response_pick: [_embedded.events, _page, _links.next.href]
+
+  - name: get_event
+    description: >-
+      Get one event by id. value_before and value_after hold the change as
+      arrays, shaped by the event type.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/events/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "event id, a 26-character string rather than an integer" }
+      required: [id]
+    examples:
+      - args: { id: "01pz58t6p04ymgsgfbmfyfy1mf" }
+        note: "event ids come from list_events; they are not the ids of the records they describe."
+    response_pick: [id, type, entity_id, entity_type, created_by, created_at, value_after, value_before]
+
+  # -- Custom fields ------------------------------------------------------
+
+  - name: list_custom_fields
+    description: >-
+      Custom field definitions for an entity type; the API returns at most 50
+      per page regardless of limit. field types: text, numeric, checkbox,
+      select, multiselect, multitext, date, url, textarea, radiobutton,
+      streetaddress, smart_address, birthday, legal_entity, date_time, price,
+      category, items, tracking_data, linked_entity, chained_list, monetary,
+      file.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[sort]: "{{args.order_sort}}"
+      order[id]: "{{args.order_id}}"
+      filter[type][0]: "{{args.filter_type}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_sort: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_type: { type: string, enum: [text, numeric, checkbox, select, multiselect, multitext, date, url, textarea, radiobutton, streetaddress, smart_address, birthday, legal_entity, date_time, price, category, items, tracking_data, linked_entity, chained_list, monetary, file], description: "keep to one field type" }
+      required: [entity_type]
+    examples:
+      - args: { entity_type: "leads", filter_type: "select", limit: 50 }
+        note: "select and multiselect fields carry their options inline under enums, so the option ids arrive with the field itself."
+    response_pick: [_embedded.custom_fields, _page, _links.next.href]
+
+  - name: get_custom_field
+    description: >-
+      Get one custom field definition by id. enums holds the options of a
+      select-like field and required_statuses the pipeline statuses that make
+      it mandatory.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "custom field id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 300 }
+        note: "the id is the numeric field id from list_custom_fields, not the human-set field code."
+    response_pick: [id, name, code, type, sort, is_api_only, group_id, enums, required_statuses]
+
+  - name: create_custom_fields
+    description: >-
+      EFFECTFUL. Create custom field definitions for an entity type in one
+      batch. Each record needs name and type; select-like types take
+      enums as [{value, sort}] and group_id places the field in a card group.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "field label shown in the card" }
+              type: { type: string, enum: [text, numeric, checkbox, select, multiselect, multitext, date, url, textarea, radiobutton, streetaddress, smart_address, birthday, legal_entity, date_time, price, category, items, tracking_data, linked_entity, chained_list, monetary, file] }
+              enums: { type: array, items: { type: object, additionalProperties: true }, description: "options of a select-like field as [{value, sort}]" }
+              group_id: { type: string, description: "id of a custom field group from list_custom_field_groups" }
+            required: [name, type]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ name: "apb-test-field", type: "text" }] }
+        note: "the enum ids handed back here are what custom_fields_values has to reference when writing a value into the field."
+    response_pick: [_embedded.custom_fields]
+
+  - name: update_custom_field
+    description: >-
+      EFFECTFUL. Update one custom field definition by id. record is merged
+      into the existing field: only the fields it names change. Keep the id in
+      the id argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "custom field id" }
+        record: { type: object, additionalProperties: true, description: "field definition map; only the named keys change" }
+      required: [entity_type, id, record]
+    examples:
+      - args: { entity_type: "leads", id: 300, record: { name: "renamed" } }
+        note: "the answer is the whole field definition rather than the short id and updated_at pair the other single updates return."
+    response_pick: [id, name, type, enums]
+
+  - name: delete_custom_field
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Deletes the field and every value stored in it.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "custom field id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 300 }
+        note: "the built-in system fields, such as the contact phone and email, are rejected with HTTP 400 instead of being removed."
+
+  - name: list_custom_field_groups
+    description: >-
+      List the custom field groups of an entity type. A group is the card
+      section the fields are drawn in; the fields themselves come from
+      list_custom_fields.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/groups"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+      required: [entity_type]
+    examples:
+      - args: { entity_type: "contacts" }
+        note: "group ids are strings, unlike the integer ids of the fields they hold."
+    response_pick: [_embedded.custom_field_groups]
+
+  - name: create_custom_field_groups
+    description: >-
+      EFFECTFUL. Create custom field groups for an entity type in one batch.
+      Each record takes name and sort; fields join a group through the
+      group_id of create_custom_fields or update_custom_field.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/groups"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "group label shown in the card" }
+              sort: { type: integer, description: "position of the group inside the card" }
+            required: [name]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ name: "apb-test-group", sort: 10 }] }
+        note: "a group with no fields in it still shows up in list_custom_field_groups."
+    response_pick: [_embedded.custom_field_groups]
+
+  - name: list_catalog_custom_fields
+    description: >-
+      Custom field definitions of one catalog. The type enum and the page cap
+      are the ones documented on list_custom_fields.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/custom_fields"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[sort]: "{{args.order_sort}}"
+      order[id]: "{{args.order_id}}"
+      filter[type][0]: "{{args.filter_type}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_sort: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_type: { type: string, enum: [text, numeric, checkbox, select, multiselect, multitext, date, url, textarea, radiobutton, streetaddress, smart_address, birthday, legal_entity, date_time, price, category, items, tracking_data, linked_entity, chained_list, monetary, file], description: "keep to one field type" }
+      required: [catalog_id]
+    examples:
+      - args: { catalog_id: 500 }
+        note: "catalog fields are scoped to one catalog, so the same field name in two catalogs is two different ids."
+    response_pick: [_embedded.custom_fields, _page, _links.next.href]
+
+  - name: create_catalog_custom_fields
+    description: >-
+      EFFECTFUL. Create custom field definitions for one catalog in one batch.
+      Each record needs name and type; select-like types take enums as
+      [{value, sort}].
+    method: POST
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/custom_fields"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "field label shown on the element" }
+              type: { type: string, enum: [text, numeric, checkbox, select, multiselect, multitext, date, url, textarea, radiobutton, streetaddress, smart_address, birthday, legal_entity, date_time, price, category, items, tracking_data, linked_entity, chained_list, monetary, file] }
+              enums: { type: array, items: { type: object, additionalProperties: true }, description: "options of a select-like field as [{value, sort}]" }
+            required: [name, type]
+            additionalProperties: true
+      required: [catalog_id, records]
+    examples:
+      - args: { catalog_id: 500, records: [{ name: "Weight", type: "numeric" }] }
+        note: "the products catalog takes fields through this route too; its catalog_id comes from get_products_settings."
+    response_pick: [_embedded.custom_fields]
+
+  # -- Catalogs -----------------------------------------------------------
+
+  - name: list_catalogs
+    description: >-
+      List the account's catalogs. type separates a regular catalog from
+      invoices and from the single products catalog.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: {}
+        note: "the products catalog shows up in this list only once enable_products has created it."
+    response_pick: [_embedded.catalogs, _page, _links.next.href]
+
+  - name: get_catalog
+    description: >-
+      Get one catalog by id. The can_* flags say whether elements may be added
+      by hand, shown on entity cards and linked to more than one record.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "catalog id" }
+      required: [id]
+    examples:
+      - args: { id: 500 }
+        note: "the invoices catalog is created by the invoices widget, so its id changes from account to account."
+    response_pick: [id, name, type, can_add_elements, can_show_in_cards, can_link_multiple, sort, created_at, updated_at]
+
+  - name: create_catalogs
+    description: >-
+      EFFECTFUL. Create catalogs in one batch; at most 10 catalogs per
+      account; products are the catalog with type products, created by
+      enable_products, not here.
+    method: POST
+    url: "{{account.base_url}}/api/v4/catalogs"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 10
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "catalog label" }
+              type: { type: string, enum: [regular, invoices] }
+              can_add_elements: { type: boolean, description: "lets users add elements by hand" }
+              can_show_in_cards: { type: boolean, description: "shows the catalog on entity cards" }
+              can_link_multiple: { type: boolean, description: "lets one element hang on several records" }
+              sort: { type: integer, description: "position in the catalog list" }
+            required: [name]
+            additionalProperties: true
+      required: [records]
+    examples:
+      - args: { records: [{ name: "apb-test-catalog", type: "regular", can_add_elements: true }] }
+        note: "type is fixed at creation, so a catalog made regular cannot become an invoices one later."
+    response_pick: [_embedded.catalogs]
+
+  - name: update_catalog
+    description: >-
+      EFFECTFUL. Update one catalog by id. record is merged into the existing
+      catalog: only the fields it names change. Keep the id in the id
+      argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "catalog id" }
+        record: { type: object, additionalProperties: true, description: "catalog field map; only the named keys change" }
+      required: [id, record]
+    examples:
+      - args: { id: 500, record: { name: "renamed" } }
+        note: "renaming a catalog leaves its elements and their stored field values untouched."
+    response_pick: [id, updated_at, request_id]
+
+  - name: list_catalog_elements
+    description: >-
+      List the elements of one catalog. query is a full-text search over the
+      element name and its filled field values. with: invoice_link.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/elements"
+    query:
+      with: "{{args.with}}"
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[id]: "{{args.filter_id}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        with: { type: string, description: "comma-joined include list; invoice_link is the only documented value" }
+        query: { type: string, description: "full-text search over the element name and its filled fields" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        filter_id: { type: integer, description: "element id" }
+      required: [catalog_id]
+    examples:
+      - args: { catalog_id: 500, query: "sku-1", limit: 20 }
+        note: "a product sku lives in a custom field, so query finds it while filter_id only takes the element id."
+    response_pick: [_embedded.elements, _page, _links.next.href]
+
+  - name: get_catalog_element
+    description: >-
+      Get one catalog element by id. custom_fields_values carries the per
+      catalog fields, price and sku among them for a products element.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/elements/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        id: { type: integer, description: "element id" }
+      required: [catalog_id, id]
+    examples:
+      - args: { catalog_id: 500, id: 9001 }
+        note: "an element id is scoped to its catalog, so the right id under the wrong catalog_id answers HTTP 404."
+    response_pick: [id, name, catalog_id, created_at, updated_at, custom_fields_values, _embedded]
+
+  - name: create_catalog_elements
+    description: >-
+      EFFECTFUL. Create elements in one catalog in one batch. Each record
+      needs name; every other value travels through custom_fields_values in
+      amoCRM's own shape.
+    method: POST
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/elements"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "element label" }
+              custom_fields_values: { type: array, items: { type: object, additionalProperties: true }, description: "per catalog field values as [{field_id, values}]" }
+            required: [name]
+            additionalProperties: true
+      required: [catalog_id, records]
+    examples:
+      - args: { catalog_id: 500, records: [{ name: "apb-test-item" }] }
+        note: "a products element keeps its price and sku inside custom_fields_values, not in top-level keys."
+    response_pick: [_embedded.elements]
+
+  - name: update_catalog_element
+    description: >-
+      EFFECTFUL. Update one catalog element by id. record is merged into the
+      existing element: only the fields it names change. Keep the id in the id
+      argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/elements/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        id: { type: integer, description: "element id" }
+        record: { type: object, additionalProperties: true, description: "element field map; only the named keys change" }
+      required: [catalog_id, id, record]
+    examples:
+      - args: { catalog_id: 500, id: 9001, record: { name: "renamed" } }
+        note: "custom_fields_values is merged per field_id, so a field left out of record keeps the value it already had."
+    response_pick: [id, updated_at, request_id]
+
+  # -- Products -----------------------------------------------------------
+
+  - name: get_products_settings
+    description: >-
+      Read the products feature switch and the id of the products catalog.
+      This route sits under /api/v2, not /api/v4.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v2/products_settings"
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "is_enabled false means the products catalog does not exist yet and catalog_id is absent."
+    response_pick: [is_enabled, catalog_id]
+
+  - name: enable_products
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Turns on the products feature and creates the
+      products catalog; returns its catalog_id.
+    method: POST
+    url: "{{account.base_url}}/api/v2/products_settings/"
+    body:
+      enabled: true
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "the trailing slash in the path is required here; without it the account answers HTTP 404."
+
+  # -- Webhooks -----------------------------------------------------------
+
+  - name: list_webhooks
+    description: >-
+      List the webhook subscriptions of the account. filter_destination narrows
+      the answer to one URL, which is the cheapest way to check whether a hook
+      is already registered.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/webhooks"
+    query:
+      filter[destination]: "{{args.filter_destination}}"
+    args_schema:
+      type: object
+      properties:
+        filter_destination: { type: string, description: "exact hook URL to look up" }
+      required: []
+    examples:
+      - args: { filter_destination: "https://hooks.example.com/amo" }
+        note: "a hook amoCRM has disabled after repeated delivery failures still appears here with disabled true."
+    response_pick: [_embedded.webhooks]
+
+  - name: subscribe_webhook
+    description: >-
+      EFFECTFUL. Subscribe a URL to account events (re-posting the same
+      destination replaces its settings). Deliveries are form-encoded and
+      unsigned, so they cannot be received by the apb ingest listener; point
+      destination at your own receiver. At most 100 hooks per account.
+    method: POST
+    url: "{{account.base_url}}/api/v4/webhooks"
+    body:
+      destination: "{{args.destination}}"
+      settings: "{{args.settings}}"
+      sort: "{{args.sort}}"
+    args_schema:
+      type: object
+      properties:
+        destination: { type: string, description: "https URL amoCRM posts the events to" }
+        settings:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [add_lead, update_lead, delete_lead, restore_lead, status_lead, responsible_lead, add_contact, update_contact, delete_contact, restore_contact, responsible_contact, add_company, update_company, delete_company, restore_company, responsible_company, add_customer, update_customer, delete_customer, responsible_customer, add_task, update_task, delete_task, responsible_task, add_talk, update_talk, note_lead, note_contact, note_company, note_customer, add_message, add_outgoing_message, add_chat_template_review]
+          description: "event names this hook subscribes to"
+        sort: { type: integer, description: "display order in the account settings; dropped from the body when omitted" }
+      required: [destination, settings]
+    examples:
+      - args: { destination: "https://hooks.example.com/amo", settings: ["add_lead", "status_lead"], sort: 10 }
+        note: "settings replaces the whole event list of that destination, so re-posting with one name unsubscribes the rest."
+    response_pick: [id, destination, settings, disabled]
+
+  - name: unsubscribe_webhook
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Remove the webhook subscription of one
+      destination. The URL is identified by the JSON body, not by a path id,
+      and the event list it carried is gone.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/webhooks"
+    body:
+      destination: "{{args.destination}}"
+    args_schema:
+      type: object
+      properties:
+        destination: { type: string, description: "exact hook URL as returned by list_webhooks" }
+      required: [destination]
+    examples:
+      - args: { destination: "https://hooks.example.com/amo" }
+        note: "the destination must match character for character, a trailing slash included, or amoCRM answers HTTP 404."
+
+  # -- Bots ---------------------------------------------------------------
+
+  - name: list_bots
+    description: >-
+      List the salesbots of the account with their ids. A bot id is what
+      run_bot and stop_bot take.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/bots"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        with: { type: string, description: "comma separated extras; favorite is the only documented value" }
+      required: []
+    examples:
+      - args: { limit: 50 }
+        note: "only bots built in the salesbot designer are listed; widget automations are not bots."
+    response_pick: [_embedded.bots, _page, _links.next.href]
+
+  - name: run_bot
+    description: >-
+      EFFECTFUL. Start one salesbot on one record. amoCRM answers HTTP 202 as
+      soon as the run is queued, and the bot then acts on its own, so a bot
+      that writes to the client sends real messages.
+    method: POST
+    url: "{{account.base_url}}/api/v4/bots/{{args.bot_id}}/run"
+    body:
+      entity_type: "{{args.entity_type}}"
+      entity_id: "{{args.entity_id}}"
+    args_schema:
+      type: object
+      properties:
+        bot_id: { type: integer, description: "bot id from list_bots" }
+        entity_type: { type: string, enum: [leads, contacts, customers], description: "record family the bot runs on" }
+        entity_id: { type: integer, description: "id of the record the bot runs on" }
+      required: [bot_id, entity_type, entity_id]
+    examples:
+      - args: { bot_id: 12, entity_type: "leads", entity_id: 5 }
+        note: "companies are not accepted here, unlike the four-family entity_type the rest of the connector takes."
+
+  - name: stop_bot
+    description: >-
+      EFFECTFUL. Stop the salesbot running on one lead. amoCRM answers HTTP
+      202 once the stop is queued, and the steps the bot already performed
+      are not rolled back.
+    method: POST
+    url: "{{account.base_url}}/api/v4/bots/{{args.bot_id}}/stop"
+    body:
+      entity_type: "{{args.entity_type}}"
+      entity_id: "{{args.entity_id}}"
+    args_schema:
+      type: object
+      properties:
+        bot_id: { type: integer, description: "bot id from list_bots" }
+        entity_type: { type: string, enum: [leads], description: "only leads can be stopped, unlike run_bot" }
+        entity_id: { type: integer, description: "id of the lead the bot runs on" }
+      required: [bot_id, entity_type, entity_id]
+    examples:
+      - args: { bot_id: 12, entity_type: "leads", entity_id: 5 }
+        note: "stopping a bot that is not running on that lead is accepted and changes nothing."
+
+  # -- Sources ------------------------------------------------------------
+
+  - name: list_sources
+    description: >-
+      List the lead sources registered by integrations. A source binds
+      incoming chats and forms to one pipeline.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/sources"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[external_id]: "{{args.filter_external_id}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        filter_id: { type: integer, description: "source id" }
+        filter_external_id: { type: string, description: "the external_id the integration assigned" }
+      required: []
+    examples:
+      - args: {}
+        note: "sources created by other integrations are not listed; the token only sees the ones its own integration owns."
+    response_pick: [_embedded.sources, _page, _links.next.href]
+
+  - name: create_sources
+    description: >-
+      EFFECTFUL. Register lead sources for this integration in one batch;
+      admin only. The sources appear in the interface only once the
+      integration also ships a widget with the lead_sources location.
+    method: POST
+    url: "{{account.base_url}}/api/v4/sources"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "source label shown in the interface" }
+              external_id: { type: string, description: "id unique inside this integration" }
+              pipeline_id: { type: integer, description: "pipeline the source feeds" }
+              default: { type: boolean, description: "make this the default source of the integration" }
+            required: [name, external_id]
+            additionalProperties: true
+      required: [records]
+    examples:
+      - args: { records: [{ name: "apb-test-source", external_id: "apb-1", pipeline_id: 100 }] }
+        note: "external_id must be unique within the integration; reusing one answers HTTP 400 rather than updating the source."
+    response_pick: [_embedded.sources]
+
+  # -- Chat templates -----------------------------------------------------
+
+  - name: list_chat_templates
+    description: >-
+      List the outgoing message templates of the account. The route returns
+      only the templates the calling integration created, not every template
+      on the account.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/chats/templates"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[external_id]: "{{args.filter_external_id}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 50 }
+        filter_external_id: { type: string, description: "the external_id the integration assigned" }
+      required: []
+    examples:
+      - args: { limit: 20 }
+        note: "a template carries its moderation verdict in reviews, and only an approved one can open a WhatsApp dialog."
+    response_pick: [_embedded.chat_templates, _page, _links.next.href]
+
+  # -- Talks --------------------------------------------------------------
+
+  - name: list_talks
+    description: >-
+      List chat talks. filter_only_in_work is presence-based: passing it at
+      all, even as false, keeps only open talks, so omit it to see closed
+      ones. filter_entity_type pairs with filter_entity_id.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/talks"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[talk_id]: "{{args.filter_talk_id}}"
+      filter[contact_id]: "{{args.filter_contact_id}}"
+      filter[entity_id]: "{{args.filter_entity_id}}"
+      filter[entity_type]: "{{args.filter_entity_type}}"
+      filter[only_in_work]: "{{args.filter_only_in_work}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        filter_talk_id: { type: integer, description: "talk id" }
+        filter_contact_id: { type: integer, description: "contact the talk belongs to" }
+        filter_entity_id: { type: integer, description: "id of the linked record" }
+        filter_entity_type: { type: string, enum: [lead, customer], description: "singular here, unlike the plural entity_type elsewhere" }
+        filter_only_in_work: { type: boolean, description: "presence-based: any value enables the filter, so omit it to see closed talks too" }
+      required: []
+      dependentRequired:
+        filter_entity_id: [filter_entity_type]
+        filter_entity_type: [filter_entity_id]
+    examples:
+      - args: { filter_contact_id: 9, filter_only_in_work: true }
+        note: "a talk is the unit the unanswered counter and the NPS bot work on, not the individual chat message."
+    response_pick: [_embedded.talks, _page, _links.next.href]
+
+  - name: close_talk
+    description: >-
+      EFFECTFUL. Close one talk so it stops counting as unanswered. The
+      client can reopen it by writing again.
+    method: POST
+    url: "{{account.base_url}}/api/v4/talks/{{args.id}}/close"
+    body:
+      force_close: "{{args.force_close}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "talk id from list_talks" }
+        force_close: { type: boolean, description: "true skips the NPS bot; dropped from the body when omitted" }
+      required: [id]
+    examples:
+      - args: { id: 555, force_close: true }
+        note: "without force_close the account runs its closing bot first, so the talk may stay open for a moment."
+
+  # -- Subscriptions ------------------------------------------------------
+
+  - name: list_subscriptions
+    description: >-
+      List the users subscribed to the changes of one record. Subscribers get
+      the record notifications; they are not the responsible user.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/subscriptions"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, customers] }
+        entity_id: { type: integer, description: "id of the record" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: [entity_type, entity_id]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5 }
+        note: "only leads and customers carry subscriptions; contacts and companies answer HTTP 404 on this route."
+    response_pick: [_embedded.subscriptions, _page, _links.next.href]
+
+  # -- Short links --------------------------------------------------------
+
+  - name: create_short_links
+    description: >-
+      EFFECTFUL. Shorten URLs in one batch. metadata binds a link to a
+      contact so amoCRM can attribute the click back to that record.
+    method: POST
+    url: "{{account.base_url}}/api/v4/short_links"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              url: { type: string, description: "the long URL to shorten" }
+              metadata:
+                type: object
+                properties:
+                  entity_type: { type: string, enum: [contacts] }
+                  entity_id: { type: integer, description: "contact the click is attributed to" }
+                required: [entity_type, entity_id]
+                additionalProperties: true
+                description: "click attribution target"
+            required: [url]
+            additionalProperties: true
+      required: [records]
+    examples:
+      - args: { records: [{ url: "https://example.com/offer", metadata: { entity_type: "contacts", entity_id: 9 } }] }
+        note: "shortening the same URL twice for the same contact returns the short link that already exists."
+    response_pick: [_embedded.short_links]
+
+  # -- Calls --------------------------------------------------------------
+
+  - name: add_calls
+    description: >-
+      EFFECTFUL. Log calls; the phone is matched to a contact or company by
+      its last 10 digits and an unmatched number is silently dropped.
+      call_status: 1 left message, 2 call back later, 3 not available, 4
+      conversation, 5 wrong number, 6 no answer, 7 busy.
+    method: POST
+    url: "{{account.base_url}}/api/v4/calls"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              direction: { type: string, enum: [inbound, outbound] }
+              duration: { type: integer, minimum: 0, description: "call length in seconds" }
+              source: { type: string, description: "telephony integration label" }
+              phone: { type: string, description: "the other party number" }
+              uniq: { type: string, description: "telephony side call id; repeating it updates that call" }
+              call_status: { type: integer, enum: [1, 2, 3, 4, 5, 6, 7] }
+              call_result: { type: string, description: "free text outcome shown in the feed" }
+              link: { type: string, description: "URL of the recording" }
+              responsible_user_id: { type: integer }
+              created_by: { type: integer }
+            required: [direction, duration, source, phone]
+            additionalProperties: true
+      required: [records]
+    examples:
+      - args: { records: [{ direction: "inbound", duration: 60, source: "apb", phone: "+79990000000", call_result: "ok" }] }
+        note: "the call lands as a note on the matched record, so a number that matches two contacts logs against both."
+    response_pick: [_embedded.calls, errors]
+
+  # -- Files --------------------------------------------------------------
+
+  - name: list_files
+    description: >-
+      Requires the drive_url account field (get_account with=drive_url) and
+      the Files access scope on the token. Lists the account drive; an account
+      without drive_url fails at render time before any request is sent.
+    read_only: true
+    method: GET
+    url: "{{account.drive_url}}/v1.0/files"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[term]: "{{args.filter_term}}"
+      filter[deleted]: "{{args.filter_deleted}}"
+      filter[source_id]: "{{args.filter_source_id}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1, description: "undocumented by amoCRM, but its own _links.next.href emits page and limit" }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        filter_name: { type: string, description: "exact file name" }
+        filter_term: { type: string, description: "substring searched in the file name" }
+        filter_deleted: { type: boolean, description: "presence-based: passing it at all, even as false, selects the files in the trash" }
+        filter_source_id: { type: integer, description: "drive folder the files sit in" }
+      required: []
+    examples:
+      - args: { filter_term: "contract", limit: 20 }
+        note: "the drive host differs per account, which is why the URL comes from drive_url rather than from base_url."
+    response_pick: [_embedded.files, _links.next.href]
+
+  - name: get_file
+    description: >-
+      Read one drive file by uuid, with its version history and the download
+      links. Uses the drive_url account field, like list_files.
+    read_only: true
+    method: GET
+    url: "{{account.drive_url}}/v1.0/files/{{args.uuid}}"
+    args_schema:
+      type: object
+      properties:
+        uuid: { type: string, description: "file uuid, not a numeric id" }
+      required: [uuid]
+    examples:
+      - args: { uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }
+        note: "_links.download points at a signed URL that expires, so fetch the file rather than storing that URL."
+    response_pick: [uuid, name, size, type, versions, _links]
+
+  - name: list_entity_files
+    description: >-
+      List the files attached to one record. This route lives on base_url and
+      pages by before_id rather than by page number.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/files"
+    query:
+      limit: "{{args.limit}}"
+      before_id: "{{args.before_id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record" }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        before_id: { type: integer, description: "cursor: return the attachments older than this one" }
+      required: [entity_type, entity_id]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, limit: 20 }
+        note: "attachments are listed newest first, so before_id walks backwards through the record history."
+    response_pick: [_embedded.files, _links.next.href]
+
+  - name: attach_files
+    description: >-
+      EFFECTFUL. Attach drive files to one record by uuid. The file itself is
+      uploaded to the drive elsewhere; this only creates the link. amoCRM
+      answers HTTP 202 with an empty body, so there is nothing to pick.
+    method: PUT
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/files"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              file_uuid: { type: string, description: "uuid from list_files or get_file" }
+            required: [file_uuid]
+            additionalProperties: true
+      required: [entity_type, entity_id, records]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, records: [{ file_uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }] }
+        note: "the verb is PUT because the call is idempotent: attaching a uuid that is already linked changes nothing."
+
+  - name: detach_files
+    description: >-
+      EFFECTFUL. Detach files from one record by uuid. The file stays on the
+      drive; only the link to this record is removed.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/files"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              file_uuid: { type: string, description: "uuid of an attachment on this record" }
+            required: [file_uuid]
+            additionalProperties: true
+      required: [entity_type, entity_id, records]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, records: [{ file_uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }] }
+        note: "the uuids travel in the request body, which is unusual for a DELETE but is what this route expects."
+
+  - name: list_file_links
+    description: >-
+      List the records one drive file is attached to. Use it before
+      detach_files to see where a file is in use.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/files/{{args.uuid}}/links"
+    args_schema:
+      type: object
+      properties:
+        uuid: { type: string, description: "file uuid, not a numeric id" }
+      required: [uuid]
+    examples:
+      - args: { uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }
+        note: "this route sits on base_url even though the file itself lives on the drive host."
+    response_pick: [file_uuid, entities]

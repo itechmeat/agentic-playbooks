@@ -268,10 +268,10 @@ a call without executing it, or the dashboard healthcheck to probe an account.
 
 ## Official connectors
 
-Fourteen official connectors ship inside the `apb` binary and install with
+Fifteen official connectors ship inside the `apb` binary and install with
 `apb connector install <name>`: `github`, `telegram`, `smtp`, `sentry`,
 `asana`, `imap`, `gitlab`, `youtrack`, `zulip`, `discord`, `slack`, `atrip`,
-`twenty`, `whatsapp`. Installing
+`twenty`, `whatsapp`, `amocrm`. Installing
 from the binary records trust for the
 connector's tree digest in the same action, since the bytes are already
 part of the binary you are running; `apb connector install --from-dir
@@ -558,6 +558,70 @@ sent by a hosted `link` or by a media `id` obtained out of band. The
 `healthcheck` is `get_phone_number`, which takes no arguments (its `fields`
 query is a fixed literal so the no-arg probe stays self-sufficient) and
 proves the token is valid and that `phone_number_id` belongs to it.
+
+### amocrm
+
+Account fields: `base_url` (scheme and host only, no path suffix, either
+`https://<subdomain>.amocrm.ru` or `https://<subdomain>.kommo.com`, since
+amoCRM and Kommo are the same API on different domains), `drive_url`
+(optional, non-secret, the account-specific Files API host such as
+`https://drive-b.amocrm.ru`, read once from `get_account` with
+`with=drive_url` and used only by `list_files` and `get_file`), and
+`access_token` (secret). The token is the long-lived token of an integration
+on that account: open the integration in amoMarket, tab "Keys", "Generate
+token", pick an expiry between one day and five years, and copy the value,
+which is shown only once. Long-lived tokens carry no refresh token, so
+nothing rotates them and a lapsed expiry simply starts answering 401; they
+are revocable from the integration's "Granted access" tab. A private
+integration can require an application to amoCRM support on a non-technical
+account, while an external integration created in amoMarket issues the same
+kind of token without that step; the connector accepts either, since both
+are Bearer tokens. Covers account and dictionaries (users, roles, event
+types, loss reasons), leads and the unsorted inbox, pipelines and statuses,
+contacts and companies, customers with statuses, segments and transactions,
+tasks, notes, tags, entity links, the event feed, custom field definitions
+and groups, catalogs and products, webhook subscriptions, salesbots, lead
+sources, chat templates, talks, subscriptions, short links, call logging,
+and the Files API (list, read, attach, detach). 101 functions in total, 49
+of them `read_only` and 52 effectful. Wherever amoCRM's routes are
+symmetric, one function takes an `entity_type` of `leads`, `contacts`,
+`companies` or `customers` instead of four near-identical functions, which
+is how notes, tags, links, custom fields, custom field groups, entity files
+and batch updates are exposed; subscriptions collapse the same way over the
+two families amoCRM documents for that route, `leads` and `customers`. Eight
+functions carry the `EFFECTFUL, IRREVERSIBLE` marker: `decline_unsorted`,
+`delete_pipeline`, `delete_status`, `delete_custom_field`,
+`delete_transaction`, `set_customers_mode`, `enable_products` and
+`unsubscribe_webhook`, the last two of them for their account-wide reach
+rather than because they cannot be undone; API v4 has no DELETE at all for
+leads, contacts, companies, customers, tasks, notes, tags or catalog
+elements, so the connector exposes none. Shared API facts that apply
+everywhere: 7 requests per second per integration (429 comes back as
+`rate_limited` with `retry_after_sec`, nothing retries automatically), an
+empty result is HTTP 204 with no body rather than an empty array, HAL paging
+with items under `_embedded.<collection>` and the cursor under
+`_links.next.href`, `filter[...]` on leads, contacts, companies and
+customers may need the paid filtering add-on (`get_account` with
+`with=is_api_filter_enabled` says whether it is on), each filter takes
+exactly one value because a query map cannot repeat a key, and customers,
+catalogs, webhooks and filtering are tariff-gated behind HTTP 402. Out of
+scope for this connector's 0.1 surface: receiving amoCRM webhooks through
+the ingest listener (amoCRM posts form-encoded payloads without a signature,
+while the listener requires a JSON body and an HMAC signature, so webhook
+management is exposed but reception is not), file upload (a chunked binary
+Drive session, which the format's body kinds cannot express), the Chats API
+on `amojo.amocrm.ru` (a separate host with its own HMAC-SHA1 signature
+scheme), and OAuth2 authorization-code flow with refresh rotation (refresh
+tokens are single-use with a three-month TTL and apb stores no tokens).
+Because every granted function is rendered into the node prompt in full,
+granting the whole connector costs about 70,000 characters of context;
+`connectors/amocrm/README.md` carries seven ready-to-paste grant presets
+(`sales-read`, `sales-write`, `inbox`, `setup-admin`, `catalog`,
+`customers`, `files`) and the measured prompt sizes. Request shapes are
+verified against the amoCRM API v4 documentation and the offline contract
+tests, not yet against a live account. The `healthcheck` is `get_account`,
+which renders with zero arguments and succeeds against any token the account
+has issued.
 
 ### Demo playbooks
 
