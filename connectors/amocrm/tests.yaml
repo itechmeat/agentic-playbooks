@@ -1,0 +1,16 @@
+cases:
+  # -- Account ----------------------------------------------------------------
+
+  - function: get_account
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/account"
+
+  - function: get_account
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { with: "drive_url,task_types" }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/account?with=drive_url%2Ctask_types"

@@ -1,0 +1,67 @@
+name: amocrm
+version: 0.1.0
+# amoCRM (amocrm.ru) and its international twin Kommo (kommo.com) expose the
+# same REST API v4 under https://<subdomain>.<tld>/api/v4/... base_url is
+# scheme plus host only, no trailing path; the account-specific Files API
+# host (drive_url) comes from get_account with=drive_url and is a second,
+# optional account field used only by list_files and get_file.
+#
+# Shared API facts, stated once here and in README.md rather than in every
+# function: the rate limit is 7 requests per second per integration (HTTP
+# 429 with Retry-After, no automatic retry in apb); an empty list result is
+# HTTP 204 with no body, not an empty array; list responses are HAL, the
+# items sit under _embedded.<collection> and the next page under
+# _links.next.href; page starts at 1 and limit caps at 250 (100 for
+# events, 50 for chat templates); filter[...] on leads, contacts, companies
+# and customers may need the paid filtering add-on (get_account with
+# is_api_filter_enabled says whether it is on); batch writes take an array
+# of records, 50 recommended and 250 hard cap, each record may carry a
+# request_id that is echoed back; v4 has no DELETE for leads, contacts,
+# companies, customers, tasks, notes, tags or catalog elements.
+#
+# Argument naming: call arguments are snake_case. Single-value filters are
+# exposed as filter_<field> (rendered filter[<field>]) and ranges as
+# filter_<field>_from / filter_<field>_to (rendered filter[<field>][from|to]);
+# a filter can take exactly one value because a query map cannot repeat a
+# key. Record bodies (record, records) are forwarded verbatim in amoCRM's
+# own JSON shape: custom_fields_values, _embedded, tags_to_add,
+# tags_to_delete, responsible_user_id, and so on.
+#
+# entity_type is the enum [leads, contacts, companies, customers] wherever
+# amoCRM's routes are symmetric (notes, tags, links, custom fields, files,
+# batch updates); one function replaces four.
+auth:
+  kind: header
+  header: Authorization
+  value_template: "Bearer {{secret.access_token}}"
+account_fields:
+  - name: base_url
+    required: true
+  - name: drive_url
+    required: false
+  - name: access_token
+    required: true
+    secret: true
+healthcheck: get_account
+functions:
+  # -- Account and dictionaries -------------------------------------------
+
+  - name: get_account
+    description: >-
+      Account settings and feature flags. with is a comma list from
+      amojo_id, users_groups, task_types, version, entity_names,
+      datetime_settings, drive_url, is_api_filter_enabled, invoices_settings.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/account"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. drive_url,is_api_filter_enabled,task_types" }
+      required: []
+    examples:
+      - args: { with: "drive_url,is_api_filter_enabled,task_types" }
+        note: "drive_url is the Files API host to copy into the drive_url account field; is_api_filter_enabled says whether filter_* arguments will work on leads, contacts, companies and customers."
+    response_pick: [id, name, subdomain, currency, country, drive_url, is_api_filter_enabled, _embedded]
