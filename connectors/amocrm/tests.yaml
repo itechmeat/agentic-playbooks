@@ -15,7 +15,7 @@ cases:
       method: GET
       url: "https://example.amocrm.ru/api/v4/account?with=drive_url%2Ctask_types"
 
-  # -- Dictionaries -----------------------------------------------------------
+  # -- Account and dictionaries -----------------------------------------------
 
   - function: list_users
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
@@ -297,6 +297,13 @@ cases:
     expect:
       method: GET
       url: "https://example.amocrm.ru/api/v4/customers?filter%5Bstatus_id%5D=5&limit=10"
+
+  - function: list_customers
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { query: "acme", limit: 10 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/customers?limit=10&query=acme"
 
   - function: get_customer
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }

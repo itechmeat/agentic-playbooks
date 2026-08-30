@@ -87,7 +87,7 @@ functions:
       required: []
     examples:
       - args: { with: "role,group", limit: 50 }
-        note: "every argument is optional and an omitted one is dropped from the query; an empty page is HTTP 204 with no body."
+        note: "the route needs an admin token; a non-admin token answers HTTP 403 rather than a filtered list."
     response_pick: [_embedded.users, _page, _links.next.href]
 
   - name: get_user
@@ -130,13 +130,13 @@ functions:
       required: []
     examples:
       - args: { with: "users" }
-        note: "every argument is optional; an account with no custom roles answers HTTP 204 with no body."
+        note: "roles here are the account's own permission sets; a user's is_admin flag is separate and comes from list_users."
     response_pick: [_embedded.roles, _page, _links.next.href]
 
   - name: list_event_types
     description: >-
       List the event types the account's event feed can emit, with their
-      localized labels. limit caps at 100 here rather than the usual 250.
+      localized labels.
     read_only: true
     method: GET
     url: "{{account.base_url}}/api/v4/events/types"
@@ -175,7 +175,7 @@ functions:
       required: []
     examples:
       - args: { limit: 50 }
-        note: "both arguments are optional; an account with no loss reasons answers HTTP 204 with no body."
+        note: "the ids returned here are the ones update_lead accepts as loss_reason_id when moving a lead to status_id 143."
     response_pick: [_embedded.loss_reasons, _page, _links.next.href]
 
   # -- Leads --------------------------------------------------------------
@@ -302,7 +302,7 @@ functions:
     examples:
       - args: { id: 5, record: { status_id: 142, price: 20000 } }
         note: "moving a lead to status_id 143 (lost) also accepts loss_reason_id inside record."
-    response_pick: [id, name, updated_at]
+    response_pick: [id, updated_at, request_id]
 
   - name: update_leads
     description: >-
@@ -323,7 +323,7 @@ functions:
       required: [records]
     examples:
       - args: { records: [{ id: 5, price: 20000 }, { id: 6, status_id: 142 }] }
-        note: "50 records per call is the vendor recommendation; a record without an id is rejected with HTTP 400."
+        note: "a record without an id is rejected with HTTP 400; the response returns only the leads that changed."
     response_pick: [_embedded.leads]
 
   - name: create_leads_complex
@@ -379,7 +379,7 @@ functions:
       required: []
     examples:
       - args: { filter_category: "forms", limit: 20 }
-        note: "every argument is optional and an omitted one is dropped from the query; an empty page is HTTP 204 with no body."
+        note: "the uid of each item is the argument accept_unsorted and decline_unsorted take, not the lead id."
     response_pick: [_embedded.unsorted, _page, _links.next.href]
 
   - name: get_unsorted_summary
@@ -844,7 +844,7 @@ functions:
       required: [id, record]
     examples:
       - args: { id: 3, record: { name: "Acme LLC" } }
-        note: "an unknown company id answers HTTP 404."
+        note: "linked contacts and leads are not editable here; use update_entities or link_entities for them."
     response_pick: [id, updated_at, request_id]
 
   # -- Batch updates ------------------------------------------------------
@@ -888,6 +888,7 @@ functions:
     url: "{{account.base_url}}/api/v4/customers"
     query:
       with: "{{args.with}}"
+      query: "{{args.query}}"
       page: "{{args.page}}"
       limit: "{{args.limit}}"
       order[created_at]: "{{args.order_created_at}}"
@@ -909,6 +910,7 @@ functions:
       type: object
       properties:
         with: { type: string, description: "comma-joined include list, e.g. contacts,companies" }
+        query: { type: string, description: "full-text search over filled fields" }
         page: { type: integer, minimum: 1 }
         limit: { type: integer, minimum: 1, maximum: 250 }
         order_created_at: { type: string, enum: [asc, desc] }
@@ -949,7 +951,7 @@ functions:
       required: [id]
     examples:
       - args: { id: 11, with: "contacts" }
-        note: "an unknown customer id answers HTTP 404."
+        note: "status_id here is a customer status from list_customer_statuses, not a lead pipeline stage."
     response_pick: [id, name, next_date, next_price, status_id, responsible_user_id, created_at, updated_at, custom_fields_values, _embedded]
 
   - name: create_customers
@@ -1082,8 +1084,9 @@ functions:
 
   - name: delete_transaction
     description: >-
-      EFFECTFUL, IRREVERSIBLE. Delete one customer purchase by id. Its
-      amount leaves the customer totals and there is no route to undo it.
+      EFFECTFUL, IRREVERSIBLE. Delete one customer purchase by id; the
+      account answers HTTP 402 when the tariff has no customers. Its amount
+      leaves the customer totals and there is no route to undo it.
     method: DELETE
     url: "{{account.base_url}}/api/v4/customers/transactions/{{args.id}}"
     args_schema:
@@ -1156,9 +1159,11 @@ functions:
         filter_updated_from: { type: integer, description: "unix seconds" }
         filter_updated_to: { type: integer }
       required: []
+      dependentRequired:
+        filter_entity_id: [filter_entity_type]
     examples:
       - args: { filter_is_completed: 0, filter_responsible_user_id: 7, order_complete_till: "asc", limit: 50 }
-        note: "filter_is_completed 0 lists the open tasks and 1 the closed ones."
+        note: "order[complete_till] is the deadline sort and exists only on this route, not on the entity lists."
     response_pick: [_embedded.tasks, _page, _links.next.href]
 
   - name: get_task
@@ -1175,7 +1180,7 @@ functions:
       required: [id]
     examples:
       - args: { id: 40 }
-        note: "result.text is filled only after the task has been completed."
+        note: "the route takes no with argument; entity_id and entity_type name the record the task hangs on."
     response_pick: [id, text, task_type_id, entity_id, entity_type, responsible_user_id, complete_till, is_completed, result, created_at, updated_at]
 
   - name: create_tasks
@@ -1269,7 +1274,7 @@ functions:
         order_id: { type: string, enum: [asc, desc] }
         filter_id: { type: integer, description: "note id" }
         filter_entity_id: { type: integer, description: "id of the record the notes hang on" }
-        filter_note_type: { type: string, description: "one note type, see create_notes for the list" }
+        filter_note_type: { type: string, enum: [common, call_in, call_out, service_message, extended_service_message, message_cashier, geolocation, sms_in, sms_out, attachment] }
         filter_updated_from: { type: integer, description: "unix seconds" }
         filter_updated_to: { type: integer }
       required: [entity_type]
@@ -1569,7 +1574,7 @@ functions:
         filter_entity_id: [filter_entity]
     examples:
       - args: { filter_entity: "lead", filter_entity_id: 5, filter_type: "lead_status_changed", limit: 50 }
-        note: "the event feed is capped at 100 per page rather than the usual 250."
+        note: "filter[type] takes exactly one type, so sweeping several types needs one call each."
     response_pick: [_embedded.events, _page, _links.next.href]
 
   - name: get_event
@@ -1757,9 +1762,8 @@ functions:
 
   - name: list_catalog_custom_fields
     description: >-
-      Custom field definitions of one catalog; the API returns at most 50 per
-      page regardless of limit. The type enum is the one listed on
-      list_custom_fields.
+      Custom field definitions of one catalog. The type enum and the page cap
+      are the ones documented on list_custom_fields.
     read_only: true
     method: GET
     url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/custom_fields"
@@ -1868,7 +1872,7 @@ functions:
         records:
           type: array
           minItems: 1
-          maxItems: 250
+          maxItems: 10
           items:
             type: object
             properties:
@@ -2183,7 +2187,6 @@ functions:
       limit: "{{args.limit}}"
       filter[id]: "{{args.filter_id}}"
       filter[external_id]: "{{args.filter_external_id}}"
-      filter[pipeline_id]: "{{args.filter_pipeline_id}}"
     args_schema:
       type: object
       properties:
@@ -2191,7 +2194,6 @@ functions:
         limit: { type: integer, minimum: 1, maximum: 250 }
         filter_id: { type: integer, description: "source id" }
         filter_external_id: { type: string, description: "the external_id the integration assigned" }
-        filter_pipeline_id: { type: integer, description: "pipeline the source feeds" }
       required: []
     examples:
       - args: {}
@@ -2232,8 +2234,9 @@ functions:
 
   - name: list_chat_templates
     description: >-
-      List the outgoing message templates of the account. limit caps at 50 on
-      this route rather than the usual 250.
+      List the outgoing message templates of the account. The route returns
+      only the templates the calling integration created, not every template
+      on the account.
     read_only: true
     method: GET
     url: "{{account.base_url}}/api/v4/chats/templates"
@@ -2282,6 +2285,9 @@ functions:
         filter_entity_type: { type: string, enum: [leads, contacts, companies, customers] }
         filter_only_in_work: { type: integer, enum: [0, 1], description: "1 keeps only talks that are still open" }
       required: []
+      dependentRequired:
+        filter_entity_id: [filter_entity_type]
+        filter_entity_type: [filter_entity_id]
     examples:
       - args: { filter_contact_id: 9, filter_only_in_work: 1 }
         note: "a talk is the unit the unanswered counter and the NPS bot work on, not the individual chat message."
@@ -2355,6 +2361,7 @@ functions:
                 properties:
                   entity_type: { type: string, enum: [contacts] }
                   entity_id: { type: integer, description: "contact the click is attributed to" }
+                required: [entity_type, entity_id]
                 additionalProperties: true
                 description: "click attribution target"
             required: [url]
