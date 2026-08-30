@@ -14,3 +14,197 @@ cases:
     expect:
       method: GET
       url: "https://example.amocrm.ru/api/v4/account?with=drive_url%2Ctask_types"
+
+  # -- Dictionaries -----------------------------------------------------------
+
+  - function: list_users
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { with: "role,group", limit: 50 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/users?limit=50&with=role%2Cgroup"
+
+  - function: get_user
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { id: 123 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/users/123"
+
+  - function: list_roles
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/roles"
+
+  - function: list_event_types
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { language_code: "ru" }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/events/types?language_code=ru"
+
+  - function: list_loss_reasons
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads/loss_reasons"
+
+  # -- Leads ------------------------------------------------------------------
+
+  - function: list_leads
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads"
+
+  - function: list_leads
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { filter_pipeline_id: 100, filter_status_id: 200, filter_updated_from: 1700000000, limit: 10, order_updated_at: "desc", with: "contacts" }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads?filter%5Bstatuses%5D%5B0%5D%5Bpipeline_id%5D=100&filter%5Bstatuses%5D%5B0%5D%5Bstatus_id%5D=200&filter%5Bupdated_at%5D%5Bfrom%5D=1700000000&limit=10&order%5Bupdated_at%5D=desc&with=contacts"
+
+  - function: get_lead
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { id: 5, with: "contacts,loss_reason" }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads/5?with=contacts%2Closs_reason"
+
+  - function: create_leads
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { records: [{ name: "apb-test-lead", price: 100 }] }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/leads"
+
+  - function: update_lead
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { id: 5, record: { status_id: 142 } }
+    expect:
+      method: PATCH
+      url: "https://example.amocrm.ru/api/v4/leads/5"
+      body_contains:
+        status_id: 142
+
+  - function: update_leads
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { records: [{ id: 5, price: 200 }] }
+    expect:
+      method: PATCH
+      url: "https://example.amocrm.ru/api/v4/leads"
+
+  - function: create_leads_complex
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { records: [{ name: "apb-test", _embedded: { contacts: [{ first_name: "A" }] } }] }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/leads/complex"
+
+  # -- Unsorted ---------------------------------------------------------------
+
+  - function: list_unsorted
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { filter_category: "forms", limit: 20 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads/unsorted?filter%5Bcategory%5D=forms&limit=20"
+
+  - function: get_unsorted_summary
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { filter_pipeline_id: 100 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads/unsorted/summary?filter%5Bpipeline_id%5D=100"
+
+  - function: accept_unsorted
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { uid: "abc", user_id: 7, status_id: 200 }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/leads/unsorted/abc/accept"
+      body_contains:
+        user_id: 7
+        status_id: 200
+
+  - function: decline_unsorted
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { uid: "abc" }
+    expect:
+      method: DELETE
+      url: "https://example.amocrm.ru/api/v4/leads/unsorted/abc/decline"
+
+  # -- Pipelines --------------------------------------------------------------
+
+  - function: list_pipelines
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads/pipelines"
+
+  - function: get_pipeline
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { id: 100 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads/pipelines/100"
+
+  - function: create_pipelines
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { records: [{ name: "apb-test-pipeline", sort: 10, is_main: false }] }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/leads/pipelines"
+
+  - function: update_pipeline
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { id: 100, record: { name: "renamed" } }
+    expect:
+      method: PATCH
+      url: "https://example.amocrm.ru/api/v4/leads/pipelines/100"
+      body_contains:
+        name: "renamed"
+
+  - function: delete_pipeline
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { id: 100 }
+    expect:
+      method: DELETE
+      url: "https://example.amocrm.ru/api/v4/leads/pipelines/100"
+
+  # -- Statuses ---------------------------------------------------------------
+
+  - function: list_statuses
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { pipeline_id: 100, with: "descriptions" }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads/pipelines/100/statuses?with=descriptions"
+
+  - function: create_statuses
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { pipeline_id: 100, records: [{ name: "apb-test-status", sort: 50, color: "#fffeb2" }] }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/leads/pipelines/100/statuses"
+
+  - function: update_status
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { pipeline_id: 100, id: 200, record: { name: "renamed" } }
+    expect:
+      method: PATCH
+      url: "https://example.amocrm.ru/api/v4/leads/pipelines/100/statuses/200"
+      body_contains:
+        name: "renamed"
+
+  - function: delete_status
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { pipeline_id: 100, id: 200 }
+    expect:
+      method: DELETE
+      url: "https://example.amocrm.ru/api/v4/leads/pipelines/100/statuses/200"

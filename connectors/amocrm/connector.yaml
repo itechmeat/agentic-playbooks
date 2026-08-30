@@ -65,3 +65,559 @@ functions:
       - args: { with: "drive_url,is_api_filter_enabled,task_types" }
         note: "drive_url is the Files API host to copy into the drive_url account field; is_api_filter_enabled says whether filter_* arguments will work on leads, contacts, companies and customers."
     response_pick: [id, name, subdomain, currency, country, drive_url, is_api_filter_enabled, _embedded]
+
+  - name: list_users
+    description: >-
+      List account users. with is a comma list from role, group, uuid,
+      amojo_id, user_rank. rights carries the per-entity access levels and
+      the is_admin / is_active flags.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/users"
+    query:
+      with: "{{args.with}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. role,group" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: { with: "role,group", limit: 50 }
+        note: "every argument is optional and an omitted one is dropped from the query; an empty page is HTTP 204 with no body."
+    response_pick: [_embedded.users, _page, _links.next.href]
+
+  - name: get_user
+    description: >-
+      Get one user by id. with is a comma list from role, group, uuid,
+      amojo_id, user_rank.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/users/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "user id" }
+        with: { type: string, description: "comma-joined include list, e.g. role,group" }
+      required: [id]
+    examples:
+      - args: { id: 123, with: "role" }
+        note: "with is optional and dropped from the query when omitted."
+    response_pick: [id, name, email, rights.is_admin, rights.is_active]
+
+  - name: list_roles
+    description: >-
+      List the account's user roles. with accepts users to embed the members
+      of each role.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/roles"
+    query:
+      with: "{{args.with}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list; users is the only documented value" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: { with: "users" }
+        note: "every argument is optional; an account with no custom roles answers HTTP 204 with no body."
+    response_pick: [_embedded.roles, _page, _links.next.href]
+
+  - name: list_event_types
+    description: >-
+      List the event types the account's event feed can emit, with their
+      localized labels. limit caps at 100 here rather than the usual 250.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/events/types"
+    query:
+      language_code: "{{args.language_code}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        language_code: { type: string, description: "label language, e.g. ru or en; the account language is used when omitted" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+      required: []
+    examples:
+      - args: { language_code: "ru" }
+        note: "every argument is optional and an omitted one is dropped from the query."
+    response_pick: [_embedded.events_types, _page, _links.next.href]
+
+  - name: list_loss_reasons
+    description: >-
+      List the lead loss reasons configured for the account. This route is
+      documented only by Kommo, not by the amoCRM reference, and was verified
+      live against an amocrm.ru account.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/loss_reasons"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: { limit: 50 }
+        note: "both arguments are optional; an account with no loss reasons answers HTTP 204 with no body."
+    response_pick: [_embedded.loss_reasons, _page, _links.next.href]
+
+  # -- Leads --------------------------------------------------------------
+
+  - name: list_leads
+    description: >-
+      List leads. filter_status_id needs filter_pipeline_id (rendered as one
+      filter[statuses][0] pair). with: catalog_elements, is_price_modified_by_robot,
+      loss_reason, contacts, only_deleted, source_id.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads"
+    query:
+      with: "{{args.with}}"
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[pipeline_id]: "{{args.filter_pipeline_id_only}}"
+      filter[statuses][0][pipeline_id]: "{{args.filter_pipeline_id}}"
+      filter[statuses][0][status_id]: "{{args.filter_status_id}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+      filter[closed_at][from]: "{{args.filter_closed_from}}"
+      filter[closed_at][to]: "{{args.filter_closed_to}}"
+      filter[price][from]: "{{args.filter_price_from}}"
+      filter[price][to]: "{{args.filter_price_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string }
+        query: { type: string, description: "full-text search over filled fields" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_name: { type: string }
+        filter_pipeline_id_only: { type: integer, description: "filter[pipeline_id] without a status; use filter_pipeline_id plus filter_status_id to filter by stage" }
+        filter_pipeline_id: { type: integer, description: "pipeline of the stage filter; pair with filter_status_id" }
+        filter_status_id: { type: integer, description: "stage id; 142 won, 143 lost" }
+        filter_responsible_user_id: { type: integer }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer }
+        filter_updated_from: { type: integer }
+        filter_updated_to: { type: integer }
+        filter_closed_from: { type: integer }
+        filter_closed_to: { type: integer }
+        filter_price_from: { type: integer }
+        filter_price_to: { type: integer }
+      required: []
+      dependentRequired:
+        filter_status_id: [filter_pipeline_id]
+    examples:
+      - args: { filter_pipeline_id: 100, filter_status_id: 200, limit: 50, order_updated_at: "desc" }
+        note: "every argument is optional and an omitted one is dropped from the query; an empty page is HTTP 204 with no body."
+    response_pick: [_embedded.leads, _page, _links.next.href]
+
+  - name: get_lead
+    description: >-
+      Get one lead by id. with: catalog_elements,
+      is_price_modified_by_robot, loss_reason, contacts, only_deleted,
+      source_id.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "lead id" }
+        with: { type: string, description: "comma-joined include list, e.g. contacts,loss_reason" }
+      required: [id]
+    examples:
+      - args: { id: 5, with: "contacts,loss_reason" }
+        note: "with is optional and dropped from the query when omitted."
+    response_pick: [id, name, price, status_id, pipeline_id, responsible_user_id, created_at, updated_at, closed_at, loss_reason_id, custom_fields_values, _embedded]
+
+  - name: create_leads
+    description: >-
+      EFFECTFUL. Create leads in one batch. Each record is amoCRM's lead
+      model (name, price, pipeline_id, status_id, responsible_user_id,
+      custom_fields_values, _embedded.tags/contacts/companies, request_id).
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Website order 1042", price: 15000, pipeline_id: 100, status_id: 200, request_id: "r1" }] }
+        note: "50 records per call is the vendor recommendation; request_id is echoed in _embedded.leads[].request_id."
+    response_pick: [_embedded.leads]
+
+  - name: update_lead
+    description: >-
+      EFFECTFUL. Update one lead by id. record is merged into the existing
+      lead: only the fields it names change. Keep the id in the id argument,
+      never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/leads/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "lead id" }
+        record: { type: object, additionalProperties: true, description: "lead field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 5, record: { status_id: 142, price: 20000 } }
+        note: "moving a lead to status_id 143 (lost) also accepts loss_reason_id inside record."
+    response_pick: [id, name, updated_at]
+
+  - name: update_leads
+    description: >-
+      EFFECTFUL. Update leads in one batch. Each record must carry the id of
+      the lead it updates plus the fields to change; every other field is
+      left untouched.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/leads"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ id: 5, price: 20000 }, { id: 6, status_id: 142 }] }
+        note: "50 records per call is the vendor recommendation; a record without an id is rejected with HTTP 400."
+    response_pick: [_embedded.leads]
+
+  - name: create_leads_complex
+    description: >-
+      EFFECTFUL. Create leads together with one contact and one company
+      each, in a single call. At most 50 leads per call, and unlike
+      create_leads these records take part in duplicate control.
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads/complex"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Website order 1042", price: 15000, _embedded: { contacts: [{ first_name: "Ada", custom_fields_values: [] }] } }] }
+        note: "the response is a top-level array; merged is true when duplicate control attached the lead to an existing contact or company."
+    response_pick: [id, contact_id, company_id, request_id, merged]
+
+  # -- Unsorted -----------------------------------------------------------
+
+  - name: list_unsorted
+    description: >-
+      List unsorted incoming entities awaiting acceptance. with accepts
+      contacts, source_id. Each item carries the uid that accept_unsorted and
+      decline_unsorted take.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/unsorted"
+    query:
+      with: "{{args.with}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      filter[uid]: "{{args.filter_uid}}"
+      filter[category]: "{{args.filter_category}}"
+      filter[pipeline_id]: "{{args.filter_pipeline_id}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. contacts,source_id" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        filter_uid: { type: string, description: "one unsorted entity uid" }
+        filter_category: { type: string, enum: [chats, forms, sip, mail] }
+        filter_pipeline_id: { type: integer }
+      required: []
+    examples:
+      - args: { filter_category: "forms", limit: 20 }
+        note: "every argument is optional and an omitted one is dropped from the query; an empty page is HTTP 204 with no body."
+    response_pick: [_embedded.unsorted, _page, _links.next.href]
+
+  - name: get_unsorted_summary
+    description: >-
+      Aggregate counts over the unsorted queue: totals, accepted, declined,
+      average sign time, and a per-category breakdown.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/unsorted/summary"
+    query:
+      filter[uid]: "{{args.filter_uid}}"
+      filter[pipeline_id]: "{{args.filter_pipeline_id}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+    args_schema:
+      type: object
+      properties:
+        filter_uid: { type: string, description: "one unsorted entity uid" }
+        filter_pipeline_id: { type: integer }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer, description: "unix seconds" }
+      required: []
+    examples:
+      - args: { filter_pipeline_id: 100, filter_created_from: 1700000000 }
+        note: "every argument is optional and an omitted one is dropped from the query."
+    response_pick: [total, accepted, declined, average_sign_time, categories]
+
+  - name: accept_unsorted
+    description: >-
+      EFFECTFUL. Accept one unsorted entity by uid, turning it into a lead
+      with its contact and company. user_id and status_id are both optional;
+      the account defaults apply when either is omitted.
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads/unsorted/{{args.uid}}/accept"
+    body:
+      user_id: "{{args.user_id}}"
+      status_id: "{{args.status_id}}"
+    args_schema:
+      type: object
+      properties:
+        uid: { type: string, description: "unsorted entity uid from list_unsorted" }
+        user_id: { type: integer, description: "user the accepted lead is assigned to" }
+        status_id: { type: integer, description: "stage the accepted lead lands in" }
+      required: [uid]
+    examples:
+      - args: { uid: "98b8fe2a0ec9f4a53c4b3b4e2d2c47f8", user_id: 7, status_id: 200 }
+        note: "an omitted user_id or status_id is dropped from the body rather than sent as null."
+    response_pick: [uid, pipeline_id, category, _embedded]
+
+  - name: decline_unsorted
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Reject one unsorted entity by uid. The entity
+      leaves the queue and no lead is created; there is no route to undo it.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/leads/unsorted/{{args.uid}}/decline"
+    query:
+      user_id: "{{args.user_id}}"
+    args_schema:
+      type: object
+      properties:
+        uid: { type: string, description: "unsorted entity uid from list_unsorted" }
+        user_id: { type: integer, description: "user the rejection is recorded for; amoCRM rejects the call with HTTP 400 when the account requires it and it is missing" }
+      required: [uid]
+    examples:
+      - args: { uid: "98b8fe2a0ec9f4a53c4b3b4e2d2c47f8", user_id: 7 }
+        note: "user_id is dropped from the query when omitted."
+    response_pick: [uid, _links]
+
+  # -- Pipelines ----------------------------------------------------------
+
+  - name: list_pipelines
+    description: >-
+      List the lead pipelines of the account, each with its statuses
+      embedded. This route returns every pipeline at once and takes no
+      paging arguments.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/pipelines"
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "takes no arguments; _embedded.pipelines[]._embedded.statuses carries the stages of each pipeline."
+    response_pick: [_embedded.pipelines, _total_items]
+
+  - name: get_pipeline
+    description: >-
+      Get one lead pipeline by id, with its statuses embedded.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "pipeline id" }
+      required: [id]
+    examples:
+      - args: { id: 100 }
+        note: "an unknown pipeline id answers HTTP 404."
+    response_pick: [id, name, sort, is_main, _embedded.statuses]
+
+  - name: create_pipelines
+    description: >-
+      EFFECTFUL. Create lead pipelines in one batch. Each record takes name
+      plus the optional sort, is_main, is_unsorted_on and an _embedded
+      statuses array describing the stages to create with it.
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads/pipelines"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Partner sales", sort: 20, is_main: false }] }
+        note: "marking a new pipeline is_main demotes the previous main pipeline."
+    response_pick: [_embedded.pipelines]
+
+  - name: update_pipeline
+    description: >-
+      EFFECTFUL. Update one lead pipeline by id. record is merged into the
+      existing pipeline: only the fields it names change (name, sort,
+      is_main, is_unsorted_on).
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "pipeline id" }
+        record: { type: object, additionalProperties: true, description: "pipeline field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 100, record: { name: "Partner sales 2026" } }
+        note: "statuses are not edited here; use create_statuses, update_status and delete_status."
+    response_pick: [id, name, sort, is_main]
+
+  - name: delete_pipeline
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Delete one lead pipeline by id, together with
+      its statuses. Leads sitting in it move to the main pipeline. The main
+      pipeline itself cannot be deleted.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "pipeline id" }
+      required: [id]
+    examples:
+      - args: { id: 100 }
+        note: "answers HTTP 204 with no body on success; deleting the main pipeline is rejected with HTTP 400."
+
+  # -- Statuses -----------------------------------------------------------
+
+  - name: list_statuses
+    description: >-
+      List the statuses (stages) of one pipeline. with accepts descriptions
+      to embed each stage's description text.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.pipeline_id}}/statuses"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        pipeline_id: { type: integer, description: "pipeline id" }
+        with: { type: string, description: "comma-joined include list; descriptions is the only documented value" }
+      required: [pipeline_id]
+    examples:
+      - args: { pipeline_id: 100, with: "descriptions" }
+        note: "142 (won) and 143 (lost) are the two system statuses present in every pipeline."
+    response_pick: [_embedded.statuses, _total_items]
+
+  - name: create_statuses
+    description: >-
+      EFFECTFUL. Create statuses in one pipeline in a single batch. Each
+      record takes name plus the optional sort and color (one of amoCRM's
+      fixed stage colors, e.g. #fffeb2).
+    method: POST
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.pipeline_id}}/statuses"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        pipeline_id: { type: integer, description: "pipeline id" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [pipeline_id, records]
+    examples:
+      - args: { pipeline_id: 100, records: [{ name: "Contract sent", sort: 50, color: "#fffeb2" }] }
+        note: "a color outside amoCRM's fixed palette is rejected with HTTP 400."
+    response_pick: [_embedded.statuses]
+
+  - name: update_status
+    description: >-
+      EFFECTFUL. Update one status of one pipeline. record is merged into
+      the existing status: only the fields it names change (name, sort,
+      color). The system statuses 142 and 143 accept only name and color.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.pipeline_id}}/statuses/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        pipeline_id: { type: integer, description: "pipeline id" }
+        id: { type: integer, description: "status id inside that pipeline" }
+        record: { type: object, additionalProperties: true, description: "status field map; only the named fields change" }
+      required: [pipeline_id, id, record]
+    examples:
+      - args: { pipeline_id: 100, id: 200, record: { name: "Contract signed" } }
+        note: "sort on a system status (142, 143) is rejected with HTTP 400."
+    response_pick: [id, name, sort, color]
+
+  - name: delete_status
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Delete one status of one pipeline. Leads
+      sitting in it move to the first status of the same pipeline. The
+      system statuses 142 and 143 cannot be deleted.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/leads/pipelines/{{args.pipeline_id}}/statuses/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        pipeline_id: { type: integer, description: "pipeline id" }
+        id: { type: integer, description: "status id inside that pipeline" }
+      required: [pipeline_id, id]
+    examples:
+      - args: { pipeline_id: 100, id: 200 }
+        note: "answers HTTP 204 with no body on success; deleting 142 or 143 is rejected with HTTP 400."
