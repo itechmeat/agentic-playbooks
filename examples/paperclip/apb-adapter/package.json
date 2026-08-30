@@ -1,0 +1,23 @@
+{
+  "name": "paperclip-apb-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Paperclip external server adapter that dispatches agent work to a local apb (agentic-playbooks) engine.",
+  "main": "./src/index.js",
+  "exports": {
+    ".": "./src/index.js"
+  },
+  "engines": {
+    "node": ">=24"
+  },
+  "files": [
+    "src",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test 'test/adapter.test.js' 'test/resolve.test.js'",
+    "test:live": "node --test 'test/live-apb.test.js'",
+    "test:all": "node --test 'test/*.test.js'"
+  }
+}

@@ -1,0 +1,19 @@
+schema: 2
+id: apb-noop
+name: APB No-op Fixture
+description: >-
+  Throwaway fixture playbook for the Paperclip apb connector. Runs a single
+  deterministic shell script node - no agent, no LLM, no connectors, no
+  network - so an end-to-end Paperclip -> apb dispatch can be exercised
+  without touching any real business playbook.
+version: 1.0.0
+params:
+  - { name: note, type: string, label: "Free-form note echoed into the run", default: "" }
+effects: []
+nodes:
+  - { id: start, type: start }
+  - { id: noop, type: script, script: "scripts/noop.sh", runner: sh, timeout_seconds: 30 }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: noop }
+  - { from: noop, to: done }
