@@ -1588,3 +1588,448 @@ functions:
       - args: { id: "01pz58t6p04ymgsgfbmfyfy1mf" }
         note: "event ids come from list_events; they are not the ids of the records they describe."
     response_pick: [id, type, entity_id, entity_type, created_by, created_at, value_after, value_before]
+
+  # -- Custom fields ------------------------------------------------------
+
+  - name: list_custom_fields
+    description: >-
+      Custom field definitions for an entity type; the API returns at most 50
+      per page regardless of limit. field types: text, numeric, checkbox,
+      select, multiselect, multitext, date, url, textarea, radiobutton,
+      streetaddress, smart_address, birthday, legal_entity, date_time, price,
+      category, items, tracking_data, linked_entity, chained_list, monetary,
+      file.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[sort]: "{{args.order_sort}}"
+      order[id]: "{{args.order_id}}"
+      filter[type][0]: "{{args.filter_type}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_sort: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_type: { type: string, enum: [text, numeric, checkbox, select, multiselect, multitext, date, url, textarea, radiobutton, streetaddress, smart_address, birthday, legal_entity, date_time, price, category, items, tracking_data, linked_entity, chained_list, monetary, file], description: "keep to one field type" }
+      required: [entity_type]
+    examples:
+      - args: { entity_type: "leads", filter_type: "select", limit: 50 }
+        note: "select and multiselect fields carry their options inline under enums, so the option ids arrive with the field itself."
+    response_pick: [_embedded.custom_fields, _page, _links.next.href]
+
+  - name: get_custom_field
+    description: >-
+      Get one custom field definition by id. enums holds the options of a
+      select-like field and required_statuses the pipeline statuses that make
+      it mandatory.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "custom field id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 300 }
+        note: "the id is the numeric field id from list_custom_fields, not the human-set field code."
+    response_pick: [id, name, code, type, sort, is_api_only, group_id, enums, required_statuses]
+
+  - name: create_custom_fields
+    description: >-
+      EFFECTFUL. Create custom field definitions for an entity type in one
+      batch. Each record needs name and type; select-like types take
+      enums as [{value, sort}] and group_id places the field in a card group.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "field label shown in the card" }
+              type: { type: string, enum: [text, numeric, checkbox, select, multiselect, multitext, date, url, textarea, radiobutton, streetaddress, smart_address, birthday, legal_entity, date_time, price, category, items, tracking_data, linked_entity, chained_list, monetary, file] }
+              enums: { type: array, items: { type: object, additionalProperties: true }, description: "options of a select-like field as [{value, sort}]" }
+              group_id: { type: string, description: "id of a custom field group from list_custom_field_groups" }
+            required: [name, type]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ name: "apb-test-field", type: "text" }] }
+        note: "the enum ids handed back here are what custom_fields_values has to reference when writing a value into the field."
+    response_pick: [_embedded.custom_fields]
+
+  - name: update_custom_field
+    description: >-
+      EFFECTFUL. Update one custom field definition by id. record is merged
+      into the existing field: only the fields it names change. Keep the id in
+      the id argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "custom field id" }
+        record: { type: object, additionalProperties: true, description: "field definition map; only the named keys change" }
+      required: [entity_type, id, record]
+    examples:
+      - args: { entity_type: "leads", id: 300, record: { name: "renamed" } }
+        note: "the answer is the whole field definition rather than the short id and updated_at pair the other single updates return."
+    response_pick: [id, name, type, enums]
+
+  - name: delete_custom_field
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Deletes the field and every value stored in it.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "custom field id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 300 }
+        note: "the built-in system fields, such as the contact phone and email, are rejected with HTTP 400 instead of being removed."
+
+  - name: list_custom_field_groups
+    description: >-
+      List the custom field groups of an entity type. A group is the card
+      section the fields are drawn in; the fields themselves come from
+      list_custom_fields.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/groups"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+      required: [entity_type]
+    examples:
+      - args: { entity_type: "contacts" }
+        note: "group ids are strings, unlike the integer ids of the fields they hold."
+    response_pick: [_embedded.custom_field_groups]
+
+  - name: create_custom_field_groups
+    description: >-
+      EFFECTFUL. Create custom field groups for an entity type in one batch.
+      Each record takes name and sort; fields join a group through the
+      group_id of create_custom_fields or update_custom_field.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/custom_fields/groups"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "group label shown in the card" }
+              sort: { type: integer, description: "position of the group inside the card" }
+            required: [name]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ name: "apb-test-group", sort: 10 }] }
+        note: "a group with no fields in it still shows up in list_custom_field_groups."
+    response_pick: [_embedded.custom_field_groups]
+
+  - name: list_catalog_custom_fields
+    description: >-
+      Custom field definitions of one catalog; the API returns at most 50 per
+      page regardless of limit. The type enum is the one listed on
+      list_custom_fields.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/custom_fields"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[sort]: "{{args.order_sort}}"
+      order[id]: "{{args.order_id}}"
+      filter[type][0]: "{{args.filter_type}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_sort: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_type: { type: string, enum: [text, numeric, checkbox, select, multiselect, multitext, date, url, textarea, radiobutton, streetaddress, smart_address, birthday, legal_entity, date_time, price, category, items, tracking_data, linked_entity, chained_list, monetary, file], description: "keep to one field type" }
+      required: [catalog_id]
+    examples:
+      - args: { catalog_id: 500 }
+        note: "catalog fields are scoped to one catalog, so the same field name in two catalogs is two different ids."
+    response_pick: [_embedded.custom_fields, _page, _links.next.href]
+
+  - name: create_catalog_custom_fields
+    description: >-
+      EFFECTFUL. Create custom field definitions for one catalog in one batch.
+      Each record needs name and type; select-like types take enums as
+      [{value, sort}].
+    method: POST
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/custom_fields"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "field label shown on the element" }
+              type: { type: string, enum: [text, numeric, checkbox, select, multiselect, multitext, date, url, textarea, radiobutton, streetaddress, smart_address, birthday, legal_entity, date_time, price, category, items, tracking_data, linked_entity, chained_list, monetary, file] }
+              enums: { type: array, items: { type: object, additionalProperties: true }, description: "options of a select-like field as [{value, sort}]" }
+            required: [name, type]
+            additionalProperties: true
+      required: [catalog_id, records]
+    examples:
+      - args: { catalog_id: 500, records: [{ name: "Weight", type: "numeric" }] }
+        note: "the products catalog takes fields through this route too; its catalog_id comes from get_products_settings."
+    response_pick: [_embedded.custom_fields]
+
+  # -- Catalogs -----------------------------------------------------------
+
+  - name: list_catalogs
+    description: >-
+      List the account's catalogs. type separates a regular catalog from
+      invoices and from the single products catalog.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: {}
+        note: "the products catalog shows up in this list only once enable_products has created it."
+    response_pick: [_embedded.catalogs, _page, _links.next.href]
+
+  - name: get_catalog
+    description: >-
+      Get one catalog by id. The can_* flags say whether elements may be added
+      by hand, shown on entity cards and linked to more than one record.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "catalog id" }
+      required: [id]
+    examples:
+      - args: { id: 500 }
+        note: "the invoices catalog is created by the invoices widget, so its id changes from account to account."
+    response_pick: [id, name, type, can_add_elements, can_show_in_cards, can_link_multiple, sort, created_at, updated_at]
+
+  - name: create_catalogs
+    description: >-
+      EFFECTFUL. Create catalogs in one batch; at most 10 catalogs per
+      account; products are the catalog with type products, created by
+      enable_products, not here.
+    method: POST
+    url: "{{account.base_url}}/api/v4/catalogs"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "catalog label" }
+              type: { type: string, enum: [regular, invoices] }
+              can_add_elements: { type: boolean, description: "lets users add elements by hand" }
+              can_show_in_cards: { type: boolean, description: "shows the catalog on entity cards" }
+              can_link_multiple: { type: boolean, description: "lets one element hang on several records" }
+              sort: { type: integer, description: "position in the catalog list" }
+            required: [name]
+            additionalProperties: true
+      required: [records]
+    examples:
+      - args: { records: [{ name: "apb-test-catalog", type: "regular", can_add_elements: true }] }
+        note: "type is fixed at creation, so a catalog made regular cannot become an invoices one later."
+    response_pick: [_embedded.catalogs]
+
+  - name: update_catalog
+    description: >-
+      EFFECTFUL. Update one catalog by id. record is merged into the existing
+      catalog: only the fields it names change. Keep the id in the id
+      argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "catalog id" }
+        record: { type: object, additionalProperties: true, description: "catalog field map; only the named keys change" }
+      required: [id, record]
+    examples:
+      - args: { id: 500, record: { name: "renamed" } }
+        note: "renaming a catalog leaves its elements and their stored field values untouched."
+    response_pick: [id, updated_at, request_id]
+
+  - name: list_catalog_elements
+    description: >-
+      List the elements of one catalog. query is a full-text search over the
+      element name and its filled field values. with: invoice_link.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/elements"
+    query:
+      with: "{{args.with}}"
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[id]: "{{args.filter_id}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        with: { type: string, description: "comma-joined include list; invoice_link is the only documented value" }
+        query: { type: string, description: "full-text search over the element name and its filled fields" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        filter_id: { type: integer, description: "element id" }
+      required: [catalog_id]
+    examples:
+      - args: { catalog_id: 500, query: "sku-1", limit: 20 }
+        note: "a product sku lives in a custom field, so query finds it while filter_id only takes the element id."
+    response_pick: [_embedded.elements, _page, _links.next.href]
+
+  - name: get_catalog_element
+    description: >-
+      Get one catalog element by id. custom_fields_values carries the per
+      catalog fields, price and sku among them for a products element.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/elements/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        id: { type: integer, description: "element id" }
+      required: [catalog_id, id]
+    examples:
+      - args: { catalog_id: 500, id: 9001 }
+        note: "an element id is scoped to its catalog, so the right id under the wrong catalog_id answers HTTP 404."
+    response_pick: [id, name, catalog_id, created_at, updated_at, custom_fields_values, _embedded]
+
+  - name: create_catalog_elements
+    description: >-
+      EFFECTFUL. Create elements in one catalog in one batch. Each record
+      needs name; every other value travels through custom_fields_values in
+      amoCRM's own shape.
+    method: POST
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/elements"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "element label" }
+              custom_fields_values: { type: array, items: { type: object, additionalProperties: true }, description: "per catalog field values as [{field_id, values}]" }
+            required: [name]
+            additionalProperties: true
+      required: [catalog_id, records]
+    examples:
+      - args: { catalog_id: 500, records: [{ name: "apb-test-item" }] }
+        note: "a products element keeps its price and sku inside custom_fields_values, not in top-level keys."
+    response_pick: [_embedded.elements]
+
+  - name: update_catalog_element
+    description: >-
+      EFFECTFUL. Update one catalog element by id. record is merged into the
+      existing element: only the fields it names change. Keep the id in the id
+      argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/catalogs/{{args.catalog_id}}/elements/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        catalog_id: { type: integer, description: "catalog id from list_catalogs" }
+        id: { type: integer, description: "element id" }
+        record: { type: object, additionalProperties: true, description: "element field map; only the named keys change" }
+      required: [catalog_id, id, record]
+    examples:
+      - args: { catalog_id: 500, id: 9001, record: { name: "renamed" } }
+        note: "custom_fields_values is merged per field_id, so a field left out of record keeps the value it already had."
+    response_pick: [id, updated_at, request_id]
+
+  # -- Products -----------------------------------------------------------
+
+  - name: get_products_settings
+    description: >-
+      Read the products feature switch and the id of the products catalog.
+      This route sits under /api/v2, not /api/v4.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v2/products_settings"
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "is_enabled false means the products catalog does not exist yet and catalog_id is absent."
+    response_pick: [is_enabled, catalog_id]
+
+  - name: enable_products
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Turns on the products feature and creates the
+      products catalog; returns its catalog_id.
+    method: POST
+    url: "{{account.base_url}}/api/v2/products_settings/"
+    body:
+      enabled: true
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "the trailing slash in the path is required here; without it the account answers HTTP 404."
