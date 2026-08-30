@@ -36,6 +36,27 @@ export class ApbError extends Error {
   }
 }
 
+const SLASH = '/'.charCodeAt(0);
+
+/**
+ * Trim trailing slashes in linear time.
+ *
+ * The obvious `replace(/\/+$/, '')` is quadratic when a long run of slashes is
+ * followed by anything other than end-of-string: the engine starts a match at
+ * every offset in the run, greedily consumes the rest of it, then fails the `$`
+ * anchor and does it again one offset along. baseUrl is operator-supplied
+ * config that this package does not length-check, so a value like 80KB of
+ * slashes and a trailing character blocks the event loop for about six seconds.
+ * Scanning back to the last non-slash and slicing once is linear and allocates
+ * a single string.
+ */
+export function stripTrailingSlashes(value) {
+  const text = String(value ?? '');
+  let end = text.length;
+  while (end > 0 && text.charCodeAt(end - 1) === SLASH) end -= 1;
+  return end === text.length ? text : text.slice(0, end);
+}
+
 const DEFAULT_BASE_URL = 'http://127.0.0.1:7321';
 
 export class ApbClient {
@@ -52,7 +73,7 @@ export class ApbClient {
     // Request from a credentialed URL (so it would fail outright), and its
     // error message quotes the whole URL - password included - into anything
     // that logs the failure.
-    let base = String(baseUrl).replace(/\/+$/, '');
+    let base = stripTrailingSlashes(baseUrl);
     let basic = null;
     try {
       const u = new URL(base);
@@ -60,7 +81,7 @@ export class ApbClient {
         basic = Buffer.from(`${decodeURIComponent(u.username)}:${decodeURIComponent(u.password)}`).toString('base64');
         u.username = '';
         u.password = '';
-        base = u.toString().replace(/\/+$/, '');
+        base = stripTrailingSlashes(u.toString());
       }
     } catch {
       /* leave a malformed base alone; the first request reports it */

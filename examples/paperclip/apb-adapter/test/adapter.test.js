@@ -17,7 +17,7 @@ import {
   describeParams,
   sessionCodec,
 } from '../src/index.js';
-import { ApbClient } from '../src/apb-client.js';
+import { ApbClient, stripTrailingSlashes } from '../src/apb-client.js';
 
 // ---------------------------------------------------------------------------
 // fake transport
@@ -167,6 +167,36 @@ test('a stalled body read hits the request timeout', async () => {
   });
   const c = new ApbClient({ fetchImpl: impl, requestTimeoutMs: 30 });
   await assert.rejects(() => c.health(), (e) => e.code === 'APB_REQUEST_TIMEOUT');
+});
+
+test('trailing-slash trimming stays linear on a pathological baseUrl', () => {
+  // Regression guard for CodeQL js/polynomial-redos. The old `/\/+$/` trim went
+  // quadratic when a long slash run was followed by a non-slash: it began a
+  // match at every offset in the run, consumed the rest, then failed `$`. The
+  // shape below measured about six seconds at 80k under the old code and stays
+  // near a millisecond now. baseUrl is config this package does not
+  // length-check, so the bound has to come from the algorithm, not validation.
+  const evil = `${'/'.repeat(80_000)}a`;
+
+  const started = performance.now();
+  const plain = new ApbClient({ baseUrl: `http://127.0.0.1:7321/${evil}` });
+  const credentialed = new ApbClient({ baseUrl: `http://u:p@127.0.0.1:7321/${evil}` });
+  const elapsed = performance.now() - started;
+
+  // Nothing is trimmed: these do not end in a slash. The point is the cost.
+  assert.ok(plain.baseUrl.endsWith('a'));
+  assert.equal(credentialed.basicAuth, Buffer.from('u:p').toString('base64'));
+  assert.ok(!credentialed.baseUrl.includes('u:p@'));
+  assert.ok(elapsed < 1000, `construction took ${elapsed.toFixed(1)}ms`);
+
+  // The trimming itself still has to be correct, including the userinfo path
+  // that re-trims the rebuilt URL.
+  assert.equal(new ApbClient({ baseUrl: 'http://127.0.0.1:7321///' }).baseUrl, 'http://127.0.0.1:7321');
+  assert.equal(new ApbClient({ baseUrl: 'http://u:p@127.0.0.1:7321///' }).baseUrl, 'http://127.0.0.1:7321');
+  assert.equal(stripTrailingSlashes('http://h/a/'), 'http://h/a');
+  assert.equal(stripTrailingSlashes('http://h/a'), 'http://h/a');
+  assert.equal(stripTrailingSlashes('/'.repeat(50_000)), '');
+  assert.equal(stripTrailingSlashes(null), '');
 });
 
 test('failFromApbError arms: 404 / 409 / 429 map to distinct exit codes', async () => {
