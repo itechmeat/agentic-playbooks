@@ -621,3 +621,621 @@ functions:
     examples:
       - args: { pipeline_id: 100, id: 200 }
         note: "answers HTTP 204 with no body on success; deleting 142 or 143 is rejected with HTTP 400."
+
+  # -- Contacts -----------------------------------------------------------
+
+  - name: list_contacts
+    description: >-
+      List contacts. query is a full-text search over the filled fields;
+      the filter_* arguments need the paid filtering add-on. with:
+      catalog_elements, leads, customers.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/contacts"
+    query:
+      with: "{{args.with}}"
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+      filter[closest_task_at][from]: "{{args.filter_closest_task_from}}"
+      filter[closest_task_at][to]: "{{args.filter_closest_task_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. leads,customers" }
+        query: { type: string, description: "full-text search over filled fields" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_name: { type: string }
+        filter_responsible_user_id: { type: integer }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer }
+        filter_updated_from: { type: integer }
+        filter_updated_to: { type: integer }
+        filter_closest_task_from: { type: integer }
+        filter_closest_task_to: { type: integer }
+      required: []
+    examples:
+      - args: { query: "ivanov", limit: 50, order_updated_at: "desc" }
+        note: "query also matches phone and email values, so a phone number finds its contact without a filter."
+    response_pick: [_embedded.contacts, _page, _links.next.href]
+
+  - name: get_contact
+    description: >-
+      Get one contact by id. with: catalog_elements, leads, customers.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/contacts/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "contact id" }
+        with: { type: string, description: "comma-joined include list, e.g. leads,customers" }
+      required: [id]
+    examples:
+      - args: { id: 9, with: "leads" }
+        note: "with=leads embeds the linked leads under _embedded.leads."
+    response_pick: [id, name, first_name, last_name, responsible_user_id, created_at, updated_at, closest_task_at, custom_fields_values, _embedded]
+
+  - name: create_contacts
+    description: >-
+      EFFECTFUL. Create contacts in one batch. Each record is amoCRM's
+      contact model (name or first_name plus last_name, responsible_user_id,
+      custom_fields_values, _embedded.tags/companies, request_id).
+    method: POST
+    url: "{{account.base_url}}/api/v4/contacts"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ first_name: "Ada", last_name: "Ivanova", responsible_user_id: 7 }] }
+        note: "a record with neither name nor first_name is rejected with HTTP 400."
+    response_pick: [_embedded.contacts]
+
+  - name: update_contact
+    description: >-
+      EFFECTFUL. Update one contact by id. record is merged into the
+      existing contact: only the fields it names change. Keep the id in the
+      id argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/contacts/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "contact id" }
+        record: { type: object, additionalProperties: true, description: "contact field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 9, record: { first_name: "Ada", last_name: "Petrova" } }
+        note: "sending name overwrites first_name and last_name; send those two instead to keep them apart."
+    response_pick: [id, updated_at, request_id]
+
+  # -- Companies ----------------------------------------------------------
+
+  - name: list_companies
+    description: >-
+      List companies. query is a full-text search over the filled fields;
+      the filter_* arguments need the paid filtering add-on. with:
+      catalog_elements, leads, customers, contacts.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/companies"
+    query:
+      with: "{{args.with}}"
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+      filter[closest_task_at][from]: "{{args.filter_closest_task_from}}"
+      filter[closest_task_at][to]: "{{args.filter_closest_task_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. contacts,leads" }
+        query: { type: string, description: "full-text search over filled fields" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_name: { type: string }
+        filter_responsible_user_id: { type: integer }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer }
+        filter_updated_from: { type: integer }
+        filter_updated_to: { type: integer }
+        filter_closest_task_from: { type: integer }
+        filter_closest_task_to: { type: integer }
+      required: []
+    examples:
+      - args: { filter_name: "Acme", with: "contacts" }
+        note: "a company has one name field rather than first_name and last_name, so filter_name matches it exactly."
+    response_pick: [_embedded.companies, _page, _links.next.href]
+
+  - name: get_company
+    description: >-
+      Get one company by id. with: catalog_elements, leads, customers,
+      contacts.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/companies/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "company id" }
+        with: { type: string, description: "comma-joined include list, e.g. contacts,leads" }
+      required: [id]
+    examples:
+      - args: { id: 3, with: "contacts" }
+        note: "with=contacts embeds the contacts attached to the company."
+    response_pick: [id, name, responsible_user_id, created_at, updated_at, closest_task_at, custom_fields_values, _embedded]
+
+  - name: create_companies
+    description: >-
+      EFFECTFUL. Create companies in one batch. Each record is amoCRM's
+      company model (name, responsible_user_id, custom_fields_values,
+      _embedded.tags, request_id).
+    method: POST
+    url: "{{account.base_url}}/api/v4/companies"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Acme", responsible_user_id: 7 }] }
+        note: "amoCRM accepts a duplicate company name, so check list_companies with filter_name first."
+    response_pick: [_embedded.companies]
+
+  - name: update_company
+    description: >-
+      EFFECTFUL. Update one company by id. record is merged into the
+      existing company: only the fields it names change. Keep the id in the
+      id argument, never inside record.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/companies/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "company id" }
+        record: { type: object, additionalProperties: true, description: "company field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 3, record: { name: "Acme LLC" } }
+        note: "an unknown company id answers HTTP 404."
+    response_pick: [id, updated_at, request_id]
+
+  # -- Batch updates ------------------------------------------------------
+
+  - name: update_entities
+    description: >-
+      EFFECTFUL. Batch update leads, contacts, companies or customers; each
+      record carries id plus the fields to change (tags_to_add and
+      tags_to_delete attach or detach tags by id or name).
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              id: { type: integer }
+            required: [id]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ id: 5, tags_to_add: [{ name: "vip" }] }] }
+        note: "the only tag attach path in v4; there is no separate endpoint."
+    response_pick: [_embedded]
+
+  # -- Customers ----------------------------------------------------------
+
+  - name: list_customers
+    description: >-
+      List customers (buyers); the account answers HTTP 402 when the tariff
+      has no customers. with: catalog_elements, contacts, companies.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers"
+    query:
+      with: "{{args.with}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[status_id]: "{{args.filter_status_id}}"
+      filter[next_date][from]: "{{args.filter_next_date_from}}"
+      filter[next_date][to]: "{{args.filter_next_date_to}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+      filter[next_price][from]: "{{args.filter_next_price_from}}"
+      filter[next_price][to]: "{{args.filter_next_price_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. contacts,companies" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_name: { type: string }
+        filter_responsible_user_id: { type: integer }
+        filter_status_id: { type: integer, description: "customer status id from list_customer_statuses" }
+        filter_next_date_from: { type: integer, description: "unix seconds" }
+        filter_next_date_to: { type: integer }
+        filter_created_from: { type: integer }
+        filter_created_to: { type: integer }
+        filter_updated_from: { type: integer }
+        filter_updated_to: { type: integer }
+        filter_next_price_from: { type: integer }
+        filter_next_price_to: { type: integer }
+      required: []
+    examples:
+      - args: { filter_next_date_from: 1700000000, filter_next_date_to: 1700604800, limit: 50 }
+        note: "next_date is the expected repeat-sale date, so this range is the customers due in that window."
+    response_pick: [_embedded.customers, _page, _links.next.href]
+
+  - name: get_customer
+    description: >-
+      Get one customer by id; the account answers HTTP 402 when the tariff
+      has no customers. with: catalog_elements, contacts, companies.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers/{{args.id}}"
+    query:
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "customer id" }
+        with: { type: string, description: "comma-joined include list, e.g. contacts,companies" }
+      required: [id]
+    examples:
+      - args: { id: 11, with: "contacts" }
+        note: "an unknown customer id answers HTTP 404."
+    response_pick: [id, name, next_date, next_price, status_id, responsible_user_id, created_at, updated_at, custom_fields_values, _embedded]
+
+  - name: create_customers
+    description: >-
+      EFFECTFUL. Create customers in one batch; the account answers HTTP 402
+      when the tariff has no customers. Each record takes name plus the
+      optional next_date, next_price, status_id, responsible_user_id.
+    method: POST
+    url: "{{account.base_url}}/api/v4/customers"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ name: "Acme repeat sales", next_date: 1700000000, next_price: 15000 }] }
+        note: "next_date is unix seconds and amoCRM stores it rounded to the start of that day."
+    response_pick: [_embedded.customers]
+
+  - name: update_customer
+    description: >-
+      EFFECTFUL. Update one customer by id; the account answers HTTP 402
+      when the tariff has no customers. record is merged into the existing
+      customer: only the fields it names change.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/customers/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "customer id" }
+        record: { type: object, additionalProperties: true, description: "customer field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 11, record: { next_price: 500, status_id: 5 } }
+        note: "status_id comes from list_customer_statuses and only applies while the account is in segments mode."
+    response_pick: [id, updated_at, request_id]
+
+  - name: list_customer_statuses
+    description: >-
+      List the customer statuses (the stages of the buyers pipeline); the
+      account answers HTTP 402 when the tariff has no customers. This route
+      returns every status at once and takes no paging arguments.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers/statuses"
+    args_schema:
+      type: object
+      properties: {}
+      required: []
+    examples:
+      - args: {}
+        note: "takes no arguments; the ids listed here are the ones update_customer accepts as status_id."
+    response_pick: [_embedded.statuses, _total_items]
+
+  - name: list_customer_segments
+    description: >-
+      List the customer segments of the account; the account answers HTTP
+      402 when the tariff has no customers. Each segment carries its name,
+      color, available_products_price_type and custom_fields_values.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers/segments"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: []
+    examples:
+      - args: { limit: 50 }
+        note: "segment membership is recomputed by amoCRM in the background, so it can lag a customer edit."
+    response_pick: [_embedded.segments, _page, _links.next.href]
+
+  - name: list_transactions
+    description: >-
+      List the purchases recorded for one customer; the account answers HTTP
+      402 when the tariff has no customers. Each transaction carries price,
+      comment and completed_at.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/customers/{{args.customer_id}}/transactions"
+    query:
+      filter[id]: "{{args.filter_id}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        customer_id: { type: integer, description: "customer id; part of the path" }
+        filter_id: { type: integer, description: "one transaction id" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: [customer_id]
+    examples:
+      - args: { customer_id: 11, limit: 50 }
+        note: "there is no account-wide transactions route; the customer id is always part of the path."
+    response_pick: [_embedded.transactions, _page, _links.next.href]
+
+  - name: add_transactions
+    description: >-
+      EFFECTFUL. Add purchases to one customer in a batch; the account
+      answers HTTP 402 when the tariff has no customers. Each record takes
+      price plus the optional comment, completed_at and request_id.
+    method: POST
+    url: "{{account.base_url}}/api/v4/customers/{{args.customer_id}}/transactions"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        customer_id: { type: integer, description: "customer id; part of the path" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [customer_id, records]
+    examples:
+      - args: { customer_id: 11, records: [{ price: 15000, comment: "March renewal" }] }
+        note: "price is in the account currency and raises the customer's lifetime total."
+    response_pick: [_embedded.transactions]
+
+  - name: delete_transaction
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Delete one customer purchase by id. Its
+      amount leaves the customer totals and there is no route to undo it.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/customers/transactions/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "transaction id" }
+      required: [id]
+    examples:
+      - args: { id: 77 }
+        note: "the path carries no customer id, unlike list_transactions and add_transactions."
+
+  - name: set_customers_mode
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Enable or switch the customers mode; admin
+      only, changes account behaviour.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/customers/mode"
+    body:
+      mode: "{{args.mode}}"
+      is_enabled: "{{args.is_enabled}}"
+    args_schema:
+      type: object
+      properties:
+        mode: { type: string, enum: [segments, periodicity] }
+        is_enabled: { type: boolean, description: "turns the customers section on or off; dropped from the body when omitted" }
+      required: [mode]
+    examples:
+      - args: { mode: "segments", is_enabled: true }
+        note: "switching an account that already has customers between the two modes rewrites how their stages are computed."
+    response_pick: [mode, is_enabled]
+
+  # -- Tasks --------------------------------------------------------------
+
+  - name: list_tasks
+    description: >-
+      List tasks. filter_entity_type pairs with filter_entity_id to list the
+      tasks of one record; filter_is_completed takes the integer 0 or 1
+      rather than a boolean.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/tasks"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[created_at]: "{{args.order_created_at}}"
+      order[complete_till]: "{{args.order_complete_till}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[responsible_user_id]: "{{args.filter_responsible_user_id}}"
+      filter[is_completed]: "{{args.filter_is_completed}}"
+      filter[task_type]: "{{args.filter_task_type}}"
+      filter[entity_type]: "{{args.filter_entity_type}}"
+      filter[entity_id]: "{{args.filter_entity_id}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_created_at: { type: string, enum: [asc, desc] }
+        order_complete_till: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer }
+        filter_responsible_user_id: { type: integer }
+        filter_is_completed: { type: integer, enum: [0, 1] }
+        filter_task_type: { type: integer, description: "task type id from get_account with=task_types" }
+        filter_entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        filter_entity_id: { type: integer }
+        filter_updated_from: { type: integer, description: "unix seconds" }
+        filter_updated_to: { type: integer }
+      required: []
+    examples:
+      - args: { filter_is_completed: 0, filter_responsible_user_id: 7, order_complete_till: "asc", limit: 50 }
+        note: "filter_is_completed 0 lists the open tasks and 1 the closed ones."
+    response_pick: [_embedded.tasks, _page, _links.next.href]
+
+  - name: get_task
+    description: >-
+      Get one task by id, together with its result text once it has been
+      completed.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/tasks/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "task id" }
+      required: [id]
+    examples:
+      - args: { id: 40 }
+        note: "result.text is filled only after the task has been completed."
+    response_pick: [id, text, task_type_id, entity_id, entity_type, responsible_user_id, complete_till, is_completed, result, created_at, updated_at]
+
+  - name: create_tasks
+    description: >-
+      EFFECTFUL. Create tasks in one batch. Each record takes text and
+      complete_till plus the optional task_type_id, entity_id, entity_type,
+      responsible_user_id and request_id.
+    method: POST
+    url: "{{account.base_url}}/api/v4/tasks"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items: { type: object, additionalProperties: true }
+      required: [records]
+    examples:
+      - args: { records: [{ text: "Call back", complete_till: 1700003600, entity_id: 5, entity_type: "leads", task_type_id: 1 }] }
+        note: "entity_id and entity_type go together; a record with neither creates a task attached to nothing."
+    response_pick: [_embedded.tasks]
+
+  - name: update_task
+    description: >-
+      EFFECTFUL. Update one task by id. record is merged into the existing
+      task: only the fields it names change. Closing a task with a result
+      goes through complete_task.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/tasks/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "task id" }
+        record: { type: object, additionalProperties: true, description: "task field map; only the named fields change" }
+      required: [id, record]
+    examples:
+      - args: { id: 40, record: { complete_till: 1700090000 } }
+        note: "complete_till is unix seconds, so writing a later one reschedules the task."
+    response_pick: [id, updated_at, request_id]
+
+  - name: complete_task
+    description: >-
+      EFFECTFUL. Mark a task completed with a result text (PATCH is_completed
+      plus result.text).
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/tasks/{{args.id}}"
+    body:
+      is_completed: true
+      result:
+        text: "{{args.result_text}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer }
+        result_text: { type: string }
+      required: [id, result_text]
+    examples:
+      - args: { id: 40, result_text: "Called, agreed on a demo" }
+        note: "task_type ids come from get_account with=task_types; 1 is call, 2 is meeting."
+    response_pick: [id, is_completed, result]
