@@ -17,15 +17,18 @@ and the Files API (list, read, attach, detach). 101 functions in total, 52
 of them effectful. Wherever amoCRM's routes are symmetric across families,
 one function takes an `entity_type` of `leads`, `contacts`, `companies` or
 `customers` instead of four near-identical functions, which is how notes,
-tags, links, custom fields, custom field groups, entity files, subscriptions
-and batch updates are exposed.
+tags, links, custom fields, custom field groups, entity files and batch
+updates are exposed; subscriptions collapse the same way over the two
+families amoCRM documents for that route, `leads` and `customers`.
 
 Several things are deliberately absent. API v4 has no DELETE for leads,
 contacts, companies, customers, tasks, notes, tags or catalog elements, so
-this connector has none either: the eight irreversible functions it does
-carry (`decline_unsorted`, `delete_pipeline`, `delete_status`,
+this connector has none either: the eight functions marked `EFFECTFUL,
+IRREVERSIBLE` (`decline_unsorted`, `delete_pipeline`, `delete_status`,
 `delete_custom_field`, `delete_transaction`, `set_customers_mode`,
-`enable_products`, `unsubscribe_webhook`) are the whole destructive surface.
+`enable_products`, `unsubscribe_webhook`) are the whole destructive surface,
+and the last two of those can be redone rather than undone, earning the
+marker through their account-wide reach instead.
 Webhook management is included (`list_webhooks`, `subscribe_webhook`,
 `unsubscribe_webhook`) so an external receiver can be wired up, but
 receiving amoCRM webhooks through apb's own ingest listener is not: amoCRM

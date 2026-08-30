@@ -1,5 +1,5 @@
 cases:
-  # -- Account ----------------------------------------------------------------
+  # -- Account and dictionaries -----------------------------------------------
 
   - function: get_account
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
@@ -14,8 +14,6 @@ cases:
     expect:
       method: GET
       url: "https://example.amocrm.ru/api/v4/account?with=drive_url%2Ctask_types"
-
-  # -- Account and dictionaries -----------------------------------------------
 
   - function: list_users
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
@@ -133,10 +131,12 @@ cases:
 
   - function: decline_unsorted
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
-    args: { uid: "abc" }
+    args: { uid: "abc", user_id: 7 }
     expect:
       method: DELETE
       url: "https://example.amocrm.ru/api/v4/leads/unsorted/abc/decline"
+      body_contains:
+        user_id: 7
 
   # -- Pipelines --------------------------------------------------------------
 
@@ -365,12 +365,13 @@ cases:
 
   - function: set_customers_mode
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
-    args: { mode: "segments" }
+    args: { mode: "segments", is_enabled: true }
     expect:
       method: PATCH
       url: "https://example.amocrm.ru/api/v4/customers/mode"
       body_contains:
         mode: "segments"
+        is_enabled: true
 
   # -- Tasks ------------------------------------------------------------------
 
@@ -717,22 +718,22 @@ cases:
 
   - function: run_bot
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
-    args: { bot_id: 12, entity_type: 2, entity_id: 5 }
+    args: { bot_id: 12, entity_type: "leads", entity_id: 5 }
     expect:
       method: POST
       url: "https://example.amocrm.ru/api/v4/bots/12/run"
       body_contains:
-        entity_type: 2
+        entity_type: "leads"
         entity_id: 5
 
   - function: stop_bot
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
-    args: { bot_id: 12, entity_type: 2, entity_id: 5 }
+    args: { bot_id: 12, entity_type: "leads", entity_id: 5 }
     expect:
       method: POST
       url: "https://example.amocrm.ru/api/v4/bots/12/stop"
       body_contains:
-        entity_type: 2
+        entity_type: "leads"
         entity_id: 5
 
   # -- Sources ----------------------------------------------------------------
@@ -764,10 +765,10 @@ cases:
 
   - function: list_talks
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
-    args: { filter_contact_id: 9, filter_only_in_work: 1 }
+    args: { filter_contact_id: 9, filter_only_in_work: true }
     expect:
       method: GET
-      url: "https://example.amocrm.ru/api/v4/talks?filter%5Bcontact_id%5D=9&filter%5Bonly_in_work%5D=1"
+      url: "https://example.amocrm.ru/api/v4/talks?filter%5Bcontact_id%5D=9&filter%5Bonly_in_work%5D=true"
 
   - function: close_talk
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
@@ -809,10 +810,10 @@ cases:
 
   - function: list_files
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
-    args: { filter_term: "contract", limit: 20 }
+    args: { filter_term: "contract", filter_deleted: true, page: 2, limit: 20 }
     expect:
       method: GET
-      url: "https://drive-b.amocrm.ru/v1.0/files?filter%5Bterm%5D=contract&limit=20"
+      url: "https://drive-b.amocrm.ru/v1.0/files?filter%5Bdeleted%5D=true&filter%5Bterm%5D=contract&limit=20&page=2"
 
   - function: get_file
     account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }

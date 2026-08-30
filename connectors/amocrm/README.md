@@ -29,14 +29,15 @@ the browser. Every function is templated under `<base_url>/api/v4/...`, so a
 trailing path or a stray slash breaks every call at once.
 
 The token comes from an integration on that account. Open amoMarket, create
-a private integration, grant it "Account data" and "Files access" (add "File
-deletion" only if you intend to use `detach_files`), open the integration,
-go to the tab "Keys", press "Generate token", and pick an expiry, which can
-be anything from one day to five years. The value is shown once and cannot
-be read again afterwards, only revoked and regenerated, so copy it
-immediately. A long-lived token has no refresh token and needs no rotation
-logic; it can be revoked at any time from the integration's "Granted access"
-tab.
+a private integration, grant it "Account data" and "Files access", open the
+integration, go to the tab "Keys", press "Generate token", and pick an
+expiry, which can be anything from one day to five years. "Files access" is
+enough for every file function in this connector, `detach_files` included;
+"File deletion" is never needed, because no drive-level delete is exposed.
+The value is shown once and cannot be read again afterwards, only revoked
+and regenerated, so copy it immediately. A long-lived token has no refresh
+token and needs no rotation logic; it can be revoked at any time from the
+integration's "Granted access" tab.
 
 There is a third, optional field, `drive_url`: the account-specific Files
 API host, for example `https://drive-b.amocrm.ru`. Only `list_files` and
@@ -52,8 +53,8 @@ before the integration section becomes available. The "external integration"
 created directly in amoMarket issues the same kind of long-lived token
 without that step, and amoCRM documents long-lived tokens for external and
 private integrations alike. Either path hands you a Bearer token, and this
-connector accepts both: it only ever sends
-`Authorization: Bearer {{env.AMOCRM_ACCESS_TOKEN}}`.
+connector accepts both: it only ever sends `Authorization: Bearer <token>`,
+where the token is whatever the account's `access_token` field resolves to.
 
 ## What this connector can and cannot do
 
@@ -69,7 +70,9 @@ of them effectful and 49 marked `read_only`.
 Wherever amoCRM's routes are symmetric, one function takes an `entity_type`
 of `leads`, `contacts`, `companies` or `customers` rather than four
 near-identical functions. That collapse covers notes, tags, links, custom
-fields, custom field groups, entity files, subscriptions and batch updates.
+fields, custom field groups, entity files and batch updates. Subscriptions
+collapse the same way but over two families only, `leads` and `customers`,
+which is all amoCRM documents for that route.
 
 These API facts hold across the whole connector and are stated here rather
 than repeated in every function description:
@@ -173,8 +176,8 @@ connectors:
     functions: [list_customers, get_customer, create_customers, update_customer, list_customer_statuses, list_customer_segments, list_transactions, add_transactions, delete_transaction, set_customers_mode]
 ```
 
-`customers`: repeat sales. Both `delete_transaction` and
-`set_customers_mode` are irreversible, and the family answers 402 on a
+`customers`: repeat sales. `delete_transaction` cannot be undone and
+`set_customers_mode` reshapes the whole account; the family answers 402 on a
 tariff without customers.
 
 ```yaml
@@ -184,7 +187,8 @@ connectors:
 ```
 
 `files`: attachments. `list_files` and `get_file` need the `drive_url`
-account field, and the whole family needs "Files access" on the token.
+account field, and the whole family needs "Files access" on the token, which
+is the only file scope it needs.
 
 `functions: read_only` is the built-in coarse split. It grants all 49
 read-only functions at once, which is broader and more expensive than
@@ -192,17 +196,21 @@ read-only functions at once, which is broader and more expensive than
 
 ## Irreversible functions worth restricting
 
-Eight functions cannot be undone through the API: `decline_unsorted`,
-`delete_pipeline`, `delete_status`, `delete_custom_field`,
-`delete_transaction`, `set_customers_mode`, `enable_products` and
-`unsubscribe_webhook`. Deleting a status moves its leads to the first stage
-of the pipeline; deleting a custom field takes its values with it;
-`set_customers_mode` and `enable_products` change how the whole account
-behaves. A ninth function is worth the same treatment without being on that
-list: `detach_files` leaves the drive file intact, so it is not irreversible,
-but it does strip the attachment off the record. Keep those eight, and
-`detach_files` with them, out of any grant that does not specifically need
-them.
+Eight functions carry the `EFFECTFUL, IRREVERSIBLE` marker:
+`decline_unsorted`, `delete_pipeline`, `delete_status`,
+`delete_custom_field`, `delete_transaction`, `set_customers_mode`,
+`enable_products` and `unsubscribe_webhook`. Six of them cannot be undone
+through the API at all: deleting a status moves its leads to the first stage
+of the pipeline, deleting a custom field takes its values with it, and
+`enable_products` cannot be switched back. The last two can be redone rather
+than undone, and are on the list for their account-wide reach:
+`set_customers_mode` can be switched again, but it recomputes how every
+customer's stages are derived, and `unsubscribe_webhook` can be
+resubscribed, but every event fired in between is lost. A ninth function is
+worth the same treatment without being on that list: `detach_files` leaves
+the drive file intact, so it is not irreversible, but it does strip the
+attachment off the record. Keep those eight, and `detach_files` with them,
+out of any grant that does not specifically need them.
 
 ## Doing it by hand
 

@@ -586,11 +586,14 @@ and the Files API (list, read, attach, detach). 101 functions in total, 49
 of them `read_only` and 52 effectful. Wherever amoCRM's routes are
 symmetric, one function takes an `entity_type` of `leads`, `contacts`,
 `companies` or `customers` instead of four near-identical functions, which
-is how notes, tags, links, custom fields, custom field groups, entity files,
-subscriptions and batch updates are exposed. Eight functions are
-irreversible: `decline_unsorted`, `delete_pipeline`, `delete_status`,
-`delete_custom_field`, `delete_transaction`, `set_customers_mode`,
-`enable_products` and `unsubscribe_webhook`; API v4 has no DELETE at all for
+is how notes, tags, links, custom fields, custom field groups, entity files
+and batch updates are exposed; subscriptions collapse the same way over the
+two families amoCRM documents for that route, `leads` and `customers`. Eight
+functions carry the `EFFECTFUL, IRREVERSIBLE` marker: `decline_unsorted`,
+`delete_pipeline`, `delete_status`, `delete_custom_field`,
+`delete_transaction`, `set_customers_mode`, `enable_products` and
+`unsubscribe_webhook`, the last two of them for their account-wide reach
+rather than because they cannot be undone; API v4 has no DELETE at all for
 leads, contacts, companies, customers, tasks, notes, tags or catalog
 elements, so the connector exposes none. Shared API facts that apply
 everywhere: 7 requests per second per integration (429 comes back as
