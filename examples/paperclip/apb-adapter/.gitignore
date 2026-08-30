@@ -1,0 +1,5 @@
+node_modules/
+*.log
+# apb writes run journals into the fixture project at test time
+test-fixture/.apb/runs/
+.secrets/
