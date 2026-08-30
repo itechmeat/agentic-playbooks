@@ -2033,3 +2033,517 @@ functions:
     examples:
       - args: {}
         note: "the trailing slash in the path is required here; without it the account answers HTTP 404."
+
+  # -- Webhooks -----------------------------------------------------------
+
+  - name: list_webhooks
+    description: >-
+      List the webhook subscriptions of the account. filter_destination narrows
+      the answer to one URL, which is the cheapest way to check whether a hook
+      is already registered.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/webhooks"
+    query:
+      filter[destination]: "{{args.filter_destination}}"
+    args_schema:
+      type: object
+      properties:
+        filter_destination: { type: string, description: "exact hook URL to look up" }
+      required: []
+    examples:
+      - args: { filter_destination: "https://hooks.example.com/amo" }
+        note: "a hook amoCRM has disabled after repeated delivery failures still appears here with disabled true."
+    response_pick: [_embedded.webhooks]
+
+  - name: subscribe_webhook
+    description: >-
+      EFFECTFUL. Subscribe a URL to account events (re-posting the same
+      destination replaces its settings). Deliveries are form-encoded and
+      unsigned, so they cannot be received by the apb ingest listener; point
+      destination at your own receiver. At most 100 hooks per account.
+    method: POST
+    url: "{{account.base_url}}/api/v4/webhooks"
+    body:
+      destination: "{{args.destination}}"
+      settings: "{{args.settings}}"
+      sort: "{{args.sort}}"
+    args_schema:
+      type: object
+      properties:
+        destination: { type: string, description: "https URL amoCRM posts the events to" }
+        settings:
+          type: array
+          minItems: 1
+          items:
+            type: string
+            enum: [add_lead, update_lead, delete_lead, restore_lead, status_lead, responsible_lead, add_contact, update_contact, delete_contact, restore_contact, responsible_contact, add_company, update_company, delete_company, restore_company, responsible_company, add_customer, update_customer, delete_customer, responsible_customer, add_task, update_task, delete_task, responsible_task, add_talk, update_talk, note_lead, note_contact, note_company, note_customer, add_message, add_outgoing_message, add_chat_template_review]
+          description: "event names this hook subscribes to"
+        sort: { type: integer, description: "display order in the account settings; dropped from the body when omitted" }
+      required: [destination, settings]
+    examples:
+      - args: { destination: "https://hooks.example.com/amo", settings: ["add_lead", "status_lead"], sort: 10 }
+        note: "settings replaces the whole event list of that destination, so re-posting with one name unsubscribes the rest."
+    response_pick: [id, destination, settings, disabled]
+
+  - name: unsubscribe_webhook
+    description: >-
+      EFFECTFUL, IRREVERSIBLE. Remove the webhook subscription of one
+      destination. The URL is identified by the JSON body, not by a path id,
+      and the event list it carried is gone.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/webhooks"
+    body:
+      destination: "{{args.destination}}"
+    args_schema:
+      type: object
+      properties:
+        destination: { type: string, description: "exact hook URL as returned by list_webhooks" }
+      required: [destination]
+    examples:
+      - args: { destination: "https://hooks.example.com/amo" }
+        note: "the destination must match character for character, a trailing slash included, or amoCRM answers HTTP 404."
+
+  # -- Bots ---------------------------------------------------------------
+
+  - name: list_bots
+    description: >-
+      List the salesbots of the account with their ids. A bot id is what
+      run_bot and stop_bot take.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/bots"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      with: "{{args.with}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        with: { type: string, description: "comma separated extras, source for the bot source binding" }
+      required: []
+    examples:
+      - args: { limit: 50 }
+        note: "only bots built in the salesbot designer are listed; widget automations are not bots."
+    response_pick: [_embedded.bots, _page, _links.next.href]
+
+  - name: run_bot
+    description: >-
+      EFFECTFUL. Start one salesbot on one record. The bot then acts on its
+      own, so a bot that writes to the client sends real messages.
+    method: POST
+    url: "{{account.base_url}}/api/v4/bots/{{args.bot_id}}/run"
+    body:
+      entity_type: "{{args.entity_type}}"
+      entity_id: "{{args.entity_id}}"
+    args_schema:
+      type: object
+      properties:
+        bot_id: { type: integer, description: "bot id from list_bots" }
+        entity_type: { type: integer, enum: [1, 2, 3, 12], description: "1 contact, 2 lead, 3 company, 12 customer" }
+        entity_id: { type: integer, description: "id of the record the bot runs on" }
+      required: [bot_id, entity_type, entity_id]
+    examples:
+      - args: { bot_id: 12, entity_type: 2, entity_id: 5 }
+        note: "entity_type is the numeric amoCRM entity code here, not the leads/contacts string the other functions take."
+
+  - name: stop_bot
+    description: >-
+      EFFECTFUL. Stop the salesbot running on one record. Steps the bot has
+      already performed are not rolled back.
+    method: POST
+    url: "{{account.base_url}}/api/v4/bots/{{args.bot_id}}/stop"
+    body:
+      entity_type: "{{args.entity_type}}"
+      entity_id: "{{args.entity_id}}"
+    args_schema:
+      type: object
+      properties:
+        bot_id: { type: integer, description: "bot id from list_bots" }
+        entity_type: { type: integer, enum: [1, 2, 3, 12], description: "1 contact, 2 lead, 3 company, 12 customer" }
+        entity_id: { type: integer, description: "id of the record the bot runs on" }
+      required: [bot_id, entity_type, entity_id]
+    examples:
+      - args: { bot_id: 12, entity_type: 2, entity_id: 5 }
+        note: "stopping a bot that is not running on that record is accepted and changes nothing."
+
+  # -- Sources ------------------------------------------------------------
+
+  - name: list_sources
+    description: >-
+      List the lead sources registered by integrations. A source binds
+      incoming chats and forms to one pipeline.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/sources"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[external_id]: "{{args.filter_external_id}}"
+      filter[pipeline_id]: "{{args.filter_pipeline_id}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        filter_id: { type: integer, description: "source id" }
+        filter_external_id: { type: string, description: "the external_id the integration assigned" }
+        filter_pipeline_id: { type: integer, description: "pipeline the source feeds" }
+      required: []
+    examples:
+      - args: {}
+        note: "sources created by other integrations are not listed; the token only sees the ones its own integration owns."
+    response_pick: [_embedded.sources, _page, _links.next.href]
+
+  - name: create_sources
+    description: >-
+      EFFECTFUL. Register lead sources for this integration in one batch;
+      admin only. The sources appear in the interface only once the
+      integration also ships a widget with the lead_sources location.
+    method: POST
+    url: "{{account.base_url}}/api/v4/sources"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 50
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "source label shown in the interface" }
+              external_id: { type: string, description: "id unique inside this integration" }
+              pipeline_id: { type: integer, description: "pipeline the source feeds" }
+              default: { type: boolean, description: "make this the default source of the integration" }
+            required: [name, external_id]
+            additionalProperties: true
+      required: [records]
+    examples:
+      - args: { records: [{ name: "apb-test-source", external_id: "apb-1", pipeline_id: 100 }] }
+        note: "external_id must be unique within the integration; reusing one answers HTTP 400 rather than updating the source."
+    response_pick: [_embedded.sources]
+
+  # -- Chat templates -----------------------------------------------------
+
+  - name: list_chat_templates
+    description: >-
+      List the outgoing message templates of the account. limit caps at 50 on
+      this route rather than the usual 250.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/chats/templates"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[external_id]: "{{args.filter_external_id}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 50 }
+        filter_external_id: { type: string, description: "the external_id the integration assigned" }
+      required: []
+    examples:
+      - args: { limit: 20 }
+        note: "a template carries its moderation verdict in reviews, and only an approved one can open a WhatsApp dialog."
+    response_pick: [_embedded.chat_templates, _page, _links.next.href]
+
+  # -- Talks --------------------------------------------------------------
+
+  - name: list_talks
+    description: >-
+      List chat talks. filter_only_in_work takes the integer 0 or 1 rather
+      than a boolean, and filter_entity_type pairs with filter_entity_id to
+      read the talks of one record.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/talks"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[talk_id]: "{{args.filter_talk_id}}"
+      filter[contact_id]: "{{args.filter_contact_id}}"
+      filter[entity_id]: "{{args.filter_entity_id}}"
+      filter[entity_type]: "{{args.filter_entity_type}}"
+      filter[only_in_work]: "{{args.filter_only_in_work}}"
+    args_schema:
+      type: object
+      properties:
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        filter_talk_id: { type: integer, description: "talk id" }
+        filter_contact_id: { type: integer, description: "contact the talk belongs to" }
+        filter_entity_id: { type: integer, description: "id of the linked record" }
+        filter_entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        filter_only_in_work: { type: integer, enum: [0, 1], description: "1 keeps only talks that are still open" }
+      required: []
+    examples:
+      - args: { filter_contact_id: 9, filter_only_in_work: 1 }
+        note: "a talk is the unit the unanswered counter and the NPS bot work on, not the individual chat message."
+    response_pick: [_embedded.talks, _page, _links.next.href]
+
+  - name: close_talk
+    description: >-
+      EFFECTFUL. Close one talk so it stops counting as unanswered. The
+      client can reopen it by writing again.
+    method: POST
+    url: "{{account.base_url}}/api/v4/talks/{{args.id}}/close"
+    body:
+      force_close: "{{args.force_close}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: integer, description: "talk id from list_talks" }
+        force_close: { type: boolean, description: "true skips the NPS bot; dropped from the body when omitted" }
+      required: [id]
+    examples:
+      - args: { id: 555, force_close: true }
+        note: "without force_close the account runs its closing bot first, so the talk may stay open for a moment."
+
+  # -- Subscriptions ------------------------------------------------------
+
+  - name: list_subscriptions
+    description: >-
+      List the users subscribed to the changes of one record. Subscribers get
+      the record notifications; they are not the responsible user.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/subscriptions"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, customers] }
+        entity_id: { type: integer, description: "id of the record" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+      required: [entity_type, entity_id]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5 }
+        note: "only leads and customers carry subscriptions; contacts and companies answer HTTP 404 on this route."
+    response_pick: [_embedded.subscriptions, _page, _links.next.href]
+
+  # -- Short links --------------------------------------------------------
+
+  - name: create_short_links
+    description: >-
+      EFFECTFUL. Shorten URLs in one batch. metadata binds a link to a
+      contact so amoCRM can attribute the click back to that record.
+    method: POST
+    url: "{{account.base_url}}/api/v4/short_links"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              url: { type: string, description: "the long URL to shorten" }
+              metadata:
+                type: object
+                properties:
+                  entity_type: { type: string, enum: [contacts] }
+                  entity_id: { type: integer, description: "contact the click is attributed to" }
+                additionalProperties: true
+                description: "click attribution target"
+            required: [url]
+            additionalProperties: true
+      required: [records]
+    examples:
+      - args: { records: [{ url: "https://example.com/offer", metadata: { entity_type: "contacts", entity_id: 9 } }] }
+        note: "shortening the same URL twice for the same contact returns the short link that already exists."
+    response_pick: [_embedded.short_links]
+
+  # -- Calls --------------------------------------------------------------
+
+  - name: add_calls
+    description: >-
+      EFFECTFUL. Log calls; the phone is matched to a contact or company by
+      its last 10 digits and an unmatched number is silently dropped.
+      call_status: 1 left message, 2 call back later, 3 not available, 4
+      conversation, 5 wrong number, 6 no answer, 7 busy.
+    method: POST
+    url: "{{account.base_url}}/api/v4/calls"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              direction: { type: string, enum: [inbound, outbound] }
+              duration: { type: integer, minimum: 0, description: "call length in seconds" }
+              source: { type: string, description: "telephony integration label" }
+              phone: { type: string, description: "the other party number" }
+              uniq: { type: string, description: "telephony side call id; repeating it updates that call" }
+              call_status: { type: integer, enum: [1, 2, 3, 4, 5, 6, 7] }
+              call_result: { type: string, description: "free text outcome shown in the feed" }
+              link: { type: string, description: "URL of the recording" }
+              responsible_user_id: { type: integer }
+              created_by: { type: integer }
+            required: [direction, duration, source, phone]
+            additionalProperties: true
+      required: [records]
+    examples:
+      - args: { records: [{ direction: "inbound", duration: 60, source: "apb", phone: "+79990000000", call_result: "ok" }] }
+        note: "the call lands as a note on the matched record, so a number that matches two contacts logs against both."
+    response_pick: [_embedded.calls, errors]
+
+  # -- Files --------------------------------------------------------------
+
+  - name: list_files
+    description: >-
+      Requires the drive_url account field (get_account with=drive_url) and
+      the Files access scope on the token. Lists the account drive; an account
+      without drive_url fails at render time before any request is sent.
+    read_only: true
+    method: GET
+    url: "{{account.drive_url}}/v1.0/files"
+    query:
+      limit: "{{args.limit}}"
+      offset: "{{args.offset}}"
+      filter[name]: "{{args.filter_name}}"
+      filter[term]: "{{args.filter_term}}"
+      filter[deleted]: "{{args.filter_deleted}}"
+      filter[source_id]: "{{args.filter_source_id}}"
+    args_schema:
+      type: object
+      properties:
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        offset: { type: integer, minimum: 0, description: "this route pages by offset, not by page number" }
+        filter_name: { type: string, description: "exact file name" }
+        filter_term: { type: string, description: "substring searched in the file name" }
+        filter_deleted: { type: integer, enum: [0, 1], description: "1 lists the files in the trash instead" }
+        filter_source_id: { type: integer, description: "drive folder the files sit in" }
+      required: []
+    examples:
+      - args: { filter_term: "contract", limit: 20 }
+        note: "the drive host differs per account, which is why the URL comes from drive_url rather than from base_url."
+    response_pick: [_embedded.files, _links.next.href]
+
+  - name: get_file
+    description: >-
+      Read one drive file by uuid, with its version history and the download
+      links. Uses the drive_url account field, like list_files.
+    read_only: true
+    method: GET
+    url: "{{account.drive_url}}/v1.0/files/{{args.uuid}}"
+    args_schema:
+      type: object
+      properties:
+        uuid: { type: string, description: "file uuid, not a numeric id" }
+      required: [uuid]
+    examples:
+      - args: { uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }
+        note: "_links.download points at a signed URL that expires, so fetch the file rather than storing that URL."
+    response_pick: [uuid, name, size, type, versions, _links]
+
+  - name: list_entity_files
+    description: >-
+      List the files attached to one record. This route lives on base_url and
+      pages by before_id rather than by page number.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/files"
+    query:
+      limit: "{{args.limit}}"
+      before_id: "{{args.before_id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record" }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        before_id: { type: integer, description: "cursor: return the attachments older than this one" }
+      required: [entity_type, entity_id]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, limit: 20 }
+        note: "attachments are listed newest first, so before_id walks backwards through the record history."
+    response_pick: [_embedded.files, _links.next.href]
+
+  - name: attach_files
+    description: >-
+      EFFECTFUL. Attach drive files to one record by uuid. The file itself is
+      uploaded to the drive elsewhere; this only creates the link.
+    method: PUT
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/files"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              file_uuid: { type: string, description: "uuid from list_files or get_file" }
+            required: [file_uuid]
+            additionalProperties: true
+      required: [entity_type, entity_id, records]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, records: [{ file_uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }] }
+        note: "the verb is PUT because the call is idempotent: attaching a uuid that is already linked changes nothing."
+    response_pick: [_embedded.files]
+
+  - name: detach_files
+    description: >-
+      EFFECTFUL. Detach files from one record by uuid. The file stays on the
+      drive; only the link to this record is removed.
+    method: DELETE
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/files"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              file_uuid: { type: string, description: "uuid of an attachment on this record" }
+            required: [file_uuid]
+            additionalProperties: true
+      required: [entity_type, entity_id, records]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, records: [{ file_uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }] }
+        note: "the uuids travel in the request body, which is unusual for a DELETE but is what this route expects."
+
+  - name: list_file_links
+    description: >-
+      List the records one drive file is attached to. Use it before
+      detach_files to see where a file is in use.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/files/{{args.uuid}}/links"
+    args_schema:
+      type: object
+      properties:
+        uuid: { type: string, description: "file uuid, not a numeric id" }
+      required: [uuid]
+    examples:
+      - args: { uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }
+        note: "this route sits on base_url even though the file itself lives on the drive host."
+    response_pick: [_embedded.entities]

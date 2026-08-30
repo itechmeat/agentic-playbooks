@@ -670,3 +670,174 @@ cases:
       url: "https://example.amocrm.ru/api/v2/products_settings/"
       body_contains:
         enabled: true
+
+  # -- Webhooks ---------------------------------------------------------------
+
+  - function: list_webhooks
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { filter_destination: "https://hooks.example.com/amo" }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/webhooks?filter%5Bdestination%5D=https%3A%2F%2Fhooks.example.com%2Famo"
+
+  - function: subscribe_webhook
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { destination: "https://hooks.example.com/amo", settings: ["add_lead", "status_lead"], sort: 10 }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/webhooks"
+      body_contains:
+        destination: "https://hooks.example.com/amo"
+        settings: ["add_lead", "status_lead"]
+
+  - function: unsubscribe_webhook
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { destination: "https://hooks.example.com/amo" }
+    expect:
+      method: DELETE
+      url: "https://example.amocrm.ru/api/v4/webhooks"
+      body_contains:
+        destination: "https://hooks.example.com/amo"
+
+  # -- Bots -------------------------------------------------------------------
+
+  - function: list_bots
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { limit: 50 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/bots?limit=50"
+
+  - function: run_bot
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { bot_id: 12, entity_type: 2, entity_id: 5 }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/bots/12/run"
+      body_contains:
+        entity_type: 2
+        entity_id: 5
+
+  - function: stop_bot
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { bot_id: 12, entity_type: 2, entity_id: 5 }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/bots/12/stop"
+      body_contains:
+        entity_type: 2
+        entity_id: 5
+
+  # -- Sources ----------------------------------------------------------------
+
+  - function: list_sources
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: {}
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/sources"
+
+  - function: create_sources
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { records: [{ name: "apb-test-source", external_id: "apb-1", pipeline_id: 100 }] }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/sources"
+
+  # -- Chat templates ---------------------------------------------------------
+
+  - function: list_chat_templates
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { limit: 20 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/chats/templates?limit=20"
+
+  # -- Talks ------------------------------------------------------------------
+
+  - function: list_talks
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { filter_contact_id: 9, filter_only_in_work: 1 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/talks?filter%5Bcontact_id%5D=9&filter%5Bonly_in_work%5D=1"
+
+  - function: close_talk
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { id: 555, force_close: true }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/talks/555/close"
+      body_contains:
+        force_close: true
+
+  # -- Subscriptions ----------------------------------------------------------
+
+  - function: list_subscriptions
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { entity_type: "leads", entity_id: 5 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads/5/subscriptions"
+
+  # -- Short links ------------------------------------------------------------
+
+  - function: create_short_links
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { records: [{ url: "https://example.com/offer", metadata: { entity_type: "contacts", entity_id: 9 } }] }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/short_links"
+
+  # -- Calls ------------------------------------------------------------------
+
+  - function: add_calls
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { records: [{ direction: "inbound", duration: 60, source: "apb", phone: "+79990000000", call_result: "ok" }] }
+    expect:
+      method: POST
+      url: "https://example.amocrm.ru/api/v4/calls"
+
+  # -- Files ------------------------------------------------------------------
+
+  - function: list_files
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { filter_term: "contract", limit: 20 }
+    expect:
+      method: GET
+      url: "https://drive-b.amocrm.ru/v1.0/files?filter%5Bterm%5D=contract&limit=20"
+
+  - function: get_file
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }
+    expect:
+      method: GET
+      url: "https://drive-b.amocrm.ru/v1.0/files/0bd7d1a8-7d36-4f6b-9c2a-000000000001"
+
+  - function: list_entity_files
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { entity_type: "leads", entity_id: 5, limit: 20 }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/leads/5/files?limit=20"
+
+  - function: attach_files
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { entity_type: "leads", entity_id: 5, records: [{ file_uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }] }
+    expect:
+      method: PUT
+      url: "https://example.amocrm.ru/api/v4/leads/5/files"
+
+  - function: detach_files
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { entity_type: "leads", entity_id: 5, records: [{ file_uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }] }
+    expect:
+      method: DELETE
+      url: "https://example.amocrm.ru/api/v4/leads/5/files"
+
+  - function: list_file_links
+    account: { base_url: "https://example.amocrm.ru", drive_url: "https://drive-b.amocrm.ru" }
+    args: { uuid: "0bd7d1a8-7d36-4f6b-9c2a-000000000001" }
+    expect:
+      method: GET
+      url: "https://example.amocrm.ru/api/v4/files/0bd7d1a8-7d36-4f6b-9c2a-000000000001/links"
