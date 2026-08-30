@@ -1239,3 +1239,352 @@ functions:
       - args: { id: 40, result_text: "Called, agreed on a demo" }
         note: "task_type ids come from get_account with=task_types; 1 is call, 2 is meeting."
     response_pick: [id, is_completed, result]
+
+  # -- Notes --------------------------------------------------------------
+
+  - name: list_notes
+    description: >-
+      List the notes of one entity family. Without filter_entity_id the whole
+      family is listed, so pass it to read the notes of a single record.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes"
+    query:
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      order[updated_at]: "{{args.order_updated_at}}"
+      order[id]: "{{args.order_id}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[entity_id]: "{{args.filter_entity_id}}"
+      filter[note_type]: "{{args.filter_note_type}}"
+      filter[updated_at][from]: "{{args.filter_updated_from}}"
+      filter[updated_at][to]: "{{args.filter_updated_to}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        order_updated_at: { type: string, enum: [asc, desc] }
+        order_id: { type: string, enum: [asc, desc] }
+        filter_id: { type: integer, description: "note id" }
+        filter_entity_id: { type: integer, description: "id of the record the notes hang on" }
+        filter_note_type: { type: string, description: "one note type, see create_notes for the list" }
+        filter_updated_from: { type: integer, description: "unix seconds" }
+        filter_updated_to: { type: integer }
+      required: [entity_type]
+    examples:
+      - args: { entity_type: "leads", filter_entity_id: 5, filter_note_type: "common", limit: 50 }
+        note: "notes are ordered by id ascending unless order_updated_at or order_id says otherwise."
+    response_pick: [_embedded.notes, _page, _links.next.href]
+
+  - name: get_note
+    description: >-
+      Get one note by id. note_type says which kind of note it is and params
+      carries the payload whose keys depend on that type.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "note id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 88 }
+        note: "note ids are scoped to one family, so the same id under another entity_type answers HTTP 404."
+    response_pick: [id, entity_id, note_type, params, is_pinned, responsible_user_id, created_by, created_at, updated_at]
+
+  - name: create_notes
+    description: >-
+      EFFECTFUL. Create notes on one entity family in one batch. note_type:
+      common, call_in, call_out, service_message, extended_service_message,
+      message_cashier, geolocation, sms_in, sms_out, attachment; params per
+      type (common: text; call_in/call_out: uniq, duration, source, link,
+      phone, call_responsible; service_message: service, text;
+      sms_in/sms_out: text, phone).
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              entity_id: { type: integer, description: "id of the record the note hangs on" }
+              note_type: { type: string, enum: [common, call_in, call_out, service_message, extended_service_message, message_cashier, geolocation, sms_in, sms_out, attachment] }
+              params: { type: object, additionalProperties: true, description: "payload for that note_type" }
+            required: [entity_id, note_type]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ entity_id: 5, note_type: "common", params: { text: "Called, agreed on a demo" } }] }
+        note: "a params key that the chosen note_type does not define is rejected with HTTP 400."
+    response_pick: [_embedded.notes]
+
+  - name: update_note
+    description: >-
+      EFFECTFUL. Update one note by id. record is merged into the existing
+      note: only the fields it names change, and params is replaced whole
+      rather than merged key by key.
+    method: PATCH
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes/{{args.id}}"
+    body: "{{args.record}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "note id" }
+        record: { type: object, additionalProperties: true, description: "note field map; only the named fields change" }
+      required: [entity_type, id, record]
+    examples:
+      - args: { entity_type: "leads", id: 88, record: { params: { text: "Called, demo booked for Friday" } } }
+        note: "note_type cannot be changed after creation; only params and responsible_user_id are editable."
+    response_pick: [id, updated_at, request_id]
+
+  - name: pin_note
+    description: >-
+      EFFECTFUL. Pin one note to the top of its record feed. A record holds
+      one pinned note, so pinning a second one replaces the first.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes/{{args.id}}/pin"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "note id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 88 }
+        note: "the call takes no body and answers with the note itself, is_pinned now true."
+    response_pick: [id, is_pinned]
+
+  - name: unpin_note
+    description: >-
+      EFFECTFUL. Unpin one note, leaving it in the record feed in its normal
+      chronological place.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/notes/{{args.id}}/unpin"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        id: { type: integer, description: "note id" }
+      required: [entity_type, id]
+    examples:
+      - args: { entity_type: "leads", id: 88 }
+        note: "unpinning a note that is not pinned answers HTTP 400."
+    response_pick: [id, is_pinned]
+
+  # -- Tags ---------------------------------------------------------------
+
+  - name: list_tags
+    description: >-
+      List the tags defined for one entity family. query is a substring match
+      over the tag name, filter_name an exact one.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/tags"
+    query:
+      query: "{{args.query}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[id]: "{{args.filter_id}}"
+      filter[name]: "{{args.filter_name}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        query: { type: string, description: "substring of the tag name" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 250 }
+        filter_id: { type: integer, description: "tag id" }
+        filter_name: { type: string, description: "exact tag name" }
+      required: [entity_type]
+    examples:
+      - args: { entity_type: "contacts", query: "vip", limit: 50 }
+        note: "tags are per family, so the same name on leads and on contacts is two separate tags."
+    response_pick: [_embedded.tags, _page, _links.next.href]
+
+  - name: create_tags
+    description: >-
+      EFFECTFUL. Create tags for one entity family in one batch. Creating a
+      tag only defines it; attaching it to a record goes through
+      update_entities with tags_to_add.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/tags"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              name: { type: string, description: "tag name, unique within the family" }
+              color: { type: string, description: "hex colour without the hash, e.g. EBEBEB; amoCRM picks one when omitted" }
+            required: [name]
+            additionalProperties: true
+      required: [entity_type, records]
+    examples:
+      - args: { entity_type: "leads", records: [{ name: "vip", color: "EBEBEB" }] }
+        note: "a name that already exists in the family answers with the existing tag rather than a duplicate."
+    response_pick: [_embedded.tags]
+
+  # -- Links --------------------------------------------------------------
+
+  - name: list_links
+    description: >-
+      List what one record is linked to. Both sides are named: entity_type
+      and entity_id in the route, the filter_to_* arguments narrow the far
+      side.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/links"
+    query:
+      filter[to_entity_id]: "{{args.filter_to_entity_id}}"
+      filter[to_entity_type]: "{{args.filter_to_entity_type}}"
+      filter[to_catalog_id]: "{{args.filter_to_catalog_id}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record whose links are listed" }
+        filter_to_entity_id: { type: integer, description: "id on the far side of the link" }
+        filter_to_entity_type: { type: string, enum: [leads, contacts, companies, customers, catalog_elements] }
+        filter_to_catalog_id: { type: integer, description: "catalog the linked element belongs to; pair with filter_to_entity_type catalog_elements" }
+      required: [entity_type, entity_id]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, filter_to_entity_type: "contacts" }
+        note: "links are symmetric, so the same link is listed from either side of the pair."
+    response_pick: [_embedded.links]
+
+  - name: link_entities
+    description: >-
+      EFFECTFUL. Link one record to other records in one batch. metadata
+      takes is_main (main contact of a lead), quantity, catalog_id and
+      price_id (the last three for catalog_elements).
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/link"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record being linked from" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              to_entity_id: { type: integer }
+              to_entity_type: { type: string, enum: [leads, contacts, companies, customers, catalog_elements] }
+              metadata: { type: object, additionalProperties: true, description: "is_main, quantity, catalog_id, price_id" }
+            required: [to_entity_id, to_entity_type]
+            additionalProperties: true
+      required: [entity_type, entity_id, records]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, records: [{ to_entity_id: 9, to_entity_type: "contacts", metadata: { is_main: true } }] }
+        note: "linking a catalog element needs metadata.catalog_id; without it the record is rejected with HTTP 400."
+    response_pick: [_embedded.links]
+
+  - name: unlink_entities
+    description: >-
+      EFFECTFUL. Remove links between one record and others in one batch.
+      Only the link is removed; both records stay.
+    method: POST
+    url: "{{account.base_url}}/api/v4/{{args.entity_type}}/{{args.entity_id}}/unlink"
+    body: "{{args.records}}"
+    args_schema:
+      type: object
+      properties:
+        entity_type: { type: string, enum: [leads, contacts, companies, customers] }
+        entity_id: { type: integer, description: "id of the record being unlinked from" }
+        records:
+          type: array
+          minItems: 1
+          maxItems: 250
+          items:
+            type: object
+            properties:
+              to_entity_id: { type: integer }
+              to_entity_type: { type: string, enum: [leads, contacts, companies, customers, catalog_elements] }
+              metadata: { type: object, additionalProperties: true, description: "catalog_id, needed to pick out one catalog element link" }
+            required: [to_entity_id, to_entity_type]
+            additionalProperties: true
+      required: [entity_type, entity_id, records]
+    examples:
+      - args: { entity_type: "leads", entity_id: 5, records: [{ to_entity_id: 9, to_entity_type: "contacts" }] }
+        note: "a link that does not exist is silently ignored rather than reported."
+
+  # -- Events -------------------------------------------------------------
+
+  - name: list_events
+    description: >-
+      List account events (the audit trail). filter_entity_id needs
+      filter_entity. Common types: lead_added, lead_status_changed,
+      lead_linked, task_added, task_completed, incoming_chat_message,
+      outgoing_chat_message, custom_field_value_changed,
+      entity_responsible_changed; list_event_types returns the full set.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/events"
+    query:
+      with: "{{args.with}}"
+      page: "{{args.page}}"
+      limit: "{{args.limit}}"
+      filter[entity]: "{{args.filter_entity}}"
+      filter[entity_id]: "{{args.filter_entity_id}}"
+      filter[type]: "{{args.filter_type}}"
+      filter[created_by]: "{{args.filter_created_by}}"
+      filter[created_at][from]: "{{args.filter_created_from}}"
+      filter[created_at][to]: "{{args.filter_created_to}}"
+    args_schema:
+      type: object
+      properties:
+        with: { type: string, description: "comma-joined include list, e.g. contact_name,lead_name" }
+        page: { type: integer, minimum: 1 }
+        limit: { type: integer, minimum: 1, maximum: 100 }
+        filter_entity: { type: string, enum: [lead, contact, company, customer, task], description: "singular here, unlike the plural entity_type elsewhere" }
+        filter_entity_id: { type: integer, description: "id of the record; needs filter_entity" }
+        filter_type: { type: string, description: "one event type" }
+        filter_created_by: { type: integer, description: "user who caused the event" }
+        filter_created_from: { type: integer, description: "unix seconds" }
+        filter_created_to: { type: integer }
+      required: []
+      dependentRequired:
+        filter_entity_id: [filter_entity]
+    examples:
+      - args: { filter_entity: "lead", filter_entity_id: 5, filter_type: "lead_status_changed", limit: 50 }
+        note: "the event feed is capped at 100 per page rather than the usual 250."
+    response_pick: [_embedded.events, _page, _links.next.href]
+
+  - name: get_event
+    description: >-
+      Get one event by id. value_before and value_after hold the change as
+      arrays, shaped by the event type.
+    read_only: true
+    method: GET
+    url: "{{account.base_url}}/api/v4/events/{{args.id}}"
+    args_schema:
+      type: object
+      properties:
+        id: { type: string, description: "event id, a 26-character string rather than an integer" }
+      required: [id]
+    examples:
+      - args: { id: "01pz58t6p04ymgsgfbmfyfy1mf" }
+        note: "event ids come from list_events; they are not the ids of the records they describe."
+    response_pick: [id, type, entity_id, entity_type, created_by, created_at, value_after, value_before]
