@@ -615,10 +615,12 @@ fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
 
     let mut mcp = McpSession::start(dir.path());
     let started = Instant::now();
+    // The rewritten snapshot is not an approved digest, so the resume needs
+    // the acknowledge a start would.
     let body = mcp.call(
         2,
         &format!(
-            r#"{{"name":"run_resume","arguments":{{"run_id":"{run_id}","from_node":"work"}}}}"#
+            r#"{{"name":"run_resume","arguments":{{"run_id":"{run_id}","from_node":"work","acknowledge_untrusted":true}}}}"#
         ),
     );
     let elapsed = started.elapsed();
@@ -640,6 +642,76 @@ fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
         "the resumed run to finish after the MCP process was killed",
     );
     assert_eq!(status, RunStatus::Succeeded);
+}
+
+/// Copies a run directory tree (a run shipped inside a repository is exactly
+/// such a copy under a new name).
+fn copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            fs::copy(entry.path(), &to).unwrap();
+        }
+    }
+}
+
+// MCP `run_resume` holds a resume to the same consent as a start: a run
+// directory apb did not create here (one that came with the repository) is
+// refused even with an acknowledge, and a run whose snapshot is not approved
+// needs the acknowledge.
+#[test]
+fn mcp_run_resume_refuses_a_foreign_run_and_an_unapproved_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("resumegate", 0);
+    seed(dir.path(), "resumegate", &yaml, &script);
+    let out = crate::common::apb_std()
+        .arg("run")
+        .arg("resumegate")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let run_id = stdout
+        .split_whitespace()
+        .find(|w| w.starts_with("resumegate-"))
+        .unwrap_or_else(|| panic!("no run id in `apb run` output: {stdout}"))
+        .to_string();
+    let runs = dir.path().join(".apb/runs");
+    copy_dir(&runs.join(&run_id), &runs.join("shipped-1"));
+    let _guards = (
+        RunGuard::new(dir.path(), &run_id),
+        RunGuard::new(dir.path(), "shipped-1"),
+    );
+
+    let mut mcp = McpSession::start(dir.path());
+    let foreign = mcp.call(
+        2,
+        r#"{"name":"run_resume","arguments":{"run_id":"shipped-1","from_node":"work","acknowledge_untrusted":true}}"#,
+    );
+    assert_eq!(
+        foreign["policy_refusal"]["policy"], "run_not_created_locally",
+        "got: {foreign}"
+    );
+    let unapproved = mcp.call(
+        3,
+        &format!(
+            r#"{{"name":"run_resume","arguments":{{"run_id":"{run_id}","from_node":"work"}}}}"#
+        ),
+    );
+    assert_eq!(
+        unapproved["policy_refusal"]["policy"], "untrusted_requires_acknowledge",
+        "got: {unapproved}"
+    );
+    mcp.kill();
 }
 
 // A long-running `apb mcp` (an agent session's MCP server) keeps starting

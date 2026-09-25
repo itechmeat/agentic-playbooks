@@ -356,6 +356,13 @@ fn main() -> ExitCode {
     if registers_workspace(cli.command.as_ref()) && root.join(".apb").is_dir() {
         apb_core::projects::touch(&root);
     }
+    // The key that stamps the runs this installation creates (see
+    // `apb_core::run_origin`), so an MCP resume can refuse a run directory
+    // that came with a repository. Created on first use; best effort, like the
+    // registration above: without it runs are simply unstamped.
+    if registers_workspace(cli.command.as_ref()) {
+        let _ = apb_core::run_origin::ensure_key();
+    }
     match cli.command {
         Some(Command::Init) => run_init(&root),
         Some(Command::List) => run_list(&root),

@@ -78,7 +78,7 @@ Mutations (destructive):
 | `playbook_update` | New minor version of an existing playbook (approves the saved digest, like create) |
 | `playbook_delete` | Soft delete to trash (`.apb/trash/<id>-<millis>`; runs stay) |
 | `playbook_trash_restore` | Restore a trash entry by `name`, or a playbook id's latest deletion, with every version; the restored current version is approved like a save. A playbook that exists again under the id is a conflict and nothing moves. Current workspace only |
-| `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below) |
+| `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below). Only a run apb created on this machine resumes (`run_not_created_locally` otherwise, not bypassable); a run whose snapshot digest is not approved needs `acknowledge_untrusted: true` |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
 | `review_decide` | Decide a run's human_review node |
 | `run_progress_report` | Report cycle progress from inside a run: `done` of `total` iterations of the current cycle group, optional `label`; pass your own node id (`APB_NODE_ID`) when branches run concurrently |
@@ -129,6 +129,15 @@ be approved (or acknowledged), and the verified child pins go to the engine,
 so a child that changes after the check is refused when it would start. The
 read-only/destructive annotations remain client hints; enforcement lives on
 the server.
+
+A resume executes what the run directory holds, and a run directory lives in
+the workspace, so a repository can ship one. apb stamps every run it prepares
+with an HMAC keyed by a per-installation secret (`<config-dir>/run-origin.key`,
+created on first use), and MCP `run_resume` refuses a directory without a valid
+stamp (`run_not_created_locally`, an acknowledge does not bypass it). It then
+gates the snapshot's digest (its `playbook.yaml` plus its `scripts/`) like a
+start. Runs created before the stamp existed resume from the dashboard or
+`apb resume`, where the person resuming is the confirmation.
 
 The dashboard's Run button and `apb run` (with or without `--detach` or
 `--supervise`) go through the same gate (`apb_engine::gate::check_run`). The

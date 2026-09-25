@@ -600,6 +600,10 @@ pub(crate) fn prepare_run_target(
     if !manifest.is_empty() {
         prep_try(&mut log, crate::manifest::write(&run_dir, &manifest))?;
     }
+    // Mark the directory as created by this installation (after the
+    // write-once manifest, which the stamp covers), so a resume can tell it
+    // from a run directory that arrived with the repository.
+    prep_try(&mut log, apb_core::run_origin::stamp(&run_dir, &run_id))?;
 
     log.append(EventPayload::RunStarted {
         playbook: id.into(),

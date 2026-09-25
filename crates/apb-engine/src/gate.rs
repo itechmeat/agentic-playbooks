@@ -120,6 +120,40 @@ pub struct RunPermit {
     pub warnings: Vec<String>,
 }
 
+/// The gate for an agent resuming an existing run (MCP `run_resume`). A
+/// resume executes what the run directory holds - its playbook snapshot, its
+/// scripts copy, its manifest - so it gets the consent a start gets:
+/// - the directory must carry this installation's stamp
+///   ([`apb_core::run_origin`]): a run directory that came with a repository
+///   is refused outright (`run_not_created_locally`), acknowledged or not;
+/// - the snapshot's digest (its `playbook.yaml` plus its `scripts/`, the same
+///   [`apb_core::scope::definition_digest`] a start pins) must be approved,
+///   unless the caller acknowledged after confirming with the user.
+pub fn check_resume(root: &Path, run_id: &str, acknowledge_untrusted: bool) -> Result<(), Value> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(json!({ "policy": "not_found", "detail": format!("run `{run_id}`") }));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(json!({ "policy": "not_found", "detail": format!("run `{run_id}`") }));
+    }
+    if !apb_core::run_origin::verify(&run_dir, run_id) {
+        return Err(json!({
+            "policy": "run_not_created_locally",
+            "run_id": run_id,
+            "detail": "this run directory was not created by apb on this machine (it may have come with the repository); it cannot be resumed through MCP. Start the playbook again instead",
+        }));
+    }
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))
+        .map_err(|e| json!({ "policy": "not_found", "detail": e.to_string() }))?;
+    let digest = apb_core::scope::definition_digest(&yaml, &run_dir)
+        .map_err(|e| json!({ "policy": "snapshot_unreadable", "detail": e.to_string() }))?;
+    let id = apb_core::schema::Playbook::from_yaml(&yaml)
+        .map(|p| p.id)
+        .unwrap_or_default();
+    check_digest_trust(&id, &digest, acknowledge_untrusted)
+}
+
 /// One-pass walk of a playbook's sub-playbook tree (spec C), shared by the local
 /// run gate (`check_run`) and the cross-workspace consent surface (`preflight`)
 /// so both derive the SAME children pins and recursive effects union from a

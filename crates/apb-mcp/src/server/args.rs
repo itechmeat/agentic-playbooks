@@ -149,6 +149,11 @@ pub struct RunResumeArgs {
     /// (the accepted drift is recorded as an event in the run log).
     #[serde(default)]
     pub allow_environment_drift: bool,
+    /// Resume a run whose playbook snapshot (YAML plus scripts) is not an
+    /// approved digest. Pass true only after confirming with the user, as for
+    /// `playbook_run`.
+    #[serde(default)]
+    pub acknowledge_untrusted: Option<bool>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,

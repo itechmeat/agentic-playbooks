@@ -506,7 +506,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Resume a run, optionally from a given node. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway.",
+        description = "Resume a run, optionally from a given node. Only a run apb created on this machine can be resumed; a run whose playbook snapshot is not approved needs acknowledge_untrusted: true after user confirmation, like playbook_run. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn run_resume(
@@ -515,6 +515,7 @@ impl WfMcp {
             run_id,
             from_node,
             allow_environment_drift,
+            acknowledge_untrusted,
             workspace,
         }): Parameters<RunResumeArgs>,
     ) -> CallToolResult {
@@ -522,6 +523,11 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
+        if let Err(refusal) =
+            crate::policy::check_resume(&root, &run_id, acknowledge_untrusted == Some(true))
+        {
+            return to_call_tool_result(Ok(json!({ "policy_refusal": refusal })));
+        }
         to_call_tool_result(tools::run_resume(
             &root,
             &run_id,

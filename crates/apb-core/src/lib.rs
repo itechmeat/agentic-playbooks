@@ -20,6 +20,7 @@ pub mod profile;
 pub mod profile_store;
 pub mod projects;
 pub mod registry;
+pub mod run_origin;
 pub mod schema;
 pub mod schema_migrate;
 pub mod scope;
