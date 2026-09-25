@@ -221,7 +221,9 @@ impl WfMcp {
             expected_profile_bundles: Some(expected_bundles),
             ..Default::default()
         };
-        match apb_engine::run_background_resolved(&resolved, opts) {
+        // Driven by a detached process, like every other background start:
+        // the run must not die with this MCP session.
+        match apb_engine::start_detached_resolved(&resolved, opts) {
             Ok(run_id) => to_call_tool_result(Ok(json!({
                 "run_ref": { "workspace_id": payload.workspace_id, "run_id": run_id }
             }))),

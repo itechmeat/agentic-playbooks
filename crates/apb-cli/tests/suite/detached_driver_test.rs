@@ -457,6 +457,125 @@ fn a_stop_in_the_driver_spawn_window_is_not_lost() {
     );
 }
 
+// Scenario 2e: a run started from the dashboard survives the dashboard.
+//
+// The dashboard used to drive its runs on a thread of its own process, while
+// the CLI and MCP hand theirs to a detached driver. Every dashboard restart
+// (and on a dev box the service restarts on every `apb` reinstall) took each
+// run it had started down with it, leaving a `running` journal that nothing
+// would ever finish. Kill the dashboard mid-run: the run must still finish.
+#[test]
+fn a_dashboard_run_survives_the_dashboard_being_killed() {
+    let cfg = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("dashsurvive", 3);
+    seed(dir.path(), "dashsurvive", &yaml, &script);
+    // Register the project in this test's own registry, the way any `apb`
+    // command run inside it does, so the global dashboard can address it.
+    let listed = crate::common::apb_std()
+        .arg("list")
+        .current_dir(dir.path())
+        .env("APB_CONFIG_DIR", cfg.path())
+        .env_remove("CI")
+        .env_remove("APB_NO_REGISTRY")
+        .output()
+        .unwrap();
+    assert!(listed.status.success(), "apb list failed: {listed:?}");
+    let workspace = fs::read_to_string(dir.path().join(".apb/workspace.local"))
+        .expect("the project was registered")
+        .trim()
+        .to_string();
+
+    let mut dashboard = Dashboard::start(cfg.path());
+    let run_id = dashboard.start_run("dashsurvive", &workspace);
+    let _guard = RunGuard::new(dir.path(), &run_id);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    wait_until_driving(&run_dir);
+
+    dashboard.kill();
+
+    let status = wait_for_outcome(
+        &run_dir,
+        0,
+        "the dashboard's run to finish after the dashboard was killed",
+    );
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
+/// A global `apb dashboard` on a free loopback port, killed on drop.
+struct Dashboard {
+    child: Child,
+    port: u16,
+}
+
+impl Dashboard {
+    fn start(config_dir: &Path) -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let child = crate::common::apb_std()
+            .args(["dashboard", "--no-open", "--port", &port.to_string()])
+            .env("APB_CONFIG_DIR", config_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let dashboard = Self { child, port };
+        poll_until("the dashboard to accept connections", || {
+            std::net::TcpStream::connect(("127.0.0.1", port)).ok()
+        });
+        dashboard
+    }
+
+    /// `POST /api/playbooks/{id}/run` and the run id it answers with.
+    fn start_run(&mut self, id: &str, workspace: &str) -> String {
+        let mut conn = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        conn.set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        write!(
+            conn,
+            "POST /api/playbooks/{id}/run?workspace={workspace} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+            self.port
+        )
+        .unwrap();
+        let mut response = String::new();
+        std::io::Read::read_to_string(&mut conn, &mut response).unwrap();
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        let json: serde_json::Value = serde_json::from_str(body)
+            .unwrap_or_else(|_| panic!("the run start answered: {response}"));
+        json["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no run_id in: {response}"))
+            .to_string()
+    }
+
+    fn kill(&mut self) {
+        sig::kill_pid(self.child.id());
+        wait_with_deadline(&mut self.child, REAP_DEADLINE, "the dashboard to die");
+    }
+}
+
+impl Drop for Dashboard {
+    /// Bounded, like `McpSession`'s: this also runs while unwinding.
+    fn drop(&mut self) {
+        sig::kill_pid(self.child.id());
+        let deadline = Instant::now() + REAP_DEADLINE;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => std::thread::sleep(POLL_STEP),
+            }
+        }
+    }
+}
+
 // Scenario 3: `run_resume` acknowledges immediately and the resumed run then
 // completes without the caller. The resumed node sleeps 10s, so an ack that
 // arrives in well under 5s can only mean the drive was handed to another

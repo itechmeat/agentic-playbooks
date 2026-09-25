@@ -207,7 +207,13 @@ pub(crate) struct RunBody {
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
 /// returns its run_id immediately, so the dashboard can jump straight to the
-/// run view. Mirrors the CLI/MCP background-run path.
+/// run view.
+///
+/// The run is prepared here and then driven by a DETACHED `apb __drive-run`
+/// process, exactly like `apb run --detach` and MCP `playbook_run` with
+/// `background: true`. It used to be driven on a thread of the dashboard
+/// process instead, so every dashboard restart (a service restart, a
+/// reinstall) orphaned every run the dashboard had started.
 ///
 /// A start that finds the shared workdir already held by another write-run is
 /// QUEUED rather than refused (`server.workdir_queue_wait_seconds`, default
@@ -292,7 +298,7 @@ pub(crate) async fn run_playbook_handler(
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     }
 
-    match apb_engine::run_background(&root, &id, None, opts) {
+    match apb_engine::start_detached(&root, &id, None, opts) {
         Ok(run_id) => Json(serde_json::json!({ "run_id": run_id })).into_response(),
         Err(apb_engine::EngineError::NotFound(what)) => {
             (StatusCode::NOT_FOUND, what).into_response()

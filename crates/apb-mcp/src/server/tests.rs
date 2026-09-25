@@ -1218,9 +1218,20 @@ async fn prepare_then_execute_runs_in_target_workspace() {
         .expect("run_id present")
         .to_string();
     assert_eq!(out["run_ref"]["workspace_id"], b_id);
+    // The run is prepared in B and handed to a detached `apb __drive-run`
+    // process (driving it to completion is proven against the real binary in
+    // the apb-cli detached-driver suite; this test binary is not `apb`).
+    let events = apb_engine::event::read_all(&b.path().join(".apb/runs").join(&run_id)).unwrap();
     assert!(
-        run_finished(b.path(), &run_id),
-        "run should finish in target workspace B"
+        events.iter().any(|e| matches!(
+            e.payload,
+            apb_engine::event::EventPayload::RunStarted { .. }
+        )),
+        "the run must be prepared in target workspace B"
+    );
+    assert!(
+        !a.path().join(".apb/runs").join(&run_id).exists(),
+        "the run must not land in the calling workspace A"
     );
 
     unsafe {
