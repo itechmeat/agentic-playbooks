@@ -148,6 +148,20 @@ pub(crate) fn supervisor_brief(
 /// Poll interval for control.jsonl while waiting in supervised mode.
 pub(crate) const AWAIT_CONTROL_POLL: Duration = Duration::from_millis(50);
 
+/// Fails once the run directory is gone (a deleted workspace). Every waiting
+/// loop checks it, because a missing journal reads as empty and appends go to
+/// the unlinked file, so a parked driver would otherwise poll forever.
+pub(crate) fn ensure_run_dir(run_dir: &Path) -> Result<(), EngineError> {
+    if run_dir.is_dir() {
+        Ok(())
+    } else {
+        Err(EngineError::NotFound(format!(
+            "run directory {} was removed",
+            run_dir.display()
+        )))
+    }
+}
+
 /// Blocks until the first command with seq greater than `cursor` that must be
 /// returned to the caller (Retry/ContinueFrom/Pause/Abort/Patch). Used only in
 /// supervised mode after a wake event - by that point the run is already
@@ -165,6 +179,7 @@ pub(crate) fn await_control(
 ) -> Result<(Control, u64), EngineError> {
     let mut cursor = cursor;
     loop {
+        ensure_run_dir(run_dir)?;
         for entry in read_control_after(run_dir, cursor)? {
             match entry.cmd {
                 Control::ContextAppend { note } => {

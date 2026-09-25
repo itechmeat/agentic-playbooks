@@ -248,6 +248,36 @@ fn human_review_entry_event_carries_prompt() {
     assert_eq!(result.outcome, RunStatus::Succeeded);
 }
 
+/// A driver parked on an undecided gate must stop once its run directory is
+/// deleted (a removed workspace), instead of polling every 50 ms forever and
+/// appending `ReviewRequested` into an unlinked journal.
+#[test]
+fn a_gate_waiting_driver_stops_when_its_run_dir_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), WF_REVIEW);
+    let (tx, rx) = mpsc::channel();
+    let root = dir.path().to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "rev", None, RunOptions::default()).map(|r| r.outcome));
+    });
+    let run_dir = latest_run_dir(dir.path());
+    poll_until("review_requested", || {
+        read_all(&run_dir)
+            .ok()?
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::ReviewRequested { .. }))
+            .then_some(())
+    });
+    fs::remove_dir_all(dir.path()).unwrap();
+    let outcome = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("the driver kept polling a deleted run dir");
+    assert!(
+        !matches!(outcome, Ok(RunStatus::Succeeded)),
+        "got: {outcome:?}"
+    );
+}
+
 #[test]
 fn output_match_routes_on_substring() {
     let dir = tempfile::tempdir().unwrap();

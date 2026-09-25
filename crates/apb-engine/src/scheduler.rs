@@ -561,6 +561,7 @@ fn drive_inner(
     let mut steps = 0usize;
 
     loop {
+        supervisor::ensure_run_dir(run_dir)?;
         if steps >= max_steps {
             return Err(EngineError::Invalid(format!(
                 "run exceeded {max_steps} steps without reaching a finish node"

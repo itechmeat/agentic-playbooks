@@ -797,21 +797,15 @@ fn resume_detached_preflight_returns_drift_error_without_spawning() {
     // The override still threads through the detached path: with allow=true the
     // preflight passes and a driver is spawned. The detached child re-execs
     // `current_exe()` (this test binary), which has no `__drive-run` subcommand,
-    // so the child fails fast - but that failure happens AFTER the preflight
-    // returned Ok, which is what we assert here. The synchronous override is
-    // covered by `env_drift_stops_resume_unless_allowed` above.
+    // so the child exits at once and the engine's background reaper collects it
+    // (never signal its pid here: it may already be reused). That failure
+    // happens AFTER the preflight returned Ok, which is what we assert here. The
+    // synchronous override is covered by `env_drift_stops_resume_unless_allowed`.
     let spawned = resume_detached_with(proj.path(), &res.run_id, Some("t"), true);
     assert!(
         spawned.is_ok(),
         "allow=true must pass the preflight and spawn: {spawned:?}"
     );
-    if let Ok(pid) = spawned {
-        // Reap the test-binary child so it does not linger; it exits non-zero
-        // immediately because the test harness has no __drive-run subcommand.
-        let _ = std::process::Command::new("kill")
-            .args(["-9", &pid.to_string()])
-            .status();
-    }
 }
 
 #[test]
