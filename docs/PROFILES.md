@@ -140,10 +140,11 @@ MCP tools (agent-facing): `profile_list`, `profile_get`, `profile_write`,
 CLI: `apb profile list | show | move | delete | write | edit`, `apb detect`,
 `apb adopt`, `apb subscriptions`, and `apb migrate` to convert legacy `executors`
 playbooks. `apb profile write --scope --agent --model [--fallback a:m ...]
-[--skill NAME ...] [--soul FILE] [--description ...] [--expected-digest DIGEST]`
-creates or updates a profile through the same logic as the MCP tool (validation,
-per-profile CAS lock, bundle auto-approve); a stale `--expected-digest` is a
-reported conflict. `apb profile edit <name> [--scope]` opens `profile.yaml` and
+[--skill NAME ...] [--soul FILE] [--description ...] [--expected-digest DIGEST]
+[--hermetic true|false]` creates or updates a profile through the same logic as
+the MCP tool (validation, per-profile CAS lock, bundle auto-approve); a stale
+`--expected-digest` is a reported conflict. An update that omits `--hermetic`
+(or the MCP `hermetic` field, or the web editor) keeps the stored flag. `apb profile edit <name> [--scope]` opens `profile.yaml` and
 `SOUL.md` in `$EDITOR` and saves with a CAS check against the digest read before
 editing, so a concurrent change is a conflict rather than a clobber.
 

@@ -449,7 +449,8 @@ pub struct ProfileWriteArgs {
     #[serde(default)]
     pub expected_digest: Option<String>,
     /// When true, the executor launches with hermetic isolation (disables
-    /// user-scope plugins and hooks). Default false when absent.
+    /// user-scope plugins and hooks). Absent: an update keeps the stored flag,
+    /// a new profile gets false.
     #[serde(default)]
     pub hermetic: Option<bool>,
 }

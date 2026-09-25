@@ -141,8 +141,10 @@ pub struct ProfileWrite {
     pub expected_digest: Option<String>,
     pub soul_requirement: SoulRequirement,
     /// When true, the executor launches with hermetic isolation (disables
-    /// user-scope plugins and hooks). Default false.
-    pub hermetic: bool,
+    /// user-scope plugins and hooks). `None` keeps the stored profile's flag on
+    /// an update (false for a new profile), so a surface that cannot express
+    /// the flag never strips it.
+    pub hermetic: Option<bool>,
 }
 
 /// Create/update a profile (CAS under a per-profile lock, spec 9.1).
@@ -182,7 +184,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         let model = zcode_model(&agent, model)?;
         fallbacks.push(ProfileFallback { agent, model });
     }
-    let doc = ProfileDoc {
+    let mut doc = ProfileDoc {
         name: name.clone(),
         description,
         executor: ProfileExecutor {
@@ -192,9 +194,8 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         },
         soul: soul_requirement,
         skills,
-        hermetic,
+        hermetic: hermetic.unwrap_or(false),
     };
-    let yaml = serde_yaml_ng::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
 
     // Validation: the agent is known (builtin or config) - both the primary and EVERY
     // fallback; an unknown agent is a refusal, not a warning (spec 9.1).
@@ -249,8 +250,16 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
                     "expected_digest does not match current".into(),
                 ));
             }
+            // An update that does not state `hermetic` keeps the stored flag
+            // (read under the lock, from the exact content the CAS matched).
+            if hermetic.is_none() {
+                doc.hermetic = ProfileDoc::from_yaml(&cur_yaml)
+                    .map(|d| d.hermetic)
+                    .unwrap_or(false);
+            }
         }
     }
+    let yaml = serde_yaml_ng::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
 
     // Publish as a whole directory (not two independent files): assemble into
     // staging, then swap under the already-held lock (writers are serialized by

@@ -68,6 +68,10 @@ pub(crate) struct ProfileWriteArgs {
     /// Update an existing profile: digest it must currently match (CAS)
     #[arg(long)]
     expected_digest: Option<String>,
+    /// Hermetic isolation (true|false). Omitted: an update keeps the stored
+    /// flag, a new profile is not hermetic.
+    #[arg(long, value_name = "BOOL")]
+    hermetic: Option<bool>,
 }
 
 pub(crate) fn profile_cmd(root: &Path, action: ProfileAction) -> ExitCode {
@@ -143,7 +147,7 @@ pub(crate) fn profile_write_cmd(
             },
             expected_digest: args.expected_digest,
             soul_requirement,
-            hermetic: false,
+            hermetic: args.hermetic,
         },
     )
 }
@@ -334,7 +338,7 @@ pub(crate) fn profile_edit_cmd(root: &Path, name: &str, scope: &str) -> ExitCode
             },
             expected_digest: Some(digest_before),
             soul_requirement: doc.soul,
-            hermetic: doc.hermetic,
+            hermetic: Some(doc.hermetic),
         },
     );
     match res {

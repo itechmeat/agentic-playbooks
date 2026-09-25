@@ -96,7 +96,7 @@ fn profile_write_persists_hermetic_field() {
             description: "desc".into(),
             soul_md: "role".into(),
             executor: exec(),
-            hermetic: true,
+            hermetic: Some(true),
             ..Default::default()
         },
     )
@@ -117,7 +117,7 @@ fn profile_write_persists_hermetic_field() {
             description: "desc".into(),
             soul_md: "role".into(),
             executor: exec(),
-            hermetic: false,
+            hermetic: Some(false),
             ..Default::default()
         },
     )
@@ -128,6 +128,53 @@ fn profile_write_persists_hermetic_field() {
     assert!(
         !doc_plain.hermetic,
         "hermetic: false (or omitted) must parse back as false; yaml:\n{yaml_plain}"
+    );
+}
+
+/// F15: an update that does not mention `hermetic` (MCP `profile_write` without
+/// the field, `apb profile write` without the flag) keeps the stored flag
+/// instead of silently turning hermetic isolation off.
+#[test]
+fn profile_update_without_hermetic_keeps_stored_flag() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _h, _c) = setup();
+    let write = |desc: &str, expected: Option<String>| {
+        profile_tools::profile_write(
+            proj.path(),
+            profile_tools::ProfileWrite {
+                name: "herm".into(),
+                scope: "project".into(),
+                description: desc.into(),
+                soul_md: "role".into(),
+                executor: exec(),
+                expected_digest: expected,
+                ..Default::default()
+            },
+        )
+        .expect("profile_write ok")
+    };
+    let created = profile_tools::profile_write(
+        proj.path(),
+        profile_tools::ProfileWrite {
+            name: "herm".into(),
+            scope: "project".into(),
+            description: "desc".into(),
+            soul_md: "role".into(),
+            executor: exec(),
+            hermetic: Some(true),
+            ..Default::default()
+        },
+    )
+    .expect("profile_write ok");
+    let digest = created["profile_digest"].as_str().unwrap().to_string();
+    write("updated", Some(digest));
+    let yaml = fs::read_to_string(proj.path().join(".apb/profiles/herm/profile.yaml")).unwrap();
+    let doc = apb_core::profile::ProfileDoc::from_yaml(&yaml).unwrap();
+    assert_eq!(doc.description, "updated");
+    assert!(
+        doc.hermetic,
+        "an update that omits hermetic must keep it; yaml:\n{yaml}"
     );
 }
 

@@ -94,7 +94,7 @@ impl WfMcp {
                 executor,
                 expected_digest,
                 soul_requirement,
-                hermetic: hermetic.unwrap_or(false),
+                hermetic,
             },
         ))
     }
