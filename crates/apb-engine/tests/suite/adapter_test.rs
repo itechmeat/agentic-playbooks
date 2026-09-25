@@ -143,3 +143,74 @@ fn hermes_adapter_sends_z_flag_prefixed_soul_and_model_flag() {
     // falls back to the full captured stdout.
     assert_eq!(report.summary, report.raw);
 }
+
+/// A prompt (or a SOUL prefix, e.g. YAML front matter) that starts with `-`
+/// must reach every built-in agent as the prompt, never as an option. Where the
+/// prompt is a positional argument it follows an end-of-options `--` and comes
+/// last, after every flag apb adds (SOUL, autonomy, session); where it is the
+/// value of an option (`-p <text>`, `-z <text>`) it must not start with `-`,
+/// since several parsers refuse or misread a dash-led option value. Covers the
+/// launch form and the resume form of each agent.
+#[test]
+fn a_dash_led_prompt_never_reaches_an_agent_as_an_option() {
+    const POSITIONAL: &[&str] = &["claude", "codex", "opencode", "cursor", "qoder"];
+    const AGENTS: &[&str] = &[
+        "claude", "agy", "codex", "opencode", "hermes", "grok", "cursor", "qoder", "zcode",
+    ];
+    let dir = tempfile::tempdir().unwrap();
+    let program = stub_agent(dir.path(), "printf '<<<%s>>>\\001' \"$@\"");
+    for agent in AGENTS {
+        let base = builtin(agent).unwrap_or_else(|| panic!("builtin {agent}"));
+        let mut forms = vec![("launch", base.clone())];
+        if let Some(resume) = apb_engine::invocation::resume_spec(&base, agent, "sess-1") {
+            forms.push(("resume", resume));
+        }
+        for (form, spec) in forms {
+            let ad = ClaudeAdapter {
+                program: program.clone(),
+                spec,
+            };
+            let report = ad
+                .run(&AgentTask {
+                    prompt: "--help me review this",
+                    model: "m-1",
+                    workdir: dir.path(),
+                    timeout: None,
+                    stream_log: None,
+                    soul: Some("---\nrole: reviewer\n---"),
+                    grant_autonomy: true,
+                    connector_policy: &Default::default(),
+                    interactive: false,
+                    report_contract: true,
+                    node: "test",
+                    agent: "claude",
+                    extract: None,
+                    status_file: None,
+                    hermetic_settings: None,
+                })
+                .unwrap();
+            let argv: Vec<&str> = report
+                .raw
+                .split('\u{1}')
+                .filter(|s| !s.is_empty())
+                .map(|s| s.trim_start_matches("<<<").trim_end_matches(">>>"))
+                .collect();
+            let at = argv
+                .iter()
+                .position(|a| a.contains("--help me review this"))
+                .unwrap_or_else(|| panic!("{agent} {form}: no prompt in {argv:?}"));
+            if POSITIONAL.contains(agent) {
+                assert_eq!(
+                    (at, argv[at - 1]),
+                    (argv.len() - 1, "--"),
+                    "{agent} {form}: the prompt must be last, right after `--`: {argv:?}"
+                );
+            } else {
+                assert!(
+                    !argv[at].starts_with('-'),
+                    "{agent} {form}: an option value must not start with `-`: {argv:?}"
+                );
+            }
+        }
+    }
+}

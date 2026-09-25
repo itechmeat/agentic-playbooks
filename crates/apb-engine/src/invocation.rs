@@ -29,6 +29,17 @@ pub struct ResolvedInvocation {
 
 /// Built-in invocation form for the known ten. `None` for unknown agents and
 /// for pi (details will follow once the binary exists).
+///
+/// The prompt is never parsed as an option. Where an agent takes it as a
+/// positional argument (claude, codex, opencode, cursor, qoder) the form ends
+/// with `--`, `{prompt}` and the adapter keeps that pair last. Verified
+/// against claude 2.1.283, `codex exec` and `codex exec resume` 0.157.0 and
+/// `opencode run` 1.18.32: each reads a dash-led prompt after `--` as text and refuses
+/// it without one. cursor and qoder are not installed where this was checked;
+/// `--` is the standard end of options of their parsers. Where the prompt is an option's value
+/// (`-p <text>` for grok, zcode and agy, `-z <text>` for hermes) there is no
+/// `--` to put in front of it; the adapter sends a dash-led prompt with a
+/// leading newline instead (zcode refuses a dash-led `-p` value outright).
 pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
     let mk = |argv: &[&str],
               soul: SoulDelivery,
@@ -53,7 +64,7 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         // blocking `ask_user` MCP tool, Task 11); the aggregators that expose a
         // resumable session get `resume`; agy, which does not, gets `reprompt`.
         "claude" => Some(mk(
-            &["-p", "{prompt}", "--model", "{model}"],
+            &["-p", "--model", "{model}", "--", "{prompt}"],
             SoulDelivery::Native,
             Some("--append-system-prompt"),
             &["--permission-mode", "bypassPermissions"],
@@ -74,7 +85,7 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         // prompts and runs without sandboxing, the one-shot equivalent of
         // claude's bypassPermissions.
         "codex" => Some(mk(
-            &["exec", "{prompt}", "-m", "{model}"],
+            &["exec", "-m", "{model}", "--", "{prompt}"],
             SoulDelivery::Prefix,
             None,
             &["--dangerously-bypass-approvals-and-sandbox"],
@@ -83,7 +94,7 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         // Verified against the local `opencode run --help`: `--auto`
         // auto-approves permissions that are not explicitly denied.
         "opencode" => Some(mk(
-            &["run", "{prompt}", "-m", "{model}"],
+            &["run", "-m", "{model}", "--", "{prompt}"],
             SoulDelivery::Prefix,
             None,
             &["--auto"],
@@ -126,7 +137,7 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         // together with `--print`). No system-prompt flag exists, so the SOUL
         // travels as a prefix like the other aggregators.
         "cursor" => Some(mk(
-            &["-p", "--model", "{model}", "{prompt}"],
+            &["-p", "--model", "{model}", "--", "{prompt}"],
             SoulDelivery::Prefix,
             None,
             &["--output-format", "text", "--force"],
@@ -147,6 +158,7 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
                 "text",
                 "--model",
                 "{model}",
+                "--",
                 "{prompt}",
             ],
             SoulDelivery::Native,
@@ -199,27 +211,30 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
             "--resume",
             "{session}",
             "-p",
-            "{prompt}",
             "--model",
             "{model}",
+            "--",
+            "{prompt}",
         ])),
         // codex re-enters a conversation via `exec resume <id>`.
         "codex" => Some(v(&[
             "exec",
             "resume",
             "{session}",
-            "{prompt}",
             "-m",
             "{model}",
+            "--",
+            "{prompt}",
         ])),
         // opencode re-enters a session via `--session <id>`.
         "opencode" => Some(v(&[
             "run",
             "--session",
             "{session}",
-            "{prompt}",
             "-m",
             "{model}",
+            "--",
+            "{prompt}",
         ])),
         // hermes re-enters a session via `--resume <id>`, still in script mode.
         "hermes" => Some(v(&[
@@ -241,6 +256,7 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
             "-p",
             "--model",
             "{model}",
+            "--",
             "{prompt}",
         ])),
         // qoder resumes a session via `--resume <id>`; the follow-up prompt
@@ -253,6 +269,7 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
             "text",
             "--model",
             "{model}",
+            "--",
             "{prompt}",
         ])),
         // zcode re-enters a persisted session via `--resume sess_...`; the mode
@@ -268,6 +285,32 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
         ])),
         _ => None,
     }
+}
+
+/// `base` turned into its resume form for `session` (the agent's declarative
+/// resume argv with the id substituted, spec 2026-07-20 Task 7). The binary,
+/// autonomy flags and transport stay; the follow-up always travels as argv
+/// `{prompt}`. `None` for an agent with no resume form.
+pub fn resume_spec(
+    base: &apb_core::config::InvocationDef,
+    agent: &str,
+    session: &str,
+) -> Option<apb_core::config::InvocationDef> {
+    let argv = resume_argv(agent)?
+        .into_iter()
+        .map(|a| {
+            if a == "{session}" {
+                session.to_string()
+            } else {
+                a
+            }
+        })
+        .collect();
+    Some(apb_core::config::InvocationDef {
+        argv,
+        prompt_via: apb_core::config::PromptVia::Argv,
+        ..base.clone()
+    })
 }
 
 /// How a fresh attempt makes its agent session findable, so a retry, a
@@ -600,11 +643,14 @@ mod tests {
     }
 
     /// cursor's `-p` is a boolean print flag and the prompt is POSITIONAL, so
-    /// the prompt slot must come last, after every option.
+    /// the prompt slot comes last, after `--` and every option.
     #[test]
     fn builtin_cursor_form() {
         let spec = builtin("cursor").expect("cursor builtin spec");
-        assert_eq!(spec.argv, vec!["-p", "--model", "{model}", "{prompt}"]);
+        assert_eq!(
+            spec.argv,
+            vec!["-p", "--model", "{model}", "--", "{prompt}"]
+        );
         assert_eq!(spec.soul, SoulDelivery::Prefix);
         assert_eq!(spec.soul_flag, None);
         assert_eq!(spec.transport, Transport::Headless);
@@ -621,6 +667,7 @@ mod tests {
                 "-p",
                 "--model",
                 "{model}",
+                "--",
                 "{prompt}"
             ]
         );
@@ -642,6 +689,7 @@ mod tests {
                 "text",
                 "--model",
                 "{model}",
+                "--",
                 "{prompt}"
             ]
         );
@@ -663,6 +711,7 @@ mod tests {
                 "text",
                 "--model",
                 "{model}",
+                "--",
                 "{prompt}"
             ]
         );

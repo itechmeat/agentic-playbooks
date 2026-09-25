@@ -44,12 +44,12 @@ edges:
 /// of pure spawn and kill stall on an otherwise idle tree, failing the 3s budget
 /// in 5 of 8 isolated runs while the cancel path worked every time.
 fn write_mock_agent(root: &Path, marker: &Path) -> String {
-    // Adapter arguments: -p <prompt> --model <model>. $2 = the prompt.
+    // Adapter arguments: -p --model <model> -- <prompt>; the prompt is last.
     let path = root.join("mock-agent.sh");
     fs::write(
         &path,
         format!(
-            "#!/bin/sh\ncase \"$2\" in *slow*) sleep 5; : > {} ;; esac\necho done\n",
+            "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in *slow*) sleep 5; : > {} ;; esac\necho done\n",
             marker.to_string_lossy()
         ),
     )

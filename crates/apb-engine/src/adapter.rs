@@ -900,26 +900,65 @@ pub struct ClaudeAdapter {
     pub spec: InvocationDef,
 }
 
+/// An agent command line as the adapter assembles it: the options, the
+/// trailing positional prompt kept apart so flags added later still land in
+/// front of it, and an optional stdin payload.
+struct AgentCommand {
+    /// Everything before the end-of-options marker; callers append their own
+    /// flags here.
+    argv: Vec<String>,
+    /// `--` and the prompt when the form passes the prompt as a trailing
+    /// positional (a `--` element right before `{prompt}`), else empty.
+    tail: Vec<String>,
+    stdin: Option<String>,
+}
+
+impl AgentCommand {
+    /// The complete argv (options, then the prompt tail) and the stdin payload.
+    fn into_parts(self) -> (Vec<String>, Option<String>) {
+        let mut argv = self.argv;
+        argv.extend(self.tail);
+        (argv, self.stdin)
+    }
+}
+
 /// Builds argv (without the program name) and an optional stdin payload from
 /// the invocation form. The `{prompt}`/`{model}` placeholders are substituted
 /// as whole elements. SOUL: with `prefix` it is prepended before the prompt,
 /// with `native` it goes out as a separate `soul_flag <soul>`. An empty SOUL
 /// is not delivered.
+///
+/// A prompt is text, never an option. A `--` element right before `{prompt}`
+/// marks it as a trailing positional: the pair is emitted last, after every
+/// other element and every flag appended later, so nothing the prompt starts
+/// with can be parsed as an option. Where the form has no such marker (the
+/// prompt is an option's value, `-p <text>`), a prompt that starts with `-` is
+/// sent with a leading newline, because several parsers refuse or misread an
+/// option value that looks like an option.
 fn build_command(
     spec: &InvocationDef,
     prompt: &str,
     model: &str,
     soul: Option<&str>,
     grant_autonomy: bool,
-) -> (Vec<String>, Option<String>) {
+) -> AgentCommand {
     let soul = soul.filter(|s| !s.is_empty());
     let effective_prompt = match (spec.soul, soul) {
         (SoulDelivery::Prefix, Some(s)) => format!("{s}\n\n---\n\n{prompt}"),
         _ => prompt.to_string(),
     };
     let mut argv: Vec<String> = Vec::with_capacity(spec.argv.len() + 2);
-    for a in &spec.argv {
+    let mut tail: Vec<String> = Vec::new();
+    let mut elements = spec.argv.iter().peekable();
+    while let Some(a) = elements.next() {
         match a.as_str() {
+            "--" if elements.peek().is_some_and(|n| n.as_str() == "{prompt}") => {
+                elements.next();
+                tail = vec!["--".to_string(), effective_prompt.clone()];
+            }
+            "{prompt}" if effective_prompt.starts_with('-') => {
+                argv.push(format!("\n{effective_prompt}"))
+            }
             "{prompt}" => argv.push(effective_prompt.clone()),
             "{model}" => argv.push(model.to_string()),
             other => argv.push(other.to_string()),
@@ -939,11 +978,11 @@ fn build_command(
     if grant_autonomy {
         argv.extend(spec.autonomous_args.iter().cloned());
     }
-    let stdin_payload = match spec.prompt_via {
+    let stdin = match spec.prompt_via {
         PromptVia::Stdin => Some(effective_prompt),
         PromptVia::Argv => None,
     };
-    (argv, stdin_payload)
+    AgentCommand { argv, tail, stdin }
 }
 
 /// Appends the live `--mcp-config` sidecar injection to `argv` when this is a
@@ -1253,15 +1292,16 @@ impl ClaudeAdapter {
         control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = transport_prompt(task);
-        let (mut argv, stdin_payload) = build_command(
+        let mut built = build_command(
             &self.spec,
             &prompt,
             task.model,
             task.soul,
             task.grant_autonomy,
         );
-        inject_ask_server(&mut argv, task, live);
-        inject_hermetic_settings(&mut argv, task);
+        inject_ask_server(&mut built.argv, task, live);
+        inject_hermetic_settings(&mut built.argv, task);
+        let (argv, stdin_payload) = built.into_parts();
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(task.workdir)
@@ -1464,18 +1504,19 @@ impl ClaudeAdapter {
         // Base argv comes from the invocation form; claude-specific streaming
         // flags (stream-json) are layered on top. In the first iteration,
         // acp = claude.
-        let (mut argv, _stdin) = build_command(
+        let mut built = build_command(
             &self.spec,
             &prompt,
             task.model,
             task.soul,
             task.grant_autonomy,
         );
-        inject_ask_server(&mut argv, task, live);
-        inject_hermetic_settings(&mut argv, task);
-        argv.push("--output-format".to_string());
-        argv.push("stream-json".to_string());
-        argv.push("--verbose".to_string());
+        inject_ask_server(&mut built.argv, task, live);
+        inject_hermetic_settings(&mut built.argv, task);
+        built.argv.push("--output-format".to_string());
+        built.argv.push("stream-json".to_string());
+        built.argv.push("--verbose".to_string());
+        let (argv, _stdin) = built.into_parts();
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(task.workdir)
@@ -1873,7 +1914,8 @@ impl AgentAdapter for ClaudeAdapter {
         // The supervisor keeps the default permission posture for now; its
         // intervention path is the supervisor_* MCP tools, not autonomous
         // file/network actions in the run workdir.
-        let (argv, stdin_payload) = build_command(&self.spec, brief, model, soul, false);
+        let (argv, stdin_payload) =
+            build_command(&self.spec, brief, model, soul, false).into_parts();
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(workdir)
@@ -1985,7 +2027,7 @@ mod tests {
     #[test]
     fn build_command_appends_autonomous_args_when_granted() {
         let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
-        let (argv, _) = build_command(&spec, "hello", "claude-opus-5-5", None, true);
+        let (argv, _) = build_command(&spec, "hello", "claude-opus-5-5", None, true).into_parts();
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"),
@@ -1996,21 +2038,20 @@ mod tests {
     #[test]
     fn build_command_omits_autonomous_args_when_not_granted() {
         let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
-        let (argv, _) = build_command(&spec, "hello", "claude-opus-5-5", None, false);
+        let (argv, _) = build_command(&spec, "hello", "claude-opus-5-5", None, false).into_parts();
         assert!(
             !argv.iter().any(|a| a == "bypassPermissions"),
             "must not grant permissions without autonomy, got {argv:?}"
         );
     }
 
-    /// qoder is the only builtin combining a trailing positional `{prompt}`
-    /// with `SoulDelivery::Native`: the SOUL and the autonomy flags are
-    /// appended AFTER the positional prompt, not before it like claude/grok
-    /// (whose `{prompt}` sits mid-argv). Pins the fully assembled command,
-    /// not just `spec.argv`, so a future change to `build_command`'s append
-    /// order is caught here.
+    /// qoder combines a trailing positional `{prompt}` with
+    /// `SoulDelivery::Native`: the SOUL and the autonomy flags are appended to
+    /// the options, and the prompt still comes last, after `--`. Pins the
+    /// fully assembled command, not just `spec.argv`, so a future change to
+    /// `build_command`'s append order is caught here.
     #[test]
-    fn build_command_assembles_qoder_soul_and_autonomy_after_the_positional_prompt() {
+    fn build_command_assembles_qoder_soul_and_autonomy_before_the_trailing_prompt() {
         let spec = crate::invocation::builtin("qoder").expect("builtin qoder spec");
         let (argv, stdin) = build_command(
             &spec,
@@ -2018,7 +2059,8 @@ mod tests {
             "qwen3.8-max",
             Some("You are a careful reviewer."),
             true,
-        );
+        )
+        .into_parts();
         assert_eq!(
             argv,
             vec![
@@ -2027,11 +2069,12 @@ mod tests {
                 "text",
                 "--model",
                 "qwen3.8-max",
-                "do the thing",
                 "--append-system-prompt",
                 "You are a careful reviewer.",
                 "--permission-mode",
                 "bypass_permissions",
+                "--",
+                "do the thing",
             ]
         );
         assert_eq!(stdin, None);

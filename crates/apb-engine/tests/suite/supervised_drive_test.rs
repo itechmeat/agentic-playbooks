@@ -293,13 +293,13 @@ edges:
 "#;
 
 /// One stub for both branches: the adapter passes `-p <prompt> --model <model>`,
-/// so `$2` is the prompt and the branch is told apart by its text. The flaky
+/// so the last argument is the prompt and the branch is told apart by its text. The flaky
 /// branch fails once (marker file) and succeeds afterwards.
 fn branch_agent(dir: &Path) -> String {
     let marker = dir.join("branch_b.marker");
     let path = dir.join("branch_agent.sh");
     let body = format!(
-        "#!/bin/sh\ncase \"$2\" in\n  *flaky*)\n    if [ -f '{m}' ]; then echo ok; exit 0; fi\n    touch '{m}'\n    echo 'branch b boom' 1>&2\n    exit 1\n    ;;\nesac\necho ok\n",
+        "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n  *flaky*)\n    if [ -f '{m}' ]; then echo ok; exit 0; fi\n    touch '{m}'\n    echo 'branch b boom' 1>&2\n    exit 1\n    ;;\nesac\necho ok\n",
         m = marker.display()
     );
     fs::write(&path, body).unwrap();
@@ -441,7 +441,7 @@ edges:
 fn two_flaky_branches_agent(dir: &Path) -> String {
     let path = dir.join("two_flaky.sh");
     let body = format!(
-        "#!/bin/sh\ncase \"$2\" in\n\
+        "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n\
          \x20 *flaky1*) m='{m1}' ;;\n\
          \x20 *flaky2*) m='{m2}' ;;\n\
          \x20 *) echo ok; exit 0 ;;\n\
@@ -582,7 +582,7 @@ fn fail_on_demand_agent(dir: &Path) -> String {
     let path = dir.join("fail_on_demand.sh");
     fs::write(
         &path,
-        "#!/bin/sh\ncase \"$2\" in *fail-me*) echo 'boom' 1>&2; exit 1 ;; esac\necho ok\n",
+        "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in *fail-me*) echo 'boom' 1>&2; exit 1 ;; esac\necho ok\n",
     )
     .unwrap();
     set_executable(&path);

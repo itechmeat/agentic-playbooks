@@ -37,9 +37,10 @@ impl Invocation {
             .map(|w| w[1].as_str())
     }
 
-    /// The prompt text handed over with `-p` (claude's and the stub's form).
+    /// The prompt text: the argument after the end-of-options `--`
+    /// (claude's and the stub's form).
     pub fn prompt(&self) -> &str {
-        self.flag("-p").unwrap_or("")
+        self.flag("--").unwrap_or("")
     }
 
     /// Whether this process re-entered an existing session (claude

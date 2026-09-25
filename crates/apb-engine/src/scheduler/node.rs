@@ -119,32 +119,6 @@ fn resolve_session(
     }
 }
 
-/// `base` turned into its resume form for `session` (the agent's declarative
-/// resume argv with the id substituted, spec 2026-07-20 Task 7). The binary,
-/// autonomy flags and transport stay; the follow-up always travels as argv
-/// `{prompt}`. `None` for an agent with no resume form.
-fn resume_spec(
-    base: &apb_core::config::InvocationDef,
-    agent: &str,
-    session: &str,
-) -> Option<apb_core::config::InvocationDef> {
-    let argv = crate::invocation::resume_argv(agent)?
-        .into_iter()
-        .map(|a| {
-            if a == "{session}" {
-                session.to_string()
-            } else {
-                a
-            }
-        })
-        .collect();
-    Some(apb_core::config::InvocationDef {
-        argv,
-        prompt_via: apb_core::config::PromptVia::Argv,
-        ..base.clone()
-    })
-}
-
 /// How much of the last failure a continuation prompt quotes.
 const CONTINUATION_REASON_MAX_BYTES: usize = 2048;
 
@@ -1033,8 +1007,10 @@ pub(crate) fn execute_node(
                     let adapter: Box<dyn crate::adapter::AgentAdapter> = match &base_spec {
                         Some((base, program)) => {
                             let spec = match &continued {
-                                Some((sid, _)) => resume_spec(base, &step.agent, sid)
-                                    .expect("a continued session implies a resume form"),
+                                Some((sid, _)) => {
+                                    crate::invocation::resume_spec(base, &step.agent, sid)
+                                        .expect("a continued session implies a resume form")
+                                }
                                 None => {
                                     let f = crate::invocation::fresh_session(
                                         &step.agent,

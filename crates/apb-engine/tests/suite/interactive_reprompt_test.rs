@@ -643,11 +643,11 @@ fn reinvocation_prompt_carries_original_and_transcript() {
     let promptfile = bin.path().join("prompts");
     seed_playbook(proj.path());
     seed_profile(proj.path(), "arch");
-    // Every invocation appends its prompt argument ($2 = the `-p` prompt) to
+    // Every invocation appends its prompt argument (the last argument, after `--`) to
     // `promptfile`. Invocation 1 asks; invocation 2 (reachable only after the
     // answer) finishes.
     let body = format!(
-        "c=\"{}\"\np=\"{}\"\nn=$(cat \"$c\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$c\"\nprintf '%s\\n' \"$2\" >> \"$p\"\nif [ \"$n\" = \"1\" ]; then\n  printf '%s\\n' '<<<apb:question>>>'\n  printf '%s\\n' '{{\"question\":\"Which DB?\",\"options\":[\"pg\"]}}'\n  exit 0\nfi\necho done\nexit 0",
+        "for last; do :; done\nc=\"{}\"\np=\"{}\"\nn=$(cat \"$c\" 2>/dev/null || echo 0); n=$((n+1)); echo \"$n\" > \"$c\"\nprintf '%s\\n' \"$last\" >> \"$p\"\nif [ \"$n\" = \"1\" ]; then\n  printf '%s\\n' '<<<apb:question>>>'\n  printf '%s\\n' '{{\"question\":\"Which DB?\",\"options\":[\"pg\"]}}'\n  exit 0\nfi\necho done\nexit 0",
         counter.display(),
         promptfile.display()
     );

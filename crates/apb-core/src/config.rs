@@ -152,7 +152,12 @@ pub enum Interaction {
 #[serde(deny_unknown_fields)]
 pub struct InvocationDef {
     /// Argument template (without the program name). Placeholders:
-    /// `{prompt}`, `{model}`.
+    /// `{prompt}`, `{model}`. A `--` element right before `{prompt}` marks the
+    /// prompt as a trailing positional: the engine emits `-- <prompt>` last,
+    /// after every flag it appends (SOUL, autonomy, session), so a prompt that
+    /// starts with `-` is never parsed as an option. Without that marker the
+    /// prompt is taken to be an option's value, and a dash-led prompt is sent
+    /// with a leading newline instead.
     pub argv: Vec<String>,
     #[serde(default)]
     pub prompt_via: PromptVia,
