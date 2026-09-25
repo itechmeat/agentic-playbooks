@@ -661,6 +661,18 @@ handle something (a review that routes into a fix, a check that routes into a
 retry) stay exactly as they are. Only the edges that led nowhere but the end of
 the run disappear.
 
+An unconditional edge (no `condition`, not a `fallback`) is taken whatever the
+node's status, so it moves the run past a failure without handling it. A run
+that reaches a `finish outcome: success` node carrying such a failure ends
+**failed**, with a run error naming the node: a delegated `type: playbook`
+child that failed, followed by one arrow onward, must not read as success. A
+failure counts as handled when, after it, the run takes a conditional or
+`fallback` edge out of the failed node, the `on_failure` route, an edge into
+an explicit `join` (which weighs the delivered failure), or any conditional
+edge that reads the failed node (for example `build -> check`, then `check ->
+fix` on `node_status: build equals failure`). Only the node's latest result
+counts, so a retry or a loop that later succeeds leaves nothing behind.
+
 The web canvas marks a node whose failure the policy handles with `stop on
 failure` or `on failure: <node>`, so the branch that is no longer drawn is
 still visible.

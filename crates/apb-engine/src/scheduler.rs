@@ -651,13 +651,30 @@ fn drive_inner(
             } else {
                 String::new()
             };
-            let outcome = match o {
-                Outcome::Success => RunStatus::Succeeded,
-                Outcome::Failure => RunStatus::Failed,
+            // The declared outcome is honest only if no failure was carried
+            // here past every route (issue #106): an unconditional edge moves
+            // on from a failed node without handling the failure, and a
+            // success finish must not paper over it.
+            let unhandled = match o {
+                Outcome::Success => parallel::unhandled_failure(&playbook, &read_all(run_dir)?),
+                Outcome::Failure => None,
             };
-            let s = match o {
-                Outcome::Success => "succeeded",
-                Outcome::Failure => "failed",
+            if let Some(node) = &unhandled {
+                log.append(EventPayload::RunError {
+                    node: Some(node.clone()),
+                    reason: format!(
+                        "node `{node}` failed and no route handled the failure: it went on \
+                         along an unconditional edge, so the run cannot finish as succeeded"
+                    ),
+                })?;
+            }
+            let outcome = match (o, &unhandled) {
+                (Outcome::Success, None) => RunStatus::Succeeded,
+                _ => RunStatus::Failed,
+            };
+            let s = match outcome {
+                RunStatus::Succeeded => "succeeded",
+                _ => "failed",
             };
             log.append(EventPayload::NodeFinished {
                 node: current.clone(),

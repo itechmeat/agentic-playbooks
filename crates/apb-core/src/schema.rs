@@ -548,6 +548,10 @@ fn is_false(b: &bool) -> bool {
 /// nowhere to go means, which is why declaring it lets a playbook delete the
 /// pile of `node_status: failure` edges into a negative finish node and keep
 /// only the branches that actually handle something.
+///
+/// An unconditional edge out of a failed node moves the run on but does not
+/// handle the failure: a run that reaches a success finish carrying such a
+/// failure ends failed (`apb_engine::parallel::unhandled_failure`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FailurePolicy {
     /// Today's behavior: an unhandled failure is an engine error, because the

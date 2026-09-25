@@ -207,6 +207,8 @@ mod supervisor_commands_test;
 #[cfg(unix)]
 #[path = "suite/token_economy_test.rs"]
 mod token_economy_test;
+#[path = "suite/unhandled_failure_test.rs"]
+mod unhandled_failure_test;
 #[path = "suite/wait_test.rs"]
 mod wait_test;
 #[path = "suite/wake_events_test.rs"]
