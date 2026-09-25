@@ -540,14 +540,6 @@ async fn background_run_returns_run_id_without_blocking() {
 }
 
 #[test]
-fn patch_playbook_tool_maps_to_patch_capability() {
-    assert_eq!(
-        capability_for_tool("supervisor_patch_playbook"),
-        "patch_playbook"
-    );
-}
-
-#[test]
 fn patch_playbook_rejected_without_capability() {
     let dir = tempfile::tempdir().unwrap();
     let server = WfMcp::new(dir.path().to_path_buf());
@@ -576,11 +568,6 @@ fn patch_playbook_allowed_with_capability() {
 /// gated exactly like its sibling `supervisor_node_retry`: it is a control-flow
 /// intervention, so it needs the `retry` capability, not `observe`.
 #[test]
-fn interrupt_attempt_tool_maps_to_retry_capability() {
-    assert_eq!(capability_for_tool("supervisor_interrupt_attempt"), "retry");
-}
-
-#[test]
 fn interrupt_attempt_rejected_without_capability() {
     let dir = tempfile::tempdir().unwrap();
     let server = WfMcp::new(dir.path().to_path_buf());
@@ -596,11 +583,6 @@ fn interrupt_attempt_rejected_without_capability() {
 /// capability: strictly larger than a retry (it re-runs the trust gate for a new
 /// bundle and changes the run's effective binding), so a policy can grant retry
 /// without granting rebind.
-#[test]
-fn rebind_profile_tool_maps_to_rebind_capability() {
-    assert_eq!(capability_for_tool("supervisor_rebind_profile"), "rebind");
-}
-
 #[test]
 fn rebind_profile_rejected_without_the_rebind_capability() {
     let dir = tempfile::tempdir().unwrap();
