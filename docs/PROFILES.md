@@ -187,6 +187,54 @@ whatever flags the CLI does or does not offer. That is also the right shape for
 review, audit and analysis nodes regardless of the agent, because the finding is
 the deliverable and nothing in the workspace changes.
 
+## Where the agent and model lists come from
+
+There is exactly one source of truth for which agents exist and which models
+apb offers for each: `apb_core::agent_catalog`. Every consumer goes through it,
+so the lists cannot disagree between the dashboard, the CLI, the MCP tools, and
+validation.
+
+| Layer | Holds | Role |
+|---|---|---|
+| `assets/models.yaml`, embedded in the binary | curated rows, `claude_static_models`, `codex_static_models` | authoritative for claude, codex, and the curated table |
+| `<config_dir>/models.yaml` (user overlay) | per-field row patches, list overrides, subscriptions | authoritative when present; merged by `models_table::load_merged` |
+| `zcode::ALLOWED_MODELS` (Rust constant) | `GLM-5.3`, `GLM-5.3-Flash` | authoritative for zcode; the spawn path, `apb validate`, `profile_write` and adoption enforce the same constant |
+| agent probes (`detect::probe`) | installed, version, `opencode models` output, auth and provider hints | authoritative for external facts only; never produces an apb-owned list |
+| `<config_dir>/state/agents-detect.json` | the last probe results | an invisible memo of the probes, see below |
+| `agent_catalog::load` / `assemble` | agents with their inventories, `options_by_agent` | the one function every consumer calls |
+| `GET /api/models`, `GET /api/agents` | one catalog snapshot, `Cache-Control: no-store` | derived, served fresh on every request |
+| web profile editor | nothing persisted | reads `/api/models` on every mount |
+| `apb detect`, MCP `agents_detect`, `profile_howto` | `agents` and `options_by_agent` | derived from the same catalog |
+
+`static_models_for_agent` is the single definition of an agent's closed list
+(claude, codex, zcode). `assemble` sets it as the installed agent's `Static`
+inventory and `model_options_for_agent` offers exactly it, so the detected
+inventory and the editor's options are one list. Other agents get the curated
+table (filtered to the vendor for grok) plus whatever the agent itself listed.
+
+The memo stores only probe results, never a list apb owns: those are recomputed
+from the running binary on every call (microseconds). The memo is reused only
+when all of these hold, otherwise every agent is probed again:
+
+- it was written by the same build: `detect::build_id` is the package version,
+  the fingerprint (path, size, mtime) of the running executable, and a digest of
+  the embedded `assets/models.yaml`;
+- every probe input is unchanged: the agent binary fingerprint and the files the
+  probe or the agent's own model listing reads (auth and config files; for
+  opencode also `opencode.json`, `opencode.jsonc` and its cached model catalog),
+  plus the presence of `ANTHROPIC_API_KEY`;
+- it is younger than 24 hours, the bound for what no local input shows (for
+  example opencode's remote model catalog).
+
+Why a memo at all: the probes run in parallel, and a cold detection on a machine
+with claude, codex, opencode, grok and zcode installed still takes about 1.6 s
+(`opencode models` alone is about 1.1 s); a memo hit takes about 2 ms. `apb
+detect --refresh` and MCP `agents_detect` with `refresh: true` bypass it.
+
+The dashboard never keeps its own copy. A reload always shows the lists of the
+`apb` that is running, and a rebuilt binary shows its new lists on the next
+reload without any cache to clear.
+
 ## ZCode (zcode)
 
 `agent: zcode` runs the headless CLI of Z.ai's ZCode desktop app. apb finds it
