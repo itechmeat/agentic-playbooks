@@ -86,7 +86,7 @@ Phase 4 is fully done: 4a (engine infrastructure) + 4b (supervisor MCP tools + s
 
 Done: 5a (version-machinery backend + write tools/API; plan 2026-07-09-workflows-cli-phase5a.md) and 5b (browser visual editor; plan 2026-07-09-workflows-cli-phase5b.md).
 
-- [x] **Version machinery** - minor-version creation (copying scripts/, applying edits, validation), atomic number issuance (temp + rename), immutable version folders, soft delete to trash + restore.
+- [x] **Version machinery** - minor-version creation (copying scripts/, applying edits, validation), atomic number issuance (temp + rename), immutable version folders, soft delete to trash + restore (listed and restored from the dashboard Trash view, `apb trash`, and MCP `playbook_trash_list`/`playbook_trash_restore`, issue #140).
 - [x] **Playbook CRUD from the web UI** - backend (MCP write tools + HTTP POST/PUT/DELETE) and UI (create, duplicate, delete to trash in the list).
 - [x] **Node and edge editor** - type palette, property forms per node type, edge connect/delete; edits via the YAML AST preserve all fields.
 - [x] **Layout persistence** - writes `layouts/<version>.yaml` (mutable), HTTP `PUT .../layout` endpoint, autosave on node drag.

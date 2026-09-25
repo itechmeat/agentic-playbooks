@@ -3,7 +3,8 @@ use std::path::Path;
 
 use apb_core::registry::Registry;
 use apb_mcp::tools::{
-    DetailMode, ToolError, playbook_create, playbook_delete, playbook_get, playbook_update,
+    DetailMode, ToolError, playbook_create, playbook_delete, playbook_get, playbook_trash_list,
+    playbook_trash_restore, playbook_update,
 };
 
 const VALID: &str = include_str!("../../../apb-core/tests/fixtures/valid.yaml");
@@ -60,19 +61,37 @@ fn playbook_update_missing_is_not_found() {
     assert!(matches!(err, ToolError::NotFound(_)), "got {err:?}");
 }
 
+/// Delete, the trash listing and restore over the MCP tool layer, including
+/// the conflict a restore meets when the id was taken again: it must reach
+/// the caller as a conflict, not as a generic engine failure.
 #[test]
-fn playbook_delete_moves_to_trash() {
+fn playbook_delete_trash_list_and_restore() {
     let _cfg = crate::common::config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
 
     let v = playbook_delete(dir.path(), "implement-task").unwrap();
     let trashed = v["trashed"].as_str().expect("trashed path");
-    assert!(trashed.contains(".apb/trash/implement-task-"));
     assert!(Path::new(trashed).is_dir());
-
     let err = playbook_get(dir.path(), "implement-task", None, DetailMode::Full).unwrap_err();
     assert!(matches!(err, ToolError::NotFound(_)), "got {err:?}");
+
+    let listed = playbook_trash_list(dir.path()).unwrap();
+    assert_eq!(listed[0]["id"], "implement-task");
+    assert_eq!(listed[0]["conflict"], false);
+
+    let restored = playbook_trash_restore(dir.path(), "implement-task").unwrap();
+    assert_eq!(restored["id"], "implement-task");
+    assert!(playbook_get(dir.path(), "implement-task", None, DetailMode::Full).is_ok());
+    assert_eq!(
+        playbook_trash_list(dir.path()).unwrap(),
+        serde_json::json!([])
+    );
+
+    playbook_delete(dir.path(), "implement-task").unwrap();
+    playbook_create(dir.path(), "implement-task", VALID).unwrap();
+    let err = playbook_trash_restore(dir.path(), "implement-task").unwrap_err();
+    assert!(matches!(err, ToolError::Conflict(_)), "got {err:?}");
 }
 
 #[test]

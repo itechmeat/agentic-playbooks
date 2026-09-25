@@ -30,6 +30,26 @@ graph page and read the rendered branches back, the way a human reviewer
 would. This is advisory only, no code path depends on `agent-browser`; a
 plain manual look is equally valid.
 
+## Deleting and restoring a playbook
+
+Deleting a playbook (the dashboard's Delete, MCP `playbook_delete`) moves its
+whole folder to `.apb/trash/<id>-<deleted_at_ms>`; its runs stay where they
+are. The trash is listed and restored through one core path
+(`apb_core::versioning::restore_from_trash`) from every surface:
+
+- dashboard: Playbooks, then Trash, grouped by project, with the deletion time
+  and a Restore button per entry;
+- CLI: `apb trash list [--json]` and `apb trash restore <name|id>` (exit 1 on a
+  conflict, 2 when nothing matches);
+- MCP: `playbook_trash_list` and `playbook_trash_restore`.
+
+A restore takes a trash entry name or a playbook id (its latest deletion) and
+brings back every version, the `current` pointer, layouts and provenance. The
+restored current version is trusted like any save through apb (its digest is
+approved). When a playbook with that id exists again, the restore is refused
+and nothing moves: the listing flags such an entry (`conflict`), and the
+dashboard says so on its card. Delete or rename the newer playbook first.
+
 ## Executor binding: profiles
 
 An `agent_task` node binds its executor only through a profile. A profile

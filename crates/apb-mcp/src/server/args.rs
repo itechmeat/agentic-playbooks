@@ -80,6 +80,13 @@ pub struct PlaybookWriteArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrashRestoreArgs {
+    /// A trash entry name (`<id>-<deleted_at_ms>`, from playbook_trash_list)
+    /// or a playbook id, which restores that id's latest deletion.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunRefArgs {
     pub run_id: String,
     /// workspace_id of another workspace (spec 7). None - the current one.

@@ -36,6 +36,7 @@ Reads (read-only):
 | `playbook_interview` | Tier 2: the interview guide for building a playbook from a user interview (pull only when the user describes a process to automate) |
 | `playbook_get` | Playbook definition by id and (optional) version; `detail` selects `summary` (default: interface only, no node prompt bodies) or `full` (complete authoring payload) |
 | `playbook_validate` | Validate a playbook, list of issues |
+| `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing) |
 | `runs_list` | List of runs |
 | `run_status` | Current run status (nodes, outputs) |
@@ -70,7 +71,8 @@ Mutations (destructive):
 | `suggestion_dismiss` | Record the user's decline of a save-as-playbook suggestion: `kind` `soft` (a not-now decline whose silence escalates along the backoff schedule) or `hard` (an explicit never-again, the default so an old-style call is unchanged), a one-sentence `synopsis` of the action, and `scope` `project` (default) or `global`. The `pattern` must be a lowercase slug (`[a-z0-9][a-z0-9-]*`, at most 64 chars), so the record stays addressable by `apb suggestions` and the dashboard. Returns the stored record with the server-computed `snoozed_until`, plus a `diagnostics` array when the `suggestions:` config section is invalid or a broken store had to be moved aside. A project-scope dismiss on a directory with no `.apb` yet initializes it, since the call only happens on a root the user already connected apb to |
 | `playbook_create` | New playbook or a new minor version (creating via the tool approves the digest) |
 | `playbook_update` | New minor version of an existing playbook (approves the saved digest, like create) |
-| `playbook_delete` | Soft delete to trash |
+| `playbook_delete` | Soft delete to trash (`.apb/trash/<id>-<millis>`; runs stay) |
+| `playbook_trash_restore` | Restore a trash entry by `name`, or a playbook id's latest deletion, with every version; the restored current version is approved like a save. A playbook that exists again under the id is a conflict and nothing moves. Current workspace only |
 | `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below) |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
 | `review_decide` | Decide a run's human_review node |
@@ -90,7 +92,10 @@ through apb itself - `playbook_create` / `playbook_update`, the dashboard
 editor, `apb import` - goes through one save path
 (`apb_core::versioning::save_definition`) that approves the digest it wrote:
 the user asked for that write, so its result is trusted (the same rule as
-`profile_write`).
+`profile_write`). A restore from the trash (`playbook_trash_restore`, the
+dashboard's Trash view, `apb trash restore`) goes through one path too
+(`apb_core::versioning::restore_from_trash`) and approves the restored current
+version the same way.
 `playbook_run` goes through a server-side gate: draft is rejected (only via
 `playbook_trial`), an unapproved digest requires `acknowledge_untrusted: true`
 after user confirmation, and running in another workspace only happens via the
