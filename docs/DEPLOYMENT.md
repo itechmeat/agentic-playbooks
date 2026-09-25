@@ -205,6 +205,7 @@ Group=apb
 ExecStart=/usr/local/bin/apb dashboard --no-open
 Restart=on-failure
 RestartSec=5
+KillMode=process
 NoNewPrivileges=true
 PrivateTmp=true
 
@@ -217,6 +218,12 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now apb-dashboard
 journalctl -u apb-dashboard -f
 ```
+
+`KillMode=process` matters: a run started from the dashboard is driven by a
+detached `apb __drive-run` process, which systemd still counts as part of the
+service. With the default `KillMode=control-group`, every restart of the
+dashboard (an upgrade, a config change) kills those drivers and leaves their
+runs interrupted.
 
 Run apb as its own unprivileged user. That user owns the playbooks, the runs,
 and every connector credential the runs use, so give it nothing else. It must
