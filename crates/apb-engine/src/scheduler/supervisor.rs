@@ -3,11 +3,6 @@
 
 use super::*;
 
-pub(crate) fn next_supervisor_token() -> String {
-    let n = SUPERVISOR_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("sv-{}-{n}", apb_core::clock::now_ms())
-}
-
 /// Spawns a background supervisor agent for run `run_id`: mints a
 /// token, persists the session and the baseline `supervisor/spawned_at` (so
 /// heartbeat monitoring can detect the agent's silence even before its first
@@ -33,7 +28,7 @@ pub fn spawn_supervisor_agent(
         return Ok(None);
     }
 
-    let token = next_supervisor_token();
+    let token = crate::inspect::mint_supervisor_token()?;
     // Default capabilities for 4c - restricted by policy - to be refined
     // later (see the carry-over note in the Phase 4c plan).
     let capabilities = vec!["observe".to_string(), "retry".to_string()];

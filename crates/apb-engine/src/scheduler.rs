@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -234,11 +234,6 @@ fn resolved_max_parallel(playbook: &Playbook, cfg: &RunConfig) -> usize {
         .map(|n| n.max(1))
         .unwrap_or(DEFAULT_MAX_PARALLEL)
 }
-
-/// Counter for generating unique supervisor tokens within a single engine
-/// process (in addition to the timestamp in the token itself - in case of
-/// several spawns within the same millisecond).
-static SUPERVISOR_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Returns (playbook id, run's active version). The active version is
 /// the latest `RunMigrated.to_version`; if there were no migrations - `RunStarted.version`.

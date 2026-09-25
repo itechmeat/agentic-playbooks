@@ -215,8 +215,18 @@ fn initial_spawn_writes_brief_and_persists_session() {
         .expect("brief must contain the sv- supervisor token");
     let token: String = content[start..]
         .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
+    // The token is the supervisor's only credential: 32 bytes from the OS
+    // CSPRNG in unpadded base64url, never a clock reading or a counter.
+    let body = token.strip_prefix("sv-").expect("sv- prefix");
+    assert!(
+        body.len() == 43
+            && body
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
+        "supervisor token must be 256 random bits in base64url, got `{token}`"
+    );
     let (found_run_id, caps) = find_session_by_token(dir.path(), &token)
         .unwrap()
         .expect("find_session_by_token must resolve the freshly minted token");

@@ -260,6 +260,23 @@ pub struct PersistedSession {
     pub capabilities: Vec<String>,
 }
 
+/// Mints a supervisor token: `sv-` plus 32 bytes from the OS CSPRNG in
+/// unpadded base64url. The token is the supervisor tools' only credential and
+/// is handed to an agent process, so it must not be guessable from the clock
+/// or from a counter. Every surface that issues one (the MCP server and the
+/// background supervisor spawn) goes through here.
+pub fn mint_supervisor_token() -> Result<String, EngineError> {
+    let body = apb_core::server_auth::random_token()
+        .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(format!("sv-{body}"))
+}
+
+/// The fingerprint a supervisor session is stored and looked up under. The
+/// raw token never reaches disk or a lookup table.
+pub fn supervisor_token_fingerprint(token: &str) -> String {
+    apb_core::content::sha256_hex(token.as_bytes())
+}
+
 /// Writes the supervisor session to `run_dir/supervisor/session.json`
 /// atomically. Only the token's fingerprint reaches disk, not the token itself.
 pub fn write_supervisor_session(
@@ -271,7 +288,7 @@ pub fn write_supervisor_session(
     let run_dir = resolve_run_dir(root, run_id)?;
     let session_path = run_dir.join("supervisor").join("session.json");
     let session = PersistedSession {
-        token_hash: apb_core::content::sha256_hex(token.as_bytes()),
+        token_hash: supervisor_token_fingerprint(token),
         capabilities: capabilities.to_vec(),
     };
     let bytes = serde_json::to_vec(&session).map_err(|e| EngineError::Yaml(e.to_string()))?;
@@ -291,6 +308,7 @@ pub fn find_session_by_token(
     if !runs_dir.is_dir() {
         return Ok(None);
     }
+    let presented = supervisor_token_fingerprint(token);
     for entry in std::fs::read_dir(&runs_dir)? {
         let entry = match entry {
             Ok(e) => e,
@@ -314,8 +332,9 @@ pub fn find_session_by_token(
             Err(_) => continue,
         };
         // Compare the fingerprint of the presented token with the stored
-        // fingerprint: the token itself is never stored on disk.
-        if session.token_hash == apb_core::content::sha256_hex(token.as_bytes()) {
+        // fingerprint (the token itself is never stored on disk), in constant
+        // time.
+        if apb_core::server_auth::ct_eq_str(&session.token_hash, &presented) {
             return Ok(Some((run_id, session.capabilities)));
         }
     }

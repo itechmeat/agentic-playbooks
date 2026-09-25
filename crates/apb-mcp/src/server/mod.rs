@@ -8,7 +8,6 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use rmcp::handler::server::router::tool::ToolRouter;
@@ -45,10 +44,9 @@ pub struct WfMcp {
     // #[tool_handler] generates reads this field (not a fresh router), so a
     // server built with fewer routes (`for_supervisor`) really serves fewer.
     tool_router: ToolRouter<Self>,
-    /// Token -> session. The token is a trusted boot-core identifier for the
-    /// local client, not a cryptographic secret.
+    /// Token fingerprint -> session. The token is the supervisor tools'
+    /// credential; the table keys on its SHA-256 so the raw value is not kept.
     sessions: Arc<Mutex<HashMap<String, SupervisorSession>>>,
-    token_counter: Arc<AtomicU64>,
     /// Plan nonces already consumed (spec 7): guarantees single-use for a
     /// plan_token within the lifetime of the server process.
     used_nonces: Arc<Mutex<HashSet<String>>>,
@@ -192,7 +190,6 @@ impl WfMcp {
             root: Arc::new(root),
             tool_router: Self::tool_router(),
             sessions: Arc::new(Mutex::new(HashMap::new())),
-            token_counter: Arc::new(AtomicU64::new(0)),
             used_nonces: Arc::new(Mutex::new(HashSet::new())),
             supervisor_role: false,
         }
@@ -224,9 +221,9 @@ impl WfMcp {
         server
     }
 
-    /// Mints a new supervisor session token and stores it in the server's
-    /// session table. The token is a trusted local identifier (boot-core),
-    /// not a cryptographic secret.
+    /// Mints a new supervisor session token (256 random bits, see
+    /// `apb_engine::mint_supervisor_token`) and stores the session in the
+    /// server's table under the token's fingerprint, never the token itself.
     ///
     /// Additionally makes a best-effort persist of the session to disk
     /// (`write_supervisor_session`) so a separate `apb mcp` process (for a
@@ -234,20 +231,20 @@ impl WfMcp {
     /// to this process's in-memory session table. If the run directory does
     /// not exist yet at minting time, the write is simply skipped - the
     /// in-memory path still works for this same process.
-    fn mint_token(&self, run_id: String, capabilities: Vec<String>) -> String {
-        let n = self.token_counter.fetch_add(1, Ordering::Relaxed);
-        let token = format!("sv-{}-{}", apb_core::clock::now_ms(), n);
+    fn mint_token(&self, run_id: String, capabilities: Vec<String>) -> Result<String, ToolError> {
+        let token = apb_engine::mint_supervisor_token()
+            .map_err(|e| ToolError::Engine(format!("cannot mint a supervisor token: {e}")))?;
         // best-effort: if the run directory does not exist yet, the write fails - fine,
         // the in-memory path still resolves the token for this same process.
         let _ = apb_engine::write_supervisor_session(&self.root, &run_id, &token, &capabilities);
         self.sessions.lock().unwrap().insert(
-            token.clone(),
+            apb_engine::supervisor_token_fingerprint(&token),
             SupervisorSession {
                 run_id,
                 capabilities,
             },
         );
-        token
+        Ok(token)
     }
 
     /// Resolves a supervisor token to a run_id and checks that the session
@@ -264,7 +261,7 @@ impl WfMcp {
     fn resolve_session(&self, token: &str, tool_name: &str) -> Result<String, ToolError> {
         {
             let sessions = self.sessions.lock().unwrap();
-            if let Some(session) = sessions.get(token) {
+            if let Some(session) = sessions.get(&apb_engine::supervisor_token_fingerprint(token)) {
                 let cap = capability_for_tool(tool_name);
                 if !session.capabilities.iter().any(|c| c == cap) {
                     return Err(ToolError::Engine(format!("capability `{cap}` not granted")));
@@ -353,7 +350,10 @@ impl WfMcp {
                 )));
             }
         };
-        let token = self.mint_token(run_id.clone(), capabilities.clone());
+        let token = match self.mint_token(run_id.clone(), capabilities.clone()) {
+            Ok(t) => t,
+            Err(e) => return to_call_tool_result(Err(e)),
+        };
         to_call_tool_result(with_warnings(
             Ok(json!({
                 "run_id": run_id,
