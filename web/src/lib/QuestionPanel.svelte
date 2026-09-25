@@ -2,7 +2,7 @@
   import * as Card from '$lib/components/ui/card'
   import { Button } from '$lib/components/ui/button'
   import { Input } from '$lib/components/ui/input'
-  import type { QuestionEntry } from './questions'
+  import type { QuestionEntry } from './rungates'
 
   // Mirrors RunView's "Human review" panel interaction pattern: option
   // buttons for a suggested answer plus a free-text field, both disabled

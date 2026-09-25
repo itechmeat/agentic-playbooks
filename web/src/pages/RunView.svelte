@@ -4,11 +4,8 @@
   import { fetchRun, fetchRunReport, postAnswer, postReview } from '../lib/api'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { interventionJournal, runEventJournal } from '../lib/journal'
-  import { pendingQuestions, pendingQuestionsFromPayload } from '../lib/questions'
-  import { pendingReviews } from '../lib/reviews'
   import { cachedNodeIds } from '../lib/runcache'
-  import { pendingWaits } from '../lib/waits'
-  import { pendingSupervisorFromPayload } from '../lib/supervisors'
+  import { runGates } from '../lib/rungates'
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
@@ -36,21 +33,13 @@
   const nodeTypes = { playbookNode: PlaybookNode }
   const journal = $derived(detail ? interventionJournal(detail.events) : [])
   const eventJournal = $derived(detail ? runEventJournal(detail.events) : [])
-  const pending = $derived(detail ? pendingReviews(detail.events) : [])
-  // Prefer the event-journaled questions; before drive journals `question_asked`
-  // for a node, fall back to the channel-derived `progress.pending_question`
-  // the run payload already carries (spec 2026-07-20-interactive-nodes) so the
-  // panel appears the moment the question is posted, not only once drive
-  // observes it.
-  const questions = $derived.by(() => {
-    if (!detail) return []
-    const fromEvents = pendingQuestions(detail.events)
-    return fromEvents.length ? fromEvents : pendingQuestionsFromPayload(detail.progress?.pending_question)
-  })
-  const waiting = $derived(detail ? pendingWaits(detail.events) : [])
-  const supervisor = $derived(
-    detail ? pendingSupervisorFromPayload(detail.progress?.pending_supervisor) : null,
-  )
+  // Every open gate comes from the server's derived progress (runGates), the
+  // same view `apb wait` and MCP run_wait decide on.
+  const gates = $derived(detail ? runGates(detail) : null)
+  const pending = $derived(gates?.reviews ?? [])
+  const questions = $derived(gates?.questions ?? [])
+  const waiting = $derived(gates?.waits ?? [])
+  const supervisor = $derived(gates?.supervisor ?? null)
   const hookEntries = $derived(Object.entries(detail?.hooks ?? {}))
   const children = $derived(detail?.children ?? [])
 
