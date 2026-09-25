@@ -375,7 +375,7 @@ pub fn profile_move(root: &Path, name: &str, from: &str, to: &str) -> Result<Val
                 .to_string(),
         ));
     }
-    copy_dir(&src, &dst).map_err(|e| ToolError::Engine(e.to_string()))?;
+    apb_core::fsutil::copy_tree(&src, &dst).map_err(|e| ToolError::Engine(e.to_string()))?;
     Ok(json!({ "name": name, "from": from, "to": to, "copied": true }))
 }
 
@@ -453,21 +453,6 @@ fn playbook_references(playbook: &apb_core::schema::Playbook, name: &str) -> boo
         .nodes
         .iter()
         .any(|n| matches!(&n.kind, NodeKind::AgentTask { profile, .. } if matches(profile)))
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
 }
 
 /// Skills for profile_write from a plain list of strings (scope auto).

@@ -1061,7 +1061,7 @@ fn commit_version_dir(
         if let Some(base) = base_version {
             let scripts_src = playbook_dir.join(base).join("scripts");
             if scripts_src.is_dir() {
-                copy_dir_recursive(&scripts_src, &tmp.join("scripts"))?;
+                crate::fsutil::copy_tree(&scripts_src, &tmp.join("scripts"))?;
             }
         }
 
@@ -1118,21 +1118,6 @@ fn copy_parent_layout(
         .join("layouts")
         .join(format!("{new_version}.yaml"));
     atomic_write(&dst, content.as_bytes())?;
-    Ok(())
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let target = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), &target)?;
-        }
-    }
     Ok(())
 }
 

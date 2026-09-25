@@ -45,6 +45,45 @@ pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
     }
 }
 
+/// Recursively copies the directory `src` into `dst` (created if missing). The
+/// one tree copy for definition content: a new playbook version's `scripts/`,
+/// the scripts a run starts with, a profile moved between scopes, a migrated
+/// playbook, a skill snapshot.
+///
+/// A symlink is recreated as the same symlink, never followed: following it
+/// would copy the content of whatever it points at, possibly a file outside
+/// the repository, into a directory that is committed or executed. A
+/// directory is copied recursively, a regular file byte for byte, and any
+/// other entry (a FIFO, a socket, a device) is refused with
+/// [`io::ErrorKind::InvalidInput`] rather than opened. Off unix a symlink
+/// fails with [`io::ErrorKind::Unsupported`] (see [`symlink`]).
+pub fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        // `DirEntry::file_type` does not follow symlinks.
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            symlink(&fs::read_link(&from)?, &to)?;
+        } else if ft.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if ft.is_file() {
+            fs::copy(&from, &to)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "not a regular file, directory or symlink: {}",
+                    from.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Control files are always written this way: temp + fsync + atomic rename (spec 4.3).
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path

@@ -1915,7 +1915,7 @@ pub(crate) fn materialize_isolated_skills(
             .join("skills")
             .join(&sk.scope)
             .join(&sk.name);
-        copy_tree(&src, &skills_parent.join(&sk.name))?;
+        apb_core::fsutil::copy_tree(&src, &skills_parent.join(&sk.name))?;
     }
     if !entry.skills.is_empty() {
         let claude_parent = workdir.join(".claude/skills");
@@ -1930,38 +1930,6 @@ pub(crate) fn materialize_isolated_skills(
                 "isolated skill bridge failed: {}",
                 notes.join("; ")
             )));
-        }
-    }
-    Ok(())
-}
-
-/// Recursively copies a skill-snapshot tree. Symlinks are RECREATED as symlinks
-/// (not dereferenced), in parity with `content::snapshot_tree`, which
-/// preserves in-tree relative symlinks: otherwise a symlinked directory would fail
-/// in `fs::copy` with EISDIR and abort the run. `file_type()` from `read_dir` does not
-/// follow symlinks, so a symlink is never `is_dir()` - we check it first.
-pub(crate) fn copy_tree(src: &Path, dst: &Path) -> Result<(), EngineError> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        let ft = entry.file_type()?;
-        if ft.is_symlink() {
-            #[cfg(unix)]
-            {
-                let target = std::fs::read_link(&from)?;
-                std::os::unix::fs::symlink(&target, &to)?;
-            }
-            #[cfg(not(unix))]
-            {
-                // Off unix, skill symlinks are not supported - copy the target instead.
-                std::fs::copy(&from, &to)?;
-            }
-        } else if ft.is_dir() {
-            copy_tree(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
         }
     }
     Ok(())

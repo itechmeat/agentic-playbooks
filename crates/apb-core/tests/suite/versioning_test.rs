@@ -353,6 +353,37 @@ fn create_version_copies_scripts_from_base() {
     assert_eq!(content, "#!/bin/sh\necho ok\n");
 }
 
+/// A symlink in the base version's `scripts/` stays a symlink in the new
+/// version. Following it instead would write the content of whatever it
+/// points at (any file outside the repository) into the new version's
+/// directory, which is committed with the project.
+#[cfg(unix)]
+#[test]
+fn create_version_keeps_a_scripts_symlink_a_symlink() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let outside = tempfile::tempdir().unwrap();
+    let target = outside.path().join("private.txt");
+    fs::write(&target, "outside-the-repo\n").unwrap();
+    let link = dir
+        .path()
+        .join(".apb/playbooks/implement-task/1.0.0/scripts/notes.txt");
+    std::os::unix::fs::symlink(&target, &link).unwrap();
+
+    let modified = VALID.replace("name: Implement Task", "name: Edited");
+    let version = create_version(dir.path(), "implement-task", &modified, None, true).unwrap();
+
+    let copied = dir.path().join(format!(
+        ".apb/playbooks/implement-task/{version}/scripts/notes.txt"
+    ));
+    let meta = fs::symlink_metadata(&copied).unwrap();
+    assert!(
+        meta.file_type().is_symlink(),
+        "the copy must be the link itself, not the file it points at"
+    );
+    assert_eq!(fs::read_link(&copied).unwrap(), target);
+}
+
 /// The trash round trip every surface relies on (dashboard, `apb trash`, MCP):
 /// the listing tells what a deletion holds, and a restore brings the whole
 /// playbook back - every version, the current pointer, layouts - and trusts

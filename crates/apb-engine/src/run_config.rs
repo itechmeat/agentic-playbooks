@@ -242,23 +242,7 @@ pub fn copy_scripts(version_dir: &Path, run_dir: &Path) -> Result<(), EngineErro
     if !src.is_dir() {
         return Ok(());
     }
-    copy_dir_recursive(&src, &run_dir.join("scripts"))
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), EngineError> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
+    Ok(apb_core::fsutil::copy_tree(&src, &run_dir.join("scripts"))?)
 }
 
 #[cfg(test)]
