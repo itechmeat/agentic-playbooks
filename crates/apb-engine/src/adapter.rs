@@ -266,6 +266,46 @@ fn apply_agent_home(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorCla
     }
 }
 
+/// Sets the environment a spawned zcode needs (see
+/// `apb_core::zcode::spawn_env`): the built-in provider config location, and a
+/// run-scoped personal provider config carrying the attempt's plan-qualified
+/// model as ZCode's default selection. zcode has no `--model` flag, so this IS
+/// its model passing. The scoped copy lives in the run's agent home
+/// (`agent-home/zcode/<node>`) when the attempt belongs to a run. A no-op for
+/// every other agent.
+fn apply_zcode_env(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorClass, String)> {
+    if task.agent != apb_core::zcode::AGENT_ID {
+        return Ok(());
+    }
+    let scoped = task
+        .connector_policy
+        .run_dir
+        .as_deref()
+        .map(|d| d.join("agent-home").join("zcode").join(task.node));
+    let env = apb_core::zcode::spawn_env(task.model, scoped.as_deref()).map_err(|e| {
+        (
+            ErrorClass::ProcessExit,
+            format!("prepare zcode provider config failed: {e}"),
+        )
+    })?;
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    Ok(())
+}
+
+/// The reply text of an attempt's stdout. zcode's `--json` wraps the reply in
+/// a JSON object (`response`); every other agent prints the reply itself.
+/// Falls back to the raw stdout when the expected shape is absent.
+fn reply_text(agent: &str, stdout: &str) -> String {
+    if agent == apb_core::zcode::AGENT_ID
+        && let Some(r) = apb_core::zcode::response_text(stdout)
+    {
+        return r.trim().to_string();
+    }
+    stdout.to_string()
+}
+
 pub struct AgentTask<'a> {
     pub prompt: &'a str,
     pub model: &'a str,
@@ -654,6 +694,10 @@ pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
         "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
         "cursor" => capture_json_string_field(raw, &["chatId", "chat_id", "session_id"]),
         "qoder" => capture_json_string_field(raw, &["session_id"]),
+        // zcode's `--json` prints one PRETTY-printed object, so the per-line
+        // scan above cannot see it; the zcode parser reads the whole document
+        // (and the stream-json `result` line as well).
+        "zcode" => apb_core::zcode::session_id(raw),
         _ => None,
     }
 }
@@ -1131,6 +1175,8 @@ impl ClaudeAdapter {
         // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
         // spawned codex cannot inherit the user's interactive MCP config.
         apply_agent_home(&mut cmd, task)?;
+        // zcode's provider config and model selection (no `--model` flag).
+        apply_zcode_env(&mut cmd, task)?;
         // Per-attempt status file (subtask S2): the agent may write its final
         // verdict as JSON here, which the engine reads before the textual report.
         if let Some(sf) = &task.status_file {
@@ -1252,21 +1298,23 @@ impl ClaudeAdapter {
         }
         // Status comes from the structured report block (spec 6.2); the node
         // output is the reply body with that block stripped, and raw is the full
-        // stdout for debugging/streaming.
-        let report = interpret_report(&stdout);
+        // stdout for debugging/streaming. The reply is stdout itself except for
+        // an agent that wraps it in JSON (zcode's `--json`).
+        let reply = reply_text(task.agent, &stdout);
+        let report = interpret_report(&reply);
         // Node-output contract (Finding 2 of issue #56): when the node set
         // `outputs.extract`, the output is the LAST `<tag>...</tag>` block in
         // stdout, if present. Status/summary/session/question stay as derived
         // from the report block above - only `output` is overridden.
         let output = task
             .extract
-            .and_then(|tag| extract_marker(&stdout, tag))
+            .and_then(|tag| extract_marker(&reply, tag))
             .unwrap_or(report.output);
         // Marker scan (spec 2026-07-20): an interactive node's agent may ask a
         // question instead of finishing. The scan is gated on `task.interactive`
         // and hard-fails on malformed JSON naming the node; a non-interactive
         // node's literal marker text is simply ignored.
-        let question = scan_question(&stdout, task)?;
+        let question = scan_question(&reply, task)?;
         // Session capture (spec 2026-07-20, Task 7): pull the agent's session id
         // from its output so the answer round can resume the same session. The
         // plain headless `-p` form carries no session id, so this is normally
@@ -1334,6 +1382,8 @@ impl ClaudeAdapter {
         // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
         // spawned codex cannot inherit the user's interactive MCP config.
         apply_agent_home(&mut cmd, task)?;
+        // zcode's provider config and model selection (no `--model` flag).
+        apply_zcode_env(&mut cmd, task)?;
         // Per-attempt status file (subtask S2): the agent may write its final
         // verdict as JSON here, which the engine reads before the textual report.
         if let Some(sf) = &task.status_file {
@@ -1770,6 +1820,8 @@ fn default_program(agent: &str) -> String {
         // cursor is installed as `cursor-agent`; the bare `cursor` binary is
         // the GUI editor CLI, not the headless agent.
         "cursor" => "cursor-agent".to_string(),
+        // zcode is deployed into the home directory, off PATH.
+        "zcode" => apb_core::zcode::default_program(),
         other => other.to_string(),
     }
 }

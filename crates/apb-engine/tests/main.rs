@@ -208,3 +208,6 @@ mod wait_test;
 mod wake_events_test;
 #[path = "suite/workdir_test.rs"]
 mod workdir_test;
+#[cfg(unix)]
+#[path = "suite/zcode_adapter_test.rs"]
+mod zcode_adapter_test;

@@ -1,0 +1,18 @@
+{
+  "sessionId": "sess_3f1c2a9e-7b4d-4e21-9a55-0c8d6f2b1e47",
+  "traceId": "8fecb01f-54b4-4ec6-b5c1-e80e1a92596d",
+  "turnId": "turn_1",
+  "response": "PONG from the plan node.\n\n```yaml\nstatus: success\nsummary: replied PONG\n```",
+  "usage": {
+    "inputTokens": 5120,
+    "outputTokens": 42
+  },
+  "eventCount": 9,
+  "projection": {
+    "status": "idle",
+    "turnCount": 1,
+    "totalTokenCount": 5162,
+    "contextUsed": 5162,
+    "contextWindow": 200000
+  }
+}

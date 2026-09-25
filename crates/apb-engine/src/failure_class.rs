@@ -80,6 +80,12 @@ const BUDGET_PATTERNS: &[&str] = &[
     "plan limit",
     "monthly limit",
     "budget exceeded",
+    // Z.ai / ZCode coding plans: 1113 "Insufficient balance or no resource
+    // package", 1310 "Weekly/Monthly Limit Exhausted" (1308 "Usage limit
+    // reached for 5 hour" is covered by `usage limit` above).
+    "insufficient balance",
+    "no resource package",
+    "limit exhausted",
 ];
 
 /// Credentials. Same non-transient handling as [`BUDGET_PATTERNS`], for the same
@@ -216,6 +222,25 @@ fn has_code(hay: &str, codes: &[&str]) -> bool {
                 && !after.is_some_and(|c| c.is_ascii_digit())
         })
     })
+}
+
+/// The billing account an `(agent, model)` executor spends, which is what a
+/// non-transient (auth, budget) failure blocks for the rest of the fallback
+/// chain. For almost every agent that is the agent itself: one login, one
+/// budget. zcode is the exception: each Z.ai plan (paid Individual, free
+/// Start, ...) is its own account with its own quota, even for the same
+/// model, so its key carries the plan and a paid `GLM-5.3` that ran out can
+/// still fall back to the free plan's `GLM-5.3`.
+pub fn billing_account(agent: &str, model: &str) -> String {
+    if agent == apb_core::zcode::AGENT_ID {
+        let family = apb_core::zcode::home_dir()
+            .map(|h| apb_core::zcode::account_family(&h))
+            .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
+        if let Some(sel) = apb_core::zcode::parse_model(model, &family, &[]) {
+            return sel.account_key();
+        }
+    }
+    agent.to_string()
 }
 
 /// `supervisor_action.action` marker written before each infrastructure backoff,
@@ -362,6 +387,9 @@ mod tests {
             "billing is not configured for this account",
             "402 Payment Required",
             "monthly limit reached",
+            "Error: Usage limit reached for 5 hour. Your limit will reset at 2026-09-25 18:00:00 (traceId: t)",
+            "Error: Weekly/Monthly Limit Exhausted. Your limit will reset at 2026-10-01 (traceId: t)",
+            "Error: Insufficient balance or no resource package. Please recharge. (traceId: t)",
         ] {
             assert_eq!(
                 classify(detail),
@@ -388,6 +416,26 @@ mod tests {
                 "expected agent for {detail:?}"
             );
         }
+    }
+
+    /// A spend limit blocks one billing account. For zcode that is one plan,
+    /// so the same model on another plan stays reachable; for other agents it
+    /// is the whole agent, whatever the model.
+    #[test]
+    fn billing_account_is_per_plan_for_zcode_and_per_agent_otherwise() {
+        let paid = billing_account("zcode", "zai-individual/GLM-5.3");
+        let free = billing_account("zcode", "zai-start/GLM-5.3");
+        assert_ne!(paid, free);
+        assert_eq!(paid, "zcode:account:zai-individual-coding-plan");
+        assert_eq!(free, "zcode:account:zai-start-plan");
+        assert_eq!(
+            billing_account("zcode", "zai-individual/GLM-5.3-Flash"),
+            paid,
+            "two models on one plan share its quota"
+        );
+        assert_eq!(billing_account("claude", "claude-opus-4-8"), "claude");
+        assert_eq!(billing_account("claude", "claude-sonnet-5"), "claude");
+        assert_eq!(billing_account("zcode", ""), "zcode");
     }
 
     /// The engine's OWN deadline kill must not be read as a transport timeout:

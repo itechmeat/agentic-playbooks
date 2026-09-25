@@ -358,6 +358,22 @@ describe('vendor-tied agents (server narrows the curated table; the client only 
     ])
   })
 
+  it('offers zcode only its plan-qualified models, paid plan first', () => {
+    const zcode: Record<string, ModelOption[]> = {
+      zcode: [
+        { id: 'zai-individual/GLM-5.3', vendor: 'zhipu', detected: true },
+        { id: 'zai-individual/GLM-5.3-Flash', vendor: 'zhipu', detected: true },
+        { id: 'zai-start/GLM-5.3', vendor: 'zhipu', detected: true },
+      ],
+    }
+    expect(modelIdsForAgent('zcode', zcode, [])).toEqual([
+      'zai-individual/GLM-5.3',
+      'zai-individual/GLM-5.3-Flash',
+      'zai-start/GLM-5.3',
+    ])
+    expect(firstModelForAgent('zcode', zcode, [])).toBe('zai-individual/GLM-5.3')
+  })
+
   it('leaves an aggregator like qoder on the full table', () => {
     expect(modelIdsForAgent('qoder', table, [])).toEqual([
       'claude-opus-4-8',

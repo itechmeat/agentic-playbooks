@@ -684,7 +684,10 @@ pub(crate) fn execute_node(
             // gap issue #74 finding 2 describes is exactly a SAME-AGENT,
             // different-model step being walked into after a spend limit.
             // A different agent may well have its own working credential and
-            // budget, so cross-agent fallback stays allowed.
+            // budget, so cross-agent fallback stays allowed. The set holds
+            // billing accounts (`failure_class::billing_account`): the agent id
+            // for every agent except zcode, whose plans are separate accounts,
+            // so a paid-plan quota stop can still fall back to a free plan.
             let mut blocked_agents: BTreeSet<String> = BTreeSet::new();
             // A resume re-invocation runs the primary step only (see above);
             // an ordinary attempt walks the whole fallback chain.
@@ -694,7 +697,12 @@ pub(crate) fn execute_node(
                     let same_binding = last_tried
                         .as_ref()
                         .is_some_and(|(agent, model)| *agent == step.agent && *model == step.model);
-                    if same_binding || blocked_agents.contains(&step.agent) {
+                    if same_binding
+                        || blocked_agents.contains(&crate::failure_class::billing_account(
+                            &step.agent,
+                            &step.model,
+                        ))
+                    {
                         continue;
                     }
                     events.push(EventPayload::FallbackTriggered {
@@ -1520,7 +1528,10 @@ pub(crate) fn execute_node(
                                 // on this step can succeed, so the remaining node
                                 // retries are skipped, and the chain loop above
                                 // will skip every later step on this same agent.
-                                blocked_agents.insert(step.agent.clone());
+                                blocked_agents.insert(crate::failure_class::billing_account(
+                                    &step.agent,
+                                    &step.model,
+                                ));
                                 break;
                             } else if class == ErrorClass::Transport || class == ErrorClass::Timeout
                             {

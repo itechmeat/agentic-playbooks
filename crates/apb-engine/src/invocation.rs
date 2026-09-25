@@ -1,6 +1,6 @@
 //! Resolving the agent invocation form (spec 2026-07-12, sections 6.2-6.3).
 //!
-//! The invocation form is data (`InvocationDef`), not code: the built-in nine
+//! The invocation form is data (`InvocationDef`), not code: the built-in ten
 //! are provided by `builtin`, custom agents come from the global config's
 //! `agents:`. `resolve_invocation` fixes the agent, model, invocation form,
 //! SOUL delivery method, canonical binary path, and its fingerprint - all of
@@ -27,7 +27,7 @@ pub struct ResolvedInvocation {
     pub executable_fingerprint: String,
 }
 
-/// Built-in invocation form for the known nine. `None` for unknown agents and
+/// Built-in invocation form for the known ten. `None` for unknown agents and
 /// for pi (details will follow once the binary exists).
 pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
     let mk = |argv: &[&str],
@@ -154,6 +154,23 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
             &["--permission-mode", "bypass_permissions"],
             Interaction::Resume,
         )),
+        // zcode (Z.ai's ZCode headless CLI, verified against zcode-agent
+        // 0.16.9). `--mode` DEFAULTS TO `yolo` for `-p`, so the base form pins
+        // `build` (every approval request is denied in `-p` mode, there is no
+        // interactive gate) and only an authorized effectful run gets `yolo`:
+        // the autonomy flags come later in argv and zcode's option parser
+        // keeps the last value. `--json` prints one JSON object with
+        // `sessionId` and `response`, which the adapter unwraps. There is no
+        // `--model` flag and no system-prompt flag: the model travels through
+        // a run-scoped provider config (see `adapter::apply_zcode_env`) and
+        // the SOUL as a prompt prefix.
+        "zcode" => Some(mk(
+            &["-p", "{prompt}", "--json", "--mode", "build"],
+            SoulDelivery::Prefix,
+            None,
+            &["--mode", "yolo"],
+            Interaction::Resume,
+        )),
         _ => None,
     }
 }
@@ -231,6 +248,17 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
             "{model}",
             "{prompt}",
         ])),
+        // zcode re-enters a persisted session via `--resume sess_...`; the mode
+        // is pinned again (a resumed `-p` turn would otherwise run as yolo).
+        "zcode" => Some(v(&[
+            "--resume",
+            "{session}",
+            "-p",
+            "{prompt}",
+            "--json",
+            "--mode",
+            "build",
+        ])),
         _ => None,
     }
 }
@@ -245,7 +273,7 @@ pub fn spec_for(agent_id: &str, global: &GlobalConfig) -> Result<InvocationDef, 
         .and_then(|a| a.invocation.clone())
         .or_else(|| builtin(agent_id))
         // Agent is defined in config but without an explicit form and is not
-        // one of the built-in nine: historical compatibility falls back to
+        // one of the built-in ten: historical compatibility falls back to
         // the claude form (`-p {prompt} --model {model}`).
         .or_else(|| global.agents.get(agent_id).and(builtin("claude")))
         .ok_or_else(|| {
@@ -275,6 +303,8 @@ pub fn program_for(agent_id: &str, global: &GlobalConfig) -> String {
             // cursor is installed as `cursor-agent`; the bare `cursor` binary
             // is the GUI editor CLI, not the headless agent.
             "cursor" => "cursor-agent".to_string(),
+            // zcode is deployed into the home directory, off PATH.
+            "zcode" => apb_core::zcode::default_program(),
             other => other.to_string(),
         })
 }
@@ -481,7 +511,7 @@ mod tests {
     #[test]
     fn builtin_agents_present_and_valid() {
         for id in [
-            "claude", "agy", "codex", "opencode", "hermes", "grok", "cursor", "qoder",
+            "claude", "agy", "codex", "opencode", "hermes", "grok", "cursor", "qoder", "zcode",
         ] {
             builtin(id).unwrap().validate().unwrap();
         }
@@ -574,6 +604,36 @@ mod tests {
                 "--model",
                 "{model}",
                 "{prompt}"
+            ]
+        );
+    }
+
+    /// zcode must never fall into its implicit `yolo` default: the base form
+    /// and the resume form both pin `--mode build`, and only the autonomy
+    /// flags (appended after them, last value wins) switch to `yolo`.
+    #[test]
+    fn builtin_zcode_form_pins_an_explicit_mode() {
+        let spec = builtin("zcode").expect("zcode builtin spec");
+        assert_eq!(
+            spec.argv,
+            vec!["-p", "{prompt}", "--json", "--mode", "build"]
+        );
+        assert_eq!(spec.soul, SoulDelivery::Prefix);
+        assert_eq!(spec.soul_flag, None);
+        assert_eq!(spec.transport, Transport::Headless);
+        assert_eq!(spec.autonomous_args, vec!["--mode", "yolo"]);
+        assert_eq!(spec.interaction, Interaction::Resume);
+        assert!(!spec.argv.iter().any(|a| a == "{model}"));
+        assert_eq!(
+            resume_argv("zcode").expect("zcode resume argv"),
+            vec![
+                "--resume",
+                "{session}",
+                "-p",
+                "{prompt}",
+                "--json",
+                "--mode",
+                "build"
             ]
         );
     }
