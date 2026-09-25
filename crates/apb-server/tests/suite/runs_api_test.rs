@@ -281,10 +281,41 @@ edges:
   - { from: wait, to: done }
 "#;
 
+/// A run parked on webhook-wait, driven on a background thread. Dropping it
+/// stops the run and joins the thread BEFORE the temp dir goes: a drive still
+/// parked on the wait would otherwise outlive the test and write the run's
+/// files back into the shared temp dir after the directory was removed.
+struct WebhookRun {
+    dir: tempfile::TempDir,
+    run_id: String,
+    secret: String,
+    drive: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for WebhookRun {
+    fn drop(&mut self) {
+        let _ = apb_engine::stop_run(self.dir.path(), &self.run_id);
+        let Some(drive) = self.drive.take() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !drive.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "timed out after 30s waiting for the webhook run `{}` to stop",
+                    self.run_id
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = drive.join();
+    }
+}
+
 // A run parked on webhook-wait: prepare generates hooks.json, drive waits
 // for the signal in the background (we don't send it - a running run is
 // enough for the endpoint test).
-fn seed_webhook_run() -> (tempfile::TempDir, String, String) {
+fn seed_webhook_run() -> WebhookRun {
     let dir = tempfile::tempdir().unwrap();
     apb_core::registry::init_project(dir.path()).unwrap();
     let vdir = dir.path().join(".apb/playbooks/hooky/1.0.0");
@@ -292,7 +323,7 @@ fn seed_webhook_run() -> (tempfile::TempDir, String, String) {
     fs::write(vdir.join("playbook.yaml"), WEBHOOK_WF).unwrap();
     fs::write(dir.path().join(".apb/playbooks/hooky/current"), "1.0.0").unwrap();
     let root = dir.path().to_path_buf();
-    std::thread::spawn(move || {
+    let drive = std::thread::spawn(move || {
         let _ = apb_engine::run(&root, "hooky", None, apb_engine::RunOptions::default());
     });
     // Wait for the run and its hooks.json to appear. Bounded: the run is
@@ -329,12 +360,18 @@ fn seed_webhook_run() -> (tempfile::TempDir, String, String) {
     )
     .unwrap();
     let secret = hooks.get("ci").unwrap().clone();
-    (dir, run_id, secret)
+    WebhookRun {
+        dir,
+        run_id,
+        secret,
+        drive: Some(drive),
+    }
 }
 
 #[tokio::test]
 async fn post_hook_with_valid_secret_signals() {
-    let (dir, run_id, secret) = seed_webhook_run();
+    let run = seed_webhook_run();
+    let (dir, run_id, secret) = (&run.dir, run.run_id.clone(), run.secret.clone());
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let (status, json) = post_json(
         app,
@@ -356,7 +393,8 @@ async fn post_hook_with_valid_secret_signals() {
 
 #[tokio::test]
 async fn post_hook_with_wrong_secret_404() {
-    let (dir, run_id, _secret) = seed_webhook_run();
+    let run = seed_webhook_run();
+    let (dir, run_id) = (&run.dir, run.run_id.clone());
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let (status, _) = post_json(
         app,
@@ -369,7 +407,8 @@ async fn post_hook_with_wrong_secret_404() {
 
 #[tokio::test]
 async fn run_detail_exposes_hooks() {
-    let (dir, run_id, _secret) = seed_webhook_run();
+    let run = seed_webhook_run();
+    let (dir, run_id) = (&run.dir, run.run_id.clone());
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let (status, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
     assert_eq!(status, StatusCode::OK);
