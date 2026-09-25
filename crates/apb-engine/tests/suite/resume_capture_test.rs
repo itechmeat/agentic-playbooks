@@ -287,6 +287,15 @@ fn resume_reinvokes_with_resume_flag_and_no_transcript() {
         !argv.contains("prior questions and answers"),
         "resume must NOT append the Q&A transcript: {argv}"
     );
+    // The resumed session already holds the node's contracts, so the answer
+    // round re-sends none of them (issue #136 item 5): no question-marker
+    // contract, no report-block instruction, just the answer and one line.
+    // The resume is the last invocation, so it runs to the end of the file.
+    let resumed = &argv[argv.find("--resume").expect("a resume invocation")..];
+    assert!(
+        !resumed.contains("<<<apb:question>>>") && !resumed.contains("status: success | failure"),
+        "the answer round must not repeat the node's contracts: {resumed}"
+    );
 }
 
 // --- (a) resume invocation fails at runtime -> downgrade to reprompt ---

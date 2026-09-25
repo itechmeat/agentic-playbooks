@@ -34,7 +34,11 @@ user a question, apb uses one of three transports, best available first:
 2. **resume**: the agent prints a question marker and exits; apb re-invokes
    it with the answer once a human replies. Requires headless session resume
    with full state, and the session id must be obtainable from a headless
-   run's output.
+   run's output. The answer round's prompt is only the answer plus one line
+   pointing back at the session's own instructions: the node's standing
+   contracts (skills, connector grants, the question protocol, the status
+   file and the report block) already live in the resumed session and are
+   not sent again.
 3. **reprompt**: the floor. Fresh invocation carrying the full Q&A
    transcript in the prompt. Works with any agent, loses in-flight state.
 

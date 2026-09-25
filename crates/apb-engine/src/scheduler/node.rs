@@ -65,6 +65,19 @@ fn marker_contract() -> String {
     )
 }
 
+/// The prompt of an answer round that resumes the asking session: the user's
+/// answer and one line pointing back at the contracts the session already
+/// holds. Everything else the first turn carried (skills, connector grants,
+/// the question protocol, the status-file and report contracts) is not sent
+/// again (issue #136 item 5).
+pub(crate) fn answer_followup(answer: &str) -> String {
+    format!("{answer}\n\n{ANSWER_FOLLOWUP_NOTE}")
+}
+
+/// See [`answer_followup`].
+const ANSWER_FOLLOWUP_NOTE: &str = "(The user's answer to your question. Continue the task; the \
+     instructions from the start of this session still apply, including how to finish your reply.)";
+
 /// A `resume`-transport re-invocation of an interactive node (spec 2026-07-20,
 /// Task 7). Carries the session id captured from the attempt that asked, plus
 /// the user's answer to hand the agent as the follow-up prompt. When present,
@@ -430,7 +443,7 @@ pub(crate) fn execute_node(
             // ordinary attempt renders the node prompt (or takes the reprompt
             // override the drive loop supplied).
             let mut text = match (&resume, &override_prompt) {
-                (Some(rc), _) => rc.answer.clone(),
+                (Some(rc), _) => answer_followup(&rc.answer),
                 (None, Some(p)) => p.clone(),
                 (None, None) => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
             };
@@ -550,7 +563,13 @@ pub(crate) fn execute_node(
                 Some(Isolation::Full) | Some(Isolation::BestEffort)
             );
             let skills_mode = if isolated { "materialized" } else { "advisory" };
-            if !skill_names.is_empty() {
+            // The blocks below are the node's standing contracts (skills,
+            // connector grants, the question protocol, the status file). A
+            // resumed session already holds them from the attempt that asked,
+            // so an answer round re-sends none of them (issue #136 item 5):
+            // its prompt is the answer plus one line, see `answer_followup`.
+            let first_turn = resume.is_none();
+            if first_turn && !skill_names.is_empty() {
                 text = format!(
                     "{text}\n\nRelevant skills: {} - use them via your skills mechanism",
                     skill_names.join(", ")
@@ -562,7 +581,7 @@ pub(crate) fn execute_node(
             // call and how. Built only from the run snapshot (manifest non-secret
             // fields + snapshotted ConnectorDocs), so no secret reaches the prompt.
             let grants = manifest.grants_for(node_id);
-            if !grants.is_empty() {
+            if first_turn && !grants.is_empty() {
                 let docs =
                     crate::connector::prompt::load_snapshot_docs(run_dir, &manifest.connectors);
                 let block = crate::connector::prompt::instruction_block(
@@ -584,9 +603,9 @@ pub(crate) fn execute_node(
             // re-invocation. Non-interactive nodes receive neither. The marker
             // scan stays active on a live node too, so a live agent that ignores
             // the tool and prints the marker still parks (no regression).
-            if live.is_some() {
+            if first_turn && live.is_some() {
                 text = format!("{text}\n\n{}", crate::adapter::LIVE_PROMPT_PARAGRAPH);
-            } else if *interactive {
+            } else if first_turn && *interactive {
                 text = format!("{text}\n\n{}", marker_contract());
             }
 
@@ -598,7 +617,7 @@ pub(crate) fn execute_node(
             // keeps the report-only contract.
             let status_note =
                 super::status_file::status_file_note(node.success_check.is_some(), require_verdict);
-            if !status_note.is_empty() {
+            if first_turn && !status_note.is_empty() {
                 text = format!("{text}\n\n{status_note}");
             }
 
@@ -886,7 +905,9 @@ pub(crate) fn execute_node(
                         interactive: *interactive,
                         // Ordinary agent_task attempts carry the spec 6.2 report
                         // contract so the agent's self-assessed status routes the node.
-                        report_contract: true,
+                        // An answer round resumes a session that already has it;
+                        // `answer_followup` points back at it in one line.
+                        report_contract: resume.is_none(),
                         node: node_id,
                         agent: &step.agent,
                         // Node-output contract (Finding 2 of issue #56): honor
