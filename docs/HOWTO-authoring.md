@@ -372,7 +372,8 @@ A `human_review` node pauses the run for a human decision:
 - { id: review, type: human_review, options: [approve, reject] }
 ```
 
-`options` is a required list of strings: the choices a reviewer can pick.
+`options` is a list of strings: the choices a reviewer can pick. It is optional:
+an empty or absent list offers the defaults `approve` and `reject`.
 `review_decide` records one of them as the node's decision, plus a free-form
 note (available downstream as `{{nodes.review.review_note}}`).
 

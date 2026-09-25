@@ -759,6 +759,21 @@ impl SuccessCheck {
     }
 }
 
+/// The decisions a `human_review` gate offers when it declares none.
+pub const DEFAULT_REVIEW_OPTIONS: [&str; 2] = ["approve", "reject"];
+
+/// The decisions a `human_review` gate actually offers: its declared
+/// `options`, or [`DEFAULT_REVIEW_OPTIONS`] when it declares none. The one
+/// reading every surface (the review event, `pending_review`, the owner
+/// instruction) uses, so a gate without options still shows buttons.
+pub fn effective_review_options(options: &[String]) -> Vec<String> {
+    if options.is_empty() {
+        DEFAULT_REVIEW_OPTIONS.iter().map(|s| s.to_string()).collect()
+    } else {
+        options.to_vec()
+    }
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum NodeKind {
@@ -829,6 +844,10 @@ pub enum NodeKind {
         max_loops: Option<u32>,
     },
     HumanReview {
+        /// The decisions a reviewer can pick. Optional: an empty or absent list
+        /// means [`DEFAULT_REVIEW_OPTIONS`]; read it through
+        /// [`effective_review_options`], never directly.
+        #[serde(default)]
         options: Vec<String>,
         /// Optional guidance shown to the reviewer at the gate (issue #102.9),
         /// rendered into the owner-facing review instruction above the

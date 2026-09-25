@@ -1269,7 +1269,7 @@ fn drive_inner(
                     );
                     log.append(EventPayload::ReviewRequested {
                         node: current.clone(),
-                        options: options.clone(),
+                        options: apb_core::schema::effective_review_options(options),
                         title,
                         instruction,
                         prompt: prompt.clone(),

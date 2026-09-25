@@ -114,11 +114,7 @@ pub fn review_instruction(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .unwrap_or(node_id);
-    let opts = if options.is_empty() {
-        "approve or reject".to_string()
-    } else {
-        options.join(", ")
-    };
+    let opts = apb_core::schema::effective_review_options(options).join(", ");
     let guidance = prompt
         .map(str::trim)
         .filter(|p| !p.is_empty())
@@ -147,7 +143,7 @@ pub fn pending_review(
             .filter(|t| !t.is_empty())
             .map(str::to_string),
         instruction: review_instruction(node_id, title, options, prompt),
-        options: options.to_vec(),
+        options: apb_core::schema::effective_review_options(options),
         how_to_decide: review_how_to_decide(node_id),
         prompt: prompt
             .map(str::trim)
@@ -1211,6 +1207,48 @@ edges:
             "got: {}",
             pr.instruction
         );
+    }
+
+    /// F17: a gate that declares no options (an empty list, or the key left
+    /// out) is decided with the default approve/reject. The pending block every
+    /// surface renders its buttons from must list them, or the gate cannot be
+    /// decided from the dashboard.
+    #[test]
+    fn pending_review_of_a_gate_without_options_offers_the_defaults() {
+        for gate in [
+            "{ id: r, type: human_review, options: [] }",
+            "{ id: r, type: human_review }",
+        ] {
+            let pb = Playbook::from_yaml(&format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: {{ profile: x }}\n\
+                 nodes:\n  - {{ id: s, type: start }}\n  - {gate}\n  - {{ id: f, type: finish, outcome: success }}\n\
+                 edges:\n  - {{ from: s, to: r }}\n  - {{ from: r, to: f }}\n"
+            ))
+            .unwrap_or_else(|e| panic!("{gate}: {e}"));
+            let events = vec![
+                ev(
+                    0,
+                    EventPayload::RunStarted {
+                        playbook: "p".into(),
+                        version: "1.0.0".into(),
+                    },
+                ),
+                ev(
+                    1,
+                    EventPayload::ReviewRequested {
+                        node: "r".into(),
+                        options: vec![],
+                        title: None,
+                        instruction: String::new(),
+                        prompt: None,
+                    },
+                ),
+            ];
+            let pr = compute(&pb, &events)
+                .pending_review
+                .expect("pending_review must be Some");
+            assert_eq!(pr.options, ["approve", "reject"], "{gate}");
+        }
     }
 
     #[test]
