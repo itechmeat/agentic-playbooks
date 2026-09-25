@@ -323,3 +323,73 @@ fn builtin_table_drops_retired_claude_ids() {
         }
     }
 }
+
+/// The 2026-09-25 codex refresh: the static list is exactly the seven models
+/// a paid Codex account offers, in its order (the first is the default), and
+/// each has a full OpenAI pricing row.
+#[test]
+fn builtin_codex_static_list_is_the_seven_with_priced_rows() {
+    let t = models_table::builtin();
+    assert_eq!(
+        t.codex_static_models,
+        [
+            "gpt-6-sol",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+        ]
+    );
+    for id in &t.codex_static_models {
+        let m = t
+            .models
+            .iter()
+            .find(|m| &m.id == id)
+            .unwrap_or_else(|| panic!("codex model `{id}` has no pricing row"));
+        assert_eq!(m.vendor, "openai", "row `{id}`");
+        assert!(
+            m.cost_in_usd_mtok.is_some() && m.cost_out_usd_mtok.is_some(),
+            "row `{id}` is missing a price"
+        );
+        assert!(m.context_tokens.is_some(), "row `{id}` is missing context");
+        assert!(m.reasoning.is_some(), "row `{id}` is missing reasoning");
+        assert!(!m.source_url.is_empty(), "row `{id}` is missing source_url");
+        assert!(!m.checked_at.is_empty(), "row `{id}` is missing checked_at");
+        assert!(
+            !m.price_basis.is_empty(),
+            "row `{id}` is missing price_basis"
+        );
+    }
+}
+
+/// The 2026-09-25 codex refresh retires the older OpenAI coding ids: no model
+/// row, purpose score, or codex static list entry may still cite one.
+#[test]
+fn builtin_table_drops_retired_codex_ids() {
+    let t = models_table::builtin();
+    let retired = [
+        "gpt-5.5-pro",
+        "gpt-5.4",
+        "gpt-5.4-mini",
+        "gpt-5.4-pro",
+        "gpt-5.2-codex",
+        "gpt-5-codex",
+    ];
+    for id in retired {
+        assert!(
+            !t.models.iter().any(|m| m.id == id),
+            "retired codex model `{id}` must be dropped"
+        );
+        assert!(
+            !t.codex_static_models.iter().any(|m| m == id),
+            "codex static list still cites retired `{id}`"
+        );
+        for p in &t.purposes {
+            for s in &p.scores {
+                assert_ne!(s.model, id, "purpose `{}` still cites retired `{id}`", p.id);
+            }
+        }
+    }
+}

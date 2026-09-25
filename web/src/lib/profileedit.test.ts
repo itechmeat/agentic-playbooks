@@ -369,6 +369,23 @@ describe('vendor-tied agents (server narrows the curated table; the client only 
     expect(firstModelForAgent('zcode', zcode, [])).toBe('GLM-5.3')
   })
 
+  it('offers codex its static list in order, gpt-6-sol as the default', () => {
+    const seven = [
+      'gpt-6-sol',
+      'gpt-6-astra',
+      'gpt-6-luna',
+      'gpt-5.6-sol',
+      'gpt-5.6-terra',
+      'gpt-5.6-luna',
+      'gpt-5.5',
+    ]
+    const codex: Record<string, ModelOption[]> = {
+      codex: seven.map((id) => ({ id, vendor: 'openai', detected: true })),
+    }
+    expect(modelIdsForAgent('codex', codex, [])).toEqual(seven)
+    expect(firstModelForAgent('codex', codex, [])).toBe('gpt-6-sol')
+  })
+
   it('leaves an aggregator like qoder on the full table', () => {
     expect(modelIdsForAgent('qoder', table, [])).toEqual([
       'claude-opus-5-5',

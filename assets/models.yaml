@@ -57,71 +57,87 @@ models:
     price_basis: list
 
   # --- OpenAI (source: developers.openai.com/api/docs/pricing) ---
+  # The seven codex models first, in codex_static_models order (below). Standard short-context list prices; above 272k
+  # input tokens every one of them bills 2x input and 1.5x output for the whole
+  # request. Context windows are from the model pages
+  # (developers.openai.com/api/docs/models/<id>).
   # Deliberately not added: gpt-5.6-cyber/5.5-cyber are a specialized
   # red-team line with no general-purpose curated fit.
-  - id: gpt-5.6-sol
+  - id: gpt-6-sol
     vendor: openai
-    cost_in_usd_mtok: 5.0
-    cost_out_usd_mtok: 30.0
+    cost_in_usd_mtok: 2.0
+    cost_out_usd_mtok: 10.0
     reasoning: high
+    context_tokens: 1050000
     vision: true
     source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-07-13"
+    checked_at: "2026-09-25"
     price_basis: list
+  - id: gpt-6-astra
+    vendor: openai
+    cost_in_usd_mtok: 10.0
+    cost_out_usd_mtok: 50.0
+    reasoning: high
+    context_tokens: 1050000
+    vision: true
+    source_url: https://developers.openai.com/api/docs/pricing
+    checked_at: "2026-09-25"
+    price_basis: list
+  - id: gpt-6-luna
+    vendor: openai
+    cost_in_usd_mtok: 0.1
+    cost_out_usd_mtok: 0.5
+    reasoning: medium
+    context_tokens: 1050000
+    vision: true
+    source_url: https://developers.openai.com/api/docs/pricing
+    checked_at: "2026-09-25"
+    price_basis: list
+  - id: gpt-5.6-sol
+    vendor: openai
+    cost_in_usd_mtok: 4.0
+    cost_out_usd_mtok: 20.0
+    reasoning: high
+    context_tokens: 1050000
+    vision: true
+    # Promotional price, "available at least through November 21, 2026"
+    # (pricing page); the list price before it was $5 in / $30 out.
+    source_url: https://developers.openai.com/api/docs/pricing
+    checked_at: "2026-09-25"
+    price_basis: launch-until-2026-11-21
   - id: gpt-5.6-terra
     vendor: openai
     cost_in_usd_mtok: 2.0
     cost_out_usd_mtok: 12.0
     reasoning: high
+    context_tokens: 1050000
     vision: true
     source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-08-15"
+    checked_at: "2026-09-25"
     price_basis: list
   - id: gpt-5.6-luna
     vendor: openai
     cost_in_usd_mtok: 0.2
     cost_out_usd_mtok: 1.2
     reasoning: medium
+    context_tokens: 1050000
     vision: true
     source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-08-15"
+    checked_at: "2026-09-25"
     price_basis: list
   - id: gpt-5.5
     vendor: openai
     cost_in_usd_mtok: 5.0
     cost_out_usd_mtok: 30.0
     reasoning: high
+    context_tokens: 1050000
     vision: true
     source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-07-13"
+    checked_at: "2026-09-25"
     price_basis: list
-  - id: gpt-5.5-pro
-    vendor: openai
-    cost_in_usd_mtok: 30.0
-    cost_out_usd_mtok: 180.0
-    reasoning: high
-    vision: true
-    source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-07-13"
-    price_basis: list
-  - id: gpt-5.4
-    vendor: openai
-    cost_in_usd_mtok: 2.5
-    cost_out_usd_mtok: 15.0
-    reasoning: high
-    vision: true
-    source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-07-13"
-    price_basis: list
-  - id: gpt-5.4-mini
-    vendor: openai
-    cost_in_usd_mtok: 0.75
-    cost_out_usd_mtok: 4.5
-    reasoning: medium
-    vision: true
-    source_url: https://developers.openai.com/api/docs/pricing
-    checked_at: "2026-07-13"
-    price_basis: list
+  # gpt-5.5-pro, gpt-5.4 and gpt-5.4-mini are dropped (2026-09-25): no agent
+  # list, purpose or profile cites them. gpt-5.4-nano (cheap-glue) and
+  # o4-mini (review) stay because purposes below score them.
   - id: gpt-5.4-nano
     vendor: openai
     cost_in_usd_mtok: 0.2
@@ -437,3 +453,16 @@ claude_static_models:
   - claude-sonnet-5
   - claude-haiku-4-5-20251001
   - claude-fable-5-1
+
+# CLI model identifiers codex accepts: exactly the models a paid Codex account
+# lists (2026-09-25), in its order, the default (gpt-6-sol) first. Detection
+# uses this for codex's Static authority list and the profile editor's option
+# set (the first entry is the editor's default), like claude's above.
+codex_static_models:
+  - gpt-6-sol
+  - gpt-6-astra
+  - gpt-6-luna
+  - gpt-5.6-sol
+  - gpt-5.6-terra
+  - gpt-5.6-luna
+  - gpt-5.5

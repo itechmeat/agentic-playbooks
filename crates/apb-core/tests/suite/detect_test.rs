@@ -295,7 +295,7 @@ fn config_source_change_invalidates_cache_before_ttl() {
     detect::detect(false);
     assert_eq!(count_lines(&e.counter), base, "cache hit must not respawn");
 
-    // Change config.toml (codex's models source). Also change the content SIZE,
+    // Change config.toml (codex's providers source). Also change the content SIZE,
     // not just the mtime - that way invalidation doesn't depend on the
     // filesystem's mtime granularity (the fingerprint is size:mtime).
     std::thread::sleep(std::time::Duration::from_millis(10));
@@ -308,11 +308,13 @@ fn config_source_change_invalidates_cache_before_ttl() {
 }
 
 /// CI runners (and hermetic tests) often lack a real `codex` on PATH. The
-/// profile editor still needs to annotate models named in
-/// `~/.codex/config.toml`; file-based sources must not be gated on binary
-/// presence (regression that failed PR CI on clean Linux runners).
+/// `[model_providers.*]` annotation from `~/.codex/config.toml` stays
+/// file-based and is never gated on binary presence (regression that failed
+/// PR CI on clean Linux runners). The static model list, like claude's, is
+/// claimed only once codex is installed: exactly the seven models, default
+/// first, and never the `model` line of config.toml.
 #[test]
-fn codex_config_models_read_even_when_binary_absent() {
+fn codex_static_models_and_config_providers_without_binary() {
     let _l = lock();
     let e = setup();
     // PATH is only the empty temp bin dir from setup: no codex binary.
@@ -320,7 +322,7 @@ fn codex_config_models_read_even_when_binary_absent() {
     std::fs::create_dir_all(&codex_dir).unwrap();
     std::fs::write(
         codex_dir.join("config.toml"),
-        "model = \"gpt-5.4\"\n[model_providers.openai]\n",
+        "model = \"gpt-custom\"\n[model_providers.openai]\n",
     )
     .unwrap();
 
@@ -330,20 +332,31 @@ fn codex_config_models_read_even_when_binary_absent() {
         !codex.installed,
         "no binary on PATH must leave installed=false"
     );
-    let models = codex
-        .models
-        .as_ref()
-        .expect("config.toml model must be reported without the binary");
-    assert_eq!(models.authority, Authority::Partial);
-    assert!(
-        models.items.iter().any(|m| m == "gpt-5.4"),
-        "model from config.toml: {:?}",
-        models.items
-    );
+    assert!(codex.models.is_none(), "{codex:?}");
     assert_eq!(
         codex.providers,
         Some(vec!["openai".to_string()]),
-        "model_providers sections are also file-based"
+        "model_providers sections are file-based"
+    );
+
+    write_agent(&e.bin, "codex", &e.counter, "echo 1.0.0");
+    let agents = detect::detect(true);
+    let codex = agents.iter().find(|a| a.agent == "codex").unwrap();
+    assert!(codex.installed);
+    let models = codex.models.as_ref().expect("installed: the static list");
+    assert_eq!(models.authority, Authority::Static);
+    assert_eq!(
+        models.items,
+        vec![
+            "gpt-6-sol".to_string(),
+            "gpt-6-astra".to_string(),
+            "gpt-6-luna".to_string(),
+            "gpt-5.6-sol".to_string(),
+            "gpt-5.6-terra".to_string(),
+            "gpt-5.6-luna".to_string(),
+            "gpt-5.5".to_string(),
+        ],
+        "codex's static list, in table order"
     );
 }
 

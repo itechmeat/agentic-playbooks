@@ -22,7 +22,7 @@ with two files:
     agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes, grok, cursor, qoder, zcode) or a configured one
     model: claude-opus-5-5   # exactly the string that agent's --model expects
     fallbacks:               # optional ordered chain; same role, different executor
-      - { agent: codex, model: gpt-5.2-codex }
+      - { agent: codex, model: gpt-6-sol }
   soul: any                  # any | native_required (does the role need a native system-prompt channel)
   hermetic: false            # optional; default false. See "Hermetic isolation" below
   skills:                    # names (scope auto) or { name, scope }
@@ -261,3 +261,12 @@ Fallbacks. A spend or quota stop (Z.ai `Usage limit reached`,
 and blocks the Individual plan for the rest of the chain, not the whole agent:
 the other zcode model is skipped too (same quota), while a fallback on another
 agent is still tried.
+
+## Codex (codex)
+
+`apb detect` and the profile editor offer codex a fixed list, in this order
+(the first one is the editor's default): `gpt-6-sol`, `gpt-6-astra`,
+`gpt-6-luna`, `gpt-5.6-sol`, `gpt-5.6-terra`, `gpt-5.6-luna`, `gpt-5.5`. The
+list lives in `assets/models.yaml` (`codex_static_models`), next to a pricing
+row for each model; the `model` line of `~/.codex/config.toml` does not extend
+it.

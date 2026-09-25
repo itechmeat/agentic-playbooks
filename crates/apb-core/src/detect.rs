@@ -89,9 +89,11 @@ enum ModelsSource {
         args: Vec<String>,
         authority: Authority,
     },
-    /// codex: `[model_providers.*]` sections plus `model` from
-    /// `~/.codex/config.toml`.
-    CodexConfig,
+    /// codex: the static list from the models table (`codex_static_models`,
+    /// the models a paid Codex account offers, default first);
+    /// `[model_providers.*]` sections of `~/.codex/config.toml` still feed
+    /// `providers`.
+    CodexStatic,
     /// claude: a hardcoded list (data from the models table, Task 11).
     ClaudeStatic,
     /// zcode: apb's allowlist ([`crate::zcode::ALLOWED_MODELS`]), the two
@@ -155,7 +157,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             category: AgentCategory::Vendor,
             version_args: v("--version"),
             home_paths: Vec::new(),
-            models_source: ModelsSource::CodexConfig,
+            models_source: ModelsSource::CodexStatic,
             auth_source: AuthSource::Codex,
         },
         Probe {
@@ -569,15 +571,20 @@ fn claude_static_models() -> Vec<String> {
     crate::models_table::builtin().claude_static_models
 }
 
+/// The list of codex models is hardcoded (Static authority). Single source of
+/// truth - `codex_static_models` from the models table: the models a paid
+/// Codex account offers, in its order, the default (`gpt-6-sol`) first.
+fn codex_static_models() -> Vec<String> {
+    crate::models_table::builtin().codex_static_models
+}
+
 /// Parses `~/.codex/config.toml` best-effort: `[model_providers.*]` section
-/// names as providers and the `model` key. No TOML crate - a plain string
-/// scan.
-fn codex_config(home: &Path) -> (Vec<String>, Vec<String>) {
+/// names as providers. No TOML crate - a plain string scan.
+fn codex_providers(home: &Path) -> Vec<String> {
     let path = home.join(".codex/config.toml");
     let Ok(raw) = std::fs::read_to_string(&path) else {
-        return (Vec::new(), Vec::new());
+        return Vec::new();
     };
-    let mut models = Vec::new();
     let mut providers = Vec::new();
     for line in raw.lines() {
         let t = line.trim();
@@ -585,16 +592,9 @@ fn codex_config(home: &Path) -> (Vec<String>, Vec<String>) {
             && let Some(name) = rest.strip_suffix(']')
         {
             providers.push(name.trim_matches('"').to_string());
-        } else if let Some(rest) = t.strip_prefix("model")
-            && let Some(eq) = rest.trim_start().strip_prefix('=')
-        {
-            let m = eq.trim().trim_matches('"').to_string();
-            if !m.is_empty() {
-                models.push(m);
-            }
         }
     }
-    (models, providers)
+    providers
 }
 
 /// Best-effort authentication hint based on files in HOME. Secret values are
@@ -757,19 +757,22 @@ fn probe_one(p: &Probe) -> AgentInfo {
                 }
             }
         }
-        // File-based: readable without the binary on PATH.
-        ModelsSource::CodexConfig => {
+        // The provider annotation is file-based: readable without the binary
+        // on PATH. The static model list, like claude's, is only claimed when
+        // the agent is installed (the profile editor takes its codex options
+        // from the models table directly, so it never depends on this).
+        ModelsSource::CodexStatic => {
             if let Some(home) = &home {
-                let (models, providers) = codex_config(home);
-                if !models.is_empty() {
-                    info.models = Some(ModelsInventory {
-                        items: models,
-                        authority: Authority::Partial,
-                    });
-                }
+                let providers = codex_providers(home);
                 if !providers.is_empty() {
                     info.providers = Some(providers);
                 }
+            }
+            if found.is_some() {
+                info.models = Some(ModelsInventory {
+                    items: codex_static_models(),
+                    authority: Authority::Static,
+                });
             }
         }
         // Static table only claimed when the agent is actually installed.
@@ -875,7 +878,9 @@ fn probe_source_files(p: &Probe, home: Option<&Path>) -> Vec<PathBuf> {
         AuthSource::Zcode => out.push(home.join(crate::zcode::HOME_REL_CREDENTIALS)),
         AuthSource::None => {}
     }
-    if matches!(p.models_source, ModelsSource::CodexConfig) {
+    if matches!(p.models_source, ModelsSource::CodexStatic) {
+        // The provider annotation comes from config.toml, so an edit there
+        // must invalidate the cache.
         out.push(home.join(".codex/config.toml"));
     }
     if matches!(p.models_source, ModelsSource::ZcodeStatic) {
@@ -909,6 +914,7 @@ fn agent_cache_key(p: &Probe, home: Option<&Path>) -> String {
     // list must not keep serving the old one from the cache until the TTL.
     let static_items = match p.models_source {
         ModelsSource::ClaudeStatic => Some(claude_static_models()),
+        ModelsSource::CodexStatic => Some(codex_static_models()),
         ModelsSource::ZcodeStatic => Some(crate::zcode::model_list()),
         _ => None,
     };

@@ -188,6 +188,10 @@ pub struct ModelsTable {
     pub purposes: Vec<Purpose>,
     #[serde(default)]
     pub claude_static_models: Vec<String>,
+    /// The model ids codex accepts, user-visible ones only (detection's
+    /// Static authority list for codex, and the profile editor's option set).
+    #[serde(default)]
+    pub codex_static_models: Vec<String>,
     /// Populated only from the overlay (declared subscriptions).
     #[serde(default)]
     pub subscriptions: Vec<Subscription>,
@@ -205,6 +209,8 @@ struct ModelsOverlay {
     purposes: Vec<Purpose>,
     #[serde(default)]
     claude_static_models: Vec<String>,
+    #[serde(default)]
+    codex_static_models: Vec<String>,
     #[serde(default)]
     subscriptions: Vec<Subscription>,
 }
@@ -267,6 +273,9 @@ pub fn load_merged() -> Result<ModelsTable, ModelsError> {
     if !overlay.claude_static_models.is_empty() {
         table.claude_static_models = overlay.claude_static_models;
     }
+    if !overlay.codex_static_models.is_empty() {
+        table.codex_static_models = overlay.codex_static_models;
+    }
     table.subscriptions = overlay.subscriptions;
     Ok(table)
 }
@@ -288,17 +297,17 @@ pub fn agent_vendor(agent: &str) -> Option<&'static str> {
     }
 }
 
-/// Whether `agent`'s option set is a closed apb-side list (zcode's allowlist)
-/// rather than the curated table filtered to a vendor. For such an agent a
-/// detected item outside the list must NOT be appended as an option: the list
-/// is exactly what apb supports.
-pub fn agent_models_are_closed_list(agent: &str) -> bool {
-    agent == crate::zcode::AGENT_ID
+/// Whether `agent`'s option set is a closed apb-side list (zcode's allowlist,
+/// codex's static list) rather than the curated table filtered to a vendor.
+/// For such an agent a detected item outside the list must NOT be appended as
+/// an option: the list is exactly what apb supports.
+pub fn agent_models_are_closed_list(agent: &str, table: &ModelsTable) -> bool {
+    agent == crate::zcode::AGENT_ID || (agent == "codex" && !table.codex_static_models.is_empty())
 }
 
 /// One model choice offered for a specific agent in the profile editor
-/// (issue #42 finding 9). The curated table (or, for zcode, a closed apb
-/// list) drives the option SET; detection
+/// (issue #42 finding 9). The curated table (or, for zcode and codex, a
+/// closed apb list) drives the option SET; detection
 /// only annotates it - `detected` marks a curated row also named by the
 /// agent's local config/detected model list, and never limits which rows are
 /// offered.
@@ -315,6 +324,8 @@ pub struct ModelOption {
 /// - zcode: apb's zcode allowlist (`crate::zcode::model_list`), the bare ids
 ///   of the two Individual-plan models. The curated zhipu rows would offer
 ///   models the allowlist refuses.
+/// - codex (when the table carries `codex_static_models`): that list, in its
+///   order (the first entry is the default).
 /// - otherwise: the curated rows tied to the agent's vendor (or every row
 ///   for an aggregator/unrecognized agent, which is not pinned to a single
 ///   vendor).
@@ -339,6 +350,12 @@ pub fn model_options_for_agent(
             .into_iter()
             .map(|id| (id, agent_vendor_str.clone()))
             .collect()
+    } else if agent == "codex" && !table.codex_static_models.is_empty() {
+        table
+            .codex_static_models
+            .iter()
+            .map(|id| (id.clone(), agent_vendor_str.clone()))
+            .collect()
     } else {
         table
             .models
@@ -359,7 +376,7 @@ pub fn model_options_for_agent(
             vendor,
         })
         .collect();
-    if !agent_models_are_closed_list(agent) {
+    if !agent_models_are_closed_list(agent, table) {
         for item in detected_items {
             if !offered.contains(item) {
                 out.push(ModelOption {
@@ -560,6 +577,7 @@ mod tests {
                 .collect(),
             purposes: Vec::new(),
             claude_static_models: Vec::new(),
+            codex_static_models: Vec::new(),
             subscriptions: Vec::new(),
         }
     }
@@ -689,5 +707,39 @@ mod tests {
         let leaked = model_options_for_agent("zcode", &["GLM-5-Turbo".to_string()], &t);
         let ids: Vec<&str> = leaked.iter().map(|o| o.id.as_str()).collect();
         assert_eq!(ids, vec!["GLM-5.3", "GLM-5.3-Flash"]);
+    }
+
+    /// codex's option set is the static list from the table, in list order;
+    /// detection only annotates. With no static list in the table the old
+    /// vendor-rows path applies (an overlay may clear or omit it).
+    #[test]
+    fn model_options_for_codex_come_from_the_static_list() {
+        let mut t = table_of(&[("gpt-5.6-sol", "openai"), ("gpt-5.4-nano", "openai")]);
+        let seven = [
+            "gpt-6-sol",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+        ];
+        t.codex_static_models = seven.iter().map(|s| s.to_string()).collect();
+        let opts = model_options_for_agent(
+            "codex",
+            &["gpt-5.6-terra".to_string(), "gpt-reserve".to_string()],
+            &t,
+        );
+        let ids: Vec<&str> = opts.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, seven, "exactly the static list, default first");
+        assert!(
+            !opts
+                .iter()
+                .any(|o| o.id == "gpt-reserve" || o.id == "gpt-5.4-nano"),
+            "neither a config-only model nor a curated row outside the list may join it"
+        );
+        let terra = opts.iter().find(|o| o.id == "gpt-5.6-terra").unwrap();
+        assert!(terra.detected);
+        assert!(!opts.iter().find(|o| o.id == "gpt-6-sol").unwrap().detected);
     }
 }

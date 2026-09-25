@@ -30,14 +30,15 @@ pub(crate) async fn list_agents_handler() -> impl IntoResponse {
 }
 
 /// GET /api/models: the curated models table (a hint, not a hard binding),
-/// the claude static list, and `options_by_agent` - the per-agent option list
-/// the profile form's model combobox now uses (issue #42 finding 9): the
-/// curated table filtered to that agent's vendor, each row annotated
-/// `detected` when the agent's local config/detected model list also names
-/// it, plus a `detected`-only entry for a detected model the table does not
-/// carry. Detection only annotates or extends the list here, it never
-/// replaces it - see `apb_core::models_table::model_options_for_agent`.
-/// Machine-wide. Powers the model combobox.
+/// the claude and codex static lists, and `options_by_agent` - the per-agent
+/// option list the profile form's model combobox uses (issue #42 finding 9):
+/// for zcode apb's allowlist and for codex its static list (closed lists,
+/// detection only annotates them), otherwise the curated table filtered to
+/// that agent's vendor, each row annotated `detected` when the agent's local
+/// config/detected model list also names it, plus a `detected`-only entry for
+/// a detected model the table does not carry - see
+/// `apb_core::models_table::model_options_for_agent`. Machine-wide. Powers
+/// the model combobox.
 pub(crate) async fn list_models_handler() -> impl IntoResponse {
     match apb_core::models_table::load_merged() {
         Ok(t) => {
@@ -63,6 +64,7 @@ pub(crate) async fn list_models_handler() -> impl IntoResponse {
                 "as_of": t.as_of,
                 "models": t.models,
                 "claude_static": t.claude_static_models,
+                "codex_static": t.codex_static_models,
                 "options_by_agent": options_by_agent,
             }))
             .into_response()
