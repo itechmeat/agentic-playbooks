@@ -35,7 +35,7 @@
   } from '../lib/connectorstats'
   import { fetchConnectorInbox, fetchConnectorInboxEvents } from '../lib/api'
   import type { ConnectorInbox, InboxEventRow } from '../lib/connectorinbox'
-  import { renderMarkdown } from '../lib/markdown'
+  import { renderMarkdown, safeExternalUrl } from '../lib/markdown'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
@@ -300,6 +300,9 @@
   const outcomeTone = (r: HealthcheckResult) => (r.ok ? 'ok' : 'danger') as keyof typeof badgeClass
 
   const fieldEntries = (a: ConnectorAccount) => Object.entries(a.fields)
+  // Connector metadata is untrusted (a folder can be installed from disk):
+  // the homepage becomes a link only as an absolute http(s) URL.
+  const homepage = $derived(safeExternalUrl(detail?.meta.homepage))
 
   // The breadcrumb shows the same label as the card below it, falling back to
   // the slug while the detail is still loading or the name is unknown.
@@ -386,9 +389,9 @@
             {#if detail.meta.publisher}
               <span>by {detail.meta.publisher}</span>
             {/if}
-            {#if detail.meta.homepage}
+            {#if homepage}
               <a
-                href={detail.meta.homepage}
+                href={homepage}
                 target="_blank"
                 rel="noreferrer"
                 class="inline-flex items-center gap-1 text-primary hover:underline"

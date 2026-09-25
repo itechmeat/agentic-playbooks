@@ -247,7 +247,20 @@ pub fn public_meta_from_str(content: &str, name: &str) -> PublicMeta {
     if meta.display_name.trim().is_empty() {
         meta.display_name = name.to_string();
     }
+    // The dashboard renders `homepage` as a link, and a connector installed
+    // from a folder is untrusted content: keep it only as an absolute http or
+    // https URL with no control characters or whitespace, never another
+    // scheme.
+    if !is_http_url(&meta.homepage) {
+        meta.homepage = String::new();
+    }
     meta
+}
+
+fn is_http_url(s: &str) -> bool {
+    let lower = s.to_ascii_lowercase();
+    (lower.starts_with("https://") || lower.starts_with("http://"))
+        && !s.chars().any(|c| c.is_control() || c.is_whitespace())
 }
 
 /// Reads and parses `PUBLIC.md`'s frontmatter (spec 3.2). Falls back to a
@@ -542,6 +555,27 @@ mod tests {
 
         let meta = public_meta(&sub);
         assert_eq!(meta.display_name, "Foo");
+    }
+
+    /// `homepage` becomes a link in the dashboard, and a connector folder can
+    /// be installed from disk, so only an http or https URL is kept.
+    #[test]
+    fn public_meta_keeps_only_an_http_homepage() {
+        for bad in [
+            "javascript:alert(1)",
+            "\u{1}javascript:alert(1)",
+            " data:text/html,x",
+            "//evil.example",
+            "https://ok.example/\u{0}",
+        ] {
+            let md = format!("---\nhomepage: {bad:?}\n---\n");
+            assert_eq!(public_meta_from_str(&md, "x").homepage, "", "{bad:?}");
+        }
+        let md = "---\nhomepage: https://ok.example/docs\n---\n";
+        assert_eq!(
+            public_meta_from_str(md, "x").homepage,
+            "https://ok.example/docs"
+        );
     }
 
     #[test]
