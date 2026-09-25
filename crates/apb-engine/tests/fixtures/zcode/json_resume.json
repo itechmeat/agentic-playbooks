@@ -1,0 +1,26 @@
+{
+  "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+  "traceId": "00000000-0000-4000-8000-0000000000a2",
+  "turnId": "turn_00000000-0000-4000-8000-0000000000b2",
+  "response": "OGNAM",
+  "usage": {
+    "source": "provider",
+    "modelRequestCount": 1,
+    "inputTokens": 21529,
+    "outputTokens": 39,
+    "totalTokens": 21568,
+    "cacheReadTokens": 15552,
+    "cacheWriteTokens": 0,
+    "reasoningTokens": 0,
+    "webFetchRequests": 0,
+    "webSearchRequests": 0
+  },
+  "eventCount": 49,
+  "projection": {
+    "status": "idle",
+    "turnCount": 1,
+    "totalTokenCount": 21568,
+    "contextUsed": 21568,
+    "contextWindow": 200000
+  }
+}

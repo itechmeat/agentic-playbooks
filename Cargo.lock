@@ -136,6 +136,7 @@ dependencies = [
  "jsonschema",
  "libc",
  "percent-encoding",
+ "regex",
  "rust-embed",
  "serde",
  "serde_json",

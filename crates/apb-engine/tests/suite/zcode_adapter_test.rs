@@ -5,12 +5,11 @@
 //! Fixture provenance (`tests/fixtures/zcode/`):
 //! - `error_no_model.stderr` is a REAL capture from zcode-agent 0.16.9 on a
 //!   machine whose standalone CLI was not logged in.
-//! - `json_result.json` and `stream_json_result.jsonl` follow the output
-//!   writer of zcode-agent 0.16.9 (`runPrompt`: `--json` prints
-//!   `JSON.stringify(summary, null, 2)` with `sessionId`, `traceId`, `turnId`,
-//!   `response`, `usage`, `eventCount`, `projection`; `--output-format
-//!   stream-json` ends with a one-line `{"type":"result",...}`), with
-//!   placeholder ids: a real headless turn needs `zcode-agent login`.
+//! - `json_plan.json`, `json_resume.json` (same session, `--resume`) and
+//!   `json_edit.json` are REAL `--json` results of zcode-agent 0.16.9 on
+//!   GLM-5.3-Flash (2026-09-25), with the session/trace/turn ids replaced by
+//!   placeholders. apb does not use `--output-format stream-json`; its final
+//!   `{"type":"result",...}` line is covered inline.
 //! - `error_quota.stderr` is Z.ai's documented 1308 message in the CLI's
 //!   `Error: <message> (traceId: ...)` framing.
 
@@ -87,7 +86,14 @@ fn task<'a>(dir: &'a Path, policy: &'a ConnectorEnvPolicy, grant_autonomy: bool)
 #[test]
 fn zcode_json_output_is_unwrapped_and_its_session_captured() {
     let dir = tempfile::tempdir().unwrap();
-    let json = Path::new(FIXTURES).join("json_result.json");
+    // The real result, with its reply swapped for one that carries the
+    // report block apb asks every agent for.
+    let mut doc: serde_json::Value = serde_json::from_str(&fixture("json_plan.json")).unwrap();
+    doc["response"] = serde_json::Value::String(
+        "MANGO\n\n```yaml\nstatus: success\nsummary: found the word\n```".into(),
+    );
+    let json = dir.path().join("result.json");
+    fs::write(&json, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
     let ad = ClaudeAdapter {
         program: stub_zcode(dir.path(), &format!("cat '{}'", json.display())),
         spec: builtin("zcode").unwrap(),
@@ -98,11 +104,11 @@ fn zcode_json_output_is_unwrapped_and_its_session_captured() {
     assert_eq!(report.status, NodeStatus::Succeeded);
     // The node output is the reply inside `response`, report block stripped,
     // not the JSON envelope.
-    assert_eq!(report.output, "PONG from the plan node.");
-    assert_eq!(report.summary, "replied PONG");
+    assert_eq!(report.output, "MANGO");
+    assert_eq!(report.summary, "found the word");
     assert_eq!(
         report.session.as_deref(),
-        Some("sess_3f1c2a9e-7b4d-4e21-9a55-0c8d6f2b1e47")
+        Some("sess_00000000-0000-4000-8000-000000000001")
     );
     // raw keeps the full stdout for debugging.
     assert!(report.raw.contains("\"eventCount\""));
@@ -121,7 +127,7 @@ fn zcode_json_output_is_unwrapped_and_its_session_captured() {
 #[test]
 fn zcode_autonomy_switches_the_mode_to_yolo_last() {
     let dir = tempfile::tempdir().unwrap();
-    let json = Path::new(FIXTURES).join("json_result.json");
+    let json = Path::new(FIXTURES).join("json_plan.json");
     let ad = ClaudeAdapter {
         program: stub_zcode(dir.path(), &format!("cat '{}'", json.display())),
         spec: builtin("zcode").unwrap(),
@@ -177,19 +183,28 @@ fn zcode_quota_stop_classifies_as_budget() {
 
 #[test]
 fn capture_session_reads_zcode_json_and_stream_json() {
-    let pretty = fixture("json_result.json");
+    // A resumed turn reports the session it re-entered.
+    for name in ["json_plan.json", "json_resume.json"] {
+        assert_eq!(
+            capture_session("zcode", &fixture(name)).as_deref(),
+            Some("sess_00000000-0000-4000-8000-000000000001"),
+            "{name}"
+        );
+    }
     assert_eq!(
-        capture_session("zcode", &pretty).as_deref(),
-        Some("sess_3f1c2a9e-7b4d-4e21-9a55-0c8d6f2b1e47")
+        apb_core::zcode::response_text(&fixture("json_resume.json")).as_deref(),
+        Some("OGNAM")
     );
-    let stream = fixture("stream_json_result.jsonl");
-    assert_eq!(
-        capture_session("zcode", &stream).as_deref(),
-        Some("sess_3f1c2a9e-7b4d-4e21-9a55-0c8d6f2b1e47")
+    assert!(
+        apb_core::zcode::response_text(&fixture("json_edit.json"))
+            .unwrap()
+            .contains("hello.py")
     );
+    let stream = "{\"type\":\"turn_started\",\"sessionId\":\"sess_x\"}\n{\"type\":\"result\",\"sessionId\":\"sess_x\",\"response\":\"done\"}\n";
+    assert_eq!(capture_session("zcode", stream).as_deref(), Some("sess_x"));
     assert_eq!(
-        apb_core::zcode::response_text(&stream).as_deref(),
-        Some("PONG from the plan node.")
+        apb_core::zcode::response_text(stream).as_deref(),
+        Some("done")
     );
     assert_eq!(capture_session("zcode", "plain text reply\n"), None);
 }
@@ -298,7 +313,7 @@ fn a_paid_plan_quota_stop_falls_back_to_the_same_model_on_another_plan() {
             ("zcode", "zai-start/GLM-5.3@max"),
         ],
     );
-    let json = Path::new(FIXTURES).join("json_result.json");
+    let json = Path::new(FIXTURES).join("json_plan.json");
     let quota = Path::new(FIXTURES).join("error_quota.stderr");
     let stub = dir.path().join("zcode-stub");
     common::write_sync(
@@ -366,7 +381,7 @@ fn a_paid_plan_quota_stop_falls_back_to_the_same_model_on_another_plan() {
         EventPayload::NodeFinished { node, output, .. } if node == "work" => Some(output.clone()),
         _ => None,
     });
-    assert_eq!(node_out.as_deref(), Some("PONG from the plan node."));
+    assert_eq!(node_out.as_deref(), Some("MANGO"));
     // The user's own ZCode config was never written.
     assert!(
         !home

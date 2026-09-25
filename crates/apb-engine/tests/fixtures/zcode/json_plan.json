@@ -1,0 +1,26 @@
+{
+  "sessionId": "sess_00000000-0000-4000-8000-000000000001",
+  "traceId": "00000000-0000-4000-8000-0000000000a1",
+  "turnId": "turn_00000000-0000-4000-8000-0000000000b1",
+  "response": "MANGO",
+  "usage": {
+    "source": "provider",
+    "modelRequestCount": 2,
+    "inputTokens": 42763,
+    "outputTokens": 233,
+    "totalTokens": 42996,
+    "cacheReadTokens": 29824,
+    "cacheWriteTokens": 0,
+    "reasoningTokens": 0,
+    "webFetchRequests": 0,
+    "webSearchRequests": 0
+  },
+  "eventCount": 202,
+  "projection": {
+    "status": "idle",
+    "turnCount": 1,
+    "totalTokenCount": 42996,
+    "contextUsed": 21507,
+    "contextWindow": 200000
+  }
+}

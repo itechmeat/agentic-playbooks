@@ -25,6 +25,10 @@ hmac.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 subtle.workspace = true
+# zcode: evaluates ZCode's built-in `modelMatch` rules (JS-compatible subset)
+# to find a model's reasoning levels (a selection without one is rejected by
+# ZCode and silently replaced by a different model).
+regex = "1"
 
 # Group termination of the agent-detection probe tree (Unix): kill(-pgid,
 # SIGKILL) as a syscall rather than a `kill -KILL -<pgid>` subprocess, whose

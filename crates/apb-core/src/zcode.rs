@@ -306,6 +306,94 @@ pub fn builtin_plan_models(builtin_config: &Path) -> Vec<(String, String)> {
         .collect()
 }
 
+/// The reasoning levels ZCode accepts for `model_id`, from the built-in
+/// config's `modelRules`: every rule whose `modelMatch` matches the whole id
+/// (case-insensitively, as ZCode does) overlays the previous one, so the LAST
+/// matching rule that declares `reasoningLevel` wins. `None` when the config
+/// is unreadable or no rule matches.
+pub fn reasoning_levels(builtin_config: &Path, model_id: &str) -> Option<Vec<String>> {
+    let raw = std::fs::read_to_string(builtin_config).ok()?;
+    let doc: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    let rules = doc
+        .pointer("/config/modelConfigRules/modelRules")?
+        .as_array()?;
+    let mut found = None;
+    for rule in rules {
+        let Some(pattern) = rule.get("modelMatch").and_then(|m| m.as_str()) else {
+            continue;
+        };
+        let Ok(re) = regex::RegexBuilder::new(&format!("^(?:{pattern})$"))
+            .case_insensitive(true)
+            .build()
+        else {
+            continue;
+        };
+        if !re.is_match(model_id) {
+            continue;
+        }
+        if let Some(values) = rule
+            .pointer("/config/optionSpecs/reasoningLevel/values")
+            .and_then(|v| v.as_array())
+        {
+            found = Some(
+                values
+                    .iter()
+                    .filter_map(|v| v.as_str().map(str::to_string))
+                    .collect(),
+            );
+        }
+    }
+    found
+}
+
+/// Makes a selection one ZCode will honor instead of silently replacing.
+///
+/// ZCode rejects a default selection whose model is not on the plan, or that
+/// carries no (or an unsupported) reasoning level, and then quietly runs the
+/// first model of the first usable plan instead (GLM-5.3 at max effort, the
+/// most expensive one; verified 2026-09-25). So: the model must be one the
+/// built-in config enables on that plan, and a missing effort is filled with
+/// ZCode's own default, the model's highest level. Only `account:` plans are
+/// checked; a custom provider passes through.
+pub fn complete_selection(sel: &mut ModelSelection, builtin_config: &Path) -> Result<(), String> {
+    if !sel.provider_id.starts_with("account:") {
+        return Ok(());
+    }
+    let pairs = builtin_plan_models(builtin_config);
+    let plan = plan_alias(&sel.provider_id).unwrap_or_else(|| sel.provider_id.clone());
+    if !pairs.is_empty()
+        && !pairs
+            .iter()
+            .any(|(p, m)| *p == sel.provider_id && *m == sel.model_id)
+    {
+        let offered: Vec<&str> = pairs
+            .iter()
+            .filter(|(p, _)| *p == sel.provider_id)
+            .map(|(_, m)| m.as_str())
+            .collect();
+        return Err(format!(
+            "zcode model `{}` is not offered on plan `{plan}` (offered: {})",
+            sel.model_id,
+            offered.join(", ")
+        ));
+    }
+    let Some(levels) = reasoning_levels(builtin_config, &sel.model_id) else {
+        return Ok(());
+    };
+    match &sel.effort {
+        None => sel.effort = levels.last().cloned(),
+        Some(e) if !levels.contains(e) => {
+            return Err(format!(
+                "zcode effort `{e}` is not supported by `{}` (supported: {})",
+                sel.model_id,
+                levels.join(", ")
+            ));
+        }
+        Some(_) => {}
+    }
+    Ok(())
+}
+
 /// Distinct model ids named in the built-in config, for case-insensitive
 /// canonicalization in [`parse_model`].
 pub fn known_model_ids(home: &Path) -> Vec<String> {
@@ -536,8 +624,11 @@ pub fn spawn_env_in(
     let known = known_model_ids(&home);
     let family = account_family(&home);
     match parse_model(model, &family, &known) {
-        Some(sel) => {
+        Some(mut sel) => {
             check_plan_usable(&sel, &logged_in_providers(&home)).map_err(std::io::Error::other)?;
+            if let Some(builtin) = builtin_config_path(&home) {
+                complete_selection(&mut sel, &builtin).map_err(std::io::Error::other)?;
+            }
             let dest = match scoped_dir {
                 Some(dir) => dir.join("provider_config.json"),
                 None => {
@@ -730,6 +821,70 @@ mod tests {
         assert!(logged_in_providers(tempfile::tempdir().unwrap().path()).is_empty());
     }
 
+    /// A trimmed copy of ZCode 0.16.9's built-in provider config: the plan
+    /// model list and the reasoning-level rules that matter here.
+    const FAKE_BUILTIN: &str = r#"{"schemaVersion":1,"revision":30,"config":{"modelConfigRules":{
+        "modelRules":[
+            {"modelMatch":".*","config":{"optionSpecs":{"reasoningLevel":{"values":["disabled","enabled"]}}}},
+            {"modelMatch":".*GLM-5\\.2(?:[.\\-:/\\[].*)?","config":{"optionSpecs":{"reasoningLevel":{"values":["disabled","high","max"]}}}},
+            {"modelMatch":".*glm-5\\.3(?:-flash)?(?:[.\\-:/\\[].*)?","config":{"optionSpecs":{"reasoningLevel":{"values":["low","high","max"]}}}}
+        ],
+        "builtinProviderModelRules":[
+            {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
+            {"modelId":"GLM-5.3-Flash","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
+            {"modelId":"GLM-5-Turbo","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
+            {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:zai-start-plan"}]}}}"#;
+
+    #[test]
+    fn reasoning_levels_follow_the_last_matching_rule() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("b.json");
+        std::fs::write(&f, FAKE_BUILTIN).unwrap();
+        assert_eq!(
+            reasoning_levels(&f, "GLM-5.3-Flash").unwrap(),
+            vec!["low", "high", "max"]
+        );
+        assert_eq!(
+            reasoning_levels(&f, "GLM-5.2").unwrap(),
+            vec!["disabled", "high", "max"]
+        );
+        assert_eq!(
+            reasoning_levels(&f, "GLM-5-Turbo").unwrap(),
+            vec!["disabled", "enabled"]
+        );
+    }
+
+    /// Every selection apb hands ZCode must be one it honors: ZCode replaces
+    /// an invalid one with GLM-5.3 at max effort without saying so.
+    #[test]
+    fn complete_selection_fills_effort_and_refuses_what_zcode_would_replace() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("b.json");
+        std::fs::write(&f, FAKE_BUILTIN).unwrap();
+        let mut flash = parse_model("zai-individual/glm-5.3-flash", "zai", &known()).unwrap();
+        complete_selection(&mut flash, &f).unwrap();
+        assert_eq!(flash.effort.as_deref(), Some("max"));
+        let mut low = parse_model("zai-individual/GLM-5.3-Flash@low", "zai", &known()).unwrap();
+        complete_selection(&mut low, &f).unwrap();
+        assert_eq!(low.effort.as_deref(), Some("low"));
+        let mut turbo = parse_model("zai-individual/GLM-5-Turbo", "zai", &known()).unwrap();
+        complete_selection(&mut turbo, &f).unwrap();
+        assert_eq!(turbo.effort.as_deref(), Some("enabled"));
+
+        let mut bad_effort =
+            parse_model("zai-individual/GLM-5.3-Flash@xhigh", "zai", &known()).unwrap();
+        let e = complete_selection(&mut bad_effort, &f).unwrap_err();
+        assert!(e.contains("low, high, max"), "{e}");
+        let mut off_plan = parse_model("zai-start/GLM-5.3-Flash", "zai", &known()).unwrap();
+        let e = complete_selection(&mut off_plan, &f).unwrap_err();
+        assert!(e.contains("not offered on plan `zai-start`"), "{e}");
+        let mut typo = parse_model("zai-individual/GLM-5.3-Flsh", "zai", &known()).unwrap();
+        assert!(complete_selection(&mut typo, &f).is_err());
+        let mut custom = parse_model("my-provider/anything", "zai", &known()).unwrap();
+        complete_selection(&mut custom, &f).unwrap();
+        assert_eq!(custom.effort, None);
+    }
+
     /// Lays out a fake ZCode home: built-in config with two plans, a personal
     /// config, and credentials logged in to the individual plan only.
     fn fake_home() -> tempfile::TempDir {
@@ -737,14 +892,7 @@ mod tests {
         let v2 = home.path().join(".zcode/v2");
         let bundled = home.path().join(HOME_REL_BUILTIN_CONFIG);
         std::fs::create_dir_all(bundled.parent().unwrap()).unwrap();
-        std::fs::write(
-            &bundled,
-            r#"{"schemaVersion":1,"revision":30,"config":{"modelConfigRules":{"builtinProviderModelRules":[
-                {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
-                {"modelId":"GLM-5.3-Flash","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
-                {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:zai-start-plan"}]}}}"#,
-        )
-        .unwrap();
+        std::fs::write(&bundled, FAKE_BUILTIN).unwrap();
         std::fs::write(
             v2.join("provider_config.json"),
             r#"{"schemaVersion":1,"config":{"providerConfigRules":{"providerRules":[]},"modelConfigRules":{"providerModelRules":[],"manualProviderModelRules":[]}}}"#,

@@ -213,8 +213,13 @@ executor:
 - `<model>`: a ZCode model id such as `GLM-5.3` or `GLM-5.3-Flash`, matched
   case-insensitively.
 - `@<effort>`: optional reasoning level (ZCode's effort setting), for example
-  `@low`, `@high`, `@max` for GLM-5.3. Omitted, ZCode uses the model's highest
-  level. There is no profile-level effort field; the suffix is zcode-only.
+  `@low`, `@high`, `@max` for GLM-5.3 and GLM-5.3-Flash. Omitted, apb fills in
+  the model's highest level, which is ZCode's own default. There is no
+  profile-level effort field; the suffix is zcode-only.
+- apb validates the selection before spawning: the model must be one ZCode's
+  built-in config offers on that plan, and the effort one the model supports.
+  ZCode itself does not reject an invalid selection: it silently runs GLM-5.3
+  at max effort instead (observed), so apb fails such a step up front.
 - An unqualified model (`GLM-5.3`) resolves deterministically to the PAID
   individual coding plan of the account family ZCode is set to (`zai` unless
   ZCode's settings say `bigmodel`). Qualify the model to use any other plan.
@@ -224,8 +229,9 @@ The model list the profile editor offers for zcode is the detected
 the CLI can use), paid plan first.
 
 How it runs: `zcode-agent -p <prompt> --json --mode build`. ZCode's `--mode`
-defaults to `yolo` for `-p`, so apb always pins one: `build` normally (every
-approval request is denied in headless mode), `yolo` only for an authorized
+defaults to `yolo` for `-p`, so apb always pins one: `build` normally (in
+headless mode every approval request is denied, so file writes and shell
+commands are refused: effectively read-only), `yolo` only for an authorized
 effectful run (appended last, the last value wins). The CLI has no `--model`
 flag: apb writes a run-scoped copy of the user's ZCode personal provider
 config (`<run>/agent-home/zcode/<node>/provider_config.json`) with the
