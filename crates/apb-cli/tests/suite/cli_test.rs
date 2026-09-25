@@ -96,6 +96,37 @@ fn validate_all_reports_a_playbook_that_fails_to_load() {
         .stdout(predicate::str::contains("implement-task: OK"));
 }
 
+/// `apb validate` checks the connector rules run start checks: a playbook
+/// binding an installed connector whose manifest no longer loads is a V42
+/// error here, not only a code-less refusal when the run starts.
+#[test]
+fn validate_reports_v42_for_an_installed_broken_connector() {
+    let dir = seeded_dir();
+    let cfg = tempfile::tempdir().unwrap();
+    let conn = cfg.path().join("connectors/brokenhook");
+    fs::create_dir_all(&conn).unwrap();
+    fs::write(
+        conn.join("connector.yaml"),
+        "name: brokenhook\nversion: 0.1.0\nfunctions:\n  - name: inbox_read\n    description: read pending\n    read_only: true\n    response_pick: [events]\n    inbox:\n      op: read\n",
+    )
+    .unwrap();
+    let pdir = dir.path().join(".apb/playbooks/hooked");
+    fs::create_dir_all(pdir.join("1.0.0")).unwrap();
+    fs::write(
+        pdir.join("1.0.0/playbook.yaml"),
+        "schema: 2\nid: hooked\nname: hooked\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - id: a\n    type: agent_task\n    prompt: hi\n    profile: architect\n    connectors: [{ name: brokenhook, functions: [inbox_read] }]\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n",
+    )
+    .unwrap();
+    fs::write(pdir.join("current"), "1.0.0").unwrap();
+    playbook()
+        .arg("validate")
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("hooked: error V42"));
+}
+
 /// Whole-project validation checks zcode profile models against apb's
 /// allowlist: the bare id and the legacy `zai-individual/` spelling pass, any
 /// other model is an error naming the allowlist.

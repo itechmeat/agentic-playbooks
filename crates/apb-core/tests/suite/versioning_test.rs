@@ -593,3 +593,41 @@ fn create_version_with_override_none_keeps_auto_assign() {
             .unwrap();
     assert_eq!(assigned, "1.1.0");
 }
+
+/// A playbook that binds `brokenhook`, an installed connector whose manifest
+/// no longer loads (an inbox function without the webhook block it needs).
+const BINDS_BROKEN_CONNECTOR: &str = "schema: 2\nid: hooked\nname: hooked\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - id: a\n    type: agent_task\n    prompt: hi\n    profile: architect\n    connectors: [{ name: brokenhook, functions: [inbox_read] }]\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n";
+
+/// Installs `brokenhook` into `cfg`'s connector store.
+fn install_broken_connector(cfg: &Path) {
+    let dir = cfg.join("connectors/brokenhook");
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("connector.yaml"),
+        "name: brokenhook\nversion: 0.1.0\nfunctions:\n  - name: inbox_read\n    description: read pending\n    read_only: true\n    response_pick: [events]\n    inbox:\n      op: read\n",
+    )
+    .unwrap();
+}
+
+/// Saving validates against the same connector facts run start does: a
+/// definition that binds an installed-but-broken connector is refused with
+/// V42 at save time, instead of saving fine and failing at run start with a
+/// code-less "playbook is invalid".
+#[test]
+fn save_refuses_a_binding_to_an_installed_broken_connector_with_v42() {
+    let _lock = crate::common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    install_broken_connector(cfg.path());
+    unsafe { std::env::set_var("APB_CONFIG_DIR", cfg.path()) };
+    let root = tempfile::tempdir().unwrap();
+    seed(root.path());
+    let res = create_version(root.path(), "hooked", BINDS_BROKEN_CONNECTOR, None, true);
+    unsafe { std::env::remove_var("APB_CONFIG_DIR") };
+    match res {
+        Err(VersioningError::Validation(issues)) => assert!(
+            issues.iter().any(|i| i.code == "V42"),
+            "expected V42, got {issues:?}"
+        ),
+        other => panic!("expected a V42 validation refusal, got {other:?}"),
+    }
+}

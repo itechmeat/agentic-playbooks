@@ -120,6 +120,22 @@ pub struct ValidationContext {
     pub connectors: std::collections::BTreeMap<String, crate::connector::resolve::ConnectorFacts>,
 }
 
+impl ValidationContext {
+    /// The facts a stored definition is validated against: the profiles of the
+    /// registry it lives in, its origin, and the installed connectors (so V42
+    /// and V43 fire). The one constructor every validating surface uses -
+    /// `apb validate`, MCP `playbook_validate`, the dashboard's playbook view,
+    /// save, doctor and run start - so none of them checks against fewer facts
+    /// than run start does.
+    pub fn for_registry(reg: &crate::registry::Registry, origin: PlaybookOrigin) -> Self {
+        Self {
+            profiles: reg.profiles(),
+            playbook_origin: origin,
+            connectors: crate::connector::resolve::validation_facts(),
+        }
+    }
+}
+
 pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationReport {
     let mut r = ValidationReport::default();
     check_unique_ids(playbook, &mut r); // V01, V02

@@ -279,10 +279,8 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
         Some(n) => vec![n],
         None => reg.playbook_ids(),
     };
-    let ctx = ValidationContext {
-        profiles: reg.profiles(),
-        ..Default::default()
-    };
+    let ctx =
+        ValidationContext::for_registry(&reg, apb_core::profile_store::PlaybookOrigin::Project);
     let mut failed = false;
     for id in names {
         match reg.load(&id, None) {

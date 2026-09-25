@@ -321,11 +321,8 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         }
     }
 
+    let ctx = ValidationContext::for_registry(&reg, PlaybookOrigin::Project);
     for (id, playbook) in &loaded {
-        let ctx = ValidationContext {
-            profiles: profiles.clone(),
-            ..Default::default()
-        };
         let report = validate(playbook, &ctx);
         let errors = report
             .issues

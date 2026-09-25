@@ -458,10 +458,10 @@ pub(crate) async fn get_playbook(
     };
     match reg.load(&id, q.version.as_deref()) {
         Ok(loaded) => {
-            let ctx = ValidationContext {
-                profiles: reg.profiles(),
-                ..Default::default()
-            };
+            let ctx = ValidationContext::for_registry(
+                &reg,
+                apb_core::profile_store::PlaybookOrigin::Project,
+            );
             let report = validate(&loaded.playbook, &ctx);
             let validation: Vec<serde_json::Value> = report.issues.iter().map(|i| serde_json::json!({
                 "code": i.code,

@@ -757,11 +757,7 @@ pub fn create_draft_in(
     let reg = Registry::open_dir(parent).map_err(|e| VersioningError::NotFound(e.to_string()))?;
     // Origin is passed explicitly: global draft with `scope: project` should
     // fail V14 immediately, not only at runtime.
-    let ctx = ValidationContext {
-        profiles: reg.profiles(),
-        playbook_origin: origin,
-        connectors: crate::connector::resolve::validation_facts(),
-    };
+    let ctx = ValidationContext::for_registry(&reg, origin);
     let report = validate(&playbook, &ctx);
     let errors: Vec<Issue> = report
         .issues
@@ -838,10 +834,7 @@ fn schema_err(e: SchemaError) -> VersioningError {
 
 fn validate_playbook(root: &Path, playbook: &Playbook) -> Result<(), VersioningError> {
     let reg = Registry::open(root).map_err(|e| VersioningError::NotFound(e.to_string()))?;
-    let ctx = ValidationContext {
-        profiles: reg.profiles(),
-        ..Default::default()
-    };
+    let ctx = ValidationContext::for_registry(&reg, crate::profile_store::PlaybookOrigin::Project);
     let report = validate(playbook, &ctx);
     if report.is_valid() {
         return Ok(());

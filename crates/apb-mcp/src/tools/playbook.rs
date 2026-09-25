@@ -261,10 +261,8 @@ fn ref_value(r: &QualifiedProfileRef) -> Value {
 pub fn playbook_validate(root: &Path, id: &str) -> Result<Value, ToolError> {
     let reg = open(root)?;
     let loaded = reg.load(id, None)?;
-    let ctx = ValidationContext {
-        profiles: reg.profiles(),
-        ..Default::default()
-    };
+    let ctx =
+        ValidationContext::for_registry(&reg, apb_core::profile_store::PlaybookOrigin::Project);
     let report = validate(&loaded.playbook, &ctx);
     let issues: Vec<Value> = report.issues.iter().map(|i| json!({
         "code": i.code,

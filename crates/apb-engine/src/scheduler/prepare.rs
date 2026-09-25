@@ -404,18 +404,19 @@ pub(crate) fn prepare_run_target(
     } else {
         PlaybookOrigin::Project
     };
-    let ctx = ValidationContext {
-        profiles: reg.profiles(),
-        playbook_origin: origin,
-        // The run is about to snapshot these connectors, so the inbox rules
-        // are checkable here and worth checking: a node granting inbox
-        // functions of a connector that cannot receive anything would park
-        // forever on an empty inbox.
-        connectors: apb_core::connector::resolve::validation_facts(),
-    };
+    let ctx = ValidationContext::for_registry(&reg, origin);
     let report = validate(&playbook, &ctx);
-    if report.issues.iter().any(|i| i.severity == Severity::Error) {
-        return Err(EngineError::Invalid(format!("playbook `{id}` is invalid")));
+    let errors: Vec<String> = report
+        .issues
+        .iter()
+        .filter(|i| i.severity == Severity::Error)
+        .map(|i| format!("{} {}", i.code, i.message))
+        .collect();
+    if !errors.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "playbook `{id}` is invalid: {}",
+            errors.join("; ")
+        )));
     }
 
     let start_node = playbook
