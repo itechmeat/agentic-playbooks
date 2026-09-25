@@ -861,7 +861,7 @@ fn drive_inner(
                     }
                     // A pause: no NEW work, and NOTHING is written off. A paused
                     // run is resumable and `Cancelled` is terminal for
-                    // `parallel::is_terminal`, so journaling a queued member
+                    // `NodeStatus::is_finished`, so journaling a queued member
                     // here would make `pending_heads` skip it forever and the
                     // resume would silently drop that branch. The gate's
                     // POSITION is shared with the abort; its effect is not.

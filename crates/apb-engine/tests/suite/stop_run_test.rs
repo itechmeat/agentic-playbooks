@@ -771,7 +771,7 @@ fn a_stop_during_a_batch_kills_the_members_in_flight() {
 }
 
 /// #77(B), the sharpest trap: a PAUSE stops admission and writes NOTHING off.
-/// `Cancelled` is terminal for `parallel::is_terminal`, so journaling a queued
+/// `Cancelled` is terminal for `NodeStatus::is_finished`, so journaling a queued
 /// member cancelled here would make the resume skip it forever and silently
 /// drop that branch.
 #[cfg(unix)]

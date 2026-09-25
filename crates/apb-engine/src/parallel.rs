@@ -37,17 +37,6 @@ pub enum JoinReadiness {
     ReadyFailure,
 }
 
-fn is_terminal(s: NodeStatus) -> bool {
-    matches!(
-        s,
-        NodeStatus::Succeeded
-            | NodeStatus::Failed
-            | NodeStatus::TimedOut
-            | NodeStatus::Skipped
-            | NodeStatus::Cancelled
-    )
-}
-
 fn succeeded(s: NodeStatus) -> bool {
     s == NodeStatus::Succeeded
 }
@@ -260,7 +249,7 @@ fn live_nodes(playbook: &Playbook, state: &RunState, active: &[String]) -> BTree
         }
     }
     while let Some(id) = queue.pop_front() {
-        let next: BTreeSet<String> = match is_terminal(status_of(state, &id)) {
+        let next: BTreeSet<String> = match status_of(state, &id).is_finished() {
             true => routed_targets(playbook, &id, state),
             false => playbook
                 .edges
@@ -344,11 +333,11 @@ fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet
 pub fn pending_heads(playbook: &Playbook, state: &RunState) -> Vec<String> {
     let mut heads: BTreeSet<String> = BTreeSet::new();
     for (node, status) in &state.nodes {
-        if !is_terminal(*status) {
+        if !status.is_finished() {
             continue;
         }
         for s in routed_targets(playbook, node, state) {
-            if !is_terminal(status_of(state, &s)) {
+            if !status_of(state, &s).is_finished() {
                 heads.insert(s);
             }
         }
@@ -366,7 +355,7 @@ fn arrival(
     live: &BTreeSet<String>,
 ) -> Arrival {
     let status = status_of(state, source);
-    if !is_terminal(status) {
+    if !status.is_finished() {
         // Still to run, or dead: nothing that can still execute leads here.
         return match live.contains(source) {
             true => Arrival::Pending,

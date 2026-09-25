@@ -150,10 +150,8 @@ fn nodes_check(view: &crate::run_view::RunView) -> RunCheck {
     let mut bad = false;
     for status in nodes.values() {
         *counts.entry(status.as_str()).or_default() += 1;
-        bad |= matches!(
-            status.as_str(),
-            "failed" | "timed_out" | "interrupted" | "lost"
-        );
+        bad |=
+            status == liveness::LOST || crate::state::NodeStatus::from_label(status).ended_badly();
     }
     let detail = counts
         .iter()
