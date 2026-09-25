@@ -642,6 +642,32 @@ fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
     assert_eq!(status, RunStatus::Succeeded);
 }
 
+// A long-running `apb mcp` (an agent session's MCP server) keeps starting
+// background runs after `apb` is reinstalled under it. Reinstalling replaces
+// the file, so the running process's own executable reads as deleted, and a
+// driver re-exec'd from that path used to fail to spawn.
+#[test]
+fn mcp_background_run_starts_after_the_binary_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("afterreinstall", 0);
+    seed(dir.path(), "afterreinstall", &yaml, &script);
+
+    let bin_dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let exe = bin_dir.path().join("apb");
+    fs::copy(crate::common::apb_bin(), &exe).unwrap();
+    let mut mcp = McpSession::start_with(dir.path(), crate::common::apb_std_from(&exe));
+
+    // The reinstall: a new file at the same path, as `cargo install` does.
+    fs::remove_file(&exe).unwrap();
+    fs::copy(crate::common::apb_bin(), &exe).unwrap();
+
+    let run_id = mcp.run_background("afterreinstall");
+    let _guard = RunGuard::new(dir.path(), &run_id);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let status = wait_for_outcome(&run_dir, 0, "the run started after the reinstall to finish");
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
 // --- minimal stdio MCP client -------------------------------------------------
 
 /// A live `apb mcp` child spoken to over stdio, with the initialize handshake
@@ -655,7 +681,11 @@ struct McpSession {
 
 impl McpSession {
     fn start(root: &Path) -> Self {
-        let mut child = crate::common::apb_std()
+        Self::start_with(root, crate::common::apb_std())
+    }
+
+    fn start_with(root: &Path, mut cmd: std::process::Command) -> Self {
+        let mut child = cmd
             .arg("mcp")
             .current_dir(root)
             .stdin(Stdio::piped())

@@ -220,7 +220,7 @@ pub fn spawn_detached_driver(
     resume: bool,
     allow_environment_drift: bool,
 ) -> io::Result<u32> {
-    let exe = std::env::current_exe()?;
+    let exe = apb_core::fsutil::reexec_exe()?;
     // The child gets an absolute root: it starts from a different working
     // directory context and must not have to guess what a relative path meant
     // to the parent.

@@ -512,7 +512,7 @@ pub(crate) fn spawn_detached_supervised(
     allow_shared_workdir: bool,
     continued_from: Option<&str>,
 ) -> ExitCode {
-    let exe = match std::env::current_exe() {
+    let exe = match apb_core::fsutil::reexec_exe() {
         Ok(e) => e,
         Err(e) => {
             eprintln!("run failed: cannot resolve own executable: {e}");

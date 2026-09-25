@@ -2,6 +2,28 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// The path to re-exec this binary from (`__drive-run`, `__drive-supervised`,
+/// the `__ask-server` sidecar). Normally `current_exe`. A long-running
+/// process (`apb mcp` in an agent session, the dashboard) outlives a
+/// reinstall of `apb`, which replaces the file: Linux then reports the old
+/// executable as `<path> (deleted)`, which cannot be spawned. The binary now
+/// at the original path is the one to run, exactly what a fresh `apb` would
+/// be; it re-opens the run from disk like any driver.
+pub fn reexec_exe() -> io::Result<PathBuf> {
+    Ok(live_exe_path(std::env::current_exe()?))
+}
+
+fn live_exe_path(exe: PathBuf) -> PathBuf {
+    if exe.exists() {
+        return exe;
+    }
+    exe.to_str()
+        .and_then(|s| s.strip_suffix(" (deleted)"))
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or(exe)
+}
+
 /// Creates a symbolic link at `link` pointing at `target`.
 ///
 /// Symlinks are a unix-only capability in apb (skill bridges, materialized

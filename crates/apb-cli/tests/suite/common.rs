@@ -83,6 +83,15 @@ pub fn apb_std() -> std::process::Command {
     cmd
 }
 
+/// `std::process` handle on a COPY of the `apb` binary at `exe`, with the same
+/// sandboxed global config dir as [`apb_std`]. For tests about the binary
+/// itself changing on disk under a running process (a reinstall).
+pub fn apb_std_from(exe: &Path) -> std::process::Command {
+    let mut cmd = std::process::Command::new(exe);
+    cmd.env("APB_CONFIG_DIR", sandbox_config_dir());
+    cmd
+}
+
 /// Every process signal and liveness check in these tests is a syscall, not a
 /// `kill`/`ps` subprocess.
 ///
