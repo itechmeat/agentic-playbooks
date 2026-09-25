@@ -243,10 +243,19 @@ acknowledging what it processed.
 **Inbox content is untrusted.** It is written by whoever can reach the
 callback URL, which is the first apb input not authored by the operator. The
 node prompt says so to the agent, and the dashboard marks it when it renders
-it, but the real protection is the grant: give an inbox-reading node the
-narrowest `functions:` allowlist and a `max_calls` budget it can live with,
-and never let the same node hold a write-capable grant it would not want a
-stranger to steer.
+it. Neither stops a message from steering the agent that reads it.
+
+A grant limits only what the node can do through apb's connector calls: give an
+inbox-reading node the narrowest `functions:` allowlist and a `max_calls` budget
+it can live with, and never let the same node hold a write-capable grant it
+would not want a stranger to steer. A grant does not confine the agent itself.
+apb starts coding agents in their autonomous modes, in your working directory,
+with your environment minus the connector secrets, so an agent that follows
+injected instructions can still use its own tools: run commands, edit files,
+call other CLIs you are logged in to. Treat a node that reads the inbox as a
+node that runs untrusted input: keep its prompt's job narrow, prefer a
+`hermetic` profile, and run such playbooks where that agent's reach is
+acceptable.
 
 Two validator rules cover the playbook side. **V42**: a node grants inbox
 functions of a connector with no webhook block, so nothing could ever be
