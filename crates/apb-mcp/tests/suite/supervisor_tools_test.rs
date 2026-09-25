@@ -45,8 +45,17 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 /// through the engine with the options the tool would have used. The tool's
 /// own launch path is covered end-to-end against the real binary in
 /// `apb-cli/tests/suite/detached_driver_test.rs`.
-fn start_supervised_in_process(root: &Path, id: &str, params: BTreeMap<String, String>) -> String {
-    apb_engine::run_background(
+///
+/// Returns the run id and a guard that ends the drive before the test's
+/// TempDir goes: declared after the TempDir, it drops first. A drive thread
+/// still writing while the TempDir is being removed would otherwise leave a
+/// half-deleted run tree behind.
+fn start_supervised_in_process(
+    root: &Path,
+    id: &str,
+    params: BTreeMap<String, String>,
+) -> (String, InProcessRun) {
+    let run_id = apb_engine::run_background(
         root,
         id,
         None,
@@ -56,7 +65,37 @@ fn start_supervised_in_process(root: &Path, id: &str, params: BTreeMap<String, S
             ..Default::default()
         },
     )
-    .unwrap()
+    .unwrap();
+    let guard = InProcessRun {
+        root: root.to_path_buf(),
+        run_id: run_id.clone(),
+    };
+    (run_id, guard)
+}
+
+/// See [`start_supervised_in_process`]: on drop, stops the run unless it
+/// already ended and waits (bounded) for its drive to journal the end.
+struct InProcessRun {
+    root: std::path::PathBuf,
+    run_id: String,
+}
+
+impl Drop for InProcessRun {
+    fn drop(&mut self) {
+        let ended = || {
+            run_status(&self.root, &self.run_id)
+                .ok()
+                .and_then(|s| s["run_status"].as_str().map(str::to_string))
+                .is_some_and(|s| matches!(s.as_str(), "succeeded" | "failed" | "aborted"))
+        };
+        if !ended() {
+            let _ = apb_engine::stop_run(&self.root, &self.run_id);
+        }
+        let start = Instant::now();
+        while !ended() && start.elapsed() < POLL_DEADLINE {
+            std::thread::sleep(POLL_STEP);
+        }
+    }
 }
 
 fn set_executable(path: &Path) {
@@ -154,7 +193,7 @@ fn supervised_no_agent_run_reaches_succeeded() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     wait_for_status(dir.path(), &run_id, "succeeded");
 }
@@ -234,7 +273,7 @@ fn supervised_wake_context_append_and_retry_recovers() {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }
 
-    let run_id = start_supervised_in_process(dir.path(), "supflow_mcp", BTreeMap::new());
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "supflow_mcp", BTreeMap::new());
 
     let wake = poll_until("a non-null wake from supervisor_wait_event", || {
         let out = supervisor_wait_event(dir.path(), &run_id, None, Some(2_000)).unwrap();
@@ -345,7 +384,7 @@ fn interrupt_attempt_posts_command() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     let v = interrupt_attempt(dir.path(), &run_id, Some("wedged"), None).unwrap();
     assert!(
@@ -390,7 +429,7 @@ fn interrupt_attempt_forwards_the_targeted_node() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     let v = interrupt_attempt(dir.path(), &run_id, Some("branch is wedged"), Some("work")).unwrap();
     assert!(
@@ -432,7 +471,7 @@ fn supervisor_report_write_then_read() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
     wait_for_status(dir.path(), &run_id, "succeeded");
 
     supervisor_report(dir.path(), &run_id, "final summary").unwrap();
@@ -449,7 +488,7 @@ fn run_continue_from_posts_command() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     let v = run_continue_from(dir.path(), &run_id, "note").unwrap();
     assert!(
@@ -590,7 +629,7 @@ fn write_supervisor_session_is_findable_without_in_memory_table() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     apb_engine::write_supervisor_session(
         dir.path(),
