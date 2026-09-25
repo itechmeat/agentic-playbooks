@@ -1212,10 +1212,11 @@ mod tests {
     /// the YAML writer quotes the value to preserve its string type, adding two
     /// bytes. The check asks the writer itself rather than guessing its rules:
     /// filtering only all-digit ids let the exponent form through (about 0.6%
-    /// of ids, so roughly one run in a hundred of a test that issues two). Two keys that disagree on that make the file
-    /// lengths differ for a reason that has nothing to do with what these tests
-    /// are about, so the ids are pinned to the unquoted form instead of the
-    /// same-length precondition being left to a coin flip.
+    /// of ids, so roughly one run in a hundred of a test that issues two). Two
+    /// keys that disagree on that make the file lengths differ for a reason
+    /// that has nothing to do with what these tests are about, so the ids are
+    /// pinned to the unquoted form instead of the same-length precondition
+    /// being left to a coin flip.
     fn issue_unquoted_id(path: &std::path::Path) -> (String, apb_core::server_auth::KeyRecord) {
         loop {
             let (key, record) = server_auth::issue_into(path).unwrap();

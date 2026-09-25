@@ -15,20 +15,23 @@ use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-/// Issues a key whose id is not an all-digit string, revoking and retrying
-/// until it gets one.
+/// Issues a key whose id the YAML writer leaves unquoted, revoking and
+/// retrying until it gets one.
 ///
 /// A `KeyRecord` serializes to a fixed-width record, which is what makes a
 /// revoke-then-issue reproduce the same file length. The one exception is the
-/// id: it is the first 8 hex chars of the hash, and when those happen to be all
-/// digits the YAML writer quotes the value to preserve its string type, adding
-/// two bytes. Two keys that disagree on that make the file lengths differ for a
-/// reason unrelated to what the same-tick test is about, so the ids are pinned
-/// to the unquoted form rather than the precondition being left to a coin flip.
+/// id: it is the first 8 hex chars of the hash, and when those read as a YAML
+/// number (all digits, or an exponent form such as `0e123456`) the YAML writer
+/// quotes the value to preserve its string type, adding two bytes. The check
+/// asks the writer itself rather than guessing its rules: filtering only
+/// all-digit ids let the exponent form through. Two keys that disagree on that
+/// make the file lengths differ for a reason unrelated to what the same-tick
+/// test is about, so the ids are pinned to the unquoted form rather than the
+/// precondition being left to a coin flip.
 fn issue_unquoted_id(path: &std::path::Path) -> (String, apb_core::server_auth::KeyRecord) {
     loop {
         let (key, record) = server_auth::issue_into(path).unwrap();
-        if !record.id.bytes().all(|b| b.is_ascii_digit()) {
+        if serde_yaml_ng::to_string(&record.id).unwrap().trim_end() == record.id {
             return (key, record);
         }
         server_auth::revoke_in(path, &record.id).unwrap();
