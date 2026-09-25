@@ -16,7 +16,8 @@ mod auth;
 pub(crate) mod encode;
 mod response;
 
-use account::{account_selection_error, select_account, select_live_account};
+pub use account::select_live_account;
+use account::{account_selection_error, select_account};
 use auth::{non_secret_fields, resolve_secrets};
 use encode::{
     base64_encode, encode_args_for_url, encode_component, encode_form_body, encode_path_segment,

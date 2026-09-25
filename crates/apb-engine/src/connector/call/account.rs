@@ -10,7 +10,7 @@ use super::*;
 /// no selection (ambiguous, reported by the caller via
 /// `account_selection_error`). Mirrors the CLI pipeline's `select_account`
 /// defaulting rule, minus the grant list (a live call has no grants).
-pub(crate) fn select_live_account<'a>(
+pub fn select_live_account<'a>(
     accounts: &'a [config::Account],
     account: Option<&str>,
 ) -> Option<&'a config::Account> {

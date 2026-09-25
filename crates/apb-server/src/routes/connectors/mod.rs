@@ -73,6 +73,61 @@ pub(crate) fn merged_accounts(
     Ok(out)
 }
 
+/// The project root a call-path request (approve, healthcheck, playground
+/// call) acts in, and the account it names. With `?workspace=<id>` that is the
+/// one project, strictly, as before. Without it the request comes from the
+/// machine-wide connector page, whose account rows are [`merged_accounts`]
+/// across every reachable project: the account is looked up in exactly that
+/// list, so a click acts on the row the page showed, in the project whose
+/// config holds it. An omitted `account` picks the single or default one of
+/// that list ([`select_live_account`], the rule the call itself applies).
+///
+/// Returns the account itself whenever one was named or picked; `None` only
+/// in the single-project view with no account named, where the executor
+/// applies its own defaulting against that project.
+///
+/// [`select_live_account`]: apb_engine::connector::call::select_live_account
+#[allow(clippy::result_large_err)]
+pub(crate) fn account_scope(
+    state: &AppState,
+    workspace: Option<&str>,
+    name: &str,
+    account: Option<&str>,
+) -> Result<(PathBuf, Option<config::Account>), Response> {
+    let not_found = |what: String| (StatusCode::NOT_FOUND, what).into_response();
+    if workspace.is_some() {
+        let root = resolve_root(state, workspace)?;
+        let Some(wanted) = account else {
+            return Ok((root, None));
+        };
+        let accounts = config::load_merged(&root, name)
+            .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
+        return match accounts.into_iter().find(|a| a.name == wanted) {
+            Some(a) => Ok((root, Some(a))),
+            None => Err(not_found(format!(
+                "account `{wanted}` not configured for `{name}`"
+            ))),
+        };
+    }
+    let roots = connector_roots(state, None)?;
+    let listed = merged_accounts(&roots, name)
+        .map_err(|e| (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response())?;
+    let plain: Vec<config::Account> = listed.iter().map(|(_, a)| a.clone()).collect();
+    let Some(picked) = apb_engine::connector::call::select_live_account(&plain, account) else {
+        return Err(not_found(match account {
+            Some(wanted) => format!("account `{wanted}` not configured for `{name}`"),
+            None => {
+                format!("no single or default account configured for `{name}`; name the account")
+            }
+        }));
+    };
+    let (root, acct) = listed
+        .into_iter()
+        .find(|(_, a)| a.name == picked.name)
+        .expect("the picked account comes from the listed ones");
+    Ok((root, Some(acct)))
+}
+
 /// GET /api/connectors: installed connectors with their storefront summary,
 /// trust status, and account configuration readiness (spec 9). With
 /// `?workspace=<id>` the account numbers describe that one project; without
@@ -379,8 +434,8 @@ pub(crate) async fn healthcheck_connector_handler(
     AxPath((name, account)): AxPath<(String, String)>,
     Query(q): Query<WorkspaceQuery>,
 ) -> impl IntoResponse {
-    let root = match resolve_root(&state, q.workspace.as_deref()) {
-        Ok(r) => r,
+    let root = match account_scope(&state, q.workspace.as_deref(), &name, Some(&account)) {
+        Ok((root, _)) => root,
         Err(e) => return e,
     };
     let (value, _ok) = apb_engine::connector::call::healthcheck(&root, &name, &account);
@@ -420,10 +475,16 @@ pub(crate) async fn call_connector_handler(
     Query(q): Query<WorkspaceQuery>,
     Json(body): Json<ConnectorCallBody>,
 ) -> impl IntoResponse {
-    let root = match resolve_root(&state, q.workspace.as_deref()) {
-        Ok(r) => r,
+    let (root, picked) = match account_scope(
+        &state,
+        q.workspace.as_deref(),
+        &name,
+        body.account.as_deref(),
+    ) {
+        Ok(scope) => scope,
         Err(e) => return e,
     };
+    let account = picked.map(|a| a.name).or(body.account);
     // An absent/null `args` in the request body deserializes to
     // `Value::Null`; the executor's schema validation and template
     // rendering both expect an object, so normalize here rather than push
@@ -436,7 +497,7 @@ pub(crate) async fn call_connector_handler(
     let (value, _ok) = apb_engine::connector::call::play_call(
         &root,
         &name,
-        body.account.as_deref(),
+        account.as_deref(),
         &body.function,
         &args,
         body.dry_run,
@@ -461,16 +522,13 @@ pub(crate) async fn approve_connector_handler(
     Query(q): Query<WorkspaceQuery>,
     Json(body): Json<ConnectorApproveBody>,
 ) -> impl IntoResponse {
-    let root = match resolve_root(&state, q.workspace.as_deref()) {
-        Ok(r) => r,
-        Err(e) => return e,
-    };
     let loaded = match store::load(&body.name) {
         Ok(l) => l,
         Err(e) => return (StatusCode::NOT_FOUND, e.to_string()).into_response(),
     };
     let mut trust = TrustStore::load();
     match body.account.as_deref() {
+        // The connector's own digest is machine-wide: no project involved.
         None => {
             if let Err(e) = trust.approve_kind(
                 &loaded.digest,
@@ -482,20 +540,13 @@ pub(crate) async fn approve_connector_handler(
             }
         }
         Some(acct_name) => {
-            let accounts = match config::load_merged(&root, &body.name) {
-                Ok(a) => a,
-                Err(e) => {
-                    return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response();
-                }
-            };
-            let Some(account) = accounts.iter().find(|a| a.name == acct_name) else {
-                return (
-                    StatusCode::NOT_FOUND,
-                    format!("account `{acct_name}` not configured for `{}`", body.name),
-                )
-                    .into_response();
-            };
-            let digest = config::account_digest(account);
+            let account =
+                match account_scope(&state, q.workspace.as_deref(), &body.name, Some(acct_name)) {
+                    Ok((_, Some(a))) => a,
+                    Ok((_, None)) => unreachable!("a named account is always returned"),
+                    Err(e) => return e,
+                };
+            let digest = config::account_digest(&account);
             let id = account_trust_id(&body.name, acct_name);
             if let Err(e) = trust.approve_kind(
                 &digest,
