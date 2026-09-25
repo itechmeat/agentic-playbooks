@@ -219,12 +219,20 @@ when all of these hold, otherwise every agent is probed again:
 - it was written by the same build: `detect::build_id` is the package version,
   the fingerprint (path, size, mtime) of the running executable, and a digest of
   the embedded `assets/models.yaml`;
-- every probe input is unchanged: the agent binary fingerprint and the files the
+- every probe input is unchanged: the program probed (see below), the agent
+  binary fingerprint and the files the
   probe or the agent's own model listing reads (auth and config files; for
   opencode also `opencode.json`, `opencode.jsonc` and its cached model catalog),
   plus the presence of `ANTHROPIC_API_KEY`;
 - it is younger than 24 hours, the bound for what no local input shows (for
   example opencode's remote model catalog).
+
+Each built-in agent is probed at the program a run launches: `agents.<id>.program`
+from `config.yaml` when set (a name looked up on PATH, or a path used as is),
+otherwise its default binary. The default binaries (`cursor` runs as
+`cursor-agent`, `claude-code` is `claude`, zcode falls back to its home-deployed
+CLI) live in one table, `detect::BUILTIN_BINS`; the engine launches
+`detect::default_program` from the same table.
 
 Why a memo at all: the probes run in parallel, and a cold detection on a machine
 with claude, codex, opencode, grok and zcode installed still takes about 1.6 s

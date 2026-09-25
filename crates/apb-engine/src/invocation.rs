@@ -289,8 +289,9 @@ pub fn spec_for(agent_id: &str, global: &GlobalConfig) -> Result<InvocationDef, 
 
 /// Agent binary name/path, resolved the same way `adapter_for` picks it:
 /// APB_AGENT_CMD (override for tests/local runs) has the highest priority,
-/// then `agents.<id>.program`, then the default (claude/claude-code ->
-/// "claude", otherwise the id itself). Shared source for both the adapter and
+/// then `agents.<id>.program`, then the default binary of the built-in agent
+/// table (`apb_core::detect::default_program`; detection probes the same
+/// program). Shared source for both the adapter and
 /// the manifest fingerprint - otherwise env drift would trigger falsely.
 pub fn program_for(agent_id: &str, global: &GlobalConfig) -> String {
     if let Ok(p) = std::env::var("APB_AGENT_CMD") {
@@ -298,15 +299,7 @@ pub fn program_for(agent_id: &str, global: &GlobalConfig) -> String {
     }
     global
         .agent_program(agent_id)
-        .unwrap_or_else(|| match agent_id {
-            "claude" | "claude-code" => "claude".to_string(),
-            // cursor is installed as `cursor-agent`; the bare `cursor` binary
-            // is the GUI editor CLI, not the headless agent.
-            "cursor" => "cursor-agent".to_string(),
-            // zcode is deployed into the home directory, off PATH.
-            "zcode" => apb_core::zcode::default_program(),
-            other => other.to_string(),
-        })
+        .unwrap_or_else(|| apb_core::detect::default_program(agent_id))
 }
 
 /// Resolves the invocation for an agent+model pair: form + canonical binary

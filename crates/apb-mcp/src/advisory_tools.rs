@@ -187,10 +187,7 @@ fn adopt_check_model(
     // Normalize the id to the detection probe the same way the invocation resolver does
     // (claude-code -> claude), otherwise a profile on claude-code would give a false
     // model_unverifiable instead of a real check against the claude probe.
-    let probe_id = match agent {
-        "claude-code" => "claude",
-        other => other,
-    };
+    let probe_id = apb_core::detect::canonical_agent_id(agent);
     let Some(info) = agents.iter().find(|a| a.agent == probe_id) else {
         // The agent is not among the built-in top six - nothing to check against.
         findings.push(json!({ "code": "model_unverifiable", "ref": profile_key, "agent": agent, "model": model }));

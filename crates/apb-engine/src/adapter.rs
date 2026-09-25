@@ -1826,41 +1826,13 @@ pub fn adapter_for(agent: &str) -> Result<Box<dyn AgentAdapter>, EngineError> {
     // agent").
     let global = apb_core::config::GlobalConfig::load().unwrap_or_default();
     let spec = crate::invocation::spec_for(agent, &global)?;
-    let program = global
-        .agent_program(agent)
-        .unwrap_or_else(|| default_program(agent));
+    let program = crate::invocation::program_for(agent, &global);
     Ok(Box::new(ClaudeAdapter { program, spec }))
-}
-
-/// Default binary name for built-in agents when not set in config:
-/// claude/claude-code -> "claude", others - the id itself (codex, opencode, agy).
-fn default_program(agent: &str) -> String {
-    match agent {
-        "claude" | "claude-code" => "claude".to_string(),
-        // cursor is installed as `cursor-agent`; the bare `cursor` binary is
-        // the GUI editor CLI, not the headless agent.
-        "cursor" => "cursor-agent".to_string(),
-        // zcode is deployed into the home directory, off PATH.
-        "zcode" => apb_core::zcode::default_program(),
-        other => other.to_string(),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// cursor is installed as `cursor-agent`; the bare `cursor` binary is the
-    /// GUI editor CLI. `default_program` must resolve the agent id to the
-    /// detected binary so `adapter_for` spawns the right executable.
-    #[test]
-    fn default_program_maps_cursor_to_its_binary() {
-        assert_eq!(default_program("cursor"), "cursor-agent");
-        assert_eq!(default_program("grok"), "grok");
-        assert_eq!(default_program("codex"), "codex");
-        assert_eq!(default_program("claude"), "claude");
-        assert_eq!(default_program("claude-code"), "claude");
-    }
 
     /// A failing agent explains itself on whichever stream it likes, and the
     /// explanation is all the node output has to offer. Losing stdout used to

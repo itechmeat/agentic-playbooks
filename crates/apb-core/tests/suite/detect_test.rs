@@ -820,3 +820,45 @@ fn opencode_providers_come_from_the_xdg_auth_file() {
     let raw = std::fs::read_to_string(e.cfg.join("state/agents-detect.json")).unwrap();
     assert!(!raw.contains("SECRET"));
 }
+
+/// Issue #139 F19: runs launch `agents.<id>.program` from the config, so that
+/// is the binary detection must report for a built-in agent, not whatever the
+/// agent's default name finds on PATH. Repointing it must also invalidate the
+/// detection memo.
+#[test]
+fn a_builtin_agent_is_detected_at_its_configured_program() {
+    let _l = lock();
+    let e = setup();
+    // A PATH `codex` that runs never use.
+    write_agent(&e.bin, "codex", &e.counter, "echo path-codex 1.0.0");
+    let tools = e.home.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let configure = |name: &str, version: &str| {
+        write_agent(&tools, name, &e.counter, &format!("echo {name} {version}"));
+        let program = tools.join(name);
+        std::fs::write(
+            e.cfg.join("config.yaml"),
+            format!("agents:\n  codex:\n    program: {}\n", program.display()),
+        )
+        .unwrap();
+        std::fs::canonicalize(program).unwrap()
+    };
+    let codex = |refresh: bool| {
+        agent_catalog::agents(refresh)
+            .into_iter()
+            .find(|a| a.agent == "codex")
+            .unwrap()
+    };
+
+    let first = configure("my-codex", "2.0.0");
+    let found = codex(true);
+    assert_eq!(found.version.as_deref(), Some("my-codex 2.0.0"));
+    assert_eq!(found.canonical_path.as_deref(), Some(first.as_path()));
+
+    configure("other-codex", "3.0.0");
+    assert_eq!(
+        codex(false).version.as_deref(),
+        Some("other-codex 3.0.0"),
+        "a memo written for the old program was reused"
+    );
+}

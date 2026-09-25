@@ -152,14 +152,60 @@ pub struct Probe {
     auth_source: AuthSource,
 }
 
+/// The built-in agents and the binary each one is found and launched as when
+/// the config names no `agents.<id>.program`: the one copy of these names.
+/// Detection probes them ([`builtin_probes`]) and the engine launches
+/// [`default_program`].
+const BUILTIN_BINS: &[(&str, &str)] = &[
+    ("claude", "claude"),
+    ("codex", "codex"),
+    ("agy", "agy"),
+    ("opencode", "opencode"),
+    ("pi", "pi"),
+    ("hermes", "hermes"),
+    ("grok", "grok"),
+    // cursor is installed as `cursor-agent`; the bare `cursor` binary is the
+    // GUI editor CLI, not the headless agent.
+    ("cursor", "cursor-agent"),
+    ("qoder", "qoder"),
+    (crate::zcode::AGENT_ID, crate::zcode::PATH_BIN),
+];
+
+/// The id a built-in agent alias stands for (`claude-code` is `claude`).
+pub fn canonical_agent_id(agent_id: &str) -> &str {
+    match agent_id {
+        "claude-code" => "claude",
+        other => other,
+    }
+}
+
+/// The binary a built-in agent is found as on PATH, `None` for any other id.
+fn builtin_bin(agent_id: &str) -> Option<&'static str> {
+    let id = canonical_agent_id(agent_id);
+    BUILTIN_BINS.iter().find(|(a, _)| *a == id).map(|(_, b)| *b)
+}
+
+/// The program apb launches for `agent_id` when the config names none: the
+/// built-in agent's binary, zcode's home-deployed CLI when it is off PATH,
+/// and the id itself for any other agent.
+pub fn default_program(agent_id: &str) -> String {
+    if canonical_agent_id(agent_id) == crate::zcode::AGENT_ID {
+        return crate::zcode::default_program();
+    }
+    builtin_bin(agent_id).unwrap_or(agent_id).to_string()
+}
+
 /// Built-in probes for the ten agents (claude, codex, agy, opencode, pi,
-/// hermes, grok, cursor, qoder, zcode).
+/// hermes, grok, cursor, qoder, zcode), with the default binaries of
+/// [`BUILTIN_BINS`]. [`probe`] replaces those with `agents.<id>.program`
+/// where the config names one.
 pub fn builtin_probes() -> Vec<Probe> {
     let v = |s: &str| vec![s.to_string()];
+    let bin = |id: &str| v(builtin_bin(id).unwrap_or(id));
     vec![
         Probe {
             id: "claude".into(),
-            bins: v("claude"),
+            bins: bin("claude"),
             category: AgentCategory::Vendor,
             version_args: v("--version"),
             home_paths: Vec::new(),
@@ -168,7 +214,7 @@ pub fn builtin_probes() -> Vec<Probe> {
         },
         Probe {
             id: "codex".into(),
-            bins: v("codex"),
+            bins: bin("codex"),
             category: AgentCategory::Vendor,
             version_args: v("--version"),
             home_paths: Vec::new(),
@@ -177,7 +223,7 @@ pub fn builtin_probes() -> Vec<Probe> {
         },
         Probe {
             id: "agy".into(),
-            bins: v("agy"),
+            bins: bin("agy"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
             home_paths: Vec::new(),
@@ -189,7 +235,7 @@ pub fn builtin_probes() -> Vec<Probe> {
         },
         Probe {
             id: "opencode".into(),
-            bins: v("opencode"),
+            bins: bin("opencode"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
             home_paths: Vec::new(),
@@ -201,7 +247,7 @@ pub fn builtin_probes() -> Vec<Probe> {
         },
         Probe {
             id: "pi".into(),
-            bins: v("pi"),
+            bins: bin("pi"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
             home_paths: Vec::new(),
@@ -210,7 +256,7 @@ pub fn builtin_probes() -> Vec<Probe> {
         },
         Probe {
             id: "hermes".into(),
-            bins: v("hermes"),
+            bins: bin("hermes"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
             home_paths: Vec::new(),
@@ -225,7 +271,7 @@ pub fn builtin_probes() -> Vec<Probe> {
         // unauthenticated machine would cache an empty list.
         Probe {
             id: "grok".into(),
-            bins: v("grok"),
+            bins: bin("grok"),
             category: AgentCategory::Vendor,
             version_args: v("--version"),
             home_paths: Vec::new(),
@@ -236,7 +282,7 @@ pub fn builtin_probes() -> Vec<Probe> {
         // vendor models, so it contributes no curated rows of its own.
         Probe {
             id: "cursor".into(),
-            bins: v("cursor-agent"),
+            bins: bin("cursor"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
             home_paths: Vec::new(),
@@ -251,7 +297,7 @@ pub fn builtin_probes() -> Vec<Probe> {
         // authentication, so it is deferred like grok's.
         Probe {
             id: "qoder".into(),
-            bins: v("qoder"),
+            bins: bin("qoder"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
             home_paths: Vec::new(),
@@ -264,7 +310,7 @@ pub fn builtin_probes() -> Vec<Probe> {
         // symlink) wins and the known deploy location is the fallback.
         Probe {
             id: crate::zcode::AGENT_ID.into(),
-            bins: v(crate::zcode::PATH_BIN),
+            bins: bin(crate::zcode::AGENT_ID),
             category: AgentCategory::Vendor,
             version_args: v("--version"),
             home_paths: v(crate::zcode::HOME_REL_BIN),
@@ -326,9 +372,18 @@ fn fingerprint(path: &Path) -> String {
 }
 
 /// Finds the first executable candidate binary in PATH, canonicalizes the
-/// path. PATH entries inside the current working directory are ignored
+/// path. A candidate given as a path (a configured `program`) is taken as
+/// is. PATH entries inside the current working directory are ignored
 /// (protection against a project-local binary swap of the agent).
 fn find_in_path(bins: &[String]) -> Option<PathBuf> {
+    // A configured program given as a path is used as is.
+    if let Some(found) = bins
+        .iter()
+        .filter(|b| b.contains('/') || b.contains('\\'))
+        .find(|b| crate::config::program_in_path(b))
+    {
+        return std::fs::canonicalize(found).ok();
+    }
     let path = std::env::var("PATH").ok()?;
     // Canonicalize CWD - comparing raw paths breaks on symlink prefixes
     // (macOS /var -> /private/var).
@@ -336,7 +391,10 @@ fn find_in_path(bins: &[String]) -> Option<PathBuf> {
         .ok()
         .and_then(|c| std::fs::canonicalize(&c).ok());
     for dir in std::env::split_paths(&path) {
-        for bin in bins {
+        for bin in bins
+            .iter()
+            .filter(|b| !b.contains('/') && !b.contains('\\'))
+        {
             let cand = dir.join(bin);
             if crate::config::program_in_path(&cand.to_string_lossy())
                 && let Ok(canon) = std::fs::canonicalize(&cand)
@@ -824,18 +882,10 @@ fn probe_one(p: &Probe) -> AgentInfo {
 /// built-in ten are not duplicated). Only checks for the binary's presence -
 /// no model/auth sources. Best-effort: a malformed config yields an empty
 /// list.
-fn custom_probes() -> Vec<Probe> {
-    let Ok(cfg) = crate::config::GlobalConfig::load() else {
-        return Vec::new();
-    };
-    let builtin: std::collections::BTreeSet<&str> = [
-        "claude", "codex", "agy", "opencode", "pi", "hermes", "grok", "cursor", "qoder", "zcode",
-    ]
-    .into_iter()
-    .collect();
+fn custom_probes(cfg: &crate::config::GlobalConfig) -> Vec<Probe> {
     let mut out = Vec::new();
     for (id, def) in &cfg.agents {
-        if def.probe != Some(true) || builtin.contains(id.as_str()) {
+        if def.probe != Some(true) || builtin_bin(id).is_some() {
             continue;
         }
         let bins = if !def.bins.is_empty() {
@@ -856,6 +906,27 @@ fn custom_probes() -> Vec<Probe> {
         });
     }
     out
+}
+
+/// The probes to run: the built-in ones, each looking for the program a run
+/// would launch - `agents.<id>.program` when the config names one (then only
+/// that program, not the default name on PATH or the home fallback) - plus
+/// the custom `probe: true` agents. The binaries are part of every memo key
+/// ([`agent_cache_key`]), so repointing a program re-probes. A config that
+/// does not load yields the built-in defaults only.
+fn configured_probes() -> Vec<Probe> {
+    let mut probes = builtin_probes();
+    let Ok(cfg) = crate::config::GlobalConfig::load() else {
+        return probes;
+    };
+    for p in &mut probes {
+        if let Some(program) = cfg.agent_program(&p.id) {
+            p.bins = vec![program];
+            p.home_paths.clear();
+        }
+    }
+    probes.extend(custom_probes(&cfg));
+    probes
 }
 
 /// Source files (config/auth) that a probe consults. They are part of the
@@ -953,8 +1024,7 @@ pub fn build_id() -> String {
 /// Consumers want `agent_catalog::load` or `agent_catalog::agents`, which
 /// build on this.
 pub fn probe(refresh: bool) -> Vec<AgentInfo> {
-    let mut probes = builtin_probes();
-    probes.extend(custom_probes());
+    let probes = configured_probes();
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     // Current cache keys: probe description + binary/absent + sources +
     // env-auth (to compare against the cache). Every probe has a key, so

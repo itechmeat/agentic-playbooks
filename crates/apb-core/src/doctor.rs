@@ -68,16 +68,6 @@ fn playbook_profile_refs(playbook: &Playbook) -> Vec<QualifiedProfileRef> {
     out
 }
 
-/// Normalizes an agent id to a detect probe id the same way the invocation
-/// resolver does: `claude-code` -> `claude` (shared `claude` binary). Other
-/// ids pass through as-is.
-fn detect_probe_id(agent: &str) -> &str {
-    match agent {
-        "claude-code" => "claude",
-        other => other,
-    }
-}
-
 /// Environment diagnostics: global config, playbook and profile registry,
 /// availability of agent programs and runner runtimes in PATH, playbook
 /// validity. Returns a structured report; formatting and the exit code are
@@ -212,14 +202,14 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     // binary.
     let want_detect = agents
         .iter()
-        .any(|a| detect_ids.contains(detect_probe_id(a)));
+        .any(|a| detect_ids.contains(crate::detect::canonical_agent_id(a)));
     let detected = if want_detect {
         crate::agent_catalog::agents(false)
     } else {
         Vec::new()
     };
     for agent in &agents {
-        let probe_id = detect_probe_id(agent);
+        let probe_id = crate::detect::canonical_agent_id(agent);
         // An agent program explicitly set in the config takes priority over
         // detect: detect probes the fixed names of the six, but here the
         // agent may point at a custom binary (agents.<id>.program).
