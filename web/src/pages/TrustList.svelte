@@ -79,6 +79,7 @@
   async function confirmRevoke() {
     const e = target
     if (!e) return
+    confirmOpen = false
     revoking = e.digest
     try {
       await revokeTrust(e.digest)
@@ -88,7 +89,6 @@
       toast.error('Revoke failed', { description: String(err) })
     } finally {
       revoking = null
-      target = null
     }
   }
 
