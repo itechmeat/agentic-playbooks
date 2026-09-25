@@ -605,3 +605,79 @@ fn write_supervisor_session_is_findable_without_in_memory_table() {
     assert_eq!(found_run_id, run_id);
     assert_eq!(caps, vec!["observe".to_string(), "retry".to_string()]);
 }
+
+/// Token economy: the wait answer carries the cursor for the next call and
+/// caps a huge wake detail (a failed node's whole output) to its tail, so the
+/// supervisor does not pay for it on every later turn.
+#[test]
+fn supervisor_wait_event_returns_a_cursor_and_clips_huge_details() {
+    use apb_engine::event::{EventLog, EventPayload, WakeTrigger};
+    let dir = tempfile::tempdir().unwrap();
+    let rd = dir.path().join(".apb/runs/big");
+    let mut log = EventLog::create(&rd).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "w".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    let detail = format!("{}FATAL: the real error", "x".repeat(100_000));
+    let wake = log
+        .append(EventPayload::WakeRaised {
+            trigger: WakeTrigger::NodeFailed,
+            node: "impl".into(),
+            detail,
+        })
+        .unwrap();
+    log.append(EventPayload::RunFinished {
+        outcome: "failed".into(),
+    })
+    .unwrap();
+
+    let out = supervisor_wait_event(dir.path(), "big", None, Some(2_000)).unwrap();
+    assert_eq!(out["reason"], "wake");
+    assert_eq!(out["next_after_seq"], wake.seq);
+    assert_eq!(out["wake"]["detail_truncated"], true);
+    let kept = out["wake"]["detail"].as_str().unwrap();
+    assert!(kept.len() < 17 * 1024, "kept {} bytes", kept.len());
+    assert!(kept.ends_with("FATAL: the real error"));
+
+    let out = supervisor_wait_event(dir.path(), "big", Some(wake.seq), Some(2_000)).unwrap();
+    assert_eq!(out["reason"], "ended");
+    assert!(out["wake"].is_null());
+    assert_eq!(out["next_after_seq"], wake.seq);
+}
+
+/// Token economy: node outputs are not shipped a third time inside `events`
+/// unless the supervisor asks for the raw texts.
+#[test]
+fn run_inspect_elides_long_event_texts_unless_asked() {
+    use apb_engine::event::{EventLog, EventPayload, WakeTrigger};
+    let dir = tempfile::tempdir().unwrap();
+    let rd = dir.path().join(".apb/runs/ins");
+    let mut log = EventLog::create(&rd).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "w".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    let big = "y".repeat(20_000);
+    log.append(EventPayload::WakeRaised {
+        trigger: WakeTrigger::NodeFailed,
+        node: "impl".into(),
+        detail: big.clone(),
+    })
+    .unwrap();
+
+    let compact = sv_run_inspect(dir.path(), "ins").unwrap();
+    let text = compact["events"].to_string();
+    assert!(!text.contains(&big), "events must not repeat the long text");
+    assert!(text.contains("bytes elided"));
+    // The wake itself still carries the full detail.
+    assert_eq!(
+        compact["wakes"][0]["detail"].as_str().unwrap().len(),
+        20_000
+    );
+
+    let full = apb_mcp::tools::sv_run_inspect_with(dir.path(), "ins", true).unwrap();
+    assert!(full["events"].to_string().contains(&big));
+}

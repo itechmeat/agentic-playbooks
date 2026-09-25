@@ -5,11 +5,12 @@
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
-use rmcp::{tool, tool_router};
+use rmcp::service::RequestContext;
+use rmcp::{RoleServer, tool, tool_router};
 use serde_json::json;
 
 use super::args::*;
-use super::{WfMcp, to_call_tool_result, with_warnings};
+use super::{WfMcp, sliced_wait, to_call_tool_result, with_warnings};
 use crate::tools::{self, ToolError};
 
 #[tool_router(router = run_router, vis = "pub(crate)")]
@@ -229,7 +230,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately",
+        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_run(
@@ -400,7 +401,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Get the current status of a run, including liveness: `driver_alive` (null when no process claims the run), `node_times` with each node's start and the age and pid of its open attempt (plus `past_estimate`, true once an open attempt is running past its `expected_duration`), and the node status `lost` for a node whose attempt process is gone. Use `node_times` to tell a slow node from a stuck one, and `apb doctor --run <id>` for a full per-run diagnosis.",
+        description = "Get the current status of a run, including liveness: `driver_alive` (null when no process claims the run), `node_times` with each node's start and the age and pid of its open attempt (plus `past_estimate`, true once an open attempt is running past its `expected_duration`), and the node status `lost` for a node whose attempt process is gone. Use `node_times` to tell a slow node from a stuck one, and `apb doctor --run <id>` for a full per-run diagnosis. The answer is large (every node output); to wait for a run to finish or need input, call run_wait instead of calling this repeatedly.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn run_status(
@@ -412,6 +413,47 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         to_call_tool_result(tools::run_status(&root, &run_id))
+    }
+
+    #[tool(
+        description = "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review gate, a supervisor decision), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer or review_decide, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. On reason timeout, call run_wait again with the same arguments.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn run_wait(
+        &self,
+        Parameters(RunWaitArgs {
+            run_id,
+            workspace,
+            timeout_ms,
+        }): Parameters<RunWaitArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        let total = tools::wait_timeout(timeout_ms);
+        // One waiter across all slices, so a gate's grace is not restarted
+        // at every slice boundary.
+        let waiter = match apb_engine::run_wait::RunWaiter::new(&root, &run_id) {
+            Ok(w) => std::sync::Mutex::new(w),
+            Err(e) => return to_call_tool_result(Err(ToolError::from(e))),
+        };
+        let res = sliced_wait(
+            &ctx,
+            total,
+            format!("waiting for run `{run_id}`"),
+            move |slice| {
+                let mut w = waiter
+                    .lock()
+                    .map_err(|_| ToolError::Engine("run_wait: poisoned waiter".into()))?;
+                let res = w.wait(slice)?;
+                let done = res.reason != apb_engine::run_wait::WaitReason::Timeout;
+                Ok((res, done))
+            },
+        )
+        .await;
+        to_call_tool_result(res.and_then(|res| tools::run_wait_result(&root, &run_id, &res)))
     }
 
     #[tool(

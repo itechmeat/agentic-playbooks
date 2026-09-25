@@ -213,6 +213,82 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     }))
 }
 
+/// Default `run_wait` block when the caller names none: under the ~60 s
+/// tool-call limit of the strictest hosts (Codex, ChatGPT Apps), so a single
+/// wait never times out on the host side.
+pub const RUN_WAIT_DEFAULT_MS: u64 = 50_000;
+/// Upper bound for one `run_wait` call (30 minutes). Hosts with a long tool
+/// timeout (Claude Code) can wait out a whole run in one call.
+pub const RUN_WAIT_MAX_MS: u64 = 30 * 60 * 1000;
+
+/// Clamps a caller's `timeout_ms` for `run_wait`/`supervisor_wait_event`.
+pub fn wait_timeout(timeout_ms: Option<u64>) -> std::time::Duration {
+    std::time::Duration::from_millis(
+        timeout_ms
+            .unwrap_or(RUN_WAIT_DEFAULT_MS)
+            .min(RUN_WAIT_MAX_MS),
+    )
+}
+
+/// The compact `run_wait` answer: why it returned and only what the caller
+/// needs to act on (the gate to answer, the final answer, the failure), not
+/// the full `run_status` with every node output. A caller that wants the
+/// detail calls `run_status`/`run_report` once, not on every wake.
+pub fn run_wait_result(
+    root: &Path,
+    run_id: &str,
+    res: &apb_engine::run_wait::RunWaitResult,
+) -> Result<Value, ToolError> {
+    use apb_engine::run_wait::WaitReason;
+    let status = run_status(root, run_id)?;
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    if let Some(nodes) = status["nodes"].as_object() {
+        for v in nodes.values() {
+            if let Some(s) = v.as_str() {
+                *counts.entry(s.to_string()).or_default() += 1;
+            }
+        }
+    }
+    let next = match res.reason {
+        WaitReason::Finished => {
+            "done: the run is over; call run_report only if you need the details"
+        }
+        WaitReason::NeedsInput => match res.needs {
+            Some(apb_engine::run_wait::NeedsInput::Question) => {
+                "answer pending_question with run_answer, then call run_wait again"
+            }
+            Some(apb_engine::run_wait::NeedsInput::Review) => {
+                "relay pending_review to the user, record it with review_decide, then call run_wait again"
+            }
+            _ => "the run is parked for a supervisor decision (pending_supervisor)",
+        },
+        WaitReason::Stopped => "the run is paused or has no live driver; run_resume continues it",
+        WaitReason::Timeout => {
+            "still running: call run_wait again with the same arguments; do not poll run_status"
+        }
+    };
+    let mut out = json!({
+        "run_id": run_id,
+        "reason": res.reason,
+        "run_status": status["run_status"],
+        "waited_ms": res.waited.as_millis() as u64,
+        "nodes": counts,
+        "next": next,
+    });
+    for key in [
+        "pending_question",
+        "pending_review",
+        "pending_supervisor",
+        "failure_reason",
+        "answer",
+    ] {
+        if !status[key].is_null() {
+            out[key] = status[key].clone();
+        }
+    }
+    Ok(out)
+}
+
 pub fn run_events(root: &Path, run_id: &str, from_seq: Option<u64>) -> Result<Value, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
     let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;

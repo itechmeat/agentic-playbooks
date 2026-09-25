@@ -3,48 +3,118 @@
 //! executor, patch the playbook, append context, abort, and report.
 
 use std::path::Path;
-use std::time::Duration;
 
-use super::run::run_status;
+use super::run::{run_status, wait_timeout};
 use super::{ToolError, open};
 use apb_core::versioning::create_patch_version;
 use apb_engine::control::Control;
+use apb_engine::run_wait::{SupervisorWait, clip_tail, wait_supervisor_event};
 use apb_engine::{
-    post_supervisor_command, run_cancel, run_inspect as engine_run_inspect, touch_heartbeat,
-    wait_wake, write_supervisor_report,
+    post_supervisor_command, run_cancel, run_inspect as engine_run_inspect, write_supervisor_report,
 };
 use serde_json::{Value, json};
 
-/// Blockingly waits for the next wake (or a timeout/run completion) and
-/// returns it along with a fresh status. `wake: null` means the run
-/// has already finished, or the wait timed out - the agent decides for itself whether to
-/// keep looping.
+/// Byte cap for a wake's `detail` in the `supervisor_wait_event` answer. The
+/// detail of a failed node is its whole output, which can run to hundreds of
+/// kilobytes; the supervisor pays for it on the wake turn and again on every
+/// later turn of its conversation. The tail (where a failure usually says
+/// what went wrong) is kept; `supervisor_run_inspect` has the full output.
+pub const WAKE_DETAIL_MAX_BYTES: usize = 16 * 1024;
+
+/// Blockingly waits for the next wake, a new human-review gate, the end of
+/// the run, or the timeout, and returns it along with a fresh status. `wake:
+/// null` with a non-terminal `run_status` and no `pending_review` means only
+/// that the wait timed out. `next_after_seq` is the cursor to pass on the
+/// next call. The supervisor heartbeat stays fresh for the whole wait, so a
+/// long timeout is safe (and cheaper: every return is a model turn).
 pub fn supervisor_wait_event(
     root: &Path,
     run_id: &str,
     after_seq: Option<u64>,
     timeout_ms: Option<u64>,
 ) -> Result<Value, ToolError> {
-    // A liveness mark for the background supervisor before the blocking wait:
-    // a signal that the process watching the run is still alive and polling.
-    touch_heartbeat(root, run_id)?;
-    let timeout = Duration::from_millis(timeout_ms.unwrap_or(25_000));
-    let wake = wait_wake(root, run_id, after_seq, timeout)?;
+    let outcome = wait_supervisor_event(root, run_id, after_seq, wait_timeout(timeout_ms))?;
+    supervisor_wait_result(root, run_id, after_seq, &outcome)
+}
+
+/// The `supervisor_wait_event` answer for one wait outcome.
+pub fn supervisor_wait_result(
+    root: &Path,
+    run_id: &str,
+    after_seq: Option<u64>,
+    outcome: &SupervisorWait,
+) -> Result<Value, ToolError> {
     let status = run_status(root, run_id)?;
+    let (wake, next_after_seq, reason) = match outcome {
+        SupervisorWait::Wake(w) => {
+            let (detail, clipped) = clip_tail(&w.detail, WAKE_DETAIL_MAX_BYTES);
+            let mut v = json!({
+                "seq": w.seq,
+                "trigger": w.trigger,
+                "node": w.node,
+                "detail": detail,
+            });
+            if clipped {
+                v["detail_truncated"] = json!(true);
+            }
+            (v, Some(w.seq), "wake")
+        }
+        SupervisorWait::Review { seq, .. } => (Value::Null, Some(*seq), "review"),
+        SupervisorWait::Ended => (Value::Null, after_seq, "ended"),
+        SupervisorWait::TimedOut => (Value::Null, after_seq, "timeout"),
+    };
     // Surface the pending human-review gate here too (issue #42 finding 4): a
     // supervisor that wakes on a run must see the gate and its owner-facing
     // instruction so it relays the decision to the user rather than blocking.
     Ok(json!({
         "wake": wake,
+        "reason": reason,
+        "next_after_seq": next_after_seq,
         "run_status": status["run_status"],
         "pending_review": status["pending_review"],
         "pending_supervisor": status["pending_supervisor"],
     }))
 }
 
-/// A full run summary for the observer (status, nodes, context.md, wakes, actions, events).
+/// Strings in the `events` list longer than this are elided by default in
+/// `supervisor_run_inspect`: they are node outputs and wake details the same
+/// answer already carries in `outputs`, `context` and `wakes`.
+pub const INSPECT_EVENT_TEXT_MAX_BYTES: usize = 512;
+
+/// A run summary for the observer (status, nodes, outputs, context.md, wakes,
+/// actions, events), with the long texts inside `events` elided: every node
+/// output would otherwise ship three times (outputs, context, events).
 pub fn sv_run_inspect(root: &Path, run_id: &str) -> Result<Value, ToolError> {
-    Ok(engine_run_inspect(root, run_id)?)
+    sv_run_inspect_with(root, run_id, false)
+}
+
+/// [`sv_run_inspect`]; `full_events` keeps the raw event texts verbatim.
+pub fn sv_run_inspect_with(
+    root: &Path,
+    run_id: &str,
+    full_events: bool,
+) -> Result<Value, ToolError> {
+    let mut v = engine_run_inspect(root, run_id)?;
+    if !full_events && let Some(events) = v.get_mut("events").and_then(Value::as_array_mut) {
+        for e in events {
+            elide_long_strings(e);
+        }
+    }
+    Ok(v)
+}
+
+fn elide_long_strings(v: &mut Value) {
+    match v {
+        Value::String(s) if s.len() > INSPECT_EVENT_TEXT_MAX_BYTES => {
+            *s = format!(
+                "[{} bytes elided: see outputs, context or wakes; full_events: true for the raw text]",
+                s.len()
+            );
+        }
+        Value::Array(a) => a.iter_mut().for_each(elide_long_strings),
+        Value::Object(o) => o.values_mut().for_each(elide_long_strings),
+        _ => {}
+    }
 }
 
 pub fn node_retry(

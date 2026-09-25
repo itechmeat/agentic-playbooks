@@ -5,18 +5,19 @@
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
-use rmcp::{tool, tool_router};
+use rmcp::service::RequestContext;
+use rmcp::{RoleServer, tool, tool_router};
 
 use serde_json::json;
 
 use super::args::*;
-use super::{WfMcp, to_call_tool_result};
+use super::{WfMcp, sliced_wait, to_call_tool_result};
 use crate::tools::{self, ToolError};
 
 #[tool_router(router = supervisor_router, vis = "pub(crate)")]
 impl WfMcp {
     #[tool(
-        description = "Block until the next supervisor wake for a run (or timeout), then return it with fresh status. Requires the `observe` capability",
+        description = "Block server-side until the next supervisor wake, a new human_review gate to relay, the end of the run, or timeout_ms, then return it with fresh status. Every return costs you a turn, so wait long: pass the largest timeout_ms your host allows (default 50000, max 1800000); the server keeps your heartbeat alive and sends progress notifications meanwhile. reason timeout means nothing happened: call again at once with after_seq = next_after_seq, without other calls. Requires the `observe` capability",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn supervisor_wait_event(
@@ -26,33 +27,48 @@ impl WfMcp {
             after_seq,
             timeout_ms,
         }): Parameters<SupervisorWaitArgs>,
+        ctx: RequestContext<RoleServer>,
     ) -> CallToolResult {
         let run_id = match self.resolve_session(&token, "supervisor_wait_event") {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Err(e)),
         };
-        let root = self.root.clone();
-        let res = tokio::task::spawn_blocking(move || {
-            tools::supervisor_wait_event(&root, &run_id, after_seq, timeout_ms)
-        })
-        .await
-        .unwrap_or_else(|e| Err(ToolError::Engine(format!("wait task failed: {e}"))));
-        to_call_tool_result(res)
+        let root = (*self.root).clone();
+        let total = tools::wait_timeout(timeout_ms);
+        let (r, id) = (root.clone(), run_id.clone());
+        let outcome = sliced_wait(
+            &ctx,
+            total,
+            format!("waiting for a supervisor wake on run `{run_id}`"),
+            move |slice| {
+                let o = apb_engine::run_wait::wait_supervisor_event(&r, &id, after_seq, slice)?;
+                let done = !matches!(o, apb_engine::run_wait::SupervisorWait::TimedOut);
+                Ok((o, done))
+            },
+        )
+        .await;
+        to_call_tool_result(
+            outcome.and_then(|o| tools::supervisor_wait_result(&root, &run_id, after_seq, &o)),
+        )
     }
 
     #[tool(
-        description = "Get a full inspection report of a supervised run (status, nodes, context, wakes, actions, events). Requires the `observe` capability",
+        description = "Get an inspection report of a supervised run (status, nodes, outputs, context, wakes, actions, events). Long texts inside events are elided since outputs, context and wakes already carry them; pass full_events: true for the raw texts. Call it only when a wake detail is not enough. Requires the `observe` capability",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn supervisor_run_inspect(
         &self,
-        Parameters(SupervisorRunRefArgs { token }): Parameters<SupervisorRunRefArgs>,
+        Parameters(SupervisorInspectArgs { token, full_events }): Parameters<SupervisorInspectArgs>,
     ) -> CallToolResult {
         let run_id = match self.resolve_session(&token, "supervisor_run_inspect") {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Err(e)),
         };
-        to_call_tool_result(tools::sv_run_inspect(&self.root, &run_id))
+        to_call_tool_result(tools::sv_run_inspect_with(
+            &self.root,
+            &run_id,
+            full_events == Some(true),
+        ))
     }
 
     #[tool(

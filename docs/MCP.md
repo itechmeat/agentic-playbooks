@@ -39,6 +39,7 @@ Reads (read-only):
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing) |
 | `runs_list` | List of runs |
 | `run_status` | Current run status (nodes, outputs) |
+| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status` |
 | `run_events` | Run events, optionally from a given seq |
 | `run_report` | Short run summary |
 | `profile_list` | Profiles (project + global) with bundle trust status |
@@ -94,13 +95,21 @@ Supervisor tools (`supervisor_*`) are only available inside a supervisor
 session (behind a session gate) and are not listed here as part of the normal
 surface. One is worth naming regardless, because its polling contract is easy
 to get wrong: `supervisor_wait_event { token, after_seq, timeout_ms }` blocks
-until the run's next wake, or a timeout, whichever comes first. Pass
-`after_seq` as the `seq` of the last wake you already saw (omit it on the
-first call); the response's `wake.seq` becomes your next `after_seq`, so you
-walk the wake stream forward instead of re-scanning wakes you already
-handled. `timeout_ms` bounds the block (default 25000). `wake: null` means
-the run already reached a terminal state, or the call simply timed out with
-nothing new - the caller decides whether to wait again.
+until the run's next wake, a new human_review gate, the end of the run, or a
+timeout, whichever comes first. Pass `after_seq` as the response's
+`next_after_seq` (omit it on the first call), so you walk the event stream
+forward instead of re-scanning wakes you already handled. `reason` says why
+it returned: `wake`, `review` (relay `pending_review`), `ended` or `timeout`.
+`timeout_ms` bounds the block (default 50000, max 1800000). Every return is a
+model turn for the supervisor, so pass the largest value the host's tool-call
+limit allows: the server refreshes the supervisor heartbeat while it blocks
+(so a long wait never reads as a lost supervisor) and sends progress
+notifications every 15 s when the call carries a progress token. On `timeout`,
+just call again. A wake's `detail` is capped at its last 16 KiB
+(`detail_truncated: true`); `supervisor_run_inspect` has the full output.
+`supervisor_run_inspect` itself elides texts over 512 bytes inside `events`
+(they repeat `outputs`, `context` and `wakes`); pass `full_events: true` for
+the raw journal.
 
 An interactive `agent_task` node (`interactive: true`) can park a run on a
 question mid-attempt; `run_status`'s `pending_question` (`{ node, question,
@@ -157,8 +166,18 @@ tool call (for example, ChatGPT Apps at around 60 seconds). That's why
 
 - `playbook_run` with `background: true` starts the run in the background and
   returns `run_id` **immediately**, without waiting for completion.
-- The client then polls `run_status` (or `run_events` with an increasing
-  `seq`) until the status becomes terminal (`succeeded` / `failed`).
+- The client then calls `run_wait { run_id, timeout_ms }`, which blocks
+  server-side and returns only when the run finishes (`reason: finished`),
+  needs input (`needs_input`, with `pending_question`, `pending_review` or
+  `pending_supervisor`), is paused or driverless (`stopped`), or `timeout_ms`
+  runs out (`timeout`: call it again). Do not poll `run_status` in a loop:
+  every call is a model turn that re-reads the whole conversation plus every
+  node output, while `run_wait` costs one turn per decision. `timeout_ms`
+  defaults to 50000 (under the strictest ~60 s host limits) and goes up to
+  1800000; pass the largest value your host allows. Progress notifications go
+  out every 15 s when the call carries a progress token. A gate must stay
+  pending for 1.5 s before `run_wait` reports it, so a wait right after
+  `run_answer` or `review_decide` does not return the gate just answered.
 - If the run hits a human_review node, the client resolves it via
   `review_decide`, and the run continues.
 - If the run hits an interactive `agent_task` node that asked a question
@@ -168,6 +187,15 @@ tool call (for example, ChatGPT Apps at around 60 seconds). That's why
 Without `background: true`, behavior is unchanged: `playbook_run` blocks
 until completion and returns the result. This remains the default for
 backward compatibility.
+
+The CLI has the same shape for an agent that drives apb through a shell:
+`apb run <id> --detach` prints the run id and returns at once, and
+`apb wait <run_id> [--timeout SECS]` blocks until the run finishes, needs
+input or stops. Run `apb wait` as one background command and act on its exit
+code (0 succeeded, 1 failed or aborted, 3 needs input, 4 paused or
+driverless, 5 timeout); no status polling, no tokens while it blocks. A plain
+`apb run <id>` also blocks, but it cannot report a gate: it just keeps waiting
+until someone answers it.
 
 ## Detached runs, resume, and stop
 
@@ -195,8 +223,8 @@ restarts), `advance_past_finished` (nothing was interrupted; the run
 continues past the last finished node without re-running it),
 `parallel_fallback` (two or more branches were cut, so the run restarts from
 the last finished node), or `explicit_from_node` (the caller named
-`from_node`). Poll `run_status` / `run_events` afterward the same way you
-would for a `background: true` run.
+`from_node`). Follow it with `run_wait` the same way you would for a
+`background: true` run.
 
 When the run still has an unapplied stop in its control queue, the ack also
 carries `"stops_on_pending_abort": true` and a `note` saying so. Control

@@ -88,6 +88,19 @@ pub struct RunRefArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunWaitArgs {
+    pub run_id: String,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// How many milliseconds to block at most (default 50000, max 1800000).
+    /// Pass the largest value your host's tool-call timeout allows: each
+    /// return costs a model turn.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct ProgressReportArgs {
     pub run_id: String,
     /// Iterations completed in the current cycle group.
@@ -180,10 +193,22 @@ pub struct RunAnswerArgs {
 pub struct SupervisorWaitArgs {
     /// Supervisor session token, issued on start with supervise: "self".
     pub token: String,
-    /// Return wakes starting from this seq (excluding ones already seen).
+    /// Return wakes starting from this seq (excluding ones already seen):
+    /// pass the previous answer's `next_after_seq`.
     pub after_seq: Option<u64>,
-    /// How many milliseconds to block waiting for the next wake.
+    /// How many milliseconds to block waiting for the next wake (default
+    /// 50000, max 1800000). Longer is cheaper: each return is a model turn.
     pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SupervisorInspectArgs {
+    pub token: String,
+    /// Keep the long texts inside `events` verbatim. Off by default: they are
+    /// the node outputs and wake details already present in `outputs`,
+    /// `context` and `wakes`.
+    #[serde(default)]
+    pub full_events: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

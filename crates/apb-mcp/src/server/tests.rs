@@ -133,6 +133,7 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "playbook_delete",
         "runs_list",
         "run_status",
+        "run_wait",
         "run_events",
         "run_report",
         "run_resume",
@@ -199,6 +200,7 @@ fn tools_carry_safety_annotations() {
         "playbook_validate",
         "runs_list",
         "run_status",
+        "run_wait",
         "run_events",
         "run_report",
         "supervisor_wait_event",
@@ -722,8 +724,9 @@ async fn supervisor_tool_rejects_unknown_token() {
     let server = WfMcp::new(dir.path().to_path_buf());
 
     let result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs {
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
             token: "bogus".to_string(),
+            full_events: None,
         }))
         .await;
 
@@ -776,7 +779,10 @@ async fn capability_gate_blocks_retry_when_observe_only() {
     );
 
     let inspect_result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs { token }))
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
+            token,
+            full_events: None,
+        }))
         .await;
     assert_eq!(
         inspect_result.is_error,
@@ -824,8 +830,9 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
     let server = WfMcp::new(dir.path().to_path_buf());
 
     let inspect_result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs {
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
             token: "sv-disk-1".to_string(),
+            full_events: None,
         }))
         .await;
     assert_eq!(
@@ -838,8 +845,9 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
     // Capabilities from disk must also be enforced: an unknown token
     // without a disk persist remains refused.
     let unknown_result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs {
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
             token: "sv-nowhere".to_string(),
+            full_events: None,
         }))
         .await;
     assert_eq!(unknown_result.is_error, Some(true));
@@ -899,8 +907,9 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
     );
 
     let inspect_result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs {
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
             token: "sv-disk-observe-only".to_string(),
+            full_events: None,
         }))
         .await;
     assert_eq!(

@@ -54,6 +54,70 @@ pub struct WfMcp {
     used_nonces: Arc<Mutex<HashSet<String>>>,
 }
 
+/// Longest single blocking slice of a server-side wait (`run_wait`,
+/// `supervisor_wait_event`). Between slices the server sends a progress
+/// notification, when the caller supplied a progress token, and stops early if
+/// the caller cancelled the request. Neither costs the caller a model turn.
+pub(crate) const WAIT_SLICE: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// [`WAIT_SLICE`], overridable through `APB_WAIT_SLICE_MS` so tests can
+/// observe the progress keep-alive in milliseconds. A malformed value falls
+/// back to the default: it is a keep-alive knob, not a correctness input.
+fn wait_slice() -> std::time::Duration {
+    std::env::var("APB_WAIT_SLICE_MS")
+        .ok()
+        .and_then(|v| v.trim().parse::<u64>().ok())
+        .map(std::time::Duration::from_millis)
+        .unwrap_or(WAIT_SLICE)
+}
+
+/// Runs a blocking wait in slices of at most [`wait_slice`] on the blocking
+/// pool. `step(slice)` waits up to `slice` and returns its result plus whether
+/// the wait is over; a slice that only timed out is retried until `total`
+/// runs out, and its result is what the caller gets on the final timeout.
+pub(crate) async fn sliced_wait<T, F>(
+    ctx: &rmcp::service::RequestContext<rmcp::RoleServer>,
+    total: std::time::Duration,
+    label: String,
+    step: F,
+) -> Result<T, ToolError>
+where
+    T: Send + 'static,
+    F: Fn(std::time::Duration) -> Result<(T, bool), ToolError> + Send + Sync + 'static,
+{
+    let step = Arc::new(step);
+    let deadline = std::time::Instant::now() + total;
+    let token = ctx.meta.get_progress_token();
+    let mut ticks = 0u64;
+    let max_slice = wait_slice();
+    loop {
+        let slice = deadline
+            .saturating_duration_since(std::time::Instant::now())
+            .min(max_slice);
+        let f = Arc::clone(&step);
+        let (value, done) = tokio::task::spawn_blocking(move || f(slice))
+            .await
+            .map_err(|e| ToolError::Engine(format!("wait task failed: {e}")))??;
+        if done || std::time::Instant::now() >= deadline {
+            return Ok(value);
+        }
+        if ctx.ct.is_cancelled() {
+            return Err(ToolError::Engine(format!("{label}: request cancelled")));
+        }
+        if let Some(token) = &token {
+            ticks += 1;
+            // Best-effort keep-alive: a failed notification must not end the wait.
+            let _ = ctx
+                .peer
+                .notify_progress(
+                    rmcp::model::ProgressNotificationParam::new(token.clone(), ticks as f64)
+                        .with_message(label.clone()),
+                )
+                .await;
+        }
+    }
+}
+
 /// Convert the result of a pure tool function into an MCP response.
 ///
 /// Both `ToolError::NotFound` and `ToolError::Engine` become a tool-level
