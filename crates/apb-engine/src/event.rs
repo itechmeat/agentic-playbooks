@@ -99,6 +99,17 @@ pub enum EventPayload {
         #[serde(default)]
         spawn_ms: Option<u64>,
     },
+    /// The attempt's agent process has exited and the drive is finishing the
+    /// attempt: reading its status file, capturing its session, running the
+    /// node's `success_check`. The matching `AttemptFinished` follows (issue
+    /// #107). Until then the attempt is still open and its pid is gone, and
+    /// this event is what tells a reader that the drive saw the exit itself,
+    /// so a live drive's attempt reads as running, not lost. Written only for
+    /// an attempt whose spawn was journaled with a pid.
+    AttemptExited {
+        node: String,
+        attempt: u32,
+    },
     AttemptFinished {
         node: String,
         attempt: u32,

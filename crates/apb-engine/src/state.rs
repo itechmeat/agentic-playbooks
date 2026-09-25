@@ -212,6 +212,10 @@ impl RunState {
                     s.attempts.insert(node.clone(), *attempt);
                     open.insert(node.clone());
                 }
+                // The attempt stays open until its `attempt_finished`: an exit
+                // the drive never finished is a crash to an offline reader.
+                // Live reporting reads this event (see `liveness`).
+                EventPayload::AttemptExited { .. } => {}
                 EventPayload::AttemptFinished {
                     node,
                     rejected_output,

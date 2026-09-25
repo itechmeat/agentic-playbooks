@@ -1303,6 +1303,17 @@ pub(crate) fn execute_node(
                     if let Some(e) = control_err.borrow_mut().take() {
                         return Err(e);
                     }
+                    // The agent process is gone; everything below until the
+                    // `attempt_finished` (status file, session lookup,
+                    // success_check) is the drive finishing the attempt. Say
+                    // so, so a reader does not take the exited pid for a lost
+                    // attempt meanwhile (issue #107).
+                    if spawn_at.get().is_some() {
+                        journal.append(EventPayload::AttemptExited {
+                            node: node_id.into(),
+                            attempt,
+                        })?;
+                    }
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
                     // fix): the adapter tore the agent down on the abort flag.
                     // Fail this attempt with the node-named message, journaling

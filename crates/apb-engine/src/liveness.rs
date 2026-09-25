@@ -420,6 +420,9 @@ pub struct OpenAttempt {
     /// over `started_ms` for ordering against later journal entries: two
     /// events can share a wall-clock millisecond, but seq never ties.
     pub started_seq: u64,
+    /// The drive journaled `attempt_exited`: it saw the process exit and is
+    /// finishing the attempt (issue #107).
+    pub exited: bool,
 }
 
 /// Every attempt still open at the end of the journal, ordered by node then
@@ -427,13 +430,28 @@ pub struct OpenAttempt {
 /// separate because the fold deliberately throws away the pid and the
 /// timestamp, which are exactly what liveness needs.
 pub fn open_attempts(events: &[Event]) -> Vec<OpenAttempt> {
-    let mut open: BTreeMap<(String, u32), (u128, u64, Option<u32>)> = BTreeMap::new();
+    let mut open: BTreeMap<(String, u32), OpenAttempt> = BTreeMap::new();
     for e in events {
         match &e.payload {
             EventPayload::AttemptStarted {
                 node, attempt, pid, ..
             } => {
-                open.insert((node.clone(), *attempt), (e.ts, e.seq, *pid));
+                open.insert(
+                    (node.clone(), *attempt),
+                    OpenAttempt {
+                        node: node.clone(),
+                        attempt: *attempt,
+                        pid: *pid,
+                        started_ms: e.ts,
+                        started_seq: e.seq,
+                        exited: false,
+                    },
+                );
+            }
+            EventPayload::AttemptExited { node, attempt } => {
+                if let Some(a) = open.get_mut(&(node.clone(), *attempt)) {
+                    a.exited = true;
+                }
             }
             EventPayload::AttemptFinished { node, attempt, .. } => {
                 open.remove(&(node.clone(), *attempt));
@@ -447,17 +465,7 @@ pub fn open_attempts(events: &[Event]) -> Vec<OpenAttempt> {
             _ => {}
         }
     }
-    open.into_iter()
-        .map(
-            |((node, attempt), (started_ms, started_seq, pid))| OpenAttempt {
-                node,
-                attempt,
-                pid,
-                started_ms,
-                started_seq,
-            },
-        )
-        .collect()
+    open.into_values().collect()
 }
 
 /// Per-node timings surfaced by `run_status`. Without these "is it stuck or
@@ -619,6 +627,33 @@ pub fn lost_nodes(events: &[Event]) -> BTreeSet<String> {
         .collect()
 }
 
+/// Nodes whose open attempt's process is gone but whose drive journaled the
+/// exit itself (`attempt_exited`) and is finishing the attempt: reading its
+/// status file, running its `success_check` (issue #107). Under a live drive
+/// these are in flight, not lost; the reporting functions below apply that
+/// only when the caller knows the drive claim holds. The entry reaper still
+/// sees them in [`dead_open_attempts`]: a new drive only starts once the old
+/// one is gone, and then nothing will finish them.
+pub fn finishing_nodes(events: &[Event]) -> BTreeSet<String> {
+    dead_open_attempts(events)
+        .into_iter()
+        .filter(|a| a.exited)
+        .map(|a| a.node)
+        .collect()
+}
+
+/// [`lost_nodes`] as a reader with the run's drive claim should report them:
+/// under a live drive, an attempt the drive itself saw exit is being finished,
+/// not lost.
+fn reported_lost_nodes(events: &[Event], driver_alive: Option<bool>) -> BTreeSet<String> {
+    let mut lost = lost_nodes(events);
+    if driver_alive == Some(true) {
+        let finishing = finishing_nodes(events);
+        lost.retain(|n| !finishing.contains(n));
+    }
+    lost
+}
+
 /// Nodes whose currently open attempt process is still alive. The pure fold
 /// maps an open `attempt_started` to `interrupted` (crash-shape for offline
 /// readers); live reporting must re-promote those nodes to running so an
@@ -669,12 +704,14 @@ pub fn live_open_nodes(events: &[Event]) -> BTreeSet<String> {
 /// perfectly healthy, parent-driven child as driverless and this repair would
 /// never fire for it.
 ///
-/// This does NOT fix every transient `Interrupted` flicker a caller might see.
-/// A run genuinely mid-crash - the agent process just exited, `lost_nodes` is
-/// non-empty, but the drive thread is still running `success_check` and has
-/// not yet journaled `AttemptFinished` - is deliberately left `Interrupted`
-/// here: `lost_nodes` is by design unaffected by this change, and a
-/// wait/signal park is never what that shape actually is.
+/// A third repair (issue #107) covers the window between an agent process
+/// exiting and the drive journaling its `AttemptFinished`, while the drive
+/// reads the status file and runs `success_check`. The pid is gone, so the
+/// attempt is in `lost_nodes`; but the drive journaled `AttemptExited` when it
+/// saw the exit, so under a live drive claim (`driver_alive == Some(true)`)
+/// that attempt is being finished and the run reads `running`. An exited pid
+/// without that event, or under a claim that is absent or dead, is still
+/// reported as it was: real information about a crash.
 ///
 /// A provably dead drive claim (`driver_alive == Some(false)`) wins over both
 /// repairs and over a pure `running`: the only process that could ever write
@@ -701,8 +738,13 @@ pub fn reported_run_status(
     if !live_open_nodes(events).is_empty() {
         return RunStatus::Running;
     }
-    let parked_on_wait =
-        waiting && lost_nodes(events).is_empty() && matches!(driver_alive, Some(true));
+    // Issue #107: the agent exited and the live drive is finishing the attempt.
+    if driver_alive == Some(true) && !finishing_nodes(events).is_empty() {
+        return RunStatus::Running;
+    }
+    let parked_on_wait = waiting
+        && reported_lost_nodes(events, driver_alive).is_empty()
+        && matches!(driver_alive, Some(true));
     if parked_on_wait {
         return RunStatus::Running;
     }
@@ -724,8 +766,11 @@ pub fn reported_node_statuses(
     driver_alive: Option<bool>,
 ) -> BTreeMap<String, String> {
     let state = RunState::fold(events);
-    let lost = lost_nodes(events);
-    let live = live_open_nodes(events);
+    let lost = reported_lost_nodes(events, driver_alive);
+    let mut live = live_open_nodes(events);
+    if driver_alive == Some(true) {
+        live.extend(finishing_nodes(events));
+    }
     let driver_dead = driver_alive == Some(false);
     state
         .nodes
@@ -1598,5 +1643,58 @@ edges:
         .unwrap();
 
         assert_eq!(driver_alive(&child_dir, "child-2"), Some(true));
+    }
+
+    /// Issue #107: an attempt whose pid is gone reads `running` only when the
+    /// drive journaled `attempt_exited` for it AND the drive claim holds. The
+    /// same exit without that event, or under a claim that is absent or dead,
+    /// is still a crash to report; and the entry reaper still sees the
+    /// attempt, since a new drive only starts once the old one is gone.
+    #[test]
+    fn an_exited_attempt_reads_running_only_under_a_live_drive_that_journaled_it() {
+        use crate::state::RunStatus;
+        let started = vec![
+            ev(
+                0,
+                1_000,
+                EventPayload::NodeStarted {
+                    node: "a".into(),
+                    attempt: 1,
+                },
+            ),
+            ev(1, 2_000, attempt_started("a", 1, Some(u32::MAX))),
+        ];
+        let mut exited = started.clone();
+        exited.push(ev(
+            2,
+            3_000,
+            EventPayload::AttemptExited {
+                node: "a".into(),
+                attempt: 1,
+            },
+        ));
+        let cases = [
+            (&exited, Some(true), RunStatus::Running, "running"),
+            (&exited, None, RunStatus::Interrupted, LOST),
+            (&exited, Some(false), RunStatus::Interrupted, LOST),
+            (&started, Some(true), RunStatus::Interrupted, LOST),
+        ];
+        for (events, driver, run, node) in cases {
+            assert_eq!(
+                reported_run_status(events, false, driver),
+                run,
+                "{driver:?} exited={}",
+                events.len() == 3
+            );
+            assert_eq!(
+                reported_node_statuses(events, driver)
+                    .get("a")
+                    .map(String::as_str),
+                Some(node),
+                "{driver:?} exited={}",
+                events.len() == 3
+            );
+        }
+        assert_eq!(dead_open_attempts(&exited).len(), 1, "still reapable");
     }
 }

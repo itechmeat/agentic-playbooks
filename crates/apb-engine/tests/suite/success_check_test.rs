@@ -243,3 +243,68 @@ fn success_check_overrides_agent_self_assessment() {
         "passing success_check must allow success"
     );
 }
+
+/// Issue #107: between the agent process exiting and the drive journaling its
+/// `attempt_finished`, the drive is still working on the attempt (reading the
+/// status file, running the `success_check`, which can take seconds). A reader
+/// must see that run as running, not interrupted: the attempt's pid is gone,
+/// but the drive recorded that itself and is finishing the attempt. The check
+/// blocks on a file the test controls, so the window is held open by
+/// construction, not by timing.
+#[test]
+fn a_run_reads_running_while_the_drive_post_processes_an_exited_attempt() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), 0);
+    let entered = dir.path().join("check-entered");
+    let release = dir.path().join("check-release");
+    // Bounded: a test that never releases fails instead of hanging.
+    common::write_sync(
+        &dir.path().join(".apb/playbooks/sc/1.0.0/scripts/check.sh"),
+        &format!(
+            "#!/bin/sh\n: > '{e}'\ni=0\nwhile [ ! -f '{r}' ] && [ $i -lt 1200 ]; do sleep 0.05; i=$((i+1)); done\nexit 0\n",
+            e = entered.display(),
+            r = release.display()
+        ),
+    );
+    let prog = ok_agent(dir.path());
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let root = dir.path().to_path_buf();
+    let drive = std::thread::spawn(move || run(&root, "sc", None, RunOptions::default()));
+
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(60);
+    while !entered.exists() {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the check never started"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+    let runs = dir.path().join(".apb/runs");
+    let run_id = fs::read_dir(&runs)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .next()
+        .expect("a run dir");
+    let view = apb_engine::run_view::RunView::load(&runs.join(&run_id), &run_id).unwrap();
+    let nodes = view.nodes();
+    fs::write(&release, "").unwrap();
+    let res = drive.join().unwrap().unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+
+    assert_eq!(
+        view.run_status,
+        RunStatus::Running,
+        "a run whose drive is finishing an exited attempt is running"
+    );
+    assert_eq!(
+        nodes.get("w").map(String::as_str),
+        Some("running"),
+        "{nodes:?}"
+    );
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+}

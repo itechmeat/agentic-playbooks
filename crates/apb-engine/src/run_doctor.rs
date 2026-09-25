@@ -182,6 +182,15 @@ fn attempt_checks(events: &[Event]) -> Vec<RunCheck> {
                 Some(pid) if liveness::pid_is_live(pid) => {
                     RunCheck::new(OK, subject, format!("open under pid {pid}, which is running"))
                 }
+                // The drive saw the exit itself (issue #107): it is finishing
+                // the attempt, unless it died before it could.
+                Some(pid) if a.exited => RunCheck::new(
+                    WARN,
+                    subject,
+                    format!(
+                        "pid {pid} exited and its drive is finishing the attempt, or died before it could"
+                    ),
+                ),
                 Some(pid) => RunCheck::new(
                     FAIL,
                     subject,
