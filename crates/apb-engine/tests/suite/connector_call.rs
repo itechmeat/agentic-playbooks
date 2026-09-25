@@ -808,15 +808,21 @@ fn echoed_secret_is_redacted_in_result() {
 }
 
 #[test]
-fn transport_error_message_redacts_query_auth_secret() {
+fn a_dropped_connection_maps_to_network_without_leaking_the_query_secret() {
     let _lock = common::env_lock();
     let run = tempfile::tempdir().unwrap();
     let root = tempfile::tempdir().unwrap();
     seed_secret(root.path());
 
-    // Query-kind auth places the secret in the URL query string. A ureq
-    // transport error's Display includes that URL, so the resolved secret must
-    // be scrubbed from `error.message` before it is printed or logged.
+    // A listener on a free port that accepts the connection and drops it, so
+    // the call fails in transport after the secret-bearing URL was built. Not a
+    // closed port: under WSL mirrored networking a connect to one hangs until
+    // the call timeout instead of being refused.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let server = std::thread::spawn(move || drop(listener.accept()));
+
+    // Query-kind auth places the secret in the URL query string.
     const Q_YAML: &str = r#"
 name: q-conn
 version: 0.1.0
@@ -839,10 +845,8 @@ functions:
     let acct = ManifestAccount {
         name: "acct1".to_string(),
         default: true,
-        // Port 1 needs root to bind, so nothing listens: connect is refused
-        // immediately and deterministically.
         fields: BTreeMap::from([
-            ("base_url".to_string(), "http://127.0.0.1:1".to_string()),
+            ("base_url".to_string(), base_url),
             ("token".to_string(), format!("{{{{env.{SECRET_VAR}}}}}")),
         ]),
         env: BTreeMap::from([("token".to_string(), SECRET_VAR.to_string())]),
@@ -880,21 +884,17 @@ functions:
         dry_run: false,
         full: false,
     });
+    server.join().unwrap();
     assert!(!ok);
-    assert_eq!(value["error"]["code"], serde_json::json!("network"));
-    let msg = value["error"]["message"].as_str().unwrap();
-    assert!(
-        !msg.contains(SECRET_VALUE),
-        "the resolved secret leaked into the error message: {msg}"
+    assert_eq!(
+        value["error"]["code"],
+        serde_json::json!("network"),
+        "{value}"
     );
-    // If the request URL (with its query-auth param) reached the message at
-    // all, it must have been redacted rather than dropped.
-    if msg.contains("api_key") {
-        assert!(
-            msg.contains(&format!("[redacted:{SECRET_VAR}]")),
-            "url present in message but the secret was not redacted: {msg}"
-        );
-    }
+    assert!(
+        !value.to_string().contains(SECRET_VALUE),
+        "the resolved secret leaked into the error: {value}"
+    );
 }
 
 #[test]
