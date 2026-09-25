@@ -19,7 +19,7 @@ use std::path::Path;
 
 use crate::control::{read_control_after, read_control_cursor};
 use crate::error::EngineError;
-use crate::event::{Event, EventPayload, read_all};
+use crate::event::{Event, EventPayload};
 use crate::liveness;
 use crate::state::{RunState, RunStatus};
 
@@ -60,7 +60,7 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    let events = read_all(&run_dir)?;
+    let events = crate::run_view::read_events(&run_dir)?;
 
     let mut checks = vec![run_check(&run_dir, run_id, &events), nodes_check(&events)];
     checks.extend(failure_reason_check(&events));

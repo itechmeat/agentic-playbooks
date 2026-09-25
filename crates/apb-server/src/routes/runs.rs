@@ -74,18 +74,15 @@ pub(crate) async fn get_run_handler(
     if !run_dir.is_dir() {
         return (StatusCode::NOT_FOUND, format!("run `{id}` not found")).into_response();
     }
-    // Tolerant of a torn trailing line (issue #103.3): the drive appends to
-    // `events.jsonl` a line at a time, so a detail request that lands between
-    // the bytes of a line and its newline is a normal transient state of a
-    // live run. The strict `read_all` failed the whole request with a 500 in
-    // that window, which is what makes "every poll during execution failed"
-    // look like a broken body to a polling client. Only a read-only reporting
-    // surface may do this; the engine itself stays strict.
-    let events = match apb_engine::event::read_all_lossy_tail(&run_dir) {
-        Ok(ev) => ev,
+    // The run view every status surface reports from (`apb runs`, `apb
+    // wait`, MCP `run_status`): the journal read tolerant of a line the drive
+    // is still appending (issue #103.3), and the liveness overlay applied once
+    // (#85.4, #102.4 cause A) - a live open attempt reads running, a dead
+    // driver interrupted, a sub-playbook child follows its parent's drive.
+    let view = match apb_engine::run_view::RunView::load(&run_dir, &id) {
+        Ok(view) => view,
         Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
     };
-    let run_state = apb_engine::state::RunState::fold(&events);
     let cfg = apb_engine::run_config::read_run_config(&run_dir).unwrap_or_default();
 
     // The run's playbook snapshot (may be missing for very old runs). Kept in
@@ -99,33 +96,7 @@ pub(crate) async fn get_run_handler(
         ),
         None => (serde_json::Value::Null, id.clone(), String::new()),
     };
-    let progress = apb_engine::progress::from_run_dir(&run_dir, &events);
-    let answer = apb_engine::progress::run_answer(&run_dir, &events);
-
-    // Child runs started from this run (spec review R1-I6): mirrors MCP
-    // `run_status`'s pattern exactly - one entry per `ChildRunStarted` event,
-    // with the child's current status folded from its own run dir. An
-    // unreadable child event log (deleted/corrupt run dir) reports `"unknown"`
-    // rather than failing the parent's detail read.
-    let children: Vec<serde_json::Value> = events
-        .iter()
-        .filter_map(|e| match &e.payload {
-            apb_engine::event::EventPayload::ChildRunStarted { node_id, run_id } => {
-                let child_dir = run_dir.parent().map(|p| p.join(run_id));
-                let status = child_dir
-                    .and_then(|d| apb_engine::event::read_all(&d).ok())
-                    .map(|ev| {
-                        apb_engine::state::RunState::fold(&ev)
-                            .run_status
-                            .as_str()
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
-                Some(serde_json::json!({ "node_id": node_id, "run_id": run_id, "status": status }))
-            }
-            _ => None,
-        })
-        .collect();
+    let answer = apb_engine::progress::run_answer(&run_dir, &view.events);
 
     // The saved graph layout for the run's playbook version, so the run view
     // shows the same node arrangement the author laid out in the editor rather
@@ -137,18 +108,6 @@ pub(crate) async fn get_run_handler(
         .and_then(|reg| reg.load(&playbook_id, Some(&version)).ok())
         .and_then(|loaded| loaded.layout);
 
-    // Live reporting, on the same terms the run listing and MCP `run_status`
-    // already use (#85.4, #102.4 cause A). The pure fold calls every open
-    // attempt `interrupted`, so before this the detail view read a healthy
-    // in-flight run as interrupted while the run list beside it read running,
-    // and it never showed that a driverless run needs a resume at all.
-    // `driver_alive` is `liveness::driver_alive`, not a bare pid check: a
-    // sub-playbook child follows its parent's drive claim.
-    let driver_alive = apb_engine::liveness::driver_alive(&run_dir, &id);
-    let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
-    let run_status = apb_engine::liveness::reported_run_status(&events, waiting, driver_alive);
-    let nodes = apb_engine::liveness::reported_node_statuses(&events);
-
     // The run's hooks as map key -> relative path of the signal endpoint.
     let hooks: std::collections::BTreeMap<String, String> = apb_engine::read_hooks(&run_dir)
         .unwrap_or_default()
@@ -156,38 +115,24 @@ pub(crate) async fn get_run_handler(
         .map(|(k, secret)| (k, apb_engine::hook_path(&id, &secret)))
         .collect();
 
-    // Why the run failed, on the same terms MCP `run_status` reports it: the
-    // last `RunError` folded from the journal. Without this the dashboard shows
-    // a red run and no explanation, and the reason is only reachable through
-    // `apb doctor --run` or an MCP call. Only for a failed run: a reason folded
-    // from an earlier, recovered anomaly is not why the run ended.
-    let failure_reason = (run_status == apb_engine::state::RunStatus::Failed)
-        .then(|| {
-            run_state
-                .failure_reason
-                .as_ref()
-                .map(apb_engine::state::FailureReason::display)
-        })
-        .flatten();
-
     Json(serde_json::json!({
         "run_id": id,
         "playbook": playbook_id,
         "version": version,
-        "run_status": run_status.as_str(),
-        "failure_reason": failure_reason,
-        "driver_alive": driver_alive,
-        "nodes": nodes,
-        "outputs": run_state.outputs,
+        "run_status": view.run_status.as_str(),
+        "failure_reason": view.failure_reason(),
+        "driver_alive": view.driver_alive,
+        "nodes": view.nodes(),
+        "outputs": view.state.outputs,
         "instruction": cfg.instruction,
         "params": cfg.params,
         "model": playbook_json,
         "layout": layout,
         "hooks": hooks,
-        "events": events,
-        "progress": progress,
+        "children": view.children(&run_dir),
+        "progress": view.progress,
         "answer": answer,
-        "children": children,
+        "events": view.events,
     }))
     .into_response()
 }

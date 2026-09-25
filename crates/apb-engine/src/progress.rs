@@ -606,7 +606,7 @@ pub fn from_run_dir_with_root(
         // progress this poll) rather than failing the parent's status read.
         // Unlike `map_child_outcome`/`run_is_terminal`, no correctness or
         // terminality choice hinges on it, so `unwrap_or_default` is deliberate.
-        let child_events = crate::event::read_all(&child_dir).unwrap_or_default();
+        let child_events = crate::event::read_all_lossy_tail(&child_dir).unwrap_or_default();
         if let Some(cp) = from_run_dir_with_root(root, &child_dir, &child_events) {
             extra += (cp.percent as u128) * (n.expected_seconds() as u128) / 100;
         }

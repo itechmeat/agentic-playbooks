@@ -133,3 +133,27 @@ fn list_runs_reports_running_for_live_open_attempt() {
     );
     assert_eq!(live.playbook, "live-pb");
 }
+
+/// A run whose driver is in the middle of appending a line is a live run, not
+/// a corrupt one: the listing used to drop it for that instant, so it blinked
+/// out of `apb runs`, MCP `runs_list` and the dashboard list.
+#[test]
+fn list_runs_keeps_a_run_whose_last_line_is_still_being_written() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let run_dir = dir.path().join(".apb/runs/live-1");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        format!("{GOOD_EVENTS}{{\"seq\":4,\"ts\":5,\"type\":\"node_sta"),
+    )
+    .unwrap();
+
+    let runs = list_runs(dir.path()).unwrap();
+
+    let run = runs
+        .iter()
+        .find(|r| r.run_id == "live-1")
+        .expect("a run with a torn last line must stay listed");
+    assert_eq!(run.status, "succeeded");
+}

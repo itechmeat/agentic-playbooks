@@ -215,7 +215,7 @@ fn doctor_run(root: &Path, run_id: &str) -> ExitCode {
 /// events.jsonl simply omits the line rather than failing the whole report.
 fn print_pending_question_check(root: &Path, run_id: &str) {
     let run_dir = root.join(".apb/runs").join(run_id);
-    let Ok(events) = apb_engine::event::read_all(&run_dir) else {
+    let Ok(events) = apb_engine::run_view::read_events(&run_dir) else {
         return;
     };
     if let Some(pq) =

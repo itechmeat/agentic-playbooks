@@ -23,8 +23,9 @@ use std::time::{Duration, Instant};
 use serde::Serialize;
 
 use crate::error::EngineError;
-use crate::event::{EventPayload, read_all};
+use crate::event::EventPayload;
 use crate::inspect::WakeEvent;
+use crate::run_view::read_events;
 use crate::state::RunStatus;
 
 /// How often the waits re-read the run. A file read, not a model call.
@@ -106,14 +107,11 @@ pub struct RunWaitResult {
     pub waited: Duration,
 }
 
-/// Reads the run once, with the same liveness overlay `run_status` applies.
+/// Reads the run once, through the same [`crate::run_view::RunView`] every
+/// status surface reports from.
 pub fn snapshot(run_dir: &Path, run_id: &str) -> Result<RunSnapshot, EngineError> {
-    let events = read_all(run_dir)?;
-    let progress = crate::progress::from_run_dir(run_dir, &events);
-    let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
-    let driver_alive = crate::liveness::driver_alive(run_dir, run_id);
-    let status = crate::liveness::reported_run_status(&events, waiting, driver_alive);
-    let needs = progress.as_ref().and_then(|p| {
+    let view = crate::run_view::RunView::load(run_dir, run_id)?;
+    let needs = view.progress.as_ref().and_then(|p| {
         if p.pending_question.is_some() {
             Some(NeedsInput::Question)
         } else if p.pending_review.is_some() {
@@ -125,9 +123,9 @@ pub fn snapshot(run_dir: &Path, run_id: &str) -> Result<RunSnapshot, EngineError
         }
     });
     Ok(RunSnapshot {
-        status,
+        status: view.run_status,
         needs,
-        driver_alive,
+        driver_alive: view.driver_alive,
     })
 }
 
@@ -275,7 +273,7 @@ pub fn wait_supervisor_event_with(
     crate::inspect::touch_heartbeat(root, run_id)?;
     let mut last_beat = Instant::now();
     loop {
-        for event in read_all(&run_dir)? {
+        for event in read_events(&run_dir)? {
             if i128::from(event.seq) <= cursor {
                 continue;
             }

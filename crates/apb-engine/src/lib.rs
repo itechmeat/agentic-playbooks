@@ -21,6 +21,7 @@ pub mod review;
 pub mod run_config;
 pub mod run_doctor;
 mod run_lineage;
+pub mod run_view;
 pub mod run_wait;
 pub mod scheduler;
 pub mod script;

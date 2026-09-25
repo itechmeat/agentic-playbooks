@@ -1068,3 +1068,43 @@ async fn run_detail_tolerates_a_torn_trailing_event_line() {
         "every complete line is still reported"
     );
 }
+
+/// The detail's `children` used to fold each child's journal on its own, with
+/// no liveness at all, while the parent's own status beside it (and MCP
+/// `run_status`'s children) went through the live overlay. A healthy child
+/// whose agent is working has an open attempt, which the bare fold calls
+/// `interrupted`, so the dashboard showed a working child as interrupted.
+#[tokio::test]
+async fn run_detail_reports_a_working_child_run_as_running() {
+    let dir = seed_with_run();
+    let runs = dir.path().join(".apb/runs");
+    // Our own pid stands in for both the parent's driver and the child's
+    // agent: alive by definition and never a reused number.
+    seed_open_attempt_run(dir.path(), "child-1", std::process::id());
+    fs::remove_file(runs.join("child-1/driver.pid")).unwrap();
+    fs::write(runs.join("child-1/driven_by"), "parent-1").unwrap();
+    fs::create_dir_all(runs.join("parent-1")).unwrap();
+    let mut log = apb_engine::event::EventLog::open(&runs.join("parent-1")).unwrap();
+    log.append(apb_engine::event::EventPayload::RunStarted {
+        playbook: "noagent".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    log.append(apb_engine::event::EventPayload::ChildRunStarted {
+        node_id: "sub".into(),
+        run_id: "child-1".into(),
+    })
+    .unwrap();
+    fs::write(
+        runs.join("parent-1/driver.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs/parent-1").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["children"][0]["run_id"], "child-1", "detail: {json}");
+    assert_eq!(json["children"][0]["status"], "running", "detail: {json}");
+}

@@ -949,3 +949,30 @@ mod drift_resume {
         }
     }
 }
+
+/// `run_report` promises the `run_status` shape, but it folded the journal on
+/// its own, with no liveness: an agent that is still working has an open
+/// attempt, which the bare fold calls `interrupted`, so a supervisor was told
+/// `running` by one tool and `interrupted` by the other for the same run.
+#[test]
+fn run_report_reports_a_working_run_as_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = bare_run_dir(dir.path(), "r-report");
+    let agent = Sleeper::spawn();
+    let agent_pid = agent.pid();
+    fs::write(run_dir.join("driver.pid"), std::process::id().to_string()).unwrap();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        format!(
+            "{{\"seq\":0,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}}\n\
+             {{\"seq\":1,\"ts\":2,\"type\":\"node_started\",\"node\":\"a\",\"attempt\":1}}\n\
+             {{\"seq\":2,\"ts\":3,\"type\":\"attempt_started\",\"node\":\"a\",\"attempt\":1,\"agent\":\"stub\",\"pid\":{agent_pid}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let report = apb_mcp::tools::run_report(dir.path(), "r-report").unwrap();
+
+    assert_eq!(report["run_status"], "running", "report: {report}");
+    assert_eq!(report["nodes"]["a"], "running", "report: {report}");
+}

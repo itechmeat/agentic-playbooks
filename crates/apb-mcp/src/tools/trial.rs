@@ -8,7 +8,7 @@ use super::ToolError;
 use super::run::build_duration_table_from;
 use apb_core::registry::Registry;
 use apb_engine::RunOptions;
-use apb_engine::event::read_all;
+use apb_engine::run_view::read_events;
 use apb_engine::state::{RunState, RunStatus};
 use serde_json::{Value, json};
 
@@ -44,7 +44,7 @@ fn truncate_on_char_boundary(s: &mut String, max: usize) {
 fn poll_terminal(run_dir: &Path) -> String {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        if let Ok(events) = read_all(run_dir) {
+        if let Ok(events) = read_events(run_dir) {
             let state = RunState::fold(&events);
             if matches!(
                 state.run_status,
@@ -151,7 +151,7 @@ pub fn playbook_trial(
                 }
                 truncate_on_char_boundary(&mut diff, 64 * 1024);
                 let measured = apb_engine::progress::node_durations_seconds(
-                    &read_all(&run_dir).unwrap_or_default(),
+                    &read_events(&run_dir).unwrap_or_default(),
                 );
                 let durations = build_duration_table_from(&loaded.playbook, &measured);
                 let _ = git(root, &["worktree", "remove", "--force", &scratch_str]);
@@ -181,7 +181,7 @@ pub fn playbook_trial(
     let run_dir = root.join(".apb/runs").join(&run_id);
     let status = poll_terminal(&run_dir);
     let measured =
-        apb_engine::progress::node_durations_seconds(&read_all(&run_dir).unwrap_or_default());
+        apb_engine::progress::node_durations_seconds(&read_events(&run_dir).unwrap_or_default());
     let durations = build_duration_table_from(&loaded.playbook, &measured);
     Ok(json!({
         "run_id": run_id,

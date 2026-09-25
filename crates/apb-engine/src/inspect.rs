@@ -6,7 +6,8 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
-use crate::event::{EventPayload, WakeTrigger, read_all};
+use crate::event::{EventPayload, WakeTrigger};
+use crate::run_view::read_events;
 use crate::state::RunState;
 
 /// A wake event handed to the calling code: the first `WakeRaised` after the cursor.
@@ -50,7 +51,7 @@ pub fn wait_wake(
     let cursor: i128 = after_seq.map(i128::from).unwrap_or(-1);
     let deadline = Instant::now() + timeout;
     loop {
-        let events = read_all(&run_dir)?;
+        let events = read_events(&run_dir)?;
         for event in &events {
             if i128::from(event.seq) <= cursor {
                 continue;
@@ -87,21 +88,20 @@ pub fn wait_wake(
 /// (phase 4b) will be a thin wrapper around it.
 pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, EngineError> {
     let run_dir = resolve_run_dir(root, run_id)?;
-    let events = read_all(&run_dir)?;
-    let state = RunState::fold(&events);
+    // The same run view `run_status` reports from: a live open attempt, or a
+    // run parked on a wait with a live driver, reads running here too, and a
+    // dead driver reads interrupted.
+    let view = crate::run_view::RunView::load(&run_dir, run_id)?;
+    let nodes = view.nodes();
+    let crate::run_view::RunView {
+        events,
+        state,
+        progress,
+        run_status,
+        ..
+    } = view;
 
     let context = std::fs::read_to_string(run_dir.join("context.md")).unwrap_or_default();
-
-    // Same live overlay as `run_status` (issue #45 finding 9, and issue
-    // #102.4 cause B for a wait/signal park): a live open attempt, or a run
-    // parked on a wait with a live driver, must not report as interrupted
-    // here either. `progress` is computed once and reused below for the
-    // pending-gate fields.
-    let nodes = crate::liveness::reported_node_statuses(&events);
-    let progress = crate::progress::from_run_dir(&run_dir, &events);
-    let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
-    let driver_alive = crate::liveness::driver_alive(&run_dir, run_id);
-    let run_status = crate::liveness::reported_run_status(&events, waiting, driver_alive);
 
     let wakes: Vec<serde_json::Value> = events
         .iter()
@@ -198,7 +198,7 @@ pub fn supervisor_report_or_summary(root: &Path, run_id: &str) -> Result<String,
         return Ok(report);
     }
 
-    let events = read_all(&run_dir)?;
+    let events = read_events(&run_dir)?;
     let state = RunState::fold(&events);
 
     let mut out = String::new();

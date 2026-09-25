@@ -261,3 +261,25 @@ fn a_resumed_waiter_keeps_the_grace_across_short_slices() {
     decide(&run_dir, "approved");
     rx.recv_timeout(Duration::from_secs(5)).unwrap();
 }
+
+/// The driver appends `events.jsonl` while waits read it, so a read can land
+/// in the middle of a line. That is a normal state of a live run, and it used
+/// to fail the whole wait (`apb wait` exited 2 mid-run, `run_wait` answered an
+/// engine error). The torn tail is simply not there yet.
+#[test]
+fn run_wait_reads_through_a_torn_trailing_line() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = synthetic_run(dir.path(), "torn");
+    log.append(EventPayload::RunFinished {
+        outcome: "succeeded".into(),
+    })
+    .unwrap();
+    let events = dir.path().join(".apb/runs/torn/events.jsonl");
+    let mut file = fs::OpenOptions::new().append(true).open(&events).unwrap();
+    std::io::Write::write_all(&mut file, br#"{"seq":9,"ts":9,"type":"node_sta"#).unwrap();
+
+    let res = wait_run(dir.path(), "torn", Duration::from_secs(5)).unwrap();
+
+    assert_eq!(res.reason, WaitReason::Finished);
+    assert_eq!(res.status, RunStatus::Succeeded);
+}
