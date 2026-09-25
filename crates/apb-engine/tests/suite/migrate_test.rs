@@ -13,7 +13,13 @@ use apb_engine::scheduler::{
 };
 use apb_engine::state::RunStatus;
 
-const POLL_DEADLINE: Duration = Duration::from_secs(5);
+/// Anti-hang ceiling, not a performance budget: every assertion here is about
+/// what the drive journaled and returned, never about how fast. A drive of
+/// these few prompt nodes finishes in milliseconds on an idle machine; the
+/// ceiling only turns a genuine hang into a named failure before nextest's
+/// per-test ceiling. It used to be 5s, which a machine starved by a parallel
+/// build exceeded while the drive was merely slow.
+const POLL_DEADLINE: Duration = Duration::from_secs(120);
 const POLL_STEP: Duration = Duration::from_millis(10);
 
 const WF_PROMPTS: &str = r#"
@@ -121,11 +127,28 @@ fn seed(root: &Path, playbook: &str) {
     fs::write(root.join(".apb/playbooks/migrate/current"), "1.0.0").unwrap();
 }
 
-fn seed_slow_gate(root: &Path) {
+/// Marker the `gate` script waits for; see [`seed_held_gate`].
+fn gate_release(root: &Path) -> PathBuf {
+    root.join("gate-release")
+}
+
+/// Seeds [`WF_SLOW_GATE`] with a `gate` node that holds until the test creates
+/// [`gate_release`], so the test decides when the gate ends instead of racing
+/// a fixed sleep. The script's own bound (about 120s) only keeps a failed test
+/// from leaving it behind.
+fn seed_held_gate(root: &Path) {
     seed(root, WF_SLOW_GATE);
     let scripts = root.join(".apb/playbooks/migrate/1.0.0/scripts");
     fs::create_dir_all(&scripts).unwrap();
-    fs::write(scripts.join("gate.sh"), "sleep 0.4\n").unwrap();
+    let release = gate_release(root);
+    fs::write(
+        scripts.join("gate.sh"),
+        format!(
+            "i=0\nwhile [ ! -e '{}' ] && [ $i -lt 2400 ]; do sleep 0.05; i=$((i+1)); done\n",
+            release.display()
+        ),
+    )
+    .unwrap();
 }
 
 fn prepare(root: &Path) -> (PreparedRun, String, PathBuf) {
@@ -223,7 +246,7 @@ fn valid_patch_migrates_run_and_promotes_improvement() {
 #[test]
 fn invalid_patch_rejects_change_to_executed_node() {
     let dir = tempfile::tempdir().unwrap();
-    seed_slow_gate(dir.path());
+    seed_held_gate(dir.path());
     let (prepared, run_id, run_dir) = prepare(dir.path());
     let version = create_patch_version(
         dir.path(),
@@ -251,6 +274,8 @@ fn invalid_patch_rejects_change_to_executed_node() {
         },
     )
     .unwrap();
+    // The patch is posted while the gate still runs: only now may it end.
+    fs::write(gate_release(dir.path()), "").unwrap();
 
     let result = wait_result(&rx);
     assert_eq!(result.outcome, RunStatus::Succeeded);
