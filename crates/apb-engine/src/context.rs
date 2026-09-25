@@ -183,7 +183,18 @@ pub fn assemble_agent_prompt(
     instruction: Option<&str>,
     events: &[Event],
 ) -> String {
-    let mut text = with_run_instruction(template, instruction);
+    // A template that places `{{run.context}}` already carries the instruction:
+    // the context leads with the same `## run instruction` section. Appending
+    // it again only doubled the instruction in every such prompt (issue #136
+    // item 5), so the trailing copy is added only when the rendered text does
+    // not hold the section yet. Either way the prompt has exactly one
+    // `## run instruction` section, which is what the precedence frame names.
+    let section = instruction_section(instruction);
+    let mut text = if !section.is_empty() && template.contains(&section) {
+        template.to_string()
+    } else {
+        with_run_instruction(template, instruction)
+    };
     text = with_supervisor_notes(&text, events);
     text.push_str(&precedence_frame(instruction, events));
     text

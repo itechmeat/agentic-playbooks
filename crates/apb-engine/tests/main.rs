@@ -204,6 +204,9 @@ mod supervised_drive_test;
 mod supervisor_channel_delivery_test;
 #[path = "suite/supervisor_commands_test.rs"]
 mod supervisor_commands_test;
+#[cfg(unix)]
+#[path = "suite/token_economy_test.rs"]
+mod token_economy_test;
 #[path = "suite/wait_test.rs"]
 mod wait_test;
 #[path = "suite/wake_events_test.rs"]
