@@ -1202,21 +1202,24 @@ mod tests {
         );
     }
 
-    /// Issues a key whose id is not an all-digit string, revoking and retrying
-    /// until it gets one.
+    /// Issues a key whose id the YAML writer leaves unquoted, revoking and
+    /// retrying until it gets one.
     ///
     /// A `KeyRecord` serializes to a fixed-width record, which is what makes a
     /// revoke-then-issue reproduce the same file length. The one exception is
     /// the id: it is the first 8 hex chars of the hash, and when those happen to
-    /// be all digits the YAML writer quotes the value to preserve its string
-    /// type, adding two bytes. Two keys that disagree on that make the file
+    /// read as a YAML number (all digits, or an exponent form like `12201e13`)
+    /// the YAML writer quotes the value to preserve its string type, adding two
+    /// bytes. The check asks the writer itself rather than guessing its rules:
+    /// filtering only all-digit ids let the exponent form through (about 0.6%
+    /// of ids, so roughly one run in a hundred of a test that issues two). Two keys that disagree on that make the file
     /// lengths differ for a reason that has nothing to do with what these tests
     /// are about, so the ids are pinned to the unquoted form instead of the
     /// same-length precondition being left to a coin flip.
     fn issue_unquoted_id(path: &std::path::Path) -> (String, apb_core::server_auth::KeyRecord) {
         loop {
             let (key, record) = server_auth::issue_into(path).unwrap();
-            if !record.id.bytes().all(|b| b.is_ascii_digit()) {
+            if serde_yaml_ng::to_string(&record.id).unwrap().trim_end() == record.id {
                 return (key, record);
             }
             server_auth::revoke_in(path, &record.id).unwrap();
