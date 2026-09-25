@@ -268,8 +268,8 @@ fn apply_agent_home(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorCla
 
 /// Sets the environment a spawned zcode needs (see
 /// `apb_core::zcode::spawn_env`): the built-in provider config location, and a
-/// run-scoped personal provider config carrying the attempt's plan-qualified
-/// model as ZCode's default selection. zcode has no `--model` flag, so this IS
+/// run-scoped personal provider config carrying the attempt's model selection
+/// as ZCode's default selection. zcode has no `--model` flag, so this IS
 /// its model passing. The scoped copy lives in the run's agent home
 /// (`agent-home/zcode/<node>`) when the attempt belongs to a run. A no-op for
 /// every other agent.

@@ -163,17 +163,32 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
     let parent = scope_dir(root, scope_enum)?;
     std::fs::create_dir_all(&parent).map_err(|e| ToolError::Engine(e.to_string()))?;
 
+    // zcode models: stored in the canonical bare spelling (the legacy
+    // `zai-individual/` prefix is accepted and dropped) and refused outside
+    // apb's allowlist, for the primary and every fallback.
+    let zcode_model = |agent: &str, model: String| -> Result<String, ToolError> {
+        if agent != apb_core::zcode::AGENT_ID {
+            return Ok(model);
+        }
+        let family = apb_core::zcode::home_dir()
+            .map(|h| apb_core::zcode::account_family(&h))
+            .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
+        apb_core::zcode::check_model_allowed(&model, &family).map_err(ToolError::Engine)?;
+        Ok(apb_core::zcode::canonical_model(&model, &family))
+    };
+    let primary_model = zcode_model(&executor.agent, executor.model)?;
+    let mut fallbacks = Vec::with_capacity(executor.fallbacks.len());
+    for (agent, model) in executor.fallbacks {
+        let model = zcode_model(&agent, model)?;
+        fallbacks.push(ProfileFallback { agent, model });
+    }
     let doc = ProfileDoc {
         name: name.clone(),
         description,
         executor: ProfileExecutor {
             agent: executor.agent,
-            model: executor.model,
-            fallbacks: executor
-                .fallbacks
-                .into_iter()
-                .map(|(agent, model)| ProfileFallback { agent, model })
-                .collect(),
+            model: primary_model,
+            fallbacks,
         },
         soul: soul_requirement,
         skills,

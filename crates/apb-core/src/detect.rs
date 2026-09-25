@@ -94,10 +94,10 @@ enum ModelsSource {
     CodexConfig,
     /// claude: a hardcoded list (data from the models table, Task 11).
     ClaudeStatic,
-    /// zcode: the plan-qualified `plan/Model` pairs its built-in provider
-    /// config enables, narrowed to the account family and to the plans the
-    /// standalone CLI is logged in to (see `crate::zcode`).
-    ZcodeConfig,
+    /// zcode: apb's allowlist ([`crate::zcode::ALLOWED_MODELS`]), the two
+    /// models on the paid Individual plan; the plan annotation and the login
+    /// note still read the account files under HOME.
+    ZcodeStatic,
     /// No free source available.
     None,
 }
@@ -251,7 +251,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             category: AgentCategory::Vendor,
             version_args: v("--version"),
             home_paths: v(crate::zcode::HOME_REL_BIN),
-            models_source: ModelsSource::ZcodeConfig,
+            models_source: ModelsSource::ZcodeStatic,
             auth_source: AuthSource::Zcode,
         },
     ]
@@ -781,30 +781,24 @@ fn probe_one(p: &Probe) -> AgentInfo {
                 });
             }
         }
-        ModelsSource::ZcodeConfig => {
-            if let Some(home) = &home {
-                let family = crate::zcode::account_family(home);
-                let pairs = crate::zcode::builtin_config_path(home)
-                    .map(|p| crate::zcode::builtin_plan_models(&p))
-                    .unwrap_or_default();
-                let logged_in = crate::zcode::logged_in_providers(home);
-                let items = crate::zcode::plan_model_list(&pairs, &family, &logged_in);
-                if !items.is_empty() {
-                    let mut plans: Vec<String> = Vec::new();
-                    for item in &items {
-                        if let Some((plan, _)) = item.split_once('/')
-                            && !plans.iter().any(|p| p == plan)
-                        {
-                            plans.push(plan.to_string());
-                        }
-                    }
-                    info.providers = Some(plans);
-                    info.models = Some(ModelsInventory {
-                        items,
-                        authority: Authority::Display,
-                    });
-                }
-                if found.is_some() && logged_in.is_empty() {
+        ModelsSource::ZcodeStatic => {
+            // apb's allowlist, the two Individual-plan models, as bare ids
+            // (a bare id resolves to the Individual plan). Claimed only when
+            // the CLI is installed; the profile editor takes its zcode options
+            // from the allowlist directly.
+            if found.is_some() {
+                let family = home
+                    .as_deref()
+                    .map(crate::zcode::account_family)
+                    .unwrap_or_else(|| crate::zcode::DEFAULT_FAMILY.to_string());
+                info.providers = Some(vec![format!("{family}-individual")]);
+                info.models = Some(ModelsInventory {
+                    items: crate::zcode::model_list(),
+                    authority: Authority::Static,
+                });
+                if let Some(home) = &home
+                    && crate::zcode::logged_in_providers(home).is_empty()
+                {
                     info.notes.push(
                         "standalone CLI not logged in: run `zcode-agent login` (the desktop's \
                          login alone does not cover headless runs)"
@@ -884,8 +878,9 @@ fn probe_source_files(p: &Probe, home: Option<&Path>) -> Vec<PathBuf> {
     if matches!(p.models_source, ModelsSource::CodexConfig) {
         out.push(home.join(".codex/config.toml"));
     }
-    if matches!(p.models_source, ModelsSource::ZcodeConfig) {
-        out.push(home.join(crate::zcode::HOME_REL_BUILTIN_CONFIG));
+    if matches!(p.models_source, ModelsSource::ZcodeStatic) {
+        // The plan annotation takes the account family from the settings
+        // (the login note is covered by the credentials file above).
         out.push(home.join(crate::zcode::HOME_REL_SETTINGS));
     }
     out
@@ -909,6 +904,17 @@ fn agent_cache_key(p: &Probe, home: Option<&Path>) -> String {
     for src in probe_source_files(p, home) {
         fp.push('|');
         fp.push_str(&fingerprint(&src));
+    }
+    // A static list ships inside the apb binary: a new apb with a different
+    // list must not keep serving the old one from the cache until the TTL.
+    let static_items = match p.models_source {
+        ModelsSource::ClaudeStatic => Some(claude_static_models()),
+        ModelsSource::ZcodeStatic => Some(crate::zcode::model_list()),
+        _ => None,
+    };
+    if let Some(items) = static_items {
+        fp.push_str("|static:");
+        fp.push_str(&items.join(","));
     }
     // Env-auth presence (only the fact that the variable exists, not its
     // value): the key appearing/disappearing changes the auth hint and must

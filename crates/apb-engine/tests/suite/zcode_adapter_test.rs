@@ -288,13 +288,15 @@ edges:
   - { from: work, to: failed, condition: { type: node_status, node: work, equals: failure } }
 "#;
 
-/// Cross-plan fallback: the paid plan's quota is exhausted, so the other
-/// model on the SAME paid plan is skipped (same account, same quota) and the
-/// same model on the free plan runs. The stub decides by the plan in the
-/// run-scoped provider config apb hands it, which is also the proof that the
-/// plan-qualified model reached zcode.
+/// Quota stop on the Individual plan: the other allowlisted model on the SAME
+/// plan is skipped (same account, same quota), and a legacy fallback onto the
+/// free Start plan is refused before zcode starts (apb allows only the
+/// Individual plan), so the run fails without ever handing zcode another
+/// plan. The stub decides by the plan in the run-scoped provider config apb
+/// hands it, which is also the proof that the bare model resolved to the
+/// Individual plan.
 #[test]
-fn a_paid_plan_quota_stop_falls_back_to_the_same_model_on_another_plan() {
+fn a_paid_plan_quota_stop_skips_the_same_plan_and_never_runs_another_plan() {
     let dir = tempfile::tempdir().unwrap();
     let root = dir.path().join("proj");
     let home = dir.path().join("home");
@@ -307,7 +309,7 @@ fn a_paid_plan_quota_stop_falls_back_to_the_same_model_on_another_plan() {
         &root,
         "main",
         "zcode",
-        "zai-individual/GLM-5.3",
+        "GLM-5.3",
         &[
             ("zcode", "zai-individual/GLM-5.3-Flash"),
             ("zcode", "zai-start/GLM-5.3@max"),
@@ -315,11 +317,17 @@ fn a_paid_plan_quota_stop_falls_back_to_the_same_model_on_another_plan() {
     );
     let json = Path::new(FIXTURES).join("json_plan.json");
     let quota = Path::new(FIXTURES).join("error_quota.stderr");
+    let calls = dir.path().join("calls");
     let stub = dir.path().join("zcode-stub");
     common::write_sync(
         &stub,
         &format!(
-            "#!/bin/sh\nif grep -q 'zai-individual-coding-plan' \"$ZCODE_PERSONAL_PROVIDER_CONFIG_FILE\"; then cat '{}' >&2; exit 1; fi\ngrep -q '\"reasoningLevel\": \"max\"' \"$ZCODE_PERSONAL_PROVIDER_CONFIG_FILE\" || exit 7\ncat '{}'\n",
+            "#!/bin/sh
+echo call >> '{}'
+if grep -q 'zai-individual-coding-plan' \"$ZCODE_PERSONAL_PROVIDER_CONFIG_FILE\"; then cat '{}' >&2; exit 1; fi
+cat '{}'
+",
+            calls.display(),
             quota.display(),
             json.display()
         ),
@@ -335,53 +343,37 @@ fn a_paid_plan_quota_stop_falls_back_to_the_same_model_on_another_plan() {
 
     let _env = ZcodeRunEnv::set(&[("HOME", &home), ("APB_CONFIG_DIR", &cfg)]);
     let res = run(&root, "zplan", None, RunOptions::default()).unwrap();
-    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert_ne!(res.outcome, RunStatus::Succeeded);
+    assert_eq!(
+        fs::read_to_string(&calls).unwrap().lines().count(),
+        1,
+        "only the Individual-plan GLM-5.3 step may reach zcode"
+    );
 
     let run_dir = root.join(".apb/runs").join(&res.run_id);
     let events = read_all(&run_dir).unwrap();
-    let attempts: Vec<(String, Option<String>)> = events
-        .iter()
-        .filter_map(|e| match &e.payload {
-            EventPayload::AttemptFinished {
-                node,
-                status,
-                failure_kind,
-                ..
-            } if node == "work" => Some((status.clone(), failure_kind.clone())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        attempts,
-        vec![
-            ("failed".to_string(), Some("budget".to_string())),
-            ("succeeded".to_string(), None),
-        ],
-        "the same-plan Flash step must be skipped, the free plan must run"
-    );
-    let fallbacks: Vec<(Option<String>, Option<String>)> = events
-        .iter()
-        .filter_map(|e| match &e.payload {
-            EventPayload::FallbackTriggered {
-                from_model,
-                to_model,
-                ..
-            } => Some((from_model.clone(), to_model.clone())),
-            _ => None,
-        })
-        .collect();
-    assert_eq!(
-        fallbacks,
-        vec![(
-            Some("zai-individual/GLM-5.3".to_string()),
-            Some("zai-start/GLM-5.3@max".to_string())
-        )]
-    );
-    let node_out = events.iter().find_map(|e| match &e.payload {
-        EventPayload::NodeFinished { node, output, .. } if node == "work" => Some(output.clone()),
+    let first = events.iter().find_map(|e| match &e.payload {
+        EventPayload::AttemptFinished {
+            node,
+            status,
+            failure_kind,
+            ..
+        } if node == "work" => Some((status.clone(), failure_kind.clone())),
         _ => None,
     });
-    assert_eq!(node_out.as_deref(), Some("MANGO"));
+    assert_eq!(
+        first,
+        Some(("failed".to_string(), Some("budget".to_string()))),
+        "the Individual plan's quota stop is a budget failure"
+    );
+    assert!(
+        !events.iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::NodeFinished { node, output, .. }
+                if node == "work" && output == "MANGO"
+        )),
+        "no other plan may produce the node output"
+    );
     // The user's own ZCode config was never written.
     assert!(
         !home

@@ -23,8 +23,12 @@
 //!   the desktop materializes that file under `~/.zcode/v2/runtime/provider/`.
 //! - The same model is served by several plans ("Z.ai Individual Coding Plan",
 //!   "Start Plan", ...), each a separate provider id such as
-//!   `account:zai-individual-coding-plan`. apb therefore takes a
-//!   plan-qualified model string, see [`parse_model`].
+//!   `account:zai-individual-coding-plan`. apb's canonical zcode model string
+//!   is the BARE model id (e.g. `GLM-5.3`), which resolves to the paid
+//!   Individual plan; the older plan-qualified spelling
+//!   (`zai-individual/GLM-5.3`) is still accepted, see [`parse_model`].
+//!   Only the models on apb's allowlist ([`ALLOWED_MODELS`]) are listed and
+//!   accepted on ZCode's own plans.
 //! - The standalone CLI only sees a plan after `zcode-agent login` stored an
 //!   `account-provider:<providerId>:identity` credential next to the plan's
 //!   api key in `~/.zcode/v2/credentials.json`. Only the KEY NAMES of that file
@@ -79,9 +83,38 @@ const PLAN_KINDS: &[(&str, &str)] = &[
     ("offpeak-idle-plan", "idle"),
 ];
 
-/// The only plan kind the standalone (headless) CLI's account source covers in
-/// zcode-agent 0.16.9.
-const STANDALONE_PLAN_KIND: &str = "individual-coding-plan";
+/// The zcode models apb lists and accepts on ZCode's own plans, in offer
+/// order, all on the paid Individual plan (the only one the headless CLI can
+/// use). ZCode's provider config enables more (GLM-5.2, GLM-5-Turbo, and the
+/// same ids on the free Start plan), but the allowlist pins apb's supported
+/// set: anything else is refused with a clear error instead of being handed
+/// to ZCode. The ids are the canonical spelling; input is matched
+/// case-insensitively and rewritten to it.
+pub const ALLOWED_MODELS: &[&str] = &["GLM-5.3", "GLM-5.3-Flash"];
+
+/// Whether `model_id` is on [`ALLOWED_MODELS`] (case-insensitive: ZCode ids
+/// are matched the same way everywhere else here).
+pub fn is_allowed_model(model_id: &str) -> bool {
+    ALLOWED_MODELS
+        .iter()
+        .any(|m| m.eq_ignore_ascii_case(model_id))
+}
+
+/// What the allowlist admits, for error messages.
+fn allowlist_message() -> String {
+    format!(
+        "apb offers only {} for zcode (the paid Individual plan)",
+        ALLOWED_MODELS.join(" and ")
+    )
+}
+
+/// The model list apb offers for zcode: exactly [`ALLOWED_MODELS`], as bare
+/// model ids in offer order. A bare id resolves to the paid Individual plan
+/// (see [`parse_model`]); no other plan is ever listed, because the headless
+/// CLI cannot use one ([`check_plan_usable`]).
+pub fn model_list() -> Vec<String> {
+    ALLOWED_MODELS.iter().map(|m| (*m).to_string()).collect()
+}
 
 /// Account families (`providerFamilyDomain` in ZCode's settings).
 const FAMILIES: &[&str] = &["zai", "bigmodel"];
@@ -170,17 +203,20 @@ pub fn resolve_plan(plan: &str, family: &str) -> String {
 
 /// Parses an apb zcode model string: `[<plan>/]<model>[@<effort>]`.
 ///
-/// - `zai-individual/GLM-5.3` - the model on the paid Z.ai Individual plan;
-/// - `zai-start/GLM-5.3@max` - the same model on the free Start plan, max
-///   effort;
-/// - `GLM-5.3` - unqualified: resolves deterministically to the PAID
-///   individual plan of the account family (`family`, from ZCode's settings,
-///   `zai` by default). Qualify the model to use any other plan.
+/// - `GLM-5.3`, `GLM-5.3-Flash@high` - the canonical spelling: a bare model
+///   id resolves deterministically to the PAID individual plan of the account
+///   family (`family`, from ZCode's settings, `zai` by default);
+/// - `zai-individual/GLM-5.3` - the older plan-qualified spelling, still
+///   accepted for backward compatibility and equal to the bare name; apb
+///   never emits it (see [`canonical_model`]);
+/// - another plan (`zai-start/...`) still parses, but the allowlist
+///   ([`check_model_allowed`]) and the login check ([`check_plan_usable`])
+///   refuse it before zcode starts.
 ///
-/// The model id is matched case-insensitively against `known_models` (the
-/// ids from ZCode's built-in provider config) and rewritten to its canonical
-/// spelling, so `glm-5.3` works. An empty string is `None`: ZCode then keeps
-/// the user's own default selection.
+/// The model id is matched case-insensitively against [`ALLOWED_MODELS`] and
+/// then `known_models` (the ids from ZCode's built-in provider config) and
+/// rewritten to its canonical spelling, so `glm-5.3` works. An empty string
+/// is `None`: ZCode then keeps the user's own default selection.
 pub fn parse_model(raw: &str, family: &str, known_models: &[String]) -> Option<ModelSelection> {
     let s = raw.trim();
     if s.is_empty() {
@@ -198,10 +234,19 @@ pub fn parse_model(raw: &str, family: &str, known_models: &[String]) -> Option<M
     if model.is_empty() {
         return None;
     }
-    let model_id = known_models
+    // Canonical spelling: the allowlist first (static, always available),
+    // then the ids from ZCode's built-in config; anything else (a custom
+    // provider's model, or a model newer than apb) keeps its input spelling.
+    let model_id = ALLOWED_MODELS
         .iter()
         .find(|k| k.eq_ignore_ascii_case(model))
-        .cloned()
+        .map(|k| (*k).to_string())
+        .or_else(|| {
+            known_models
+                .iter()
+                .find(|k| k.eq_ignore_ascii_case(model))
+                .cloned()
+        })
         .unwrap_or_else(|| model.to_string());
     Some(ModelSelection {
         provider_id,
@@ -359,6 +404,16 @@ pub fn complete_selection(sel: &mut ModelSelection, builtin_config: &Path) -> Re
     if !sel.provider_id.starts_with("account:") {
         return Ok(());
     }
+    // The allowlist is apb's own gate and comes first: a model ZCode offers
+    // on the plan but apb does not support (GLM-5.2, GLM-5-Turbo) must fail
+    // here with the allowlist named, not run.
+    if !is_allowed_model(&sel.model_id) {
+        return Err(format!(
+            "zcode model `{}` is not allowed: {}",
+            sel.model_id,
+            allowlist_message()
+        ));
+    }
     let pairs = builtin_plan_models(builtin_config);
     let plan = plan_alias(&sel.provider_id).unwrap_or_else(|| sel.provider_id.clone());
     if !pairs.is_empty()
@@ -425,45 +480,67 @@ pub fn logged_in_providers(home: &Path) -> BTreeSet<String> {
         .collect()
 }
 
-/// Rank of a provider id in [`PLAN_KINDS`] order (unknown last).
-fn plan_rank(provider_id: &str) -> usize {
-    PLAN_KINDS
-        .iter()
-        .position(|(suffix, _)| provider_id.ends_with(suffix))
-        .unwrap_or(PLAN_KINDS.len())
+/// The individual (paid) plan's provider id suffix.
+const INDIVIDUAL_PLAN_KIND: &str = "individual-coding-plan";
+
+/// The refusal for a selection outside the allowlist, or `None` when it is
+/// fine: a model on [`ALLOWED_MODELS`] on the individual plan. Custom
+/// providers (anything that is not an `account:` plan) are not governed.
+fn allowlist_refusal(sel: &ModelSelection) -> Option<String> {
+    if !sel.provider_id.starts_with("account:") {
+        return None;
+    }
+    if !is_allowed_model(&sel.model_id) {
+        return Some(format!(
+            "zcode model `{}` is not allowed: {}",
+            sel.model_id,
+            allowlist_message()
+        ));
+    }
+    if !sel.provider_id.ends_with(INDIVIDUAL_PLAN_KIND) {
+        let plan = plan_alias(&sel.provider_id).unwrap_or_else(|| sel.provider_id.clone());
+        return Some(format!(
+            "zcode plan `{plan}` is not allowed: {}; write the bare model id",
+            allowlist_message()
+        ));
+    }
+    None
 }
 
-/// The plan-qualified model list apb offers for zcode: `alias/ModelId` for
-/// every model the built-in config enables on a plan of the account `family`
-/// that the headless CLI can use - the plans it is logged in to, or, before
-/// any login, the individual coding plan a login would enable. Paid plans
-/// first; deterministic (stable sort by plan rank, then file order).
-pub fn plan_model_list(
-    pairs: &[(String, String)],
-    family: &str,
-    logged_in: &BTreeSet<String>,
-) -> Vec<String> {
-    let prefix = format!("account:{family}-");
-    let mut rows: Vec<&(String, String)> = pairs
-        .iter()
-        .filter(|(p, _)| p.starts_with(&prefix))
-        .filter(|(p, _)| {
-            if logged_in.is_empty() {
-                p.ends_with(STANDALONE_PLAN_KIND)
-            } else {
-                logged_in.contains(p)
+/// Whether an apb zcode model string names a model apb supports on ZCode's
+/// own plans: `Ok(())`, or `Err` with the message that names the allowlist.
+/// The bare id, the legacy `zai-individual/` spelling and an effort suffix
+/// are all fine; another plan (`zai-start/...`) or a model off the allowlist
+/// is refused. Custom providers (anything that does not resolve to an
+/// `account:` plan) pass - the allowlist governs ZCode's plans only. This is
+/// the advisory half of the gate (profile writes, adopt); [`spawn_env_in`]
+/// enforces the same rule before zcode starts.
+pub fn check_model_allowed(raw: &str, family: &str) -> Result<(), String> {
+    match parse_model(raw, family, &[]) {
+        // Empty: ZCode keeps the user's own default selection.
+        None => Ok(()),
+        Some(sel) => allowlist_refusal(&sel).map_or(Ok(()), Err),
+    }
+}
+
+/// The canonical spelling of an apb zcode model string: the bare model id
+/// with its effort suffix (`zai-individual/glm-5.3-flash@HIGH` ->
+/// `GLM-5.3-Flash@high`) when it resolves to the individual plan; anything
+/// else (another plan, a custom provider, an empty string) is returned
+/// trimmed but otherwise unchanged, so the allowlist check can name it.
+pub fn canonical_model(raw: &str, family: &str) -> String {
+    match parse_model(raw, family, &[]) {
+        Some(sel)
+            if sel.provider_id.ends_with(INDIVIDUAL_PLAN_KIND)
+                && sel.provider_id.starts_with("account:") =>
+        {
+            match &sel.effort {
+                Some(e) => format!("{}@{e}", sel.model_id),
+                None => sel.model_id,
             }
-        })
-        .collect();
-    rows.sort_by_key(|(p, _)| plan_rank(p));
-    let mut seen = BTreeSet::new();
-    rows.into_iter()
-        .filter_map(|(p, m)| {
-            let plan = plan_alias(p).unwrap_or_else(|| p.clone());
-            let id = format!("{plan}/{m}");
-            seen.insert(id.clone()).then_some(id)
-        })
-        .collect()
+        }
+        _ => raw.trim().to_string(),
+    }
 }
 
 /// Extracts the final reply text from zcode's stdout. `--json` prints one
@@ -625,7 +702,12 @@ pub fn spawn_env_in(
     let family = account_family(&home);
     match parse_model(model, &family, &known) {
         Some(mut sel) => {
+            // The login check keeps its own message (the failure classifier
+            // reads "not logged in" as an auth failure), then the allowlist.
             check_plan_usable(&sel, &logged_in_providers(&home)).map_err(std::io::Error::other)?;
+            if let Some(refusal) = allowlist_refusal(&sel) {
+                return Err(std::io::Error::other(refusal));
+            }
             if let Some(builtin) = builtin_config_path(&home) {
                 complete_selection(&mut sel, &builtin).map_err(std::io::Error::other)?;
             }
@@ -744,6 +826,76 @@ mod tests {
         assert_eq!(s.model_id, "some-model");
     }
 
+    /// Allowlisted ids canonicalize to the allowlist spelling even when the
+    /// built-in config is unknown to the caller, and case is rewritten.
+    #[test]
+    fn allowlisted_models_canonicalize_without_a_config() {
+        for raw in ["GLM-5.3", "glm-5.3", "GLM-5.3-flash"] {
+            let s = parse_model(raw, "zai", &[]).unwrap();
+            assert_eq!(s.provider_id, "account:zai-individual-coding-plan");
+            assert!(
+                is_allowed_model(&s.model_id),
+                "{raw} must canonicalize onto the allowlist, got {}",
+                s.model_id
+            );
+        }
+        let with_effort = parse_model("glm-5.3-flash@LOW", "zai", &[]).unwrap();
+        assert_eq!(with_effort.model_id, "GLM-5.3-Flash");
+        assert_eq!(with_effort.effort.as_deref(), Some("low"));
+    }
+
+    /// The legacy `plan/model` spelling still resolves to the same selection
+    /// as the bare name - it is accepted but never emitted.
+    #[test]
+    fn legacy_plan_qualified_spelling_parses_like_the_bare_name() {
+        for raw in ["zai-individual/GLM-5.3", "GLM-5.3", "glm-5.3"] {
+            let s = parse_model(raw, "zai", &known()).unwrap();
+            assert_eq!(s.provider_id, "account:zai-individual-coding-plan", "{raw}");
+            assert_eq!(s.model_id, "GLM-5.3", "{raw}");
+        }
+    }
+
+    /// The allowlist governs model strings on ZCode's own plans; a custom
+    /// provider and an empty string pass.
+    #[test]
+    fn check_model_allowed_enforces_the_allowlist() {
+        assert!(check_model_allowed("GLM-5.3", "zai").is_ok());
+        assert!(check_model_allowed("GLM-5.3-Flash@low", "zai").is_ok());
+        assert!(check_model_allowed("zai-individual/glm-5.3-flash@high", "zai").is_ok());
+        assert!(check_model_allowed("", "zai").is_ok());
+        assert!(check_model_allowed("my-provider/anything", "zai").is_ok());
+        let err = check_model_allowed("GLM-5.2", "zai").unwrap_err();
+        assert!(err.contains("GLM-5.2"), "{err}");
+        assert!(err.contains("GLM-5.3-Flash"), "{err}");
+        assert!(err.contains("Individual plan"), "{err}");
+        assert!(check_model_allowed("zai-start/GLM-5-Turbo", "zai").is_err());
+        // An allowed model on a non-Individual plan is refused too.
+        let start = check_model_allowed("zai-start/GLM-5.3", "zai").unwrap_err();
+        assert!(start.contains("zai-start"), "{start}");
+        assert!(start.contains("Individual plan"), "{start}");
+    }
+
+    /// apb emits only the bare spelling: the legacy prefix and case are
+    /// normalized, anything that is not the individual plan is left alone.
+    #[test]
+    fn canonical_model_drops_the_individual_plan_prefix() {
+        assert_eq!(
+            canonical_model("zai-individual/glm-5.3-flash@HIGH", "zai"),
+            "GLM-5.3-Flash@high"
+        );
+        assert_eq!(canonical_model("zai-individual/GLM-5.3", "zai"), "GLM-5.3");
+        assert_eq!(
+            canonical_model(" GLM-5.3-Flash@low ", "zai"),
+            "GLM-5.3-Flash@low"
+        );
+        assert_eq!(
+            canonical_model("zai-start/GLM-5.3", "zai"),
+            "zai-start/GLM-5.3"
+        );
+        assert_eq!(canonical_model("my-provider/x", "zai"), "my-provider/x");
+        assert_eq!(canonical_model("", "zai"), "");
+    }
+
     #[test]
     fn selection_json_matches_zcode_schema() {
         let s = parse_model("zai-start/GLM-5.3@low", "zai", &known()).unwrap();
@@ -772,38 +924,11 @@ mod tests {
         assert!(check_plan_usable(&custom, &BTreeSet::new()).is_ok());
     }
 
+    /// The offered list is exactly the allowlist, as bare ids - no plan
+    /// prefix, no Start-plan entries, independent of login state.
     #[test]
-    fn plan_model_list_orders_paid_first_and_filters_family_and_login() {
-        let pairs: Vec<(String, String)> = [
-            ("account:zai-start-plan", "GLM-5.3"),
-            ("account:zai-individual-coding-plan", "GLM-5.3"),
-            ("account:zai-individual-coding-plan", "GLM-5.3-Flash"),
-            ("account:bigmodel-start-plan", "GLM-5.3"),
-            ("account:zai-offpeak-idle-plan", "GLM-5.3"),
-        ]
-        .iter()
-        .map(|(a, b)| (a.to_string(), b.to_string()))
-        .collect();
-        // Before any login: the individual plan a login would enable.
-        let none = plan_model_list(&pairs, "zai", &BTreeSet::new());
-        assert_eq!(
-            none,
-            vec!["zai-individual/GLM-5.3", "zai-individual/GLM-5.3-Flash"]
-        );
-        // Logged in to several plans: all of them, paid first.
-        let both: BTreeSet<String> = [
-            "account:zai-start-plan".to_string(),
-            "account:zai-individual-coding-plan".to_string(),
-        ]
-        .into();
-        assert_eq!(
-            plan_model_list(&pairs, "zai", &both),
-            vec![
-                "zai-individual/GLM-5.3",
-                "zai-individual/GLM-5.3-Flash",
-                "zai-start/GLM-5.3",
-            ]
-        );
+    fn model_list_is_exactly_the_allowlist_as_bare_ids() {
+        assert_eq!(model_list(), vec!["GLM-5.3", "GLM-5.3-Flash"]);
     }
 
     #[test]
@@ -855,7 +980,9 @@ mod tests {
     }
 
     /// Every selection apb hands ZCode must be one it honors: ZCode replaces
-    /// an invalid one with GLM-5.3 at max effort without saying so.
+    /// an invalid one with GLM-5.3 at max effort without saying so. The
+    /// allowlist gate comes first: GLM-5-Turbo is enabled on the individual
+    /// plan in the fixture config, but apb refuses it anyway.
     #[test]
     fn complete_selection_fills_effort_and_refuses_what_zcode_would_replace() {
         let dir = tempfile::tempdir().unwrap();
@@ -867,9 +994,11 @@ mod tests {
         let mut low = parse_model("zai-individual/GLM-5.3-Flash@low", "zai", &known()).unwrap();
         complete_selection(&mut low, &f).unwrap();
         assert_eq!(low.effort.as_deref(), Some("low"));
+
         let mut turbo = parse_model("zai-individual/GLM-5-Turbo", "zai", &known()).unwrap();
-        complete_selection(&mut turbo, &f).unwrap();
-        assert_eq!(turbo.effort.as_deref(), Some("enabled"));
+        let e = complete_selection(&mut turbo, &f).unwrap_err();
+        assert!(e.contains("not allowed"), "{e}");
+        assert!(e.contains("GLM-5.3-Flash"), "{e}");
 
         let mut bad_effort =
             parse_model("zai-individual/GLM-5.3-Flash@xhigh", "zai", &known()).unwrap();

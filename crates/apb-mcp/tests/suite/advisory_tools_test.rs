@@ -161,6 +161,36 @@ fn adopt_report_emits_expected_codes() {
     );
 }
 
+/// zcode's allowlist is a hard gate in adoption: a model outside it is
+/// `model_not_allowed` naming the allowlist; the legacy
+/// `zai-individual/` spelling of an allowed model is not.
+#[test]
+fn adopt_report_flags_a_zcode_model_off_the_allowlist() {
+    let _l = lock();
+    let c = setup();
+    seed_profile(&c.root, "zbad", "zcode", "");
+    let dir = c.root.join(".apb/profiles/zok");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("profile.yaml"),
+        "name: zok\ndescription: d\nexecutor:\n  agent: zcode\n  model: zai-individual/GLM-5.3-Flash@high\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("SOUL.md"), "").unwrap();
+    let playbook = "schema: 1\nid: wfz\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: zbad }\n  - { id: b, type: agent_task, prompt: \"do\", profile: zok }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: done }\n";
+    seed_playbook(&c.root, "wfz", playbook);
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfz")).unwrap();
+    let findings = report["playbooks"][0]["findings"].as_array().unwrap();
+    let not_allowed: Vec<&serde_json::Value> = findings
+        .iter()
+        .filter(|f| f["code"] == "model_not_allowed")
+        .collect();
+    assert_eq!(not_allowed.len(), 1, "{findings:?}");
+    assert_eq!(not_allowed[0]["model"], "m1");
+    let detail = not_allowed[0]["detail"].as_str().unwrap();
+    assert!(detail.contains("GLM-5.3-Flash"), "{detail}");
+}
+
 #[test]
 fn adopt_report_flags_missing_skill() {
     let _l = lock();

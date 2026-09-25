@@ -131,6 +131,46 @@ fn profile_write_persists_hermetic_field() {
     );
 }
 
+/// zcode profiles are stored with the bare model id (the legacy
+/// `zai-individual/` prefix is accepted and dropped, in fallbacks too), and a
+/// model or plan outside apb's allowlist is refused with a clear message.
+#[test]
+fn profile_write_normalizes_and_gates_zcode_models() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _h, _c) = setup();
+    let write = |name: &str, model: &str| {
+        profile_tools::profile_write(
+            proj.path(),
+            profile_tools::ProfileWrite {
+                name: name.into(),
+                scope: "project".into(),
+                description: "d".into(),
+                soul_md: "role".into(),
+                executor: ExecutorInput {
+                    agent: "zcode".into(),
+                    model: model.into(),
+                    fallbacks: vec![("zcode".into(), "zai-individual/GLM-5.3".into())],
+                },
+                ..Default::default()
+            },
+        )
+    };
+    write("legacy", "zai-individual/glm-5.3-flash@HIGH").expect("legacy spelling accepted");
+    let yaml = fs::read_to_string(proj.path().join(".apb/profiles/legacy/profile.yaml")).unwrap();
+    let doc = apb_core::profile::ProfileDoc::from_yaml(&yaml).unwrap();
+    assert_eq!(doc.executor.model, "GLM-5.3-Flash@high");
+    assert_eq!(doc.executor.fallbacks[0].model, "GLM-5.3");
+    assert!(!yaml.contains("zai-individual"), "{yaml}");
+
+    for (name, bad) in [("turbo", "GLM-5-Turbo"), ("start", "zai-start/GLM-5.3")] {
+        let err = write(name, bad).unwrap_err().to_string();
+        assert!(err.contains("not allowed"), "{bad}: {err}");
+        assert!(err.contains("GLM-5.3-Flash"), "{bad}: {err}");
+        assert!(!proj.path().join(".apb/profiles").join(name).exists());
+    }
+}
+
 #[test]
 fn write_create_then_conflict_on_double_create() {
     let _l = lock();

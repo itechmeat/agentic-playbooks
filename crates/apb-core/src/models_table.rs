@@ -288,16 +288,17 @@ pub fn agent_vendor(agent: &str) -> Option<&'static str> {
     }
 }
 
-/// Whether `agent` takes plan-qualified model strings (`plan/Model`) that a
-/// curated row id can never be (zcode). For such an agent the detected list,
-/// when there is one, IS the option set: offering a bare curated id next to
-/// it would only add an ambiguous duplicate of a qualified entry.
-pub fn agent_models_are_plan_qualified(agent: &str) -> bool {
+/// Whether `agent`'s option set is a closed apb-side list (zcode's allowlist)
+/// rather than the curated table filtered to a vendor. For such an agent a
+/// detected item outside the list must NOT be appended as an option: the list
+/// is exactly what apb supports.
+pub fn agent_models_are_closed_list(agent: &str) -> bool {
     agent == crate::zcode::AGENT_ID
 }
 
 /// One model choice offered for a specific agent in the profile editor
-/// (issue #42 finding 9). The curated table drives the option SET; detection
+/// (issue #42 finding 9). The curated table (or, for zcode, a closed apb
+/// list) drives the option SET; detection
 /// only annotates it - `detected` marks a curated row also named by the
 /// agent's local config/detected model list, and never limits which rows are
 /// offered.
@@ -308,44 +309,65 @@ pub struct ModelOption {
     pub detected: bool,
 }
 
-/// Builds `agent`'s model option list: `table` rows tied to its vendor (or
-/// every row for an aggregator/unrecognized agent, which is not pinned to a
-/// single vendor), each annotated `detected` when `detected_items` (the
-/// agent's local config/detected model list, e.g. `~/.codex/config.toml`'s
-/// `model` line) also names it. A detected item absent from that curated set
-/// is appended as its own `detected`-only entry, so a model the agent
-/// reports but the curated table does not carry yet is never hidden - it is
-/// added, not used to replace the table.
+/// Builds `agent`'s model option list.
+///
+/// The option SET, in offer order:
+/// - zcode: apb's zcode allowlist (`crate::zcode::model_list`), the bare ids
+///   of the two Individual-plan models. The curated zhipu rows would offer
+///   models the allowlist refuses.
+/// - otherwise: the curated rows tied to the agent's vendor (or every row
+///   for an aggregator/unrecognized agent, which is not pinned to a single
+///   vendor).
+///
+/// Each entry is annotated `detected` when `detected_items` (the agent's
+/// local config/detected model list, e.g. `~/.codex/config.toml`'s `model`
+/// line) also names it. On the vendor path a detected item absent from the
+/// curated set is appended as its own `detected`-only entry, so a model the
+/// agent reports but the curated table does not carry yet is never hidden; on
+/// a closed list ([`agent_models_are_closed_list`]) it is not - the list is
+/// exactly what apb supports.
 pub fn model_options_for_agent(
     agent: &str,
     detected_items: &[String],
     table: &ModelsTable,
 ) -> Vec<ModelOption> {
     let vendor = agent_vendor(agent);
-    let curated: Vec<&ModelRow> = match vendor {
-        _ if agent_models_are_plan_qualified(agent) && !detected_items.is_empty() => Vec::new(),
-        Some(v) => table.models.iter().filter(|m| m.vendor == v).collect(),
-        None => table.models.iter().collect(),
+    let agent_vendor_str = vendor.unwrap_or_default().to_string();
+    // (id, vendor) pairs of the option set, in offer order.
+    let set: Vec<(String, String)> = if agent == crate::zcode::AGENT_ID {
+        crate::zcode::model_list()
+            .into_iter()
+            .map(|id| (id, agent_vendor_str.clone()))
+            .collect()
+    } else {
+        table
+            .models
+            .iter()
+            .filter(|m| vendor.is_none_or(|v| m.vendor == v))
+            .map(|m| (m.id.clone(), m.vendor.clone()))
+            .collect()
     };
     let detected_set: std::collections::BTreeSet<&str> =
         detected_items.iter().map(String::as_str).collect();
-    let mut out: Vec<ModelOption> = curated
-        .iter()
-        .map(|m| ModelOption {
-            id: m.id.clone(),
-            vendor: m.vendor.clone(),
-            detected: detected_set.contains(m.id.as_str()),
+    let offered: std::collections::BTreeSet<String> =
+        set.iter().map(|(id, _)| id.clone()).collect();
+    let mut out: Vec<ModelOption> = set
+        .into_iter()
+        .map(|(id, vendor)| ModelOption {
+            detected: detected_set.contains(id.as_str()),
+            id,
+            vendor,
         })
         .collect();
-    let curated_ids: std::collections::BTreeSet<&str> =
-        curated.iter().map(|m| m.id.as_str()).collect();
-    for item in detected_items {
-        if !curated_ids.contains(item.as_str()) {
-            out.push(ModelOption {
-                id: item.clone(),
-                vendor: vendor.unwrap_or_default().to_string(),
-                detected: true,
-            });
+    if !agent_models_are_closed_list(agent) {
+        for item in detected_items {
+            if !offered.contains(item) {
+                out.push(ModelOption {
+                    id: item.clone(),
+                    vendor: agent_vendor_str.clone(),
+                    detected: true,
+                });
+            }
         }
     }
     out
@@ -627,28 +649,45 @@ mod tests {
         // curated row, same as an unrecognized agent id.
         let opts = model_options_for_agent("opencode", &[], &t);
         assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].vendor, "openai", "each row keeps its own vendor");
+        assert_eq!(opts[1].vendor, "anthropic", "each row keeps its own vendor");
         let unknown = model_options_for_agent("some-custom-agent", &[], &t);
         assert_eq!(unknown.len(), 2);
     }
 
-    /// zcode takes plan-qualified ids (`zai-start/GLM-5.3`): once detection
-    /// found its plan/model list, that list is the whole option set (a bare
-    /// curated `glm-5.2` next to it would be an ambiguous duplicate). With no
-    /// detection it falls back to the curated zhipu rows like any vendor.
+    /// zcode's option set is apb's allowlist, always: bare ids, annotated
+    /// `detected` from the detected list, never extended by a detected item
+    /// outside the allowlist (the curated zhipu row `glm-5.2` must not
+    /// appear either).
     #[test]
-    fn model_options_for_zcode_use_the_plan_qualified_list() {
+    fn model_options_for_zcode_come_from_the_allowlist() {
         let t = table_of(&[("glm-5.2", "zhipu"), ("gpt-5.6-sol", "openai")]);
-        let detected = vec![
-            "zai-individual/GLM-5.3".to_string(),
-            "zai-start/GLM-5.3".to_string(),
-        ];
+        let detected = vec!["GLM-5.3".to_string(), "GLM-5.3-Flash".to_string()];
         let opts = model_options_for_agent("zcode", &detected, &t);
-        let ids: Vec<&str> = opts.iter().map(|o| o.id.as_str()).collect();
-        assert_eq!(ids, vec!["zai-individual/GLM-5.3", "zai-start/GLM-5.3"]);
-        assert!(opts.iter().all(|o| o.detected && o.vendor == "zhipu"));
+        assert_eq!(
+            opts,
+            vec![
+                ModelOption {
+                    id: "GLM-5.3".into(),
+                    vendor: "zhipu".into(),
+                    detected: true
+                },
+                ModelOption {
+                    id: "GLM-5.3-Flash".into(),
+                    vendor: "zhipu".into(),
+                    detected: true
+                },
+            ]
+        );
 
+        // No detection yet: the allowlist is still the whole offer.
         let bare = model_options_for_agent("zcode", &[], &t);
         let ids: Vec<&str> = bare.iter().map(|o| o.id.as_str()).collect();
-        assert_eq!(ids, vec!["glm-5.2"]);
+        assert_eq!(ids, vec!["GLM-5.3", "GLM-5.3-Flash"]);
+
+        // A detected id outside the allowlist must not leak into the offer.
+        let leaked = model_options_for_agent("zcode", &["GLM-5-Turbo".to_string()], &t);
+        let ids: Vec<&str> = leaked.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, vec!["GLM-5.3", "GLM-5.3-Flash"]);
     }
 }

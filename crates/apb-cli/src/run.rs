@@ -291,6 +291,7 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
         Ok(r) => r,
         Err(c) => return c,
     };
+    let validate_all = name.is_none();
     let names: Vec<String> = match name {
         Some(n) => vec![n],
         None => match reg.list() {
@@ -338,11 +339,47 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
             }
         }
     }
+    if validate_all && !validate_profile_models(root, &ctx.profiles) {
+        failed = true;
+    }
     if failed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Whole-project `apb validate` also checks the project profiles' models
+/// where apb enforces a closed list (zcode's allowlist): a refused model is
+/// an error, printed as `profile <name>: error zcode_model_not_allowed ...`.
+/// Returns whether every profile passed. An unreadable profile is left to the
+/// run-time resolver, which reports it with its own error.
+fn validate_profile_models(root: &Path, names: &[String]) -> bool {
+    let family = apb_core::zcode::home_dir()
+        .map(|h| apb_core::zcode::account_family(&h))
+        .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
+    let mut ok = true;
+    for name in names {
+        let path = root.join(".apb/profiles").join(name).join("profile.yaml");
+        let Some(doc) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|y| apb_core::profile::ProfileDoc::from_yaml(&y).ok())
+        else {
+            continue;
+        };
+        let chain = std::iter::once((&doc.executor.agent, &doc.executor.model))
+            .chain(doc.executor.fallbacks.iter().map(|f| (&f.agent, &f.model)));
+        for (agent, model) in chain {
+            if agent != apb_core::zcode::AGENT_ID {
+                continue;
+            }
+            if let Err(refusal) = apb_core::zcode::check_model_allowed(model, &family) {
+                println!("profile {name}: error zcode_model_not_allowed {refusal}");
+                ok = false;
+            }
+        }
+    }
+    ok
 }
 
 #[allow(clippy::too_many_arguments)]

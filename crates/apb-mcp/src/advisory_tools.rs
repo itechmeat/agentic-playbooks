@@ -150,6 +150,35 @@ fn adopt_check_model(
     agents: &[detect::AgentInfo],
     findings: &mut Vec<Value>,
 ) {
+    // apb's zcode allowlist is a hard gate, not a hint: a zcode model outside
+    // it fails before spawn (`zcode::spawn_env`), so adoption reports
+    // `model_not_allowed` instead of the softer unverifiable. The legacy
+    // plan-qualified spelling and effort suffixes are accepted here like
+    // everywhere else; custom providers pass. An allowed model is matched
+    // against the detected list by its bare id (no plan prefix, no effort).
+    let zcode_bare: String;
+    let match_id = if agent == apb_core::zcode::AGENT_ID {
+        let family = apb_core::zcode::home_dir()
+            .map(|h| apb_core::zcode::account_family(&h))
+            .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
+        if let Err(e) = apb_core::zcode::check_model_allowed(model, &family) {
+            findings.push(json!({
+                "code": "model_not_allowed",
+                "ref": profile_key,
+                "agent": agent,
+                "model": model,
+                "detail": e,
+            }));
+            return;
+        }
+        let canonical = apb_core::zcode::canonical_model(model, &family);
+        zcode_bare = canonical
+            .split_once('@')
+            .map_or(canonical.clone(), |(m, _)| m.to_string());
+        zcode_bare.as_str()
+    } else {
+        model
+    };
     // Normalize the id to the detection probe the same way the invocation resolver does
     // (claude-code -> claude), otherwise a profile on claude-code would give a false
     // model_unverifiable instead of a real check against the claude probe.
@@ -168,7 +197,7 @@ fn adopt_check_model(
     }
     match &info.models {
         Some(m) if m.authority == Authority::Full => {
-            if !m.items.iter().any(|x| x == model) {
+            if !m.items.iter().any(|x| x == match_id) {
                 findings.push(json!({ "code": "model_not_available", "ref": profile_key, "agent": agent, "model": model }));
             }
         }
@@ -177,7 +206,7 @@ fn adopt_check_model(
             if info
                 .models
                 .as_ref()
-                .is_none_or(|m| !m.items.iter().any(|x| x == model))
+                .is_none_or(|m| !m.items.iter().any(|x| x == match_id))
             {
                 findings.push(json!({ "code": "model_unverifiable", "ref": profile_key, "agent": agent, "model": model }));
             }
@@ -201,7 +230,7 @@ const SELECTION_RULES: &str = "\
 Pick agent and model from the task's purpose using the models table as a hint only. Match the purpose (coding, review, planning, writing, cheap-glue, vision-tasks, and so on) to a high-scoring model, then confirm the user has access (subscription or key). Prefer a fallback chain that degrades gracefully. The table is advisory: never hard-bind a node to a table entry, and never claim a model works without detection evidence.";
 
 const COVERAGE_SEMANTICS: &str = "\
-Model availability is only asserted when detection authority is Full: then a missing model is model_not_available. For Partial, Display, Static, or no list, treat availability as model_unverifiable and do not block on it.";
+Model availability is only asserted when detection authority is Full: then a missing model is model_not_available. For Partial, Display, Static, or no list, treat availability as model_unverifiable and do not block on it. zcode is the exception: apb allows only GLM-5.3 and GLM-5.3-Flash (bare ids, optional @low|high|max effort) and reports any other zcode model as model_not_allowed, which does block.";
 
 const AUTHORIZATION_BOUNDS: &str = "\
 Create a project profile a directly requested playbook needs without extra questions. Ask the user before an unexpected global mutation or an initiative-driven change to a profile other playbooks already use. Cross-workspace profile mutations are not allowed.";

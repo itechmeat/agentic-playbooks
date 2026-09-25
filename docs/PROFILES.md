@@ -194,39 +194,44 @@ as `zcode` on PATH, else at `~/.zcode/server/agents/glm/zcode-agent`, where the
 desktop deploys it (it never puts it on PATH); `agents.zcode.program` in the
 global config overrides both. `apb detect` and `apb doctor` report it.
 
-Model strings are plan-qualified, because ZCode serves the same model from
-several plans, each with its own quota:
+apb allows exactly two zcode models, both on Z.ai's paid Individual coding
+plan: `GLM-5.3` and `GLM-5.3-Flash`. A model string is the bare model id with
+an optional effort suffix:
 
 ```yaml
 executor:
   agent: zcode
-  model: zai-individual/GLM-5.3        # <plan>/<model>[@<effort>]
+  model: GLM-5.3                 # <model>[@<effort>]
   fallbacks:
-    - { agent: zcode, model: zai-individual/GLM-5.3-Flash@low }
+    - { agent: zcode, model: GLM-5.3-Flash@low }
 ```
 
-- `<plan>`: `zai-individual`, `zai-team`, `zai-start`, `zai-idle` (and the
-  `bigmodel-*` twins). ZCode's own provider ids
-  (`account:zai-individual-coding-plan`) and a bare kind (`individual`,
-  `start`) are accepted too; any other value is passed through as a custom
-  provider id from the user's ZCode provider config.
-- `<model>`: a ZCode model id such as `GLM-5.3` or `GLM-5.3-Flash`, matched
-  case-insensitively.
-- `@<effort>`: optional reasoning level (ZCode's effort setting), for example
-  `@low`, `@high`, `@max` for GLM-5.3 and GLM-5.3-Flash. Omitted, apb fills in
-  the model's highest level, which is ZCode's own default. There is no
-  profile-level effort field; the suffix is zcode-only.
-- apb validates the selection before spawning: the model must be one ZCode's
-  built-in config offers on that plan, and the effort one the model supports.
-  ZCode itself does not reject an invalid selection: it silently runs GLM-5.3
-  at max effort instead (observed), so apb fails such a step up front.
-- An unqualified model (`GLM-5.3`) resolves deterministically to the PAID
-  individual coding plan of the account family ZCode is set to (`zai` unless
-  ZCode's settings say `bigmodel`). Qualify the model to use any other plan.
+- `<model>`: `GLM-5.3` or `GLM-5.3-Flash`, matched case-insensitively and
+  stored in that spelling. A bare model resolves to the Individual coding plan
+  of the account family ZCode is set to (`zai` unless ZCode's settings say
+  `bigmodel`).
+- `@<effort>`: optional reasoning level (ZCode's effort setting): `@low`,
+  `@high` or `@max`. Omitted, apb fills in the model's highest level, which is
+  ZCode's own default. There is no profile-level effort field; the suffix is
+  zcode-only.
+- The older plan-qualified spelling `zai-individual/GLM-5.3-Flash@high` is
+  still accepted for backward compatibility and means the same as
+  `GLM-5.3-Flash@high`; the dashboard and the profile tools save the bare
+  form, and apb never emits the prefix.
+- Any other model (GLM-5.2, GLM-5-Turbo, ...) or plan (Start, Team, Idle) is
+  refused with a message naming the two allowed models: by the profile editor
+  and `profile_write`, by `apb validate` (`zcode_model_not_allowed`), by the
+  adopt report (`model_not_allowed`), and before zcode is spawned.
+- apb also validates the selection against ZCode's built-in provider config
+  before spawning (the model must be enabled on the plan, the effort one the
+  model supports). ZCode itself does not reject an invalid selection: it
+  silently runs GLM-5.3 at max effort instead (observed), so apb fails such a
+  step up front.
+- A custom provider from the user's ZCode provider config
+  (`<provider-id>/<model>`) is passed through unchecked.
 
-The model list the profile editor offers for zcode is the detected
-`plan/model` list (from ZCode's built-in provider config, narrowed to the plans
-the CLI can use), paid plan first.
+`apb detect` and the profile editor list exactly `GLM-5.3` and
+`GLM-5.3-Flash`, whatever else ZCode's built-in config enables.
 
 How it runs: `zcode-agent -p <prompt> --json --mode build`. ZCode's `--mode`
 defaults to `yolo` for `-p`, so apb always pins one: `build` normally (in
@@ -251,8 +256,8 @@ Because ZCode silently runs its first usable plan when asked for one it cannot
 use, apb refuses such a step before spawning (an auth-class failure that the
 fallback chain skips) instead of letting it spend the paid plan.
 
-Fallbacks across plans. A spend or quota stop (Z.ai `Usage limit reached`,
+Fallbacks. A spend or quota stop (Z.ai `Usage limit reached`,
 `Weekly/Monthly Limit Exhausted`, `Insufficient balance`) is a budget failure
-and blocks that PLAN for the rest of the chain, not the whole agent: another
-model on the same plan is skipped (same quota), while the same model on a
-different plan is still tried once the CLI can use that plan.
+and blocks the Individual plan for the rest of the chain, not the whole agent:
+the other zcode model is skipped too (same quota), while a fallback on another
+agent is still tried.

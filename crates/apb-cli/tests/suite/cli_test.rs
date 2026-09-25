@@ -76,6 +76,35 @@ fn validate_broken_playbook_fails_with_code() {
         .stdout(predicate::str::contains("V13"));
 }
 
+/// Whole-project validation checks zcode profile models against apb's
+/// allowlist: the bare id and the legacy `zai-individual/` spelling pass, any
+/// other model is an error naming the allowlist.
+#[test]
+fn validate_refuses_a_zcode_profile_model_off_the_allowlist() {
+    let dir = seeded_dir();
+    let profile =
+        |model: &str| format!("name: architect\nexecutor:\n  agent: zcode\n  model: {model}\n");
+    let path = dir.path().join(".apb/profiles/architect/profile.yaml");
+    for ok in ["GLM-5.3-Flash@high", "zai-individual/GLM-5.3"] {
+        fs::write(&path, profile(ok)).unwrap();
+        playbook()
+            .arg("validate")
+            .current_dir(dir.path())
+            .assert()
+            .success();
+    }
+    fs::write(&path, profile("GLM-5-Turbo")).unwrap();
+    playbook()
+        .arg("validate")
+        .current_dir(dir.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "profile architect: error zcode_model_not_allowed",
+        ))
+        .stdout(predicate::str::contains("GLM-5.3-Flash"));
+}
+
 #[test]
 fn list_without_apb_dir_fails() {
     let dir = tempfile::tempdir().unwrap();
