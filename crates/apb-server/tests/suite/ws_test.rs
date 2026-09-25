@@ -90,3 +90,33 @@ async fn ws_upgrade_rejects_a_cross_origin_handshake() {
     assert_ne!(res.status(), StatusCode::FORBIDDEN);
     assert_eq!(res.status(), StatusCode::UPGRADE_REQUIRED);
 }
+
+/// Reading a definition is not a change. notify reports opens and read-closes
+/// as events too, and each one used to broadcast `playbooks_changed`: an open
+/// playbook list or view reloads on that message, and its reload reads the
+/// definitions again, so every open tab refetched about twice a second
+/// forever. A read must broadcast nothing; the write after it still does.
+#[tokio::test]
+async fn watcher_ignores_reads_and_still_reports_writes() {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let file = dir.path().join(".apb/playbooks/demo/1.0.0/playbook.yaml");
+    fs::create_dir_all(file.parent().unwrap()).unwrap();
+    fs::write(&file, "id: demo").unwrap();
+    let state = AppState::new(dir.path().to_path_buf());
+    let mut rx = state.events.subscribe();
+    let _watcher =
+        apb_server::watch::spawn_watcher(dir.path().to_path_buf(), state.events.clone()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    assert_eq!(fs::read_to_string(&file).unwrap(), "id: demo");
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    assert!(rx.try_recv().is_err(), "a read must not broadcast a change");
+
+    fs::write(&file, "id: demo2").unwrap();
+    let msg = tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("timeout waiting for the write's event")
+        .expect("channel closed");
+    assert!(msg.contains("playbooks_changed"));
+}

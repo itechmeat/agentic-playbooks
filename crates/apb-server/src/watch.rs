@@ -2,6 +2,7 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::Duration;
 
+use notify::event::{AccessKind, AccessMode, EventKind};
 use notify::{Event, RecommendedWatcher, RecursiveMode, Watcher};
 use tokio::sync::broadcast;
 
@@ -32,6 +33,19 @@ fn change_message(event: &Event) -> &'static str {
     }
 }
 
+/// Whether an event may have changed what the dashboard shows. notify also
+/// reports opens and read-closes (`Access`), and the dashboard's own GETs
+/// cause those: broadcasting them made every open list or playbook view
+/// reload, read again and reload again, twice a second, forever. A write that
+/// closes (`Access(Close(Write))`) still counts.
+fn is_change(event: &Event) -> bool {
+    match event.kind {
+        EventKind::Access(AccessKind::Close(AccessMode::Write)) => true,
+        EventKind::Access(_) => false,
+        _ => true,
+    }
+}
+
 /// Project-scoped watcher over a single `<root>/.apb` (test harness / pinned
 /// root). Kept for the single-project test server.
 pub fn spawn_watcher(
@@ -39,7 +53,9 @@ pub fn spawn_watcher(
     tx: broadcast::Sender<String>,
 ) -> notify::Result<RecommendedWatcher> {
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-        if let Ok(event) = res {
+        if let Ok(event) = res
+            && is_change(&event)
+        {
             // Ignore the send error: no subscribers means nothing to send.
             let _ = tx.send(change_message(&event).to_string());
         }
@@ -114,7 +130,9 @@ pub fn spawn_global_watcher(tx: broadcast::Sender<String>) -> notify::Result<Glo
     let cfg = apb_core::config::config_dir();
     let cfg_for_events = cfg.clone();
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
-        if let Ok(event) = res {
+        if let Ok(event) = res
+            && is_change(&event)
+        {
             let msg = match &cfg_for_events {
                 Some(c) if event.paths.iter().any(|p| p.starts_with(c)) => {
                     config_message(&event, c)
