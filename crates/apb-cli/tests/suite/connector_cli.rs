@@ -5,7 +5,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// Runs `apb <args>` with a fresh per-test config dir and no inherited run
 /// context (`APB_RUN_DIR`/`APB_NODE_ID` explicitly removed so a developer's
@@ -17,7 +16,7 @@ fn playbook(dir: &Path, args: &[&str]) -> std::process::Output {
 /// Like `playbook`, but with extra environment variables set on the child
 /// (e.g. the scaffold's secret env var).
 fn playbook_env(dir: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::process::Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apb"));
+    let mut cmd = crate::common::apb_std();
     cmd.args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))

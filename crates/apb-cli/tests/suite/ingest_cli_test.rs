@@ -4,14 +4,9 @@
 //! spawn concurrently).
 
 use std::path::Path;
-use std::process::Command;
-
-fn apb_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_apb")
-}
 
 fn run(cfg: &Path, args: &[&str]) -> (String, String, bool) {
-    let out = Command::new(apb_bin())
+    let out = crate::common::apb_std()
         .args(args)
         .env("APB_CONFIG_DIR", cfg)
         .env_remove("CI")
@@ -303,7 +298,7 @@ fn doctor_warns_that_a_project_only_account_cannot_be_addressed() {
     )
     .unwrap();
 
-    let out = Command::new(apb_bin())
+    let out = crate::common::apb_std()
         .args(["connector", "doctor"])
         .current_dir(project.path())
         .env("APB_CONFIG_DIR", cfg.path())

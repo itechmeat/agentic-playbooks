@@ -9,7 +9,7 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::Duration;
 
@@ -93,7 +93,7 @@ fn stdio_profile_write_run_then_skill_edit_refuses() {
     let stub = make_stub(bin.path());
 
     // init + seed skill.
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .arg("init")
         .current_dir(proj.path())
         .output()
@@ -102,7 +102,7 @@ fn stdio_profile_write_run_then_skill_edit_refuses() {
     fs::create_dir_all(&skill).unwrap();
     fs::write(skill.join("SKILL.md"), "v1").unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let mut child = crate::common::apb_std()
         .arg("mcp")
         .current_dir(proj.path())
         .env("APB_AGENT_CMD", &stub)

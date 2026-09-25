@@ -15,7 +15,7 @@ use std::fs;
 use std::path::Path;
 
 fn apb() -> Command {
-    Command::cargo_bin("apb").unwrap()
+    crate::common::apb()
 }
 
 /// A real pid that is reliably absent: a child spawned, waited for and reaped,

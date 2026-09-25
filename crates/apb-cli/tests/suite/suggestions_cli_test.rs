@@ -15,14 +15,9 @@
 //! way every other suite's does, via `Command::env`.
 
 use std::path::Path;
-use std::process::Command;
-
-fn apb_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_apb")
-}
 
 fn run(cfg: &Path, cwd: &Path, args: &[&str]) -> (String, String, bool) {
-    let out = Command::new(apb_bin())
+    let out = crate::common::apb_std()
         .args(["suggestions"])
         .args(args)
         .current_dir(cwd)

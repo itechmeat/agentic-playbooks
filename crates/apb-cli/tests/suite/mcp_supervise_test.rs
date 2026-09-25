@@ -10,7 +10,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -38,7 +38,7 @@ fn supervise_self_over_stdio_mints_token_and_inspect_resolves_it() {
     let dir = tempfile::tempdir().unwrap();
 
     // init + seed the same minimal playbook without agent_task.
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .arg("init")
         .current_dir(dir.path())
         .output()
@@ -48,7 +48,7 @@ fn supervise_self_over_stdio_mints_token_and_inspect_resolves_it() {
     fs::write(vdir.join("playbook.yaml"), NOAGENT).unwrap();
     fs::write(dir.path().join(".apb/playbooks/noagent/current"), "1.0.0").unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let mut child = crate::common::apb_std()
         .arg("mcp")
         .current_dir(dir.path())
         .stdin(Stdio::piped())

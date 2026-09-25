@@ -16,7 +16,7 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
 use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -226,7 +226,7 @@ edges:
 }
 
 fn seed(root: &Path, id: &str, playbook: &str, script: &str) {
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .arg("init")
         .current_dir(root)
         .output()
@@ -263,7 +263,7 @@ fn drive_run_subcommand_completes_a_run_prepared_by_another_process() {
     // the child then takes it itself.
     drop(prepared);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let out = crate::common::apb_std()
         .arg("__drive-run")
         .arg("--root")
         .arg(dir.path())
@@ -391,7 +391,7 @@ fn spawn_driver_at_returns_the_driver_pid_and_drives_the_run_alone() {
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
 
     let pid = apb_engine::driver::spawn_driver_at(
-        Path::new(env!("CARGO_BIN_EXE_apb")),
+        crate::common::apb_bin(),
         dir.path(),
         &run_id,
         None,
@@ -455,7 +455,7 @@ fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
 
     // This test process is the launcher, so it owns the reaper.
     let pid = apb_engine::driver::spawn_driver_at(
-        Path::new(env!("CARGO_BIN_EXE_apb")),
+        crate::common::apb_bin(),
         dir.path(),
         &run_id,
         None,
@@ -651,7 +651,7 @@ fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
     let (yaml, script) = slowscript_yaml("resumeme", 0);
     seed(dir.path(), "resumeme", &yaml, &script);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let out = crate::common::apb_std()
         .arg("run")
         .arg("resumeme")
         .current_dir(dir.path())
@@ -720,7 +720,7 @@ struct McpSession {
 
 impl McpSession {
     fn start(root: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+        let mut child = crate::common::apb_std()
             .arg("mcp")
             .current_dir(root)
             .stdin(Stdio::piped())

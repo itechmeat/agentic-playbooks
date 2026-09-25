@@ -1,4 +1,5 @@
-use std::process::Command;
+#[path = "suite/common.rs"]
+mod common;
 
 /// Anti-hang ceiling for the pty waits below, not a performance budget: every
 /// assertion here is about what the questionnaire printed and that the process
@@ -33,7 +34,7 @@ fn warm_binary() {
 
     static WARM: OnceLock<()> = OnceLock::new();
     WARM.get_or_init(|| {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+        let mut child = common::apb_std()
             .arg("--version")
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::null())
@@ -96,7 +97,7 @@ fn survey_offer_does_not_block_when_stdout_is_piped() {
 
     let dir = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap(); // fresh, so onboarding is Uninitialized
-    let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let mut child = common::apb_std()
         .arg("subscriptions")
         .current_dir(dir.path())
         .env("APB_NO_REGISTRY", "1")
@@ -144,7 +145,7 @@ fn survey_offer_does_not_block_when_stdout_is_piped() {
 #[test]
 fn init_with_piped_stdio_stays_noninteractive() {
     let dir = tempfile::tempdir().unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let out = common::apb_std()
         .arg("init")
         .current_dir(dir.path())
         .env("APB_NO_REGISTRY", "1")
@@ -164,7 +165,7 @@ fn init_with_piped_stdio_stays_noninteractive() {
 fn init_rerun_is_safe() {
     let dir = tempfile::tempdir().unwrap();
     for _ in 0..2 {
-        let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+        let out = common::apb_std()
             .arg("init")
             .current_dir(dir.path())
             .env("APB_NO_REGISTRY", "1")
@@ -240,7 +241,7 @@ fn init_on_tty(project: &std::path::Path, answers: &[(&str, u8)]) -> String {
     let master = unsafe { OwnedFd::from_raw_fd(master) };
     let slave = unsafe { OwnedFd::from_raw_fd(slave) };
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let mut child = common::apb_std()
         .arg("init")
         .current_dir(project)
         .env("APB_NO_REGISTRY", "1")

@@ -24,7 +24,7 @@ edges:
 "#;
 
 fn playbook() -> Command {
-    Command::cargo_bin("apb").unwrap()
+    crate::common::apb()
 }
 
 fn seeded() -> tempfile::TempDir {

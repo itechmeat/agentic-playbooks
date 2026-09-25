@@ -13,7 +13,7 @@ use std::fs;
 use std::path::Path;
 
 fn apb() -> Command {
-    Command::cargo_bin("apb").unwrap()
+    crate::common::apb()
 }
 
 fn init(dir: &Path) {

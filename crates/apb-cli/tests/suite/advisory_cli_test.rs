@@ -4,10 +4,10 @@
 //! spawns nothing.
 
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 fn playbook(dir: &Path, empty_bin: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))

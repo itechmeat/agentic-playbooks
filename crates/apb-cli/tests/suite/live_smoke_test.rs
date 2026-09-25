@@ -22,7 +22,7 @@ use std::path::Path;
 use std::process::Command;
 
 fn playbook(dir: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::process::Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apb"));
+    let mut cmd = crate::common::apb_std();
     cmd.args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))
@@ -121,7 +121,7 @@ fn write_stub_agent(
     call_fn: &str,
     call_args: &str,
 ) -> std::path::PathBuf {
-    let apb_bin = env!("CARGO_BIN_EXE_apb");
+    let apb_bin = crate::common::apb_bin().display();
     let script = format!(
         r#"#!/bin/sh
 set -e

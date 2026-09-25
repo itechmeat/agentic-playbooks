@@ -307,6 +307,23 @@ enum Command {
     },
 }
 
+/// Whether this invocation auto-registers its cwd in the project registry.
+/// The hidden re-exec targets (`__drive-supervised`, `__drive-run`,
+/// `__ask-server`) are spawned by an apb process that already registered the
+/// project, so they must not: `__drive-run` works on its `--root`, not its cwd,
+/// and `__ask-server` inherits the coding agent's cwd, which can be any
+/// directory. It also keeps a test that spawns the driver straight from the
+/// engine (`spawn_driver_at`, no chance to set `APB_CONFIG_DIR`) out of the
+/// real `~/.config/apb/projects.json`.
+fn registers_workspace(command: Option<&Command>) -> bool {
+    !matches!(
+        command,
+        Some(
+            Command::DriveSupervised { .. } | Command::DriveRun { .. } | Command::AskServer { .. }
+        )
+    )
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = std::env::current_dir().expect("cwd");
@@ -316,7 +333,7 @@ fn main() -> ExitCode {
     // command. Done at the process entry point rather than in WfMcp::new, so
     // that constructing the server in tests does not write to the real
     // ~/.config/playbook.
-    if root.join(".apb").is_dir() {
+    if registers_workspace(cli.command.as_ref()) && root.join(".apb").is_dir() {
         apb_core::projects::touch(&root);
     }
     match cli.command {
@@ -440,5 +457,51 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registers(args: &[&str]) -> bool {
+        let cli = Cli::try_parse_from(args).expect("args parse");
+        registers_workspace(cli.command.as_ref())
+    }
+
+    #[test]
+    fn user_facing_commands_register_the_workspace() {
+        assert!(registers(&["apb"]));
+        assert!(registers(&["apb", "list"]));
+        assert!(registers(&["apb", "mcp"]));
+    }
+
+    #[test]
+    fn internal_reexec_targets_do_not_register_the_workspace() {
+        assert!(!registers(&[
+            "apb",
+            "__drive-run",
+            "--root",
+            "/r",
+            "--run-id",
+            "x"
+        ]));
+        assert!(!registers(&[
+            "apb",
+            "__drive-supervised",
+            "pb",
+            "--handshake",
+            "/h"
+        ]));
+        assert!(!registers(&[
+            "apb",
+            "__ask-server",
+            "--run",
+            "r",
+            "--node",
+            "n",
+            "--attempt",
+            "1"
+        ]));
     }
 }

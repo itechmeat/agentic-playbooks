@@ -1,11 +1,10 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 const NAMED: &str = "schema: 1\nid: a\nname: W\nversion: 1.0.0\nexecutors:\n  main:\n    agent: claude\n    model: haiku\ndefaults:\n  executor: main\nnodes:\n  - { id: start, type: start }\n  - { id: t, type: agent_task, prompt: \"do\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: t }\n  - { from: t, to: done }\n";
 
 fn playbook(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))
@@ -44,7 +43,7 @@ fn apb_with_editor(dir: &Path, editor: &Path, args: &[&str]) -> std::process::Ou
 /// Like `apb_with_editor`, but $EDITOR is an arbitrary string (may carry
 /// arguments, e.g. "ed.sh --wait").
 fn apb_with_editor_str(dir: &Path, editor: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))

@@ -7,6 +7,13 @@
 //! except: `include_str!` relative paths adjusted for the extra directory
 //! depth, and `stdio_profile_e2e_test.rs`'s former `#![cfg(unix)]` inner
 //! attribute converted to the outer `#[cfg(unix)]` below on its `mod` line.
+//!
+//! `suite/common.rs` is the one way these tests spawn `apb`: it sandboxes the
+//! global config dir so a test run never writes the real `~/.config/apb`.
+//! `suite/real_config_guard_test.rs` enforces that.
+
+#[path = "suite/common.rs"]
+mod common;
 
 #[path = "suite/advisory_cli_test.rs"]
 mod advisory_cli_test;
@@ -43,6 +50,8 @@ mod phase9_cli_test;
 mod profile_cli_test;
 #[path = "suite/projects_cli_test.rs"]
 mod projects_cli_test;
+#[path = "suite/real_config_guard_test.rs"]
+mod real_config_guard_test;
 #[path = "suite/run_cli_test.rs"]
 mod run_cli_test;
 #[path = "suite/run_doctor_cli_test.rs"]
