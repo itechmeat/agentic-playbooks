@@ -1,7 +1,6 @@
 <script lang="ts">
   import {
-    fetchAgentsCached,
-    fetchModelsCached,
+    fetchModelCatalog,
     fetchProfile,
     fetchProjects,
     fetchSkills,
@@ -165,13 +164,9 @@
   async function loadMeta() {
     metaLoaded = false
     try {
-      const [pj, ag, md] = await Promise.all([
-        fetchProjects(),
-        fetchAgentsCached(),
-        fetchModelsCached(),
-      ])
+      const [pj, md] = await Promise.all([fetchProjects(), fetchModelCatalog()])
       projects = pj
-      agents = ag
+      agents = md.agents
       modelsTable = md.models
       optionsByAgent = md.options_by_agent
       if (isNew && !workspaceInput && projects.length) workspaceInput = projects[0].workspace_id

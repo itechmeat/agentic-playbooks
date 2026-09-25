@@ -4,6 +4,7 @@ import {
   createPlaybook,
   deletePlaybook,
   fetchDiff,
+  fetchModelCatalog,
   fetchInputDraft,
   fetchPlaybook,
   postAnswer,
@@ -279,5 +280,45 @@ describe('401 handling', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'auth' }, 401))
     await expect(fetchPlaybook('demo')).rejects.toThrow(/HTTP 401/)
     expect(get(auth)).toEqual({ required: true, authenticated: false, checked: true })
+  })
+})
+
+describe('fetchModelCatalog', () => {
+  const catalog = {
+    models: [],
+    claude_static: ['claude-opus-5-5'],
+    codex_static: [],
+    agents: [{ agent: 'claude', installed: true }],
+    options_by_agent: { claude: [{ id: 'claude-opus-5-5', vendor: 'anthropic', detected: true }] },
+  }
+
+  it('asks the server every time and ignores a stale copy left in sessionStorage', async () => {
+    // A tab opened before a rebuild still holds the old cache entry: it must
+    // never be read or written again.
+    const store = new Map<string, string>([
+      [
+        'apb.cache.models',
+        JSON.stringify({
+          at: Date.now(),
+          data: { options_by_agent: { claude: [{ id: 'claude-opus-5', vendor: 'anthropic', detected: true }] } },
+        }),
+      ],
+    ])
+    const storage = {
+      getItem: vi.fn((k: string) => store.get(k) ?? null),
+      setItem: vi.fn((k: string, v: string) => void store.set(k, v)),
+    }
+    vi.stubGlobal('sessionStorage', storage)
+    fetchMock.mockImplementation(async () => jsonResponse(catalog))
+
+    const first = await fetchModelCatalog()
+    const second = await fetchModelCatalog()
+
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenCalledWith('/api/models', { headers: H })
+    expect(first.options_by_agent.claude.map((o) => o.id)).toEqual(['claude-opus-5-5'])
+    expect(second).toEqual(catalog)
+    expect(storage.getItem).not.toHaveBeenCalled()
+    expect(storage.setItem).not.toHaveBeenCalled()
   })
 })

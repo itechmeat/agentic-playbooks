@@ -12,12 +12,7 @@ import type {
   WriteResult,
 } from '../types'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
-import { cachedJson } from '../sessioncache'
 import { getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
-
-/** TTL for the cached agent/model lookups: they only change when the CLI
- * environment changes, so an hour is a safe amount of staleness to accept. */
-export const LOOKUP_CACHE_TTL_MS = 60 * 60 * 1000
 
 export const fetchProjects = () => getJson<Project[]>('/api/projects')
 
@@ -80,13 +75,6 @@ export interface AgentInfo {
   category?: string
   models?: { items: string[]; authority: string } | null
 }
-export const fetchAgents = () =>
-  getJson<{ agents: AgentInfo[] }>('/api/agents').then((r) => r.agents)
-
-// CLI agent detection is slow server-side; cache it client-side so opening a
-// second profile editor right after the first does not refetch it.
-export const fetchAgentsCached = () =>
-  cachedJson('apb.cache.agents', LOOKUP_CACHE_TTL_MS, fetchAgents)
 
 export interface ModelRow {
   id: string
@@ -106,18 +94,19 @@ export interface ModelOption {
   vendor: string
   detected: boolean
 }
-export const fetchModels = () =>
-  getJson<{
-    models: ModelRow[]
-    claude_static: string[]
-    codex_static: string[]
-    options_by_agent: Record<string, ModelOption[]>
-  }>('/api/models')
 
-// Same rationale as fetchAgentsCached: the curated models table plus
-// per-agent detection is slow to assemble and rarely changes.
-export const fetchModelsCached = () =>
-  cachedJson('apb.cache.models', LOOKUP_CACHE_TTL_MS, fetchModels)
+/** The agent/model catalog, as the server computes it (`GET /api/models`,
+ * `apb_core::agent_catalog`). The server is the only source of truth for
+ * these lists: the client never persists them, so a reload always shows what
+ * the running `apb` offers. Agents and options come from one snapshot. */
+export interface ModelCatalog {
+  models: ModelRow[]
+  claude_static: string[]
+  codex_static: string[]
+  agents: AgentInfo[]
+  options_by_agent: Record<string, ModelOption[]>
+}
+export const fetchModelCatalog = () => getJson<ModelCatalog>('/api/models')
 
 export interface AvailableSkill {
   name: string
