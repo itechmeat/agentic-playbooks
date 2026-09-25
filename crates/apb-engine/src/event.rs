@@ -304,6 +304,17 @@ pub enum EventPayload {
         decision: String,
         note: String,
     },
+    /// An open review request that will never be decided: a supervisor's
+    /// directive (`node_retry`, `run_continue_from`) moved the run off the
+    /// gate while it waited. It closes the request like a decision would, so
+    /// nothing reports the gate as pending any more, and reaching the gate
+    /// again asks anew. `reason` names the directive. Additive variant: old
+    /// logs never carry it.
+    ReviewWithdrawn {
+        node: String,
+        #[serde(default)]
+        reason: String,
+    },
     WaitStarted {
         node: String,
         kind: String,
@@ -728,9 +739,26 @@ pub(crate) fn review_decided_count(events: &[Event], node: &str) -> usize {
         .count()
 }
 
-/// How many times a gate has asked for a decision. A gate is pending exactly
-/// while this exceeds [`review_decided_count`], which is what both the drive
-/// loop and `post_review`'s node validation judge against.
+/// How many open requests of a gate were withdrawn without a decision
+/// ([`EventPayload::ReviewWithdrawn`]).
+pub(crate) fn review_withdrawn_count(events: &[Event], node: &str) -> usize {
+    events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::ReviewWithdrawn { node: n, .. } if n == node),
+        )
+        .count()
+}
+
+/// How many of a gate's review requests are still open: asked, and neither
+/// decided nor withdrawn. The one definition of "pending" the drive loop, the
+/// progress fold and `post_review`'s node validation all judge against.
+pub(crate) fn review_open_count(events: &[Event], node: &str) -> usize {
+    review_requested_count(events, node)
+        .saturating_sub(review_decided_count(events, node) + review_withdrawn_count(events, node))
+}
+
+/// How many times a gate has asked for a decision (see [`review_open_count`]).
 pub(crate) fn review_requested_count(events: &[Event], node: &str) -> usize {
     events
         .iter()

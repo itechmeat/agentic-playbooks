@@ -309,6 +309,51 @@ pub(crate) fn monitor_supervisor_heartbeat(
     Ok(())
 }
 
+/// Applies a directive that moves the run to a named node - `Retry` (run it
+/// again, optionally with a one-shot prompt override) or `ContinueFrom` - and
+/// consumes it: journals the `SupervisorAction`, then persists the cursor, then
+/// points `current` at the node. Shared by the two places a driver waits for
+/// one: a supervised park on a failed node and a park on an undecided
+/// `human_review` gate. Any other command is left untouched (`Ok(false)`).
+pub(crate) fn apply_move_directive(
+    run_dir: &Path,
+    log: &mut EventLog,
+    control_cursor: &mut Option<u64>,
+    prompt_overrides: &mut BTreeMap<String, String>,
+    current: &mut String,
+    cmd: Control,
+    seq: u64,
+) -> Result<bool, EngineError> {
+    let (node, action, override_text) = match cmd {
+        Control::Retry {
+            node,
+            prompt_override,
+        } => (
+            node,
+            crate::event::supervisor_action::NODE_RETRY,
+            prompt_override,
+        ),
+        Control::ContinueFrom { node } => (
+            node,
+            crate::event::supervisor_action::RUN_CONTINUE_FROM,
+            None,
+        ),
+        _ => return Ok(false),
+    };
+    log.append(EventPayload::SupervisorAction {
+        action: action.into(),
+        node: Some(node.clone()),
+        detail: override_text.clone().unwrap_or_default(),
+    })?;
+    *control_cursor = Some(seq);
+    write_control_cursor(run_dir, seq)?;
+    if let Some(p) = override_text {
+        prompt_overrides.insert(node.clone(), p);
+    }
+    *current = node;
+    Ok(true)
+}
+
 /// What a supervised park decided once a command arrived.
 pub(crate) enum WakeOutcome {
     /// A directive (retry, continue-from, patch) moved the run on; the drive
@@ -447,32 +492,16 @@ pub(crate) fn park_for_supervisor(
             // not fail the run, just wait for the next command on the same node.
             Control::ContextAppend { .. } => continue,
             Control::Progress { .. } => continue,
-            Control::Retry {
-                node,
-                prompt_override,
-            } => {
-                log.append(EventPayload::SupervisorAction {
-                    action: crate::event::supervisor_action::NODE_RETRY.into(),
-                    node: Some(node.clone()),
-                    detail: prompt_override.clone().unwrap_or_default(),
-                })?;
-                *control_cursor = Some(seq);
-                write_control_cursor(run_dir, seq)?;
-                if let Some(p) = prompt_override {
-                    prompt_overrides.insert(node.clone(), p);
-                }
-                *current = node;
-                break;
-            }
-            Control::ContinueFrom { node } => {
-                log.append(EventPayload::SupervisorAction {
-                    action: crate::event::supervisor_action::RUN_CONTINUE_FROM.into(),
-                    node: Some(node.clone()),
-                    detail: String::new(),
-                })?;
-                *control_cursor = Some(seq);
-                write_control_cursor(run_dir, seq)?;
-                *current = node;
+            directive @ (Control::Retry { .. } | Control::ContinueFrom { .. }) => {
+                apply_move_directive(
+                    run_dir,
+                    log,
+                    control_cursor,
+                    prompt_overrides,
+                    current,
+                    directive,
+                    seq,
+                )?;
                 break;
             }
             Control::Patch {

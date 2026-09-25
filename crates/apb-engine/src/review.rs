@@ -73,9 +73,9 @@ fn check_review_target(run_dir: &Path, node: &str) -> Result<(), EngineError> {
     let Ok(events) = crate::event::read_all(run_dir) else {
         return Ok(());
     };
-    let requested = crate::event::review_requested_count(&events, node);
+    let open = crate::event::review_open_count(&events, node);
     let decided = crate::event::review_decided_count(&events, node);
-    if requested <= decided {
+    if open == 0 {
         return Err(EngineError::Conflict(format!(
             "node `{node}` has no review decision pending"
         )));
@@ -98,7 +98,7 @@ fn check_review_target(run_dir: &Path, node: &str) -> Result<(), EngineError> {
         .filter(|e| e.cmd.node == node)
         .count()
         .saturating_sub(decided);
-    if unconsumed >= requested - decided {
+    if unconsumed >= open {
         return Err(EngineError::Conflict(format!(
             "a decision is already queued for node `{node}`"
         )));

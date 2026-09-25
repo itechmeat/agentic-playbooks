@@ -67,7 +67,7 @@ pub(crate) use journal::{
     last_question_asked_ts, last_wait_started_ts, node_finished_count,
     node_has_unanswered_channel_question, node_primary_invocation, node_started_count,
     question_answered_count, question_asked_count, questions_answered_before_seq,
-    questions_asked_before_seq, review_decided_count, review_requested_count, wait_ended_count,
+    questions_asked_before_seq, review_decided_count, review_open_count, wait_ended_count,
     wait_signalled_count, wait_started_count,
 };
 pub use listing::{RunSummary, list_runs};
@@ -1248,7 +1248,7 @@ fn drive_inner(
                 // #42 finding 4) so a supervising agent, or any reader of the
                 // log alone, can tell the owner an action is expected, what the
                 // options are, and how to answer.
-                if review_requested_count(&events, &current) <= decided {
+                if review_open_count(&events, &current) == 0 {
                     let title = playbook.node(&current).and_then(|n| n.title.clone());
                     let instruction = crate::progress::review_instruction(
                         &current,
@@ -1263,6 +1263,42 @@ fn drive_inner(
                         instruction,
                         prompt: prompt.clone(),
                     })?;
+                }
+                // A directive that moves the run elsewhere (`node_retry`,
+                // `run_continue_from`) is what a supervisor sends when it sees,
+                // parked on this gate, that an earlier node went wrong. The
+                // top-of-loop scan leaves exactly such a directive at the head
+                // of the pending commands (it answers a wake, and a gate raises
+                // none), so it is applied here: the open request is withdrawn
+                // - no one can decide a gate the run has left - and the run
+                // moves on. Reaching the gate again asks anew.
+                if let Some(entry) = read_control_after(run_dir, control_cursor)?
+                    .into_iter()
+                    .next()
+                    && matches!(
+                        entry.cmd,
+                        Control::Retry { .. } | Control::ContinueFrom { .. }
+                    )
+                {
+                    let reason = match &entry.cmd {
+                        Control::Retry { node, .. } => format!("node_retry `{node}`"),
+                        Control::ContinueFrom { node } => format!("run_continue_from `{node}`"),
+                        _ => String::new(),
+                    };
+                    log.append(EventPayload::ReviewWithdrawn {
+                        node: current.clone(),
+                        reason,
+                    })?;
+                    supervisor::apply_move_directive(
+                        run_dir,
+                        log,
+                        &mut control_cursor,
+                        &mut prompt_overrides,
+                        &mut current,
+                        entry.cmd,
+                        entry.seq,
+                    )?;
+                    continue;
                 }
                 std::thread::sleep(AWAIT_CONTROL_POLL);
                 continue;

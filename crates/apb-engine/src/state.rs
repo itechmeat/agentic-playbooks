@@ -324,7 +324,7 @@ impl RunState {
                         reason: reason.clone(),
                     });
                 }
-                EventPayload::ReviewRequested { .. } => {}
+                EventPayload::ReviewRequested { .. } | EventPayload::ReviewWithdrawn { .. } => {}
                 EventPayload::ReviewDecided {
                     node,
                     decision,

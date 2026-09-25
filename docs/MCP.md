@@ -202,6 +202,14 @@ grants; the default when the key is absent is all of them
 `supervisor_context_append`, `supervisor_interrupt_attempt`); `patch_playbook`
 gates `supervisor_patch_playbook`.
 
+`supervisor_node_retry` and `supervisor_run_continue_from` also act while the
+run is parked on an undecided `human_review` gate, the moment a supervisor
+often notices that an earlier node went wrong: the driver withdraws the open
+review (a `review_withdrawn` event; the gate is no longer pending and the
+decision surfaces refuse it), moves to the named node, and asks for the review
+again when the gate is reached anew. A `supervisor_patch_playbook` queued behind
+such a directive is applied right after it.
+
 `rebind` gates `supervisor_rebind_profile { token, node, profile, scope?,
 acknowledge_untrusted?, reason? }`, the sanctioned escape hatch for switching a
 node's executor profile mid-run when its bound agent is wedged (a service that

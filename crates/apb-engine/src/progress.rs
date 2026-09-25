@@ -819,10 +819,7 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     // The counters themselves live in `event` (issue #103.1), shared with the
     // decision channel's own pending check, so the two surfaces cannot drift
     // on what "pending" means.
-    let review_pending = |id: &str| {
-        crate::event::review_requested_count(events, id)
-            > crate::event::review_decided_count(events, id)
-    };
+    let review_pending = |id: &str| crate::event::review_open_count(events, id) > 0;
     let open_gates: Vec<(&apb_core::schema::Node, WaitingKind)> = playbook
         .nodes
         .iter()
