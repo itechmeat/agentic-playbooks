@@ -123,9 +123,13 @@ config change.
 Pushing a tag `vX.Y.Z` triggers the release workflow: it builds the shell
 installer, the Homebrew formula (tap `itechmeat/homebrew-agentic-playbooks`),
 and archives for the configured targets. A test gate (fmt, clippy, nextest,
-doctests, and a check that `docs/release-notes/<tag>.md` exists) runs both as
-a fast plan-stage job and again inside every build leg, so a failing gate
-physically blocks publishing rather than just warning. `dist plan` also runs
+doctests, and a check that `docs/release-notes/<tag>.md` exists) runs as a
+local-artifacts job next to the builds and again inside every build leg; the
+host job that creates the release requires the gate job to succeed, so a
+failing gate blocks publishing. The host job attests every artifact
+(`github-attestations`, keyless build provenance) before creating the release.
+Every action is pinned to a commit SHA (`[dist.github-action-commits]` for the
+generated file); `release_workflow_test` in apb-cli checks all three. `dist plan` also runs
 on every PR (`pr-run-mode = "plan"`) to catch config drift before a tag is
 pushed. `docs/release-notes/<tag>.md` is required per tag and becomes the
 published release body via a post-announce job.

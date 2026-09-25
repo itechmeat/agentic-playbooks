@@ -71,6 +71,18 @@ Each archive unpacks into a directory named after the platform (for example
 `LICENSE`; a companion `.sha256` checksum file sits next to the archive on
 the Releases page.
 
+A checksum only proves the download matches the file on the Releases page.
+To check that the file was built by this repository's release workflow, verify
+its build-provenance attestation (keyless: signed through GitHub's Sigstore
+integration, no key to fetch) with the GitHub CLI:
+
+```sh
+gh attestation verify apb-aarch64-apple-darwin.tar.xz --repo itechmeat/agentic-playbooks
+```
+
+Every release artifact (archives, checksums, the shell installer) is attested
+this way, from releases made after this was introduced.
+
 ## 5. Build from source (contributor path)
 
 ### Important: the web frontend is embedded in the binary

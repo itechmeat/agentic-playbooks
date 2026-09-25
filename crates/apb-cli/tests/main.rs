@@ -52,6 +52,8 @@ mod profile_cli_test;
 mod projects_cli_test;
 #[path = "suite/real_config_guard_test.rs"]
 mod real_config_guard_test;
+#[path = "suite/release_workflow_test.rs"]
+mod release_workflow_test;
 #[path = "suite/run_cli_test.rs"]
 mod run_cli_test;
 #[path = "suite/run_doctor_cli_test.rs"]
