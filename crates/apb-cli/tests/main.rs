@@ -56,6 +56,8 @@ mod real_config_guard_test;
 mod run_cli_test;
 #[path = "suite/run_doctor_cli_test.rs"]
 mod run_doctor_cli_test;
+#[path = "suite/run_wait_cli_test.rs"]
+mod run_wait_cli_test;
 #[path = "suite/server_key_cli_test.rs"]
 mod server_key_cli_test;
 #[cfg(unix)]

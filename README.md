@@ -108,7 +108,8 @@ Once installed, run `apb init` in a project to set it up. In an interactive term
 apb init            create the .apb structure
 apb list            playbooks and versions
 apb validate        validate playbook schema
-apb run <id>        run a playbook (--overrides, --supervise, params)
+apb run <id>        run a playbook (--overrides, --supervise, --detach, params)
+apb wait <run>      block until a run finishes, needs input or stops (exit code = verdict)
 apb runs            list runs
 apb resume <run>    resume a paused or interrupted run
 apb stop <run>      stop a run: interrupt the running node, finalize if the driver is gone
@@ -158,7 +159,7 @@ Other MCP-compatible hosts (Codex, OpenCode, etc.): add a stdio MCP server
 with command `apb` and args `["mcp"]`, using the name `agentic-playbooks`.
 
 Tool families: playbook CRUD and validation, run control (`playbook_run`,
-`run_status`, `run_events`, `run_report`, `run_resume`), profile and advisory
+`run_wait`, `run_status`, `run_events`, `run_report`, `run_resume`), profile and advisory
 tools, and supervisor tools.
 
 **Supervised runs.** `playbook_run` with `supervise: "self"` starts the run in

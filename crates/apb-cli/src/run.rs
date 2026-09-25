@@ -354,6 +354,7 @@ pub(crate) fn run_cmd(
     params: Vec<String>,
     allow_shared_workdir: bool,
     supervise: bool,
+    detach: bool,
     overrides_path: Option<&Path>,
     no_cache: bool,
     refresh_cache: bool,
@@ -461,6 +462,18 @@ pub(crate) fn run_cmd(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
     };
+    if detach {
+        return match apb_engine::start_detached(root, name, version, opts) {
+            Ok(run_id) => {
+                println!("run started: {run_id}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("run failed: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
     match run(root, name, version, opts) {
         Ok(res) => {
             println!("run {} finished: {}", res.run_id, res.outcome.as_str());
@@ -782,6 +795,55 @@ pub(crate) fn resume_cmd(
 /// process is driving the run any more - a driver that crashed, taking the run
 /// down with it and leaving it reading `running` forever - the stop finalizes
 /// the run itself. `stop_run` validates `run_id` and existence.
+/// `apb wait`: blocks on the run with no model in the loop and reports why it
+/// returned. The exit code carries the verdict so a shell caller needs no
+/// parsing: 0 succeeded, 1 failed/aborted, 3 needs input, 4 stopped, 5 timeout.
+pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> ExitCode {
+    use apb_engine::run_wait::{NeedsInput, WaitReason, wait_run};
+    // No limit by default: an agent runs this as one background command and is
+    // notified when it exits. A century is "no limit" without overflow.
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(100 * 365 * 24 * 3600));
+    let res = match wait_run(root, run_id, timeout) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("wait failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let status = res.status.as_str();
+    match res.reason {
+        WaitReason::Finished => {
+            println!("run {run_id} finished: {status}");
+            if res.status == RunStatus::Succeeded {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        WaitReason::NeedsInput => {
+            let how = match res.needs {
+                Some(NeedsInput::Question) => {
+                    format!("a question is pending: `apb answer {run_id} <text>`")
+                }
+                Some(NeedsInput::Review) => format!(
+                    "a human review is pending: `apb review {run_id} <node> --decision <option>`"
+                ),
+                _ => "a supervisor decision is pending".to_string(),
+            };
+            println!("run {run_id} needs input ({status}): {how}; then `apb wait {run_id}` again");
+            ExitCode::from(3)
+        }
+        WaitReason::Stopped => {
+            println!("run {run_id} stopped ({status}): `apb resume {run_id}` continues it");
+            ExitCode::from(4)
+        }
+        WaitReason::Timeout => {
+            println!("run {run_id} still {status} after the timeout");
+            ExitCode::from(5)
+        }
+    }
+}
+
 pub(crate) fn stop_cmd(root: &Path, run_id: &str) -> ExitCode {
     match stop_run(root, run_id) {
         Ok(StopOutcome::SignaledLiveDriver) => {

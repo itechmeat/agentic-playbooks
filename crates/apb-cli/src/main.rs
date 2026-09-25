@@ -24,7 +24,7 @@ use crate::manage::{
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
     answer_cmd, drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd,
-    run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
+    run_doctor, run_list, run_validate, runs_cmd, stop_cmd, wait_cmd,
 };
 use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
@@ -130,6 +130,10 @@ enum Command {
         /// background supervisor agent and watches its heartbeat
         #[arg(long)]
         supervise: bool,
+        /// Start the run in a detached background process, print its id and
+        /// return at once; follow it with `apb wait <run_id>`
+        #[arg(long, conflicts_with = "supervise")]
+        detach: bool,
         /// Run-level overrides YAML file (spec 11): swap models/executors
         /// without creating a new version
         #[arg(long)]
@@ -163,6 +167,17 @@ enum Command {
         /// (the accepted drift is recorded as an event in the run log).
         #[arg(long = "allow-environment-drift")]
         allow_environment_drift: bool,
+    },
+    /// Block until a run finishes, needs input (a question, a review, a
+    /// supervisor decision) or stops, then print why. A single call that
+    /// costs an agent nothing while it blocks, unlike polling `apb runs`.
+    /// Exit codes: 0 succeeded, 1 failed or aborted, 3 needs input,
+    /// 4 paused or driverless, 5 timeout, 2 error
+    Wait {
+        run_id: String,
+        /// Give up after this many seconds (default: no limit)
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
     /// Stop a run: interrupt whatever node it is executing right now, and
     /// finalize it outright if the process driving it is gone
@@ -352,6 +367,7 @@ fn main() -> ExitCode {
             params,
             allow_shared_workdir,
             supervise,
+            detach,
             overrides,
             no_cache,
             refresh_cache,
@@ -364,6 +380,7 @@ fn main() -> ExitCode {
             params,
             allow_shared_workdir,
             supervise,
+            detach,
             overrides.as_deref(),
             no_cache,
             refresh_cache,
@@ -381,6 +398,7 @@ fn main() -> ExitCode {
             allow_environment_drift,
         ),
         Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
+        Some(Command::Wait { run_id, timeout }) => wait_cmd(&root, &run_id, timeout),
         Some(Command::Note { run_id, text }) => note_cmd(&root, &run_id, &text),
         Some(Command::Review {
             run_id,
