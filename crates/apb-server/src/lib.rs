@@ -204,7 +204,8 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     // issuing a first key or revoking a compromised one takes effect on a
     // running dashboard without a restart.
     let mut auth_state = auth::AuthState::new(Some(auth_path), auth_file.keys, &global_cfg.server)
-        .map_err(std::io::Error::other)?;
+        .map_err(std::io::Error::other)?
+        .with_port(port);
     // check_bind_allowed only checks the bind/key precondition once, at
     // startup. On a non-loopback bind, require_keys keeps it enforced for the
     // life of the process: if the key set empties out later (the last key

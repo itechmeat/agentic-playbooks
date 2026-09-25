@@ -423,6 +423,13 @@ pub struct ServerConfig {
     /// and restores the immediate refusal (HTTP 429), which is the right
     /// setting only where the caller is a human who can retry.
     pub workdir_queue_wait_seconds: Option<u64>,
+    /// Extra host names a KEYLESS dashboard answers besides its loopback
+    /// names and the host of `public_base_url`: a local proxy or tailnet name
+    /// in front of a loopback dashboard. A bare name (`apb.lan`) or
+    /// `name:port`. Any other `Host` gets 403 (DNS-rebinding protection). A
+    /// dashboard with API keys authenticates every request and does not
+    /// consult it.
+    pub allowed_hosts: Vec<String>,
 }
 
 /// How long an admitted run waits for the shared workdir by default.
@@ -455,6 +462,36 @@ impl ServerConfig {
                 .parse::<IpAddr>()
                 .map_err(|e| format!("invalid bind address `{raw}`: {e}")),
         }
+    }
+
+    /// The configured host names a keyless dashboard answers (lowercase):
+    /// the host of `public_base_url` (its authority, and the bare name) plus
+    /// every `allowed_hosts` entry.
+    pub fn allowed_host_names(&self) -> BTreeSet<String> {
+        let mut out: BTreeSet<String> = self
+            .allowed_hosts
+            .iter()
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+        if let Some(url) = self.public_base_url.as_deref() {
+            let rest = url.trim().split_once("://").map_or(url.trim(), |(_, r)| r);
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            let authority = authority
+                .rsplit('@')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !authority.is_empty() {
+                let name = match authority.strip_prefix('[') {
+                    Some(v6) => v6.split(']').next().unwrap_or("").to_string(),
+                    None => authority.split(':').next().unwrap_or("").to_string(),
+                };
+                out.insert(authority);
+                out.insert(name);
+            }
+        }
+        out
     }
 
     /// `trusted_proxies` as parsed addresses. A CIDR range or any other

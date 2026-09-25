@@ -46,7 +46,7 @@ fn upgrade_request(origin: Option<&str>) -> axum::http::Request<axum::body::Body
     use axum::body::Body;
     use axum::http::Request;
     let mut b = Request::get("/api/ws")
-        .header("host", "example.com")
+        .header("host", "127.0.0.1:7321")
         .header("connection", "upgrade")
         .header("upgrade", "websocket")
         .header("sec-websocket-version", "13")
@@ -78,7 +78,7 @@ async fn ws_upgrade_rejects_a_cross_origin_handshake() {
     // origin gate did not refuse it.
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let res = app
-        .oneshot(upgrade_request(Some("http://example.com")))
+        .oneshot(upgrade_request(Some("http://127.0.0.1:7321")))
         .await
         .unwrap();
     assert_ne!(res.status(), StatusCode::FORBIDDEN);

@@ -14,6 +14,15 @@
 //! set empty out mid-run would silently reopen an RCE-equivalent panel to
 //! the network. See [`AuthState::refuses_because_keyless`].
 //!
+//! The keyless pass-through is also where a loopback dashboard is exposed to
+//! DNS rebinding: any web page the user opens can rebind its own name to
+//! 127.0.0.1 and call the API with the browser as its proxy. So before that
+//! branch, a keyless dashboard answers only requests whose `Host` is one of
+//! its own names (a loopback name, `server.public_base_url`'s host, or a
+//! `server.allowed_hosts` entry; see [`AuthState::host_allowed`]), and it
+//! refuses a browser write that does not prove it came from the dashboard
+//! itself (see [`keyless_write_allowed`]).
+//!
 //! Every lock in this module is a std mutex taken inside a plain block and
 //! dropped before any await, because a guard held across an await stalls the
 //! executor and is denied by clippy.
@@ -308,6 +317,14 @@ pub struct AuthState {
     /// [`AuthState::require_keys`]). `None` for the loopback default and for
     /// every test that does not exercise this path.
     required_bind: Option<IpAddr>,
+    /// Extra host names (lowercase; a bare name, or `name:port`) a keyless
+    /// dashboard answers besides the loopback names: the host of
+    /// `server.public_base_url` and every `server.allowed_hosts` entry.
+    allowed_hosts: BTreeSet<String>,
+    /// The port the dashboard is bound to, once known ([`AuthState::with_port`]).
+    /// `None` in the in-process test harness, where a loopback name on any
+    /// port passes.
+    port: Option<u16>,
     /// Whether the "auth is required but the key set is empty" state has
     /// already been logged, so the warning fires once per transition into
     /// that state rather than once per request. Reset the moment a key
@@ -332,6 +349,8 @@ impl AuthState {
             sessions: Mutex::new(SessionStore::default()),
             failures: Mutex::new(RateLimiter::default()),
             required_bind: None,
+            allowed_hosts: BTreeSet::new(),
+            port: None,
             zero_keys_warned: AtomicBool::new(false),
         }
     }
@@ -359,8 +378,41 @@ impl AuthState {
             sessions: Mutex::new(SessionStore::default()),
             failures: Mutex::new(RateLimiter::default()),
             required_bind: None,
+            allowed_hosts: cfg.allowed_host_names(),
+            port: None,
             zero_keys_warned: AtomicBool::new(false),
         })
+    }
+
+    /// Records the port the dashboard is bound to: a loopback `Host` must
+    /// then name that port.
+    pub fn with_port(mut self, port: u16) -> Self {
+        self.port = Some(port);
+        self
+    }
+
+    /// Whether a `Host` (or an `Origin`'s authority) names this dashboard: a
+    /// loopback name (`localhost`, `127.0.0.1`, `[::1]`, any loopback IP) on
+    /// the bound port, or a configured host (`server.public_base_url`,
+    /// `server.allowed_hosts`). `None` - no `Host` at all - passes: every
+    /// browser sends one, so its absence is a non-browser client that DNS
+    /// rebinding cannot produce.
+    pub fn host_allowed(&self, authority: Option<&str>) -> bool {
+        let Some(authority) = authority else {
+            return true;
+        };
+        let authority = authority.trim().to_ascii_lowercase();
+        let (name, port) = split_authority(&authority);
+        let name = name.trim_end_matches('.');
+        if self.allowed_hosts.contains(name) || self.allowed_hosts.contains(&authority) {
+            return true;
+        }
+        let loopback = name == "localhost"
+            || name
+                .parse::<IpAddr>()
+                .map(|ip| ip.is_loopback())
+                .unwrap_or(false);
+        loopback && self.port.is_none_or(|p| port.unwrap_or(80) == p)
     }
 
     /// Marks the server as started bound to a non-loopback address: an empty
@@ -759,6 +811,67 @@ pub(crate) fn rate_limited() -> Response {
         .into_response()
 }
 
+pub(crate) fn forbidden_host() -> Response {
+    (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": "host",
+            "detail": "this dashboard answers only its own host names; add a proxy or tailnet name to server.allowed_hosts",
+        })),
+    )
+        .into_response()
+}
+
+/// Splits `name[:port]` / `[v6]:port` into the name (brackets removed) and
+/// the port, when one is given and numeric.
+fn split_authority(authority: &str) -> (&str, Option<u16>) {
+    if let Some(rest) = authority.strip_prefix('[') {
+        return match rest.split_once(']') {
+            Some((name, tail)) => (name, tail.strip_prefix(':').and_then(|p| p.parse().ok())),
+            None => (rest, None),
+        };
+    }
+    match authority.rsplit_once(':') {
+        Some((name, port)) if !name.contains(':') => (name, port.parse().ok()),
+        _ => (authority, None),
+    }
+}
+
+/// The request's authority: the `Host` header, or the URI's own authority
+/// (HTTP/2 carries `:authority` and hyper synthesizes no `Host`).
+pub(crate) fn request_authority<'a>(
+    headers: &'a HeaderMap,
+    uri: &'a axum::http::Uri,
+) -> Option<&'a str> {
+    headers
+        .get(header::HOST)
+        .and_then(|v| v.to_str().ok())
+        .or_else(|| uri.authority().map(|a| a.as_str()))
+}
+
+/// Whether a keyless dashboard lets a write (any method but GET, HEAD,
+/// OPTIONS) to `/api/` through. A cross-site page can post a `text/plain` or
+/// multipart form without a CORS preflight, so a browser write must prove it
+/// came from the dashboard: the marker header (which no cross-site request
+/// can set) or `Sec-Fetch-Site: same-origin`. A request with neither an
+/// `Origin` nor a `Sec-Fetch-Site` is not from a browser (every current
+/// browser sends `Origin` on a write, `null` included), so a local script or
+/// bridge keeps working. The run-hook endpoint is authenticated by its own
+/// path secret and stays open to external senders.
+fn keyless_write_allowed(method: &Method, path: &str, headers: &HeaderMap) -> bool {
+    if matches!(*method, Method::GET | Method::HEAD | Method::OPTIONS)
+        || !path.starts_with("/api/")
+        || (path.starts_with("/api/hooks/") && method == Method::POST)
+        || has_csrf_marker(headers)
+    {
+        return true;
+    }
+    match headers.get("sec-fetch-site").and_then(|v| v.to_str().ok()) {
+        Some(site) => site.trim().eq_ignore_ascii_case("same-origin"),
+        None => !headers.contains_key(header::ORIGIN),
+    }
+}
+
 fn is_safe_method(method: &Method) -> bool {
     method == Method::GET || method == Method::HEAD
 }
@@ -822,6 +935,13 @@ pub async fn auth_middleware(
     }
 
     if !auth.enabled() {
+        // DNS rebinding: a foreign name resolved to this loopback socket.
+        if !auth.host_allowed(request_authority(req.headers(), req.uri())) {
+            return deny_framing(forbidden_host());
+        }
+        if !keyless_write_allowed(req.method(), req.uri().path(), req.headers()) {
+            return deny_framing(forbidden_csrf());
+        }
         return deny_framing(next.run(req).await);
     }
 
@@ -890,6 +1010,7 @@ mod tests {
             public_base_url: public.map(|s| s.to_string()),
             trusted_proxies: vec![proxy.to_string()],
             workdir_queue_wait_seconds: None,
+            allowed_hosts: Vec::new(),
         };
         AuthState::new(None, Vec::new(), &cfg).unwrap()
     }
@@ -929,6 +1050,39 @@ mod tests {
         let single = headers(&[("x-forwarded-for", "1.2.3.4")]);
         let ctx = client_ctx(&auth, &single, Some("10.0.0.1".parse().unwrap()));
         assert_eq!(ctx.ip, "1.2.3.4".parse::<IpAddr>().unwrap());
+    }
+
+    /// The host allowlist of a keyless dashboard: loopback names on the bound
+    /// port, the host of `public_base_url`, and `allowed_hosts` entries.
+    #[test]
+    fn host_allowlist_covers_loopback_on_the_port_and_configured_hosts() {
+        let cfg = apb_core::config::ServerConfig {
+            public_base_url: Some("https://apb.example.com/".into()),
+            allowed_hosts: vec!["workstation.lan".into(), "proxy.lan:8080".into()],
+            ..Default::default()
+        };
+        let auth = AuthState::new(None, Vec::new(), &cfg)
+            .unwrap()
+            .with_port(7321);
+        for ok in [
+            "127.0.0.1:7321",
+            "LOCALHOST:7321",
+            "[::1]:7321",
+            "apb.example.com",
+            "workstation.lan:7321",
+            "proxy.lan:8080",
+        ] {
+            assert!(auth.host_allowed(Some(ok)), "{ok}");
+        }
+        for refused in [
+            "attacker.example:7321",
+            "127.0.0.1:9999",
+            "localhost",
+            "proxy.lan:9090",
+            "127.0.0.1.attacker.example:7321",
+        ] {
+            assert!(!auth.host_allowed(Some(refused)), "{refused}");
+        }
     }
 
     #[test]

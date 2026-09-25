@@ -97,6 +97,29 @@ headers are believed. Those headers are used only for rate-limit keying,
 logging, and the cookie `Secure` decision, never for an authentication
 decision. Exact addresses only, no CIDR ranges.
 
+A dashboard with no API key (the loopback default) authenticates nobody, so
+it guards itself against the browser being used as a proxy:
+
+- it answers only requests addressed to one of its own names: `localhost`,
+  `127.0.0.1` or `[::1]` on the bound port, the host of `public_base_url`, and
+  every `allowed_hosts` entry (a bare name or `name:port`). Any other `Host`
+  gets 403, which is what stops a web page from rebinding its own DNS name to
+  127.0.0.1 and calling the API. Add a local proxy or tailnet name in front of
+  a keyless dashboard to `allowed_hosts`;
+- a write to `/api/` from a browser must carry the dashboard's
+  `x-requested-with: apb-dashboard` header or `Sec-Fetch-Site: same-origin`,
+  so another site cannot post a form to it. A client that is not a browser
+  (no `Origin`, no `Sec-Fetch-Site`), such as a local script, is unaffected;
+  the run-hook endpoint stays open to its senders.
+
+```yaml
+server:
+  allowed_hosts: ["workstation.lan", "proxy.lan:8080"]
+```
+
+A dashboard with keys authenticates every request and does not consult
+`allowed_hosts`.
+
 Set `trusted_proxies` whenever `public_base_url` is set, and set it before
 putting the dashboard behind the proxy. Without it every request arrives with
 the proxy's own address, so all clients share a single rate-limit key and one
