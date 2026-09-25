@@ -195,8 +195,7 @@ fn with_registry<T>(mut f: impl FnMut(&mut ProjectsFile) -> T) -> std::io::Resul
 /// other directory.
 fn is_reachable(workspace_id: &str, path: &Path) -> bool {
     path.join(".apb").is_dir()
-        && std::fs::read_to_string(path.join(".apb/workspace.local"))
-            .is_ok_and(|s| s.trim() == workspace_id)
+        && crate::workspace::read_id(path).is_some_and(|id| id == workspace_id)
 }
 
 /// Reconciles an entry's stored state with [`is_reachable`]: a reachable
@@ -265,6 +264,18 @@ pub fn touch(root: &Path) {
 
     let _ = with_registry(|file| {
         apply_time_transitions(file, &cfg);
+        // An id already registered to ANOTHER directory that still holds it
+        // (a copied checkout, a second clone that kept the file) is not
+        // re-pointed here: the last checkout to run a command would otherwise
+        // capture every request for that id. A real move leaves the old
+        // directory without the id, so the entry follows the workspace.
+        if let Some(existing) = file.entries.get(&workspace_id) {
+            let old = Path::new(&existing.path);
+            let same_dir = std::fs::canonicalize(old).ok() == std::fs::canonicalize(root).ok();
+            if !same_dir && is_reachable(&workspace_id, old) {
+                return;
+            }
+        }
         file.entries.insert(
             workspace_id.clone(),
             StoredEntry {
@@ -413,8 +424,9 @@ mod tests {
         assert_eq!(listed[0].workspace_id, ws_id);
         let first_path = listed[0].path.clone();
 
-        // "Move": the same workspace.local in a new directory -> a single
-        // entry, path updated.
+        // "Move": the same workspace.local in a new directory while the old
+        // one is gone -> a single entry, path updated.
+        std::fs::remove_dir_all(a.path().join(".apb")).unwrap();
         let b = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(b.path().join(".apb/playbooks")).unwrap();
         std::fs::write(b.path().join(".apb/workspace.local"), &ws_id).unwrap();
@@ -429,6 +441,41 @@ mod tests {
             listed[0].path, first_path,
             "path should follow the workspace"
         );
+    }
+
+    /// Another checkout cannot take over a live workspace's id: not by a
+    /// `workspace.local` that is a symlink to that workspace's file, and not
+    /// by a copy of it while the original is still there. Either would route
+    /// every request for that id to the other checkout.
+    #[cfg(unix)]
+    #[test]
+    fn another_checkout_cannot_take_over_a_live_workspace_id() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+
+        let victim = tempfile::tempdir().unwrap();
+        init_project(victim.path()).unwrap();
+        touch(victim.path());
+        let id = crate::workspace::ensure_id(victim.path()).unwrap();
+        let victim_root = std::fs::canonicalize(victim.path()).unwrap();
+
+        let linked = tempfile::tempdir().unwrap();
+        init_project(linked.path()).unwrap();
+        std::os::unix::fs::symlink(
+            victim.path().join(".apb/workspace.local"),
+            linked.path().join(".apb/workspace.local"),
+        )
+        .unwrap();
+        touch(linked.path());
+        assert_eq!(resolve_root(&id).unwrap(), victim_root, "symlinked id");
+
+        let copied = tempfile::tempdir().unwrap();
+        init_project(copied.path()).unwrap();
+        std::fs::write(copied.path().join(".apb/workspace.local"), &id).unwrap();
+        touch(copied.path());
+        assert_eq!(resolve_root(&id).unwrap(), victim_root, "copied id");
     }
 
     #[test]

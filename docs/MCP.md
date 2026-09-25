@@ -56,6 +56,11 @@ workspaces; without it, the current project is used. Structural workspace-
 resolution errors (in `effective_root` and `playbook_prepare_run`):
 `workspace_unreachable` - the workspace path was removed or is unreachable;
 `workspace_unknown` - the id is not registered in the registry.
+A workspace's id is its `.apb/workspace.local` (a regular file, gitignored);
+apb does not follow a symlinked `workspace.local`, and it does not move a
+registered id to another directory while the original directory still holds
+it (a copied checkout keeps its own registration off until it gets its own id:
+delete the copied `workspace.local`).
 
 `playbook_catalog` returns both `dismissed_patterns` (the slug list, unchanged) and `suppressed_suggestions`: the active suggestion-decision records for the current project, merged from the project store `.apb/suggestions.json` and the global `<config-dir>/suggestions.json`, each with `pattern`, `synopsis`, `kind`, `scope`, `declines` and `snoozed_until`. Matching a candidate action against those records is done by the meaning of the synopsis, on the agent side; the server does no language processing. Both fields fold into `catalog_revision`, so an `unchanged: true` response stays correct after any dismiss write. Timing defaults are `soft_backoff_days: [1, 7, 30, 90]` and `hard_ttl_days: 90`, overridable per key by a `suggestions:` section in the global `config.yaml` and in the project `.apb/config.yaml` (project wins). `apb suggestions list|allow|reset` and the dashboard's silenced-suggestions section manage the same records.
 
