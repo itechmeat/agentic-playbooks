@@ -864,7 +864,7 @@ fn prepare_play_call(
         // Trust gate (spec 2026-07-18-connectors-design section 9): a live
         // call resolves LIVE secrets and sends them to the LIVE config's
         // base_url, so an unapproved or changed connector/account must
-        // never be callable - the same guard `apb_mcp::policy::check_connectors`
+        // never be callable - the same guard `crate::gate::check_connectors`
         // applies before a real run, checked here before anything below
         // touches a secret. Connector digest first (a changed folder is a
         // bigger deal than one account), then the target account's own

@@ -1,10 +1,21 @@
-//! The server-side run policy gate (spec 9). Checks what cannot be
-//! trusted to the host model's discipline: lifecycle, digest-based trust,
-//! the cross-workspace boundary, and applicability preflight. Returns a structural
-//! refusal (JSON) that the tool hands back to the agent as-is.
+//! The run policy gate (spec 9): the ONE pre-start check every launch
+//! surface runs - MCP `playbook_run`, the dashboard's `POST
+//! /api/playbooks/{id}/run`, and the CLI's `apb run` / `apb run --supervise`.
+//! Checks lifecycle (draft/retired), `requires` applicability, digest-based
+//! playbook and profile-bundle trust, connector and account trust, and the
+//! sub-playbook tree, and returns a [`RunPermit`] the caller hands to the
+//! engine verbatim ([`RunPermit::apply`]). A refusal is structural JSON the
+//! surface passes on as-is.
+//!
+//! The surfaces differ in exactly one knob, `acknowledge_untrusted`: an agent
+//! (MCP) must confirm with the user first and passes it only after that; a
+//! person clicking Run in the dashboard or typing `apb run` IS that
+//! confirmation, so those surfaces pass `true`. Connector and account trust
+//! ignore the knob on every surface (secret egress).
 
 use std::path::Path;
 
+use crate::run_config::ChildExpectation;
 use apb_core::config::program_in_path;
 use apb_core::connector::config::account_digest;
 use apb_core::connector::resolve::resolve_playbook;
@@ -15,7 +26,6 @@ use apb_core::registry::Registry;
 use apb_core::schema::{Effect, NodeKind, Playbook};
 use apb_core::scope::{Origin, PlaybookRef, digest_str};
 use apb_core::trust::{Lifecycle, TrustStore, account_trust_id, read_lifecycle};
-use apb_engine::run_config::ChildExpectation;
 use serde_json::{Value, json};
 
 /// String name of an effect, for plans/catalog.
@@ -29,14 +39,6 @@ pub fn effect_str(e: &Effect) -> &'static str {
         Effect::Irreversible => "irreversible",
     }
 }
-
-/// The two connector permit maps the gate produces: `connector name -> tree
-/// digest` and `"connector/account" -> account digest`. Handed to the engine
-/// verbatim as `expected_connectors` / `expected_connector_accounts`.
-pub type ConnectorPermitMaps = (
-    std::collections::BTreeMap<String, String>,
-    std::collections::BTreeMap<String, String>,
-);
 
 /// Preflight facts for the two-phase contract (spec 7).
 pub struct Preflight {
@@ -162,6 +164,25 @@ fn resolve_tree(
     })
 }
 
+impl RunPermit {
+    /// Hands the permit to the engine verbatim: the digest, the verified
+    /// profile bundles, the child pins and the connector maps become the
+    /// run's `expected_*` pins, so the engine refuses any drift between this
+    /// check and the run's snapshot (anti-TOCTOU). The one exception is the
+    /// profile-bundle map of a run with non-empty `overrides`: the gate sees
+    /// the definition, not the ephemeral executor, so combining the two would
+    /// be a false key-set mismatch (see the invariant in `build_run_manifest`);
+    /// such a run keeps every other pin.
+    pub fn apply(self, opts: &mut crate::RunOptions) {
+        let has_overrides = opts.overrides.as_ref().is_some_and(|o| !o.is_empty());
+        opts.expected_digest = Some(self.playbook_digest);
+        opts.expected_profile_bundles = (!has_overrides).then_some(self.profile_bundles);
+        opts.expected_children = Some(self.children);
+        opts.expected_connectors = self.connectors;
+        opts.expected_connector_accounts = self.connector_accounts;
+    }
+}
+
 /// Checks whether a run is permitted. `Ok(RunPermit)` - the run may proceed (digest +
 /// verified bundle map); `Err(value)` - a structural policy refusal.
 /// `supervised` - whether the run will actually spawn an EXTERNAL supervisor
@@ -225,8 +246,7 @@ pub fn check_run(
     )?;
 
     // Connector trust (spec 6 step 1, 7) for this playbook, then the
-    // sub-playbook pins (spec C) - ONE walk, shared verbatim with the ungated
-    // seam (`connector_permit_maps_with_children`), see `walk_connectors_and_tree`.
+    // sub-playbook pins (spec C) - ONE walk, see `walk_connectors_and_tree`.
     let GateWalk {
         connectors,
         connector_accounts,
@@ -262,64 +282,9 @@ pub fn check_run(
     })
 }
 
-/// Public seam for the connector trust gate PLUS the sub-playbook pin walk
-/// (spec 6 step 1 and 7, spec C), for a caller that does not go through the
-/// full `check_run` policy gate but still must never start a run with an empty
-/// (and therefore vacuously-refusing, or worse silently-unverified) permit map:
-/// the dashboard's `POST /api/playbooks/{id}/run` handler in `apb-server` and
-/// the CLI's `apb run` / `__drive-supervised` paths, neither of which has an
-/// MCP tool call in front of it. Runs the EXACT SAME resolution and trust
-/// checks `check_run` runs for its own connector and children steps, in one
-/// pass, so a dashboard- or CLI-started run gets the identical
-/// connector/account trust decision an MCP-started run would - for the
-/// playbook itself AND for every `type: playbook` child it delegates to.
-/// Callers must never reimplement either walk at the call site - always come
-/// back through here (anti-TOCTOU: the map handed to the engine is exactly the
-/// map that was verified, never a recomputation).
-///
-/// `origin`/`playbook_id` identify the playbook being started; they drive
-/// `scope: auto` resolution of its children and cycle detection.
-///
-/// Trust semantics, deliberately matched to what these two paths already do
-/// for the playbook itself: they pass no `expected_digest` and no
-/// `expected_profile_bundles`, i.e. they do not gate playbook-digest or
-/// profile-bundle trust at all, so imposing that on a CHILD would make a child
-/// stricter than its own parent on the same path. The walk therefore runs with
-/// `acknowledge_untrusted: true`, exactly as `preflight` does: lifecycle
-/// (draft/retired), `requires`, cycles, and - because `check_connectors`
-/// deliberately ignores that flag - the full connector and account trust gate
-/// are all still enforced for every child. Connector trust guards secret
-/// egress and is never bypassable, on any path, at any depth.
-pub fn connector_permit_maps_with_children(
-    root: &Path,
-    playbook: &Playbook,
-    origin: &Origin,
-    playbook_id: &str,
-) -> Result<ConnectorPermitTree, Value> {
-    let walk = walk_connectors_and_tree(root, playbook, origin, playbook_id, true)?;
-    // The seam needs the maps and the pins; the consent-time warnings
-    // (finding 11) and the recursive effects union are surfaced by the full
-    // `check_run` gate and by `preflight`, so they are dropped here.
-    Ok((
-        (walk.connectors, walk.connector_accounts),
-        walk.tree.children,
-    ))
-}
-
-/// The two connector permit maps of a playbook plus the verified pins of its
-/// sub-playbook children, keyed by playbook-node id. The caller hands the maps
-/// to the engine as `expected_connectors`/`expected_connector_accounts` and the
-/// pins as `expected_children`, verbatim.
-pub type ConnectorPermitTree = (
-    ConnectorPermitMaps,
-    std::collections::BTreeMap<String, ChildExpectation>,
-);
-
-/// One pass of the two walks every run-start path needs: the connector trust
-/// gate for the playbook itself, then its sub-playbook tree. Kept as a single
-/// function so `check_run` and the ungated seam share ONE implementation and
-/// one refusal order (connector refusals before tree refusals), rather than
-/// two call sites that could drift apart.
+/// One pass of the two walks a run start needs: the connector trust gate for
+/// the playbook itself, then its sub-playbook tree, in one refusal order
+/// (connector refusals before tree refusals).
 struct GateWalk {
     connectors: std::collections::BTreeMap<String, String>,
     connector_accounts: std::collections::BTreeMap<String, String>,

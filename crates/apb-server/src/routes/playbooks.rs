@@ -226,21 +226,15 @@ pub(crate) struct RunBody {
 /// operator who wants the old behavior back sets the wait to `0` and gets the
 /// 429 below.
 ///
-/// A connector-binding playbook additionally needs its two connector permit
-/// maps computed server-side first (Task 15 review follow-up): the dashboard
-/// has no MCP tool call in front of it to run `policy::check_run`, so without
-/// this the engine would see empty `expected_connectors`/
-/// `expected_connector_accounts` maps and refuse ANY connector-binding
-/// playbook (a playbook that binds connectors is never permitted to run with
-/// an empty permit - see `RunOptions::expected_connectors`). The same is true
-/// one level down (issue #102.1): a `type: playbook` child is spawned with the
-/// permit maps its pin carries, so a parent started without pins spawned a
-/// connector-binding child with empty maps and the child died fail-closed.
-/// Both are computed in ONE pass by
-/// `apb_mcp::policy::connector_permit_maps_with_children`, the exact same
-/// resolution and trust gate `check_run` runs for its own connector and
-/// children steps, rather than duplicating either walk here (anti-TOCTOU: the
-/// maps handed to the engine are exactly the maps that were verified).
+/// Before anything is written the start goes through the one run gate every
+/// launch surface uses, `apb_engine::gate::check_run`: a draft or retired
+/// playbook, unmet `requires`, an untrusted connector or account, or a broken
+/// sub-playbook tree is refused with the gate's structural JSON (409; 404 when
+/// the playbook does not resolve). The person clicking Run is the trust
+/// confirmation, so the call acknowledges untrusted content the way MCP does
+/// after asking the user; connector trust is never bypassable. The returned
+/// permit is applied to the run verbatim (anti-TOCTOU), and its consent-time
+/// warnings ride the 200 answer.
 pub(crate) async fn run_playbook_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
@@ -266,40 +260,29 @@ pub(crate) async fn run_playbook_handler(
         ..Default::default()
     };
 
-    let reg = match Registry::open(&root) {
-        Ok(r) => r,
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: id.clone(),
+        version: None,
     };
-    match reg.load(&id, None) {
-        Ok(loaded) => {
-            // The gate is cheap and a no-op for a playbook that binds no
-            // connector and delegates to no sub-playbook (both walks return
-            // empty), so it runs unconditionally rather than behind a
-            // hand-rolled "does it bind anything" pre-check that would have to
-            // stay in sync with the walks.
-            match apb_mcp::policy::connector_permit_maps_with_children(
-                &root,
-                &loaded.playbook,
-                &apb_core::scope::Origin::Project { workspace_id: None },
-                &id,
-            ) {
-                Ok(((connectors, connector_accounts), children)) => {
-                    opts.expected_connectors = connectors;
-                    opts.expected_connector_accounts = connector_accounts;
-                    // No sub-playbook node means no pin to carry: keep `None`
-                    // so nothing changes for the (vast majority) of playbooks
-                    // without children.
-                    opts.expected_children = (!children.is_empty()).then_some(children);
-                }
-                Err(refusal) => return (StatusCode::CONFLICT, Json(refusal)).into_response(),
-            }
+    let permit = match apb_engine::gate::check_run(&root, &wref, true, false) {
+        Ok(p) => p,
+        Err(refusal) => {
+            let status = if refusal["policy"] == "not_found" {
+                StatusCode::NOT_FOUND
+            } else {
+                StatusCode::CONFLICT
+            };
+            return (status, Json(refusal)).into_response();
         }
-        Err(RegistryError::NotFound(what)) => return (StatusCode::NOT_FOUND, what).into_response(),
-        Err(e) => return (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
-    }
+    };
+    let warnings = permit.warnings.clone();
+    permit.apply(&mut opts);
 
     match apb_engine::start_detached(&root, &id, None, opts) {
-        Ok(run_id) => Json(serde_json::json!({ "run_id": run_id })).into_response(),
+        Ok(run_id) => {
+            Json(serde_json::json!({ "run_id": run_id, "warnings": warnings })).into_response()
+        }
         Err(apb_engine::EngineError::NotFound(what)) => {
             (StatusCode::NOT_FOUND, what).into_response()
         }

@@ -40,10 +40,11 @@ code-ranker, see below).
   (`invocation.rs`), agent adapters (`adapter.rs`), the append-only event log
   (`event.rs`), connector execution (`connector/`, with `call/` split into
   account selection, auth, encoding and response mapping), background
-  supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`).
-- `apb-mcp` - rmcp stdio MCP server (`server/`), the server-side run policy gate
-  (`policy.rs`), and the tool layer in `tools/` (one module per domain:
-  `playbook`, `run`, `supervisor`, `trial`, `capture`, `meta`).
+  supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), and the run
+  policy gate every launch surface calls (`gate.rs`).
+- `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
+  (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
+  `meta`).
 - `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
   core/engine/mcp. `apb init` runs a short interactive questionnaire in a
   terminal (feedback-loop consent into CLAUDE.md/AGENTS.md, agent
@@ -64,7 +65,12 @@ code-ranker, see below).
 - A run snapshots its resolved profiles, skills, and invocations into an
   immutable, write-once `runs/<id>/manifest.yaml`. All post-start reads (retry,
   fallback, resume) come from that snapshot, not live files.
-- Anti-TOCTOU: the MCP policy gate (`policy::check_run`) returns a `RunPermit`
+- One run gate for every launch surface: `apb_engine::gate::check_run`
+  (lifecycle, `requires`, playbook/profile/connector trust, sub-playbook pins).
+  MCP, the dashboard and the CLI all call it; they differ only in
+  `acknowledge_untrusted` (a person clicking Run or typing `apb run` is the
+  confirmation, MCP asks the user first). `apb_mcp::policy` re-exports it.
+- Anti-TOCTOU: the gate returns a `RunPermit`
   (playbook digest + the exact verified profile-bundle map) in one pass; the
   engine is handed that map verbatim as `expected_*` and rejects any drift.
   Never recompute that map separately between gate and run.

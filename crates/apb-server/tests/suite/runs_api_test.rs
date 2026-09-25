@@ -1108,3 +1108,28 @@ async fn run_detail_reports_a_working_child_run_as_running() {
     assert_eq!(json["children"][0]["run_id"], "child-1", "detail: {json}");
     assert_eq!(json["children"][0]["status"], "running", "detail: {json}");
 }
+
+/// The dashboard's Run button goes through the same run gate as MCP
+/// `playbook_run`: a draft playbook is refused with the gate's structural
+/// refusal (409 `draft_requires_trial`) and no run is written. It used to
+/// start, because the handler only checked connector trust.
+#[tokio::test]
+async fn post_playbook_run_refuses_a_draft_playbook() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path());
+    apb_core::trust::write_lifecycle(
+        &dir.path().join(".apb/playbooks/scripted"),
+        apb_core::trust::Lifecycle::Draft,
+    )
+    .unwrap();
+    let res = post_script_run(AppState::new(dir.path().to_path_buf())).await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["policy"], "draft_requires_trial", "got {body}");
+    let runs = dir.path().join(".apb/runs");
+    assert!(
+        !runs.exists() || fs::read_dir(&runs).unwrap().count() == 0,
+        "a refused start writes no run"
+    );
+}

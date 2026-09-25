@@ -54,9 +54,25 @@ export async function errorMessage(
   try {
     const body = JSON.parse(text) as {
       error?: string
+      policy?: string
       codes?: string[]
       message?: string
       detail?: string
+      [field: string]: unknown
+    }
+    // A run gate refusal (`apb_engine::gate::check_run`) carries `policy`
+    // instead of `error`, plus the list it is about (missing requirements,
+    // unapproved connectors or accounts, untrusted profiles).
+    if (body.policy) {
+      const lists = ['missing', 'connectors', 'accounts', 'profiles']
+        .flatMap((k) => (Array.isArray(body[k]) ? (body[k] as unknown[]) : []))
+        .map(String)
+      const what = body.detail ?? (lists.length ? lists.join(', ') : undefined)
+      return {
+        message: `${url}: run refused (${body.policy})${what ? `: ${what}` : ''}`,
+        code: body.policy,
+        detail: body.detail,
+      }
     }
     const meta = { code: body.error, detail: body.detail }
     if (body.error === 'validation' && body.codes?.length) {

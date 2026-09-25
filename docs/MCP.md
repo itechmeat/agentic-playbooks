@@ -91,6 +91,13 @@ two-phase `playbook_prepare_run` / `playbook_execute_plan`. The
 read-only/destructive annotations remain client hints; enforcement lives on
 the server.
 
+The dashboard's Run button and `apb run` (with or without `--detach` or
+`--supervise`) go through the same gate (`apb_engine::gate::check_run`). The
+person starting the run there is the confirmation, so an unapproved digest is
+acknowledged for them; everything else refuses on every surface: a draft or
+retired playbook, unmet `requires`, an unapproved connector or account, and a
+broken sub-playbook tree.
+
 Supervisor tools (`supervisor_*`) are only available inside a supervisor
 session (behind a session gate) and are not listed here as part of the normal
 surface. One is worth naming regardless, because its polling contract is easy

@@ -16,68 +16,48 @@ use apb_engine::{
 
 use crate::util::open_registry;
 
-/// Resolves the two connector permit maps for a playbook, plus the verified
-/// pins of every `type: playbook` child it delegates to, before it runs
-/// through the CLI (foreground `apb run` and the `__drive-supervised` child
-/// alike). A playbook that binds no connector and has no sub-playbook node
-/// gets the same empty maps and `None` pins `RunOptions` always defaulted to;
-/// this is what keeps such a playbook's behavior byte-for-byte unchanged.
-///
-/// This is the same seam the dashboard's `run_playbook_handler` uses
-/// (`apb-server/src/routes/playbooks.rs`) and the same trust gate an
-/// MCP-started run goes through (`policy::check_run`): without it the engine
-/// would see empty `expected_connectors`/`expected_connector_accounts` and
-/// refuse ANY connector-binding run with the opaque "connector bindings
-/// present but no connector permit" message, even though nothing was actually
-/// checked - and, one level down (issue #102.1), a child spawned without a pin
-/// would die with exactly that message the moment a parent delegated to a
-/// connector-binding sub-playbook. Both walks happen in ONE gate pass and are
-/// never reimplemented here (anti-TOCTOU). On `Err` this returns a
-/// ready-to-print, actionable message (see `connector_refusal_message`)
-/// instead of the raw refusal JSON.
-fn connector_permits_for(
+/// Runs the one run gate every launch surface uses
+/// (`apb_engine::gate::check_run`) for a CLI start - foreground `apb run`,
+/// `--detach`, and the `__drive-supervised` child alike - and hands the permit
+/// to `opts` verbatim (anti-TOCTOU). A draft or retired playbook, unmet
+/// `requires`, an untrusted connector or account, or a broken sub-playbook
+/// tree is refused before anything is written. The person typing `apb run` is
+/// the trust confirmation, so untrusted playbook and profile content is
+/// acknowledged (MCP asks the user first); connector trust is never
+/// bypassable. `supervised` is true only when an external supervisor agent
+/// will be spawned, so its profile joins the verified bundle set. Consent-time
+/// warnings go to stderr. On `Err` this returns a ready-to-print, actionable
+/// message (see `gate_refusal_message`).
+fn gate_run(
     root: &Path,
     name: &str,
     version: Option<&str>,
-) -> Result<PlaybookRunPermits, String> {
-    let reg = Registry::open(root).map_err(|e| format!("no project here: {e} (run `apb init`)"))?;
-    let loaded = reg
-        .load(name, version)
-        .map_err(|e| format!("cannot load playbook `{name}`: {e}"))?;
-    let ((connectors, accounts), children) = apb_mcp::policy::connector_permit_maps_with_children(
-        root,
-        &loaded.playbook,
-        &apb_core::scope::Origin::Project { workspace_id: None },
-        name,
-    )
-    .map_err(|refusal| connector_refusal_message(&refusal))?;
-    // No sub-playbook node means no pin to carry: keep `None` so nothing
-    // changes for a playbook without children.
-    Ok((
-        connectors,
-        accounts,
-        (!children.is_empty()).then_some(children),
-    ))
+    supervised: bool,
+    opts: &mut RunOptions,
+) -> Result<(), String> {
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: name.to_string(),
+        version: version.map(str::to_string),
+    };
+    let permit = apb_engine::gate::check_run(root, &wref, true, supervised)
+        .map_err(|refusal| gate_refusal_message(&refusal))?;
+    for w in &permit.warnings {
+        eprintln!("warning: {w}");
+    }
+    permit.apply(opts);
+    Ok(())
 }
 
-/// What a CLI run start needs from the gate: the two connector permit maps and
-/// the sub-playbook pins (`None` when the playbook has no `type: playbook`
-/// node), handed to `RunOptions` verbatim.
-type PlaybookRunPermits = (
-    BTreeMap<String, String>,
-    BTreeMap<String, String>,
-    Option<BTreeMap<String, apb_engine::run_config::ChildExpectation>>,
-);
-
-/// Turns a connector-gate refusal (see `apb_mcp::policy::check_run`'s
-/// connector step) into an actionable CLI message: names the policy code and,
+/// Turns a run-gate refusal (see `apb_engine::gate::check_run`) into an
+/// actionable CLI message: names the policy code and,
 /// for a trust refusal, points at the exact `apb connector approve` invocation
 /// that clears it; for a missing-env refusal, at `apb connector env --write`.
 /// Falls back to printing the refusal verbatim for a policy code this
 /// function does not special-case (e.g. `connector_unresolved`, `not_found`),
 /// so a future refusal kind still surfaces something useful rather than
 /// nothing.
-fn connector_refusal_message(refusal: &serde_json::Value) -> String {
+fn gate_refusal_message(refusal: &serde_json::Value) -> String {
     let policy = refusal
         .get("policy")
         .and_then(|v| v.as_str())
@@ -463,15 +443,7 @@ pub(crate) fn run_cmd(
             continued_from.as_deref(),
         );
     }
-    let (expected_connectors, expected_connector_accounts, expected_children) =
-        match connector_permits_for(root, name, version) {
-            Ok(permits) => permits,
-            Err(msg) => {
-                eprintln!("run failed: {msg}");
-                return ExitCode::from(2);
-            }
-        };
-    let opts = RunOptions {
+    let mut opts = RunOptions {
         instruction,
         params: parsed,
         allow_shared_workdir,
@@ -481,21 +453,22 @@ pub(crate) fn run_cmd(
         context_max_bytes: None,
         context_compact_model: None,
         overrides,
-        expected_digest: None,
-        expected_profile_bundles: None,
         parent_run: None,
         continued_from,
         depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
         cache,
         max_parallel: None,
         // Fail-fast on a busy workdir: this caller is a person waiting on the
         // answer, who can retry, not an event source whose event dies with the
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
+        // The `expected_*` pins come from the run gate (`gate_run`).
+        ..Default::default()
     };
+    if let Err(msg) = gate_run(root, name, version, false, &mut opts) {
+        eprintln!("run failed: {msg}");
+        return ExitCode::from(2);
+    }
     if detach {
         return match apb_engine::start_detached(root, name, version, opts) {
             Ok(run_id) => {
@@ -646,15 +619,7 @@ pub(crate) fn drive_supervised_child(
             }
         }
     }
-    let (expected_connectors, expected_connector_accounts, expected_children) =
-        match connector_permits_for(root, name, version) {
-            Ok(permits) => permits,
-            Err(msg) => {
-                let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
-                return ExitCode::from(2);
-            }
-        };
-    let opts = RunOptions {
+    let mut opts = RunOptions {
         instruction,
         params: parsed,
         allow_shared_workdir,
@@ -664,21 +629,22 @@ pub(crate) fn drive_supervised_child(
         context_max_bytes: None,
         context_compact_model: None,
         overrides: None,
-        expected_digest: None,
-        expected_profile_bundles: None,
         parent_run: None,
         continued_from,
         depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
         cache: Default::default(),
         max_parallel: None,
         // Fail-fast on a busy workdir: this caller is a person waiting on the
         // answer, who can retry, not an event source whose event dies with the
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
+        // The `expected_*` pins come from the run gate (`gate_run`).
+        ..Default::default()
     };
+    if let Err(msg) = gate_run(root, name, version, true, &mut opts) {
+        let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
+        return ExitCode::from(2);
+    }
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,
         Err(e) => {

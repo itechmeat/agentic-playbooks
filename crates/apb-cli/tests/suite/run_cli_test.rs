@@ -280,3 +280,31 @@ fn run_continued_from_rejects_cross_playbook() {
         .stderr(predicate::str::contains("noagent"))
         .stderr(predicate::str::contains("other"));
 }
+
+/// `apb run` goes through the same run gate as MCP `playbook_run`: a playbook
+/// whose `requires` is not met in this project is refused before anything is
+/// written, naming the gate's policy code and the missing file. It used to run
+/// anyway, because the CLI only checked connector trust.
+#[test]
+fn run_refuses_a_playbook_whose_requires_is_unmet() {
+    let dir = seeded();
+    let yaml = NOAGENT.replace("params:", "requires: { files: [NEEDED.md] }\nparams:");
+    fs::write(
+        dir.path()
+            .join(".apb/playbooks/noagent/1.0.0/playbook.yaml"),
+        yaml,
+    )
+    .unwrap();
+    playbook()
+        .args(["run", "noagent", "--param", "who=world"])
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("requires_unmet"))
+        .stderr(predicate::str::contains("NEEDED.md"));
+    assert!(
+        !dir.path().join(".apb/runs").exists()
+            || fs::read_dir(dir.path().join(".apb/runs")).unwrap().count() == 0,
+        "a refused start writes no run"
+    );
+}
