@@ -81,14 +81,9 @@
       .join('\n'),
   )
 
-  // Version history newest-first.
-  function cmpVersionDesc(a: string, b: string): number {
-    const pa = a.split('.').map((n) => parseInt(n, 10) || 0)
-    const pb = b.split('.').map((n) => parseInt(n, 10) || 0)
-    for (let i = 0; i < 3; i++) if ((pb[i] ?? 0) !== (pa[i] ?? 0)) return (pb[i] ?? 0) - (pa[i] ?? 0)
-    return 0
-  }
-  const versionsDesc = $derived([...versions].sort((a, b) => cmpVersionDesc(a.version, b.version)))
+  // Version history newest-first: the API lists versions oldest first in
+  // semver order, so this only reverses it.
+  const versionsDesc = $derived([...versions].reverse())
 
   async function loadVersions(token: number) {
     try {

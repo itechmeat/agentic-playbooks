@@ -149,11 +149,12 @@ export interface VersionProvenance {
   created_by: string
   run_id: string | null
   classification: string | null
-  promoted: boolean
 }
 
+// Versions come from the API oldest first in semver order.
 export interface VersionInfo {
   version: string
+  /** `current` points here: the one source for the version in use. */
   is_current: boolean
   provenance: VersionProvenance | null
 }

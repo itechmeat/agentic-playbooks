@@ -4,7 +4,7 @@ use std::sync::mpsc;
 use std::time::{Duration, Instant};
 
 use apb_core::registry::init_project;
-use apb_core::versioning::{create_patch_version, read_provenance};
+use apb_core::versioning::create_patch_version;
 use apb_engine::control::{Control, read_control_cursor};
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{
@@ -218,12 +218,6 @@ fn valid_patch_migrates_run_and_promotes_improvement() {
             .trim(),
         version
     );
-    assert!(
-        read_provenance(dir.path(), "migrate", &version)
-            .unwrap()
-            .unwrap()
-            .promoted
-    );
 }
 
 #[test]
@@ -305,12 +299,6 @@ fn workaround_patch_succeeds_without_promotion() {
             .unwrap()
             .trim(),
         "1.0.0"
-    );
-    assert!(
-        !read_provenance(dir.path(), "migrate", &version)
-            .unwrap()
-            .unwrap()
-            .promoted
     );
     assert!(
         !read_all(&run_dir)

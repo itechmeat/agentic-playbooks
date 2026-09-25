@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::fsutil::atomic_write;
-use crate::registry::{Registry, is_frozen_dir, is_safe_segment};
+use crate::registry::{Registry, is_frozen_dir, is_safe_segment, list_versions, parse_version};
 use crate::schema::{Playbook, SchemaError};
 use crate::validate::{Issue, Severity, ValidationContext, validate};
 
@@ -38,12 +38,17 @@ pub enum VersioningError {
     Io(#[from] io::Error),
 }
 
+/// Who made a version, stored beside it in `meta/<version>.yaml`. Which
+/// version is in use is not part of it: the `current` pointer is the one
+/// authority for that (see [`VersionInfo::is_current`]). Sidecars written by
+/// older builds carry a `promoted` flag that drifted from `current` (a
+/// rollback or a save that did not move `current` left it set); it is
+/// ignored on read.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct VersionProvenance {
     pub created_by: String,
     pub run_id: Option<String>,
     pub classification: Option<String>,
-    pub promoted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +74,7 @@ fn advance_minor_pair(major: u32, minor: u32) -> Result<(u32, u32), ()> {
 /// Invalid `base` (not three numeric segments) yields safe default `1.0.0`.
 /// If minor is exhausted, major is incremented (explicit safeguard against looping on `u32::MAX`).
 pub fn next_minor_version(base: &str, existing: &[String]) -> String {
-    let Some((mut major, minor, _)) = parse_version_triple(base) else {
+    let Some((mut major, minor, _)) = parse_version(base) else {
         return "1.0.0".to_string();
     };
     let taken: HashSet<&str> = existing.iter().map(String::as_str).collect();
@@ -94,7 +99,7 @@ pub fn next_minor_version(base: &str, existing: &[String]) -> String {
 /// Invalid `base` yields safe default `1.0.0`; create_patch_version
 /// separately rejects such base before creating the version.
 pub fn next_patch_version(base: &str, existing: &[String]) -> String {
-    let Some((major, minor, patch)) = parse_version_triple(base) else {
+    let Some((major, minor, patch)) = parse_version(base) else {
         return "1.0.0".to_string();
     };
     let taken: HashSet<&str> = existing.iter().map(String::as_str).collect();
@@ -166,14 +171,14 @@ pub fn create_version_with_override(
     let existing = if is_new {
         Vec::new()
     } else {
-        list_version_dirs(&playbook_dir)?
+        list_versions(&playbook_dir)?
     };
 
     let (mut version, bump) = if let Some(v) = version_override {
         if !is_safe_segment(v) {
             return Err(VersioningError::NotFound(format!("{id}@{v}")));
         }
-        if parse_version_triple(v).is_none() {
+        if parse_version(v).is_none() {
             return Err(VersioningError::Conflict(format!("invalid version `{v}`")));
         }
         if existing.iter().any(|e| e.as_str() == v) {
@@ -221,7 +226,6 @@ pub fn create_version_with_override(
             created_by: "user".to_string(),
             run_id: None,
             classification: None,
-            promoted: true,
         },
     )?;
 
@@ -297,7 +301,7 @@ pub fn create_patch_version(
             node: None,
         }]));
     }
-    if parse_version_triple(base_version).is_none() {
+    if parse_version(base_version).is_none() {
         return Err(VersioningError::Conflict(format!(
             "invalid version `{base_version}`"
         )));
@@ -313,7 +317,7 @@ pub fn create_patch_version(
         return Err(VersioningError::Frozen(id.to_string()));
     }
 
-    let existing = list_version_dirs(&playbook_dir)?;
+    let existing = list_versions(&playbook_dir)?;
     let version = next_patch_version(base_version, &existing);
     let mut playbook = Playbook::from_yaml(new_yaml).map_err(schema_err)?;
     playbook.version = version.clone();
@@ -342,14 +346,13 @@ pub fn create_patch_version(
             created_by: "supervisor".to_string(),
             run_id: Some(run_id.to_string()),
             classification: Some(classification.to_string()),
-            promoted: false,
         },
     )?;
 
     Ok(version)
 }
 
-/// Writes mutable provenance of version outside the immutable version folder.
+/// Writes the provenance of a version outside the immutable version folder.
 pub fn write_provenance(
     root: &Path,
     id: &str,
@@ -382,12 +385,15 @@ pub fn read_provenance(
 #[derive(Debug, Clone, Serialize)]
 pub struct VersionInfo {
     pub version: String,
+    /// Whether `current` points at this version: the one source for "in use"
+    /// (promoted) and the only one the listings report.
     pub is_current: bool,
     pub provenance: Option<VersionProvenance>,
 }
 
 /// Lists playbook versions with provenance and current marker.
-/// Order matches `list_version_dirs` (lexicographic by folder name).
+/// Oldest first in semver order, like every version listing
+/// ([`crate::registry::list_versions`]).
 pub fn list_versions_with_provenance(
     root: &Path,
     id: &str,
@@ -403,7 +409,7 @@ pub fn list_versions_with_provenance(
         .ok()
         .map(|s| s.trim().to_string());
     let mut out = Vec::new();
-    for version in list_version_dirs(&playbook_dir)? {
+    for version in list_versions(&playbook_dir)? {
         let is_current = current.as_deref() == Some(version.as_str());
         let provenance = read_provenance(root, id, &version)?;
         out.push(VersionInfo {
@@ -415,24 +421,10 @@ pub fn list_versions_with_provenance(
     Ok(out)
 }
 
-/// Changes the promote flag in mutable sidecar of a known version.
-pub fn set_promoted(
-    root: &Path,
-    id: &str,
-    version: &str,
-    promoted: bool,
-) -> Result<(), VersioningError> {
-    let mut provenance = read_provenance(root, id, version)?
-        .ok_or_else(|| VersioningError::NotFound(format!("{id}@{version}")))?;
-    provenance.promoted = promoted;
-    write_provenance(root, id, version, &provenance)
-}
-
-/// Makes `version` the current one. Any stored version qualifies, newer or
-/// older: the provenance sidecar carries the supervisor-patch `promoted` flag
-/// and is updated when it exists, but a version created by an ordinary save
-/// has no sidecar and must still be selectable - requiring one used to make
-/// every hand-authored version unpromotable.
+/// Makes `version` the current one: a promotion (a supervisor patch that
+/// passed its run, the dashboard's "Use") and a rollback are the same move of
+/// the one `current` pointer. Any stored version qualifies, newer or older,
+/// with or without a provenance sidecar.
 ///
 /// What is required instead is a version that can actually run: the directory
 /// must hold a `playbook.yaml`, so `current` never points at a half-written
@@ -445,9 +437,6 @@ pub fn promote_version(root: &Path, id: &str, version: &str) -> Result<(), Versi
     }
     if !playbook_dir.join(version).join("playbook.yaml").is_file() {
         return Err(VersioningError::NotFound(format!("{id}@{version}")));
-    }
-    if read_provenance(root, id, version)?.is_some() {
-        set_promoted(root, id, version, true)?;
     }
     atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
     Ok(())
@@ -887,19 +876,8 @@ fn validate_playbook(root: &Path, playbook: &Playbook) -> Result<(), VersioningE
     Err(VersioningError::Validation(issues))
 }
 
-fn parse_version_triple(s: &str) -> Option<(u32, u32, u32)> {
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let major = parts[0].parse().ok()?;
-    let minor = parts[1].parse().ok()?;
-    let patch = parts[2].parse().ok()?;
-    Some((major, minor, patch))
-}
-
 fn bump_minor(version: &str) -> Result<String, VersioningError> {
-    let (major, minor, _) = parse_version_triple(version)
+    let (major, minor, _) = parse_version(version)
         .ok_or_else(|| VersioningError::Conflict(format!("invalid version `{version}`")))?;
     let (next_major, next_minor) = advance_minor_pair(major, minor)
         .map_err(|()| VersioningError::Conflict(format!("version overflow for `{version}`")))?;
@@ -907,7 +885,7 @@ fn bump_minor(version: &str) -> Result<String, VersioningError> {
 }
 
 fn bump_patch(version: &str) -> Result<String, VersioningError> {
-    let (major, minor, patch) = parse_version_triple(version)
+    let (major, minor, patch) = parse_version(version)
         .ok_or_else(|| VersioningError::Conflict(format!("invalid version `{version}`")))?;
     let next_patch = patch
         .checked_add(1)
@@ -937,23 +915,6 @@ fn read_current(playbook_dir: &Path) -> Result<String, VersioningError> {
         ));
     }
     Ok(current)
-}
-
-fn list_version_dirs(playbook_dir: &Path) -> Result<Vec<String>, VersioningError> {
-    let mut out = Vec::new();
-    for entry in fs::read_dir(playbook_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == "layouts" || name == "meta" || name.starts_with(".tmp-") {
-            continue;
-        }
-        out.push(name);
-    }
-    out.sort();
-    Ok(out)
 }
 
 fn temp_dir_name(version: &str) -> String {

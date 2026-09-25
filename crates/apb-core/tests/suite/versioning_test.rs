@@ -99,7 +99,6 @@ fn create_patch_version_keeps_current_and_records_supervisor_provenance() {
     assert_eq!(provenance.created_by, "supervisor");
     assert_eq!(provenance.run_id.as_deref(), Some("run-42"));
     assert_eq!(provenance.classification.as_deref(), Some("improvement"));
-    assert!(!provenance.promoted);
 }
 
 #[test]

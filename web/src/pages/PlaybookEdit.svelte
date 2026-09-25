@@ -5,7 +5,7 @@
   import {
     createPlaybook,
     fetchPlaybook,
-    fetchPlaybooks,
+    fetchVersions,
     fetchProjects,
     saveLayout,
     updatePlaybook,
@@ -148,9 +148,7 @@
       storedLayout = detail.layout
       revision++
       try {
-        const all = await fetchPlaybooks()
-        const found = all.find((w) => w.id === id && w.workspace_id === workspace)
-        versions = found?.versions ?? (detail.version ? [detail.version] : [])
+        versions = (await fetchVersions(id, workspace)).map((v) => v.version)
       } catch {
         versions = detail.version ? [detail.version] : []
       }

@@ -736,6 +736,8 @@ A patch does not become the norm by the mere fact of being created - it has to p
 
 This way the system self-improves without human involvement, but the workflow's evolutionary line consists only of edits confirmed by a successful run. Full traceability in version history: who created the patch, whether it was promoted, and why. Rollback is a normal operation: `current` can be manually pointed at any version.
 
+Promotion IS the move of `current`, so `current` is the one record of it: the version history marks the version `current` points at, and the provenance sidecar (`meta/<version>.yaml`) keeps only who made a version and why (`created_by`, `run_id`, `classification`). A separately stored `promoted` flag was dropped (issue #139 F12): a rollback or a save that did not move `current` left it claiming a version that was no longer in use. Whether a patch was ever promoted stays in its run's journal (`version_promoted`).
+
 ### 10.6. Deletion
 
 - Deleting a workflow from the web UI or MCP moves its folder into `.wf/trash/` (recoverable); physical deletion is a separate, explicit action.

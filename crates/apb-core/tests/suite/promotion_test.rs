@@ -47,12 +47,6 @@ fn promote_version_moves_current_and_marks_provenance() {
             .trim(),
         version
     );
-    assert!(
-        read_provenance(dir.path(), "implement-task", &version)
-            .unwrap()
-            .unwrap()
-            .promoted
-    );
 }
 
 #[test]

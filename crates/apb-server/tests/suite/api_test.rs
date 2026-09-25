@@ -347,7 +347,6 @@ async fn get_versions_returns_provenance() {
     assert_eq!(patched["is_current"], false);
     assert_eq!(patched["provenance"]["classification"], "improvement");
     assert_eq!(patched["provenance"]["run_id"], "run-x");
-    assert_eq!(patched["provenance"]["promoted"], false);
 }
 
 #[tokio::test]
@@ -383,7 +382,6 @@ async fn post_promote_moves_current() {
         .unwrap()
         .clone();
     assert_eq!(patched["is_current"], true);
-    assert_eq!(patched["provenance"]["promoted"], true);
 }
 
 #[tokio::test]
