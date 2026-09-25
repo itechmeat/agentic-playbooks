@@ -292,15 +292,12 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
         Err(c) => return c,
     };
     let validate_all = name.is_none();
+    // Whole-project validation enumerates by directory, not through the
+    // listing: `Registry::list` drops a playbook that fails to load, which
+    // would hide exactly the definitions a validator exists to report.
     let names: Vec<String> = match name {
         Some(n) => vec![n],
-        None => match reg.list() {
-            Ok(l) => l.into_iter().map(|w| w.id).collect(),
-            Err(e) => {
-                eprintln!("list failed: {e}");
-                return ExitCode::from(2);
-            }
-        },
+        None => reg.playbook_ids(),
     };
     let ctx = ValidationContext {
         profiles: reg.profiles(),

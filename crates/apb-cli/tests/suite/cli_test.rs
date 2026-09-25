@@ -76,6 +76,26 @@ fn validate_broken_playbook_fails_with_code() {
         .stdout(predicate::str::contains("V13"));
 }
 
+/// Whole-project validation must not skip a playbook that fails to load (the
+/// listing drops it, so it used to vanish and the run exited 0): a playbook
+/// with unparseable YAML is named with its load error and the exit code is 1,
+/// while the healthy playbook next to it is still reported OK.
+#[test]
+fn validate_all_reports_a_playbook_that_fails_to_load() {
+    let dir = seeded_dir();
+    let broken = dir.path().join(".apb/playbooks/broken-one");
+    fs::create_dir_all(broken.join("1.0.0")).unwrap();
+    fs::write(broken.join("1.0.0/playbook.yaml"), "nodes: [unclosed").unwrap();
+    fs::write(broken.join("current"), "1.0.0").unwrap();
+    playbook()
+        .arg("validate")
+        .current_dir(dir.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("broken-one: error"))
+        .stdout(predicate::str::contains("implement-task: OK"));
+}
+
 /// Whole-project validation checks zcode profile models against apb's
 /// allowlist: the bare id and the legacy `zai-individual/` spelling pass, any
 /// other model is an error naming the allowlist.
