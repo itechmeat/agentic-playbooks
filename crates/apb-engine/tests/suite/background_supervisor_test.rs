@@ -70,7 +70,7 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 fn agent_stub(dir: &Path, invocation_file: &Path) -> String {
     let path = dir.join("agent_stub.sh");
     let body = format!(
-        "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo '---end---'; }} >> '{}'\n",
+        "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo \"MCP_TOOL_TIMEOUT=$MCP_TOOL_TIMEOUT\"; echo '---end---'; }} >> '{}'\n",
         invocation_file.display()
     );
     common::write_sync(&path, &body);
@@ -244,6 +244,20 @@ fn initial_spawn_writes_brief_and_persists_session() {
         content.contains("-p"),
         "brief must be passed via -p:\n{content}"
     );
+    // Token economy: the brief asks for a long server-side wait and says a
+    // timed-out wait is only a re-call, and the spawn lifts Claude Code's MCP
+    // tool timeout so that long wait is not cut short by the host.
+    assert!(
+        content.contains("timeout_ms ") && content.contains("reason `timeout`"),
+        "brief must set the long-wait discipline:\n{content}"
+    );
+    if std::env::var_os("MCP_TOOL_TIMEOUT").is_none() {
+        let want = format!(
+            "MCP_TOOL_TIMEOUT={}",
+            apb_engine::adapter::SUPERVISOR_MCP_TOOL_TIMEOUT_MS
+        );
+        assert!(content.contains(&want), "spawn must set {want}:\n{content}");
+    }
 }
 
 // A pipeline with several prompt nodes (no agent_task), so drive passes
@@ -407,7 +421,7 @@ edges:
     fs::write(
         &claude_stub,
         format!(
-            "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo '---end---'; }} >> '{}'\n",
+            "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo \"MCP_TOOL_TIMEOUT=$MCP_TOOL_TIMEOUT\"; echo '---end---'; }} >> '{}'\n",
             invocation_file.display()
         ),
     )

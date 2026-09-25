@@ -793,6 +793,11 @@ pub trait AgentAdapter {
     }
 }
 
+/// `MCP_TOOL_TIMEOUT` handed to a spawned supervisor: a little over the
+/// 30-minute server maximum of `supervisor_wait_event`, so the host never cuts
+/// a wait the server is still serving.
+pub const SUPERVISOR_MCP_TOOL_TIMEOUT_MS: u64 = 31 * 60 * 1000;
+
 pub struct ClaudeAdapter {
     pub program: String,
     /// Declarative invocation form (argv template, prompt_via, SOUL delivery,
@@ -1777,6 +1782,17 @@ impl AgentAdapter for ClaudeAdapter {
         // Connector env isolation (spec 4.3): the supervisor is a spawned agent
         // too, so its inherited connector tokens are scrubbed before spawn.
         policy.apply(&mut cmd);
+        // Let a Claude Code supervisor block in `supervisor_wait_event` for as
+        // long as the server allows (30 min) instead of returning to the model
+        // every few seconds: each return is a paid turn. The variable is
+        // Claude Code's MCP tool-call timeout; other agents ignore it. A value
+        // the operator set explicitly wins.
+        if std::env::var_os("MCP_TOOL_TIMEOUT").is_none() {
+            cmd.env(
+                "MCP_TOOL_TIMEOUT",
+                SUPERVISOR_MCP_TOOL_TIMEOUT_MS.to_string(),
+            );
+        }
         let mut child = cmd.spawn().map_err(|e| {
             (
                 ErrorClass::ProcessExit,
