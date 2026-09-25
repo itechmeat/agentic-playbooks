@@ -73,6 +73,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/playbooks/{id}/run",
             post(routes::playbooks::run_playbook_handler),
         )
+        .route("/api/trash", get(routes::trash::list_trash_handler))
+        .route(
+            "/api/trash/{name}/restore",
+            post(routes::trash::restore_trash_handler),
+        )
         .route(
             "/api/profiles",
             get(routes::profiles::list_profiles).post(routes::profiles::write_profile),

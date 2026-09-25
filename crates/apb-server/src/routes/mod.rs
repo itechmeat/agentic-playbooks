@@ -9,3 +9,4 @@ pub mod playbooks;
 pub mod profiles;
 pub mod runs;
 pub mod suggestions;
+pub mod trash;

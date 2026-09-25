@@ -265,11 +265,15 @@ async fn put_playbook_creates_new_minor_version() {
     assert_eq!(json["version"], "1.1.0");
 }
 
+/// The dashboard's trash round trip over HTTP: a deleted playbook is listed
+/// with its deletion time, restores with a 200, and a restore after the id was
+/// taken again is a 409 whose body says why (the Trash view shows it as is).
 #[tokio::test]
-async fn delete_playbook_moves_to_trash() {
+async fn trash_lists_restores_and_reports_a_conflict() {
+    let _cfg = crate::common::config_sandbox().await;
     let dir = seed();
     let app = build_router(AppState::new(dir.path().to_path_buf()));
-    let (status, json) = json_request(
+    let (status, _) = json_request(
         app.clone(),
         "DELETE",
         "/api/playbooks/implement-task",
@@ -277,10 +281,61 @@ async fn delete_playbook_moves_to_trash() {
     )
     .await;
     assert_eq!(status, StatusCode::OK);
-    assert!(json["trashed"].as_str().unwrap().contains(".apb/trash/"));
-
-    let (status, _) = get_json(app, "/api/playbooks/implement-task").await;
+    let (status, _) = get_json(app.clone(), "/api/playbooks/implement-task").await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+
+    let (status, trash) = get_json(app.clone(), "/api/trash").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(trash[0]["id"], "implement-task");
+    assert_eq!(trash[0]["versions"], serde_json::json!(["1.0.0"]));
+    assert_eq!(trash[0]["conflict"], false);
+    assert!(trash[0]["deleted_at_ms"].as_u64().unwrap() > 0);
+    let name = trash[0]["name"].as_str().unwrap().to_string();
+
+    let (status, restored) = json_request(
+        app.clone(),
+        "POST",
+        &format!("/api/trash/{name}/restore"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(restored["id"], "implement-task");
+    let (status, _) = get_json(app.clone(), "/api/playbooks/implement-task").await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, trash) = get_json(app.clone(), "/api/trash").await;
+    assert_eq!(trash, serde_json::json!([]));
+
+    // Deleted again, and a new playbook takes the id.
+    json_request(
+        app.clone(),
+        "DELETE",
+        "/api/playbooks/implement-task",
+        serde_json::json!({}),
+    )
+    .await;
+    let (status, _) = json_request(
+        app.clone(),
+        "POST",
+        "/api/playbooks",
+        serde_json::json!({ "id": "implement-task", "yaml": VALID }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CREATED);
+    let (_, trash) = get_json(app.clone(), "/api/trash").await;
+    assert_eq!(trash[0]["conflict"], true);
+    let res = app
+        .oneshot(
+            Request::post("/api/trash/implement-task/restore")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let body = res.into_body().collect().await.unwrap().to_bytes();
+    let body = String::from_utf8_lossy(&body);
+    assert!(body.contains("exists again"), "{body}");
 }
 
 #[tokio::test]

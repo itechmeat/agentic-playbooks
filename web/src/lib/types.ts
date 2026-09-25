@@ -74,6 +74,8 @@ export type {
   WaitingKind,
 } from './api.gen'
 export type { RunListEntry as RunSummary } from './api.gen'
+// The playbook trash (`GET /api/trash`, `POST /api/trash/{name}/restore`).
+export type { RestoredPlaybook, TrashListEntry } from './api.gen'
 
 export interface WfEvent {
   seq: number

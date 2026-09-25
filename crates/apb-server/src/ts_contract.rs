@@ -52,6 +52,9 @@ fn render_types() -> String {
         apb_engine::RunSummary::decl(&cfg),
         crate::routes::runs::RunListEntry::decl(&cfg),
         crate::routes::runs::RunDetail::decl(&cfg),
+        apb_core::versioning::TrashEntry::decl(&cfg),
+        apb_core::versioning::RestoredPlaybook::decl(&cfg),
+        crate::routes::trash::TrashListEntry::decl(&cfg),
     ];
     let mut out = format!(
         "{HEADER}\nimport type {{ PlaybookEdge, PlaybookNode, WfEvent, WfLayout }} from './types'\n"

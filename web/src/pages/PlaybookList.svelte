@@ -93,6 +93,10 @@
 
 <Topbar active="playbooks">
   {#snippet actions()}
+    <Button href="#/trash" variant="outline" size="sm" class="max-sm:px-2">
+      <Trash2 data-icon="inline-start" />
+      <span class="max-sm:sr-only">Trash</span>
+    </Button>
     <Button href="#/new" size="sm" class="max-sm:px-2">
       <Plus data-icon="inline-start" />
       <span class="max-sm:sr-only">Create</span>
@@ -197,7 +201,8 @@
     <AlertDialog.Header>
       <AlertDialog.Title>Delete playbook?</AlertDialog.Title>
       <AlertDialog.Description>
-        "{target?.id}" will be moved to trash. You can restore it from disk if needed.
+        "{target?.id}" will be moved to the trash with all its versions. You can
+        restore it from Trash.
       </AlertDialog.Description>
     </AlertDialog.Header>
     <AlertDialog.Footer>

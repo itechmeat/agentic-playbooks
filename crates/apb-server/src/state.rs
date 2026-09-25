@@ -182,6 +182,34 @@ pub(crate) fn enumerate_workspaces(state: &AppState) -> Vec<(String, String, Pat
     }
 }
 
+/// The workspaces a listing covers: every reachable one by default, or exactly
+/// the one `?workspace=<id>` names (an unknown id is a 404 through
+/// [`resolve_root`], like the detail endpoints). Each row is
+/// `(workspace_id, project name, root)`.
+///
+/// The project name comes from the registry when the requested workspace is
+/// one of the enumerated ones; a pinned-root harness has no name to give,
+/// exactly as in the aggregate. Matched on the workspace id, never on the
+/// path: `resolve_root` canonicalizes and the registry stores the path as it
+/// was registered, so on any symlinked root (every macOS `/var` temp dir, for
+/// one) a path comparison would silently drop the name.
+#[allow(clippy::result_large_err)]
+pub(crate) fn selected_workspaces(
+    state: &AppState,
+    workspace: Option<&str>,
+) -> Result<Vec<(String, String, PathBuf)>, Response> {
+    let Some(ws) = workspace else {
+        return Ok(enumerate_workspaces(state));
+    };
+    let root = resolve_root(state, Some(ws))?;
+    let project = enumerate_workspaces(state)
+        .into_iter()
+        .find(|(wid, _, _)| wid == ws)
+        .map(|(_, name, _)| name)
+        .unwrap_or_default();
+    Ok(vec![(ws.to_string(), project, root)])
+}
+
 /// Finds which project owns a given run, by locating `.apb/runs/<run_id>`
 /// among the enumerated workspaces. Used where the caller cannot pass a
 /// workspace (external webhooks).

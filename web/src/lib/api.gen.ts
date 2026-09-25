@@ -180,3 +180,73 @@ children: Array<ChildRun>,
  * the run page renders its panels from this, never from `events`.
  */
 progress: ProgressSummary | null, answer: string | null, events: WfEvent[], };
+
+export type TrashEntry = { 
+/**
+ * The trash folder name `<id>-<deleted_at_ms>`: the exact handle a
+ * restore takes when one id was deleted more than once.
+ */
+name: string, 
+/**
+ * The playbook id it restores to.
+ */
+id: string, 
+/**
+ * When it was deleted, in Unix milliseconds.
+ */
+deleted_at_ms: number, 
+/**
+ * Its versions in semver order; a restore brings all of them back.
+ */
+versions: Array<string>, 
+/**
+ * The version its `current` pointer names, if any.
+ */
+current: string | null, 
+/**
+ * A playbook with this id exists again, so a restore would be refused
+ * until that one is deleted.
+ */
+conflict: boolean, };
+
+export type RestoredPlaybook = { id: string, 
+/**
+ * The trash entry it came from.
+ */
+name: string, 
+/**
+ * The restored `current` version (its digest is now approved).
+ */
+current: string | null, versions: Array<string>, };
+
+export type TrashListEntry = { 
+/**
+ * Owning project (global dashboard). Empty on the pinned-root test server.
+ */
+workspace_id: string, project: string, 
+/**
+ * The trash folder name `<id>-<deleted_at_ms>`: the exact handle a
+ * restore takes when one id was deleted more than once.
+ */
+name: string, 
+/**
+ * The playbook id it restores to.
+ */
+id: string, 
+/**
+ * When it was deleted, in Unix milliseconds.
+ */
+deleted_at_ms: number, 
+/**
+ * Its versions in semver order; a restore brings all of them back.
+ */
+versions: Array<string>, 
+/**
+ * The version its `current` pointer names, if any.
+ */
+current: string | null, 
+/**
+ * A playbook with this id exists again, so a restore would be refused
+ * until that one is deleted.
+ */
+conflict: boolean, };

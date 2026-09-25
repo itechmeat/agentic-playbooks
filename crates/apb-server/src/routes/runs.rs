@@ -72,27 +72,9 @@ pub(crate) async fn list_runs_handler(
     State(state): State<AppState>,
     Query(q): Query<WorkspaceQuery>,
 ) -> impl IntoResponse {
-    let workspaces = match q.workspace.as_deref() {
-        None => enumerate_workspaces(&state),
-        Some(ws) => {
-            let root = match resolve_root(&state, Some(ws)) {
-                Ok(r) => r,
-                Err(e) => return e,
-            };
-            // The project name comes from the registry when the requested
-            // workspace is one of the enumerated ones; a pinned-root harness
-            // has no name to give, exactly as in the aggregate. Matched on the
-            // workspace id, never on the path: `resolve_root` canonicalizes
-            // and the registry stores the path as it was registered, so on any
-            // symlinked root (every macOS `/var` temp dir, for one) a path
-            // comparison would silently drop the name.
-            let project = enumerate_workspaces(&state)
-                .into_iter()
-                .find(|(wid, _, _)| wid == ws)
-                .map(|(_, name, _)| name)
-                .unwrap_or_default();
-            vec![(ws.to_string(), project, root)]
-        }
+    let workspaces = match selected_workspaces(&state, q.workspace.as_deref()) {
+        Ok(w) => w,
+        Err(e) => return e,
     };
     let mut out: Vec<RunListEntry> = Vec::new();
     for (workspace_id, project, root) in workspaces {

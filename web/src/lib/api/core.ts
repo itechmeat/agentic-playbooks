@@ -9,6 +9,8 @@ import type {
   VersionInfo,
   PlaybookDetail,
   PlaybookSummary,
+  RestoredPlaybook,
+  TrashListEntry,
   WriteResult,
 } from '../types'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
@@ -185,6 +187,16 @@ export const deletePlaybook = (id: string, workspace = '') =>
   requestJson<{ trashed: string }>(`${pb(id)}${qs({ workspace })}`, {
     method: 'DELETE',
   })
+
+// The playbook trash of every project; a restore answers 409 with a readable
+// message when a playbook with that id exists again.
+export const fetchTrash = () => getJson<TrashListEntry[]>('/api/trash')
+
+export const restoreFromTrash = (name: string, workspace = '') =>
+  requestJson<RestoredPlaybook>(
+    `/api/trash/${encodeURIComponent(name)}/restore${qs({ workspace })}`,
+    { method: 'POST' },
+  )
 
 export const setFrozen = (id: string, frozen: boolean, workspace = '') =>
   requestJson<{ id: string; frozen: boolean }>(`${pb(id)}/frozen${qs({ workspace })}`, {

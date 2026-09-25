@@ -42,6 +42,7 @@
   const loadProfileEdit = () => import('./pages/ProfileEdit.svelte')
   const loadConnectorList = () => import('./pages/ConnectorList.svelte')
   const loadConnectorView = () => import('./pages/ConnectorView.svelte')
+  const loadTrashList = () => import('./pages/TrashList.svelte')
 
   const dec = decodeSegment
 
@@ -72,6 +73,7 @@
     if (h.startsWith('#/playbook/')) return { ...base, page: 'playbook', ...wsId(h.slice(11)) }
     if (h.startsWith('#/run/')) return { ...base, page: 'run', ...wsId(h.slice(6)) }
     if (h.startsWith('#/runs')) return { ...base, page: 'runs' }
+    if (h === '#/trash') return { ...base, page: 'trash' }
     if (h === '#/profiles') return { ...base, page: 'profiles' }
     if (h === '#/profile-new') return { ...base, page: 'profile-new' }
     if (h.startsWith('#/profile-edit/'))
@@ -120,6 +122,12 @@
   {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'runs'}
   {#await loadRunList()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page />
+  {:catch error}<ChunkError {error} />{/await}
+{:else if route.page === 'trash'}
+  {#await loadTrashList()}
     <ChunkPending />
   {:then { default: Page }}
     <Page />
