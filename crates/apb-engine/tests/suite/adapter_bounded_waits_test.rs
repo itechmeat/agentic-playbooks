@@ -204,6 +204,37 @@ fn headless_agent_leaving_a_grandchild_on_the_pipes_completes_promptly() {
     wait_until_dead(gc, "the grandchild that inherited the agent's pipes");
 }
 
+/// An agent that writes more than a pipe buffer (64 KiB on Linux) to stdout and
+/// stderr before exiting must finish with its whole output. The adapter used to
+/// read the pipes only after the process exited, so such an agent blocked on
+/// its write forever and the attempt died at its deadline instead.
+#[test]
+fn headless_agent_writing_more_than_a_pipe_buffer_completes() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let policy = Default::default();
+    let ad = headless(stub(
+        dir.path(),
+        "verbose.sh",
+        "head -c 200000 /dev/zero | tr '\\0' 'e' 1>&2
+head -c 200000 /dev/zero | tr '\\0' 'x'
+echo",
+    ));
+    let mut t = task(dir.path(), &policy);
+    t.timeout = Some(Duration::from_secs(20));
+
+    let report = ad
+        .run(&t)
+        .expect("a verbose agent must not hit its deadline");
+
+    assert_eq!(report.status, NodeStatus::Succeeded);
+    assert_eq!(
+        report.raw.trim_end().len(),
+        200_000,
+        "stdout collected in full"
+    );
+}
+
 // The ACP path has the same exposure through its stderr drain, which used to be
 // an unbounded `err_reader.join()`.
 #[test]

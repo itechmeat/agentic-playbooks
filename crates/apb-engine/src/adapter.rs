@@ -165,33 +165,76 @@ fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<E
     }
 }
 
-/// `child.wait_with_output()` with a deadline, so a grandchild holding the
-/// pipes open cannot stall the drive. The collecting thread is abandoned on a
-/// timeout rather than joined: it owns nothing the caller needs, and joining
-/// it is the very wait being bounded.
-fn wait_with_output_bounded(
-    child: Child,
-    budget: Duration,
-    program: &str,
-) -> Result<std::process::Output, (ErrorClass, String)> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(budget) {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err((
-            ErrorClass::ProcessExit,
-            format!("collect `{program}` output failed: {e}"),
-        )),
-        Err(_) => Err((
-            ErrorClass::Timeout,
-            format!(
-                "`{program}` exited but its stdout/stderr were still held open {budget:?} later, \
-                 so its output could not be collected: a descendant that outlived it inherited \
-                 the pipes"
-            ),
-        )),
+/// A spawned agent's stdout and stderr, read to EOF on their own threads from
+/// the moment it is spawned. Reading only after the process exits deadlocked
+/// any agent that wrote more than a pipe buffer (64 KiB on Linux) to either
+/// stream: the write blocked, so the process never exited and the attempt ran
+/// into its deadline (or forever without one).
+struct PipeCollector {
+    stdout: mpsc::Receiver<Vec<u8>>,
+    stderr: mpsc::Receiver<Vec<u8>>,
+}
+
+impl PipeCollector {
+    /// Takes the child's piped stdout and stderr and starts draining them.
+    fn start(child: &mut Child) -> Self {
+        fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                let _ = tx.send(buf);
+            });
+            rx
+        }
+        PipeCollector {
+            stdout: drain(child.stdout.take()),
+            stderr: drain(child.stderr.take()),
+        }
+    }
+
+    /// The collected streams once both reached EOF, within `budget`, so a
+    /// grandchild holding the pipes open cannot stall the drive. The reading
+    /// threads are abandoned on a timeout rather than joined: they own nothing
+    /// the caller needs.
+    fn finish(
+        self,
+        mut child: Child,
+        budget: Duration,
+        program: &str,
+    ) -> Result<std::process::Output, (ErrorClass, String)> {
+        let deadline = Instant::now() + budget;
+        let held_open = || {
+            (
+                ErrorClass::Timeout,
+                format!(
+                    "`{program}` exited but its stdout/stderr were still held open {budget:?} later, \
+                     so its output could not be collected: a descendant that outlived it inherited \
+                     the pipes"
+                ),
+            )
+        };
+        let stdout = self
+            .stdout
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| held_open())?;
+        let stderr = self
+            .stderr
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| held_open())?;
+        let status = child.wait().map_err(|e| {
+            (
+                ErrorClass::ProcessExit,
+                format!("collect `{program}` output failed: {e}"),
+            )
+        })?;
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }
 
@@ -1208,6 +1251,8 @@ impl ClaudeAdapter {
         if let Some(cb) = on_spawn {
             cb(child.id(), started.elapsed().as_millis() as u64);
         }
+        // Drain both streams from the start (see `PipeCollector`).
+        let pipes = PipeCollector::start(&mut child);
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
         {
@@ -1285,7 +1330,7 @@ impl ClaudeAdapter {
         // block for the lifetime of that daemon. Tearing the group down first
         // is what makes EOF actually arrive.
         kill_process_group(child.id());
-        let output = wait_with_output_bounded(child, drain_budget(), &self.program)?;
+        let output = pipes.finish(child, drain_budget(), &self.program)?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         // Signal termination is a failure before anything else is read (issue
