@@ -485,6 +485,11 @@ pub struct ProfileWriteArgs {
     /// a new profile gets false.
     #[serde(default)]
     pub hermetic: Option<bool>,
+    /// ZCode permission mode for the profile's zcode steps in a run that grants
+    /// autonomy: "yolo" (default: files, shell, network) or "edit" (file edits
+    /// only, no shell commands). Absent: an update keeps the stored value.
+    #[serde(default)]
+    pub zcode_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

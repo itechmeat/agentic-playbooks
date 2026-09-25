@@ -49,6 +49,11 @@ pub struct ManifestProfile {
     /// (serde default), mirroring `ephemeral`.
     #[serde(default)]
     pub hermetic: bool,
+    /// The profile's `zcode_mode`, snapshotted like `hermetic`: the mode its
+    /// zcode steps get when the run grants autonomy. Absent (and in old
+    /// manifests) means `yolo`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
 }
 
 impl ManifestProfile {
@@ -240,6 +245,7 @@ mod tests {
             chain: Vec::new(),
             ephemeral: false,
             hermetic: true,
+            zcode_mode: None,
         };
         let yaml = serde_yaml_ng::to_string(&mp).unwrap();
         let back: ManifestProfile = serde_yaml_ng::from_str(&yaml).unwrap();

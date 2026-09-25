@@ -175,6 +175,13 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
     }
 }
 
+/// zcode's autonomy flags for a profile's `zcode_mode`: the `--mode` that
+/// follows the base form's `build` (zcode keeps the last value). The builtin
+/// form's `yolo` is `ZcodeMode::Yolo`.
+pub fn zcode_autonomous_args(mode: apb_core::profile::ZcodeMode) -> Vec<String> {
+    vec!["--mode".to_string(), mode.as_str().to_string()]
+}
+
 /// Declarative resume-form argv for an agent's `resume` transport (spec
 /// 2026-07-20, Task 7). The answer round substitutes the placeholders as whole
 /// argv elements - `{session}` (the captured session id), `{prompt}` (the

@@ -25,6 +25,7 @@ with two files:
       - { agent: codex, model: gpt-6-sol }
   soul: any                  # any | native_required (does the role need a native system-prompt channel)
   hermetic: false            # optional; default false. See "Hermetic isolation" below
+  zcode_mode: edit           # optional, zcode steps only: yolo (default) | edit. See "ZCode (zcode)"
   skills:                    # names (scope auto) or { name, scope }
     - coding-standards
     - { name: writing-plans, scope: global }
@@ -341,8 +342,14 @@ executor:
 How it runs: `zcode-agent -p <prompt> --json --mode build`. ZCode's `--mode`
 defaults to `yolo` for `-p`, so apb always pins one: `build` normally (in
 headless mode every approval request is denied, so file writes and shell
-commands are refused: effectively read-only), `yolo` only for an authorized
-effectful run (appended last, the last value wins). The CLI has no `--model`
+commands are refused: effectively read-only), and for an authorized effectful
+run the profile's `zcode_mode` (appended last, the last value wins): `yolo` by
+default (files, shell, network), or `edit` when the profile sets
+`zcode_mode: edit` (file edits only; shell commands stay refused, so the
+playbook runs builds and tests in its own script nodes). `zcode_mode` is set
+in `profile.yaml`, by MCP `profile_write` (`zcode_mode: "edit"`) or
+`apb profile write --zcode-mode edit`; an update that does not name it keeps the
+stored value. Other agents ignore it. The CLI has no `--model`
 flag: apb writes a run-scoped copy of the user's ZCode personal provider
 config (`<run>/agent-home/zcode/<node>/provider_config.json`) with the
 selection as its `defaultModelSelection` and points

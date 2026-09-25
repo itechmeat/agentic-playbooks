@@ -155,6 +155,10 @@ pub struct ProfileWrite {
     /// an update (false for a new profile), so a surface that cannot express
     /// the flag never strips it.
     pub hermetic: Option<bool>,
+    /// The ZCode mode for the profile's zcode steps in an autonomous run.
+    /// `None` keeps the stored value on an update (absent for a new profile),
+    /// like `hermetic`.
+    pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
 }
 
 /// Create/update a profile (CAS under a per-profile lock, spec 9.1).
@@ -169,6 +173,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         expected_digest,
         soul_requirement,
         hermetic,
+        zcode_mode,
     } = req;
     apb_core::profile::validate_profile_name(&name).map_err(ToolError::Engine)?;
     let scope_enum = parse_scope(&scope)?;
@@ -205,6 +210,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         soul: soul_requirement,
         skills,
         hermetic: hermetic.unwrap_or(false),
+        zcode_mode,
     };
 
     // Validation: the agent is known (builtin or config) - both the primary and EVERY
@@ -262,10 +268,13 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
             }
             // An update that does not state `hermetic` keeps the stored flag
             // (read under the lock, from the exact content the CAS matched).
+            let stored = ProfileDoc::from_yaml(&cur_yaml).ok();
             if hermetic.is_none() {
-                doc.hermetic = ProfileDoc::from_yaml(&cur_yaml)
-                    .map(|d| d.hermetic)
-                    .unwrap_or(false);
+                doc.hermetic = stored.as_ref().is_some_and(|d| d.hermetic);
+            }
+            // Likewise `zcode_mode`.
+            if zcode_mode.is_none() {
+                doc.zcode_mode = stored.and_then(|d| d.zcode_mode);
             }
         }
     }

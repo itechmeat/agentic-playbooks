@@ -203,6 +203,7 @@ pub(crate) fn snapshot_loaded_profile(
         // Snapshot the profile's hermetic flag so post-start reads use the
         // run's value, not the live profile (subtask S1).
         hermetic: loaded.doc.hermetic,
+        zcode_mode: loaded.doc.zcode_mode,
     })
 }
 

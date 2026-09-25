@@ -133,7 +133,9 @@ fn profile_write_persists_hermetic_field() {
 
 /// F15: an update that does not mention `hermetic` (MCP `profile_write` without
 /// the field, `apb profile write` without the flag) keeps the stored flag
-/// instead of silently turning hermetic isolation off.
+/// instead of silently turning hermetic isolation off. `zcode_mode` follows the
+/// same rule, so a surface that cannot express it (the dashboard editor) never
+/// widens a profile's `edit` back to `yolo`.
 #[test]
 fn profile_update_without_hermetic_keeps_stored_flag() {
     let _l = lock();
@@ -163,6 +165,7 @@ fn profile_update_without_hermetic_keeps_stored_flag() {
             soul_md: "role".into(),
             executor: exec(),
             hermetic: Some(true),
+            zcode_mode: Some(apb_core::profile::ZcodeMode::Edit),
             ..Default::default()
         },
     )
@@ -175,6 +178,11 @@ fn profile_update_without_hermetic_keeps_stored_flag() {
     assert!(
         doc.hermetic,
         "an update that omits hermetic must keep it; yaml:\n{yaml}"
+    );
+    assert_eq!(
+        doc.zcode_mode,
+        Some(apb_core::profile::ZcodeMode::Edit),
+        "an update that omits zcode_mode must keep it; yaml:\n{yaml}"
     );
 }
 

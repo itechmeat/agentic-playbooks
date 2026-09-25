@@ -156,6 +156,7 @@ fn profile_yaml_for(name: &str, ex: &LegacyExec) -> String {
         skills: Vec::new(),
         // Legacy schema-1 executors predate hermetic isolation.
         hermetic: false,
+        zcode_mode: None,
     };
     serde_yaml_ng::to_string(&doc).unwrap_or_default()
 }

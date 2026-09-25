@@ -238,6 +238,7 @@ fn manifest_profile_for(
         // Legacy schema-1 executors predate profiles, hence predate hermetic
         // isolation: the flag is off on the legacy/ephemeral path.
         hermetic: false,
+        zcode_mode: None,
     })
 }
 

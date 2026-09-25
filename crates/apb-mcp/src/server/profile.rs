@@ -94,6 +94,7 @@ impl WfMcp {
             soul,
             expected_digest,
             hermetic,
+            zcode_mode,
         }): Parameters<ProfileWriteArgs>,
     ) -> CallToolResult {
         let executor = crate::profile_tools::ExecutorInput {
@@ -103,6 +104,14 @@ impl WfMcp {
         };
         let soul_requirement = match crate::profile_tools::parse_soul_requirement(soul.as_deref()) {
             Ok(r) => r,
+            Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
+        };
+        let zcode_mode = match zcode_mode
+            .as_deref()
+            .map(apb_core::profile::ZcodeMode::parse)
+            .transpose()
+        {
+            Ok(m) => m,
             Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
         };
         to_call_tool_result(crate::profile_tools::profile_write(
@@ -117,6 +126,7 @@ impl WfMcp {
                 expected_digest,
                 soul_requirement,
                 hermetic,
+                zcode_mode,
             },
         ))
     }

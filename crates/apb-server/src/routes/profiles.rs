@@ -154,6 +154,10 @@ pub(crate) struct ProfileWriteBody {
     /// hermetic profile.
     #[serde(default)]
     hermetic: Option<bool>,
+    /// ZCode mode (`yolo` | `edit`); absent keeps the stored value, like
+    /// `hermetic`.
+    #[serde(default)]
+    zcode_mode: Option<apb_core::profile::ZcodeMode>,
 }
 
 #[derive(Deserialize)]
@@ -209,6 +213,7 @@ pub(crate) async fn write_profile(
             soul_requirement,
             // Absent keeps the stored flag (profile_write decides under its lock).
             hermetic: body.hermetic,
+            zcode_mode: body.zcode_mode,
         },
     );
     match res {

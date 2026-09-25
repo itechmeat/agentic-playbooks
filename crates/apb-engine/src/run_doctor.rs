@@ -797,6 +797,7 @@ mod tests {
                 chain,
                 ephemeral: false,
                 hermetic: false,
+                zcode_mode: None,
             }],
             node_bindings: BTreeMap::from([("a".to_string(), "project/x".to_string())]),
             connectors: Vec::new(),

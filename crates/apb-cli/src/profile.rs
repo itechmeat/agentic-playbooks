@@ -72,6 +72,11 @@ pub(crate) struct ProfileWriteArgs {
     /// flag, a new profile is not hermetic.
     #[arg(long, value_name = "BOOL")]
     hermetic: Option<bool>,
+    /// ZCode mode for the profile's zcode steps in an autonomous run: yolo
+    /// (files, shell, network) or edit (file edits only). Omitted: an update
+    /// keeps the stored value.
+    #[arg(long = "zcode-mode", value_name = "MODE", value_parser = apb_core::profile::ZcodeMode::parse)]
+    zcode_mode: Option<apb_core::profile::ZcodeMode>,
 }
 
 pub(crate) fn profile_cmd(root: &Path, action: ProfileAction) -> ExitCode {
@@ -148,6 +153,7 @@ pub(crate) fn profile_write_cmd(
             expected_digest: args.expected_digest,
             soul_requirement,
             hermetic: args.hermetic,
+            zcode_mode: args.zcode_mode,
         },
     )
 }
@@ -339,6 +345,7 @@ pub(crate) fn profile_edit_cmd(root: &Path, name: &str, scope: &str) -> ExitCode
             expected_digest: Some(digest_before),
             soul_requirement: doc.soul,
             hermetic: Some(doc.hermetic),
+            zcode_mode: doc.zcode_mode,
         },
     );
     match res {

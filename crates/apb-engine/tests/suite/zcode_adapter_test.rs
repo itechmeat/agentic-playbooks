@@ -382,6 +382,44 @@ cat '{}'
     );
 }
 
+/// Headless `--mode build` refuses every write, and `yolo` also allows shell
+/// and network, so a writing node on ZCode had no middle ground. A profile
+/// that asks for `zcode_mode: edit` gets `--mode edit` as its autonomy grant
+/// (the last `--mode` wins), and never yolo.
+#[test]
+fn a_profile_asking_for_zcode_edit_mode_runs_with_mode_edit() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path().join("proj");
+    let home = dir.path().join("home");
+    let cfg = dir.path().join("cfg");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&cfg).unwrap();
+    fake_zcode_home(&home);
+    init_project_with(&root);
+    common::seed_profile(&root, "main", "zcode", "GLM-5.3-Flash@low", &[]);
+    let profile = root.join(".apb/profiles/main/profile.yaml");
+    let yaml = fs::read_to_string(&profile).unwrap();
+    fs::write(&profile, format!("{yaml}zcode_mode: edit\n")).unwrap();
+    let json = Path::new(FIXTURES).join("json_plan.json");
+    let stub = stub_zcode(dir.path(), &format!("cat '{}'", json.display()));
+    fs::write(
+        cfg.join("config.yaml"),
+        format!("agents:\n  zcode:\n    program: {stub}\n"),
+    )
+    .unwrap();
+
+    let _env = ZcodeRunEnv::set(&[("HOME", &home), ("APB_CONFIG_DIR", &cfg)]);
+    let res = run(&root, "zplan", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let argv = recorded_argv(dir.path());
+    let modes: Vec<&str> = argv
+        .windows(2)
+        .filter(|w| w[0] == "--mode")
+        .map(|w| w[1].as_str())
+        .collect();
+    assert_eq!(modes, vec!["build", "edit"]);
+}
+
 fn init_project_with(root: &Path) {
     apb_core::registry::init_project(root).unwrap();
     let vdir = root.join(".apb/playbooks/zplan/1.0.0");

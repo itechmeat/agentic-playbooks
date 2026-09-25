@@ -737,7 +737,7 @@ pub(crate) fn execute_node(
                         // already substituted); the canonical binary, autonomy
                         // flags, and transport are kept. The resume form always
                         // delivers the follow-up via argv `{prompt}`.
-                        let spec = match &resume_argv {
+                        let mut spec = match &resume_argv {
                             Some(rargv) => apb_core::config::InvocationDef {
                                 argv: rargv.clone(),
                                 prompt_via: apb_core::config::PromptVia::Argv,
@@ -745,6 +745,16 @@ pub(crate) fn execute_node(
                             },
                             None => ri.spec.clone(),
                         };
+                        // A profile's `zcode_mode` narrows (or restates) the
+                        // autonomy grant of its zcode steps; the base form's
+                        // `--mode build` is untouched, so a run without
+                        // autonomy still cannot write.
+                        if let Some(mode) = entry.zcode_mode
+                            && apb_core::detect::canonical_agent_id(&step.agent)
+                                == apb_core::zcode::AGENT_ID
+                        {
+                            spec.autonomous_args = crate::invocation::zcode_autonomous_args(mode);
+                        }
                         Box::new(crate::adapter::ClaudeAdapter {
                             program: ri.canonical_executable.to_string_lossy().into_owned(),
                             spec,
