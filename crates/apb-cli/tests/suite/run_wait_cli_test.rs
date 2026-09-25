@@ -60,6 +60,7 @@ fn detach_then_wait_reports_the_gate_and_the_outcome_by_exit_code() {
         .strip_prefix("run started: ")
         .unwrap_or_else(|| panic!("unexpected output: {stdout}"))
         .to_string();
+    let _guard = crate::common::RunGuard::new(dir.path(), &run_id);
 
     let out = apb_in(dir.path(), &["wait", &run_id, "--timeout", "30"]);
     assert_eq!(out.status.code(), Some(3), "needs input: {out:?}");
@@ -180,6 +181,7 @@ fn mcp_run_wait_blocks_with_progress_and_returns_compact_results() {
     let body: serde_json::Value =
         serde_json::from_str(v["result"]["content"][0]["text"].as_str().unwrap()).unwrap();
     let run_id = body["run_id"].as_str().expect("run_id").to_string();
+    let _guard = crate::common::RunGuard::new(dir.path(), &run_id);
 
     // One call waits out the gate's grace (several slices), sending progress
     // notifications meanwhile, and returns needs_input with the gate.

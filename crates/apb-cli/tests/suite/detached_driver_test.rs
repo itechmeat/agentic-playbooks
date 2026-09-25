@@ -15,7 +15,6 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::path::PathBuf;
 use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
@@ -44,91 +43,8 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-/// Every process signal and liveness check in this module is a syscall, not a
-/// `kill`/`ps` subprocess.
-///
-/// That is not tidiness. `Command::new("kill").arg("-9").arg("-<pgid>")` is
-/// accepted by BSD kill (macOS, where this suite passed) but rejected by
-/// procps-ng kill (Linux, and so CI), which hands the leading `-` of the
-/// operand to getopt and errors out as if it were an unknown option. The
-/// signal was then never delivered, the status of the spawned `kill` was
-/// discarded, and the unbounded `child.wait()` that followed blocked forever:
-/// the CI job burned 30 minutes on a test whose own 60s poll ceiling was never
-/// reached, because control never got that far. `apb_engine::proc::run_capture`
-/// and `apb_core::detect` moved off the same subprocess form for the same
-/// reason. A syscall has no argument-parsing layer to disagree about.
-mod sig {
-    /// SIGKILLs a single process.
-    ///
-    /// Validated for the same reason `kill_group` is, and it is not academic:
-    /// `DriverReaper` calls both on a pid it parsed out of `driver.pid`. A
-    /// `driver.pid` holding `4294967295` narrows to `-1`, and
-    /// `kill(-1, SIGKILL)` is "every process I may signal" - this test suite
-    /// would end the developer's session.
-    ///
-    /// `> 0` here, where `kill_group` needs `> 1`: the single-pid form does
-    /// not negate its argument, so pid 1 is just init and merely EPERMs. Only
-    /// 0 ("my own process group") and the values that narrow negative have to
-    /// go.
-    pub fn kill_pid(pid: u32) {
-        let Some(pid) = single_target(pid) else {
-            return;
-        };
-        // SAFETY: `kill` takes no pointers; `pid` is a validated positive pid,
-        // never a wildcard, and an unknown pid is ESRCH.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-        }
-    }
-
-    /// The `kill(2)` argument naming a single process, or `None` when `pid`
-    /// cannot name one.
-    fn single_target(pid: u32) -> Option<i32> {
-        match i32::try_from(pid) {
-            Ok(p) if p > 0 => Some(p),
-            _ => None,
-        }
-    }
-
-    /// SIGKILLs every process in the group led by `pid`.
-    ///
-    /// Refuses anything that cannot lead an addressable group. The group form
-    /// negates its argument, so pid 1 becomes `kill(-1, SIGKILL)` - "every
-    /// process I may signal" - pid 0 targets our own group, and a pid above
-    /// `i32::MAX` narrows negative and then lands on a small unrelated pid.
-    /// `DriverReaper` feeds this a pid parsed out of `driver.pid`, and a
-    /// signal target that came from a file gets validated. Mirrors
-    /// `apb_engine::proc::group_target`.
-    pub fn kill_group(pid: u32) {
-        let Ok(pid) = i32::try_from(pid) else {
-            return;
-        };
-        if pid <= 1 {
-            return;
-        }
-        // SAFETY: as above; a validated negative pid addresses the group.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-
-    /// The process-group id of `pid`, or `None` once the process is gone.
-    pub fn pgid_of(pid: u32) -> Option<u32> {
-        // SAFETY: `getpgid` takes no pointers and reports ESRCH as -1.
-        let pgid = unsafe { libc::getpgid(pid as i32) };
-        (pgid >= 0).then_some(pgid as u32)
-    }
-
-    /// Whether `pid` still exists (a zombie counts as existing, which is the
-    /// point of the reaping assertions in this module).
-    pub fn alive(pid: u32) -> bool {
-        // SAFETY: signal 0 performs the permission and existence checks
-        // without delivering anything.
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-}
-
-use sig::{alive, pgid_of};
+use crate::common::RunGuard;
+use crate::common::sig::{self, alive, pgid_of};
 
 /// `child.wait()` with a deadline, and a message naming what the wait was for.
 ///
@@ -150,28 +66,6 @@ fn wait_with_deadline(child: &mut Child, budget: Duration, what: &str) {
                 std::thread::sleep(POLL_STEP);
             }
             Err(e) => panic!("wait failed while waiting for {what}: {e}"),
-        }
-    }
-}
-
-/// Kills the detached driver if a test bails out before the run finished.
-/// Nothing else would: the driver deliberately outlives every process these
-/// tests control, so a panicking `poll_until` would otherwise leave a live
-/// `sleep` running against a tempdir that is about to be deleted. On the happy
-/// path `driver.pid` is already gone and this is a no-op.
-struct DriverReaper {
-    run_dir: PathBuf,
-}
-
-impl Drop for DriverReaper {
-    fn drop(&mut self) {
-        if let Some(pid) = apb_engine::driver::read_driver_pid(&self.run_dir) {
-            // The driver leads its own group, so this also takes down the
-            // script it is running. Not waited on: the driver is not our
-            // child (it was re-exec'd by another process), so there is no
-            // handle to reap and nothing that could block here.
-            sig::kill_group(pid);
-            sig::kill_pid(pid);
         }
     }
 }
@@ -259,6 +153,7 @@ fn drive_run_subcommand_completes_a_run_prepared_by_another_process() {
     )
     .unwrap();
     let run_id = prepared.run_id().to_string();
+    let _guard = RunGuard::new(dir.path(), &run_id);
     // Release the workdir lock the way a parent that failed to spawn would;
     // the child then takes it itself.
     drop(prepared);
@@ -279,9 +174,6 @@ fn drive_run_subcommand_completes_a_run_prepared_by_another_process() {
     );
 
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
     let status = wait_for_outcome(&run_dir, 0, "the driven run to reach a terminal event");
     assert_eq!(status, RunStatus::Succeeded);
 }
@@ -313,9 +205,7 @@ fn mcp_background_run_survives_a_group_kill_of_the_mcp_process() {
         .to_string();
 
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
+    let _guard = RunGuard::new(dir.path(), &run_id);
 
     // The run is still in flight (the script sleeps 3s): the driver must be a
     // process of its own, not a thread of the MCP server.
@@ -388,6 +278,7 @@ fn spawn_driver_at_returns_the_driver_pid_and_drives_the_run_alone() {
     )
     .unwrap();
     let run_id = prepared.run_id().to_string();
+    let _guard = RunGuard::new(dir.path(), &run_id);
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
 
     let pid = apb_engine::driver::spawn_driver_at(
@@ -402,10 +293,6 @@ fn spawn_driver_at_returns_the_driver_pid_and_drives_the_run_alone() {
     // Hand the lock across exactly as `start_detached` does, so the driver
     // adopts it rather than waiting the handover window out.
     prepared.hand_over_workdir_lock(pid).unwrap();
-
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
 
     // The returned pid is the driver itself: whatever it publishes as
     // `driver.pid` must be the very pid we were handed, or the workdir
@@ -451,6 +338,7 @@ fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
     )
     .unwrap();
     let run_id = prepared.run_id().to_string();
+    let _guard = RunGuard::new(dir.path(), &run_id);
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
 
     // This test process is the launcher, so it owns the reaper.
@@ -525,9 +413,7 @@ fn a_stop_in_the_driver_spawn_window_is_not_lost() {
         .unwrap_or_else(|| panic!("no run_id in playbook_run response: {body}"))
         .to_string();
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
+    let _guard = RunGuard::new(dir.path(), &run_id);
 
     // No polling: whoever holds the run_id holds it the moment the call
     // returned, and by then the run must already name its driver.
@@ -674,9 +560,7 @@ fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
     // own snapshot, so rewriting it here is what the resumed node will run.
     fs::write(run_dir.join("scripts/work.sh"), "#!/bin/sh\nsleep 10\n").unwrap();
     let before = finishes(&run_dir);
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
+    let _guard = RunGuard::new(dir.path(), &run_id);
 
     let mut mcp = McpSession::start(dir.path());
     let started = Instant::now();
