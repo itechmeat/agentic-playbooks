@@ -45,6 +45,10 @@ pub struct Preflight {
     pub version: String,
     pub digest: String,
     pub effects: Vec<String>,
+    /// The sub-playbook tree the plan will run, keyed by the parent's
+    /// playbook-node id, so the consent surface can show every child and its
+    /// trust, not only the parent's.
+    pub children: std::collections::BTreeMap<String, ChildExpectation>,
 }
 
 /// Preflight of the definition in a given root: lifecycle (draft/retired are rejected)
@@ -65,8 +69,9 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
     // C): the parent's effective effects UNION every pinned child's, recursively.
     // Reuse the same walk `check_run` uses so both derive the identical union
     // from one resolution. A cross-workspace playbook is always project-scoped
-    // here; `acknowledge_untrusted: true` skips trust marking (trust is enforced
-    // separately at execute-plan time), keeping preflight read-only.
+    // here; `acknowledge_untrusted: true` skips trust marking, keeping preflight
+    // read-only: trust for the parent AND every child is enforced when the plan
+    // executes, by running `check_run` in the target workspace.
     let origin = Origin::Project { workspace_id: None };
     let tree = resolve_tree(root, &loaded.playbook, &origin, id, true)?;
     let effects = tree
@@ -78,6 +83,7 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
         version: loaded.version.clone(),
         digest: loaded.digest.clone(),
         effects,
+        children: tree.children,
     })
 }
 

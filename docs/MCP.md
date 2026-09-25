@@ -37,7 +37,7 @@ Reads (read-only):
 | `playbook_get` | Playbook definition by id and (optional) version; `detail` selects `summary` (default: interface only, no node prompt bodies) or `full` (complete authoring payload) |
 | `playbook_validate` | Validate a playbook, list of issues |
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
-| `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing) |
+| `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
 | `runs_list` | List of runs |
 | `run_status` | Current run status (nodes, outputs) |
 | `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status` |
@@ -117,7 +117,11 @@ catch. Re-approve such a playbook after reviewing its scripts: MCP
 `playbook_run` goes through a server-side gate: draft is rejected (only via
 `playbook_trial`), an unapproved digest requires `acknowledge_untrusted: true`
 after user confirmation, and running in another workspace only happens via the
-two-phase `playbook_prepare_run` / `playbook_execute_plan`. The
+two-phase `playbook_prepare_run` / `playbook_execute_plan`.
+`playbook_execute_plan` runs the same gate in the target workspace, with the
+caller's `acknowledge_untrusted`: the parent and every sub-playbook child must
+be approved (or acknowledged), and the verified child pins go to the engine,
+so a child that changes after the check is refused when it would start. The
 read-only/destructive annotations remain client hints; enforcement lives on
 the server.
 

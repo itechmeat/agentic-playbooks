@@ -1509,6 +1509,66 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
     }
 }
 
+/// A cross-workspace plan runs its whole sub-playbook tree through the same
+/// gate as `playbook_run`: an approved parent does not carry an unapproved
+/// child past it without an acknowledge.
+#[tokio::test]
+async fn execute_plan_refuses_an_unapproved_child_without_acknowledge() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let (a, b, b_id) = setup_two(cfg.path());
+    let seed = |id: &str, yaml: &str| {
+        let vdir = b.path().join(".apb/playbooks").join(id).join("1.0.0");
+        fs::create_dir_all(&vdir).unwrap();
+        fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+        fs::write(
+            b.path().join(".apb/playbooks").join(id).join("current"),
+            "1.0.0",
+        )
+        .unwrap();
+    };
+    seed(
+        "pp",
+        "schema: 2\nid: pp\nname: pp\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: sub, type: playbook, playbook: child }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: sub }\n  - { from: sub, to: f }\n",
+    );
+    seed(
+        "child",
+        "schema: 2\nid: child\nname: child\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: f }\n",
+    );
+    approve_version(b.path(), "pp", "1.0.0");
+
+    let server = WfMcp::new(a.path().to_path_buf());
+    let res = server
+        .playbook_prepare_run(Parameters(PlaybookPrepareRunArgs {
+            id: "pp".into(),
+            version: None,
+            workspace: b_id.clone(),
+            params: BTreeMap::new(),
+        }))
+        .await;
+    let plan: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
+    assert_eq!(plan["plan"]["children"][0]["id"], "child", "got: {plan}");
+    assert_eq!(plan["plan"]["children"][0]["trusted"], false, "got: {plan}");
+    let token = plan["plan_token"].as_str().unwrap().to_string();
+
+    let refused = server
+        .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
+            plan_token: token,
+            acknowledge_untrusted: None,
+        }))
+        .await;
+    let out: serde_json::Value = serde_json::from_str(&result_text(&refused)).unwrap();
+    assert_eq!(
+        out["policy_refusal"]["policy"], "untrusted_requires_acknowledge",
+        "got: {out}"
+    );
+    assert_eq!(out["policy_refusal"]["id"], "child", "got: {out}");
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+}
+
 // Review regression (Important #2): a global playbook is started via
 // playbook_run with scope=global and runs in the current project.
 #[tokio::test]

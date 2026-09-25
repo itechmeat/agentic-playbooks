@@ -121,73 +121,46 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        // A repeat preflight: the digest must not have drifted between prepare and execute.
-        let pf = match crate::policy::preflight(&root_b, &payload.id, Some(&payload.version)) {
-            Ok(p) => p,
-            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
-        };
-        if pf.digest != payload.digest {
-            return to_call_tool_result(Ok(
-                json!({ "error": "plan_stale", "detail": "playbook changed since prepare" }),
-            ));
-        }
-        // A drift in a profile or skill between prepare and execute also breaks the plan.
-        let now_profiles: Vec<crate::plan::PlanProfile> = crate::policy::playbook_profile_bundles(
-            &root_b,
-            &payload.id,
-            Some(&payload.version),
-            false,
-        )
-        .into_iter()
-        .map(|(key, bundle)| crate::plan::PlanProfile { key, bundle })
-        .collect();
-        if now_profiles != payload.profiles {
-            return to_call_tool_result(Ok(
-                json!({ "error": "plan_stale", "detail": "profile or skill changed since prepare" }),
-            ));
-        }
-        // Trust: an unapproved digest requires the user's explicit confirmation
-        // (spec 9). preflight does not check trust - we do it here, so an
-        // untrusted playbook of another workspace is not run silently.
-        if acknowledge_untrusted != Some(true)
-            && !apb_core::trust::TrustStore::load().is_approved(&payload.digest)
-        {
-            return to_call_tool_result(Ok(json!({
-                "policy_refusal": {
-                    "policy": "untrusted_requires_acknowledge",
-                    "id": payload.id,
-                    "digest": payload.digest,
-                    "detail": "re-run execute_plan with acknowledge_untrusted: true after user confirmation",
-                }
-            })));
-        }
-        // Trust of the plan's profiles: every bundle from the signed plan must
-        // be approved (or an explicit acknowledge). Otherwise a trusted
-        // playbook with an untrusted profile would run without confirmation
-        // (spec 5.1).
-        if acknowledge_untrusted != Some(true) {
-            let store = apb_core::trust::TrustStore::load();
-            let untrusted: Vec<String> = payload
-                .profiles
-                .iter()
-                .filter(|p| !store.is_approved(&p.bundle))
-                .map(|p| p.key.clone())
-                .collect();
-            if !untrusted.is_empty() {
-                return to_call_tool_result(Ok(json!({
-                    "policy_refusal": {
-                        "policy": "untrusted_profile_requires_acknowledge",
-                        "profiles": untrusted,
-                        "detail": "re-run execute_plan with acknowledge_untrusted: true after user confirmation",
-                    }
-                })));
-            }
-        }
+        // The run gate, in the target workspace, exactly as `playbook_run` runs
+        // it locally: lifecycle, `requires`, the parent's digest and profile
+        // trust, and the whole sub-playbook tree (every child's digest and
+        // profile trust, with its pins), each gated by the caller's
+        // acknowledge. Its permit is what the engine gets, so a child that
+        // drifts after this check is refused at spawn too.
         let wref = apb_core::scope::PlaybookRef {
             origin: apb_core::scope::Origin::Project { workspace_id: None },
             id: payload.id.clone(),
             version: Some(payload.version.clone()),
         };
+        let permit = match crate::policy::check_run(
+            &root_b,
+            &wref,
+            acknowledge_untrusted == Some(true),
+            false,
+        ) {
+            Ok(p) => p,
+            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
+        };
+        // The plan the user confirmed must still be what runs: the digest and
+        // the profile bundles the gate verified equal the signed plan's.
+        if permit.playbook_digest != payload.digest {
+            return to_call_tool_result(Ok(
+                json!({ "error": "plan_stale", "detail": "playbook changed since prepare" }),
+            ));
+        }
+        let now_profiles: Vec<crate::plan::PlanProfile> = permit
+            .profile_bundles
+            .iter()
+            .map(|(key, bundle)| crate::plan::PlanProfile {
+                key: key.clone(),
+                bundle: bundle.clone(),
+            })
+            .collect();
+        if now_profiles != payload.profiles {
+            return to_call_tool_result(Ok(
+                json!({ "error": "plan_stale", "detail": "profile or skill changed since prepare" }),
+            ));
+        }
         let resolved = match apb_core::store::resolve(&root_b, &wref) {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Err(ToolError::from(e))),
@@ -219,6 +192,7 @@ impl WfMcp {
             params: payload.params.clone(),
             expected_digest: Some(payload.digest.clone()),
             expected_profile_bundles: Some(expected_bundles),
+            expected_children: Some(permit.children),
             ..Default::default()
         };
         // Driven by a detached process, like every other background start:

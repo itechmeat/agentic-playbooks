@@ -245,6 +245,10 @@ pub fn playbook_prepare_run(
         .iter()
         .map(|p| json!({ "ref": p.key, "bundle": p.bundle, "trusted": store.is_approved(&p.bundle) }))
         .collect();
+    // Every sub-playbook the plan runs, with its own trust, so the user sees
+    // the whole tree they confirm (`node` is the path of playbook-node ids).
+    let mut children: Vec<Value> = Vec::new();
+    list_children(&pf.children, "", &store, &mut children);
     let token = crate::plan::encode(&payload);
     Ok(json!({
         "plan": {
@@ -255,10 +259,36 @@ pub fn playbook_prepare_run(
             "effects": pf.effects,
             "trusted": trusted,
             "profiles": profiles,
+            "children": children,
             "params": params,
         },
         "plan_token": token,
     }))
+}
+
+/// Flattens a sub-playbook pin tree for a plan: one entry per child, depth
+/// first, with the digest the plan pins and whether it is approved.
+fn list_children(
+    tree: &BTreeMap<String, apb_engine::run_config::ChildExpectation>,
+    prefix: &str,
+    store: &apb_core::trust::TrustStore,
+    out: &mut Vec<Value>,
+) {
+    for (node, child) in tree {
+        let path = if prefix.is_empty() {
+            node.clone()
+        } else {
+            format!("{prefix}/{node}")
+        };
+        out.push(json!({
+            "node": path,
+            "id": child.id,
+            "version": child.version,
+            "digest": child.playbook_digest,
+            "trusted": store.is_approved(&child.playbook_digest),
+        }));
+        list_children(&child.children, &path, store, out);
+    }
 }
 
 /// Activates a playbook after a successful trial or explicit confirmation (spec
