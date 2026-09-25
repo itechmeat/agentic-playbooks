@@ -9,6 +9,7 @@ mod serve;
 mod server;
 mod suggestions;
 mod trash;
+mod trust;
 mod util;
 
 use std::path::PathBuf;
@@ -32,6 +33,7 @@ use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
 use crate::server::{ServerAction, server_cmd};
 use crate::suggestions::{SuggestionsAction, suggestions_cmd};
 use crate::trash::{TrashAction, trash_cmd};
+use crate::trust::{TrustAction, trust_cmd};
 use crate::util::{resolve_bind, resolve_port};
 
 #[derive(Parser)]
@@ -120,6 +122,11 @@ enum Command {
     Trash {
         #[command(subcommand)]
         action: TrashAction,
+    },
+    /// List the approvals in the trust store, or revoke them
+    Trust {
+        #[command(subcommand)]
+        action: TrustAction,
     },
     /// Run a playbook
     Run {
@@ -373,6 +380,7 @@ fn main() -> ExitCode {
         }
         Some(Command::Import { file, no_current }) => import_cmd(&root, &file, !no_current),
         Some(Command::Trash { action }) => trash_cmd(&root, action),
+        Some(Command::Trust { action }) => trust_cmd(action),
         Some(Command::Run {
             name,
             version,

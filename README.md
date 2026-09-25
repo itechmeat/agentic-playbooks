@@ -116,6 +116,7 @@ apb stop <run>      stop a run: interrupt the running node, finalize if the driv
 apb note <run> <t>  post a note (context append) to a run's control channel
 apb review          decide a pending human_review node
 apb trash list      deleted playbooks; `apb trash restore <name|id>` brings one back
+apb trust list      approvals in the trust store; `apb trust revoke <digest|id>` removes them
 apb answer <run> <t> answer an interactive node's pending question (--node)
 apb dashboard       web UI (port 7321)
 apb mcp             stdio MCP server for coding agents

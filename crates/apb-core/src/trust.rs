@@ -62,6 +62,18 @@ pub enum OriginKind {
     RepositoryProvided,
 }
 
+impl OriginKind {
+    /// The wire and on-disk name (`bundled`, `agent_generated`, ...).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OriginKind::Bundled => "bundled",
+            OriginKind::AgentGenerated => "agent_generated",
+            OriginKind::LocallyApproved => "locally_approved",
+            OriginKind::RepositoryProvided => "repository_provided",
+        }
+    }
+}
+
 /// Reads the definition's lifecycle from `<playbook_dir>/lifecycle`. No file or
 /// an unrecognized value - `Active`.
 pub fn read_lifecycle(playbook_dir: &Path) -> Lifecycle {

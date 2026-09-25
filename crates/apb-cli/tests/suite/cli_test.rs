@@ -244,3 +244,41 @@ fn trash_list_restore_and_conflict() {
         .assert()
         .code(2);
 }
+
+/// `apb trust`: the listing shows every approval, a revoke by id removes all
+/// of that id's approvals of the given kind and prints them, and a target
+/// that matches nothing exits 2.
+#[test]
+fn trust_list_and_revoke_by_id() {
+    let cfg = tempfile::tempdir().unwrap();
+    fs::write(
+        cfg.path().join("trust.json"),
+        r#"{"schema_version":1,"approved":{
+            "sha256:aa":{"id":"demo","origin_kind":"locally_approved","approved_at_ms":1,"kind":"playbook"},
+            "sha256:bb":{"id":"demo","origin_kind":"locally_approved","approved_at_ms":2,"kind":"playbook"},
+            "sha256:cc":{"id":"keep","origin_kind":"agent_generated","approved_at_ms":3,"kind":"profile_bundle"}}}"#,
+    )
+    .unwrap();
+    let apb = |args: &[&str]| {
+        let mut cmd = playbook();
+        cmd.args(args).env("APB_CONFIG_DIR", cfg.path());
+        cmd
+    };
+
+    let out = apb(&["trust", "list", "--json"]).output().unwrap();
+    assert!(out.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed.as_array().unwrap().len(), 3, "{listed}");
+
+    apb(&["trust", "revoke", "demo", "--kind", "playbook"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("revoked 2 approval(s)"))
+        .stdout(predicate::str::contains("sha256:bb"));
+    let out = apb(&["trust", "list", "--json"]).output().unwrap();
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed[0]["id"], "keep", "{listed}");
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+
+    apb(&["trust", "revoke", "demo"]).assert().code(2);
+}
