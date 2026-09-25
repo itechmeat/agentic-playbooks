@@ -17,7 +17,16 @@
   import NodePanel from '../lib/NodePanel.svelte'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import { takeDraftYaml } from '../lib/playbookdupe'
-  import { addEdge, addNode, removeEdge, removeNode, suggestNodeId, updateNode } from '../lib/playbookedit'
+  import {
+    addEdge,
+    addNode,
+    EDITOR_NODE_KINDS,
+    removeEdge,
+    removeNode,
+    suggestNodeId,
+    updateNode,
+    type NodeKind,
+  } from '../lib/playbookedit'
   import { onEscape } from '../lib/hooks/escape.svelte'
   import { docToString, NEW_PLAYBOOK_TEMPLATE, parseDoc, parsePlaybook } from '../lib/playbookyaml'
   import type { PlaybookModel } from '../lib/playbookyaml'
@@ -44,9 +53,6 @@
   let projects = $state<Project[]>([])
   let targetWorkspace = $state('')
 
-  // Offered in the order a graph is usually built, with the node that ends a
-  // run last.
-  const NODE_KINDS = ['start', 'agent_task', 'script', 'condition', 'playbook', 'finish'] as const
 
   let yamlText = $state('')
   let idInput = $state('')
@@ -248,7 +254,7 @@
     const kind = addKind
     if (!kind) return
     addKind = ''
-    onAddNode(kind as (typeof NODE_KINDS)[number])
+    onAddNode(kind as NodeKind)
   })
 
   function onNodeClick({ node }: { node: FlowNode }) {
@@ -412,7 +418,7 @@
       </Select.Trigger>
       <Select.Content>
         <Select.Group>
-          {#each NODE_KINDS as kind (kind)}
+          {#each EDITOR_NODE_KINDS as kind (kind)}
             <Select.Item value={kind} label={kind}>{kind}</Select.Item>
           {/each}
         </Select.Group>

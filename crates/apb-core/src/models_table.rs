@@ -288,8 +288,8 @@ pub fn load_merged() -> Result<ModelsTable, ModelsError> {
 /// profiles saved before the agent id was renamed) resolves to the same
 /// vendor as `claude`.
 pub fn agent_vendor(agent: &str) -> Option<&'static str> {
-    match agent {
-        "claude" | "claude-code" => Some("anthropic"),
+    match crate::detect::canonical_agent_id(agent) {
+        "claude" => Some("anthropic"),
         "codex" => Some("openai"),
         "grok" => Some("xai"),
         "zcode" => Some("zhipu"),
@@ -311,9 +311,9 @@ pub fn agent_vendor(agent: &str) -> Option<&'static str> {
 ///
 /// An empty table list (an overlay may clear one) means no closed list.
 pub fn static_models_for_agent(agent: &str, table: &ModelsTable) -> Option<Vec<String>> {
-    let list = match agent {
+    let list = match crate::detect::canonical_agent_id(agent) {
         a if a == crate::zcode::AGENT_ID => crate::zcode::model_list(),
-        "claude" | "claude-code" => table.claude_static_models.clone(),
+        "claude" => table.claude_static_models.clone(),
         "codex" => table.codex_static_models.clone(),
         _ => return None,
     };

@@ -213,7 +213,8 @@ pub struct PendingSupervisor {
 /// progress notes do not. Abort/pause clear the pending state via their own
 /// terminal events (`RunAborted` / `RunPaused`), not via this action list.
 fn supervisor_action_resolves_wake(action: &str) -> bool {
-    matches!(action, "node_retry" | "run_continue_from")
+    use crate::event::supervisor_action::{NODE_RETRY, RUN_CONTINUE_FROM};
+    action == NODE_RETRY || action == RUN_CONTINUE_FROM
 }
 
 /// The outstanding failure/timeout wake, if the supervised driver is parked

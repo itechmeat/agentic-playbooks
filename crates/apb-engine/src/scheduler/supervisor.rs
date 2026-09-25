@@ -115,9 +115,10 @@ pub fn spawn_supervisor_agent(
 /// `ClaudeAdapter::spawn_supervisor`), so it can block for the server maximum;
 /// other agents keep under the ~60 s default of the strictest hosts (Codex).
 pub(crate) fn supervisor_wait_ms(agent_id: &str) -> u64 {
-    match agent_id {
-        "claude" | "claude-code" => 1_800_000,
-        _ => 50_000,
+    if apb_core::detect::canonical_agent_id(agent_id) == "claude" {
+        crate::run_wait::RUN_WAIT_MAX_MS
+    } else {
+        crate::run_wait::RUN_WAIT_DEFAULT_MS
     }
 }
 
@@ -174,7 +175,7 @@ pub(crate) fn await_control(
             match entry.cmd {
                 Control::ContextAppend { note } => {
                     log.append(EventPayload::SupervisorAction {
-                        action: "context_append".into(),
+                        action: crate::event::supervisor_action::CONTEXT_APPEND.into(),
                         node: None,
                         detail: note,
                     })?;
@@ -297,7 +298,7 @@ pub(crate) fn monitor_supervisor_heartbeat(
     let threshold_ms: u128 = std::env::var("APB_SUPERVISOR_HEARTBEAT_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(60_000u128);
+        .unwrap_or(crate::run_wait::SUPERVISOR_LOSS_THRESHOLD.as_millis());
     if should_declare_lost(silence, threshold_ms, *supervisor_lost_logged) {
         log.append(EventPayload::SupervisorLost {
             detail: "supervisor heartbeat lost".into(),
@@ -451,7 +452,7 @@ pub(crate) fn park_for_supervisor(
                 prompt_override,
             } => {
                 log.append(EventPayload::SupervisorAction {
-                    action: "node_retry".into(),
+                    action: crate::event::supervisor_action::NODE_RETRY.into(),
                     node: Some(node.clone()),
                     detail: prompt_override.clone().unwrap_or_default(),
                 })?;
@@ -465,7 +466,7 @@ pub(crate) fn park_for_supervisor(
             }
             Control::ContinueFrom { node } => {
                 log.append(EventPayload::SupervisorAction {
-                    action: "run_continue_from".into(),
+                    action: crate::event::supervisor_action::RUN_CONTINUE_FROM.into(),
                     node: Some(node.clone()),
                     detail: String::new(),
                 })?;

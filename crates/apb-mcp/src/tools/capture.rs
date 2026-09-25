@@ -149,7 +149,7 @@ pub fn playbook_capture(
         "id": id,
         "version": version,
         "scope": selected_scope,
-        "lifecycle": "draft",
+        "lifecycle": apb_core::trust::Lifecycle::Draft.as_str(),
         "trusted": false,
         "provenance": provenance,
     }))

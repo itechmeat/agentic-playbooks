@@ -171,12 +171,18 @@ const BUILTIN_BINS: &[(&str, &str)] = &[
     (crate::zcode::AGENT_ID, crate::zcode::PATH_BIN),
 ];
 
-/// The id a built-in agent alias stands for (`claude-code` is `claude`).
+/// Legacy ids of built-in agents and the id each one stands for: profiles
+/// saved before `claude-code` was renamed `claude` still name it. The one copy
+/// of the alias; every per-agent decision reads [`canonical_agent_id`].
+pub const BUILTIN_ALIASES: &[(&str, &str)] = &[("claude-code", "claude")];
+
+/// The id a built-in agent alias stands for (`claude-code` is `claude`); any
+/// other id is returned unchanged.
 pub fn canonical_agent_id(agent_id: &str) -> &str {
-    match agent_id {
-        "claude-code" => "claude",
-        other => other,
-    }
+    BUILTIN_ALIASES
+        .iter()
+        .find(|(alias, _)| *alias == agent_id)
+        .map_or(agent_id, |(_, id)| id)
 }
 
 /// The binary a built-in agent is found as on PATH, `None` for any other id.

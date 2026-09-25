@@ -158,13 +158,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     }))
 }
 
-/// Default `run_wait` block when the caller names none: under the ~60 s
-/// tool-call limit of the strictest hosts (Codex, ChatGPT Apps), so a single
-/// wait never times out on the host side.
-pub const RUN_WAIT_DEFAULT_MS: u64 = 50_000;
-/// Upper bound for one `run_wait` call (30 minutes). Hosts with a long tool
-/// timeout (Claude Code) can wait out a whole run in one call.
-pub const RUN_WAIT_MAX_MS: u64 = 30 * 60 * 1000;
+pub use apb_engine::run_wait::{RUN_WAIT_DEFAULT_MS, RUN_WAIT_MAX_MS};
 
 /// Clamps a caller's `timeout_ms` for `run_wait`/`supervisor_wait_event`.
 pub fn wait_timeout(timeout_ms: Option<u64>) -> std::time::Duration {
@@ -264,21 +258,6 @@ pub fn run_events(root: &Path, run_id: &str, from_seq: Option<u64>) -> Result<Va
     )
 }
 
-fn node_kind_label(kind: &apb_core::schema::NodeKind) -> &'static str {
-    use apb_core::schema::NodeKind::*;
-    match kind {
-        Start => "start",
-        AgentTask { .. } => "agent_task",
-        Script { .. } => "script",
-        Prompt { .. } => "prompt",
-        Condition { .. } => "condition",
-        HumanReview { .. } => "human_review",
-        Wait { .. } => "wait",
-        Finish { .. } => "finish",
-        Playbook { .. } => "playbook",
-    }
-}
-
 /// Per-node expected vs measured durations for calibration (spec 5). Measured
 /// comes from the run's events; expected from the playbook version bound to
 /// the run. The maintaining agent uses this to update estimates via
@@ -293,7 +272,7 @@ pub(crate) fn build_duration_table_from(
         .map(|n| {
             json!({
                 "node": n.id,
-                "kind": node_kind_label(&n.kind),
+                "kind": n.kind.type_str(),
                 "expected_seconds": n.expected_seconds(),
                 "measured_seconds": measured.get(&n.id),
             })

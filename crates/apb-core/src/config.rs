@@ -5,6 +5,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// The dashboard's port when neither `--port` nor `port:` in the global
+/// config names one. The web dev server proxies to it too (generated into
+/// `web/src/lib/api.gen.ts`).
+pub const DEFAULT_PORT: u16 = 7321;
+
 /// Global CLI config (`~/.config/playbook/config.yaml`, spec 4.2 / 7.1).
 /// Describes coding agents (id -> launch command), the runner registry (8d),
 /// and the web server port. Executors are bound through profiles (schema 2),

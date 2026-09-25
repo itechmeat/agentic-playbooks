@@ -264,9 +264,24 @@ pub enum SupervisorWait {
     TimedOut,
 }
 
+/// Default block of one server-side wait (MCP `run_wait`,
+/// `supervisor_wait_event`) when the caller names none: under the ~60 s
+/// tool-call limit of the strictest hosts (Codex, ChatGPT Apps), so a single
+/// wait never times out on the host side.
+pub const RUN_WAIT_DEFAULT_MS: u64 = 50_000;
+/// Upper bound for one server-side wait (30 minutes). Hosts with a long tool
+/// timeout (Claude Code) can wait out a whole run in one call.
+pub const RUN_WAIT_MAX_MS: u64 = 30 * 60 * 1000;
+
+/// How long a supervisor agent may stay silent (no heartbeat) before the
+/// drive declares it lost and respawns it once. `APB_SUPERVISOR_HEARTBEAT_MS`
+/// overrides it (tests).
+pub const SUPERVISOR_LOSS_THRESHOLD: Duration = Duration::from_secs(60);
+
 /// How often [`wait_supervisor_event`] refreshes the supervisor heartbeat
-/// while it blocks: well inside the default 60 s loss threshold.
+/// while it blocks: well inside [`SUPERVISOR_LOSS_THRESHOLD`].
 pub const HEARTBEAT_EVERY: Duration = Duration::from_secs(10);
+const _: () = assert!(HEARTBEAT_EVERY.as_millis() * 3 <= SUPERVISOR_LOSS_THRESHOLD.as_millis());
 
 /// Blocks until the first wake or human-review gate with seq strictly greater
 /// than `after_seq`, the end of the run, or `timeout`. Touches the

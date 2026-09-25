@@ -43,7 +43,7 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         autonomous_args: autonomous_args.iter().map(|s| s.to_string()).collect(),
         interaction,
     };
-    match agent_id {
+    match apb_core::detect::canonical_agent_id(agent_id) {
         // claude runs headless one-shot (`-p`); to actually write files and
         // reach the network on an authorized effectful run it needs an explicit
         // non-interactive permission mode, otherwise every tool call blocks
@@ -52,7 +52,7 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         // Interaction ceiling per spec 2026-07-20: claude gets `live` (the
         // blocking `ask_user` MCP tool, Task 11); the aggregators that expose a
         // resumable session get `resume`; agy, which does not, gets `reprompt`.
-        "claude" | "claude-code" => Some(mk(
+        "claude" => Some(mk(
             &["-p", "{prompt}", "--model", "{model}"],
             SoulDelivery::Native,
             Some("--append-system-prompt"),
@@ -185,10 +185,10 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
 /// in the scheduler.
 pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
     let v = |parts: &[&str]| -> Vec<String> { parts.iter().map(|s| s.to_string()).collect() };
-    match agent_id {
+    match apb_core::detect::canonical_agent_id(agent_id) {
         // claude resumes a prior session with `--resume <id>` and takes the
         // follow-up as a fresh `-p` prompt.
-        "claude" | "claude-code" => Some(v(&[
+        "claude" => Some(v(&[
             "--resume",
             "{session}",
             "-p",

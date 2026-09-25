@@ -44,6 +44,26 @@ edges:
     )
 }
 
+/// How a fan-in node waits for its incoming branches: the `join` value of an
+/// incoming edge. The one reading of those strings, shared by the validator
+/// (V36/V37) and the engine's join readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinMode {
+    All,
+    Any,
+}
+
+impl JoinMode {
+    /// `None` for a value that is neither `all` nor `any`.
+    pub fn parse(s: &str) -> Option<JoinMode> {
+        match s {
+            "all" => Some(JoinMode::All),
+            "any" => Some(JoinMode::Any),
+            _ => None,
+        }
+    }
+}
+
 /// Every node `type` tag, in declaration order. [`NodeKind::type_str`] reads
 /// from it, so this is the one list of node types (the dashboard's generated
 /// types, the authoring guide's doc test).
@@ -1000,7 +1020,9 @@ pub struct Edge {
     #[serde(default)]
     pub fallback: bool,
     #[serde(default)]
-    pub join: Option<String>, // all | any; executed in phase 2, but parsed already now
+    /// `all` | `any` ([`JoinMode`]); kept as the raw string so the validator
+    /// can name a value that is neither (V36).
+    pub join: Option<String>,
     /// Bounded-loop cap (spec 2026-07-20-run-reliability): the maximum number
     /// of times this edge may be traversed in a run. A cycle is legal only when
     /// it contains at least one edge carrying this field (validator V11). Once

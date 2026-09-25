@@ -41,7 +41,9 @@ fn sections(events: &[Event]) -> Vec<Section> {
             // - rendered in order of appearance interleaved with node
             // sections, so {{run.context}} in subsequent prompts sees the
             // note right after it was applied.
-            EventPayload::SupervisorAction { action, detail, .. } if action == "context_append" => {
+            EventPayload::SupervisorAction { action, detail, .. }
+                if action == crate::event::supervisor_action::CONTEXT_APPEND =>
+            {
                 let mut text = String::new();
                 let _ = write!(text, "## note (supervisor)\n\n{detail}\n\n");
                 out.push(Section { seq: e.seq, text });
@@ -61,7 +63,9 @@ pub fn applied_supervisor_notes(events: &[Event]) -> Vec<String> {
     events
         .iter()
         .filter_map(|e| match &e.payload {
-            EventPayload::SupervisorAction { action, detail, .. } if action == "context_append" => {
+            EventPayload::SupervisorAction { action, detail, .. }
+                if action == crate::event::supervisor_action::CONTEXT_APPEND =>
+            {
                 Some(detail.clone())
             }
             _ => None,

@@ -32,7 +32,8 @@ pub enum Lifecycle {
 }
 
 impl Lifecycle {
-    fn as_str(self) -> &'static str {
+    /// The wire and on-disk name (`draft` / `active` / `retired`).
+    pub fn as_str(self) -> &'static str {
         match self {
             Lifecycle::Draft => "draft",
             Lifecycle::Active => "active",

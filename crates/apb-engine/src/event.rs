@@ -29,6 +29,18 @@ pub struct ProfileProvenance {
     pub bundle_digest: String,
 }
 
+/// The `action` names of [`EventPayload::SupervisorAction`] that more than
+/// one site writes or reads: the drive writes them, the progress fold and the
+/// context assembler read them, so each is spelled once.
+pub mod supervisor_action {
+    /// A supervisor restarted a failed node.
+    pub const NODE_RETRY: &str = "node_retry";
+    /// A supervisor moved the run on from another node.
+    pub const RUN_CONTINUE_FROM: &str = "run_continue_from";
+    /// A note appended to the run context.
+    pub const CONTEXT_APPEND: &str = "context_append";
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum EventPayload {

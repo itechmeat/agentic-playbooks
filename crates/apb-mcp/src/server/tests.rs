@@ -183,6 +183,32 @@ fn every_registered_tool_is_documented_in_mcp_md() {
     );
 }
 
+/// F27: the blocking waits' bounds are stated in the tool descriptions, the
+/// argument docs and docs/MCP.md; each statement must be the value the
+/// server actually applies (`RUN_WAIT_DEFAULT_MS`, `RUN_WAIT_MAX_MS`).
+#[test]
+fn wait_bounds_are_stated_as_the_server_applies_them() {
+    use apb_engine::run_wait::{RUN_WAIT_DEFAULT_MS, RUN_WAIT_MAX_MS};
+    let stated = format!("default {RUN_WAIT_DEFAULT_MS}, max {RUN_WAIT_MAX_MS}");
+    for tool in WfMcp::new(PathBuf::from("."))
+        .tool_router
+        .list_all()
+        .into_iter()
+        .filter(|t| t.name == "run_wait" || t.name == "supervisor_wait_event")
+    {
+        let description = tool.description.as_deref().unwrap_or_default();
+        let schema = serde_json::to_string(&tool.input_schema).unwrap();
+        assert!(
+            description.contains(&stated),
+            "{}: {description}",
+            tool.name
+        );
+        assert!(schema.contains(&stated), "{}: {schema}", tool.name);
+    }
+    let doc = include_str!("../../../../docs/MCP.md");
+    assert!(doc.contains(&stated), "docs/MCP.md must state `{stated}`");
+}
+
 /// F18: `playbook_howto` hands agents docs/HOWTO-authoring.md; its node type
 /// list must name every node type the schema accepts.
 #[test]

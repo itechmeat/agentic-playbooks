@@ -1,5 +1,6 @@
 import { parse } from 'yaml'
 import type { AgentInfo, ModelOption, ModelRow } from './api'
+import { AGENT_ALIASES } from './consts.gen'
 
 /**
  * Canonical agent id for identity comparisons and model-option lookups.
@@ -9,7 +10,7 @@ import type { AgentInfo, ModelOption, ModelRow } from './api'
  */
 export function normalizeAgentKey(agent: string): string {
   const trimmed = agent.trim()
-  return trimmed === 'claude-code' ? 'claude' : trimmed
+  return AGENT_ALIASES[trimmed] ?? trimmed
 }
 
 /**
@@ -212,7 +213,7 @@ export function parseProfileDoc(yamlText: string): ParsedProfileDoc {
     skills?: (string | { name: string })[]
   }
   return {
-    agent: doc.executor?.agent ?? 'claude-code',
+    agent: doc.executor?.agent ?? 'claude',
     model: doc.executor?.model ?? '',
     fallbacks: (doc.executor?.fallbacks ?? []).map((f) => ({
       agent: f?.agent ?? '',

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { toFlow } from './graph'
 import { parse } from 'yaml'
-import { CURRENT_SCHEMA } from './api.gen'
+import { CURRENT_SCHEMA } from './consts.gen'
 import { NEW_PLAYBOOK_TEMPLATE, parsePlaybook } from './playbookyaml'
 
 // F22: the editor's "New playbook" starts from a document in the schema this

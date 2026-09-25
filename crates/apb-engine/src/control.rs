@@ -95,7 +95,7 @@ impl Control {
             Control::ContinueFrom { .. } => "continue_from",
             Control::Pause => "pause",
             Control::Abort { .. } => "abort",
-            Control::ContextAppend { .. } => "context_append",
+            Control::ContextAppend { .. } => crate::event::supervisor_action::CONTEXT_APPEND,
             Control::Progress { .. } => "progress",
             Control::Patch { .. } => "patch",
             Control::Interrupt { .. } => "interrupt",

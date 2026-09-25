@@ -10,21 +10,7 @@ use apb_core::schema::{Edge, EdgeCondition, Playbook, StatusEq, output_field_val
 
 use crate::state::{NodeStatus, RunState};
 
-/// Join mode (the `join` field on incoming edges). Default is `All`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JoinMode {
-    All,
-    Any,
-}
-
-impl JoinMode {
-    fn parse(s: &str) -> JoinMode {
-        match s {
-            "any" => JoinMode::Any,
-            _ => JoinMode::All,
-        }
-    }
-}
+pub use apb_core::schema::JoinMode;
 
 /// Readiness of a join node to execute, based on incoming branch statuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -206,7 +192,7 @@ pub fn join_mode(playbook: &Playbook, node: &str) -> JoinMode {
     incoming(playbook, node)
         .iter()
         .find_map(|e| e.join.as_deref())
-        .map(JoinMode::parse)
+        .map(|s| JoinMode::parse(s).unwrap_or(JoinMode::All))
         .unwrap_or(JoinMode::All)
 }
 

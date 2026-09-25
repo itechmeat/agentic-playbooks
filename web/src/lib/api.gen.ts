@@ -180,16 +180,3 @@ children: Array<ChildRun>,
  * the run page renders its panels from this, never from `events`.
  */
 progress: ProgressSummary | null, answer: string | null, events: WfEvent[], };
-
-/** The playbook schema this apb writes. */
-export const CURRENT_SCHEMA = 2
-
-/** Every node `type` tag. */
-export const NODE_TYPES = ['start', 'agent_task', 'script', 'prompt', 'condition', 'human_review', 'wait', 'finish', 'playbook'] as const
-export type NodeType = (typeof NODE_TYPES)[number]
-
-/** The decisions a human_review gate without options offers. */
-export const DEFAULT_REVIEW_OPTIONS = ['approve', 'reject'] as const
-
-/** Starter document for a new playbook. */
-export const NEW_PLAYBOOK_TEMPLATE = "schema: 2\nid: new-playbook\nname: New Playbook\nversion: 0.1.0\n\nnodes:\n  - id: start\n    type: start\n    title: Start\n  - id: done\n    type: finish\n    outcome: success\n\nedges:\n  - { from: start, to: done }\n"

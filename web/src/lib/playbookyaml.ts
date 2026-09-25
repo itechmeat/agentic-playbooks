@@ -100,4 +100,4 @@ export function docToString(doc: Document): string {
 
 /** Starter template for a new playbook: generated from apb-core, so it always
  * declares the schema this apb writes. */
-export { NEW_PLAYBOOK_TEMPLATE } from './api.gen'
+export { NEW_PLAYBOOK_TEMPLATE } from './consts.gen'

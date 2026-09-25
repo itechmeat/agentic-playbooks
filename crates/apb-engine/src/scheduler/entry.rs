@@ -20,7 +20,8 @@ pub struct RunOptions {
     /// Context size threshold in bytes for compaction (spec 8.5). `None`/0
     /// means compaction is disabled.
     pub context_max_bytes: Option<usize>,
-    /// Model used for context compaction. `None` -> "haiku".
+    /// Model used for context compaction. `None` ->
+    /// [`crate::run_config::DEFAULT_COMPACT_MODEL`].
     pub context_compact_model: Option<String>,
     /// Run-level overrides (spec 11): different models/executors without a new version.
     pub overrides: Option<apb_core::overrides::RunOverrides>,

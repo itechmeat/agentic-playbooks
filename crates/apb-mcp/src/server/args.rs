@@ -196,8 +196,9 @@ pub struct SupervisorWaitArgs {
     /// Return wakes starting from this seq (excluding ones already seen):
     /// pass the previous answer's `next_after_seq`.
     pub after_seq: Option<u64>,
-    /// How many milliseconds to block waiting for the next wake (default
-    /// 50000, max 1800000). Longer is cheaper: each return is a model turn.
+    /// How many milliseconds to block for the next wake
+    /// (default 50000, max 1800000). Longer is cheaper: each return is a
+    /// model turn.
     pub timeout_ms: Option<u64>,
 }
 

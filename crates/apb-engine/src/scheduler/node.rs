@@ -2385,8 +2385,8 @@ pub(crate) fn maybe_compact_context(
     let model = cfg
         .context_compact_model
         .clone()
-        .unwrap_or_else(|| "haiku".to_string());
-    let adapter = adapter_for("claude-code")?;
+        .unwrap_or_else(|| crate::run_config::DEFAULT_COMPACT_MODEL.to_string());
+    let adapter = adapter_for("claude")?;
     let prompt = format!(
         "Summarize the following playbook run context concisely, preserving key facts, \
          decisions, and outputs that later steps may need. Keep it to a few short \
@@ -2422,7 +2422,7 @@ pub(crate) fn maybe_compact_context(
         // behavior byte-identical.
         report_contract: true,
         node: "__context_compact",
-        agent: "claude-code",
+        agent: "claude",
         // Internal summarizer keeps today's last-message output.
         extract: None,
         // Internal summarizer: no status-file protocol.

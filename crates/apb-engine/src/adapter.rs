@@ -1,3 +1,4 @@
+use apb_core::detect::canonical_agent_id;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -385,7 +386,7 @@ pub struct AgentTask<'a> {
 /// every other adapter has no such mechanism, so the engine ignores the
 /// `hermetic` flag for it with a warning rather than failing the run.
 pub(crate) fn agent_supports_hermetic(agent: &str) -> bool {
-    matches!(agent, "claude" | "claude-code")
+    canonical_agent_id(agent) == "claude"
 }
 
 /// The apb-owned minimal claude settings written for a hermetic run. It is the
@@ -686,8 +687,8 @@ pub struct AgentReport {
 /// Transport: resume). No parser is invented for an output shape we do not
 /// produce today: a plain-text line simply never matches.
 pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
-    match agent_id {
-        "claude" | "claude-code" => capture_json_string_field(raw, &["session_id"]),
+    match canonical_agent_id(agent_id) {
+        "claude" => capture_json_string_field(raw, &["session_id"]),
         "codex" => capture_json_string_field(raw, &["session_id", "conversation_id"]),
         "opencode" => capture_json_string_field(raw, &["session_id", "sessionID"]),
         "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
@@ -861,7 +862,7 @@ fn build_command(
 /// configured servers.
 fn inject_ask_server(argv: &mut Vec<String>, task: &AgentTask, live: Option<&LiveHooks>) {
     if let Some(lh) = live
-        && (task.agent == "claude" || task.agent == "claude-code")
+        && canonical_agent_id(task.agent) == "claude"
     {
         argv.push("--mcp-config".to_string());
         argv.push(ask_server_mcp_config(

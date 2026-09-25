@@ -49,14 +49,6 @@ pub struct CatalogEntry {
     pub digest: String,
 }
 
-fn lifecycle_str(lc: Lifecycle) -> &'static str {
-    match lc {
-        Lifecycle::Draft => "draft",
-        Lifecycle::Active => "active",
-        Lifecycle::Retired => "retired",
-    }
-}
-
 /// Collects entries for one scope. Broken definitions do not crash the catalog -
 /// they land in `diagnostics`. `origin` builds the ref (project origin leaves
 /// workspace_id=None - "current workspace").
@@ -82,7 +74,7 @@ fn collect_scope(
                         version: Some(loaded.version.clone()),
                     },
                     name: loaded.playbook.name.clone(),
-                    lifecycle: lifecycle_str(lifecycle).to_string(),
+                    lifecycle: Lifecycle::as_str(lifecycle).to_string(),
                     trusted: trust.is_approved(&digest),
                     trigger: loaded.playbook.trigger.clone(),
                     effective_effects: effects,

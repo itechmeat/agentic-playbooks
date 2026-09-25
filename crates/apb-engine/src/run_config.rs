@@ -110,6 +110,9 @@ impl RunMode {
     }
 }
 
+/// The model context compaction runs on when the run config names none.
+pub const DEFAULT_COMPACT_MODEL: &str = "haiku";
+
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
 pub struct RunConfig {
     #[serde(default)]
@@ -123,7 +126,8 @@ pub struct RunConfig {
     /// (spec 8.5). None or 0 - compaction disabled.
     #[serde(default)]
     pub context_max_bytes: Option<usize>,
-    /// Model used for context compaction (a cheap one). None -> "haiku".
+    /// Model used for context compaction (a cheap one). None ->
+    /// [`DEFAULT_COMPACT_MODEL`].
     #[serde(default)]
     pub context_compact_model: Option<String>,
     /// Run-level overrides (spec 11): different models/executors without
