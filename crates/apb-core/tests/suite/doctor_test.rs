@@ -226,6 +226,53 @@ fn claude_code_agent_normalizes_to_claude_probe_no_false_not_found() {
     }
 }
 
+/// zcode lives off PATH (`~/.zcode/server/agents/glm/zcode-agent`): doctor
+/// must report it installed from there, and warn when its standalone CLI has
+/// no plan login, which otherwise surfaces only as a failed run.
+#[cfg(unix)]
+#[test]
+fn zcode_is_found_off_path_and_a_missing_login_warns() {
+    let _l = env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let glm = home.path().join(".zcode/server/agents/glm");
+    fs::create_dir_all(&glm).unwrap();
+    write_stub(&glm, "zcode-agent");
+    let saved_path = std::env::var("PATH").ok();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("PATH", bin.path());
+    }
+
+    let proj = tempfile::tempdir().unwrap();
+    init_project(proj.path()).unwrap();
+    seed_playbook(proj.path(), "va", VALID_AGENT);
+    seed_profile(proj.path(), "main", "zcode");
+    let report = diagnose(proj.path());
+    let find = |name: &str| report.checks.iter().find(|c| c.name == name).cloned();
+    let installed = find("agent zcode").expect("agent zcode checked");
+    let login = find("agent zcode login");
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+        std::env::remove_var("HOME");
+        match saved_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+    assert_eq!(installed.status, CheckStatus::Ok, "{}", installed.detail);
+    let login = login.expect("a missing zcode login must be reported");
+    assert_eq!(login.status, CheckStatus::Warn);
+    assert!(
+        login.detail.contains("zcode-agent login"),
+        "{}",
+        login.detail
+    );
+}
+
 #[test]
 fn global_scope_profile_ref_is_resolved() {
     let _l = env_lock();

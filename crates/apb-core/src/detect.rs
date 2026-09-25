@@ -94,6 +94,10 @@ enum ModelsSource {
     CodexConfig,
     /// claude: a hardcoded list (data from the models table, Task 11).
     ClaudeStatic,
+    /// zcode: the plan-qualified `plan/Model` pairs its built-in provider
+    /// config enables, narrowed to the account family and to the plans the
+    /// standalone CLI is logged in to (see `crate::zcode`).
+    ZcodeConfig,
     /// No free source available.
     None,
 }
@@ -110,6 +114,9 @@ enum AuthSource {
     /// hermes: presence of `<home>/.hermes/.env` -> api-key hint (values
     /// never read).
     Hermes,
+    /// zcode: key NAMES of `~/.zcode/v2/credentials.json` - a plan identity
+    /// key means the standalone CLI is logged in (values never read).
+    Zcode,
     None,
 }
 
@@ -121,12 +128,15 @@ pub struct Probe {
     pub bins: Vec<String>,
     pub category: AgentCategory,
     pub version_args: Vec<String>,
+    /// Known install locations relative to `$HOME`, tried after PATH. For an
+    /// agent whose installer does not put it on PATH (zcode).
+    pub home_paths: Vec<String>,
     models_source: ModelsSource,
     auth_source: AuthSource,
 }
 
-/// Built-in probes for the nine agents (claude, codex, agy, opencode, pi,
-/// hermes, grok, cursor, qoder).
+/// Built-in probes for the ten agents (claude, codex, agy, opencode, pi,
+/// hermes, grok, cursor, qoder, zcode).
 pub fn builtin_probes() -> Vec<Probe> {
     let v = |s: &str| vec![s.to_string()];
     vec![
@@ -135,6 +145,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             bins: v("claude"),
             category: AgentCategory::Vendor,
             version_args: v("--version"),
+            home_paths: Vec::new(),
             models_source: ModelsSource::ClaudeStatic,
             auth_source: AuthSource::Claude,
         },
@@ -143,6 +154,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             bins: v("codex"),
             category: AgentCategory::Vendor,
             version_args: v("--version"),
+            home_paths: Vec::new(),
             models_source: ModelsSource::CodexConfig,
             auth_source: AuthSource::Codex,
         },
@@ -151,6 +163,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             bins: v("agy"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
+            home_paths: Vec::new(),
             models_source: ModelsSource::Command {
                 args: v("models"),
                 authority: Authority::Display,
@@ -162,6 +175,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             bins: v("opencode"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
+            home_paths: Vec::new(),
             models_source: ModelsSource::Command {
                 args: v("models"),
                 authority: Authority::Full,
@@ -173,6 +187,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             bins: v("pi"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
+            home_paths: Vec::new(),
             models_source: ModelsSource::None,
             auth_source: AuthSource::None,
         },
@@ -181,6 +196,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             bins: v("hermes"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
+            home_paths: Vec::new(),
             models_source: ModelsSource::None,
             auth_source: AuthSource::Hermes,
         },
@@ -195,6 +211,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             bins: v("grok"),
             category: AgentCategory::Vendor,
             version_args: v("--version"),
+            home_paths: Vec::new(),
             models_source: ModelsSource::None,
             auth_source: AuthSource::None,
         },
@@ -205,6 +222,7 @@ pub fn builtin_probes() -> Vec<Probe> {
             bins: v("cursor-agent"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
+            home_paths: Vec::new(),
             models_source: ModelsSource::None,
             auth_source: AuthSource::None,
         },
@@ -219,8 +237,22 @@ pub fn builtin_probes() -> Vec<Probe> {
             bins: v("qoder"),
             category: AgentCategory::Aggregator,
             version_args: v("--version"),
+            home_paths: Vec::new(),
             models_source: ModelsSource::None,
             auth_source: AuthSource::None,
+        },
+        // ZCode (Z.ai's desktop agent). Vendor-tied: every plan serves Zhipu's
+        // GLM models. The desktop deploys the headless CLI into the home
+        // directory and never puts it on PATH, so a PATH `zcode` (a user-made
+        // symlink) wins and the known deploy location is the fallback.
+        Probe {
+            id: crate::zcode::AGENT_ID.into(),
+            bins: v(crate::zcode::PATH_BIN),
+            category: AgentCategory::Vendor,
+            version_args: v("--version"),
+            home_paths: v(crate::zcode::HOME_REL_BIN),
+            models_source: ModelsSource::ZcodeConfig,
+            auth_source: AuthSource::Zcode,
         },
     ]
 }
@@ -300,6 +332,20 @@ fn find_in_path(bins: &[String]) -> Option<PathBuf> {
         }
     }
     None
+}
+
+/// Finds the agent binary: PATH first ([`find_in_path`]), then each known
+/// `$HOME`-relative install location that is an executable file.
+fn find_binary(p: &Probe, home: Option<&Path>) -> Option<PathBuf> {
+    if let Some(found) = find_in_path(&p.bins) {
+        return Some(found);
+    }
+    let home = home?;
+    p.home_paths.iter().find_map(|rel| {
+        let cand = home.join(rel);
+        (crate::config::program_in_path(&cand.to_string_lossy()))
+            .then(|| std::fs::canonicalize(&cand).unwrap_or(cand))
+    })
 }
 
 /// Result of a successful probe: stdout (truncated to the limit) + a
@@ -625,6 +671,27 @@ fn auth_hint(src: &AuthSource, home: &Path) -> (Option<AuthHint>, Option<Vec<Str
                 (None, None)
             }
         }
+        AuthSource::Zcode => {
+            // Key names only: a plan identity key means `zcode-agent login`
+            // ran; the api key alone (synced by the desktop) is not enough for
+            // the standalone CLI.
+            let logged_in = crate::zcode::logged_in_providers(home);
+            if logged_in.is_empty() {
+                (
+                    Some(AuthHint {
+                        kind: AuthKind::None,
+                    }),
+                    None,
+                )
+            } else {
+                (
+                    Some(AuthHint {
+                        kind: AuthKind::Oauth,
+                    }),
+                    None,
+                )
+            }
+        }
         AuthSource::None => (None, None),
     }
 }
@@ -650,7 +717,7 @@ fn probe_one(p: &Probe) -> AgentInfo {
         auth: None,
         notes: Vec::new(),
     };
-    let found = find_in_path(&p.bins);
+    let found = find_binary(p, home.as_deref());
     if let Some(path) = &found {
         info.installed = true;
         info.canonical_path = Some(path.clone());
@@ -714,6 +781,38 @@ fn probe_one(p: &Probe) -> AgentInfo {
                 });
             }
         }
+        ModelsSource::ZcodeConfig => {
+            if let Some(home) = &home {
+                let family = crate::zcode::account_family(home);
+                let pairs = crate::zcode::builtin_config_path(home)
+                    .map(|p| crate::zcode::builtin_plan_models(&p))
+                    .unwrap_or_default();
+                let logged_in = crate::zcode::logged_in_providers(home);
+                let items = crate::zcode::plan_model_list(&pairs, &family, &logged_in);
+                if !items.is_empty() {
+                    let mut plans: Vec<String> = Vec::new();
+                    for item in &items {
+                        if let Some((plan, _)) = item.split_once('/')
+                            && !plans.iter().any(|p| p == plan)
+                        {
+                            plans.push(plan.to_string());
+                        }
+                    }
+                    info.providers = Some(plans);
+                    info.models = Some(ModelsInventory {
+                        items,
+                        authority: Authority::Display,
+                    });
+                }
+                if found.is_some() && logged_in.is_empty() {
+                    info.notes.push(
+                        "standalone CLI not logged in: run `zcode-agent login` (the desktop's \
+                         login alone does not cover headless runs)"
+                            .to_string(),
+                    );
+                }
+            }
+        }
         ModelsSource::None => {}
     }
 
@@ -730,7 +829,7 @@ fn probe_one(p: &Probe) -> AgentInfo {
 }
 
 /// Custom probes from the global config: agents with `probe: true` (the
-/// built-in nine are not duplicated). Only checks for the binary's presence -
+/// built-in ten are not duplicated). Only checks for the binary's presence -
 /// no model/auth sources. Best-effort: a malformed config yields an empty
 /// list.
 fn custom_probes() -> Vec<Probe> {
@@ -738,7 +837,7 @@ fn custom_probes() -> Vec<Probe> {
         return Vec::new();
     };
     let builtin: std::collections::BTreeSet<&str> = [
-        "claude", "codex", "agy", "opencode", "pi", "hermes", "grok", "cursor", "qoder",
+        "claude", "codex", "agy", "opencode", "pi", "hermes", "grok", "cursor", "qoder", "zcode",
     ]
     .into_iter()
     .collect();
@@ -759,6 +858,7 @@ fn custom_probes() -> Vec<Probe> {
             bins,
             category: AgentCategory::Aggregator,
             version_args: vec!["--version".to_string()],
+            home_paths: Vec::new(),
             models_source: ModelsSource::None,
             auth_source: AuthSource::None,
         });
@@ -778,10 +878,15 @@ fn probe_source_files(p: &Probe, home: Option<&Path>) -> Vec<PathBuf> {
         AuthSource::Codex => out.push(home.join(".codex/auth.json")),
         AuthSource::Opencode => out.push(home.join(".config/opencode/auth.json")),
         AuthSource::Hermes => out.push(home.join(".hermes/.env")),
+        AuthSource::Zcode => out.push(home.join(crate::zcode::HOME_REL_CREDENTIALS)),
         AuthSource::None => {}
     }
     if matches!(p.models_source, ModelsSource::CodexConfig) {
         out.push(home.join(".codex/config.toml"));
+    }
+    if matches!(p.models_source, ModelsSource::ZcodeConfig) {
+        out.push(home.join(crate::zcode::HOME_REL_BUILTIN_CONFIG));
+        out.push(home.join(crate::zcode::HOME_REL_SETTINGS));
     }
     out
 }
@@ -794,7 +899,7 @@ fn probe_source_files(p: &Probe, home: Option<&Path>) -> Vec<PathBuf> {
 /// presence (without secret values).
 fn agent_cache_key(p: &Probe, home: Option<&Path>) -> String {
     let mut fp = format!("{}[{}]", p.id, p.bins.join(","));
-    match find_in_path(&p.bins) {
+    match find_binary(p, home) {
         Some(bin) => {
             fp.push_str("|bin:");
             fp.push_str(&fingerprint(&bin));

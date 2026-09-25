@@ -160,7 +160,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     }
 
     // Agents: collect the ones mentioned through node profiles; status
-    // comes from the free detect for the built-in nine, and for the rest -
+    // comes from the free detect for the built-in ten, and for the rest -
     // a fallback to checking the program in PATH.
     let mut agents: BTreeSet<String> = BTreeSet::new();
     // Resolve the union of: (a) the flat list of project profiles (catches
@@ -200,7 +200,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         }
     }
     // Detect spawns binaries - we call it only if at least one agent from
-    // the built-in nine is mentioned (otherwise the PATH fallback is enough;
+    // the built-in ten is mentioned (otherwise the PATH fallback is enough;
     // tests stay fast).
     let detect_ids: BTreeSet<String> = crate::detect::builtin_probes()
         .iter()
@@ -252,6 +252,23 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                     format!("agent {agent}"),
                     format!("installed ({ver}){authority}"),
                 );
+                // zcode's headless CLI needs its own `zcode-agent login`: the
+                // desktop app's login does not give it a plan identity, and
+                // every run then fails with "Select a model before continuing".
+                if probe_id == crate::zcode::AGENT_ID
+                    && info
+                        .auth
+                        .as_ref()
+                        .is_some_and(|a| a.kind == crate::detect::AuthKind::None)
+                {
+                    r.push(
+                        CheckStatus::Warn,
+                        format!("agent {agent} login"),
+                        "standalone CLI not logged in to any Z.ai plan: run \
+                         `~/.zcode/server/agents/glm/zcode-agent login` once"
+                            .to_string(),
+                    );
+                }
             } else {
                 r.push(
                     CheckStatus::Warn,

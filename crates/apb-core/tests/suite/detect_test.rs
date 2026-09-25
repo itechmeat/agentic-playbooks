@@ -509,6 +509,74 @@ fn hermes_auth_hint_from_env_file() {
     assert!(h2.auth.is_none());
 }
 
+/// zcode is never on PATH: the desktop deploys its headless CLI under
+/// `~/.zcode/server/agents/glm/`. Detection must find it there, list the
+/// plan-qualified models its built-in provider config enables for the plans
+/// the CLI is logged in to, and flag a missing standalone login - reading
+/// only credential KEY NAMES.
+#[test]
+fn zcode_probe_finds_the_home_deployed_cli_and_its_plan_models() {
+    let _l = lock();
+    let e = setup();
+    let glm = e.home.join(".zcode/server/agents/glm");
+    std::fs::create_dir_all(&glm).unwrap();
+    write_agent(&glm, "zcode-agent", &e.counter, "echo 0.16.9");
+    let bundled = e.home.join(".zcode/v2/runtime/provider/bundled");
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::write(
+        bundled.join("zcode-builtin.json"),
+        r#"{"config":{"modelConfigRules":{"builtinProviderModelRules":[
+            {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:zai-start-plan"},
+            {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
+            {"modelId":"GLM-5.3-Flash","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
+            {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:bigmodel-start-plan"}]}}}"#,
+    )
+    .unwrap();
+
+    // Not logged in: the individual plan a login would enable, plus a note.
+    let agents = detect::detect(true);
+    let z = agents.iter().find(|a| a.agent == "zcode").unwrap();
+    assert!(z.installed, "{z:?}");
+    assert_eq!(z.version.as_deref(), Some("0.16.9"));
+    assert_eq!(z.category, AgentCategory::Vendor);
+    assert_eq!(
+        z.models.as_ref().unwrap().items,
+        vec!["zai-individual/GLM-5.3", "zai-individual/GLM-5.3-Flash"]
+    );
+    assert_eq!(z.auth.as_ref().map(|a| a.kind), Some(AuthKind::None));
+    assert!(
+        z.notes.iter().any(|n| n.contains("zcode-agent login")),
+        "{z:?}"
+    );
+
+    // Logged in to both zai plans: both listed, paid first; no secret leaks.
+    std::fs::write(
+        e.home.join(".zcode/v2/credentials.json"),
+        r#"{"account-provider:account:zai-individual-coding-plan:identity":"ident-secret","account-provider:account:zai-start-plan:identity":"ident-secret"}"#,
+    )
+    .unwrap();
+    let agents = detect::detect(true);
+    let z = agents.iter().find(|a| a.agent == "zcode").unwrap();
+    assert_eq!(
+        z.models.as_ref().unwrap().items,
+        vec![
+            "zai-individual/GLM-5.3",
+            "zai-individual/GLM-5.3-Flash",
+            "zai-start/GLM-5.3"
+        ]
+    );
+    assert_eq!(
+        z.providers.as_deref(),
+        Some(&["zai-individual".to_string(), "zai-start".to_string()][..])
+    );
+    assert_eq!(z.auth.as_ref().map(|a| a.kind), Some(AuthKind::Oauth));
+    assert!(
+        !serde_json::to_string(&agents)
+            .unwrap()
+            .contains("ident-secret")
+    );
+}
+
 #[test]
 fn hermes_missing_binary_reports_not_installed() {
     let _l = lock();
@@ -619,6 +687,17 @@ fn builtin_probes_include_grok_and_cursor() {
     assert_eq!(qoder.bins, vec!["qoder".to_string()]);
     assert_eq!(qoder.category, AgentCategory::Aggregator);
     assert_eq!(qoder.version_args, vec!["--version".to_string()]);
+
+    // zcode: a PATH `zcode` first, then the location the ZCode desktop
+    // deploys its headless CLI to (never on PATH). Vendor-tied (GLM).
+    let zcode = by_id("zcode");
+    assert_eq!(zcode.bins, vec!["zcode".to_string()]);
+    assert_eq!(
+        zcode.home_paths,
+        vec![".zcode/server/agents/glm/zcode-agent".to_string()]
+    );
+    assert_eq!(zcode.category, AgentCategory::Vendor);
+    assert_eq!(zcode.version_args, vec!["--version".to_string()]);
 
     // The ambiguous `agent` alias must not be probed by anyone.
     for p in &probes {

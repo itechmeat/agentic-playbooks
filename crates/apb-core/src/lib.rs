@@ -29,6 +29,7 @@ pub mod trust;
 pub mod validate;
 pub mod versioning;
 pub mod workspace;
+pub mod zcode;
 
 /// Shared lock for unit tests that touch process-global env
 /// (`APB_CONFIG_DIR` etc.): tests within one crate run on parallel threads of

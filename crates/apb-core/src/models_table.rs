@@ -283,8 +283,17 @@ pub fn agent_vendor(agent: &str) -> Option<&'static str> {
         "claude" | "claude-code" => Some("anthropic"),
         "codex" => Some("openai"),
         "grok" => Some("xai"),
+        "zcode" => Some("zhipu"),
         _ => None,
     }
+}
+
+/// Whether `agent` takes plan-qualified model strings (`plan/Model`) that a
+/// curated row id can never be (zcode). For such an agent the detected list,
+/// when there is one, IS the option set: offering a bare curated id next to
+/// it would only add an ambiguous duplicate of a qualified entry.
+pub fn agent_models_are_plan_qualified(agent: &str) -> bool {
+    agent == crate::zcode::AGENT_ID
 }
 
 /// One model choice offered for a specific agent in the profile editor
@@ -314,6 +323,7 @@ pub fn model_options_for_agent(
 ) -> Vec<ModelOption> {
     let vendor = agent_vendor(agent);
     let curated: Vec<&ModelRow> = match vendor {
+        _ if agent_models_are_plan_qualified(agent) && !detected_items.is_empty() => Vec::new(),
         Some(v) => table.models.iter().filter(|m| m.vendor == v).collect(),
         None => table.models.iter().collect(),
     };
@@ -541,6 +551,7 @@ mod tests {
         assert_eq!(agent_vendor("opencode"), None);
         assert_eq!(agent_vendor("cursor"), None);
         assert_eq!(agent_vendor("qoder"), None);
+        assert_eq!(agent_vendor("zcode"), Some("zhipu"));
         assert_eq!(agent_vendor("some-custom-agent"), None);
     }
 
@@ -618,5 +629,26 @@ mod tests {
         assert_eq!(opts.len(), 2);
         let unknown = model_options_for_agent("some-custom-agent", &[], &t);
         assert_eq!(unknown.len(), 2);
+    }
+
+    /// zcode takes plan-qualified ids (`zai-start/GLM-5.3`): once detection
+    /// found its plan/model list, that list is the whole option set (a bare
+    /// curated `glm-5.2` next to it would be an ambiguous duplicate). With no
+    /// detection it falls back to the curated zhipu rows like any vendor.
+    #[test]
+    fn model_options_for_zcode_use_the_plan_qualified_list() {
+        let t = table_of(&[("glm-5.2", "zhipu"), ("gpt-5.6-sol", "openai")]);
+        let detected = vec![
+            "zai-individual/GLM-5.3".to_string(),
+            "zai-start/GLM-5.3".to_string(),
+        ];
+        let opts = model_options_for_agent("zcode", &detected, &t);
+        let ids: Vec<&str> = opts.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, vec!["zai-individual/GLM-5.3", "zai-start/GLM-5.3"]);
+        assert!(opts.iter().all(|o| o.detected && o.vendor == "zhipu"));
+
+        let bare = model_options_for_agent("zcode", &[], &t);
+        let ids: Vec<&str> = bare.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, vec!["glm-5.2"]);
     }
 }
