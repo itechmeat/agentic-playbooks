@@ -560,7 +560,7 @@ mod tests {
         let t = table_of(&[
             ("gpt-5.6-sol", "openai"),
             ("gpt-5.6-terra", "openai"),
-            ("claude-opus-4-8", "anthropic"),
+            ("claude-opus-5-5", "anthropic"),
         ]);
         // codex ties to openai: only the two openai rows are offered, in
         // table order, none detected (an empty local config).
@@ -622,7 +622,7 @@ mod tests {
 
     #[test]
     fn model_options_for_agent_keeps_an_aggregator_on_the_full_table() {
-        let t = table_of(&[("gpt-5.6-sol", "openai"), ("claude-opus-4-8", "anthropic")]);
+        let t = table_of(&[("gpt-5.6-sol", "openai"), ("claude-opus-5-5", "anthropic")]);
         // opencode is an aggregator (no single vendor tie): it keeps every
         // curated row, same as an unrecognized agent id.
         let opts = model_options_for_agent("opencode", &[], &t);

@@ -21,7 +21,7 @@ impl Drop for EnvGuard {
 
 fn profile_yaml(name: &str, skills: &str) -> String {
     format!(
-        "name: {name}\ndescription: d\nexecutor:\n  agent: claude\n  model: claude-opus-4-8\n{skills}"
+        "name: {name}\ndescription: d\nexecutor:\n  agent: claude\n  model: claude-opus-5-5\n{skills}"
     )
 }
 

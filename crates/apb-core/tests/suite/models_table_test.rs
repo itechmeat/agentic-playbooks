@@ -35,18 +35,18 @@ fn overlay_adds_model_overrides_price_and_brings_subscriptions() {
     with_cfg(cfg.path());
     std::fs::write(
         cfg.path().join("models.yaml"),
-        "models:\n  - { id: claude-opus-4-8, vendor: anthropic, cost_in_usd_mtok: 1.5 }\n  - { id: local-llm, vendor: self, reasoning: medium }\nsubscriptions:\n  - { agent: claude, plan: max, coverage: full }\n  - { agent: opencode }\n",
+        "models:\n  - { id: claude-opus-5-5, vendor: anthropic, cost_in_usd_mtok: 1.5 }\n  - { id: local-llm, vendor: self, reasoning: medium }\nsubscriptions:\n  - { agent: claude, plan: max, coverage: full }\n  - { agent: opencode }\n",
     )
     .unwrap();
 
     let t = models_table::load_merged().unwrap();
     // Field-wise merge: overriding ONE price doesn't reset the existing
     // model's other fields to their defaults.
-    let opus = t.models.iter().find(|m| m.id == "claude-opus-4-8").unwrap();
+    let opus = t.models.iter().find(|m| m.id == "claude-opus-5-5").unwrap();
     assert_eq!(opus.cost_in_usd_mtok, Some(1.5));
     assert_eq!(
         opus.cost_out_usd_mtok,
-        Some(25.0),
+        Some(20.0),
         "untouched output price must be preserved"
     );
     assert_eq!(
@@ -78,11 +78,11 @@ fn overlay_null_clears_nullable_builtin_field() {
     // field is absent from the patch", which leaves it untouched).
     std::fs::write(
         cfg.path().join("models.yaml"),
-        "models:\n  - { id: claude-opus-4-8, reasoning: null, context_tokens: null }\n",
+        "models:\n  - { id: claude-opus-5-5, reasoning: null, context_tokens: null }\n",
     )
     .unwrap();
     let t = models_table::load_merged().unwrap();
-    let opus = t.models.iter().find(|m| m.id == "claude-opus-4-8").unwrap();
+    let opus = t.models.iter().find(|m| m.id == "claude-opus-5-5").unwrap();
     assert_eq!(opus.reasoning, None, "explicit null must clear reasoning");
     assert_eq!(
         opus.context_tokens, None,
@@ -259,14 +259,16 @@ fn builtin_table_drops_grok_4_and_llama_4_maverick() {
     }
 }
 
-/// The 2026-08-15 refresh adds new-vendor rows (moonshot, zhipu) and new
-/// entries for existing vendors (anthropic, xai, alibaba); each must parse
-/// with the expected vendor and full provenance.
+/// The 2026-08-15 refresh added new-vendor rows (moonshot, zhipu) and new
+/// entries for existing vendors (xai, alibaba); the 2026-09-25 refresh
+/// replaced the retired anthropic ids with claude-fable-5-1 and
+/// claude-opus-5-5. Each must parse with the expected vendor and provenance.
 #[test]
-fn builtin_table_carries_2026_08_15_refresh_rows() {
+fn builtin_table_carries_refresh_rows() {
     let t = models_table::builtin();
     let expect: &[(&str, &str)] = &[
-        ("claude-opus-5", "anthropic"),
+        ("claude-fable-5-1", "anthropic"),
+        ("claude-opus-5-5", "anthropic"),
         ("grok-4.6", "xai"),
         ("qwen3.8-max", "alibaba"),
         ("kimi-k3", "moonshot"),
@@ -289,5 +291,35 @@ fn builtin_table_carries_2026_08_15_refresh_rows() {
             !m.price_basis.is_empty(),
             "row `{id}` is missing price_basis"
         );
+    }
+}
+
+/// The 2026-09-25 refresh retires the older Claude ids in favor of
+/// claude-fable-5-1 and claude-opus-5-5: no model row, purpose score, or
+/// claude static list entry may still cite a retired id.
+#[test]
+fn builtin_table_drops_retired_claude_ids() {
+    let t = models_table::builtin();
+    let retired = [
+        "claude-opus-5",
+        "claude-opus-4-8",
+        "claude-opus-4-5",
+        "claude-sonnet-4-6",
+        "claude-fable-5",
+    ];
+    for id in retired {
+        assert!(
+            !t.models.iter().any(|m| m.id == id),
+            "retired Claude model `{id}` must be dropped"
+        );
+        assert!(
+            !t.claude_static_models.iter().any(|m| m == id),
+            "claude static list still cites retired `{id}`"
+        );
+        for p in &t.purposes {
+            for s in &p.scores {
+                assert_ne!(s.model, id, "purpose `{}` still cites retired `{id}`", p.id);
+            }
+        }
     }
 }

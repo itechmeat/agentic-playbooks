@@ -433,7 +433,7 @@ mod tests {
             paid,
             "two models on one plan share its quota"
         );
-        assert_eq!(billing_account("claude", "claude-opus-4-8"), "claude");
+        assert_eq!(billing_account("claude", "claude-opus-5-5"), "claude");
         assert_eq!(billing_account("claude", "claude-sonnet-5"), "claude");
         assert_eq!(billing_account("zcode", ""), "zcode");
     }

@@ -221,7 +221,7 @@ pub fn profile_digest(profile_yaml: &str, soul_md: &str) -> String {
 mod tests {
     use super::*;
 
-    const P: &str = "name: architect\ndescription: d\nexecutor:\n  agent: claude\n  model: claude-opus-4-8\n  fallbacks:\n    - { agent: opencode, model: opencode/claude-opus-4-8 }\nskills:\n  - coding-standards\n  - { name: writing-plans, scope: global }\n";
+    const P: &str = "name: architect\ndescription: d\nexecutor:\n  agent: claude\n  model: claude-opus-5-5\n  fallbacks:\n    - { agent: opencode, model: opencode/claude-opus-5-5 }\nskills:\n  - coding-standards\n  - { name: writing-plans, scope: global }\n";
 
     #[test]
     fn parses_profile_and_skill_ref_forms() {

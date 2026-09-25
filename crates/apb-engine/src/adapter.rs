@@ -1904,7 +1904,7 @@ mod tests {
     #[test]
     fn build_command_appends_autonomous_args_when_granted() {
         let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
-        let (argv, _) = build_command(&spec, "hello", "claude-opus-4-8", None, true);
+        let (argv, _) = build_command(&spec, "hello", "claude-opus-5-5", None, true);
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"),
@@ -1915,7 +1915,7 @@ mod tests {
     #[test]
     fn build_command_omits_autonomous_args_when_not_granted() {
         let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
-        let (argv, _) = build_command(&spec, "hello", "claude-opus-4-8", None, false);
+        let (argv, _) = build_command(&spec, "hello", "claude-opus-5-5", None, false);
         assert!(
             !argv.iter().any(|a| a == "bypassPermissions"),
             "must not grant permissions without autonomy, got {argv:?}"

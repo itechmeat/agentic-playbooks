@@ -20,7 +20,7 @@ with two files:
   description: senior implementation agent
   executor:
     agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes, grok, cursor, qoder, zcode) or a configured one
-    model: claude-opus-4-8   # exactly the string that agent's --model expects
+    model: claude-opus-5-5   # exactly the string that agent's --model expects
     fallbacks:               # optional ordered chain; same role, different executor
       - { agent: codex, model: gpt-5.2-codex }
   soul: any                  # any | native_required (does the role need a native system-prompt channel)
