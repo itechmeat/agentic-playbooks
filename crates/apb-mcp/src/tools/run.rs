@@ -34,7 +34,6 @@ pub fn playbook_run(
         params,
         allow_shared_workdir: false,
         mode: RunMode::Autonomous,
-        supervisor_expected: false,
         max_patches_per_run: None,
         context_max_bytes: None,
         context_compact_model: None,
@@ -87,7 +86,6 @@ pub fn playbook_run_background(
         params,
         allow_shared_workdir: false,
         mode: RunMode::Autonomous,
-        supervisor_expected: false,
         max_patches_per_run: None,
         context_max_bytes: None,
         context_compact_model: None,
@@ -436,14 +434,13 @@ pub fn playbook_run_supervised(
     continued_from: Option<String>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
-    // MCP session that called playbook_run, hence supervisor_expected: false
+    // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
     // (heartbeat oversight in drive does not touch this path).
     let opts = RunOptions {
         instruction,
         params,
         allow_shared_workdir: false,
         mode: RunMode::Supervised,
-        supervisor_expected: false,
         max_patches_per_run: None,
         context_max_bytes: None,
         context_compact_model: None,

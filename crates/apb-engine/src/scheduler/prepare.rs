@@ -232,7 +232,7 @@ pub(crate) fn build_run_manifest(
         }
     }
     // The supervisor binding is created ONLY when the run is actually supervised
-    // by an external agent (`supervised` = supervisor_expected). In that case the
+    // by an external agent (`supervised` = the mode is agent-supervised). In that case the
     // executor is supervisor.profile OR defaults.profile, EVEN without a `supervisor:`
     // section (so `--supervise` with just defaults.profile brings up an agent). For
     // an autonomous (and self-supervised) run there is no binding: otherwise the run
@@ -525,7 +525,6 @@ pub(crate) fn prepare_run_target(
     let cfg = RunConfig {
         params,
         instruction,
-        supervisor_expected: opts.supervisor_expected,
         max_patches_per_run: opts.max_patches_per_run,
         context_max_bytes: opts.context_max_bytes,
         context_compact_model: opts.context_compact_model.clone(),
@@ -571,7 +570,7 @@ pub(crate) fn prepare_run_target(
             &opts.expected_connectors,
             &opts.expected_connector_accounts,
             opts.overrides.as_ref(),
-            opts.supervisor_expected,
+            opts.mode.expects_supervisor_agent(),
         ),
     )?;
     let profiles_prov: Vec<ProfileProvenance> = manifest
@@ -624,6 +623,5 @@ pub(crate) fn prepare_run_target(
         queued_workdir,
         start_node,
         mode: opts.mode,
-        supervisor_expected: opts.supervisor_expected,
     })
 }

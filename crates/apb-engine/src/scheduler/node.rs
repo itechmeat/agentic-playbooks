@@ -2252,7 +2252,6 @@ pub(crate) fn run_playbook_node(
         StartMode::Rerun,
         cp.run_id.clone(),
         RunMode::Autonomous,
-        cp.supervisor_expected,
     )?;
     // Child may have mirrored wakes onto this parent log while we held it open
     // (issue #45 finding 8). Re-sync next_seq before any further parent appends.

@@ -285,7 +285,7 @@ pub(crate) fn monitor_supervisor_heartbeat(
     supervisor_lost_logged: &mut bool,
 ) -> Result<(), EngineError> {
     // Heartbeat monitoring: only for runs explicitly expecting an external
-    // background agent (`supervisor_expected`). Silence is measured either from
+    // background agent (`RunMode::AgentSupervised`). Silence is measured either from
     // the last heartbeat, or (as long as the agent has never checked in) from the
     // moment it was spawned - `supervisor_silence_ms` covers both cases.
     // The threshold is configurable via `APB_SUPERVISOR_HEARTBEAT_MS` (tests

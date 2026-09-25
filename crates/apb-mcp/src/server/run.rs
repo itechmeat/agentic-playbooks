@@ -277,7 +277,7 @@ impl WfMcp {
         // the window would give the engine a different set). The MCP path
         // (autonomous / supervise:"self") does not spawn an external
         // supervisor agent -> supervised: false (matches the manifest, where
-        // supervisor_expected is also false for these modes).
+        // neither mode is RunMode::AgentSupervised).
         let permit = match crate::policy::check_run(
             &self.root,
             &wref,

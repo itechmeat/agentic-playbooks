@@ -147,7 +147,7 @@ edges:
   - { from: p1, to: done }
 "#;
 
-// Scenario 1: initial spawn of the background agent when run_background(supervisor_expected:true,
+// Scenario 1: initial spawn of the background agent when run_background(mode: AgentSupervised,
 // Supervised). The brief (passed to the stub via -p) must contain the run_id, a token
 // of format `sv-...`, and the playbook id; a persisted session must exist on disk,
 // resolvable by this token via find_session_by_token.
@@ -165,8 +165,7 @@ fn initial_spawn_writes_brief_and_persists_session() {
     }
 
     let opts = RunOptions {
-        mode: RunMode::Supervised,
-        supervisor_expected: true,
+        mode: RunMode::AgentSupervised,
         ..Default::default()
     };
     let run_id = run_background(dir.path(), "bgspv1", None, opts).unwrap();
@@ -304,7 +303,7 @@ fn seed_sup_profile(root: &Path, name: &str, executor: &str, soul: &str) {
 // A pipeline WITHOUT a supervisor section - only defaults.profile. `--supervise`
 // must still bring up the agent from defaults.profile (completion-plan Task 9).
 // WITHOUT a supervisor section - only defaults.profile. Under --supervise
-// (supervisor_expected: true) the supervisor binding is taken from defaults.profile
+// (RunMode::AgentSupervised) the supervisor binding is taken from defaults.profile
 // precisely because the run is actually supervised (mode-gated). An autonomous
 // run of the same playbook does NOT create the binding (review P2).
 const WF_DEFAULTS_ONLY: &str = r#"
@@ -348,8 +347,7 @@ fn supervise_with_defaults_profile_only_spawns_and_delivers_soul() {
     }
 
     let opts = RunOptions {
-        mode: RunMode::Supervised,
-        supervisor_expected: true,
+        mode: RunMode::AgentSupervised,
         ..Default::default()
     };
     let run_id = run_background(dir.path(), "bgspv3", None, opts).unwrap();
@@ -441,8 +439,7 @@ edges:
     }
 
     let opts = RunOptions {
-        mode: RunMode::Supervised,
-        supervisor_expected: true,
+        mode: RunMode::AgentSupervised,
         ..Default::default()
     };
     let run_id = run_background(dir.path(), "bgspv4", None, opts).unwrap();
@@ -489,8 +486,7 @@ fn heartbeat_lost_triggers_single_respawn() {
     }
 
     let opts = RunOptions {
-        mode: RunMode::Supervised,
-        supervisor_expected: true,
+        mode: RunMode::AgentSupervised,
         ..Default::default()
     };
     let run_id = run_background(dir.path(), "bgspv2", None, opts).unwrap();

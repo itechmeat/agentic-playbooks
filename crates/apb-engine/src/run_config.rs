@@ -66,12 +66,48 @@ pub enum CacheRunMode {
 /// command. Persisted in the run config (not just held in memory) because a
 /// detached driver process re-opens the run from disk and must drive it in the
 /// mode it was started in.
+///
+/// Who supervises is part of the mode, so a run that expects a supervisor
+/// agent always parks for it, and a run that parks always has someone to
+/// answer: the pair `mode` + `supervisor_expected` it replaces allowed
+/// "autonomous, yet heartbeat-monitoring a supervisor agent".
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunMode {
     #[default]
     Autonomous,
+    /// Supervised by the session that started the run (MCP `supervise:
+    /// "self"`): parks on a failure, no agent is spawned or watched.
     Supervised,
+    /// Supervised by a background supervisor agent the engine spawns itself
+    /// (`apb run --supervise`) and whose heartbeat it watches, respawning it
+    /// once when it goes silent.
+    AgentSupervised,
+}
+
+impl RunMode {
+    /// A failure or timeout raises a wake and waits for a supervisor command
+    /// instead of taking the playbook's own fallbacks.
+    pub fn parks_on_failure(self) -> bool {
+        matches!(self, RunMode::Supervised | RunMode::AgentSupervised)
+    }
+
+    /// The engine spawns a supervisor agent for the run and monitors its
+    /// heartbeat.
+    pub fn expects_supervisor_agent(self) -> bool {
+        self == RunMode::AgentSupervised
+    }
+
+    /// The mode a resumed run is driven in. The session that supervised the
+    /// original drive is not there any more, so a session-supervised run
+    /// resumes autonomous; an agent-supervised run keeps its agent, which
+    /// the heartbeat monitor respawns when needed.
+    pub fn on_resume(self) -> RunMode {
+        match self {
+            RunMode::AgentSupervised => RunMode::AgentSupervised,
+            RunMode::Autonomous | RunMode::Supervised => RunMode::Autonomous,
+        }
+    }
 }
 
 #[derive(Debug, Default, Clone, Serialize, Deserialize)]
@@ -80,11 +116,6 @@ pub struct RunConfig {
     pub params: BTreeMap<String, String>,
     #[serde(default)]
     pub instruction: Option<String>,
-    /// The run expects an external background supervisor agent (the engine
-    /// spawns it itself and watches its heartbeat) - see
-    /// `RunOptions::supervisor_expected` and Phase 4c Task 4.
-    #[serde(default)]
-    pub supervisor_expected: bool,
     #[serde(default)]
     pub max_patches_per_run: Option<u32>,
     /// Threshold for the assembled context size in bytes: once exceeded, old
@@ -170,7 +201,21 @@ pub fn read_run_config(run_dir: &Path) -> Result<RunConfig, EngineError> {
         return Ok(RunConfig::default());
     }
     let raw = std::fs::read_to_string(&path)?;
-    serde_yaml_ng::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))
+    let value: serde_yaml_ng::Value =
+        serde_yaml_ng::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    // A config written before `RunMode::AgentSupervised` carried the agent
+    // half of the mode as `supervisor_expected: true` next to `mode:
+    // supervised`; fold it in so such a run keeps its supervisor agent.
+    let legacy_agent = value
+        .get("supervisor_expected")
+        .and_then(serde_yaml_ng::Value::as_bool)
+        .unwrap_or(false);
+    let mut cfg: RunConfig =
+        serde_yaml_ng::from_value(value).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    if legacy_agent && cfg.mode == RunMode::Supervised {
+        cfg.mode = RunMode::AgentSupervised;
+    }
+    Ok(cfg)
 }
 
 pub fn snapshot_playbook(run_dir: &Path, yaml: &str) -> Result<(), EngineError> {
@@ -284,5 +329,27 @@ mod tests {
         let round: ChildExpectation = serde_yaml_ng::from_str(&yaml).unwrap();
         assert_eq!(round.connectors, connectors);
         assert_eq!(round.connector_accounts, accounts);
+    }
+
+    /// A run started by an older apb with `apb run --supervise` stored
+    /// `mode: supervised` plus `supervisor_expected: true`; it must still read
+    /// as agent-supervised, so a resume keeps its supervisor agent.
+    #[test]
+    fn legacy_supervisor_expected_reads_as_agent_supervised() {
+        let dir = tempfile::tempdir().unwrap();
+        for (yaml, mode) in [
+            (
+                "mode: supervised\nsupervisor_expected: true\n",
+                RunMode::AgentSupervised,
+            ),
+            (
+                "mode: supervised\nsupervisor_expected: false\n",
+                RunMode::Supervised,
+            ),
+            ("supervisor_expected: false\n", RunMode::Autonomous),
+        ] {
+            std::fs::write(dir.path().join("run.yaml"), yaml).unwrap();
+            assert_eq!(read_run_config(dir.path()).unwrap().mode, mode, "{yaml}");
+        }
     }
 }

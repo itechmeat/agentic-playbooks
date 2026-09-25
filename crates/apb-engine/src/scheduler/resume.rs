@@ -470,11 +470,11 @@ pub(crate) fn resume_inner(
     } else {
         None
     };
-    // 4a: resume is always autonomous; supervised resume - subject of phase 4b.
-    // supervisor_expected is taken from persistent run cfg (not recreated) -
-    // if the original run awaited external supervision, heartbeat-monitoring continues
-    // to work even after resume.
-    let supervisor_expected = cfg.supervisor_expected;
+    // The persisted mode, as a resume drives it (`RunMode::on_resume`): an
+    // agent-supervised run keeps its supervisor agent (heartbeat monitoring
+    // and parking both continue), a session-supervised one resumes
+    // autonomous, since the session that supervised it is gone.
+    let mode = cfg.mode.on_resume();
     drive(
         playbook,
         &run_dir,
@@ -484,8 +484,7 @@ pub(crate) fn resume_inner(
         decision.start_node,
         decision.mode,
         run_id.to_string(),
-        RunMode::Autonomous,
-        supervisor_expected,
+        mode,
     )
 }
 

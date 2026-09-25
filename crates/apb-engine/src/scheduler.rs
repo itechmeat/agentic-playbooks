@@ -345,20 +345,10 @@ fn drive(
     start_mode: StartMode,
     run_id: String,
     mode: RunMode,
-    supervisor_expected: bool,
 ) -> Result<RunResult, EngineError> {
     let run_id_for_failure = run_id.clone();
     match drive_inner(
-        playbook,
-        run_dir,
-        root,
-        log,
-        cfg,
-        start_node,
-        start_mode,
-        run_id,
-        mode,
-        supervisor_expected,
+        playbook, run_dir, root, log, cfg, start_node, start_mode, run_id, mode,
     ) {
         Ok(r) => Ok(r),
         Err(e) => {
@@ -396,7 +386,6 @@ fn drive_inner(
     start_mode: StartMode,
     run_id: String,
     mode: RunMode,
-    supervisor_expected: bool,
 ) -> Result<RunResult, EngineError> {
     // Publish who is driving this run, for as long as the drive lasts
     // (Task 7 / issue #45 finding 10). Top-level runs own `driver.pid`;
@@ -489,7 +478,7 @@ fn drive_inner(
     // the validator (V11) only requires that a loop pass through such a node,
     // while enforcing the actual repeat-count limit is the engine's job.
     let mut cond_visits: BTreeMap<String, u32> = BTreeMap::new();
-    // Heartbeat monitoring of the background agent (only when supervisor_expected):
+    // Heartbeat monitoring of the background agent (only for an agent-supervised run):
     // we log SupervisorLost and respawn ONCE for the whole
     // drive loop - see the check at the start of each iteration below.
     let mut supervisor_lost_logged = false;
@@ -586,7 +575,7 @@ fn drive_inner(
             ControlScan::Proceed => {}
         }
 
-        if supervisor_expected {
+        if mode.expects_supervisor_agent() {
             monitor_supervisor_heartbeat(
                 root,
                 &run_id,
@@ -1124,7 +1113,7 @@ fn drive_inner(
                 // right after its own NodeFinished, and before any of the
                 // autonomous failure policy below (which the sequential path also
                 // skips by continuing out of the park).
-                if mode == RunMode::Supervised {
+                if mode.parks_on_failure() {
                     let failed: Vec<(String, NodeStatus, String)> = batch
                         .iter()
                         .filter_map(|n| batch_results.iter().find(|(bn, _, _)| bn == n))
@@ -1993,9 +1982,7 @@ fn drive_inner(
 
         // Supervisor mode: a failed/timed-out node raises a wake and waits for a
         // supervisor command instead of autonomously taking a fallback edge.
-        if mode == RunMode::Supervised
-            && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut)
-        {
+        if mode.parks_on_failure() && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut) {
             match park_for_supervisor(
                 root,
                 run_dir,
