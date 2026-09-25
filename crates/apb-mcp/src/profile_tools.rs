@@ -44,12 +44,22 @@ fn compute_bundle_for(
     scope: ProfileScope,
     name: &str,
 ) -> Result<String, ProfileError> {
+    compute_bundle_pairs(root, scope, name).map(|(_pairs, bundle)| bundle)
+}
+
+/// The bundle digest together with its `(qualified skill ref, skill digest)`
+/// pairs, for a profile on disk.
+fn compute_bundle_pairs(
+    root: &Path,
+    scope: ProfileScope,
+    name: &str,
+) -> Result<(Vec<(String, String)>, String), ProfileError> {
     let r = apb_core::profile::QualifiedProfileRef {
         name: name.to_string(),
         scope,
     };
-    let (_loaded, _pairs, bundle) = profile_store::compute_bundle(root, origin_for(scope), &r)?;
-    Ok(bundle)
+    let (_loaded, pairs, bundle) = profile_store::compute_bundle(root, origin_for(scope), &r)?;
+    Ok((pairs, bundle))
 }
 
 /// A list of profiles in both scopes with bundle trust status.
@@ -260,6 +270,14 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         }
     }
     let yaml = serde_yaml_ng::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
+    // The bundle as it stands before this write (old profile, live skills),
+    // read under the lock: whether its skill content was approved decides
+    // below whether the write may vouch for the skills it keeps.
+    let prior = if exists {
+        compute_bundle_pairs(root, scope_enum, &name).ok()
+    } else {
+        None
+    };
 
     // Publish as a whole directory (not two independent files): assemble into
     // staging, then swap under the already-held lock (writers are serialized by
@@ -296,30 +314,61 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
     }
 
     let profile_digest = apb_core::profile::profile_digest(&yaml, &soul_md);
-    // Bundle from the live tree (just written) + auto-approve.
-    let bundle = compute_bundle_for(root, scope_enum, &name)
+    // Bundle from the live tree (just written) + auto-approve. The write
+    // authored profile.yaml and SOUL.md, not the skills, so it vouches only
+    // for skill content that was already approved: a skill the profile kept
+    // is vouched for when the bundle before the write was approved, a skill
+    // this write newly names (or a new profile's skills) by the user's choice
+    // in this write. A kept skill whose content changed since the last
+    // approval leaves the bundle untrusted, and is returned for consent.
+    let (pairs, bundle) = compute_bundle_pairs(root, scope_enum, &name)
         .map_err(|e| ToolError::Engine(e.to_string()))?;
     let mut trust = TrustStore::load();
+    let skills_unapproved: Vec<Value> = match &prior {
+        None => Vec::new(),
+        Some((prior_pairs, prior_bundle)) => {
+            let prior_ok = trust.is_approved(prior_bundle);
+            pairs
+                .iter()
+                .filter(|(r, d)| {
+                    prior_pairs
+                        .iter()
+                        .find(|(pr, _)| pr == r)
+                        .is_some_and(|(_, pd)| !(prior_ok && pd == d))
+                })
+                .map(|(r, d)| json!({ "skill": r, "digest": d }))
+                .collect()
+        }
+    };
     let mut trust_write_failed = false;
-    if trust
-        .approve_kind(
-            &bundle,
-            &name,
-            Kind::ProfileBundle,
-            OriginKind::AgentGenerated,
-        )
-        .is_err()
+    if skills_unapproved.is_empty()
+        && trust
+            .approve_kind(
+                &bundle,
+                &name,
+                Kind::ProfileBundle,
+                OriginKind::AgentGenerated,
+            )
+            .is_err()
     {
         trust_write_failed = true;
     }
-    Ok(json!({
+    let mut out = json!({
         "name": name,
         "scope": scope,
         "profile_digest": profile_digest,
         "bundle_digest": bundle,
+        "trusted": skills_unapproved.is_empty() && !trust_write_failed,
         "warnings": warnings,
         "trust_write_failed": trust_write_failed,
-    }))
+    });
+    if !skills_unapproved.is_empty() {
+        out["skills_unapproved"] = json!(skills_unapproved);
+        out["detail"] = json!(
+            "these skills changed since the profile was last approved; review them, then run with acknowledge_untrusted: true after user confirmation"
+        );
+    }
+    Ok(out)
 }
 
 /// Moving a profile between scopes: copy semantics (spec 4.2). The source

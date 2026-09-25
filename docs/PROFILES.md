@@ -93,10 +93,17 @@ project profile resolves project then global.
 ## Trust (bundles)
 
 Each profile has a `bundle_digest` over `profile.yaml` + `SOUL.md` + the sorted
-skill digests. Writing a profile through `profile_write` (or `apb profile`) auto
-approves its bundle. Any later edit to the profile or one of its skills changes
-the bundle, so the next run through the MCP gate reports
-`untrusted_profile_requires_acknowledge` until the user confirms.
+skill digests. Writing a profile through `profile_write` (or `apb profile`, or
+the dashboard) auto approves its bundle, as far as the write can vouch for it:
+the write produces `profile.yaml` and `SOUL.md`, not the skills. A new profile,
+or a skill the write newly names, is the user's choice in that write. A skill the
+profile already had is vouched for only when the bundle before the write was
+approved; if its content changed since then (a `git pull` of `.agents/skills`),
+the bundle stays untrusted and the write returns `trusted: false` with
+`skills_unapproved` (`skill`, `digest`) for the user to review. Any later edit to
+the profile or one of its skills changes the bundle, so the next run through the
+MCP gate reports `untrusted_profile_requires_acknowledge` until the user
+confirms.
 
 A run started from the dashboard or from `apb run` does not gate on playbook or
 profile-bundle trust at all: those paths pass no expected digest, so a changed

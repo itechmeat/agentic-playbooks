@@ -57,8 +57,17 @@ export const fetchProfiles = () =>
 export const fetchProfile = (name: string, scope: string, workspace = '') =>
   getJson<ProfileDetail>(`/api/profiles/${encodeURIComponent(name)}${qs({ scope, workspace })}`)
 
+/** What a profile save returns. `skills_unapproved` lists skills the profile
+ * kept whose content changed since it was last approved: the save does not
+ * vouch for them, so the profile stays untrusted until the user confirms. */
+export type ProfileWriteResult = {
+  name: string
+  trusted?: boolean
+  skills_unapproved?: { skill: string; digest: string }[]
+}
+
 export const writeProfile = (body: ProfileWriteBody, workspace = '') =>
-  requestJson<{ name: string }>(`/api/profiles${qs({ workspace })}`, {
+  requestJson<ProfileWriteResult>(`/api/profiles${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify(body),

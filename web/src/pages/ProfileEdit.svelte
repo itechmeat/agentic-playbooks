@@ -273,7 +273,7 @@
     saving = true
     try {
       const ws = scopeInput === 'project' ? workspaceInput : ''
-      await writeProfile(
+      const saved = await writeProfile(
         {
           name: nm,
           scope: scopeInput,
@@ -288,7 +288,16 @@
         },
         ws,
       )
-      toast.success(`Saved profile "${nm}"`)
+      const changed = saved.skills_unapproved ?? []
+      if (changed.length > 0) {
+        toast.warning(`Saved profile "${nm}", but it is not trusted`, {
+          description: `These skills changed since the profile was last approved: ${changed
+            .map((c) => c.skill)
+            .join(', ')}. Review them; agent runs will ask for confirmation.`,
+        })
+      } else {
+        toast.success(`Saved profile "${nm}"`)
+      }
       location.hash = '#/profiles'
     } catch (e) {
       toast.error('Save failed', { description: String(e) })

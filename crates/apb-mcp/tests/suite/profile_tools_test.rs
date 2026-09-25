@@ -387,3 +387,32 @@ fn delete_blocked_by_reference_unless_forced() {
     // With force - it is deleted.
     profile_tools::profile_delete(proj.path(), "arch", "project", true).expect("force delete ok");
 }
+
+/// Rewriting a profile does not approve skill content that changed since the
+/// profile was last approved: the write produced profile.yaml and SOUL.md,
+/// not the skills. The changed skills come back for the user's consent.
+#[test]
+fn a_rewrite_does_not_approve_drifted_skill_content() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _h, _c) = setup();
+    seed_skill(proj.path(), "helper", "v1");
+    let first = write_profile(proj.path(), "dev", &["helper".to_string()], None);
+
+    seed_skill(proj.path(), "helper", "v2 from upstream");
+    let rewritten = write_profile(
+        proj.path(),
+        "dev",
+        &["helper".to_string()],
+        first["profile_digest"].as_str(),
+    );
+    let bundle = rewritten["bundle_digest"].as_str().unwrap();
+    assert!(
+        !TrustStore::load().is_approved(bundle),
+        "drifted skill content must stay unapproved: {rewritten}"
+    );
+    assert_eq!(
+        rewritten["skills_unapproved"][0]["skill"], "project/helper",
+        "{rewritten}"
+    );
+}
