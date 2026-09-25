@@ -457,7 +457,14 @@ pub(crate) fn probe(
     if let Some(NodeKind::AgentTask { prompt, .. }) = playbook.node(node_id).map(|n| &n.kind)
         && let Some((bundle, agent, model, digests)) = agent_key_parts(run_dir, node_id)
     {
-        rendered_prompt = Some(render_node_prompt(run_dir, run_id, state, cfg, prompt)?);
+        rendered_prompt = Some(render_node_prompt(
+            run_dir,
+            run_id,
+            state,
+            cfg,
+            prompt,
+            &playbook.context_budget(node_id),
+        )?);
         bundle_digest = Some(bundle);
         agent_model = Some((agent, model));
         connector_digests = digests;

@@ -263,11 +263,32 @@ pub(crate) fn drain_progress_after_execute(
 /// config carries a non-empty instruction (Task 4 completion-plan defect 3),
 /// matching what `build_context_for_render` prepends for the actual node-prompt
 /// rendering path - see `instruction_section`.
+///
+/// It also materializes each node's latest full output as
+/// `node-outputs/<node>.md` (issue #136 item 1): a prompt receives recorded
+/// output clipped to its context budget, and every clip names that file, so
+/// the file must exist by the time the next node renders. A file whose content
+/// is already current is not rewritten.
 pub(crate) fn rebuild_context_md(run_dir: &Path) -> Result<(), EngineError> {
     let cfg = crate::run_config::read_run_config(run_dir)?;
     let header = crate::context::instruction_section(cfg.instruction.as_deref());
-    let ctx_md = format!("{header}{}", build_context(&read_all(run_dir)?));
+    let events = read_all(run_dir)?;
+    let ctx_md = format!("{header}{}", build_context(&events));
     apb_core::fsutil::atomic_write_under(run_dir, &run_dir.join("context.md"), ctx_md.as_bytes())?;
+    for (node, output) in &RunState::fold(&events).outputs {
+        let path = crate::context::node_output_path(run_dir, node);
+        if path.parent() != Some(run_dir.join(crate::context::NODE_OUTPUTS_DIR).as_path()) {
+            continue;
+        }
+        if std::fs::read(&path).is_ok_and(|on_disk| on_disk == output.as_bytes()) {
+            continue;
+        }
+        apb_core::fsutil::create_dir_under(
+            run_dir,
+            &run_dir.join(crate::context::NODE_OUTPUTS_DIR),
+        )?;
+        apb_core::fsutil::atomic_write_under(run_dir, &path, output.as_bytes())?;
+    }
     Ok(())
 }
 

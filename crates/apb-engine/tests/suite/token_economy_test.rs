@@ -168,3 +168,94 @@ fn run_instruction_reaches_the_prompt_exactly_once() {
         );
     }
 }
+
+/// `bytes` of filler output, the stand-in for a verbose agent reply.
+fn filler(bytes: usize) -> String {
+    format!("head -c {bytes} /dev/zero | tr '\\0' 'x'; echo")
+}
+
+/// Two verbose producers feeding a reader through `{{run.context}}` and a
+/// direct `{{nodes.<id>.output}}` reference. `defaults` and `reader` are
+/// spliced in so a case can set the context limits at either level.
+fn context_playbook(defaults: &str, reader: &str) -> String {
+    format!(
+        "schema: 2\nid: ctx\nname: Ctx\nversion: 1.0.0\ndefaults: {{ profile: main{defaults} }}\nnodes:\n  - {{ id: start, type: start }}\n  - {{ id: first, type: agent_task, prompt: first }}\n  - {{ id: second, type: agent_task, prompt: second }}\n  - {{ id: reader, type: agent_task, prompt: \"Read.\\n\\n{{{{run.context}}}}\\n\\nDirect: {{{{nodes.first.output}}}}\"{reader} }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: first }}\n  - {{ from: first, to: second }}\n  - {{ from: second, to: reader }}\n  - {{ from: reader, to: done }}\n"
+    )
+}
+
+/// Runs [`context_playbook`] with 36 KB outputs (above every default limit, and
+/// small enough that three of them still fit one argv element) and returns the reader's
+/// prompt plus the run directory.
+fn reader_prompt(defaults: &str, reader: &str) -> (String, PathBuf, tempfile::TempDir) {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    seed_playbook(dir.path(), "ctx", &context_playbook(defaults, reader));
+    common::seed_main(dir.path());
+    let part = format!(
+        "case \"$NODE\" in first|second) {};; esac; {OK}",
+        filler(36_000)
+    );
+    let stub = recording_stub(dir.path(), &part);
+    assert_eq!(
+        run_with_stub(dir.path(), "ctx", &stub, None),
+        RunStatus::Succeeded
+    );
+    let prompt = invocations(dir.path())
+        .into_iter()
+        .find(|i| i.node == "reader")
+        .expect("reader ran")
+        .prompt()
+        .to_string();
+    let run_dir = fs::read_dir(dir.path().join(".apb/runs"))
+        .unwrap()
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .find(|p| p.is_dir())
+        .unwrap();
+    (prompt, run_dir, dir)
+}
+
+/// Item 1 of #136: recorded output reaches a downstream prompt clipped to the
+/// default budgets, each clip naming the file that holds the full text, and
+/// that file really holds it.
+#[test]
+fn downstream_prompts_receive_bounded_context_with_pointers_to_full_output() {
+    let (prompt, run_dir, _dir) = reader_prompt("", "");
+    assert!(
+        prompt.len() < 56 * 1024,
+        "three 36 KB outputs must not reach the prompt in full: {} bytes",
+        prompt.len()
+    );
+    let full = run_dir.join("node-outputs/first.md");
+    assert!(
+        prompt.contains(&full.display().to_string()),
+        "a clipped output must name its full-output file"
+    );
+    let on_disk = fs::read_to_string(&full).expect("full output on disk");
+    assert!(
+        on_disk.trim_end().len() >= 36_000,
+        "the file keeps the whole output"
+    );
+}
+
+/// The budgets are playbook- and node-configurable; `0` lifts a limit.
+#[test]
+fn context_budgets_are_configurable_per_playbook_and_node() {
+    let unlimited = ", context: { max_bytes: 0, section_max_bytes: 0, output_max_bytes: 0 }";
+    let (prompt, _, _dir) = reader_prompt(unlimited, "");
+    assert!(
+        prompt.len() > 100_000,
+        "defaults.context lifts every limit: {}",
+        prompt.len()
+    );
+
+    // The node's own setting wins over the playbook's.
+    let (prompt, _, _dir) = reader_prompt(
+        unlimited,
+        ", context: { output_max_bytes: 1000, section_max_bytes: 1000 }",
+    );
+    assert!(
+        prompt.len() < 10_000,
+        "the node narrows the budget again: {}",
+        prompt.len()
+    );
+}

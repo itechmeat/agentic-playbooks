@@ -19,9 +19,14 @@ pub(crate) fn render_node_prompt(
     state: &RunState,
     cfg: &RunConfig,
     prompt: &str,
+    budget: &apb_core::schema::ContextBudget,
 ) -> Result<String, EngineError> {
-    let context =
-        build_context_for_render(run_dir, &read_all(run_dir)?, cfg.instruction.as_deref())?;
+    let context = build_context_for_render(
+        run_dir,
+        &read_all(run_dir)?,
+        cfg.instruction.as_deref(),
+        budget,
+    )?;
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -35,6 +40,10 @@ pub(crate) fn render_node_prompt(
         &state.rejected_outputs,
         &hooks,
         &context,
+        &crate::context::OutputClip {
+            run_dir,
+            max_bytes: budget.output_max_bytes,
+        },
     ))
 }
 
@@ -405,7 +414,14 @@ pub(crate) fn execute_node(
         NodeKind::Prompt { prompt } => {
             let text = match &override_prompt {
                 Some(p) => p.clone(),
-                None => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
+                None => render_node_prompt(
+                    run_dir,
+                    run_id,
+                    state,
+                    cfg,
+                    prompt,
+                    &playbook.context_budget(node_id),
+                )?,
             };
             Ok(AttemptOutcome::Finished {
                 status: NodeStatus::Succeeded,
@@ -445,7 +461,14 @@ pub(crate) fn execute_node(
             let mut text = match (&resume, &override_prompt) {
                 (Some(rc), _) => answer_followup(&rc.answer),
                 (None, Some(p)) => p.clone(),
-                (None, None) => render_node_prompt(run_dir, run_id, state, cfg, prompt)?,
+                (None, None) => render_node_prompt(
+                    run_dir,
+                    run_id,
+                    state,
+                    cfg,
+                    prompt,
+                    &playbook.context_budget(node_id),
+                )?,
             };
             // Issue #45 finding 2 + issue #56 finding 4: deliver the run
             // instruction, every applied supervisor note, and the precedence
@@ -1672,7 +1695,8 @@ pub(crate) fn execute_finish_answer(
     // as quoted reference context (attached below by `assemble_finish_answer_prompt`),
     // never as a `## run instruction` directive header. So the auto context here
     // carries the completed nodes' recorded output but NOT the instruction header.
-    let context = build_terminal_context(&events, None);
+    let budget = playbook.context_budget(node_id);
+    let context = build_terminal_context(run_dir, &events, None, &budget);
     let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
         .into_iter()
         .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -1686,6 +1710,10 @@ pub(crate) fn execute_finish_answer(
         &state.rejected_outputs,
         &hooks,
         &context,
+        &crate::context::OutputClip {
+            run_dir,
+            max_bytes: budget.output_max_bytes,
+        },
     );
     // Finish-with-prompt scopes its composer prompt (issue #70 item 1): the run
     // instruction rides along ONLY as quoted reference context and the composer is
@@ -2059,7 +2087,7 @@ pub(crate) fn run_playbook_node(
     root: &Path,
     run_dir: &Path,
     log: &mut EventLog,
-    _playbook: &Playbook,
+    playbook: &Playbook,
     cfg: &RunConfig,
     run_id: &str,
     node_id: &str,
@@ -2101,7 +2129,9 @@ pub(crate) fn run_playbook_node(
     // falls back to its own draft). Reuses the `events` read above (review M1).
     let child_instruction = match node_instruction {
         Some(t) => {
-            let context = build_context_for_render(run_dir, &events, cfg.instruction.as_deref())?;
+            let budget = playbook.context_budget(node_id);
+            let context =
+                build_context_for_render(run_dir, &events, cfg.instruction.as_deref(), &budget)?;
             let hooks: BTreeMap<String, String> = crate::hooks::read_hooks(run_dir)?
                 .into_iter()
                 .map(|(k, secret)| (k, crate::hooks::hook_path(run_id, &secret)))
@@ -2116,6 +2146,10 @@ pub(crate) fn run_playbook_node(
                 &state.rejected_outputs,
                 &hooks,
                 &context,
+                &crate::context::OutputClip {
+                    run_dir,
+                    max_bytes: budget.output_max_bytes,
+                },
             ))
         }
         None => None,

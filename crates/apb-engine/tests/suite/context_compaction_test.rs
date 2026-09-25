@@ -3,6 +3,7 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apb_core::registry::init_project;
+use apb_core::schema::ContextBudget;
 use apb_engine::context::build_context_for_render;
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::scheduler::{RunOptions, run};
@@ -134,7 +135,8 @@ fn context_compaction_writes_artifact_and_keeps_primary_intact() {
 
     // 5. The render context = summary + uncompacted tail: shorter than the full one and
     //    starts with the summary heading.
-    let rendered = build_context_for_render(&run_dir, &events, None).unwrap();
+    let rendered =
+        build_context_for_render(&run_dir, &events, None, &ContextBudget::UNLIMITED).unwrap();
     assert!(
         rendered.starts_with("## summary (compacted)"),
         "rendered context must lead with summary"

@@ -214,11 +214,22 @@ pub(crate) fn build_reprompt_override(
     run_id: &str,
     state: &RunState,
     cfg: &RunConfig,
-    node_prompt: &str,
+    playbook: &Playbook,
     events: &[Event],
     node: &str,
 ) -> Result<String, EngineError> {
-    let base = render_node_prompt(run_dir, run_id, state, cfg, node_prompt)?;
+    let node_prompt = match playbook.node(node).map(|n| &n.kind) {
+        Some(NodeKind::AgentTask { prompt, .. }) => prompt.as_str(),
+        _ => "",
+    };
+    let base = render_node_prompt(
+        run_dir,
+        run_id,
+        state,
+        cfg,
+        node_prompt,
+        &playbook.context_budget(node),
+    )?;
     let visit_start = current_visit_start_seq(events, node);
     let prior_q = questions_asked_before_seq(events, node, visit_start);
     let prior_a = questions_answered_before_seq(events, node, visit_start);

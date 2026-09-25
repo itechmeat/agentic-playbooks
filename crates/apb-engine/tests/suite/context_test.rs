@@ -1,7 +1,73 @@
-use apb_engine::context::{build_context, build_context_for_render, render};
+use apb_core::schema::ContextBudget;
+use apb_engine::context::{OutputClip, build_context, build_context_for_render, render};
 use apb_engine::event::{Event, EventPayload};
 use apb_engine::state::ReviewDecision;
 use std::collections::BTreeMap;
+
+/// No output reference is clipped: these tests pin what `render` resolves.
+fn unlimited_outputs() -> OutputClip<'static> {
+    OutputClip {
+        run_dir: std::path::Path::new("/run"),
+        max_bytes: 0,
+    }
+}
+
+fn finished(seq: u64, node: &str, output: &str) -> Event {
+    ev(
+        seq,
+        EventPayload::NodeFinished {
+            node: node.into(),
+            status: "succeeded".into(),
+            attempt: 1,
+            output: output.into(),
+            artifacts: Vec::new(),
+        },
+    )
+}
+
+/// Issue #136 item 1: a loop re-runs a node, and only its latest output is
+/// worth prompt space; an earlier run shrinks to a pointer to `context.md`.
+/// When the sections still exceed `max_bytes`, the oldest outputs give way to
+/// pointers at their files, and the newest one is always kept.
+#[test]
+fn render_context_drops_superseded_runs_and_oldest_outputs_over_budget() {
+    let run_dir = tempfile::tempdir().unwrap();
+    let events = vec![
+        finished(0, "draft", "FIRST-DRAFT"),
+        finished(1, "review", &"r".repeat(900)),
+        finished(2, "draft", "SECOND-DRAFT"),
+        finished(3, "check", &"c".repeat(900)),
+    ];
+    let budget = ContextBudget {
+        max_bytes: 1500,
+        ..ContextBudget::UNLIMITED
+    };
+    let rendered = build_context_for_render(run_dir.path(), &events, None, &budget).unwrap();
+
+    assert!(
+        !rendered.contains("FIRST-DRAFT"),
+        "superseded run kept:\n{rendered}"
+    );
+    assert!(rendered.contains("superseded by a later run of `draft`"));
+    assert!(rendered.contains("SECOND-DRAFT"));
+    assert!(
+        !rendered.contains(&"r".repeat(900)),
+        "the oldest output must give way under the budget"
+    );
+    assert!(
+        rendered.contains(
+            &run_dir
+                .path()
+                .join("node-outputs/review.md")
+                .display()
+                .to_string()
+        )
+    );
+    assert!(
+        rendered.contains(&"c".repeat(900)),
+        "the newest output always stays"
+    );
+}
 
 fn ev(seq: u64, p: EventPayload) -> Event {
     Event {
@@ -71,6 +137,7 @@ fn renders_all_template_refs() {
         &rejected_outputs,
         &hooks,
         "CTXBODY",
+        &unlimited_outputs(),
     );
     assert_eq!(
         out,
@@ -98,8 +165,13 @@ fn build_context_for_render_leads_with_run_instruction_when_present() {
         },
     )];
     let run_dir = tempfile::tempdir().unwrap();
-    let rendered =
-        build_context_for_render(run_dir.path(), &events, Some("stay within budget")).unwrap();
+    let rendered = build_context_for_render(
+        run_dir.path(),
+        &events,
+        Some("stay within budget"),
+        &ContextBudget::UNLIMITED,
+    )
+    .unwrap();
     assert!(
         rendered.starts_with("## run instruction\n\nstay within budget\n\n"),
         "expected the rendered context to lead with the run instruction, got:\n{rendered}"
@@ -114,7 +186,8 @@ fn build_context_for_render_leads_with_run_instruction_when_present() {
 fn build_context_for_render_has_no_instruction_section_when_absent() {
     let events: Vec<Event> = Vec::new();
     let run_dir = tempfile::tempdir().unwrap();
-    let rendered = build_context_for_render(run_dir.path(), &events, None).unwrap();
+    let rendered =
+        build_context_for_render(run_dir.path(), &events, None, &ContextBudget::UNLIMITED).unwrap();
     assert!(
         !rendered.contains("## run instruction"),
         "expected no instruction section when absent, got:\n{rendered}"
@@ -141,6 +214,7 @@ fn renders_a_top_level_field_selector_on_output_and_report() {
         &BTreeMap::new(),
         &BTreeMap::new(),
         "",
+        &unlimited_outputs(),
     );
     assert_eq!(out, "V: failed | C: 3 | O: true");
 }
@@ -175,6 +249,7 @@ fn a_field_selector_renders_empty_for_every_unreadable_shape() {
             &BTreeMap::new(),
             &BTreeMap::new(),
             "",
+            &unlimited_outputs(),
         );
         assert_eq!(out, "[]", "{why} must render empty, got {out}");
     }
@@ -191,6 +266,7 @@ fn unknown_refs_become_empty() {
         &BTreeMap::new(),
         &BTreeMap::new(),
         "",
+        &unlimited_outputs(),
     );
     assert_eq!(out, "[]");
 }

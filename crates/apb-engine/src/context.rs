@@ -2,7 +2,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 use std::path::Path;
 
-use apb_core::schema::output_field_value;
+use apb_core::schema::{ContextBudget, output_field_value};
 
 use crate::error::EngineError;
 use crate::event::{Event, EventPayload};
@@ -10,10 +10,19 @@ use crate::state::ReviewDecision;
 
 /// A context section (heading + body) with the seq of the event that
 /// produced it. Needed to split the context into "old" (subject to
-/// compaction) and "recent tail" (raw).
+/// compaction) and "recent tail" (raw), and to bound what a prompt receives.
 struct Section {
     seq: u64,
-    text: String,
+    /// The node whose output this is; `None` for a supervisor note.
+    node: Option<String>,
+    heading: String,
+    body: String,
+}
+
+impl Section {
+    fn text(&self) -> String {
+        format!("{}\n\n{}\n\n", self.heading, self.body)
+    }
 }
 
 /// Parses the event log into ordered context sections. The single source for
@@ -29,14 +38,12 @@ fn sections(events: &[Event]) -> Vec<Section> {
                 attempt,
                 output,
                 ..
-            } => {
-                let mut text = String::new();
-                let _ = write!(
-                    text,
-                    "## {node} ({status}, attempt {attempt})\n\n{output}\n\n"
-                );
-                out.push(Section { seq: e.seq, text });
-            }
+            } => out.push(Section {
+                seq: e.seq,
+                node: Some(node.clone()),
+                heading: format!("## {node} ({status}, attempt {attempt})"),
+                body: output.clone(),
+            }),
             // Supervisor notes (ContextAppend), injected into the event log
             // - rendered in order of appearance interleaved with node
             // sections, so {{run.context}} in subsequent prompts sees the
@@ -44,14 +51,115 @@ fn sections(events: &[Event]) -> Vec<Section> {
             EventPayload::SupervisorAction { action, detail, .. }
                 if action == crate::event::supervisor_action::CONTEXT_APPEND =>
             {
-                let mut text = String::new();
-                let _ = write!(text, "## note (supervisor)\n\n{detail}\n\n");
-                out.push(Section { seq: e.seq, text });
+                out.push(Section {
+                    seq: e.seq,
+                    node: None,
+                    heading: "## note (supervisor)".to_string(),
+                    body: detail.clone(),
+                })
             }
             _ => {}
         }
     }
     out
+}
+
+/// The run-dir directory holding each node's latest full output as
+/// `<node>.md`, the file a clipped prompt points at (issue #136 item 1).
+/// Written by `rebuild_context_md` after every executed node.
+pub const NODE_OUTPUTS_DIR: &str = "node-outputs";
+
+/// Where the full text of `node`'s latest output lives. A node id that is not
+/// a safe path segment has no file of its own, so it points at `context.md`,
+/// which holds every run of every node.
+pub fn node_output_path(run_dir: &Path, node: &str) -> std::path::PathBuf {
+    if apb_core::registry::is_safe_segment(node) {
+        run_dir.join(NODE_OUTPUTS_DIR).join(format!("{node}.md"))
+    } else {
+        run_dir.join("context.md")
+    }
+}
+
+/// `text` cut to at most `max` bytes (on a char boundary) with a note naming
+/// how much was cut and where the whole text is. `max == 0` or a text that
+/// fits returns it unchanged.
+fn clip<'a>(text: &'a str, max: usize, full: &Path) -> std::borrow::Cow<'a, str> {
+    if max == 0 || text.len() <= max {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut cut = max;
+    while !text.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    std::borrow::Cow::Owned(format!(
+        "{}\n\n[clipped: {} more bytes; the full output is in {}]",
+        &text[..cut],
+        text.len() - cut,
+        full.display()
+    ))
+}
+
+/// The prompt view of `secs` under `budget` (issue #136 item 1), with no model
+/// call and nothing lost on disk:
+///
+/// 1. a node section that a later run of the same node superseded (a loop, a
+///    re-run) shrinks to its heading and a pointer to `context.md`;
+/// 2. every other node section is clipped to `section_max_bytes`;
+/// 3. while the whole exceeds `max_bytes`, the oldest remaining node output is
+///    replaced by a pointer to its file, never the newest one.
+///
+/// Supervisor notes are steering, not output: they are never cut.
+fn bounded(secs: &[Section], budget: &ContextBudget, run_dir: &Path) -> String {
+    let context_md = run_dir.join("context.md");
+    let mut latest: BTreeMap<&str, usize> = BTreeMap::new();
+    for (i, sec) in secs.iter().enumerate() {
+        if let Some(node) = &sec.node {
+            latest.insert(node, i);
+        }
+    }
+    let mut texts: Vec<String> = Vec::with_capacity(secs.len());
+    // Indices of full node outputs that step 3 may still replace.
+    let mut shrinkable: Vec<usize> = Vec::new();
+    for (i, sec) in secs.iter().enumerate() {
+        let text = match &sec.node {
+            None => sec.text(),
+            Some(node) if latest.get(node.as_str()) != Some(&i) => format!(
+                "{}\n\n[superseded by a later run of `{node}`; the output of every run is in {}]\n\n",
+                sec.heading,
+                context_md.display()
+            ),
+            Some(node) => {
+                shrinkable.push(i);
+                let full = node_output_path(run_dir, node);
+                format!(
+                    "{}\n\n{}\n\n",
+                    sec.heading,
+                    clip(&sec.body, budget.section_max_bytes, &full)
+                )
+            }
+        };
+        texts.push(text);
+    }
+    if budget.max_bytes > 0 {
+        let mut total: usize = texts.iter().map(String::len).sum();
+        // The newest output always stays: it is what the next node most
+        // likely builds on.
+        shrinkable.pop();
+        for i in shrinkable {
+            if total <= budget.max_bytes {
+                break;
+            }
+            let node = secs[i].node.as_deref().unwrap_or_default();
+            let stub = format!(
+                "{}\n\n[left out to keep this prompt small; the full output is in {}]\n\n",
+                secs[i].heading,
+                node_output_path(run_dir, node).display()
+            );
+            total = total - texts[i].len() + stub.len();
+            texts[i] = stub;
+        }
+    }
+    texts.concat()
 }
 
 /// Applied supervisor context notes, oldest first (issue #45 finding 2).
@@ -278,15 +386,15 @@ pub fn assemble_finish_answer_prompt(
 
 /// The full context (all sections), the materialized view for context.md and the compaction threshold.
 pub fn build_context(events: &[Event]) -> String {
-    sections(events).into_iter().map(|s| s.text).collect()
+    sections(events).iter().map(Section::text).collect()
 }
 
 /// Sections with seq strictly greater than `after_seq` - the uncompacted tail on top of the summary.
 pub fn build_context_tail(events: &[Event], after_seq: u64) -> String {
     sections(events)
-        .into_iter()
+        .iter()
         .filter(|s| s.seq > after_seq)
-        .map(|s| s.text)
+        .map(Section::text)
         .collect()
 }
 
@@ -294,9 +402,9 @@ pub fn build_context_tail(events: &[Event], after_seq: u64) -> String {
 /// needs to be folded into the next compaction on top of the previous summary.
 pub fn sections_between(events: &[Event], after_seq: u64, up_to_seq: u64) -> String {
     sections(events)
-        .into_iter()
+        .iter()
         .filter(|s| s.seq > after_seq && s.seq <= up_to_seq)
-        .map(|s| s.text)
+        .map(Section::text)
         .collect()
 }
 
@@ -312,7 +420,7 @@ pub fn compaction_boundary(events: &[Event], keep_budget: usize) -> Option<u64> 
     // Index of the first (oldest) section that made it into the tail.
     let mut first_kept = secs.len();
     for i in (0..secs.len()).rev() {
-        let len = secs[i].text.len();
+        let len = secs[i].text().len();
         if kept + len > keep_budget && kept > 0 {
             break;
         }
@@ -360,18 +468,26 @@ pub(crate) fn instruction_section(instruction: Option<&str>) -> String {
 /// kept), so an artifact failure does not bring down the run. `instruction` is
 /// the run's `RunConfig.instruction` (the caller already has it in scope as
 /// `cfg.instruction`) - prepended as a `## run instruction` section ahead of
-/// everything else, see `instruction_section`.
+/// everything else, see `instruction_section`. The sections are bounded by
+/// the rendering node's `budget` (see [`bounded`]).
 pub fn build_context_for_render(
     run_dir: &Path,
     events: &[Event],
     instruction: Option<&str>,
+    budget: &ContextBudget,
 ) -> Result<String, EngineError> {
     let header = instruction_section(instruction);
     let Some((file, up_to)) = latest_compaction(events) else {
-        return Ok(format!("{header}{}", build_context(events)));
+        return Ok(format!(
+            "{header}{}",
+            bounded(&sections(events), budget, run_dir)
+        ));
     };
     let summary = std::fs::read_to_string(run_dir.join(&file)).unwrap_or_default();
-    let tail = build_context_tail(events, up_to);
+    let tail: Vec<Section> = sections(events)
+        .into_iter()
+        .filter(|s| s.seq > up_to)
+        .collect();
     let mut out = header;
     let summary = summary.trim();
     if !summary.is_empty() {
@@ -379,14 +495,14 @@ pub fn build_context_for_render(
         out.push_str(summary);
         out.push_str("\n\n");
     }
-    out.push_str(&tail);
+    out.push_str(&bounded(&tail, budget, run_dir));
     Ok(out)
 }
 
 /// The terminal context: the run-instruction header followed by EVERY section
 /// in the append-only event log, deliberately WITHOUT compaction. The terminal
 /// finish-with-prompt node composes the run's final answer and must see every
-/// completed node's raw output.
+/// completed node's output.
 ///
 /// `build_context_for_render` is a lossy, budget-driven view for MID-RUN
 /// prompts: once the accumulated context exceeds `context_max_bytes` (which the
@@ -398,13 +514,29 @@ pub fn build_context_for_render(
 /// final deliverable would be composed from a summary that reports "no shipped
 /// work" even though every output still lives verbatim in the log (issue #42
 /// finding 5). The full record is always available here, so the terminal node
-/// reads it directly.
-pub fn build_terminal_context(events: &[Event], instruction: Option<&str>) -> String {
+/// reads it directly. The deterministic byte budget still applies (issue #136
+/// item 1): it loses nothing, since every clip names the file with the whole
+/// output.
+pub fn build_terminal_context(
+    run_dir: &Path,
+    events: &[Event],
+    instruction: Option<&str>,
+    budget: &ContextBudget,
+) -> String {
     format!(
         "{}{}",
         instruction_section(instruction),
-        build_context(events)
+        bounded(&sections(events), budget, run_dir)
     )
+}
+
+/// How big a single `{{nodes.<id>.output}}` reference may render, and the
+/// run dir its clip note points into (issue #136 item 1).
+#[derive(Debug, Clone, Copy)]
+pub struct OutputClip<'a> {
+    pub run_dir: &'a Path,
+    /// `0` means unlimited.
+    pub max_bytes: usize,
 }
 
 /// Manual scan for `{{ ... }}` without regex; substitutes known references, unknown ones -> "".
@@ -418,6 +550,7 @@ pub fn render(
     rejected_outputs: &BTreeMap<String, String>,
     hooks: &BTreeMap<String, String>,
     context: &str,
+    clip_outputs: &OutputClip<'_>,
 ) -> String {
     let mut out = String::with_capacity(text.len());
     let mut rest = text;
@@ -435,6 +568,7 @@ pub fn render(
                 rejected_outputs,
                 hooks,
                 context,
+                clip_outputs,
             ));
             rest = &after[close + 2..];
         } else {
@@ -524,15 +658,20 @@ fn resolve(
     rejected_outputs: &BTreeMap<String, String>,
     hooks: &BTreeMap<String, String>,
     context: &str,
+    clip_outputs: &OutputClip<'_>,
 ) -> String {
     let parts: Vec<&str> = key.split('.').collect();
+    let clipped = |id: &str, text: String| -> String {
+        let full = node_output_path(clip_outputs.run_dir, id);
+        clip(&text, clip_outputs.max_bytes, &full).into_owned()
+    };
     match parts.as_slice() {
         ["params", name] => params.get(*name).cloned().unwrap_or_default(),
         ["run", "instruction"] => instruction.unwrap_or("").to_string(),
         ["run", "context"] => context.to_string(),
         ["run", "hooks", key] => hooks.get(*key).cloned().unwrap_or_default(),
         ["nodes", id, "output"] | ["nodes", id, "report"] => {
-            outputs.get(*id).cloned().unwrap_or_default()
+            clipped(id, outputs.get(*id).cloned().unwrap_or_default())
         }
         // ONE top-level field of an output that parses as a JSON object, with
         // the exact `output_field` edge-condition semantics (spec 2026-08-05
@@ -540,10 +679,13 @@ fn resolve(
         // read - no output, not JSON, not an object, an absent field, a null,
         // array or object value - renders as the empty string, like every other
         // reference `resolve` cannot fill.
-        ["nodes", id, "output" | "report", field] => outputs
-            .get(*id)
-            .and_then(|output| output_field_value(output, field))
-            .unwrap_or_default(),
+        ["nodes", id, "output" | "report", field] => clipped(
+            id,
+            outputs
+                .get(*id)
+                .and_then(|output| output_field_value(output, field))
+                .unwrap_or_default(),
+        ),
         ["nodes", id, "review_note"] => {
             reviews.get(*id).map(|r| r.note.clone()).unwrap_or_default()
         }

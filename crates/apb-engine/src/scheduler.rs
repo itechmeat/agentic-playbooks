@@ -1545,18 +1545,8 @@ fn drive_inner(
                                         detail,
                                     })?;
                                 }
-                                let node_prompt = match &node_kind {
-                                    NodeKind::AgentTask { prompt, .. } => prompt.clone(),
-                                    _ => String::new(),
-                                };
                                 let ov = build_reprompt_override(
-                                    run_dir,
-                                    &run_id,
-                                    &state,
-                                    cfg,
-                                    &node_prompt,
-                                    &events,
-                                    &current,
+                                    run_dir, &run_id, &state, cfg, &playbook, &events, &current,
                                 )?;
                                 prompt_overrides.insert(current.clone(), ov);
                             }
@@ -1814,18 +1804,8 @@ fn drive_inner(
                                     output.trim()
                                 ),
                             })?;
-                            let node_prompt = match &node_kind {
-                                NodeKind::AgentTask { prompt, .. } => prompt.clone(),
-                                _ => String::new(),
-                            };
                             let ov = build_reprompt_override(
-                                run_dir,
-                                &run_id,
-                                &state,
-                                cfg,
-                                &node_prompt,
-                                &events,
-                                &current,
+                                run_dir, &run_id, &state, cfg, &playbook, &events, &current,
                             )?;
                             prompt_overrides.insert(current.clone(), ov);
                             continue;

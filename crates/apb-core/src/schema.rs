@@ -239,6 +239,80 @@ impl Playbook {
     pub fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)
     }
+
+    /// The context budget a node's prompt is rendered with: each limit comes
+    /// from the node's own `context`, else `defaults.context`, else the
+    /// engine default ([`ContextBudget::DEFAULT`]). An unknown node gets the
+    /// playbook-level budget.
+    pub fn context_budget(&self, node_id: &str) -> ContextBudget {
+        let node = self.node(node_id).and_then(|n| n.context);
+        let defaults = self.defaults.context;
+        let pick = |f: fn(&ContextLimits) -> Option<u64>, fallback: usize| -> usize {
+            node.as_ref()
+                .and_then(f)
+                .or_else(|| defaults.as_ref().and_then(f))
+                .map_or(fallback, |v| usize::try_from(v).unwrap_or(usize::MAX))
+        };
+        ContextBudget {
+            max_bytes: pick(|l| l.max_bytes, ContextBudget::DEFAULT.max_bytes),
+            section_max_bytes: pick(
+                |l| l.section_max_bytes,
+                ContextBudget::DEFAULT.section_max_bytes,
+            ),
+            output_max_bytes: pick(
+                |l| l.output_max_bytes,
+                ContextBudget::DEFAULT.output_max_bytes,
+            ),
+        }
+    }
+}
+
+/// How much recorded run output a node's prompt may carry (issue #136 item
+/// 1), as written under `defaults.context` or a node's own `context`. Every
+/// field is optional and falls back field by field (node, then defaults, then
+/// the engine default); `0` lifts that limit. Output beyond a limit is clipped
+/// in the prompt only: the full text stays on disk and the clip names the
+/// file that holds it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextLimits {
+    /// Total size of `{{run.context}}`. When the sections exceed it, the
+    /// oldest ones are replaced by a one-line pointer until it fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    /// Size of one node's section inside `{{run.context}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_max_bytes: Option<u64>,
+    /// Size of one `{{nodes.<id>.output}}` (or `.report`, or a field of it)
+    /// reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_max_bytes: Option<u64>,
+}
+
+/// The resolved limits of [`ContextLimits`] for one node, in bytes; `0` means
+/// unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextBudget {
+    pub max_bytes: usize,
+    pub section_max_bytes: usize,
+    pub output_max_bytes: usize,
+}
+
+impl ContextBudget {
+    /// The engine defaults: about 16k tokens of run context, 2k per section
+    /// and 8k per direct output reference.
+    pub const DEFAULT: ContextBudget = ContextBudget {
+        max_bytes: 64 * 1024,
+        section_max_bytes: 8 * 1024,
+        output_max_bytes: 32 * 1024,
+    };
+
+    /// No limit at all: the whole recorded output, as before the budgets.
+    pub const UNLIMITED: ContextBudget = ContextBudget {
+        max_bytes: 0,
+        section_max_bytes: 0,
+        output_max_bytes: 0,
+    };
 }
 
 impl Node {
@@ -454,6 +528,10 @@ pub struct Defaults {
     /// default`; `1` serializes every fan-out. Absent means the run decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<usize>,
+    /// Playbook-wide context budget for node prompts (issue #136 item 1). See
+    /// [`ContextLimits`]; a node's own `context` wins field by field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextLimits>,
 }
 
 /// For `skip_serializing_if` on additive boolean flags: a `false` value is
@@ -774,6 +852,10 @@ pub struct Node {
     /// unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub success_check: Option<SuccessCheck>,
+    /// This node's context budget (issue #136 item 1), overriding
+    /// `defaults.context` field by field. See [`ContextLimits`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextLimits>,
     #[serde(flatten)]
     pub kind: NodeKind,
 }

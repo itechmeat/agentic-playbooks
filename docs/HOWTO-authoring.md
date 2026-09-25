@@ -348,6 +348,7 @@ a V13 validation error:
 - `run.instruction` - the run's input prompt (see below).
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
+  Bounded by the node's context budget (see "Context budget" below).
 - `run.hooks.*` - the relative signal URL for a `wait` node's hook key
   (`run.hooks.<key>` renders `/api/hooks/<run-id>/<secret>`). Posting to that
   URL only unblocks the wait; the request body is discarded, not stored or
@@ -388,6 +389,45 @@ because there the source did give its text and the mismatch is in the agreed
 shape of it, not in the graph. One anomaly per node execution lists all of that
 node's holes. A finish node composing an answer is checked the same way; a node
 served from the cache is not, because neither its execution nor its capture runs.
+
+### Context budget (how much recorded output a prompt gets)
+
+Recorded output reaches a prompt through `run.context` and `nodes.<id>.output`
+(or `.report`, or a field of either), and both are bounded so a verbose node or
+a long loop does not grow every later prompt. The budget is deterministic (no
+model call) and loses nothing: the full text stays on disk, and every cut names
+the file that holds it, so the agent can read more when it needs to.
+
+- `run.context` keeps only the latest run of each node. An earlier run of the
+  same node (a loop pass, a re-run) shrinks to its heading and a pointer to the
+  run's `context.md`, which holds every run.
+- Each remaining node section is clipped to `section_max_bytes`, with a note
+  naming `<run dir>/node-outputs/<node>.md` (the node's latest full output).
+- When the whole context still exceeds `max_bytes`, the oldest node outputs are
+  replaced by a pointer to their file until it fits. The newest output is always
+  kept, and supervisor notes are never cut.
+- A `nodes.<id>.output` reference is clipped to `output_max_bytes` the same way.
+
+The engine defaults are `max_bytes: 65536`, `section_max_bytes: 8192` and
+`output_max_bytes: 32768` (about 16k, 2k and 8k tokens). Set them playbook-wide
+under `defaults.context` or per node under the node's own `context`; each field
+falls back on its own (node, then defaults, then the engine default), and `0`
+lifts that limit:
+
+```yaml
+defaults:
+  profile: developer
+  context: { max_bytes: 32768 }
+nodes:
+  - id: review
+    type: agent_task
+    profile: reviewer
+    prompt: "Review this diff:\n\n{{nodes.implement.output}}"
+    context: { output_max_bytes: 0 }   # this node needs the whole diff
+```
+
+A finish-with-prompt composer is bounded the same way. The budget changes the
+rendered prompt, so it also moves the node's cache key.
 
 ## Human review and conditional edges
 
