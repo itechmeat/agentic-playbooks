@@ -13,7 +13,11 @@
 		sideOffset = 4,
 		portalProps,
 		children,
-		preventScroll = true,
+		// bits-ui's own default for a select. With `true` an open select locks
+		// the page (`pointer-events: none` on <body>) and releases it only after
+		// its close animation, so a click right after picking an option (the
+		// editor's Save) was swallowed. See select-content.test.ts.
+		preventScroll = false,
 		...restProps
 	}: WithoutChild<SelectPrimitive.ContentProps> & {
 		portalProps?: WithoutChildrenOrChild<ComponentProps<typeof SelectPortal>>;
