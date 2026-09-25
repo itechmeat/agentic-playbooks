@@ -90,6 +90,12 @@ server:
   workdir_queue_wait_seconds: 900
 ```
 
+One dashboard serves a config dir. It records itself in
+`<config_dir>/serve.lock` (pid, port, instance id); a second `apb dashboard`
+on another port over the same config dir refuses to start and names the
+running one, a lock left by a process that is gone is replaced, and a
+dashboard only ever removes its own lock.
+
 `public_base_url` is the address the dashboard is reached at; when it is https,
 the session cookie is issued with the `Secure` attribute. `trusted_proxies`
 lists the exact peer addresses whose `X-Forwarded-For` and `X-Forwarded-Proto`

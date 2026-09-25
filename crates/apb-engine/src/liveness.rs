@@ -238,6 +238,20 @@ pub fn pid_is_live(pid: u32) -> bool {
     !matches!(process_probe(pid), Probe::NotFound)
 }
 
+/// Whether `pid` is a live `apb` process. For a record naming an apb process
+/// (the dashboard's `serve.lock`): a pid that was reused by an unrelated
+/// program reads as gone. Biased toward "live" when the probe cannot tell.
+pub fn apb_pid_is_live(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    match process_probe(pid) {
+        Probe::NotFound => false,
+        Probe::Unknown => true,
+        Probe::Running(argv) => argv_program_is_apb(&argv),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Driver liveness
 // ---------------------------------------------------------------------------

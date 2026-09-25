@@ -211,6 +211,7 @@ dependencies = [
  "serde_json",
  "serde_yaml_ng",
  "tempfile",
+ "thiserror",
  "tokio",
  "tower",
  "tower-http 0.7.0",

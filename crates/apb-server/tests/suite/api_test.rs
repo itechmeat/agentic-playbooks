@@ -164,15 +164,58 @@ async fn run_report_path_traversal_is_rejected() {
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
+/// F26: `<config_dir>/serve.lock` names the one dashboard serving a config
+/// dir. A second dashboard (another port) must not take it over from a live
+/// one, and no dashboard may delete a lock it does not own; a lock left by a
+/// dead process is replaced.
 #[test]
-fn lock_write_and_remove() {
-    let dir = seed();
-    let info = apb_server::lock::write_lock(dir.path(), 7321).unwrap();
-    assert_eq!(info.port, 7321);
-    let raw = fs::read_to_string(dir.path().join(".apb/serve.lock")).unwrap();
-    assert!(raw.contains("root_fingerprint"));
-    apb_server::lock::remove_lock(dir.path()).unwrap();
-    assert!(!dir.path().join(".apb/serve.lock").exists());
+fn global_lock_is_owned_by_one_live_dashboard() {
+    use apb_server::lock::{GlobalLock, LockError};
+    let cfg = tempfile::tempdir().unwrap();
+    let path = cfg.path().join("serve.lock");
+    // Another dashboard: a live process whose program is named `apb`.
+    use std::os::unix::process::CommandExt;
+    struct Reap(std::process::Child);
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut other = Reap(
+        std::process::Command::new("/bin/sh")
+            .arg0("apb")
+            .args(["-c", "sleep 30; :"])
+            .spawn()
+            .unwrap(),
+    );
+    let theirs = format!(
+        r#"{{"port":7321,"pid":{},"root_fingerprint":"x","instance_id":"theirs"}}"#,
+        other.0.id()
+    );
+    fs::write(&path, &theirs).unwrap();
+
+    let refused = GlobalLock::acquire(cfg.path(), 7400);
+    assert!(
+        matches!(refused, Err(LockError::Held { port: 7321, .. })),
+        "a live dashboard's lock must be refused"
+    );
+    assert_eq!(fs::read_to_string(&path).unwrap(), theirs, "left untouched");
+
+    // Once that process is gone its lock is stale and is replaced.
+    other.0.kill().unwrap();
+    other.0.wait().unwrap();
+    let ours = GlobalLock::acquire(cfg.path(), 7400).expect("stale lock replaced");
+    assert!(fs::read_to_string(&path).unwrap().contains("7400"));
+    // Someone else's lock in its place is not ours to delete.
+    fs::write(&path, &theirs).unwrap();
+    drop(ours);
+    assert!(path.exists(), "a lock the dashboard does not own is kept");
+
+    fs::remove_file(&path).unwrap();
+    let ours = GlobalLock::acquire(cfg.path(), 7400).unwrap();
+    drop(ours);
+    assert!(!path.exists(), "the owner removes its own lock");
 }
 
 #[tokio::test]

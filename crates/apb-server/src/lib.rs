@@ -225,12 +225,12 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     let cfg = apb_core::config::config_dir()
         .ok_or_else(|| std::io::Error::other("no config dir for the global server lock"))?;
     std::fs::create_dir_all(&cfg)?;
-    // Bind the port BEFORE writing the lock file: the port bind is the real
-    // mutual exclusion (a second server on the same port fails here), so if it
-    // fails we must return without having written a lock that no cleanup path
-    // would then remove.
+    // Bind the port BEFORE taking the lock: a second server on the same port
+    // fails here without touching the lock. The lock then refuses a second
+    // dashboard on another port over the same config dir, naming the one
+    // that is running.
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
-    let _lock = lock::write_global_lock(&cfg, port)?;
+    let _lock = lock::GlobalLock::acquire(&cfg, port).map_err(std::io::Error::other)?;
     // An upgrade restarts the dashboard: bring pristine installed copies of
     // official connectors in line with the ones embedded in this binary.
     report_connector_reconcile(apb_core::connector::install::reconcile_official());
@@ -274,8 +274,8 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
         shutdown_signal(),
     )
     .await;
-    // Remove the lock both on normal shutdown and after catching a signal.
-    lock::remove_global_lock(&cfg)?;
+    // `_lock` drops on return: the lock goes on normal shutdown and after a
+    // caught signal alike, and only while it is still this instance's.
     result?;
     Ok(())
 }
