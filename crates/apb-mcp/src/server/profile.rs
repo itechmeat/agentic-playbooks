@@ -126,7 +126,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Detect installed coding agents: presence, version, category, and local model/provider/auth hints. Detection is local - apb runs each agent's --version and reads local config, and makes no network request of its own (it does not control a spawned agent's network when apb runs). Cached; pass refresh to re-probe.",
+        description = "Detect installed coding agents: presence, version, category, local model/provider/auth hints, and options_by_agent (the model ids apb offers per agent, the same lists the dashboard shows). Detection is local - apb runs each agent's --version and reads local config, and makes no network request of its own (it does not control a spawned agent's network when apb runs). Cached; pass refresh to re-probe.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn agents_detect(

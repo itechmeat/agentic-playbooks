@@ -8,6 +8,7 @@
 
 use std::path::Path;
 
+use apb_core::agent_catalog;
 use apb_core::detect::{self, Authority};
 use apb_core::models_table::{self, OnboardingState, Subscription};
 use apb_core::profile::QualifiedProfileRef;
@@ -18,17 +19,20 @@ use serde_json::{Value, json};
 
 use crate::tools::ToolError;
 
-/// Detects installed agents (spec 7.6). `refresh` ignores the cache.
+/// Detects installed agents (spec 7.6) and the model options apb offers for
+/// each: the same `agent_catalog` snapshot the dashboard's `/api/models`
+/// serves. `refresh` re-probes instead of using the detection memo.
 pub fn agents_detect(refresh: bool) -> Result<Value, ToolError> {
-    let agents = detect::detect(refresh);
-    Ok(json!({ "agents": agents }))
+    let c = agent_catalog::load(refresh).map_err(|e| ToolError::Engine(e.to_string()))?;
+    Ok(json!({ "agents": c.agents, "options_by_agent": c.options_by_agent }))
 }
 
 /// The profile howto bundle: format, selection rules, models table, purposes,
 /// subscriptions, detection, and hints. When onboarding is `Uninitialized` it carries the
 /// `subscriptions_uninitialized` flag so the agent offers the survey.
 pub fn profile_howto() -> Result<Value, ToolError> {
-    let table = models_table::load_merged().map_err(|e| ToolError::Engine(e.to_string()))?;
+    let catalog = agent_catalog::load(false).map_err(|e| ToolError::Engine(e.to_string()))?;
+    let table = &catalog.table;
     let state = models_table::onboarding::read().map_err(|e| ToolError::Engine(e.to_string()))?;
     let mut out = json!({
         "format": PROFILE_FORMAT,
@@ -41,7 +45,8 @@ pub fn profile_howto() -> Result<Value, ToolError> {
             "purposes": table.purposes,
         },
         "subscriptions": table.subscriptions,
-        "agents": detect::detect(false),
+        "agents": catalog.agents,
+        "options_by_agent": catalog.options_by_agent,
     });
     if state == OnboardingState::Uninitialized {
         out["subscriptions_uninitialized"] = json!(true);
@@ -80,7 +85,7 @@ pub fn playbook_adopt_report(root: &Path, id: Option<&str>) -> Result<Value, Too
         Some(one) => vec![one.to_string()],
         None => reg.playbook_ids(),
     };
-    let agents = detect::detect(false);
+    let agents = agent_catalog::agents(false);
     let store = TrustStore::load();
     let mut reports = Vec::new();
     for wid in ids {

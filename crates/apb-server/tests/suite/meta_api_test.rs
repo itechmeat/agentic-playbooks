@@ -105,6 +105,23 @@ async fn agents_models_and_skills_endpoints() {
             .all(|o| o["vendor"] == "openai"),
         "every codex option is tied to the openai vendor: {json}"
     );
+    // claude's option set is its closed static list, the same list the
+    // response reports as `claude_static`.
+    let claude_static: Vec<String> = json["claude_static"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|m| m.as_str().unwrap().to_string())
+        .collect();
+    assert_eq!(ids(&json["options_by_agent"]["claude"]), claude_static);
+    // One snapshot: `/api/models` carries the same agents `/api/agents` serves.
+    assert_eq!(
+        json["agents"]
+            .as_array()
+            .expect("agents in /api/models")
+            .len(),
+        10
+    );
     // zcode's option set is apb's allowlist, bare ids.
     assert_eq!(
         ids(&json["options_by_agent"]["zcode"]),
@@ -179,4 +196,35 @@ async fn agents_models_and_skills_endpoints() {
         !names.contains(&"proj-skill"),
         "project skill must not leak into global scope: {json}"
     );
+}
+
+/// The lists are decided by the server alone: neither endpoint may be kept by
+/// an HTTP cache.
+#[tokio::test]
+async fn agent_and_model_lists_are_never_http_cached() {
+    let _guard = crate::common::env_lock().await;
+    let proj = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("APB_PROBE_TIMEOUT_MS", "300");
+    }
+    apb_core::registry::init_project(proj.path()).unwrap();
+    for uri in ["/api/models", "/api/agents"] {
+        let app = build_router(AppState::new(proj.path().to_path_buf()));
+        let res = app
+            .oneshot(Request::get(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        assert_eq!(res.status(), StatusCode::OK);
+        assert_eq!(
+            res.headers()
+                .get(axum::http::header::CACHE_CONTROL)
+                .map(|v| v.to_str().unwrap()),
+            Some("no-store"),
+            "{uri}"
+        );
+    }
 }

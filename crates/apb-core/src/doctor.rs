@@ -214,7 +214,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         .iter()
         .any(|a| detect_ids.contains(detect_probe_id(a)));
     let detected = if want_detect {
-        crate::detect::detect(false)
+        crate::agent_catalog::agents(false)
     } else {
         Vec::new()
     };

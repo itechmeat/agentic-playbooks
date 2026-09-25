@@ -22,53 +22,47 @@ pub(crate) async fn list_projects_handler() -> impl IntoResponse {
     Json(projects).into_response()
 }
 
-/// GET /api/agents: agents detected on this machine (free detection, cached).
-/// Machine-wide, so it needs no project root. Powers the profile form's agent
-/// combobox.
+/// GET /api/agents: agents detected on this machine. Machine-wide, so it
+/// needs no project root. Same data as `/api/models`' `agents`: both come from
+/// `apb_core::agent_catalog::load`, the one source of truth.
 pub(crate) async fn list_agents_handler() -> impl IntoResponse {
-    Json(serde_json::json!({ "agents": apb_core::detect::detect(false) })).into_response()
+    match catalog().await {
+        Ok(c) => no_store(Json(serde_json::json!({ "agents": c.agents }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
+    }
 }
 
-/// GET /api/models: the curated models table (a hint, not a hard binding),
-/// the claude and codex static lists, and `options_by_agent` - the per-agent
-/// option list the profile form's model combobox uses (issue #42 finding 9):
-/// for zcode apb's allowlist and for codex its static list (closed lists,
-/// detection only annotates them), otherwise the curated table filtered to
-/// that agent's vendor, each row annotated `detected` when the agent's local
-/// config/detected model list also names it, plus a `detected`-only entry for
-/// a detected model the table does not carry - see
-/// `apb_core::models_table::model_options_for_agent`. Machine-wide. Powers
-/// the model combobox.
+/// GET /api/models: the whole agent/model catalog the profile editor needs,
+/// in one consistent snapshot from `apb_core::agent_catalog::load`: the
+/// curated models table (a hint, not a hard binding), the claude and codex
+/// static lists, the detected `agents`, and `options_by_agent` - the
+/// per-agent option list of the model combobox (issue #42 finding 9, see
+/// `apb_core::models_table::model_options_for_agent`). Machine-wide.
 pub(crate) async fn list_models_handler() -> impl IntoResponse {
-    match apb_core::models_table::load_merged() {
-        Ok(t) => {
-            let agents = apb_core::detect::detect(false);
-            let options_by_agent: std::collections::BTreeMap<
-                String,
-                Vec<apb_core::models_table::ModelOption>,
-            > = agents
-                .iter()
-                .map(|a| {
-                    let detected = a
-                        .models
-                        .as_ref()
-                        .map(|m| m.items.clone())
-                        .unwrap_or_default();
-                    (
-                        a.agent.clone(),
-                        apb_core::models_table::model_options_for_agent(&a.agent, &detected, &t),
-                    )
-                })
-                .collect();
-            Json(serde_json::json!({
-                "as_of": t.as_of,
-                "models": t.models,
-                "claude_static": t.claude_static_models,
-                "codex_static": t.codex_static_models,
-                "options_by_agent": options_by_agent,
-            }))
-            .into_response()
-        }
-        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e.to_string()).into_response(),
+    match catalog().await {
+        Ok(c) => no_store(Json(serde_json::json!({
+            "as_of": c.table.as_of,
+            "models": c.table.models,
+            "claude_static": c.table.claude_static_models,
+            "codex_static": c.table.codex_static_models,
+            "agents": c.agents,
+            "options_by_agent": c.options_by_agent,
+        }))),
+        Err(e) => (StatusCode::INTERNAL_SERVER_ERROR, e).into_response(),
     }
+}
+
+/// Loads the catalog off the async runtime: a cold detection spawns the
+/// agents' CLIs and waits on them.
+async fn catalog() -> Result<apb_core::agent_catalog::Catalog, String> {
+    tokio::task::spawn_blocking(|| apb_core::agent_catalog::load(false))
+        .await
+        .map_err(|e| e.to_string())?
+        .map_err(|e| e.to_string())
+}
+
+/// These lists must never be served from an HTTP cache: the server is the only
+/// place that decides them.
+fn no_store(body: Json<serde_json::Value>) -> axum::response::Response {
+    ([(axum::http::header::CACHE_CONTROL, "no-store")], body).into_response()
 }

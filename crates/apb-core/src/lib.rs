@@ -1,3 +1,4 @@
+pub mod agent_catalog;
 pub mod bundle;
 pub mod cache;
 pub mod clock;

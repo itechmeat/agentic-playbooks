@@ -8,8 +8,22 @@
 //!
 //! Probes are sanitized: spawned by an absolute canonical path, argv without
 //! a shell, `env_clear()` plus a minimal PATH/HOME, a timeout, and an output
-//! limit. The result is cached in `<config_dir>/state/agents-detect.json`
-//! keyed by the binary's fingerprint (path+size+mtime) with a 24h TTL.
+//! limit. Probes run in parallel.
+//!
+//! This module only gathers EXTERNAL facts (installed, version, the
+//! `opencode models` output, auth/provider hints). The model lists apb owns
+//! (claude/codex static lists, the zcode allowlist) are never produced or
+//! cached here: `agent_catalog` adds them from the running binary's data on
+//! every call, and every consumer goes through it (this module never calls
+//! it back).
+//!
+//! The probe results are memoized in `<config_dir>/state/agents-detect.json`.
+//! The memo is only reused when it was written by the same apb build
+//! ([`build_id`]: version + executable fingerprint + digest of the embedded
+//! models data) AND every input of every probe is unchanged (agent binary
+//! fingerprint, the config/auth files the probe or the agent's model listing
+//! read, env-auth presence). A 24h TTL bounds what no local input can show
+//! (e.g. opencode's own remote model catalog).
 
 use std::collections::BTreeMap;
 use std::io::Read as _;
@@ -94,7 +108,8 @@ enum ModelsSource {
     /// `[model_providers.*]` sections of `~/.codex/config.toml` still feed
     /// `providers`.
     CodexStatic,
-    /// claude: a hardcoded list (data from the models table, Task 11).
+    /// claude: the static list from the models table (added by
+    /// `agent_catalog`, never by the probe).
     ClaudeStatic,
     /// zcode: apb's allowlist ([`crate::zcode::ALLOWED_MODELS`]), the two
     /// models on the paid Individual plan; the plan annotation and the login
@@ -274,6 +289,10 @@ fn probe_timeout() -> Duration {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 struct DetectCache {
+    /// The apb build that wrote the memo ([`build_id`]). A memo from any other
+    /// build is ignored.
+    #[serde(default)]
+    build_id: String,
     /// When the cache was written (unix ms).
     stamped_ms: u128,
     /// agent id -> binary fingerprint at write time ("path:size:mtime_ms").
@@ -565,19 +584,6 @@ fn nonempty_lines(s: &str) -> Vec<String> {
         .collect()
 }
 
-/// The list of claude models is hardcoded (Static authority). Single source
-/// of truth - `claude_static_models` from the models table (Task 11).
-fn claude_static_models() -> Vec<String> {
-    crate::models_table::builtin().claude_static_models
-}
-
-/// The list of codex models is hardcoded (Static authority). Single source of
-/// truth - `codex_static_models` from the models table: the models a paid
-/// Codex account offers, in its order, the default (`gpt-6-sol`) first.
-fn codex_static_models() -> Vec<String> {
-    crate::models_table::builtin().codex_static_models
-}
-
 /// Parses `~/.codex/config.toml` best-effort: `[model_providers.*]` section
 /// names as providers. No TOML crate - a plain string scan.
 fn codex_providers(home: &Path) -> Vec<String> {
@@ -595,6 +601,15 @@ fn codex_providers(home: &Path) -> Vec<String> {
         }
     }
     providers
+}
+
+/// Where opencode keeps its credentials: the XDG data dir (current opencode)
+/// first, then the legacy config-dir location.
+fn opencode_auth_paths(home: &Path) -> Vec<PathBuf> {
+    vec![
+        home.join(".local/share/opencode/auth.json"),
+        home.join(".config/opencode/auth.json"),
+    ]
 }
 
 /// Best-effort authentication hint based on files in HOME. Secret values are
@@ -650,10 +665,11 @@ fn auth_hint(src: &AuthSource, home: &Path) -> (Option<AuthHint>, Option<Vec<Str
             (Some(AuthHint { kind }), None)
         }
         AuthSource::Opencode => {
-            // Only provider names (top-level keys), no values.
-            let path = home.join(".config/opencode/auth.json");
-            let providers = std::fs::read_to_string(&path)
-                .ok()
+            // Only provider names (top-level keys), no values. The first
+            // existing file wins (opencode keeps it under XDG data).
+            let providers = opencode_auth_paths(home)
+                .into_iter()
+                .find_map(|path| std::fs::read_to_string(&path).ok())
                 .and_then(|raw| serde_json::from_str::<serde_json::Value>(&raw).ok())
                 .and_then(|v| v.as_object().map(|o| o.keys().cloned().collect::<Vec<_>>()));
             (None, providers)
@@ -703,7 +719,8 @@ fn auth_hint(src: &AuthSource, home: &Path) -> (Option<AuthHint>, Option<Vec<Str
 /// even when the binary is absent: a machine can have `~/.codex/config.toml`
 /// (or auth) without `codex` on PATH, and the profile editor's model options
 /// still need that annotation. Binary-dependent probes (version, Command
-/// models, ClaudeStatic) only run when the binary is found.
+/// models) only run when the binary is found. Static model lists are not
+/// set here: `agent_catalog::assemble` adds them.
 fn probe_one(p: &Probe) -> AgentInfo {
     let home = std::env::var("HOME").ok().map(PathBuf::from);
     let mut info = AgentInfo {
@@ -758,9 +775,7 @@ fn probe_one(p: &Probe) -> AgentInfo {
             }
         }
         // The provider annotation is file-based: readable without the binary
-        // on PATH. The static model list, like claude's, is only claimed when
-        // the agent is installed (the profile editor takes its codex options
-        // from the models table directly, so it never depends on this).
+        // on PATH. The static model list comes from `agent_catalog`.
         ModelsSource::CodexStatic => {
             if let Some(home) = &home {
                 let providers = codex_providers(home);
@@ -768,37 +783,17 @@ fn probe_one(p: &Probe) -> AgentInfo {
                     info.providers = Some(providers);
                 }
             }
-            if found.is_some() {
-                info.models = Some(ModelsInventory {
-                    items: codex_static_models(),
-                    authority: Authority::Static,
-                });
-            }
         }
-        // Static table only claimed when the agent is actually installed.
-        ModelsSource::ClaudeStatic => {
-            if found.is_some() {
-                info.models = Some(ModelsInventory {
-                    items: claude_static_models(),
-                    authority: Authority::Static,
-                });
-            }
-        }
+        ModelsSource::ClaudeStatic => {}
         ModelsSource::ZcodeStatic => {
-            // apb's allowlist, the two Individual-plan models, as bare ids
-            // (a bare id resolves to the Individual plan). Claimed only when
-            // the CLI is installed; the profile editor takes its zcode options
-            // from the allowlist directly.
+            // The plan annotation and the login note are external facts; the
+            // allowlist itself comes from `agent_catalog`.
             if found.is_some() {
                 let family = home
                     .as_deref()
                     .map(crate::zcode::account_family)
                     .unwrap_or_else(|| crate::zcode::DEFAULT_FAMILY.to_string());
                 info.providers = Some(vec![format!("{family}-individual")]);
-                info.models = Some(ModelsInventory {
-                    items: crate::zcode::model_list(),
-                    authority: Authority::Static,
-                });
                 if let Some(home) = &home
                     && crate::zcode::logged_in_providers(home).is_empty()
                 {
@@ -873,7 +868,7 @@ fn probe_source_files(p: &Probe, home: Option<&Path>) -> Vec<PathBuf> {
     match p.auth_source {
         AuthSource::Claude => out.push(home.join(".claude.json")),
         AuthSource::Codex => out.push(home.join(".codex/auth.json")),
-        AuthSource::Opencode => out.push(home.join(".config/opencode/auth.json")),
+        AuthSource::Opencode => out.extend(opencode_auth_paths(home)),
         AuthSource::Hermes => out.push(home.join(".hermes/.env")),
         AuthSource::Zcode => out.push(home.join(crate::zcode::HOME_REL_CREDENTIALS)),
         AuthSource::None => {}
@@ -882,6 +877,17 @@ fn probe_source_files(p: &Probe, home: Option<&Path>) -> Vec<PathBuf> {
         // The provider annotation comes from config.toml, so an edit there
         // must invalidate the cache.
         out.push(home.join(".codex/config.toml"));
+    }
+    if p.id == "opencode" {
+        // `opencode models` reads its config and its cached model catalog:
+        // a change to either can change the listed models.
+        for rel in [
+            ".config/opencode/opencode.json",
+            ".config/opencode/opencode.jsonc",
+            ".cache/opencode/models.json",
+        ] {
+            out.push(home.join(rel));
+        }
     }
     if matches!(p.models_source, ModelsSource::ZcodeStatic) {
         // The plan annotation takes the account family from the settings
@@ -910,18 +916,6 @@ fn agent_cache_key(p: &Probe, home: Option<&Path>) -> String {
         fp.push('|');
         fp.push_str(&fingerprint(&src));
     }
-    // A static list ships inside the apb binary: a new apb with a different
-    // list must not keep serving the old one from the cache until the TTL.
-    let static_items = match p.models_source {
-        ModelsSource::ClaudeStatic => Some(claude_static_models()),
-        ModelsSource::CodexStatic => Some(codex_static_models()),
-        ModelsSource::ZcodeStatic => Some(crate::zcode::model_list()),
-        _ => None,
-    };
-    if let Some(items) = static_items {
-        fp.push_str("|static:");
-        fp.push_str(&items.join(","));
-    }
     // Env-auth presence (only the fact that the variable exists, not its
     // value): the key appearing/disappearing changes the auth hint and must
     // invalidate the cache.
@@ -935,12 +929,30 @@ fn agent_cache_key(p: &Probe, home: Option<&Path>) -> String {
     fp
 }
 
-/// Detects built-in and configured (`probe: true`) agents. Uses the cache
-/// (if valid and `refresh` is not set), otherwise probes and overwrites the
-/// cache. The cache is invalidated by TTL, by a change of fingerprint of any
-/// installed binary, AND by a change of fingerprint of a consulted source
-/// (config/auth).
-pub fn detect(refresh: bool) -> Vec<AgentInfo> {
+/// Identity of the running apb build: its version, the fingerprint of its
+/// executable, and the digest of the embedded models data. A detection memo
+/// written by any other build is never reused, so a rebuilt binary (new probe
+/// code or new model data) always re-probes.
+pub fn build_id() -> String {
+    let exe = std::env::current_exe()
+        .map(|p| fingerprint(&p))
+        .unwrap_or_default();
+    format!(
+        "{}|{}|{}",
+        env!("CARGO_PKG_VERSION"),
+        exe,
+        crate::models_table::builtin_digest()
+    )
+}
+
+/// The raw probe results: external facts only, no apb-owned model lists.
+/// Reuses the memo when it was written by this build ([`build_id`]), within
+/// the TTL, and with every probe input unchanged; otherwise probes every
+/// agent in parallel and rewrites the memo. `refresh` always probes.
+///
+/// Consumers want `agent_catalog::load` or `agent_catalog::agents`, which
+/// build on this.
+pub fn probe(refresh: bool) -> Vec<AgentInfo> {
     let mut probes = builtin_probes();
     probes.extend(custom_probes());
     let home = std::env::var("HOME").ok().map(PathBuf::from);
@@ -951,17 +963,45 @@ pub fn detect(refresh: bool) -> Vec<AgentInfo> {
         .iter()
         .map(|p| (p.id.clone(), agent_cache_key(p, home.as_deref())))
         .collect();
+    let build = build_id();
 
     if !refresh
         && let Some(cache) = read_cache()
+        && cache.build_id == build
         && crate::clock::now_ms().saturating_sub(cache.stamped_ms) < CACHE_TTL_MS
         && cache.fingerprints == current_fp
     {
         return cache.agents;
     }
 
-    let agents: Vec<AgentInfo> = probes.iter().map(probe_one).collect();
+    // Each probe spawns up to two short-lived processes and waits on them;
+    // running them side by side makes a cold detection as slow as the
+    // slowest agent instead of the sum of all of them.
+    let agents: Vec<AgentInfo> = std::thread::scope(|scope| {
+        let handles: Vec<_> = probes
+            .iter()
+            .map(|p| scope.spawn(move || probe_one(p)))
+            .collect();
+        handles
+            .into_iter()
+            .zip(&probes)
+            .map(|(h, p)| {
+                h.join().unwrap_or_else(|_| AgentInfo {
+                    agent: p.id.clone(),
+                    installed: false,
+                    canonical_path: None,
+                    version: None,
+                    category: p.category,
+                    models: None,
+                    providers: None,
+                    auth: None,
+                    notes: vec!["probe panicked".to_string()],
+                })
+            })
+            .collect()
+    });
     write_cache(&DetectCache {
+        build_id: build,
         stamped_ms: crate::clock::now_ms(),
         fingerprints: current_fp,
         agents: agents.clone(),
