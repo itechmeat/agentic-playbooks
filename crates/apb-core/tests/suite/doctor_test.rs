@@ -317,6 +317,40 @@ fn global_scope_profile_ref_is_resolved() {
     }
 }
 
+/// F28: a finish node with a prompt runs an agent through its profile, and
+/// the run gate checks that profile; doctor must check it too, or it reports
+/// "OK" for an agent the run will refuse to start without.
+#[test]
+fn doctor_checks_the_profile_of_a_finish_with_prompt() {
+    let _l = env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    let gdir = cfg.path().join("profiles/closer");
+    fs::create_dir_all(&gdir).unwrap();
+    fs::write(
+        gdir.join("profile.yaml"),
+        "name: closer\ndescription: t\nexecutor:\n  agent: codex\n  model: o1\n",
+    )
+    .unwrap();
+    fs::write(gdir.join("SOUL.md"), "").unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    init_project(proj.path()).unwrap();
+    let playbook = "schema: 2\nid: f\nname: F\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success, prompt: \"sum up\", profile: { name: closer, scope: global } }\nedges:\n  - { from: start, to: done }\n";
+    seed_playbook(proj.path(), "f", playbook);
+
+    let report = diagnose(proj.path());
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+    assert!(
+        report.checks.iter().any(|c| c.name == "agent codex"),
+        "the finish node's agent must be checked: {:?}",
+        report.checks
+    );
+}
+
 /// The `suggestions:` timing section of both config files has exactly one
 /// validator (`dismiss::timing`), and every production caller silently keeps
 /// the defaults when it is invalid. Doctor is the surface that has to say so,

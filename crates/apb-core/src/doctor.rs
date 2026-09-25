@@ -43,20 +43,16 @@ impl DoctorReport {
     }
 }
 
-/// Qualified references to playbook profiles (nodes + supervisor, accounting
-/// for defaults) - including global-scope ones that may not be among the
+/// Qualified references to playbook profiles (every node that runs an agent,
+/// through the same `NodeKind::effective_profile_ref` the run gate uses, plus
+/// the supervisor) - including global-scope ones that may not be among the
 /// project profiles.
 fn playbook_profile_refs(playbook: &Playbook) -> Vec<QualifiedProfileRef> {
-    let mut out = Vec::new();
-    for n in &playbook.nodes {
-        if let NodeKind::AgentTask { profile, .. } = &n.kind
-            && let Some(p) = profile
-                .clone()
-                .or_else(|| playbook.defaults.profile.clone())
-        {
-            out.push(p);
-        }
-    }
+    let mut out: Vec<QualifiedProfileRef> = playbook
+        .nodes
+        .iter()
+        .filter_map(|n| n.kind.effective_profile_ref(&playbook.defaults))
+        .collect();
     if let Some(s) = &playbook.supervisor
         && let Some(p) = s
             .profile
