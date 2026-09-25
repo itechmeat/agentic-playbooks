@@ -24,7 +24,7 @@ use apb_core::profile::ProfileScope;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::Registry;
 use apb_core::schema::{Effect, NodeKind, Playbook};
-use apb_core::scope::{Origin, PlaybookRef, digest_str};
+use apb_core::scope::{Origin, PlaybookRef};
 use apb_core::trust::{Lifecycle, TrustStore, account_trust_id, read_lifecycle};
 use serde_json::{Value, json};
 
@@ -76,7 +76,7 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
         .collect();
     Ok(Preflight {
         version: loaded.version.clone(),
-        digest: digest_str(&loaded.yaml),
+        digest: loaded.digest.clone(),
         effects,
     })
 }
@@ -231,7 +231,7 @@ pub fn check_run(
     check_lifecycle(&playbook_dir, &wref.id)?;
 
     // Digest-based trust: unapproved content requires an explicit acknowledge.
-    let digest = digest_str(&loaded.yaml);
+    let digest = loaded.digest.clone();
     check_digest_trust(&wref.id, &digest, acknowledge_untrusted)?;
 
     // Profile bundle trust (spec 5.1): the profile plus the actual content of its

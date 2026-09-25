@@ -46,7 +46,8 @@ are. The trash is listed and restored through one core path
 A restore takes a trash entry name or a playbook id (its latest deletion) and
 brings back every version, the `current` pointer, layouts and provenance. The
 restored current version is trusted like any save through apb (its digest is
-approved). When a playbook with that id exists again, the restore is refused
+approved) when it has no scripts; a version with scripts keeps whatever
+approval its digest already had. When a playbook with that id exists again, the restore is refused
 and nothing moves: the listing flags such an entry (`conflict`), and the
 dashboard says so on its card. Delete or rename the newer playbook first.
 

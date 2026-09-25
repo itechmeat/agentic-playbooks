@@ -384,6 +384,45 @@ fn create_version_keeps_a_scripts_symlink_a_symlink() {
     assert_eq!(fs::read_link(&copied).unwrap(), target);
 }
 
+/// A save writes YAML, not scripts: the new version is approved only when the
+/// scripts it carries over were approved with its base. Saving on top of
+/// scripts nobody approved leaves the result untrusted.
+#[test]
+fn a_save_approves_carried_scripts_only_when_the_base_was_approved() {
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let id = "implement-task";
+    fs::write(
+        dir.path()
+            .join(".apb/playbooks/implement-task/1.0.0/scripts/x.sh"),
+        "echo from-the-repo\n",
+    )
+    .unwrap();
+    let trusted = |root: &Path| {
+        let reg = Registry::open(root).unwrap();
+        let loaded = reg.load(id, None).unwrap();
+        apb_core::trust::TrustStore::load().is_approved(&loaded.digest)
+    };
+
+    let edited = VALID.replace("name: Implement Task", "name: Edited Once");
+    apb_core::versioning::save_definition(dir.path(), id, &edited, None, true).unwrap();
+    assert!(!trusted(dir.path()), "unapproved scripts stay unapproved");
+
+    let reg = Registry::open(dir.path()).unwrap();
+    let current = reg.load(id, None).unwrap();
+    apb_core::trust::TrustStore::load()
+        .approve(
+            &current.digest,
+            id,
+            apb_core::trust::OriginKind::LocallyApproved,
+        )
+        .unwrap();
+    let edited = VALID.replace("name: Implement Task", "name: Edited Twice");
+    apb_core::versioning::save_definition(dir.path(), id, &edited, None, true).unwrap();
+    assert!(trusted(dir.path()), "approved scripts carried unchanged");
+}
+
 /// The trash round trip every surface relies on (dashboard, `apb trash`, MCP):
 /// the listing tells what a deletion holds, and a restore brings the whole
 /// playbook back - every version, the current pointer, layouts - and trusts

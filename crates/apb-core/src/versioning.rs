@@ -246,6 +246,13 @@ pub fn create_version_with_override(
 /// an authorized operation). Content that changes outside apb - a hand edit,
 /// a `git pull`, a copied directory - never passes here and stays untrusted.
 ///
+/// The save writes the YAML, not the scripts: the new version carries the
+/// base version's `scripts/` along. So the result is approved only when that
+/// carried code was already approved - the new version has no scripts, or the
+/// base version's own digest is approved and the scripts are unchanged. A save
+/// on top of scripts nobody approved (a repository update, a cloned project)
+/// leaves the new version untrusted like its base.
+///
 /// Approval is best effort: the version is already committed when it runs,
 /// so a trust-store write failure is reported on stderr rather than turning
 /// a completed save into an error (the playbook then runs only with an
@@ -257,25 +264,52 @@ pub fn save_definition(
     version_override: Option<&str>,
     make_current: bool,
 ) -> Result<String, VersioningError> {
+    let base = if is_safe_segment(id) {
+        read_current_pointer(&playbooks_dir(root).join(id))
+    } else {
+        None
+    };
     let version =
         create_version_with_override(root, id, yaml, None, version_override, make_current)?;
-    approve_written(root, id, &version, "saved");
+    approve_written(root, id, &version, base.as_deref(), "saved");
     Ok(version)
 }
 
 /// The trust half of a write through apb: approves the digest of
-/// `<id>/<version>/playbook.yaml` as `LocallyApproved`, because the user asked
-/// for that write. Shared by [`save_definition`] and [`restore_from_trash`].
+/// `<id>/<version>` (its YAML plus its scripts, see
+/// [`crate::scope::definition_digest`]) as `LocallyApproved`, because the
+/// user asked for that write. Shared by [`save_definition`] and
+/// [`restore_from_trash`]. A version with scripts is approved only when they
+/// were carried unchanged from `base`, a version whose own digest is already
+/// approved; the write never produced them, so it cannot vouch for them.
 /// A failure to record trust does not undo the write (the definition is on
 /// disk either way); it is reported and the playbook stays untrusted.
-fn approve_written(root: &Path, id: &str, version: &str, what: &str) {
-    let written = playbooks_dir(root)
-        .join(id)
-        .join(version)
-        .join("playbook.yaml");
-    let approved = fs::read_to_string(&written).and_then(|saved| {
+fn approve_written(root: &Path, id: &str, version: &str, base: Option<&str>, what: &str) {
+    let playbook_dir = playbooks_dir(root).join(id);
+    let digest_of = |v: &str, yaml_of: &str| -> io::Result<(String, String)> {
+        let yaml = fs::read_to_string(playbook_dir.join(yaml_of).join("playbook.yaml"))?;
+        let d = crate::scope::definition_digest(&yaml, &playbook_dir.join(v))
+            .map_err(io::Error::other)?;
+        Ok((yaml, d))
+    };
+    let approved = digest_of(version, version).and_then(|(yaml, digest)| {
+        let trust = crate::trust::TrustStore::load();
+        let scripts_vouched = digest == crate::scope::digest_str(&yaml)
+            || base.is_some_and(|b| {
+                // The base's YAML digested over the NEW version's scripts equals
+                // the base's approved digest exactly when the scripts are the
+                // ones that approval covered.
+                matches!(
+                    (digest_of(b, b), digest_of(version, b)),
+                    (Ok((_, base_digest)), Ok((_, carried)))
+                        if carried == base_digest && trust.is_approved(&base_digest)
+                )
+            });
+        if !scripts_vouched {
+            return Ok(());
+        }
         crate::trust::TrustStore::load().approve(
-            &crate::scope::digest_str(&saved),
+            &digest,
             id,
             crate::trust::OriginKind::LocallyApproved,
         )
@@ -807,7 +841,10 @@ fn line_diff(from: &str, to: &str) -> String {
 /// `.apb/playbooks/<id>`, so every version, the `current` pointer, layouts
 /// and provenance come back as they were (runs never moved). The restored
 /// current definition then gets the trust of any other write through apb
-/// (see [`save_definition`]): its digest is approved as `LocallyApproved`.
+/// (see [`save_definition`]): its digest is approved as `LocallyApproved`
+/// when it has no scripts. A definition with scripts keeps whatever approval
+/// its digest already had, since a restore cannot vouch for code it did not
+/// write.
 ///
 /// Errors: `NotFound` when nothing in the trash matches, `Conflict` when a
 /// playbook with that id exists again (nothing is moved then).
@@ -851,7 +888,7 @@ pub fn restore_from_trash(root: &Path, name: &str) -> Result<RestoredPlaybook, V
         Err(e) => return Err(e.into()),
     }
     if let Some(current) = &entry.current {
-        approve_written(root, &entry.id, current, "restored");
+        approve_written(root, &entry.id, current, None, "restored");
     }
     Ok(RestoredPlaybook {
         id: entry.id.clone(),

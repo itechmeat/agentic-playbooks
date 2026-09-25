@@ -371,7 +371,7 @@ pub(crate) fn prepare_run_target(
     let root = t.execution_root.as_path();
     let reg = Registry::open_dir(&t.definition_parent)?;
     let loaded = reg.load(id, version)?;
-    let digest = apb_core::scope::digest_str(&loaded.yaml);
+    let digest = loaded.digest.clone();
     // Anti-TOCTOU: if the caller checked trust against a specific digest, it
     // must match the actually loaded content - otherwise the file was swapped
     // between the check and the run (spec 9).
@@ -486,6 +486,21 @@ pub(crate) fn prepare_run_target(
         .join(id)
         .join(&loaded.version);
     prep_try(&mut log, copy_scripts(&version_dir, &run_dir))?;
+    // The copy is what script nodes execute, so verify THE COPY against the
+    // digest checked above (and against the caller's permit through it): a
+    // script swapped between loading the definition and copying it must not
+    // run under an approval that never covered it.
+    let copied = apb_core::scope::definition_digest(&loaded.yaml, &run_dir)
+        .map_err(|e| EngineError::Invalid(format!("run scripts cannot be digested: {e}")));
+    let copied = prep_try(&mut log, copied)?;
+    if copied != digest {
+        return prep_try(
+            &mut log,
+            Err(EngineError::Invalid(format!(
+                "playbook `{id}` changed since it was checked (scripts digest mismatch)"
+            ))),
+        );
+    }
     // The run's webhook hook secrets (for wait nodes, spec 6.7).
     prep_try(&mut log, crate::hooks::generate_hooks(&run_dir, &playbook))?;
 

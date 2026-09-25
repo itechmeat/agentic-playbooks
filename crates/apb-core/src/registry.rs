@@ -67,6 +67,8 @@ pub enum RegistryError {
     Schema(#[from] SchemaError),
     #[error("layout parse error: {0}")]
     Layout(String),
+    #[error("scripts of `{0}` cannot be digested: {1}")]
+    Scripts(String, String),
 }
 
 /// Checks that a path segment is safe to join: non-empty and does not
@@ -103,6 +105,10 @@ pub struct PlaybookSummary {
 pub struct LoadedPlaybook {
     pub playbook: Playbook,
     pub yaml: String,
+    /// The trust digest of this version ([`crate::scope::definition_digest`]):
+    /// `playbook.yaml` plus the version's `scripts/`. Every approval, gate and
+    /// run pin uses this one value.
+    pub digest: String,
     pub layout: Option<serde_json::Value>,
     pub version: String,
 }
@@ -276,6 +282,8 @@ impl Registry {
         }
         let yaml = fs::read_to_string(&yaml_path)?;
         let playbook = Playbook::from_yaml(&yaml)?;
+        let digest = crate::scope::definition_digest(&yaml, &base.join(&version))
+            .map_err(|e| RegistryError::Scripts(format!("{id}@{version}"), e.to_string()))?;
         if playbook.version != version {
             return Err(RegistryError::VersionMismatch {
                 file: playbook.version.clone(),
@@ -294,6 +302,7 @@ impl Registry {
         Ok(LoadedPlaybook {
             playbook,
             yaml,
+            digest,
             layout,
             version,
         })

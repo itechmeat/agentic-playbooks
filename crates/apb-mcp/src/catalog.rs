@@ -63,7 +63,7 @@ fn collect_scope(
     for id in reg.playbook_ids() {
         match reg.load(&id, None) {
             Ok(loaded) => {
-                let digest = digest_str(&loaded.yaml);
+                let digest = loaded.digest.clone();
                 let playbook_dir = parent.join("playbooks").join(&id);
                 let lifecycle = read_lifecycle(&playbook_dir);
                 let effects: Vec<Effect> = effective(&loaded.playbook).into_iter().collect();

@@ -220,3 +220,40 @@ fn an_expired_drain_says_so_instead_of_losing_stdout_silently() {
         "the script itself succeeded; only its output was lost"
     );
 }
+
+/// A run started with a gate permit runs the scripts that permit covered: a
+/// script changed between the check and the start is refused, not run.
+#[test]
+fn a_run_refuses_scripts_changed_since_its_permit() {
+    let root = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(root.path()).unwrap();
+    let vdir = root.path().join(".apb/playbooks/s/1.0.0");
+    write_script(
+        &vdir,
+        "playbook.yaml",
+        "schema: 1\nid: s\nname: s\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: lint, type: script, script: \"scripts/lint.sh\", runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: lint }\n  - { from: lint, to: done }\n",
+    );
+    write_script(&vdir, "scripts/lint.sh", "echo checked\n");
+    fs::write(root.path().join(".apb/playbooks/s/current"), "1.0.0").unwrap();
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: "s".into(),
+        version: None,
+    };
+    let permit = apb_engine::gate::check_run(root.path(), &wref, true, false).unwrap();
+
+    let marker = root.path().join("marker");
+    write_script(
+        &vdir,
+        "scripts/lint.sh",
+        &format!("touch {}\n", marker.display()),
+    );
+    let mut opts = apb_engine::RunOptions::default();
+    permit.apply(&mut opts);
+    let err = apb_engine::run(root.path(), "s", None, opts).unwrap_err();
+    assert!(
+        err.to_string().contains("changed since it was checked"),
+        "{err}"
+    );
+    assert!(!marker.exists(), "the changed script must not have run");
+}

@@ -7,7 +7,7 @@
 use std::path::{Path, PathBuf};
 
 use crate::registry::{Registry, RegistryError};
-use crate::scope::{Origin, PlaybookRef, digest_str};
+use crate::scope::{Origin, PlaybookRef};
 
 /// Result of resolution: everything the engine needs to run a playbook
 /// without knowing about scopes.
@@ -54,7 +54,7 @@ pub fn resolve(project_root: &Path, wref: &PlaybookRef) -> Result<ResolvedPlaybo
         execution_root: project_root.to_path_buf(),
         id: wref.id.clone(),
         version: loaded.version.clone(),
-        digest: digest_str(&loaded.yaml),
+        digest: loaded.digest.clone(),
         origin_label,
     })
 }

@@ -87,15 +87,33 @@ Mutations (destructive):
 
 Match confidence and execution risk are kept separate (spec 9). A playbook
 carries a lifecycle (`draft`/`active`/`retired`) and trust tied to a content
-digest: any file change (an edit outside apb, a git pull) drops trust. A save
-through apb itself - `playbook_create` / `playbook_update`, the dashboard
-editor, `apb import` - goes through one save path
+digest of the version: its `playbook.yaml` plus every file under its
+`scripts/` (`apb_core::scope::definition_digest`). Any file change (an edit
+outside apb, a git pull, a changed script) drops trust, and the same YAML
+shipped with other scripts is not the approved content. A version without
+scripts digests exactly as its YAML alone. A run copies the scripts into its
+run directory and refuses to start when the copy does not match the digest
+the gate checked.
+
+A save through apb itself - `playbook_create` / `playbook_update`, the
+dashboard editor, `apb import` - goes through one save path
 (`apb_core::versioning::save_definition`) that approves the digest it wrote:
 the user asked for that write, so its result is trusted (the same rule as
-`profile_write`). A restore from the trash (`playbook_trash_restore`, the
-dashboard's Trash view, `apb trash restore`) goes through one path too
-(`apb_core::versioning::restore_from_trash`) and approves the restored current
-version the same way.
+`profile_write`). A save writes YAML only and carries the base version's
+scripts along, so a result with scripts is approved only when its base was
+approved and the scripts are unchanged. A restore from the trash
+(`playbook_trash_restore`, the dashboard's Trash view, `apb trash restore`)
+goes through one path too (`apb_core::versioning::restore_from_trash`) and
+approves the restored current version the same way when it has no scripts;
+with scripts it keeps the approval its digest already had.
+
+Upgrading to a build whose digest covers scripts invalidates the approvals of
+playbooks that have scripts (playbooks without scripts keep theirs). apb does
+not migrate those approvals automatically, because that would approve
+whatever scripts are on disk now, which is exactly what the digest exists to
+catch. Re-approve such a playbook after reviewing its scripts: MCP
+`playbook_approve`, or confirm the next `playbook_run` with
+`acknowledge_untrusted: true`.
 `playbook_run` goes through a server-side gate: draft is rejected (only via
 `playbook_trial`), an unapproved digest requires `acknowledge_untrusted: true`
 after user confirmation, and running in another workspace only happens via the
