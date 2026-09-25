@@ -296,6 +296,62 @@ fn unsafe_skill_name_is_rejected() {
     }
 }
 
+/// `skills_dir` in `.apb/config.yaml` is repository content, so it may only
+/// point inside the repository: not above it, not to an absolute path
+/// elsewhere, and not through a symlink that leaves it. A project skill
+/// resolved from such a directory would come from outside what the repository
+/// contains. A directory inside the repository keeps working.
+#[test]
+fn a_project_skills_dir_outside_the_repository_is_refused() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _home, _cfg) = setup();
+    let outside = tempfile::tempdir().unwrap();
+    seed_skill(outside.path(), "probe", "outside");
+    seed_skill(&proj.path().join("custom/skills"), "probe", "inside");
+    apb_core::fsutil::symlink(outside.path(), &proj.path().join("linked")).unwrap();
+    let probe = SkillRef {
+        name: "probe".into(),
+        scope: ProfileScope::Project,
+    };
+    let set_skills_dir = |dir: &str| {
+        fs::write(
+            proj.path().join(".apb/config.yaml"),
+            format!("skills_dir: {dir:?}\n"),
+        )
+        .unwrap()
+    };
+
+    let escapes = [
+        format!(
+            "../{}",
+            outside.path().file_name().unwrap().to_string_lossy()
+        ),
+        outside.path().display().to_string(),
+        "linked".to_string(),
+        "custom/../../x".to_string(),
+    ];
+    for dir in &escapes {
+        set_skills_dir(dir);
+        let got = resolve_skill(proj.path(), ProfileScope::Project, &probe);
+        assert!(
+            matches!(got, Err(ProfileError::ScopeForbidden(_))),
+            "skills_dir `{dir}` must be refused, got {got:?}"
+        );
+        assert!(
+            apb_core::skills::list_available(proj.path(), ProfileScope::Project).is_empty(),
+            "skills_dir `{dir}` must not list skills"
+        );
+    }
+
+    set_skills_dir("custom/skills");
+    let inside = resolve_skill(proj.path(), ProfileScope::Project, &probe).unwrap();
+    assert_eq!(
+        fs::read_to_string(inside.canonical_path.join("SKILL.md")).unwrap(),
+        "inside"
+    );
+}
+
 #[test]
 fn claude_bridge_idempotent_and_respects_real_dirs() {
     let _l = lock();

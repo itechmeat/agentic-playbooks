@@ -29,16 +29,50 @@ struct ProjectConfigSkills {
 
 /// Project skills directory: `skills_dir` from `.apb/config.yaml`, otherwise
 /// `<root>/.agents/skills`.
-pub fn project_skills_dir(root: &Path) -> PathBuf {
+///
+/// `skills_dir` is repository content, so it must stay inside the repository:
+/// a path that leaves `root` lexically (`..`, an absolute path elsewhere) or
+/// through a symlink is refused with `ScopeForbidden`.
+pub fn project_skills_dir(root: &Path) -> Result<PathBuf, ProfileError> {
     let cfg = root.join(".apb/config.yaml");
-    if let Ok(raw) = std::fs::read_to_string(&cfg)
-        && let Ok(parsed) = serde_yaml_ng::from_str::<ProjectConfigSkills>(&raw)
-        && let Some(dir) = parsed.skills_dir
-    {
-        let p = PathBuf::from(&dir);
-        return if p.is_absolute() { p } else { root.join(p) };
+    let Ok(raw) = std::fs::read_to_string(&cfg) else {
+        return Ok(root.join(".agents/skills"));
+    };
+    let Some(dir) = serde_yaml_ng::from_str::<ProjectConfigSkills>(&raw)
+        .ok()
+        .and_then(|c| c.skills_dir)
+    else {
+        return Ok(root.join(".agents/skills"));
+    };
+    let refused = || {
+        ProfileError::ScopeForbidden(format!(
+            "skills_dir `{dir}` in .apb/config.yaml points outside the repository"
+        ))
+    };
+    let joined = root.join(&dir);
+    let mut lexical = PathBuf::new();
+    for c in joined.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                if !lexical.pop() {
+                    return Err(refused());
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => lexical.push(other),
+        }
     }
-    root.join(".agents/skills")
+    if !lexical.starts_with(root) {
+        return Err(refused());
+    }
+    // A symlink inside the repository may still lead out of it.
+    if let (Ok(real), Ok(real_root)) =
+        (std::fs::canonicalize(&lexical), std::fs::canonicalize(root))
+        && !real.starts_with(&real_root)
+    {
+        return Err(refused());
+    }
+    Ok(lexical)
 }
 
 /// Global skills directory: `~/.agents/skills`. None if HOME is not set.
@@ -49,11 +83,11 @@ pub fn global_skills_dir() -> Option<PathBuf> {
         .map(|h| PathBuf::from(h).join(".agents/skills"))
 }
 
-fn scope_dir(root: &Path, scope: ProfileScope) -> Option<PathBuf> {
+fn scope_dir(root: &Path, scope: ProfileScope) -> Result<Option<PathBuf>, ProfileError> {
     match scope {
-        ProfileScope::Project => Some(project_skills_dir(root)),
-        ProfileScope::Global => global_skills_dir(),
-        ProfileScope::Auto => None,
+        ProfileScope::Project => project_skills_dir(root).map(Some),
+        ProfileScope::Global => Ok(global_skills_dir()),
+        ProfileScope::Auto => Ok(None),
     }
 }
 
@@ -78,7 +112,9 @@ pub fn list_available(root: &Path, profile_scope: ProfileScope) -> Vec<Available
     let mut out = Vec::new();
     let mut seen: BTreeSet<String> = BTreeSet::new();
     for &scope in scopes {
-        let Some(dir) = scope_dir(root, scope) else {
+        // A refused project skills_dir lists nothing; resolving a skill from
+        // it reports the refusal.
+        let Ok(Some(dir)) = scope_dir(root, scope) else {
             continue;
         };
         let Ok(entries) = std::fs::read_dir(&dir) else {
@@ -140,7 +176,7 @@ pub fn resolve_skill(
         .map_err(|e| ProfileError::Invalid(format!("skill name `{}`: {e}", s.name)))?;
 
     for scope in candidates {
-        if let Some(dir) = scope_dir(root, scope) {
+        if let Some(dir) = scope_dir(root, scope)? {
             let cand = dir.join(&s.name);
             if cand.is_dir() {
                 let canonical_path = std::fs::canonicalize(&cand)?;
