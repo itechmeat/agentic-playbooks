@@ -19,25 +19,6 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json, Response};
 use serde::Deserialize;
 
-/// Trust status of a digest against the trust store: `"approved"` when the
-/// current digest is approved, `"changed"` when some OTHER digest of the same
-/// `id` was approved before (content moved since), else `"unapproved"`.
-/// Shared by the connector-level and account-level trust fields below.
-pub(crate) fn digest_trust_status(
-    trust: &TrustStore,
-    digest: &str,
-    id: &str,
-    kind: Kind,
-) -> &'static str {
-    if trust.is_approved(digest) {
-        "approved"
-    } else if trust.approved_record_ids(kind).iter().any(|x| x == id) {
-        "changed"
-    } else {
-        "unapproved"
-    }
-}
-
 /// The project roots a connector READ should merge account config from.
 /// `Some(workspace)` is the strict single-project view and still errors on an
 /// unknown, unreachable or malformed workspace; `None` is the machine-wide
@@ -125,7 +106,9 @@ pub(crate) async fn list_connectors_handler(
     for summary in store::list() {
         let loaded = store::load(&summary.name);
         let trust_state = match &loaded {
-            Ok(l) => digest_trust_status(&trust, &l.digest, &summary.name, Kind::Connector),
+            Ok(l) => trust
+                .status(&l.digest, &summary.name, Kind::Connector)
+                .as_str(),
             Err(_) => "invalid",
         };
         let accounts = merged_accounts(&roots, &summary.name).unwrap_or_default();
@@ -348,7 +331,7 @@ pub(crate) async fn get_connector_handler(
                 .collect();
             let digest = config::account_digest(a);
             let id = account_trust_id(&name, &a.name);
-            let acct_trust = digest_trust_status(&trust, &digest, &id, Kind::ConnectorAccount);
+            let acct_trust = trust.status(&digest, &id, Kind::ConnectorAccount).as_str();
             serde_json::json!({
                 "name": a.name,
                 "default": a.default,
@@ -360,9 +343,7 @@ pub(crate) async fn get_connector_handler(
         .collect();
 
     let connector_trust = match &install {
-        InstallState::Installed(l) => {
-            digest_trust_status(&trust, &l.digest, &name, Kind::Connector)
-        }
+        InstallState::Installed(l) => trust.status(&l.digest, &name, Kind::Connector).as_str(),
         InstallState::NotInstalled => "not_installed",
         InstallState::Invalid => "invalid",
     };

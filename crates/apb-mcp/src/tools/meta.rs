@@ -21,7 +21,6 @@ pub fn projects_list() -> Result<Value, ToolError> {
 /// still do not surface here: names only).
 pub fn connectors_list(root: &Path) -> Result<Value, ToolError> {
     let trust = apb_core::trust::TrustStore::load();
-    let approved_ids = trust.approved_record_ids(apb_core::trust::Kind::Connector);
     let mut out = Vec::new();
     for summary in apb_core::connector::store::list() {
         let Ok(loaded) = apb_core::connector::store::load(&summary.name) else {
@@ -47,13 +46,13 @@ pub fn connectors_list(root: &Path) -> Result<Value, ToolError> {
         let accounts: Vec<String> = apb_core::connector::config::load_merged(root, &summary.name)
             .map(|accts| accts.into_iter().map(|a| a.name).collect())
             .unwrap_or_default();
-        let trust_state = if trust.is_approved(&loaded.digest) {
-            "approved"
-        } else if approved_ids.iter().any(|id| id == &summary.name) {
-            "changed"
-        } else {
-            "unapproved"
-        };
+        let trust_state = trust
+            .status(
+                &loaded.digest,
+                &summary.name,
+                apb_core::trust::Kind::Connector,
+            )
+            .as_str();
         out.push(json!({
             "name": summary.name,
             "version": summary.version,

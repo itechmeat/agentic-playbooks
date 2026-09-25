@@ -130,7 +130,42 @@ impl Default for TrustStore {
     }
 }
 
+/// Trust status of one object's current digest: approved, changed since an
+/// earlier approval (some OTHER digest of the same id is approved - the
+/// content moved), or never approved. The one derivation every surface that
+/// shows connector or account trust uses (dashboard, MCP, CLI list and doctor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustStatus {
+    Approved,
+    Changed,
+    Unapproved,
+}
+
+impl TrustStatus {
+    /// The wire string (`approved` / `changed` / `unapproved`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrustStatus::Approved => "approved",
+            TrustStatus::Changed => "changed",
+            TrustStatus::Unapproved => "unapproved",
+        }
+    }
+}
+
 impl TrustStore {
+    /// [`TrustStatus`] of `digest`, the current digest of the object `id` of
+    /// `kind`.
+    pub fn status(&self, digest: &str, id: &str, kind: Kind) -> TrustStatus {
+        if self.is_approved(digest) {
+            TrustStatus::Approved
+        } else if self.approved.values().any(|r| r.kind == kind && r.id == id) {
+            TrustStatus::Changed
+        } else {
+            TrustStatus::Unapproved
+        }
+    }
+
     /// Loads the store; a missing file or config directory yields an empty
     /// store. A corrupt file does not crash the caller: a warning is printed to
     /// stderr and an empty store is returned (the data can be recovered by
@@ -156,24 +191,6 @@ impl TrustStore {
 
     pub fn is_approved(&self, digest: &str) -> bool {
         self.approved.contains_key(digest)
-    }
-
-    /// The `id`s of every approved record of the given `kind`, sorted and
-    /// deduped. Lets a caller distinguish "approved" (the current digest is
-    /// in the store) from "changed since approval" (some other digest of
-    /// this same id was approved before) versus "never approved" - `apb
-    /// connector list` uses this to tell an edited-but-previously-trusted
-    /// connector apart from one that was never trusted at all.
-    pub fn approved_record_ids(&self, kind: Kind) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .approved
-            .values()
-            .filter(|r| r.kind == kind)
-            .map(|r| r.id.clone())
-            .collect();
-        ids.sort();
-        ids.dedup();
-        ids
     }
 
     /// Marks the digest as approved and persists it. The read-modify-write runs
@@ -368,7 +385,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_record_ids_filters_by_kind_sorted_and_deduped() {
+    fn status_tells_approved_changed_and_unapproved_apart_per_kind() {
         let _lock = crate::env_test_lock();
         let cfg = tempfile::tempdir().unwrap();
         unsafe {
@@ -377,8 +394,6 @@ mod tests {
         let _g = EnvGuard;
 
         let mut store = TrustStore::load();
-        assert!(store.approved_record_ids(Kind::Connector).is_empty());
-
         store
             .approve_kind(
                 "sha256:widget-old",
@@ -389,23 +404,18 @@ mod tests {
             .unwrap();
         store
             .approve_kind(
-                "sha256:zeta",
-                "zeta",
-                Kind::Connector,
-                OriginKind::LocallyApproved,
-            )
-            .unwrap();
-        store
-            .approve_kind(
-                "sha256:unrelated",
-                "widget",
+                "sha256:acct",
+                "gadget",
                 Kind::ConnectorAccount,
                 OriginKind::LocallyApproved,
             )
             .unwrap();
 
-        let ids = store.approved_record_ids(Kind::Connector);
-        assert_eq!(ids, vec!["widget".to_string(), "zeta".to_string()]);
+        let status = |d: &str, id: &str| store.status(d, id, Kind::Connector);
+        assert_eq!(status("sha256:widget-old", "widget"), TrustStatus::Approved);
+        assert_eq!(status("sha256:widget-new", "widget"), TrustStatus::Changed);
+        // An approval of another kind under the same id is not "changed".
+        assert_eq!(status("sha256:gadget", "gadget"), TrustStatus::Unapproved);
     }
 
     #[test]

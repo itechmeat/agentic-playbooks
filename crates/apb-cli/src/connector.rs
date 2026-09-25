@@ -17,7 +17,7 @@ use apb_core::connector::def::ConnectorDoc;
 use apb_core::connector::secrets;
 use apb_core::connector::store::{self, LoadedConnector};
 use apb_core::doctor::{Check, CheckStatus};
-use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
+use apb_core::trust::{Kind, OriginKind, TrustStatus, TrustStore, account_trust_id};
 use clap::Subcommand;
 use serde_json::{Value, json};
 
@@ -146,7 +146,6 @@ fn list_cmd(root: &Path) -> ExitCode {
         );
     } else {
         let trust = TrustStore::load();
-        let approved_connector_ids = trust.approved_record_ids(Kind::Connector);
         let mut rows: Vec<Vec<String>> = vec![vec![
             "NAME".to_string(),
             "VERSION".to_string(),
@@ -155,15 +154,9 @@ fn list_cmd(root: &Path) -> ExitCode {
         ]];
         for s in &summaries {
             let trust_state = match store::load(&s.name) {
-                Ok(loaded) => {
-                    if trust.is_approved(&loaded.digest) {
-                        "approved"
-                    } else if approved_connector_ids.iter().any(|id| id == &s.name) {
-                        "changed"
-                    } else {
-                        "unapproved"
-                    }
-                }
+                Ok(loaded) => trust
+                    .status(&loaded.digest, &s.name, Kind::Connector)
+                    .as_str(),
                 Err(_) => "invalid",
             };
             let accounts_count = config::load_merged(root, &s.name)
@@ -620,18 +613,14 @@ fn push_connector_trust_check(
     name: &str,
     digest: &str,
 ) {
-    let approved = trust.is_approved(digest);
-    let detail = if approved {
-        "approved".to_string()
-    } else if trust
-        .approved_record_ids(Kind::Connector)
-        .iter()
-        .any(|id| id == name)
-    {
-        "changed since last approval".to_string()
-    } else {
-        "not approved".to_string()
-    };
+    let status = trust.status(digest, name, Kind::Connector);
+    let approved = status == TrustStatus::Approved;
+    let detail = match status {
+        TrustStatus::Approved => "approved",
+        TrustStatus::Changed => "changed since last approval",
+        TrustStatus::Unapproved => "not approved",
+    }
+    .to_string();
     checks.push(Check {
         name: format!("connector `{name}`: trust"),
         status: if approved {
