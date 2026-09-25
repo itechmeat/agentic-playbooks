@@ -449,6 +449,9 @@ window per client address:
 journalctl -u apb -f | grep apb ingest_rejected
 ```
 
+A connector or account path segment that is not a valid name is logged as
+`-`, so a request path cannot add a line of its own.
+
 A fail2ban filter matching `apb ingest_rejected ip=<HOST>` bans an address
 that keeps sending bad signatures. As above, point it at the sender's address
 only once `trusted_proxies` is configured; otherwise every ban lands on the

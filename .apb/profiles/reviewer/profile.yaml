@@ -1,6 +1,5 @@
 name: reviewer
 description: Adversarial code reviewer for apb; judges full branch diff by SOLID/KISS/DRY and verifies gates.
-hermetic: true
 executor:
   agent: claude
   model: claude-opus-5-5
@@ -9,3 +8,4 @@ soul: any
 skills:
 - name: rust-skills
   scope: auto
+hermetic: true
