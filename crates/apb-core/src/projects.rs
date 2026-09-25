@@ -15,8 +15,6 @@ const SCHEMA_VERSION: u32 = 1;
 const DEFAULT_UNREACHABLE_DAYS: u64 = 14;
 const DEFAULT_PURGE_DAYS: u64 = 90;
 const MS_PER_DAY: u64 = 24 * 60 * 60 * 1000;
-const LOCK_ATTEMPTS: u32 = 80;
-const LOCK_STEP_MS: u64 = 25;
 
 /// State of a workspace entry (spec 6.4). Timestamps are `u64` ms: that is
 /// enough for centuries, and `u128` does not deserialize via serde_json in
@@ -141,65 +139,6 @@ fn purge_ms(cfg: &GlobalConfig) -> u64 {
         .saturating_mul(MS_PER_DAY)
 }
 
-/// RAII lock over `projects.json.lock`. Best-effort: on timeout (a stuck
-/// lock left by a crashed process) it force-steals the lock. The lock is
-/// tagged with a unique owner token: the guard removes the file ONLY if the
-/// token is still ours - otherwise, after a force-steal, one process could
-/// tear down another live process's lock (cascade).
-struct LockGuard {
-    path: PathBuf,
-    token: String,
-}
-
-impl Drop for LockGuard {
-    fn drop(&mut self) {
-        // Remove only our own lock: if the content is no longer our token,
-        // the lock has been taken over (ours expired and was grabbed) -
-        // do not touch someone else's lock.
-        if std::fs::read_to_string(&self.path)
-            .map(|c| c.trim() == self.token)
-            .unwrap_or(false)
-        {
-            let _ = std::fs::remove_file(&self.path);
-        }
-    }
-}
-
-fn new_lock_token() -> String {
-    format!("{}-{}", std::process::id(), uuid::Uuid::new_v4().simple())
-}
-
-fn acquire_lock(base: &Path) -> std::io::Result<LockGuard> {
-    use std::io::Write;
-    std::fs::create_dir_all(base)?;
-    let path = base.join("projects.json.lock");
-    let token = new_lock_token();
-    for _ in 0..LOCK_ATTEMPTS {
-        match std::fs::OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&path)
-        {
-            Ok(mut f) => {
-                f.write_all(token.as_bytes())?;
-                return Ok(LockGuard { path, token });
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                std::thread::sleep(std::time::Duration::from_millis(LOCK_STEP_MS));
-            }
-            Err(e) => return Err(e),
-        }
-    }
-    // Timeout: treat the lock as stale, force-steal it under our token.
-    let _ = std::fs::remove_file(&path);
-    let mut f = std::fs::OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&path)?;
-    f.write_all(token.as_bytes())?;
-    Ok(LockGuard { path, token })
-}
-
 fn read_file(path: &Path) -> ProjectsFile {
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str(&raw).unwrap_or_else(|e| {
@@ -239,7 +178,7 @@ fn with_registry<T>(mut f: impl FnMut(&mut ProjectsFile) -> T) -> std::io::Resul
         .parent()
         .map(Path::to_path_buf)
         .unwrap_or_else(|| PathBuf::from("."));
-    let _lock = acquire_lock(&base)?;
+    let _lock = crate::fsutil::lock_dir(&base, "projects.json.lock")?;
     let mut file = read_file(&path);
     let before = file.clone();
     let out = f(&mut file);

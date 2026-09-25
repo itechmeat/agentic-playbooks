@@ -106,8 +106,8 @@ pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// owner token. The guard removes the file only if the token is still ours
 /// (after a force-steal of a stale lock, this protects against cascading
 /// removal of someone else's lock). A shared primitive for serializing
-/// read-modify-write over global state files (trust.json, suggestions.json).
-/// `projects.json` historically carries an equivalent implementation of its own.
+/// read-modify-write over global state files (trust.json, suggestions.json,
+/// projects.json).
 pub struct DirLock {
     path: PathBuf,
     token: String,
