@@ -177,6 +177,7 @@ fn lock_write_and_remove() {
 
 #[tokio::test]
 async fn post_playbook_creates_then_get_finds_it() {
+    let _cfg = crate::common::config_sandbox().await;
     let dir = seed();
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let yaml = VALID.replace("id: implement-task", "id: brand-new");
@@ -201,6 +202,7 @@ async fn post_playbook_creates_then_get_finds_it() {
 
 #[tokio::test]
 async fn put_playbook_creates_new_minor_version() {
+    let _cfg = crate::common::config_sandbox().await;
     let dir = seed();
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let yaml = VALID.replace("name: Implement Task", "name: Implement Task v2");
@@ -240,6 +242,7 @@ async fn delete_playbook_moves_to_trash() {
 
 #[tokio::test]
 async fn get_playbook_diff_between_versions() {
+    let _cfg = crate::common::config_sandbox().await;
     let dir = seed();
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let yaml = VALID
@@ -426,4 +429,36 @@ async fn write_endpoints_reject_path_traversal() {
     )
     .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+/// A save through the dashboard editor follows the one save rule
+/// (`save_definition`): the saved digest is approved, exactly as a save
+/// through MCP `playbook_update` is, so the edited playbook stays trusted for
+/// MCP runs and the catalog. It used to drop trust.
+#[tokio::test]
+async fn put_playbook_approves_the_saved_digest() {
+    let _cfg = crate::common::config_sandbox().await;
+    let dir = seed();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let yaml = VALID.replace("name: Implement Task", "name: Implement Task v2");
+    let (status, json) = json_request(
+        app,
+        "PUT",
+        "/api/playbooks/implement-task",
+        serde_json::json!({ "yaml": yaml }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let version = json["version"].as_str().unwrap();
+    let saved = fs::read_to_string(
+        dir.path()
+            .join(".apb/playbooks/implement-task")
+            .join(version)
+            .join("playbook.yaml"),
+    )
+    .unwrap();
+    assert!(
+        apb_core::trust::TrustStore::load().is_approved(&apb_core::scope::digest_str(&saved)),
+        "the dashboard save must approve the digest it wrote"
+    );
 }

@@ -232,6 +232,46 @@ pub fn create_version_with_override(
     Ok(version)
 }
 
+/// The one save path for a playbook definition written through apb: MCP
+/// `playbook_create` / `playbook_update`, the dashboard editor, and
+/// `apb import`. Creates the new version exactly like
+/// [`create_version_with_override`] and then applies the one trust rule for
+/// saves: a definition saved through apb is a user-authorized local write,
+/// so the digest of the version it wrote is approved (`LocallyApproved`,
+/// spec 3.1 and the profiles spec 9.4: auto-approve is trust in the result of
+/// an authorized operation). Content that changes outside apb - a hand edit,
+/// a `git pull`, a copied directory - never passes here and stays untrusted.
+///
+/// Approval is best effort: the version is already committed when it runs,
+/// so a trust-store write failure is reported on stderr rather than turning
+/// a completed save into an error (the playbook then runs only with an
+/// explicit acknowledge, like any untrusted one).
+pub fn save_definition(
+    root: &Path,
+    id: &str,
+    yaml: &str,
+    version_override: Option<&str>,
+    make_current: bool,
+) -> Result<String, VersioningError> {
+    let version =
+        create_version_with_override(root, id, yaml, None, version_override, make_current)?;
+    let written = playbooks_dir(root)
+        .join(id)
+        .join(&version)
+        .join("playbook.yaml");
+    let approved = fs::read_to_string(&written).and_then(|saved| {
+        crate::trust::TrustStore::load().approve(
+            &crate::scope::digest_str(&saved),
+            id,
+            crate::trust::OriginKind::LocallyApproved,
+        )
+    });
+    if let Err(e) = approved {
+        eprintln!("apb: saved `{id}` {version} but could not record its trust: {e}");
+    }
+    Ok(version)
+}
+
 /// Creates immutable patch version from base version without changing current.
 pub fn create_patch_version(
     root: &Path,

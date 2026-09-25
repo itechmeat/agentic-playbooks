@@ -3,7 +3,7 @@ use crate::state::*;
 use apb_core::registry::{PlaybookSummary, Registry, RegistryError};
 use apb_core::validate::{Severity, ValidationContext, validate};
 use apb_core::versioning::{
-    create_version, delete_playbook, list_versions_with_provenance, promote_version, save_layout,
+    delete_playbook, list_versions_with_provenance, promote_version, save_definition, save_layout,
     version_diff,
 };
 use axum::extract::{Path as AxPath, Query, State};
@@ -68,7 +68,7 @@ pub(crate) async fn create_playbook(
         Ok(r) => r,
         Err(e) => return e,
     };
-    match create_version(&root, &body.id, &body.yaml, None, true) {
+    match save_definition(&root, &body.id, &body.yaml, None, true) {
         Ok(version) => (
             StatusCode::CREATED,
             Json(serde_json::json!({ "id": body.id, "version": version })),
@@ -95,7 +95,7 @@ pub(crate) async fn update_playbook(
     if !dir.is_dir() {
         return (StatusCode::NOT_FOUND, format!("playbook `{id}` not found")).into_response();
     }
-    match create_version(&root, &id, &body.yaml, None, true) {
+    match save_definition(&root, &id, &body.yaml, None, true) {
         Ok(version) => Json(serde_json::json!({ "id": id, "version": version })).into_response(),
         Err(e) => versioning_error(e),
     }

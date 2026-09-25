@@ -34,6 +34,7 @@ fn seed(root: &Path) {
 
 #[test]
 fn export_import_round_trip_preserves_playbook_and_layout() {
+    let _cfg = crate::common::config_sandbox();
     // Export from project A.
     let a = tempfile::tempdir().unwrap();
     seed(a.path());
@@ -66,6 +67,7 @@ fn export_import_round_trip_preserves_playbook_and_layout() {
 
 #[test]
 fn import_invalid_playbook_surfaces_formatted_validation_lines_through_bundle_error() {
+    let _cfg = crate::common::config_sandbox();
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
     let invalid = PLAYBOOK.replace(r#"prompt: "do""#, r#"prompt: "{{outputs.x}}""#);
@@ -96,6 +98,7 @@ fn import_invalid_playbook_surfaces_formatted_validation_lines_through_bundle_er
 
 #[test]
 fn import_rejects_unknown_schema() {
+    let _cfg = crate::common::config_sandbox();
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
     let bad = PlaybookBundle {
@@ -114,6 +117,7 @@ fn import_rejects_unknown_schema() {
 
 #[test]
 fn import_honors_bundle_version_1_0_0_on_a_fresh_id() {
+    let _cfg = crate::common::config_sandbox();
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
     let bundle = PlaybookBundle {
@@ -130,6 +134,7 @@ fn import_honors_bundle_version_1_0_0_on_a_fresh_id() {
 
 #[test]
 fn import_honors_a_free_non_default_bundle_version() {
+    let _cfg = crate::common::config_sandbox();
     // Seed an existing playbook whose auto-assign scheme would never land on
     // 9.9.9 next (it would compute 1.1.0). A free, non-sequential bundle
     // version must still be honored exactly.
@@ -149,6 +154,7 @@ fn import_honors_a_free_non_default_bundle_version() {
 
 #[test]
 fn second_import_of_the_same_version_errors_naming_the_conflict() {
+    let _cfg = crate::common::config_sandbox();
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
     let bundle = PlaybookBundle {
@@ -177,6 +183,7 @@ fn second_import_of_the_same_version_errors_naming_the_conflict() {
 
 #[test]
 fn version_less_bundle_auto_assigns_exactly_as_today() {
+    let _cfg = crate::common::config_sandbox();
     let b = tempfile::tempdir().unwrap();
     seed(b.path());
     let bundle = PlaybookBundle {
@@ -195,6 +202,7 @@ fn version_less_bundle_auto_assigns_exactly_as_today() {
 
 #[test]
 fn import_rejects_a_non_semver_bundle_version_cleanly() {
+    let _cfg = crate::common::config_sandbox();
     let b = tempfile::tempdir().unwrap();
     init_project(b.path()).unwrap();
     let bundle = PlaybookBundle {

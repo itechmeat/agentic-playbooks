@@ -19,6 +19,7 @@ fn seed(root: &Path) {
 
 #[test]
 fn playbook_create_new_then_load() {
+    let _cfg = crate::common::config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     apb_core::registry::init_project(dir.path()).unwrap();
     fs::create_dir_all(dir.path().join(".apb/profiles/architect")).unwrap();
@@ -35,6 +36,7 @@ fn playbook_create_new_then_load() {
 
 #[test]
 fn playbook_update_creates_minor_version() {
+    let _cfg = crate::common::config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
 
@@ -50,6 +52,7 @@ fn playbook_update_creates_minor_version() {
 
 #[test]
 fn playbook_update_missing_is_not_found() {
+    let _cfg = crate::common::config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
 
@@ -59,6 +62,7 @@ fn playbook_update_missing_is_not_found() {
 
 #[test]
 fn playbook_delete_moves_to_trash() {
+    let _cfg = crate::common::config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
 
@@ -73,6 +77,7 @@ fn playbook_delete_moves_to_trash() {
 
 #[test]
 fn playbook_update_invalid_playbook_renders_structured_validation_message() {
+    let _cfg = crate::common::config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
 
@@ -96,6 +101,7 @@ fn playbook_update_invalid_playbook_renders_structured_validation_message() {
 
 #[test]
 fn playbook_create_invalid_yaml_is_engine_error() {
+    let _cfg = crate::common::config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
 

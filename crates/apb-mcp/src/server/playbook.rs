@@ -202,15 +202,7 @@ impl WfMcp {
         &self,
         Parameters(PlaybookWriteArgs { id, yaml }): Parameters<PlaybookWriteArgs>,
     ) -> CallToolResult {
-        let res = tools::playbook_create(&self.root, &id, &yaml);
-        // Local creation via the tool = local approval (spec 3.1): such a
-        // playbook is trusted and passes the run gate without acknowledge.
-        if let Ok(v) = &res
-            && let Some(ver) = v["version"].as_str()
-        {
-            tools::approve_local(&self.root, &id, ver);
-        }
-        to_call_tool_result(res)
+        to_call_tool_result(tools::playbook_create(&self.root, &id, &yaml))
     }
 
     #[tool(
@@ -221,13 +213,7 @@ impl WfMcp {
         &self,
         Parameters(PlaybookWriteArgs { id, yaml }): Parameters<PlaybookWriteArgs>,
     ) -> CallToolResult {
-        let res = tools::playbook_update(&self.root, &id, &yaml);
-        if let Ok(v) = &res
-            && let Some(ver) = v["version"].as_str()
-        {
-            tools::approve_local(&self.root, &id, ver);
-        }
-        to_call_tool_result(res)
+        to_call_tool_result(tools::playbook_update(&self.root, &id, &yaml))
     }
 
     #[tool(

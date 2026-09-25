@@ -1160,6 +1160,25 @@ async fn prepared_token(server: &WfMcp, b_id: &str) -> serde_json::Value {
     serde_json::from_str(&result_text(&res)).unwrap()
 }
 
+/// Approves the digest of a version already on disk (the trust state a save
+/// through apb leaves behind), for tests that seed definitions by hand.
+fn approve_version(root: &Path, id: &str, version: &str) {
+    let yaml = std::fs::read_to_string(
+        root.join(".apb/playbooks")
+            .join(id)
+            .join(version)
+            .join("playbook.yaml"),
+    )
+    .unwrap();
+    apb_core::trust::TrustStore::load()
+        .approve(
+            &apb_core::scope::digest_str(&yaml),
+            id,
+            apb_core::trust::OriginKind::LocallyApproved,
+        )
+        .unwrap();
+}
+
 fn setup_two(cfg: &Path) -> (tempfile::TempDir, tempfile::TempDir, String) {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -1171,7 +1190,7 @@ fn setup_two(cfg: &Path) -> (tempfile::TempDir, tempfile::TempDir, String) {
     seed_noagent_run(a.path());
     seed_noagent_run(b.path());
     // Pipeline B must be trusted+active, so that preflight lets it through.
-    tools::approve_local(b.path(), "noagent", "1.0.0");
+    approve_version(b.path(), "noagent", "1.0.0");
     apb_core::projects::touch(b.path());
     let b_id = apb_core::workspace::ensure_id(b.path()).unwrap();
     (a, b, b_id)
@@ -1287,7 +1306,7 @@ async fn digest_drift_invalidates_plan() {
     std::fs::write(&vpath, format!("{cur}# drift\n")).unwrap();
     // Re-approve the new digest, so preflight does not fail on trust and
     // we verify plan_stale specifically.
-    tools::approve_local(b.path(), "noagent", "1.0.0");
+    approve_version(b.path(), "noagent", "1.0.0");
 
     let res = server
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
