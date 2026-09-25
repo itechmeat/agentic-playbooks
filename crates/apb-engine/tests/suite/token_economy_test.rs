@@ -473,3 +473,120 @@ fn the_default_agent_environment_is_minimal_and_full_is_an_opt_in() {
         }
     }
 }
+
+const BENCH: &str = r#"schema: 2
+id: bench
+name: Bench
+version: 1.0.0
+defaults: { profile: main }
+nodes:
+  - { id: start, type: start }
+  - { id: research, type: agent_task, prompt: "Research the task.\n\n{{run.context}}" }
+  - { id: implement, type: agent_task, max_retries: 1, prompt: "Implement the plan.\n\n{{run.context}}" }
+  - { id: review, type: agent_task, require_verdict: true, timeout_seconds: 2, prompt: "Review this change:\n\n{{nodes.implement.output}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: research }
+  - { from: research, to: implement }
+  - { from: implement, to: review }
+  - { from: review, to: implement, condition: { type: node_status, node: review, equals: failure }, max_traversals: 1 }
+  - { from: review, to: done, condition: { type: node_status, node: review, equals: success } }
+"#;
+
+/// The scripted parts of the bench: research and implement answer at length,
+/// implement's first attempt reports a failure (one retry), review's first
+/// attempt overruns its 2 s deadline, its second records a failure verdict
+/// (one loop back to implement) and its third a success verdict.
+fn bench_part() -> String {
+    format!(
+        r#"case "$NODE" in
+  research) {big}; {ok};;
+  implement) {big}; if [ "$N" = 1 ]; then {fail}; else {ok}; fi;;
+  review)
+    case "$N" in
+      1) sleep 6;;
+      2) printf '{{"status":"failure","outputs":{{"note":"needs another pass"}}}}' > "$APB_STATUS_FILE"; echo reviewed;;
+      *) printf '{{"status":"success","outputs":{{"note":"fine"}}}}' > "$APB_STATUS_FILE"; echo reviewed;;
+    esac;;
+esac"#,
+        big = filler(40_000),
+        ok = OK,
+        fail = FAIL,
+    )
+}
+
+/// Harness context a claude spawn loads before the prompt, measured on one
+/// development setup with `claude -p /context` (no model call) on 2026-09-25: the operator's
+/// full setup versus the minimal environment. Only used to put the bench's
+/// spawn counts into tokens.
+const FULL_ENV_TOKENS: usize = 23_900;
+const MINIMAL_ENV_TOKENS: usize = 18_100;
+
+/// The bench (issue #136 acceptance): one run through every waste path the
+/// issue names - context growing with verbose outputs, a reported failure and
+/// its retry, a require_verdict deadline kill, and a loop - measured as the
+/// prompt text each spawned agent was handed. Before the round-2 fixes this
+/// run spawned 7 fresh full-environment agents and sent 288,696 prompt bytes
+/// (about 72k tokens, plus about 167k tokens of harness context). After them
+/// it spawns 5 fresh minimal-environment agents and resumes 2 sessions, and
+/// sends 99,224 prompt bytes (about 25k tokens, plus about 91k of harness
+/// context). The bounds below pin the improvement with some slack.
+/// `--nocapture` prints the numbers.
+#[test]
+fn token_budget_of_a_representative_run() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    seed_playbook(dir.path(), "bench", BENCH);
+    common::seed_main(dir.path());
+    let stub = recording_stub(dir.path(), &bench_part());
+
+    let outcome = run_with_stub(
+        dir.path(),
+        "bench",
+        &stub,
+        Some("Ship the feature described in issue 42 without touching the public API."),
+    );
+    assert_eq!(outcome, RunStatus::Succeeded);
+
+    let inv = invocations(dir.path());
+    let prompt_bytes: usize = inv.iter().map(|i| i.prompt().len()).sum();
+    let fresh = inv.iter().filter(|i| !i.resumed()).count();
+    let resumed = inv.len() - fresh;
+    let minimal = inv
+        .iter()
+        .filter(|i| i.flag("--setting-sources").is_some())
+        .count();
+    let harness = fresh
+        * if minimal == inv.len() {
+            MINIMAL_ENV_TOKENS
+        } else {
+            FULL_ENV_TOKENS
+        };
+    println!(
+        "token-bench: invocations={} fresh={fresh} resumed={resumed} minimal_env={minimal} \
+         prompt_bytes={prompt_bytes} (~{} tokens) harness~{harness} tokens",
+        inv.len(),
+        prompt_bytes / 4
+    );
+    for i in &inv {
+        println!(
+            "token-bench:   {:<10} resumed={:<5} prompt_bytes={}",
+            i.node,
+            i.resumed(),
+            i.prompt().len()
+        );
+    }
+    assert_eq!(
+        minimal,
+        inv.len(),
+        "every spawn uses the minimal environment"
+    );
+    assert!(
+        resumed >= 2,
+        "the retry and the deadline continuation resume"
+    );
+    assert!(
+        prompt_bytes < 130_000,
+        "prompt bytes must stay far below the 288,696 of the unbounded run: {prompt_bytes}"
+    );
+}
