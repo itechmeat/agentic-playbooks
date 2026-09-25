@@ -41,6 +41,7 @@ pub struct RunView {
 }
 
 /// A sub-playbook run started by a run, as its parent reports it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct ChildRun {
     pub node_id: String,

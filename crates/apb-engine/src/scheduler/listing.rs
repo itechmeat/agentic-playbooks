@@ -3,6 +3,7 @@
 
 use super::*;
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Serialize)]
 pub struct RunSummary {
     pub run_id: String,
@@ -10,6 +11,7 @@ pub struct RunSummary {
     pub status: String,
     pub started_ts: u128,
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub progress: Option<crate::progress::ProgressSummary>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_run: Option<String>,

@@ -15,6 +15,7 @@ use crate::state::{NodeStatus, RunState, RunStatus};
 /// The kind of node a run is waiting on. Serializes to the same strings the web
 /// badge matches on (`"human_review"` / `"wait"`); the enum gives the fold
 /// compile-time exhaustiveness instead of a free-form string.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitingKind {
@@ -35,6 +36,7 @@ pub enum WaitingKind {
 /// from the `questions.jsonl` / `answers.jsonl` channel files directly
 /// (`pending_question_for_run`), not from the event log, so it is visible
 /// even before drive journals `QuestionAsked` for it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingQuestion {
     pub node: String,
@@ -60,11 +62,13 @@ pub struct PendingQuestion {
 /// it. It exists so an intermediary that reads `run_status` is forced to see
 /// that a decision is expected, what the options are, and how to answer -
 /// rather than the run silently waiting forever.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingReview {
     pub node: String,
     /// The gate node's title from the playbook, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub title: Option<String>,
     /// A single self-contained owner-facing line: names the gate, its options,
     /// and how to decide. This is the text a supervising agent relays verbatim.
@@ -80,6 +84,7 @@ pub struct PendingReview {
     /// shows it above the options). Already folded into `instruction` too.
     /// Template placeholders inside are NOT rendered - literal text.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub prompt: Option<String>,
 }
 
@@ -190,6 +195,7 @@ pub fn supervisor_instruction(node_id: &str, trigger: &str) -> String {
 /// `Some(WaitingKind::Supervisor)` (issue #45 finding 4). Derived from the
 /// event log alone: a `WakeRaised` for node failure/timeout with no later
 /// resolving supervisor action and a non-terminal run.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingSupervisor {
     pub node: String,
@@ -279,6 +285,7 @@ pub fn pending_supervisor_decision(events: &[Event]) -> Option<PendingSupervisor
 }
 
 /// The run-progress summary surfaced by the server and MCP `run_status`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressSummary {
     pub percent: u8,

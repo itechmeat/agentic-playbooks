@@ -4,7 +4,60 @@ use apb_core::registry::Registry;
 use axum::extract::{Path as AxPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+/// One row of `GET /api/runs`: the engine's run summary stamped with the
+/// project it belongs to. Typed so the dashboard's TypeScript is generated
+/// from it (`web/src/lib/api.gen.ts`, see `ts_contract`).
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RunListEntry {
+    #[serde(flatten)]
+    pub run: apb_engine::RunSummary,
+    /// Owning project (global dashboard). Empty on the pinned-root test server.
+    pub workspace_id: String,
+    pub project: String,
+}
+
+/// `GET /api/runs/{id}`: everything the run page shows, every run fact read
+/// through one [`apb_engine::run_view::RunView`] (the same model `apb wait`
+/// and MCP `run_status`/`run_wait` report from).
+#[derive(Serialize)]
+#[cfg_attr(test, derive(ts_rs::TS))]
+pub struct RunDetail {
+    pub run_id: String,
+    pub playbook: String,
+    pub version: String,
+    pub run_status: apb_engine::state::RunStatus,
+    /// Why a failed run ended (`node \`x\`: reason`); null unless failed.
+    pub failure_reason: Option<String>,
+    /// Whether a process really drives the run; null when nothing claims to.
+    pub driver_alive: Option<bool>,
+    /// Per-node reported status (`lost` and `interrupted` included).
+    pub nodes: std::collections::BTreeMap<String, String>,
+    pub outputs: std::collections::BTreeMap<String, String>,
+    pub instruction: Option<String>,
+    pub params: std::collections::BTreeMap<String, String>,
+    /// The run's playbook snapshot; null for very old runs without one.
+    #[cfg_attr(
+        test,
+        ts(
+            type = "{ id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[]; defaults?: { on_failure?: string } | null } | null"
+        )
+    )]
+    pub model: serde_json::Value,
+    #[cfg_attr(test, ts(type = "WfLayout | null"))]
+    pub layout: Option<serde_json::Value>,
+    pub hooks: std::collections::BTreeMap<String, String>,
+    /// Sub-runs started by a `playbook` node, one per `ChildRunStarted`.
+    pub children: Vec<apb_engine::run_view::ChildRun>,
+    /// Progress and every open gate (reviews, questions, waits, supervisor):
+    /// the run page renders its panels from this, never from `events`.
+    pub progress: Option<apb_engine::progress::ProgressSummary>,
+    pub answer: Option<String>,
+    #[cfg_attr(test, ts(type = "WfEvent[]"))]
+    pub events: Vec<apb_engine::event::Event>,
+}
 
 /// GET /api/runs: every reachable project's runs by default, or exactly one
 /// project's when `?workspace=<id>` is given (issue #103.2).
@@ -41,19 +94,16 @@ pub(crate) async fn list_runs_handler(
             vec![(ws.to_string(), project, root)]
         }
     };
-    let mut out: Vec<serde_json::Value> = Vec::new();
+    let mut out: Vec<RunListEntry> = Vec::new();
     for (workspace_id, project, root) in workspaces {
         let Ok(list) = apb_engine::list_runs(&root) else {
             continue;
         };
-        for run in &list {
-            let mut v = serde_json::to_value(run).unwrap_or_else(|_| serde_json::json!({}));
-            if let Some(obj) = v.as_object_mut() {
-                obj.insert("workspace_id".into(), serde_json::json!(workspace_id));
-                obj.insert("project".into(), serde_json::json!(project));
-            }
-            out.push(v);
-        }
+        out.extend(list.into_iter().map(|run| RunListEntry {
+            run,
+            workspace_id: workspace_id.clone(),
+            project: project.clone(),
+        }));
     }
     Json(out).into_response()
 }
@@ -115,25 +165,28 @@ pub(crate) async fn get_run_handler(
         .map(|(k, secret)| (k, apb_engine::hook_path(&id, &secret)))
         .collect();
 
-    Json(serde_json::json!({
-        "run_id": id,
-        "playbook": playbook_id,
-        "version": version,
-        "run_status": view.run_status.as_str(),
-        "failure_reason": view.failure_reason(),
-        "driver_alive": view.driver_alive,
-        "nodes": view.nodes(),
-        "outputs": view.state.outputs,
-        "instruction": cfg.instruction,
-        "params": cfg.params,
-        "model": playbook_json,
-        "layout": layout,
-        "hooks": hooks,
-        "children": view.children(&run_dir),
-        "progress": view.progress,
-        "answer": answer,
-        "events": view.events,
-    }))
+    let children = view.children(&run_dir);
+    let failure_reason = view.failure_reason();
+    let nodes = view.nodes();
+    Json(RunDetail {
+        run_id: id,
+        playbook: playbook_id,
+        version,
+        run_status: view.run_status,
+        failure_reason,
+        driver_alive: view.driver_alive,
+        nodes,
+        outputs: view.state.outputs,
+        instruction: cfg.instruction,
+        params: cfg.params,
+        model: playbook_json,
+        layout,
+        hooks,
+        children,
+        progress: view.progress,
+        answer,
+        events: view.events,
+    })
     .into_response()
 }
 

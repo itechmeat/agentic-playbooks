@@ -38,6 +38,14 @@ rustls-platform-verifier.workspace = true
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# TypeScript declarations for the run types the dashboard consumes, derived
+# only under the `ts` feature: apb-server's contract test turns it on to render
+# `web/src/lib/api.gen.ts` and fail when the committed file drifts.
+ts-rs = { version = "12", optional = true }
+
+[features]
+ts = ["dep:ts-rs"]
+
 [dev-dependencies]
 tempfile = "3.27.0"
 # Decodes the recorded XOAUTH2 SASL payload in the imap listener tests.

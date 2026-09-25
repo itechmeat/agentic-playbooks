@@ -59,66 +59,21 @@ export interface PlaybookDetail {
   frozen: boolean
 }
 
-// The pending question for a run parked on an interactive `agent_task` node
-// (spec 2026-07-20-interactive-nodes), mirroring the server's
-// `progress::PendingQuestion`. Present only while `waiting_kind === 'question'`.
-export interface PendingQuestion {
-  node: string
-  question: string
-  options: string[]
-  // "human" or "supervisor" (the node's declared answer_by); the web facade
-  // always posts as "human" regardless of this value.
-  answer_by: string
-  // Milliseconds since epoch, or 0 before drive has journaled the question
-  // event yet (treat 0 as "just now", never synthesize a client-side time).
-  asked_at: number
-}
-
-// The pending supervisor decision for a run parked after a node failure/timeout
-// wake (issue #45 finding 4), mirroring `progress::PendingSupervisor`. Present
-// only while `waiting_kind === 'supervisor'`.
-export interface PendingSupervisor {
-  node: string
-  // "node_failed" or "node_timeout".
-  trigger: string
-  instruction: string
-  // Typically retry / continue_from / abort.
-  options: string[]
-  how_to_decide: string
-}
-
-export interface ProgressSummary {
-  percent: number
-  label: string | null
-  waiting_on: string | null
-  // null whenever waiting_on is null.
-  waiting_kind: 'human_review' | 'wait' | 'question' | 'supervisor' | null
-  // The pending question when waiting_kind === 'question'; null otherwise.
-  pending_question?: PendingQuestion | null
-  // The pending supervisor park when waiting_kind === 'supervisor'; null otherwise.
-  pending_supervisor?: PendingSupervisor | null
-  // Deterministic work-plan identity: changes exactly when a report raises a
-  // cycle total or the run migrates to a patched version. Does not change on
-  // ordinary done/label updates. This is the only valid reset signal.
-  plan_key: string
-}
-
-export interface RunSummary {
-  run_id: string
-  playbook: string
-  status: string
-  started_ts: number
-  // Owning project (global dashboard). Empty on the pinned-root test server.
-  workspace_id: string
-  project: string
-  progress?: ProgressSummary | null
-  parent_run?: string | null
-  continued_from?: string | null
-  superseded_by?: string | null
-  // Present and true only when the driver pid is provably gone; absent when
-  // false (see showsDriverDead in lib/status.ts for how it is rendered).
-  driver_dead?: boolean
-}
+// Run payloads (detail, listing, progress and every open gate) are generated
+// from the Rust types the server serializes, so the two cannot drift. See
+// crates/apb-server/src/ts_contract.rs.
+export type {
+  ChildRun,
+  NodeStatus,
+  PendingQuestion,
+  PendingReview,
+  PendingSupervisor,
+  ProgressSummary,
+  RunDetail,
+  RunStatus,
+  WaitingKind,
+} from './api.gen'
+export type { RunListEntry as RunSummary } from './api.gen'
 
 export interface WfEvent {
   seq: number
@@ -157,35 +112,4 @@ export interface VersionInfo {
   /** `current` points here: the one source for the version in use. */
   is_current: boolean
   provenance: VersionProvenance | null
-}
-
-export interface RunDetail {
-  run_id: string
-  playbook: string
-  version: string
-  run_status: string
-  // Why a failed run ended, as folded from the journal's last RunError
-  // (`node \`x\`: reason`). Null unless the run is failed.
-  failure_reason?: string | null
-  // Whether a process is really driving this run: true / false when the run
-  // carries a drive claim, null when it carries none at all (a finished run,
-  // and every run before the claim is written). `run_status` and `nodes`
-  // already account for it - `nodes` can read `lost` for an attempt whose
-  // process is gone.
-  driver_alive?: boolean | null
-  nodes: Record<string, string>
-  outputs: Record<string, string>
-  instruction: string | null
-  answer?: string | null
-  params: Record<string, string>
-  model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[] } | null
-  layout: WfLayout | null
-  hooks?: Record<string, string>
-  events: WfEvent[]
-  progress?: ProgressSummary | null
-  // Sub-runs started by a `playbook` node in this run (review R1-I6), one
-  // entry per `ChildRunStarted` event. Empty (not absent) when there are
-  // none; `status` is folded from the child run's own event log, `"unknown"`
-  // if that log could not be read.
-  children?: { node_id: string; run_id: string; status: string }[]
 }

@@ -19,6 +19,8 @@ pub mod lock;
 mod ratelimit;
 pub mod routes;
 pub mod state;
+#[cfg(test)]
+mod ts_contract;
 pub mod watch;
 pub mod ws;
 
