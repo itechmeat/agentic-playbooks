@@ -12,13 +12,6 @@ export function isSuccessCheckMode(v: string | undefined | null): v is SuccessCh
   return v === 'script' || v === 'marker'
 }
 
-export function successCheckMode(v: unknown): SuccessCheckMode {
-  if (v && typeof v === 'object' && typeof (v as { marker?: unknown }).marker === 'string') {
-    return 'marker'
-  }
-  return 'script'
-}
-
 /** Stored YAML value -> UI mode + editable text. */
 export function successCheckToFields(v: unknown): { mode: SuccessCheckMode; value: string } {
   if (typeof v === 'string') return { mode: 'script', value: v }

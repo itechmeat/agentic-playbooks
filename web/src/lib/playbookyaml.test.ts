@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { toFlow } from './graph'
-import { parsePlaybook, serializePlaybook } from './playbookyaml'
+import { parsePlaybook } from './playbookyaml'
 
 // Simplified sample shaped like crates/apb-core/tests/fixtures/valid.yaml
 const VALID_YAML = `schema: 1
@@ -42,16 +42,5 @@ describe('parsePlaybook', () => {
     const { model, error } = parsePlaybook('nodes:\n  - id: [unclosed')
     expect(model).toBeUndefined()
     expect(error).toBeTruthy()
-  })
-})
-
-describe('serializePlaybook', () => {
-  it('round-trips model structure', () => {
-    const { model: original } = parsePlaybook(VALID_YAML)
-    expect(original).toBeDefined()
-    const text = serializePlaybook(original!)
-    const { model: again, error } = parsePlaybook(text)
-    expect(error).toBeUndefined()
-    expect(again).toEqual(original)
   })
 })

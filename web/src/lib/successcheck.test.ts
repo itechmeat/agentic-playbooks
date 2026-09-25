@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import {
   fieldsToSuccessCheck,
-  successCheckMode,
   successCheckToFields,
 } from './successcheck'
 
@@ -51,14 +50,6 @@ describe('fieldsToSuccessCheck', () => {
   it('trims whitespace on both forms', () => {
     expect(fieldsToSuccessCheck('script', '  scripts/a.sh  ')).toBe('scripts/a.sh')
     expect(fieldsToSuccessCheck('marker', '  DONE  ')).toEqual({ marker: 'DONE' })
-  })
-})
-
-describe('successCheckMode', () => {
-  it('detects marker vs script from a stored value', () => {
-    expect(successCheckMode('scripts/a.sh')).toBe('script')
-    expect(successCheckMode({ marker: 'X' })).toBe('marker')
-    expect(successCheckMode(undefined)).toBe('script')
   })
 })
 

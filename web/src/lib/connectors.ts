@@ -119,10 +119,6 @@ export function deprecationReason(f: ConnectorFunction): string | null {
   return reason ? reason : null
 }
 
-export function isDeprecated(f: ConnectorFunction): boolean {
-  return deprecationReason(f) !== null
-}
-
 // Section visibility on the connector detail page.
 //
 // The rule is not "hide what is empty". An empty card is right whenever the
