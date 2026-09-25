@@ -61,7 +61,7 @@ fn renders_all_template_refs() {
     rejected_outputs.insert("lint".to_string(), "interim only".to_string());
     let mut hooks = BTreeMap::new();
     hooks.insert("ci".to_string(), "/api/hooks/run-1/secret-xyz".to_string());
-    let text = "T: {{params.task}} | I: {{run.instruction}} | O: {{nodes.lint.output}} | R: {{nodes.lint.report}} | RN: {{nodes.gate.review_note}} | RO: {{nodes.lint.rejected_output}} | H: {{run.hooks.ci}} | ctx: {{run.context}}";
+    let text = "T: {{params.task}} | I: {{run.instruction}} | O: {{nodes.lint.output}} | R: {{nodes.lint.report}} | RN: {{nodes.gate.review_note}} | RD: {{nodes.gate.review_decision}} | RO: {{nodes.lint.rejected_output}} | H: {{run.hooks.ci}} | ctx: {{run.context}}";
     let out = render(
         text,
         &params,
@@ -74,7 +74,7 @@ fn renders_all_template_refs() {
     );
     assert_eq!(
         out,
-        "T: ship it | I: be careful | O: 2 errors | R: 2 errors | RN: lgtm | RO: interim only | H: /api/hooks/run-1/secret-xyz | ctx: CTXBODY"
+        "T: ship it | I: be careful | O: 2 errors | R: 2 errors | RN: lgtm | RD: approved | RO: interim only | H: /api/hooks/run-1/secret-xyz | ctx: CTXBODY"
     );
 }
 

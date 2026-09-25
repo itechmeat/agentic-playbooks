@@ -536,6 +536,12 @@ fn resolve(
         ["nodes", id, "review_note"] => {
             reviews.get(*id).map(|r| r.note.clone()).unwrap_or_default()
         }
+        // The option the gate was decided with, e.g. `approve`: what a node
+        // after a multi-option gate needs, without reading the whole context.
+        ["nodes", id, "review_decision"] => reviews
+            .get(*id)
+            .map(|r| r.decision.clone())
+            .unwrap_or_default(),
         // The agent report a success_check discarded (spec
         // field-report-robustness): empty when the node was never rejected.
         ["nodes", id, "rejected_output"] => rejected_outputs.get(*id).cloned().unwrap_or_default(),

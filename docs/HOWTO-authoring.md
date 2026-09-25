@@ -339,6 +339,9 @@ a V13 validation error:
   validation like any other unknown namespace.
 - `nodes.<id>.review_note` - the reviewer's note from a `human_review` node's
   decision.
+- `nodes.<id>.review_decision` - the option a `human_review` node was decided
+  with (for example `approve`), so a node after a multi-option gate can act on
+  it without reading the whole `run.context`. Empty until the gate is decided.
 - `nodes.<id>.rejected_output` - the agent report text a `success_check`
   discarded on the node's last rejected attempt (see Success checks). Empty when
   the node was never rejected; a later rejection overwrites an earlier one.
@@ -397,7 +400,8 @@ A `human_review` node pauses the run for a human decision:
 `options` is a list of strings: the choices a reviewer can pick. It is optional:
 an empty or absent list offers the defaults `approve` and `reject`.
 `review_decide` records one of them as the node's decision, plus a free-form
-note (available downstream as `{{nodes.review.review_note}}`).
+note (available downstream as `{{nodes.review.review_decision}}` and
+`{{nodes.review.review_note}}`).
 
 An optional `prompt` gives the reviewer guidance, shown above the options in
 the owner-facing instruction and in the web review panel:
