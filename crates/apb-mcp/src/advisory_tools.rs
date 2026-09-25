@@ -100,6 +100,11 @@ pub fn playbook_adopt_report(root: &Path, id: Option<&str>) -> Result<Value, Too
                 for r in crate::policy::collect_profile_refs(&loaded.playbook, true) {
                     adopt_check_profile(root, &r, &agents, &store, &mut findings);
                 }
+                // A profile several nodes bind (or that is also the default
+                // and the supervisor) is one thing to fix: report each finding
+                // once, in first-seen order.
+                let mut seen = std::collections::HashSet::new();
+                findings.retain(|f| seen.insert(f.to_string()));
                 reports.push(json!({ "id": wid, "findings": findings }));
             }
             Err(e) => {

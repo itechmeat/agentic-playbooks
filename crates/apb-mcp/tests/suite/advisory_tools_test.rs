@@ -161,6 +161,23 @@ fn adopt_report_emits_expected_codes() {
     );
 }
 
+/// A profile several nodes share is one thing to fix, so the report names each
+/// of its findings once, not once per node that binds it (issue #137).
+#[test]
+fn adopt_report_names_a_shared_profile_once() {
+    let _l = lock();
+    let c = setup();
+    seed_profile(&c.root, "shared", "customx", "");
+    let playbook = "schema: 1\nid: wfs\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: shared }\n  - { id: b, type: agent_task, prompt: \"do\", profile: shared }\n  - { id: c, type: agent_task, prompt: \"do\", profile: shared }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: c }\n  - { from: c, to: done }\n";
+    seed_playbook(&c.root, "wfs", playbook);
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfs")).unwrap();
+    let findings = report["playbooks"][0]["findings"].as_array().unwrap();
+    for code in ["untrusted", "model_unverifiable"] {
+        let n = findings.iter().filter(|f| f["code"] == code).count();
+        assert_eq!(n, 1, "`{code}` once for the shared profile: {findings:?}");
+    }
+}
+
 /// zcode's allowlist is a hard gate in adoption: a model outside it is
 /// `model_not_allowed` naming the allowlist; the legacy
 /// `zai-individual/` spelling of an allowed model is not.
