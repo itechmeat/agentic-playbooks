@@ -270,6 +270,66 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
     }
 }
 
+/// How a fresh attempt makes its agent session findable, so a retry, a
+/// fallback back onto the same binding or a deadline continuation can resume
+/// it instead of re-sending the whole prompt (issue #136 items 2 and 3).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FreshSession {
+    /// apb picks the id and hands it over at launch (claude `--session-id`),
+    /// so the session is known even when the attempt is killed at its
+    /// deadline, before it printed anything.
+    Assigned { id: String, args: Vec<String> },
+    /// The session gets a unique title at launch and is looked up by it
+    /// afterwards (opencode `--title`, then `session list --format json`), so
+    /// it is found even when the attempt printed no id.
+    Titled { title: String, args: Vec<String> },
+    /// Only an id the agent prints itself (on a normal exit) is known.
+    Printed,
+}
+
+/// The [`FreshSession`] form of `agent_id` for a fresh attempt; `title` must be
+/// unique to the attempt (run, node and attempt number).
+pub fn fresh_session(agent_id: &str, title: &str) -> FreshSession {
+    match apb_core::detect::canonical_agent_id(agent_id) {
+        // Verified against `claude --help`: `--session-id <uuid>` uses a
+        // specific session id; `--resume <id>` continues it.
+        "claude" => {
+            let id = uuid::Uuid::new_v4().to_string();
+            FreshSession::Assigned {
+                args: vec!["--session-id".to_string(), id.clone()],
+                id,
+            }
+        }
+        // Verified against `opencode run --help` (1.18): `--title` names the
+        // session; `opencode session list --format json` lists `id` + `title`.
+        "opencode" => FreshSession::Titled {
+            args: vec!["--title".to_string(), title.to_string()],
+            title: title.to_string(),
+        },
+        _ => FreshSession::Printed,
+    }
+}
+
+/// Finds the id of the opencode session titled `title` by running
+/// `<program> session list --format json` in `workdir` (the listing is scoped
+/// to the project the directory belongs to). `None` when the listing fails or
+/// holds no such session: an attempt killed before its first assistant
+/// message never persists one, and then there is nothing to resume.
+pub fn lookup_titled_session(program: &Path, workdir: &Path, title: &str) -> Option<String> {
+    let mut cmd = std::process::Command::new(program);
+    cmd.args(["session", "list", "--format", "json"])
+        .current_dir(workdir)
+        .stdin(std::process::Stdio::null());
+    let out = crate::proc::run_capture(cmd, Some(std::time::Duration::from_secs(15)), None).ok()?;
+    if !out.status.is_some_and(|s| s.success()) {
+        return None;
+    }
+    let listed: Vec<serde_json::Value> = serde_json::from_str(out.stdout.trim()).ok()?;
+    listed.into_iter().find_map(|s| {
+        (s.get("title")?.as_str()? == title).then(|| s.get("id")?.as_str().map(str::to_string))?
+    })
+}
+
 /// Agent invocation form: config (`agents:`) overrides the built-in default.
 /// Transport is taken from config (compatibility with the former
 /// `agent_transport`).

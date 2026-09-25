@@ -136,17 +136,27 @@ fn set_env(stub: &str, home: &Path, cfg: &Path) {
 /// ceiling; `program` is left to APB_AGENT_CMD, so only the ceiling and argv
 /// come from here.
 fn write_config(cfg: &Path, interaction: &str) {
+    write_config_for(cfg, "claude", interaction);
+}
+
+/// [`write_config`] for another agent.
+fn write_config_for(cfg: &Path, agent: &str, interaction: &str) {
     let yaml = format!(
-        "agents:\n  claude:\n    invocation:\n      argv: [\"-p\", \"{{prompt}}\", \"--model\", \"{{model}}\"]\n      interaction: {interaction}\n"
+        "agents:\n  {agent}:\n    invocation:\n      argv: [\"-p\", \"{{prompt}}\", \"--model\", \"{{model}}\"]\n      interaction: {interaction}\n"
     );
     fs::write(cfg.join("config.yaml"), yaml).unwrap();
 }
 
 fn seed_profile(root: &Path, name: &str) {
+    seed_profile_for(root, name, "claude");
+}
+
+/// [`seed_profile`] bound to another agent.
+fn seed_profile_for(root: &Path, name: &str, agent: &str) {
     let dir = root.join(".apb/profiles").join(name);
     fs::create_dir_all(&dir).unwrap();
     let yaml =
-        format!("name: {name}\ndescription: d\nexecutor:\n  agent: claude\n  model: haiku\n");
+        format!("name: {name}\ndescription: d\nexecutor:\n  agent: {agent}\n  model: haiku\n");
     fs::write(dir.join("profile.yaml"), yaml).unwrap();
     fs::write(dir.join("SOUL.md"), "role").unwrap();
 }
@@ -401,8 +411,10 @@ fn resume_without_session_downgrades_to_reprompt() {
     let counter = bin.path().join("count");
     let promptfile = bin.path().join("prompts");
     seed_single(proj.path());
-    seed_profile(proj.path(), "arch");
-    write_config(cfg.path(), "resume");
+    // hermes, not claude: apb assigns every claude session its id at launch,
+    // so a claude attempt never lacks one. hermes only has the id it prints.
+    seed_profile_for(proj.path(), "arch", "hermes");
+    write_config_for(cfg.path(), "hermes", "resume");
     // Invocation 1 asks a question but prints NO session id; capture fails, so
     // the answer round must downgrade to reprompt (transcript appended). Each
     // invocation records its prompt argument ($2 = the `-p` value).

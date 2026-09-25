@@ -74,6 +74,125 @@ fn marker_contract() -> String {
     )
 }
 
+/// A session an earlier attempt of this execution ran in (issue #136 item 2).
+enum KnownSession {
+    /// The id is known. `workdir` is where it ran (`None` for the session an
+    /// answer round inherits from the asking attempt).
+    Id {
+        id: String,
+        workdir: Option<PathBuf>,
+    },
+    /// Only the title is known; the id is looked up on first use.
+    Titled { title: String, workdir: PathBuf },
+}
+
+/// The id and directory of the session `binding` left behind, resolving a
+/// titled one through the agent's own listing (and caching the id). `None`
+/// when there is none or the lookup finds none.
+fn resolve_session(
+    sessions: &mut BTreeMap<(String, String), KnownSession>,
+    binding: &(String, String),
+    program: &Path,
+) -> Option<(String, Option<PathBuf>)> {
+    let found = match sessions.get(binding)? {
+        KnownSession::Id { id, workdir } => return Some((id.clone(), workdir.clone())),
+        KnownSession::Titled { title, workdir } => {
+            crate::invocation::lookup_titled_session(program, workdir, title)
+                .map(|id| (id, workdir.clone()))
+        }
+    };
+    match found {
+        Some((id, workdir)) => {
+            sessions.insert(
+                binding.clone(),
+                KnownSession::Id {
+                    id: id.clone(),
+                    workdir: Some(workdir.clone()),
+                },
+            );
+            Some((id, Some(workdir)))
+        }
+        None => {
+            sessions.remove(binding);
+            None
+        }
+    }
+}
+
+/// `base` turned into its resume form for `session` (the agent's declarative
+/// resume argv with the id substituted, spec 2026-07-20 Task 7). The binary,
+/// autonomy flags and transport stay; the follow-up always travels as argv
+/// `{prompt}`. `None` for an agent with no resume form.
+fn resume_spec(
+    base: &apb_core::config::InvocationDef,
+    agent: &str,
+    session: &str,
+) -> Option<apb_core::config::InvocationDef> {
+    let argv = crate::invocation::resume_argv(agent)?
+        .into_iter()
+        .map(|a| {
+            if a == "{session}" {
+                session.to_string()
+            } else {
+                a
+            }
+        })
+        .collect();
+    Some(apb_core::config::InvocationDef {
+        argv,
+        prompt_via: apb_core::config::PromptVia::Argv,
+        ..base.clone()
+    })
+}
+
+/// How much of the last failure a continuation prompt quotes.
+const CONTINUATION_REASON_MAX_BYTES: usize = 2048;
+
+/// Why a session is being continued (issue #136 items 2 and 3).
+enum Continuation<'a> {
+    /// The last attempt was stopped at its deadline.
+    Deadline,
+    /// An attempt ended without recording a required verdict.
+    Interrupted,
+    /// The last attempt failed with this text (clipped when quoted).
+    Failed(&'a str),
+}
+
+/// The prompt that continues a session after its attempt did not finish: the
+/// session already holds the node prompt, so only what happened is said.
+/// `verdict_file` adds the reminder to record the verdict in the new
+/// attempt's status file (the interruption note already carries it).
+fn continuation_prompt(why: Continuation<'_>, verdict_file: bool) -> String {
+    let mut out = match why {
+        Continuation::Deadline => {
+            "Your previous turn was stopped at its time limit before it finished. \
+             Continue where you stopped; do not redo work that is already done."
+                .to_string()
+        }
+        Continuation::Interrupted => return super::status_file::INTERRUPTION_NOTE.to_string(),
+        Continuation::Failed(reason) => {
+            let reason = reason.trim();
+            let mut cut = reason.len().min(CONTINUATION_REASON_MAX_BYTES);
+            while !reason.is_char_boundary(cut) {
+                cut -= 1;
+            }
+            format!(
+                "Your previous attempt at this task did not succeed:\n\n{}\n\n\
+                 Continue in this session: fix what is wrong and finish the task. \
+                 Do not redo work that is already done.",
+                &reason[..cut]
+            )
+        }
+    };
+    if verdict_file {
+        out.push_str(
+            " Record your final verdict in the status file named by APB_STATUS_FILE \
+             (a new file for this attempt) before your turn ends.",
+        );
+    }
+    out
+}
+
 /// The prompt of an answer round that resumes the asking session: the user's
 /// answer and one line pointing back at the contracts the session already
 /// holds. Everything else the first turn carried (skills, connector grants,
@@ -288,10 +407,7 @@ pub(super) fn journal_interrupted_attempt(
 /// (advance the chain), so no existing playbook's timeout behavior moves.
 fn effective_failure_kind(detail: &str, class: ErrorClass, require_verdict: bool) -> FailureKind {
     let kind = crate::failure_class::classify(detail);
-    if kind == FailureKind::Agent
-        && require_verdict
-        && matches!(class, ErrorClass::Timeout | ErrorClass::Transport)
-    {
+    if kind == FailureKind::Agent && require_verdict && class == ErrorClass::Transport {
         return FailureKind::Transient;
     }
     kind
@@ -653,28 +769,28 @@ pub(crate) fn execute_node(
                 node_id: Some(node_id.to_string()),
             };
 
-            // Resume argv (spec 2026-07-20, Task 7): when this is a `resume`
-            // re-invocation, resolve the primary agent's declarative resume form
-            // and substitute the captured session id as a whole argv element.
-            // `{prompt}`/`{model}` stay for `build_command`. `None` here means
-            // the drive loop already decided resume is unavailable (it hands a
-            // `resume: None`); leaving it defensively also collapses to the
-            // normal argv. The resume path targets ONLY the primary executor -
-            // the session belongs to it, so there is no fallback to a different
-            // agent.
-            let resume_argv: Option<Vec<String>> = resume.as_ref().and_then(|rc| {
-                crate::invocation::resume_argv(&steps[0].agent).map(|tmpl| {
-                    tmpl.into_iter()
-                        .map(|a| {
-                            if a == "{session}" {
-                                rc.session.clone()
-                            } else {
-                                a
-                            }
-                        })
-                        .collect()
-                })
-            });
+            // Agent sessions this execution's attempts left behind, by binding
+            // (issue #136 item 2). A later attempt on the same (agent, model) -
+            // a retry, an infrastructure retry, a deadline continuation, or a
+            // fallback chain that comes back to the binding - re-enters that
+            // session with a short continuation prompt instead of re-sending
+            // the whole node prompt into a fresh one. A different agent or
+            // model never inherits a session: it starts fresh. An answer round
+            // (spec 2026-07-20, Task 7) seeds the primary binding with the
+            // session captured from the attempt that asked.
+            let mut sessions: BTreeMap<(String, String), KnownSession> = BTreeMap::new();
+            if let Some(rc) = &resume {
+                sessions.insert(
+                    (steps[0].agent.clone(), steps[0].model.clone()),
+                    KnownSession::Id {
+                        id: rc.session.clone(),
+                        workdir: None,
+                    },
+                );
+            }
+            // Set when the last attempt was killed at its deadline and the next
+            // one continues its session (issue #136 item 3).
+            let mut timeout_continuation = false;
 
             let mut attempt: u32 = 0;
             let mut last_msg = String::new();
@@ -771,22 +887,12 @@ pub(crate) fn execute_node(
                 // The profile path builds the adapter from the fixed invocation
                 // (call form + canonical binary from the manifest), so that editing
                 // agents.<id>.invocation in the config between start and resume does
-                // not silently change the prompt contract. The executor path is unchanged.
-                let adapter: Box<dyn crate::adapter::AgentAdapter> = match &step.invocation {
-                    Some(ri) => {
-                        // On a resume re-invocation the primary step's invocation
-                        // form is replaced by the agent's resume argv (session
-                        // already substituted); the canonical binary, autonomy
-                        // flags, and transport are kept. The resume form always
-                        // delivers the follow-up via argv `{prompt}`.
-                        let mut spec = match &resume_argv {
-                            Some(rargv) => apb_core::config::InvocationDef {
-                                argv: rargv.clone(),
-                                prompt_via: apb_core::config::PromptVia::Argv,
-                                ..ri.spec.clone()
-                            },
-                            None => ri.spec.clone(),
-                        };
+                // not silently change the prompt contract. The adapter itself is
+                // built per attempt below: a fresh attempt and a resumed one use
+                // different forms of this invocation.
+                let base_spec: Option<(apb_core::config::InvocationDef, PathBuf)> =
+                    step.invocation.as_ref().map(|ri| {
+                        let mut spec = ri.spec.clone();
                         // A profile's `zcode_mode` narrows (or restates) the
                         // autonomy grant of its zcode steps; the base form's
                         // `--mode build` is untouched, so a run without
@@ -797,13 +903,13 @@ pub(crate) fn execute_node(
                         {
                             spec.autonomous_args = crate::invocation::zcode_autonomous_args(mode);
                         }
-                        Box::new(crate::adapter::ClaudeAdapter {
-                            program: ri.canonical_executable.to_string_lossy().into_owned(),
-                            spec,
-                        })
-                    }
-                    None => adapter_for(&step.agent)?,
-                };
+                        (spec, ri.canonical_executable.clone())
+                    });
+                let binding = (step.agent.clone(), step.model.clone());
+                // A deadline continuation is granted once per step.
+                let mut timeout_continued = false;
+                // A resume that found no session is retried fresh once per step.
+                let mut lost_session_retried = false;
                 // Hermetic isolation (subtask S1): when the bound profile sets
                 // `hermetic: true`, claude/claude-code get an apb-owned minimal
                 // settings file (user plugins and hooks off) handed over via
@@ -854,13 +960,31 @@ pub(crate) fn execute_node(
                             attempt,
                         });
                     }
-                    // Attempt working directory. For an isolated node - a FRESH
+                    // The session this attempt continues, if any (issue #136
+                    // item 2): only after an earlier attempt of this execution (or
+                    // for an answer round), only on the binding that left it, and
+                    // only for an agent with a resume form.
+                    let answer_round = resume.is_some() && attempt == 1;
+                    let continued: Option<(String, Option<PathBuf>)> = match &base_spec {
+                        Some((_, program))
+                            if (attempt > 1 || answer_round)
+                                && crate::invocation::resume_argv(&step.agent).is_some() =>
+                        {
+                            resolve_session(&mut sessions, &binding, program)
+                        }
+                        _ => None,
+                    };
+                    // Attempt working directory. A continued session keeps the
+                    // directory it was started in (agents key their sessions by
+                    // it). Otherwise, for an isolated node - a FRESH
                     // per-attempt directory `work/<node>/<attempt>` with skills
                     // freshly materialized from the snapshot: a hostile/failed
                     // previous attempt cannot slip a modified bundle to the next one
                     // (skills_mode: materialized would then not reflect
                     // reality). For `isolation: none` - the shared workdir.
-                    let attempt_workdir: PathBuf = if isolated {
+                    let attempt_workdir: PathBuf = if let Some((_, Some(wd))) = &continued {
+                        wd.clone()
+                    } else if isolated {
                         let wd = run_dir.join("work").join(node_id).join(attempt.to_string());
                         // Fail-closed: a missing directory is normal, but any other
                         // cleanup error is NOT swallowed - otherwise we would materialize
@@ -874,6 +998,41 @@ pub(crate) fn execute_node(
                         wd
                     } else {
                         workdir.to_path_buf()
+                    };
+                    // The invocation form of this attempt: the resume form for a
+                    // continued session, else the base form plus whatever makes
+                    // the new session findable later (`FreshSession`).
+                    let mut fresh: Option<crate::invocation::FreshSession> = None;
+                    let adapter: Box<dyn crate::adapter::AgentAdapter> = match &base_spec {
+                        Some((base, program)) => {
+                            let spec = match &continued {
+                                Some((sid, _)) => resume_spec(base, &step.agent, sid)
+                                    .expect("a continued session implies a resume form"),
+                                None => {
+                                    let f = crate::invocation::fresh_session(
+                                        &step.agent,
+                                        &format!("apb {run_id} {node_id} {attempt}"),
+                                    );
+                                    let mut spec = base.clone();
+                                    match &f {
+                                        crate::invocation::FreshSession::Assigned {
+                                            args, ..
+                                        }
+                                        | crate::invocation::FreshSession::Titled {
+                                            args, ..
+                                        } => spec.argv.extend(args.iter().cloned()),
+                                        crate::invocation::FreshSession::Printed => {}
+                                    }
+                                    fresh = Some(f);
+                                    spec
+                                }
+                            };
+                            Box::new(crate::adapter::ClaudeAdapter {
+                                program: program.to_string_lossy().into_owned(),
+                                spec,
+                            })
+                        }
+                        None => adapter_for(&step.agent)?,
                     };
                     // Where to stream the attempt's NDJSON events (acp transport); one
                     // file per attempt. The headless field ignores it.
@@ -896,29 +1055,50 @@ pub(crate) fn execute_node(
                     // file is the normal case) so `read_status_file` after the run
                     // can only ever adopt a file THIS attempt actually wrote.
                     let _ = std::fs::remove_file(&status_file);
-                    // This attempt's prompt: the assembled node prompt, plus the
-                    // interruption note when a previous attempt of this node was
+                    // This attempt's prompt. A continued session already holds the
+                    // node prompt, so it gets only what happened since: the answer
+                    // (answer round), the deadline note, or why the last attempt
+                    // failed. A fresh attempt gets the assembled node prompt, plus
+                    // the interruption note when a previous attempt of this node was
                     // cut off mid-work. Appended here rather than inside
                     // `render_node_prompt`, so the recovery note (fixed text) does
                     // not shift the node's cache key.
-                    let attempt_prompt: std::borrow::Cow<'_, str> = if was_interrupted {
-                        std::borrow::Cow::Owned(format!(
+                    let attempt_prompt: std::borrow::Cow<'_, str> = match &continued {
+                        Some(_) if answer_round => std::borrow::Cow::Borrowed(text.as_str()),
+                        Some(_) => {
+                            let why = if timeout_continuation {
+                                Continuation::Deadline
+                            } else if was_interrupted {
+                                Continuation::Interrupted
+                            } else {
+                                Continuation::Failed(&last_msg)
+                            };
+                            // Supervisor notes applied since reach the continued
+                            // session too: it never saw the assembled prompt that
+                            // would carry them.
+                            let notes =
+                                crate::context::supervisor_notes_section(&read_all(run_dir)?);
+                            std::borrow::Cow::Owned(format!(
+                                "{}{notes}",
+                                continuation_prompt(why, !status_note.is_empty())
+                            ))
+                        }
+                        None if was_interrupted => std::borrow::Cow::Owned(format!(
                             "{text}\n\n{}",
                             super::status_file::INTERRUPTION_NOTE
-                        ))
-                    } else {
-                        std::borrow::Cow::Borrowed(text.as_str())
+                        )),
+                        None => std::borrow::Cow::Borrowed(text.as_str()),
                     };
+                    timeout_continuation = false;
                     let task = AgentTask {
                         prompt: attempt_prompt.as_ref(),
                         model: &step.model,
                         workdir: &attempt_workdir,
                         timeout,
                         stream_log: Some(&stream_log),
-                        // A resume re-invocation delivers no SOUL: the resumed
-                        // session already carries its role prompt, and the
-                        // follow-up is only the user's answer.
-                        soul: if resume.is_some() {
+                        // A continued session delivers no SOUL: it already
+                        // carries its role prompt.
+                        soul: if continued.is_some() {
                             None
                         } else {
                             soul_text.as_deref()
@@ -930,7 +1110,7 @@ pub(crate) fn execute_node(
                         // contract so the agent's self-assessed status routes the node.
                         // An answer round resumes a session that already has it;
                         // `answer_followup` points back at it in one line.
-                        report_contract: resume.is_none(),
+                        report_contract: !answer_round,
                         node: node_id,
                         agent: &step.agent,
                         // Node-output contract (Finding 2 of issue #56): honor
@@ -1100,7 +1280,7 @@ pub(crate) fn execute_node(
                         on_poll: &on_control_poll,
                         interrupt: &interrupt,
                     };
-                    let outcome = adapter.run_cancellable(
+                    let mut outcome = adapter.run_cancellable(
                         &task,
                         cancel,
                         Some(&on_spawn),
@@ -1145,6 +1325,62 @@ pub(crate) fn execute_node(
                         });
                     }
                     let spawn_instant = spawn_at.get();
+                    // Remember the session this attempt ran in (issue #136 item
+                    // 2), so a later attempt on this binding can continue it.
+                    // The id the agent printed wins; an assigned id stands in
+                    // when it printed none (and is journaled on the attempt, so
+                    // an answer round can resume it too).
+                    // A titled session is looked up right away only when the
+                    // attempt asked a question: its answer round resumes it
+                    // through the journaled id. Otherwise the lookup waits
+                    // until a retry actually needs it.
+                    let session_now: Option<String> = match &outcome {
+                        Ok(report) => report.session.clone(),
+                        Err(_) => None,
+                    }
+                    .or_else(|| continued.as_ref().map(|(sid, _)| sid.clone()))
+                    .or_else(|| match (&fresh, &outcome, &base_spec) {
+                        (Some(crate::invocation::FreshSession::Assigned { id, .. }), _, _)
+                            if spawn_instant.is_some() =>
+                        {
+                            Some(id.clone())
+                        }
+                        (
+                            Some(crate::invocation::FreshSession::Titled { title, .. }),
+                            Ok(report),
+                            Some((_, program)),
+                        ) if report.question.is_some() => crate::invocation::lookup_titled_session(
+                            program,
+                            &attempt_workdir,
+                            title,
+                        ),
+                        _ => None,
+                    });
+                    if let Some(id) = &session_now {
+                        sessions.insert(
+                            binding.clone(),
+                            KnownSession::Id {
+                                id: id.clone(),
+                                workdir: Some(attempt_workdir.clone()),
+                            },
+                        );
+                        if let Ok(report) = &mut outcome
+                            && report.session.is_none()
+                        {
+                            report.session = Some(id.clone());
+                        }
+                    } else if let Some(crate::invocation::FreshSession::Titled { title, .. }) =
+                        &fresh
+                        && spawn_instant.is_some()
+                    {
+                        sessions.insert(
+                            binding.clone(),
+                            KnownSession::Titled {
+                                title: title.clone(),
+                                workdir: attempt_workdir.clone(),
+                            },
+                        );
+                    }
                     // The spawn itself failed before the callback ran: still journal
                     // a started (pid unknown) so every attempt_finished is preceded
                     // by an attempt_started.
@@ -1371,6 +1607,10 @@ pub(crate) fn execute_node(
                             // decision, so neither is classified and neither earns
                             // an infrastructure retry.
                             let mut failure_kind: Option<FailureKind> = None;
+                            // A resume that found no session never reached the
+                            // model (issue #136 item 2).
+                            let session_lost =
+                                continued.is_some() && crate::failure_class::session_missing(&msg);
                             // The verdict decides the attempt even here (spec
                             // 2026-08-05 section 2.1): the process exit, the signal,
                             // or the deadline kill is transport-level noise once the
@@ -1550,7 +1790,14 @@ pub(crate) fn execute_node(
                             // retries the chosen executor instead of breaking
                             // straight to fallback, while keeping its
                             // `interrupted` label and its partial output.
-                            if failure_kind == Some(FailureKind::Transient)
+                            // A resume that found no session never reached the
+                            // model: drop the session and start fresh, once per
+                            // step, without spending a retry (issue #136 item 2).
+                            if session_lost && !lost_session_retried {
+                                sessions.remove(&binding);
+                                lost_session_retried = true;
+                                infra_retry = true;
+                            } else if failure_kind == Some(FailureKind::Transient)
                                 && infra_used < backoff.len()
                             {
                                 let wait = backoff[infra_used];
@@ -1587,6 +1834,35 @@ pub(crate) fn execute_node(
                                     &step.model,
                                 ));
                                 break;
+                            } else if class == ErrorClass::Timeout
+                                && require_verdict
+                                && !timeout_continued
+                                && !interrupted_by_supervisor
+                                && verdict.is_none()
+                                && base_spec.as_ref().is_some_and(|(_, program)| {
+                                    crate::invocation::resume_argv(&step.agent).is_some()
+                                        && resolve_session(&mut sessions, &binding, program)
+                                            .is_some()
+                                })
+                            {
+                                // A deadline kill is not an infrastructure fault
+                                // and is never re-run from scratch (issue #136
+                                // item 3). When the killed session can be
+                                // resumed, it gets ONE continuation with a short
+                                // "continue where you stopped" prompt; otherwise
+                                // the step is abandoned like any timeout.
+                                timeout_continued = true;
+                                timeout_continuation = true;
+                                infra_retry = true;
+                                journal.append(EventPayload::SupervisorAction {
+                                    action: crate::failure_class::TIMEOUT_CONTINUATION_ACTION
+                                        .to_string(),
+                                    node: Some(node_id.to_string()),
+                                    detail: format!(
+                                        "agent_task node `{node_id}` attempt {cur_attempt} hit its deadline without a verdict; continuing the same `{}` session once instead of re-running it",
+                                        step.agent,
+                                    ),
+                                })?;
                             } else if class == ErrorClass::Transport || class == ErrorClass::Timeout
                             {
                                 // A transport error and a timeout break the retry loop for this

@@ -694,10 +694,19 @@ The classifier is a curated table over the failure text, checked in that order,
 because a spend limit and an expired token are both routinely delivered as a 429.
 A plain "agent timed out" is deliberately NOT transient: that wording is the
 engine's own deadline kill, and reading it as infrastructure would hand every
-timed-out node extra same-executor attempts it never had. The one exception is a
-`require_verdict` node, where a timeout or a dropped transport says the work may
-well have continued and is worth one more attempt on the same executor, so those
-count as transient unless the text says something more specific.
+timed-out node extra same-executor attempts it never had. That holds for a
+`require_verdict` node too, where a dropped transport does count as transient
+(unless the text says something more specific) but a deadline kill does not:
+re-running a whole job from scratch because it ran out of time spends the full
+cost again on the same outcome. Instead, when the killed attempt's session can be
+resumed (see "Retries continue the session" below), a `require_verdict` node gets
+exactly ONE continuation of that session per chain step, with a short "continue
+where you stopped" prompt, journaled as a `supervisor_action` with action
+`timeout_continuation`; it spends neither the node's retries nor the
+infrastructure budget. Without a resumable session the step is abandoned like
+any other timeout (next fallback step, or the node ends `timed_out`). A node
+without `require_verdict` keeps the plain rule: a deadline kill moves on to the
+fallback chain.
 
 A `transient` failure is retried on the SAME executor out of a separate
 infrastructure budget that never touches `max_retries`: the node's own retry count
@@ -719,6 +728,36 @@ will not. That suppression lives for one node execution and is not persisted. A
 resume, a supervisor retry, or the next node walks the chain from the top again
 and hits the same expired credential unless a human fixed it in between, which is
 the point: between two drives, someone may have.
+
+### Retries continue the session
+
+A retry does not start over. When an attempt fails and the next attempt runs on
+the same agent AND model (a node retry, an infrastructure retry, a deadline
+continuation, or a fallback chain that comes back to that binding), it resumes
+the failed attempt's own agent session and sends only what happened: the
+failure text (clipped to 2 KiB), the interruption note for a verdict-less exit,
+or the deadline note, plus any supervisor notes and, when the node has a status
+file contract, a one-line reminder to write the verdict. The node prompt, the
+SOUL and the skills are not re-sent: the session holds them. A fallback to a
+different agent or model always starts fresh with the full prompt.
+
+How the session is found, per agent:
+
+- `claude`: apb assigns the id at launch (`--session-id`), so even an attempt
+  killed at its deadline can be resumed (`--resume <id>`).
+- `opencode`: apb titles the session at launch (`--title`) and finds it by that
+  title with `opencode session list --format json`. An attempt killed before its
+  first reply persisted no session; then there is nothing to resume.
+- `codex`: the `session id:` line of its stderr header, `zcode`: the `sessionId`
+  of its `--json` reply, and any agent that prints an id in its output: only an
+  attempt that exited on its own can be resumed.
+- Every other agent, and an agent without a resume form, starts fresh.
+
+A continued session keeps the working directory it started in (agents key their
+sessions by it), so an isolated node's continuation runs in the directory of the
+attempt it continues instead of a fresh one. If the agent answers that the
+session does not exist, the engine drops it and starts fresh once, without
+spending a retry.
 
 ### Interrupted attempts and reaping
 

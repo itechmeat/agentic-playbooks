@@ -746,6 +746,20 @@ pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
     }
 }
 
+/// Captures a session id an agent prints in a human-readable header on stderr
+/// rather than in its output: `codex exec` opens with a block that holds a
+/// `session id: <uuid>` line (checked against the 0.157 binary). `None` for
+/// every other agent and when no such line is present.
+pub fn capture_session_header(agent_id: &str, stderr: &str) -> Option<String> {
+    if canonical_agent_id(agent_id) != "codex" {
+        return None;
+    }
+    stderr.lines().find_map(|line| {
+        let id = line.trim().strip_prefix("session id:")?.trim();
+        (!id.is_empty() && !id.contains(char::is_whitespace)).then(|| id.to_string())
+    })
+}
+
 /// Scans each line of `raw` as a top-level JSON object and returns the LAST
 /// non-empty string value found under any name in `fields` (the terminal event
 /// wins, matching how the stream's final `result` event carries the id).
@@ -1378,7 +1392,8 @@ impl ClaudeAdapter {
         // from its output so the answer round can resume the same session. The
         // plain headless `-p` form carries no session id, so this is normally
         // `None`; the stream path below is where claude surfaces one.
-        let session = capture_session(task.agent, &stdout);
+        let session = capture_session(task.agent, &stdout)
+            .or_else(|| capture_session_header(task.agent, &stderr));
         Ok(AgentReport {
             status: report.status,
             output,

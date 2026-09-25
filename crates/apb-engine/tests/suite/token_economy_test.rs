@@ -24,7 +24,6 @@ use crate::common;
 /// One recorded agent process: which node spawned it and its argv.
 #[derive(Debug)]
 pub struct Invocation {
-    #[allow(dead_code)]
     pub node: String,
     pub args: Vec<String>,
 }
@@ -41,6 +40,15 @@ impl Invocation {
     /// The prompt text handed over with `-p` (claude's and the stub's form).
     pub fn prompt(&self) -> &str {
         self.flag("-p").unwrap_or("")
+    }
+
+    /// Whether this process re-entered an existing session (claude
+    /// `--resume`, opencode `--session`, codex `exec resume`).
+    pub fn resumed(&self) -> bool {
+        self.args
+            .iter()
+            .any(|a| a == "--resume" || a == "--session")
+            || self.args.get(..2) == Some(&["exec".to_string(), "resume".to_string()])
     }
 }
 
@@ -129,6 +137,7 @@ pub fn run_with_stub(root: &Path, id: &str, stub: &str, instruction: Option<&str
 
 /// A report block the adapter parses as the agent's self-assessed status.
 const OK: &str = "printf '\\n```yaml\\nstatus: success\\nsummary: ok\\n```\\n'";
+const FAIL: &str = "printf '\\n```yaml\\nstatus: failure\\nsummary: not yet\\n```\\n'";
 /// A one-agent playbook whose template is `body`, for prompt-shape checks.
 fn single(body: &str) -> String {
     format!(
@@ -258,4 +267,162 @@ fn context_budgets_are_configurable_per_playbook_and_node() {
         "the node narrows the budget again: {}",
         prompt.len()
     );
+}
+
+/// A one-node playbook with one retry, bound to `agent` with `fallbacks`.
+fn seed_retry(root: &Path, agent: &str, fallbacks: &[(&str, &str)]) {
+    init_project(root).unwrap();
+    seed_playbook(
+        root,
+        "one",
+        &single("Do the whole job.")
+            .replace("type: agent_task,", "type: agent_task, max_retries: 1,"),
+    );
+    common::seed_profile(root, "main", agent, "haiku", fallbacks);
+}
+
+/// Item 2 of #136: a retry continues the failed attempt's claude session
+/// (whose id apb assigned at launch) with a short prompt that quotes why it
+/// failed, instead of re-sending the node prompt into a fresh session.
+#[test]
+fn a_retry_continues_the_failed_attempts_session() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_retry(dir.path(), "claude", &[]);
+    let stub = recording_stub(
+        dir.path(),
+        &format!("if [ \"$N\" = 1 ]; then echo 'tests are red'; {FAIL}; else {OK}; fi"),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "one", &stub, None),
+        RunStatus::Succeeded
+    );
+
+    let inv = invocations(dir.path());
+    assert_eq!(inv.len(), 2);
+    let assigned = inv[0]
+        .flag("--session-id")
+        .expect("claude gets its id at launch");
+    assert!(!inv[0].resumed());
+    assert_eq!(inv[1].flag("--resume"), Some(assigned), "{:?}", inv[1].args);
+    let prompt = inv[1].prompt();
+    assert!(
+        !prompt.contains("Do the whole job.") && prompt.contains("tests are red"),
+        "the retry must say why, not repeat the task: {prompt}"
+    );
+}
+
+/// The same for an agent that only prints its session id: codex's header on
+/// stderr carries it, and the retry resumes it with `exec resume <id>`.
+#[test]
+fn a_codex_retry_resumes_the_session_id_from_its_header() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_retry(dir.path(), "codex", &[]);
+    let stub = recording_stub(
+        dir.path(),
+        &format!(
+            "echo 'session id: 0199aa00-1111-7222-8333-444455556666' 1>&2; \
+             if [ \"$N\" = 1 ]; then {FAIL}; else {OK}; fi"
+        ),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "one", &stub, None),
+        RunStatus::Succeeded
+    );
+
+    let inv = invocations(dir.path());
+    assert_eq!(inv.len(), 2);
+    assert!(
+        inv[1].args.starts_with(&[
+            "exec".to_string(),
+            "resume".to_string(),
+            "0199aa00-1111-7222-8333-444455556666".to_string(),
+        ]),
+        "{:?}",
+        inv[1].args
+    );
+}
+
+/// opencode prints no id at all: apb titles the session at launch and looks
+/// it up by that title (`session list --format json`) when it needs it.
+#[test]
+fn an_opencode_retry_finds_its_session_by_title() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_retry(dir.path(), "opencode", &[]);
+    let d = dir.path().display();
+    let stub = recording_stub(
+        dir.path(),
+        &format!(
+            r#"if [ "$1" = session ]; then printf '[{{"id":"ses_other","title":"x"}},{{"id":"ses_found","title":"%s"}}]' "$(cat '{d}/title')"; exit 0; fi
+prev=""; for a in "$@"; do if [ "$prev" = --title ]; then printf '%s' "$a" > '{d}/title'; fi; prev="$a"; done
+if [ "$N" = 1 ]; then {FAIL}; else {OK}; fi"#
+        ),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "one", &stub, None),
+        RunStatus::Succeeded
+    );
+
+    let runs: Vec<Invocation> = invocations(dir.path())
+        .into_iter()
+        .filter(|i| i.args.first().map(String::as_str) == Some("run"))
+        .collect();
+    assert_eq!(runs.len(), 2);
+    assert!(runs[0].flag("--title").is_some());
+    assert_eq!(
+        runs[1].flag("--session"),
+        Some("ses_found"),
+        "{:?}",
+        runs[1].args
+    );
+}
+
+/// A fallback to another model is a new binding: it starts fresh with the
+/// full node prompt and never inherits the failed step's session.
+#[test]
+fn a_fallback_to_another_model_starts_fresh() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    seed_playbook(dir.path(), "one", &single("Do the whole job."));
+    common::seed_profile(dir.path(), "main", "claude", "haiku", &[("claude", "opus")]);
+    let stub = recording_stub(
+        dir.path(),
+        &format!("if [ \"$N\" = 1 ]; then {FAIL}; else {OK}; fi"),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "one", &stub, None),
+        RunStatus::Succeeded
+    );
+
+    let inv = invocations(dir.path());
+    assert_eq!(inv.len(), 2);
+    assert!(!inv[1].resumed(), "{:?}", inv[1].args);
+    assert!(inv[1].prompt().contains("Do the whole job."));
+}
+
+/// A resume whose session turns out not to exist never reached the model: the
+/// engine starts fresh without spending the node's retry on it.
+#[test]
+fn a_resume_of_a_missing_session_starts_fresh_without_spending_a_retry() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_retry(dir.path(), "claude", &[]);
+    let stub = recording_stub(
+        dir.path(),
+        &format!(
+            "case \"$N\" in \
+               1) {FAIL};; \
+               2) echo 'No conversation found with session ID: x' 1>&2; exit 1;; \
+               *) {OK};; \
+             esac"
+        ),
+    );
+    assert_eq!(
+        run_with_stub(dir.path(), "one", &stub, None),
+        RunStatus::Succeeded
+    );
+
+    let inv = invocations(dir.path());
+    assert_eq!(inv.len(), 3);
+    assert!(inv[1].resumed());
+    assert!(!inv[2].resumed(), "{:?}", inv[2].args);
+    assert!(inv[2].prompt().contains("Do the whole job."));
 }

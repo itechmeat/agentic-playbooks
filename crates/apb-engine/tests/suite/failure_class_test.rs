@@ -312,18 +312,7 @@ fn a_budget_failure_skips_same_agent_fallback_steps_and_names_the_models() {
     );
 }
 
-/// The boundary ruling recorded in the spec section 2.2 addendum: a
-/// `require_verdict` node whose attempt is killed on its deadline is labeled
-/// `interrupted`, and that shape must now get the bounded infrastructure retry
-/// on the SAME executor. Before Task 6 it broke straight to the fallback chain,
-/// so a node with no fallbacks (this playbook) failed after exactly one attempt.
-///
-/// The node's own `max_retries` is absent (0), so recovery here can only come
-/// from the infrastructure budget.
-#[cfg(unix)]
-#[test]
-fn a_required_verdict_lost_to_a_deadline_kill_retries_the_same_executor() {
-    const WF_VERDICT_TIMEOUT: &str = r#"
+const WF_VERDICT_TIMEOUT: &str = r#"
 schema: 1
 id: verdicttimeoutflow
 name: Verdict Timeout
@@ -332,7 +321,7 @@ defaults:
   profile: main
 nodes:
   - { id: start, type: start }
-  - { id: work, type: agent_task, prompt: "do", require_verdict: true, timeout_seconds: 1 }
+  - { id: work, type: agent_task, prompt: "do the whole job", require_verdict: true, timeout_seconds: 1 }
   - { id: done, type: finish, outcome: success }
   - { id: failed, type: finish, outcome: failure }
 edges:
@@ -340,28 +329,44 @@ edges:
   - { from: work, to: done, condition: { type: node_status, node: work, equals: success } }
   - { from: work, to: failed, condition: { type: node_status, node: work, equals: failure } }
 "#;
-    let dir = tempfile::tempdir().unwrap();
-    init_project(dir.path()).unwrap();
-    let vdir = dir.path().join(".apb/playbooks/verdicttimeoutflow/1.0.0");
+
+/// Seeds [`WF_VERDICT_TIMEOUT`] with its profile bound to `agent`, and a stub
+/// whose first invocation wedges past the 1 s deadline while every later one
+/// records a success verdict. Each invocation's argv lands in `argv.<n>`, one
+/// element per line. Returns the stub path.
+fn seed_verdict_timeout(root: &Path, agent: &str) -> String {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/verdicttimeoutflow/1.0.0");
     fs::create_dir_all(&vdir).unwrap();
     fs::write(vdir.join("playbook.yaml"), WF_VERDICT_TIMEOUT).unwrap();
     fs::write(
-        dir.path().join(".apb/playbooks/verdicttimeoutflow/current"),
+        root.join(".apb/playbooks/verdicttimeoutflow/current"),
         "1.0.0",
     )
     .unwrap();
-    common::seed_main(dir.path());
-
-    // First invocation wedges past the node's 1 s deadline and is killed without
-    // writing a verdict; the second records one and exits.
-    let seen = dir.path().join("seen");
-    let prog = executable(
-        &dir.path().join("wedge_once.sh"),
+    common::seed_profile(root, "main", agent, "haiku", &[]);
+    let d = root.display();
+    executable(
+        &root.join("wedge_once.sh"),
         &format!(
-            "#!/bin/sh\nif [ -f '{s}' ]; then printf '{{\"status\":\"success\",\"outputs\":\"recovered\"}}' > \"$APB_STATUS_FILE\"; echo done; exit 0; fi\ntouch '{s}'\nsleep 30\n",
-            s = seen.display()
+            "#!/bin/sh\nn=$(cat '{d}/count' 2>/dev/null || echo 0); n=$((n+1)); echo $n > '{d}/count'\n\
+             printf '%s\\n' \"$@\" > '{d}/argv.'$n\n\
+             if [ $n -gt 1 ]; then printf '{{\"status\":\"success\",\"outputs\":\"recovered\"}}' > \"$APB_STATUS_FILE\"; echo done; exit 0; fi\n\
+             sleep 30\n"
         ),
-    );
+    )
+}
+
+/// Issue #136 item 3: a `require_verdict` attempt killed at its deadline is NOT
+/// an infrastructure fault to re-run from scratch (it used to earn two full-cost
+/// infrastructure retries). When its session can be resumed, it gets exactly
+/// one continuation of that session with a short prompt; the killed attempt
+/// keeps its `interrupted` label and is not classified transient.
+#[cfg(unix)]
+#[test]
+fn a_required_verdict_lost_to_a_deadline_kill_continues_the_same_session() {
+    let dir = tempfile::tempdir().unwrap();
+    let prog = seed_verdict_timeout(dir.path(), "claude");
     let _env = AgentEnv::set(&prog, "20,20");
     let res = run(
         dir.path(),
@@ -371,30 +376,66 @@ edges:
     )
     .unwrap();
 
-    assert_eq!(
-        res.outcome,
-        RunStatus::Succeeded,
-        "a deadline kill under require_verdict must retry the chosen executor, not give up"
-    );
+    assert_eq!(res.outcome, RunStatus::Succeeded);
     let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
     let attempts = attempt_records(&run_dir, "work");
-    assert_eq!(
-        attempts.len(),
-        2,
-        "expected the killed attempt plus one infrastructure retry, got {attempts:?}"
-    );
+    assert_eq!(attempts.len(), 2, "one continuation, got {attempts:?}");
     assert_eq!(
         attempts[0],
-        (1, "interrupted".to_string(), Some("transient".to_string())),
-        "the killed attempt keeps its interrupted label AND is classified transient"
+        (1, "interrupted".to_string(), Some("agent".to_string())),
+        "the killed attempt stays interrupted and is not transient"
     );
     assert_eq!(attempts[1].1, "succeeded");
+
+    let first = fs::read_to_string(dir.path().join("argv.1")).unwrap();
+    let second = fs::read_to_string(dir.path().join("argv.2")).unwrap();
+    let assigned = first
+        .lines()
+        .skip_while(|l| *l != "--session-id")
+        .nth(1)
+        .expect("a fresh claude attempt gets its session id at launch");
     assert!(
-        !read_all(&run_dir)
-            .unwrap()
-            .iter()
-            .any(|e| matches!(&e.payload, EventPayload::RetryStarted { .. })),
-        "the recovery must come from the infrastructure budget, not from a node retry"
+        second.lines().any(|l| l == "--resume") && second.lines().any(|l| l == assigned),
+        "the continuation must resume the killed session: {second}"
+    );
+    assert!(
+        !second.contains("do the whole job") && second.contains("time limit"),
+        "the continuation must not re-send the node prompt: {second}"
+    );
+    assert!(
+        read_all(&run_dir).unwrap().iter().any(|e| matches!(
+            &e.payload,
+            EventPayload::SupervisorAction { action, .. } if action == "timeout_continuation"
+        )),
+        "the continuation must be journaled"
+    );
+}
+
+/// The other half of item 3: without a session to continue, a deadline kill is
+/// not re-run at all; the step is abandoned like any other timeout (here, with
+/// no fallback, the node fails after the one attempt).
+#[cfg(unix)]
+#[test]
+fn a_deadline_kill_without_a_resumable_session_is_not_rerun() {
+    let dir = tempfile::tempdir().unwrap();
+    // hermes only has a session id it prints on a normal exit; a killed
+    // attempt printed none.
+    let prog = seed_verdict_timeout(dir.path(), "hermes");
+    let _env = AgentEnv::set(&prog, "20,20");
+    let res = run(
+        dir.path(),
+        "verdicttimeoutflow",
+        None,
+        RunOptions::default(),
+    )
+    .unwrap();
+
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    assert_eq!(
+        attempt_records(&run_dir, "work").len(),
+        1,
+        "a deadline kill must not be re-run from scratch"
     );
 }
 

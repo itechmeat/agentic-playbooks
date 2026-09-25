@@ -60,6 +60,14 @@ runs after the engine's runtime downgrade:
 | Antigravity CLI | no; persistent config files only | not documented | no: `-p` never surfaces a conversation id (open upstream issue #7) | **reprompt** (shipped, unchanged) |
 | ZCode (Z.ai, `zcode-agent` 0.16.9) | no flag; `~/.zcode/cli/config.json` `mcp.servers` only | per-server `timeoutMs` | yes, `--resume sess_...` with `-p`; `--json` surfaces `sessionId`, which apb captures | **resume** (verified 2026-09-25 end to end on GLM-5.3-Flash: the answer round re-entered the captured session, no downgrade) |
 
+Since issue #136 apb knows more sessions than the matrix above says an agent
+prints: it assigns every fresh claude attempt its session id at launch
+(`--session-id`), reads the `session id:` line of codex's stderr header, and
+titles every opencode session (`--title`) so it can find it with `opencode
+session list --format json`. So a claude answer round under a `resume` ceiling
+resumes instead of downgrading, and the same sessions let a retry continue the
+failed attempt (HOWTO-authoring.md, "Retries continue the session").
+
 Every downgrade (`live` -> `resume`, `resume` -> `reprompt`) is journaled as
 `SupervisorAction { action: "interaction_downgraded", node, detail }`, so a
 supervisor or `apb doctor --run` can see when and why a node fell back.

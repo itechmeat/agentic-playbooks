@@ -206,6 +206,23 @@ pub fn classify(detail: &str) -> FailureKind {
     FailureKind::Agent
 }
 
+/// Whether a failed resume said the session it was asked to continue does not
+/// exist (claude `No conversation found with session ID`, opencode `Session
+/// not found`, and the generic forms). Such an attempt never reached the
+/// model, so the engine drops the session and starts fresh instead of
+/// spending a retry on it (issue #136 item 2).
+pub fn session_missing(detail: &str) -> bool {
+    contains_any(&detail.to_lowercase(), SESSION_MISSING_PATTERNS)
+}
+
+const SESSION_MISSING_PATTERNS: &[&str] = &[
+    "no conversation found",
+    "session not found",
+    "no session found",
+    "session does not exist",
+    "unknown session",
+];
+
 fn contains_any(hay: &str, patterns: &[&str]) -> bool {
     patterns.iter().any(|p| hay.contains(p))
 }
@@ -259,6 +276,11 @@ const DEFAULT_BACKOFF_MS: &[u64] = &[5_000, 30_000];
 /// `APB_SUPERVISOR_HEARTBEAT_MS` precedent. A malformed or empty value falls
 /// back to the default rather than silently disabling the retries.
 pub const BACKOFF_ENV: &str = "APB_INFRA_BACKOFF_MS";
+
+/// The supervisor-action marker journaled when an attempt killed at its
+/// deadline gets its one continuation of the same session (issue #136 item
+/// 3), right between the killed attempt and the continued one.
+pub const TIMEOUT_CONTINUATION_ACTION: &str = "timeout_continuation";
 
 /// The backoff schedule in effect, honoring [`BACKOFF_ENV`].
 pub fn backoff_schedule() -> Vec<Duration> {
