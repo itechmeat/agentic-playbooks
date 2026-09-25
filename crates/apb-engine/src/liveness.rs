@@ -698,22 +698,35 @@ pub fn reported_run_status(
 /// Per-node status string for live reporting: pure fold, with `lost` for a
 /// dead attempt pid and `running` for a live open attempt that the pure fold
 /// would otherwise call `interrupted` (issue #45 finding 9).
-pub fn reported_node_statuses(events: &[Event]) -> BTreeMap<String, String> {
+///
+/// `driver_alive` is the run's drive claim, as for [`reported_run_status`].
+/// When it is provably dead, a node still reading `running` becomes
+/// `interrupted`, like the run: no process will journal its verdict. Without
+/// this, a node whose work never journaled a pid (a script node, a spawn that
+/// recorded none) read `running` forever under an `interrupted` run, because
+/// only a journaled pid can make a node `lost`.
+pub fn reported_node_statuses(
+    events: &[Event],
+    driver_alive: Option<bool>,
+) -> BTreeMap<String, String> {
     let state = RunState::fold(events);
     let lost = lost_nodes(events);
     let live = live_open_nodes(events);
+    let driver_dead = driver_alive == Some(false);
     state
         .nodes
         .iter()
         .map(|(k, v)| {
             let status = if lost.contains(k) {
-                LOST.to_string()
+                LOST
+            } else if driver_dead && (live.contains(k) || *v == NodeStatus::Running) {
+                NodeStatus::Interrupted.as_str()
             } else if live.contains(k) {
-                NodeStatus::Running.as_str().to_string()
+                NodeStatus::Running.as_str()
             } else {
-                v.as_str().to_string()
+                v.as_str()
             };
-            (k.clone(), status)
+            (k.clone(), status.to_string())
         })
         .collect()
 }
@@ -1316,7 +1329,9 @@ mod tests {
             crate::state::RunStatus::Running
         );
         assert_eq!(
-            reported_node_statuses(&events).get("a").map(String::as_str),
+            reported_node_statuses(&events, None)
+                .get("a")
+                .map(String::as_str),
             Some("running")
         );
         assert!(live_open_nodes(&events).contains("a"));

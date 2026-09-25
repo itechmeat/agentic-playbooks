@@ -68,9 +68,10 @@ impl RunView {
     }
 
     /// Per-node status for live reporting (`lost` for a dead attempt,
-    /// `running` for a live one the fold calls interrupted).
+    /// `running` for a live one the fold calls interrupted, `interrupted` for
+    /// in-flight work under a provably dead driver).
     pub fn nodes(&self) -> BTreeMap<String, String> {
-        crate::liveness::reported_node_statuses(&self.events)
+        crate::liveness::reported_node_statuses(&self.events, self.driver_alive)
     }
 
     /// The failure reason, only for a run that actually ended `failed`.
@@ -109,5 +110,88 @@ impl RunView {
                 _ => None,
             })
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A pid that was valid and is now free: spawn, reap, reuse the number.
+    fn reaped_pid() -> u32 {
+        let mut child = std::process::Command::new("sh")
+            .arg("-c")
+            .arg("exit 0")
+            .spawn()
+            .expect("spawn a throwaway child");
+        let pid = child.id();
+        child.wait().expect("reap the throwaway child");
+        pid
+    }
+
+    fn write_run(run_dir: &Path, events: &[EventPayload], driver_pid: u32) {
+        std::fs::create_dir_all(run_dir).unwrap();
+        let journal: String = events
+            .iter()
+            .enumerate()
+            .map(|(i, p)| {
+                let e = Event {
+                    seq: i as u64,
+                    ts: 1_000 + i as u128,
+                    payload: p.clone(),
+                };
+                serde_json::to_string(&e).unwrap() + "\n"
+            })
+            .collect();
+        std::fs::write(run_dir.join("events.jsonl"), journal).unwrap();
+        std::fs::write(
+            crate::driver::driver_pid_path(run_dir),
+            driver_pid.to_string(),
+        )
+        .unwrap();
+    }
+
+    /// A node whose work no process journaled a pid for (a script node, or an
+    /// attempt whose spawn recorded none) reads like the run once the driver
+    /// is provably dead: `interrupted`, never `running` under an
+    /// `interrupted` run.
+    #[test]
+    fn a_node_without_a_pid_under_a_dead_driver_reads_interrupted() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        write_run(
+            &run_dir,
+            &[
+                EventPayload::RunStarted {
+                    playbook: "p".into(),
+                    version: "1.0.0".into(),
+                },
+                EventPayload::NodeStarted {
+                    node: "script".into(),
+                    attempt: 1,
+                },
+                EventPayload::NodeStarted {
+                    node: "agent".into(),
+                    attempt: 1,
+                },
+                EventPayload::AttemptStarted {
+                    node: "agent".into(),
+                    attempt: 1,
+                    agent: "stub".into(),
+                    soul_delivery: None,
+                    skills_mode: None,
+                    pid: None,
+                    spawn_ms: None,
+                },
+            ],
+            reaped_pid(),
+        );
+
+        let view = RunView::load(&run_dir, "r1").unwrap();
+        assert_eq!(view.driver_alive, Some(false));
+        assert_eq!(view.run_status, RunStatus::Interrupted);
+        let nodes = view.nodes();
+        assert_eq!(nodes["script"], "interrupted");
+        assert_eq!(nodes["agent"], "interrupted");
     }
 }
