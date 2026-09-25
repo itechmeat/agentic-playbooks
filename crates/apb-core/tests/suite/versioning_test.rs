@@ -402,7 +402,7 @@ fn a_save_approves_carried_scripts_only_when_the_base_was_approved() {
     let trusted = |root: &Path| {
         let reg = Registry::open(root).unwrap();
         let loaded = reg.load(id, None).unwrap();
-        apb_core::trust::TrustStore::load().is_approved(&loaded.digest)
+        apb_core::trust::TrustStore::load().is_approved(&loaded.trust_digest().unwrap())
     };
 
     let edited = VALID.replace("name: Implement Task", "name: Edited Once");
@@ -413,7 +413,7 @@ fn a_save_approves_carried_scripts_only_when_the_base_was_approved() {
     let current = reg.load(id, None).unwrap();
     apb_core::trust::TrustStore::load()
         .approve(
-            &current.digest,
+            &current.trust_digest().unwrap(),
             id,
             apb_core::trust::OriginKind::LocallyApproved,
         )

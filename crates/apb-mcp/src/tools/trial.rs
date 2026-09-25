@@ -87,7 +87,7 @@ pub fn playbook_trial(
     let reg = Registry::open_dir(&definition_parent).map_err(ToolError::from)?;
     let loaded = reg.load(id, version)?;
     let effects = apb_core::effects::effective(&loaded.playbook);
-    let digest = loaded.digest.clone();
+    let digest = loaded.trust_digest()?;
 
     if effects.contains(&Effect::Irreversible) {
         return Ok(json!({ "rejected": "trial_forbidden_irreversible", "id": id }));
@@ -308,7 +308,7 @@ pub fn playbook_approve(
     };
     let reg = Registry::open_dir(&definition_parent).map_err(ToolError::from)?;
     let loaded = reg.load(id, version)?;
-    let digest = loaded.digest.clone();
+    let digest = loaded.trust_digest()?;
     let playbook_dir = definition_parent.join("playbooks").join(id);
     apb_core::trust::write_lifecycle(&playbook_dir, apb_core::trust::Lifecycle::Active)
         .map_err(|e| ToolError::Engine(e.to_string()))?;

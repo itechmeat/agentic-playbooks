@@ -81,7 +81,9 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
         .collect();
     Ok(Preflight {
         version: loaded.version.clone(),
-        digest: loaded.digest.clone(),
+        digest: loaded
+            .trust_digest()
+            .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?,
         effects,
         children: tree.children,
     })
@@ -271,7 +273,9 @@ pub fn check_run(
     check_lifecycle(&playbook_dir, &wref.id)?;
 
     // Digest-based trust: unapproved content requires an explicit acknowledge.
-    let digest = loaded.digest.clone();
+    let digest = loaded
+        .trust_digest()
+        .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?;
     check_digest_trust(&wref.id, &digest, acknowledge_untrusted)?;
 
     // Profile bundle trust (spec 5.1): the profile plus the actual content of its

@@ -105,12 +105,23 @@ pub struct PlaybookSummary {
 pub struct LoadedPlaybook {
     pub playbook: Playbook,
     pub yaml: String,
-    /// The trust digest of this version ([`crate::scope::definition_digest`]):
-    /// `playbook.yaml` plus the version's `scripts/`. Every approval, gate and
-    /// run pin uses this one value.
-    pub digest: String,
+    /// The trust digest of this version, or why it has none; read it through
+    /// [`LoadedPlaybook::trust_digest`].
+    digest: Result<String, String>,
     pub layout: Option<serde_json::Value>,
     pub version: String,
+}
+
+impl LoadedPlaybook {
+    /// The trust digest of this version ([`crate::scope::definition_digest`]):
+    /// `playbook.yaml` plus the version's `scripts/`. Every approval, gate and
+    /// run pin uses this one value. An error when the scripts cannot be
+    /// digested: such a version can be neither approved nor run.
+    pub fn trust_digest(&self) -> Result<String, RegistryError> {
+        self.digest.clone().map_err(|e| {
+            RegistryError::Scripts(format!("{}@{}", self.playbook.id, self.version), e)
+        })
+    }
 }
 
 pub struct Registry {
@@ -282,8 +293,12 @@ impl Registry {
         }
         let yaml = fs::read_to_string(&yaml_path)?;
         let playbook = Playbook::from_yaml(&yaml)?;
-        let digest = crate::scope::definition_digest(&yaml, &base.join(&version))
-            .map_err(|e| RegistryError::Scripts(format!("{id}@{version}"), e.to_string()))?;
+        // A version whose scripts cannot be digested (a symlink leaving the
+        // tree, an unsupported entry) still loads, so it can be viewed, fixed
+        // and saved; it just has no trust digest, so nothing can approve or
+        // run it.
+        let digest =
+            crate::scope::definition_digest(&yaml, &base.join(&version)).map_err(|e| e.to_string());
         if playbook.version != version {
             return Err(RegistryError::VersionMismatch {
                 file: playbook.version.clone(),

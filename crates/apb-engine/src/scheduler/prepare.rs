@@ -371,7 +371,7 @@ pub(crate) fn prepare_run_target(
     let root = t.execution_root.as_path();
     let reg = Registry::open_dir(&t.definition_parent)?;
     let loaded = reg.load(id, version)?;
-    let digest = loaded.digest.clone();
+    let digest = loaded.trust_digest()?;
     // Anti-TOCTOU: if the caller checked trust against a specific digest, it
     // must match the actually loaded content - otherwise the file was swapped
     // between the check and the run (spec 9).

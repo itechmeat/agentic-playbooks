@@ -206,3 +206,24 @@ fn approval_does_not_cover_other_or_changed_scripts() {
     let refusal = check_run(a.path(), &wref("s"), false, false).unwrap_err();
     assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
 }
+
+/// Scripts that cannot be digested (a symlink out of the version) leave the
+/// playbook loadable, to view and fix, but with nothing to approve: the gate
+/// refuses it even with an acknowledge.
+#[cfg(unix)]
+#[test]
+fn undigestable_scripts_still_load_but_never_run() {
+    let _cfg = crate::common::config_sandbox();
+    let a = tempfile::tempdir().unwrap();
+    seed_scripted(a.path(), "echo ok\n");
+    std::os::unix::fs::symlink(
+        "/etc/hostname",
+        a.path().join(".apb/playbooks/s/1.0.0/scripts/outside"),
+    )
+    .unwrap();
+    let reg = apb_core::registry::Registry::open(a.path()).unwrap();
+    let loaded = reg.load("s", None).unwrap();
+    assert!(loaded.trust_digest().is_err());
+    let refusal = check_run(a.path(), &wref("s"), true, false).unwrap_err();
+    assert_eq!(refusal["policy"], "definition_unreadable", "{refusal}");
+}

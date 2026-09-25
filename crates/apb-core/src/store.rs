@@ -54,7 +54,7 @@ pub fn resolve(project_root: &Path, wref: &PlaybookRef) -> Result<ResolvedPlaybo
         execution_root: project_root.to_path_buf(),
         id: wref.id.clone(),
         version: loaded.version.clone(),
-        digest: loaded.digest.clone(),
+        digest: loaded.trust_digest()?,
         origin_label,
     })
 }
