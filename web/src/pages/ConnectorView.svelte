@@ -5,6 +5,7 @@
     fetchConnector,
     fetchConnectorStats,
     installConnector,
+    revokeTrust,
     runConnectorHealthcheck,
     uninstallConnector,
     type HealthcheckResult,
@@ -51,6 +52,7 @@
   import { toast } from 'svelte-sonner'
   import * as Alert from '$lib/components/ui/alert'
   import ShieldCheck from '@lucide/svelte/icons/shield-check'
+  import ShieldOff from '@lucide/svelte/icons/shield-off'
   import Plug from '@lucide/svelte/icons/plug'
   import Unplug from '@lucide/svelte/icons/unplug'
   import Replace from '@lucide/svelte/icons/replace'
@@ -281,6 +283,26 @@
     }
   }
 
+  // Revoking goes through the one trust path (`POST /api/trust/revoke`): every
+  // approval of this connector, or of `connector/account`, so it reads
+  // unapproved until approved again.
+  async function revoke(account: string | null) {
+    approving = account ?? ''
+    try {
+      if (account) {
+        await revokeTrust(`${name}/${account}`, 'connector_account')
+      } else {
+        await revokeTrust(name, 'connector')
+      }
+      toast.success(account ? `Revoked account "${account}"` : 'Revoked connector approval')
+      await load(loadToken)
+    } catch (e) {
+      toast.error('Revoke failed', { description: String(e) })
+    } finally {
+      approving = null
+    }
+  }
+
   async function probe(account: ConnectorAccount) {
     probing = account.name
     try {
@@ -339,6 +361,17 @@
       <Button size="sm" class="max-sm:px-2" onclick={() => approve(null)} disabled={approving !== null}>
         {#if approving === ''}<Spinner data-icon="inline-start" />{:else}<ShieldCheck data-icon="inline-start" />{/if}
         <span class="max-sm:sr-only">Approve connector</span>
+      </Button>
+    {:else if installed && detail && detail.trust === 'approved'}
+      <Button
+        size="sm"
+        variant="outline"
+        class="max-sm:px-2"
+        onclick={() => revoke(null)}
+        disabled={approving !== null}
+      >
+        {#if approving === ''}<Spinner data-icon="inline-start" />{:else}<ShieldOff data-icon="inline-start" />{/if}
+        <span class="max-sm:sr-only">Revoke approval</span>
       </Button>
     {/if}
   {/snippet}
@@ -614,6 +647,17 @@
                                 >
                                   {#if approving === a.name}<Spinner data-icon="inline-start" />{:else}<ShieldCheck data-icon="inline-start" />{/if}
                                   <span class="max-sm:sr-only">Approve</span>
+                                </Button>
+                              {:else}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  class="max-sm:px-2"
+                                  onclick={() => revoke(a.name)}
+                                  disabled={approving !== null}
+                                >
+                                  {#if approving === a.name}<Spinner data-icon="inline-start" />{:else}<ShieldOff data-icon="inline-start" />{/if}
+                                  <span class="max-sm:sr-only">Revoke</span>
                                 </Button>
                               {/if}
                               <span

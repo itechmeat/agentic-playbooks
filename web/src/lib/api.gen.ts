@@ -250,3 +250,24 @@ current: string | null,
  * until that one is deleted.
  */
 conflict: boolean, };
+
+export type TrustKind = "playbook" | "profile_bundle" | "connector" | "connector_account";
+
+export type OriginKind = "bundled" | "agent_generated" | "locally_approved" | "repository_provided";
+
+export type TrustEntry = { 
+/**
+ * The approved content digest (`sha256:<hex>`).
+ */
+digest: string, 
+/**
+ * What it approves: a playbook id, a profile name, a connector name, or
+ * `connector/account`.
+ */
+id: string, kind: TrustKind, origin_kind: OriginKind, 
+/**
+ * When it was approved, in Unix milliseconds.
+ */
+approved_at_ms: number, };
+
+export type TrustRevoked = { revoked: Array<TrustEntry>, };

@@ -11,6 +11,9 @@ import type {
   PlaybookSummary,
   RestoredPlaybook,
   TrashListEntry,
+  TrustEntry,
+  TrustKind,
+  TrustRevoked,
   WriteResult,
 } from '../types'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
@@ -206,6 +209,18 @@ export const restoreFromTrash = (name: string, workspace = '') =>
     `/api/trash/${encodeURIComponent(name)}/restore${qs({ workspace })}`,
     { method: 'POST' },
   )
+
+// The approvals in the trust store, and their revocation: `target` is a
+// digest (exactly that approval) or an id (every approval under it, narrowed
+// by `kind`). A target that matches nothing answers 404.
+export const fetchTrust = () => getJson<TrustEntry[]>('/api/trust')
+
+export const revokeTrust = (target: string, kind?: TrustKind) =>
+  requestJson<TrustRevoked>('/api/trust/revoke', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ target, kind }),
+  })
 
 export const setFrozen = (id: string, frozen: boolean, workspace = '') =>
   requestJson<{ id: string; frozen: boolean }>(`${pb(id)}/frozen${qs({ workspace })}`, {

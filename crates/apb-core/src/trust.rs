@@ -93,7 +93,7 @@ pub fn write_lifecycle(playbook_dir: &Path, lc: Lifecycle) -> std::io::Result<()
 /// records created before profiles existed (backward compatibility for
 /// trust.json).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
-#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "TrustKind"))]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     #[default]

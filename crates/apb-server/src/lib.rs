@@ -73,6 +73,11 @@ pub fn build_router(state: AppState) -> Router {
             "/api/playbooks/{id}/run",
             post(routes::playbooks::run_playbook_handler),
         )
+        .route("/api/trust", get(routes::trust::list_trust_handler))
+        .route(
+            "/api/trust/revoke",
+            post(routes::trust::revoke_trust_handler),
+        )
         .route("/api/trash", get(routes::trash::list_trash_handler))
         .route(
             "/api/trash/{name}/restore",

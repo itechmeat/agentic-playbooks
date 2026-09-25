@@ -633,3 +633,50 @@ async fn cache_policy_and_build_identity() {
         Some("public, max-age=31536000, immutable")
     );
 }
+
+/// The dashboard's Trust view over HTTP: the listing shows every approval, a
+/// revoke by id removes all of that id's approvals of the kind and returns
+/// them, and a target that matches nothing is a 404.
+#[tokio::test]
+async fn trust_lists_and_revokes() {
+    use apb_core::trust::{Kind, OriginKind, TrustStore};
+    let _cfg = crate::common::config_sandbox().await;
+    let mut store = TrustStore::load();
+    for (digest, id, kind) in [
+        ("sha256:t1", "demo", Kind::Playbook),
+        ("sha256:t2", "demo", Kind::Playbook),
+        ("sha256:t3", "demo", Kind::ProfileBundle),
+    ] {
+        store
+            .approve_kind(digest, id, kind, OriginKind::LocallyApproved)
+            .unwrap();
+    }
+    let dir = seed();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+
+    let (status, listed) = get_json(app.clone(), "/api/trust").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(listed.as_array().unwrap().len(), 3, "{listed}");
+
+    let (status, out) = json_request(
+        app.clone(),
+        "POST",
+        "/api/trust/revoke",
+        serde_json::json!({ "target": "demo", "kind": "playbook" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(out["revoked"].as_array().unwrap().len(), 2, "{out}");
+    let (_, listed) = get_json(app.clone(), "/api/trust").await;
+    assert_eq!(listed[0]["kind"], "profile_bundle", "{listed}");
+    assert_eq!(listed.as_array().unwrap().len(), 1, "{listed}");
+
+    let (status, _) = json_request(
+        app,
+        "POST",
+        "/api/trust/revoke",
+        serde_json::json!({ "target": "sha256:t1" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
