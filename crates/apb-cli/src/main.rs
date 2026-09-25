@@ -327,9 +327,7 @@ enum Command {
 /// `__ask-server`) are spawned by an apb process that already registered the
 /// project, so they must not: `__drive-run` works on its `--root`, not its cwd,
 /// and `__ask-server` inherits the coding agent's cwd, which can be any
-/// directory. It also keeps a test that spawns the driver straight from the
-/// engine (`spawn_driver_at`, no chance to set `APB_CONFIG_DIR`) out of the
-/// real `~/.config/apb/projects.json`.
+/// directory.
 fn registers_workspace(command: Option<&Command>) -> bool {
     !matches!(
         command,

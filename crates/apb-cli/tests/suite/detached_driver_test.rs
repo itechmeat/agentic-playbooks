@@ -70,6 +70,18 @@ fn wait_with_deadline(child: &mut Child, budget: Duration, what: &str) {
     }
 }
 
+/// Waits until the detached driver has started the run's node: by then it has
+/// exec'd and claimed `driver.pid` itself.
+fn wait_until_driving(run_dir: &Path) {
+    poll_until("the driver to start the node", || {
+        read_all(run_dir)
+            .ok()?
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::NodeStarted { .. }))
+            .then_some(())
+    });
+}
+
 fn finishes(run_dir: &Path) -> usize {
     read_all(run_dir)
         .unwrap_or_default()
@@ -195,14 +207,7 @@ fn mcp_background_run_survives_a_group_kill_of_the_mcp_process() {
     // `apb mcp` leads its own group, so the group kill below cannot reach the
     // test runner itself.
     let mut mcp = McpSession::start(dir.path());
-    let body = mcp.call(
-        2,
-        r#"{"name":"playbook_run","arguments":{"id":"bgsurvive","background":true,"acknowledge_untrusted":true}}"#,
-    );
-    let run_id = body["run_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no run_id in playbook_run response: {body}"))
-        .to_string();
+    let run_id = mcp.run_background("bgsurvive");
 
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
     let _guard = RunGuard::new(dir.path(), &run_id);
@@ -236,6 +241,18 @@ fn mcp_background_run_survives_a_group_kill_of_the_mcp_process() {
         "the driver must not share its launcher's process group"
     );
 
+    // The pid the launcher published is the driver's own: once the child is
+    // driving (and has claimed `driver.pid` itself) the file still names it.
+    // A wrapper process in between would leave the child's pid here instead,
+    // and the workdir handover and every liveness check would aim at the
+    // wrong process.
+    wait_until_driving(&run_dir);
+    assert_eq!(
+        apb_engine::driver::read_driver_pid(&run_dir),
+        Some(driver_pid),
+        "the published pid must be the pid of the process that drives the run"
+    );
+
     // Kill the launcher's entire group, mid-run.
     mcp.kill_group();
     poll_until(
@@ -257,72 +274,14 @@ fn mcp_background_run_survives_a_group_kill_of_the_mcp_process() {
     );
 }
 
-// Scenario 2b: the contract of `spawn_driver_at` (and so of
-// `spawn_detached_driver`, which is the same function with `current_exe()`)
-// asserted directly, since every other scenario reaches it indirectly through
-// the MCP server. Three promises: the returned pid is the driver's own pid -
-// the SAME one that lands in `driver.pid` and that liveness checks read - the
-// driver leads its own process group, and it completes the run with the caller
-// doing nothing but wait.
-#[test]
-fn spawn_driver_at_returns_the_driver_pid_and_drives_the_run_alone() {
-    let dir = tempfile::tempdir().unwrap();
-    let (yaml, script) = slowscript_yaml("spawnme", 2);
-    seed(dir.path(), "spawnme", &yaml, &script);
-
-    let prepared = apb_engine::prepare_supervised_background(
-        dir.path(),
-        "spawnme",
-        None,
-        apb_engine::RunOptions::default(),
-    )
-    .unwrap();
-    let run_id = prepared.run_id().to_string();
-    let _guard = RunGuard::new(dir.path(), &run_id);
-    let run_dir = dir.path().join(".apb/runs").join(&run_id);
-
-    let pid = apb_engine::driver::spawn_driver_at(
-        crate::common::apb_bin(),
-        dir.path(),
-        &run_id,
-        None,
-        false,
-        false,
-    )
-    .unwrap();
-    // Hand the lock across exactly as `start_detached` does, so the driver
-    // adopts it rather than waiting the handover window out.
-    prepared.hand_over_workdir_lock(pid).unwrap();
-
-    // The returned pid is the driver itself: whatever it publishes as
-    // `driver.pid` must be the very pid we were handed, or the workdir
-    // handover and every downstream liveness check are aimed at the wrong
-    // process.
-    let published = poll_until("the driver to publish driver.pid", || {
-        apb_engine::driver::read_driver_pid(&run_dir)
-    });
-    assert_eq!(
-        published, pid,
-        "spawn_driver_at must return the pid that ends up in driver.pid"
-    );
-    assert_eq!(
-        pgid_of(pid),
-        Some(pid),
-        "the driver must lead its own process group"
-    );
-
-    // The caller drives nothing - it only waits.
-    let status = wait_for_outcome(&run_dir, 0, "the spawned driver to finish the run alone");
-    assert_eq!(status, RunStatus::Succeeded);
-}
-
-// Scenario 2c: a driver killed mid-run must read as DEAD. The launcher reaps
-// its driver handles, so a killed driver's pid is released instead of lingering
-// as a zombie - and `kill -0`, which is how liveness is checked here and in
-// `workdir`, succeeds for a zombie. Without reaping, a driver that was
-// SIGKILLed mid-run would read as alive for the rest of the launcher's
-// session, and the stuck run it left behind could never be recognised as
-// recoverable - which is exactly the signal Tasks 8 and 9 build on.
+// Scenario 2c: a driver killed mid-run must read as DEAD. The launcher (the
+// long-lived `apb mcp`) reaps its driver handles, so a killed driver's pid is
+// released instead of lingering as a zombie - and `kill -0`, which is how
+// liveness is checked here and in `workdir`, succeeds for a zombie. Without
+// reaping, a driver that was SIGKILLed mid-run would read as alive for the
+// rest of the launcher's session, and the stuck run it left behind could never
+// be recognised as recoverable - which is exactly the signal Tasks 8 and 9
+// build on.
 #[test]
 fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
     let dir = tempfile::tempdir().unwrap();
@@ -330,32 +289,12 @@ fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
     let (yaml, script) = slowscript_yaml("reapme", 30);
     seed(dir.path(), "reapme", &yaml, &script);
 
-    let prepared = apb_engine::prepare_supervised_background(
-        dir.path(),
-        "reapme",
-        None,
-        apb_engine::RunOptions::default(),
-    )
-    .unwrap();
-    let run_id = prepared.run_id().to_string();
+    let mut mcp = McpSession::start(dir.path());
+    let run_id = mcp.run_background("reapme");
     let _guard = RunGuard::new(dir.path(), &run_id);
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
-
-    // This test process is the launcher, so it owns the reaper.
-    let pid = apb_engine::driver::spawn_driver_at(
-        crate::common::apb_bin(),
-        dir.path(),
-        &run_id,
-        None,
-        false,
-        false,
-    )
-    .unwrap();
-    prepared.hand_over_workdir_lock(pid).unwrap();
-
-    poll_until("the driver to start driving", || {
-        apb_engine::driver::read_driver_pid(&run_dir)
-    });
+    let pid = apb_engine::driver::read_driver_pid(&run_dir).expect("driver.pid");
+    wait_until_driving(&run_dir);
     assert!(alive(pid), "the driver should be alive before we kill it");
 
     sig::kill_pid(pid);
@@ -404,14 +343,7 @@ fn a_stop_in_the_driver_spawn_window_is_not_lost() {
     // through `hand_to_detached_driver`, and the tool call returns the instant
     // that function does - which is precisely the window under test.
     let mut mcp = McpSession::start(dir.path());
-    let body = mcp.call(
-        2,
-        r#"{"name":"playbook_run","arguments":{"id":"stopwindow","background":true,"acknowledge_untrusted":true}}"#,
-    );
-    let run_id = body["run_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no run_id in playbook_run response: {body}"))
-        .to_string();
+    let run_id = mcp.run_background("stopwindow");
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
     let _guard = RunGuard::new(dir.path(), &run_id);
 
@@ -655,6 +587,20 @@ impl McpSession {
 
     fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Starts playbook `id` as a background run and returns its run id.
+    fn run_background(&mut self, id: &str) -> String {
+        let body = self.call(
+            2,
+            &format!(
+                r#"{{"name":"playbook_run","arguments":{{"id":"{id}","background":true,"acknowledge_untrusted":true}}}}"#
+            ),
+        );
+        body["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no run_id in playbook_run response: {body}"))
+            .to_string()
     }
 
     fn call(&mut self, id: u32, params: &str) -> serde_json::Value {

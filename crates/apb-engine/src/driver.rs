@@ -221,29 +221,6 @@ pub fn spawn_detached_driver(
     allow_environment_drift: bool,
 ) -> io::Result<u32> {
     let exe = std::env::current_exe()?;
-    spawn_driver_at(
-        &exe,
-        root,
-        run_id,
-        from_node,
-        resume,
-        allow_environment_drift,
-    )
-}
-
-/// `spawn_detached_driver` against an explicitly named driver binary, for
-/// callers that know where `apb` lives rather than being it. Production code
-/// wants `spawn_detached_driver`; this exists because `current_exe()` inside a
-/// test binary is the test harness, so the detached path can only be exercised
-/// end-to-end by naming the real binary.
-pub fn spawn_driver_at(
-    exe: &Path,
-    root: &Path,
-    run_id: &str,
-    from_node: Option<&str>,
-    resume: bool,
-    allow_environment_drift: bool,
-) -> io::Result<u32> {
     // The child gets an absolute root: it starts from a different working
     // directory context and must not have to guess what a relative path meant
     // to the parent.
