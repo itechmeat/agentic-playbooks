@@ -19,7 +19,7 @@ with two files:
   name: architect            # must equal the directory name
   description: senior implementation agent
   executor:
-    agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes, grok, cursor, qoder) or a configured one
+    agent: claude            # one of the known agents (claude, codex, agy, opencode, pi, hermes, grok, cursor, qoder, zcode) or a configured one
     model: claude-opus-4-8   # exactly the string that agent's --model expects
     fallbacks:               # optional ordered chain; same role, different executor
       - { agent: codex, model: gpt-5.2-codex }
@@ -171,7 +171,7 @@ not reset the other fields). Declare which subscriptions you have with
 Not every agent can run unattended. apb passes a non-interactive permission flag
 where the agent has one: `--permission-mode bypassPermissions` for claude and
 grok, `--force` for cursor, `--permission-mode bypass_permissions` for qoder,
-`--dangerously-skip-permissions` for agy,
+`--mode yolo` for zcode, `--dangerously-skip-permissions` for agy,
 `--dangerously-bypass-approvals-and-sandbox` for codex, and `--auto` for
 opencode. hermes has no flag apb passes today: its `--yolo` is documented but
 unverified in the one-shot form apb uses, so it is deliberately not shipped. A
@@ -186,3 +186,67 @@ then never needs write permission at all, so no approval prompt can appear,
 whatever flags the CLI does or does not offer. That is also the right shape for
 review, audit and analysis nodes regardless of the agent, because the finding is
 the deliverable and nothing in the workspace changes.
+
+## ZCode (zcode)
+
+`agent: zcode` runs the headless CLI of Z.ai's ZCode desktop app. apb finds it
+as `zcode` on PATH, else at `~/.zcode/server/agents/glm/zcode-agent`, where the
+desktop deploys it (it never puts it on PATH); `agents.zcode.program` in the
+global config overrides both. `apb detect` and `apb doctor` report it.
+
+Model strings are plan-qualified, because ZCode serves the same model from
+several plans, each with its own quota:
+
+```yaml
+executor:
+  agent: zcode
+  model: zai-individual/GLM-5.3        # <plan>/<model>[@<effort>]
+  fallbacks:
+    - { agent: zcode, model: zai-individual/GLM-5.3-Flash@low }
+```
+
+- `<plan>`: `zai-individual`, `zai-team`, `zai-start`, `zai-idle` (and the
+  `bigmodel-*` twins). ZCode's own provider ids
+  (`account:zai-individual-coding-plan`) and a bare kind (`individual`,
+  `start`) are accepted too; any other value is passed through as a custom
+  provider id from the user's ZCode provider config.
+- `<model>`: a ZCode model id such as `GLM-5.3` or `GLM-5.3-Flash`, matched
+  case-insensitively.
+- `@<effort>`: optional reasoning level (ZCode's effort setting), for example
+  `@low`, `@high`, `@max` for GLM-5.3. Omitted, ZCode uses the model's highest
+  level. There is no profile-level effort field; the suffix is zcode-only.
+- An unqualified model (`GLM-5.3`) resolves deterministically to the PAID
+  individual coding plan of the account family ZCode is set to (`zai` unless
+  ZCode's settings say `bigmodel`). Qualify the model to use any other plan.
+
+The model list the profile editor offers for zcode is the detected
+`plan/model` list (from ZCode's built-in provider config, narrowed to the plans
+the CLI can use), paid plan first.
+
+How it runs: `zcode-agent -p <prompt> --json --mode build`. ZCode's `--mode`
+defaults to `yolo` for `-p`, so apb always pins one: `build` normally (every
+approval request is denied in headless mode), `yolo` only for an authorized
+effectful run (appended last, the last value wins). The CLI has no `--model`
+flag: apb writes a run-scoped copy of the user's ZCode personal provider
+config (`<run>/agent-home/zcode/<node>/provider_config.json`) with the
+selection as its `defaultModelSelection` and points
+`ZCODE_PERSONAL_PROVIDER_CONFIG_FILE` at it; the user's own ZCode config is
+never written. The node output is the `response` of the `--json` result, and
+its `sessionId` feeds `--resume` for the interactive `resume` transport. The
+SOUL travels as a prompt prefix (no system-prompt flag).
+
+Login and plans. The headless CLI needs its own one-time login,
+`~/.zcode/server/agents/glm/zcode-agent login`; the desktop app's login does
+not cover it, and `apb doctor` warns when it is missing. Note that this login
+also sets the default model in ZCode's shared provider config. In
+zcode-agent 0.16.9 the headless CLI can only use the individual coding plan:
+the Start (free), Team and Idle plans the desktop offers are desktop-only.
+Because ZCode silently runs its first usable plan when asked for one it cannot
+use, apb refuses such a step before spawning (an auth-class failure that the
+fallback chain skips) instead of letting it spend the paid plan.
+
+Fallbacks across plans. A spend or quota stop (Z.ai `Usage limit reached`,
+`Weekly/Monthly Limit Exhausted`, `Insufficient balance`) is a budget failure
+and blocks that PLAN for the rest of the chain, not the whole agent: another
+model on the same plan is skipped (same quota), while the same model on a
+different plan is still tried once the CLI can use that plan.
