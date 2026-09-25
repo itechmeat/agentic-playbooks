@@ -21,6 +21,9 @@ export interface ConnectorCard {
   trust: ConnectorTrust
   accountsTotal: number
   accountsReady: number
+  // The built-in version when the installed copy differs from the one embedded
+  // in the running apb (an upgrade shipped a fix, or the copy was edited).
+  updateAvailable: string | null
 }
 
 export interface ConnectorAccount {
@@ -81,6 +84,8 @@ export interface ConnectorDetail {
   // connected yet. Everything else on this object is manifest-derived and is
   // populated either way.
   installed: boolean
+  // See ConnectorCard.updateAvailable.
+  updateAvailable: string | null
   trust: ConnectorTrust
   meta: ConnectorMeta
   bodyMd: string

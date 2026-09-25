@@ -164,6 +164,9 @@
                   <Card.Title class="text-base">{c.displayName || c.name}</Card.Title>
                   <span class="font-mono text-xs text-muted-foreground">v{c.version}</span>
                   <Badge variant="outline" class={badgeClass[badge.tone]}>{badge.label}</Badge>
+                  {#if c.updateAvailable}
+                    <Badge variant="outline" class={badgeClass.warn}>built-in v{c.updateAvailable} available</Badge>
+                  {/if}
                 </div>
                 <Card.Description>{c.summary}</Card.Description>
                 <Card.Action>

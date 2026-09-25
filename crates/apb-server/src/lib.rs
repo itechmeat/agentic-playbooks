@@ -229,6 +229,9 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     // would then remove.
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
     let _lock = lock::write_global_lock(&cfg, port)?;
+    // An upgrade restarts the dashboard: bring pristine installed copies of
+    // official connectors in line with the ones embedded in this binary.
+    report_connector_reconcile(apb_core::connector::install::reconcile_official());
     // Real-time updates across all projects: a filesystem watcher broadcasts
     // change pings on the shared channel that the dashboard's WebSocket relays.
     // Best-effort: if it cannot start, the server still serves (the UI just
@@ -273,6 +276,31 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     lock::remove_global_lock(&cfg)?;
     result?;
     Ok(())
+}
+
+fn report_connector_reconcile(outcome: Vec<apb_core::connector::install::Reconciled>) {
+    use apb_core::connector::install::Reconciled;
+    for r in outcome {
+        match r {
+            Reconciled::Updated {
+                name,
+                from_version,
+                to_version,
+            } => println!(
+                "apb dashboard: connector `{name}` updated to the built-in copy ({from_version} -> {to_version})"
+            ),
+            Reconciled::UpdateAvailable {
+                name,
+                installed_version,
+                embedded_version,
+            } => println!(
+                "apb dashboard: connector `{name}` {installed_version} has local changes; the built-in {embedded_version} is available (apb connector install {name} --force)"
+            ),
+            Reconciled::Failed { name, error } => {
+                eprintln!("apb dashboard: cannot update connector `{name}`: {error}")
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() {

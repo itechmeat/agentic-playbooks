@@ -42,6 +42,10 @@ Both files ship inside the connector folder, so `apb connector install <name>` m
 
 Neither file is read at run time, and neither is used by the dashboard, which renders `PUBLIC.md`. They are covered by the connector's tree digest like every other file in the folder, so editing one drops connector trust until it is approved again.
 
+## Upgrades
+
+An installed official connector is a copy of the one embedded in the `apb` binary. When the dashboard starts (an upgrade restarts it), every installed copy that is exactly what an earlier `apb` installed, meaning its tree digest is trusted with origin `bundled`, is replaced by the embedded version, trust included. A copy with local changes is left alone: `apb connector list`, MCP `connectors_list` and the dashboard report it with `update_available` (the built-in version), and `apb connector install <name> --force` or the dashboard's "Update to the built-in version" replaces it.
+
 ## Configuring accounts
 
 An account tells the connector where to send a call and which secret to use. The

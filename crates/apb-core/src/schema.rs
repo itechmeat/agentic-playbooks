@@ -768,7 +768,10 @@ pub const DEFAULT_REVIEW_OPTIONS: [&str; 2] = ["approve", "reject"];
 /// instruction) uses, so a gate without options still shows buttons.
 pub fn effective_review_options(options: &[String]) -> Vec<String> {
     if options.is_empty() {
-        DEFAULT_REVIEW_OPTIONS.iter().map(|s| s.to_string()).collect()
+        DEFAULT_REVIEW_OPTIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
     } else {
         options.to_vec()
     }

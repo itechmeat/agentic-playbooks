@@ -193,6 +193,11 @@ impl TrustStore {
         self.approved.contains_key(digest)
     }
 
+    /// Where the approval of `digest` came from, if it is approved at all.
+    pub fn origin(&self, digest: &str) -> Option<OriginKind> {
+        self.approved.get(digest).map(|r| r.origin_kind)
+    }
+
     /// Marks the digest as approved and persists it. The read-modify-write runs
     /// under a file lock that re-reads the current store from disk - concurrent
     /// approvals from different processes merge instead of clobbering each

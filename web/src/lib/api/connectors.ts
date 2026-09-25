@@ -31,6 +31,7 @@ interface ConnectorCardDto {
   trust: ConnectorTrust
   accounts_total: number
   accounts_ready: number
+  update_available?: string | null
 }
 
 const toConnectorCard = (d: ConnectorCardDto): ConnectorCard => ({
@@ -42,6 +43,7 @@ const toConnectorCard = (d: ConnectorCardDto): ConnectorCard => ({
   trust: d.trust,
   accountsTotal: d.accounts_total,
   accountsReady: d.accounts_ready,
+  updateAvailable: d.update_available ?? null,
 })
 
 export const fetchConnectors = (workspace = '') =>
@@ -87,6 +89,7 @@ interface ConnectorDetailDto {
   name: string
   version: string
   installed: boolean
+  update_available?: string | null
   trust: ConnectorTrust
   meta: ConnectorMeta
   body_md: string
@@ -100,6 +103,7 @@ export const fetchConnector = (name: string, workspace = '') =>
       name: d.name,
       version: d.version,
       installed: d.installed,
+      updateAvailable: d.update_available ?? null,
       trust: d.trust,
       meta: d.meta,
       bodyMd: d.body_md,

@@ -408,6 +408,29 @@
               before is kept in a separate store and is picked up again automatically.
             </p>
           {/if}
+          {#if installed && detail.updateAvailable && !forceOffered}
+            <Alert.Root>
+              <Replace />
+              <Alert.Title>The built-in version differs</Alert.Title>
+              <Alert.Description>
+                <p>
+                  The installed files differ from the v{detail.updateAvailable} built into this apb,
+                  usually because they were edited locally (an untouched copy is updated when the
+                  dashboard starts). Updating overwrites the installed files with the built-in copy,
+                  which is trusted as shipped. Account configuration is not affected.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onclick={() => connect(true)}
+                  disabled={busy !== null}
+                >
+                  {#if busy === 'connect'}<Spinner data-icon="inline-start" />{:else}<Replace data-icon="inline-start" />{/if}
+                  Update to the built-in version
+                </Button>
+              </Alert.Description>
+            </Alert.Root>
+          {/if}
           {#if forceOffered}
             <Alert.Root variant="destructive">
               <Replace />

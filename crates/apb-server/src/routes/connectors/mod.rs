@@ -131,6 +131,7 @@ pub(crate) async fn list_connectors_handler(
             "trust": trust_state,
             "accounts_total": accounts.len(),
             "accounts_ready": accounts_ready,
+            "update_available": apb_core::connector::install::embedded_update(&summary.name),
         }));
     }
     Json(out).into_response()
@@ -354,6 +355,7 @@ pub(crate) async fn get_connector_handler(
         "name": name,
         "version": public.doc.version,
         "installed": installed,
+        "update_available": apb_core::connector::install::embedded_update(&name),
         "trust": connector_trust,
         "meta": public.meta,
         "body_md": public.body_md,

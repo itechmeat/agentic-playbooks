@@ -171,15 +171,15 @@ fn list_cmd(root: &Path) -> ExitCode {
         }
         print_table(&rows);
 
-        // Version-drift notes: an installed connector whose embedded version
-        // differs (a binary upgrade shipped a newer manifest).
+        // Drift notes: an installed official connector whose files differ
+        // from the copy embedded in this binary (an upgrade shipped a fix, or
+        // the copy was edited locally). The dashboard replaces pristine copies
+        // on start; an edited one stays until the user reinstalls it.
         for s in &summaries {
-            if let Some(o) = official.iter().find(|o| o.name == s.name)
-                && o.version != s.version
-            {
+            if let Some(embedded) = apb_core::connector::install::embedded_update(&s.name) {
                 println!(
-                    "note: `{}` installed {}, embedded {} (reinstall with --force to upgrade)",
-                    s.name, s.version, o.version
+                    "note: `{}` installed {} differs from the built-in {embedded} (reinstall with --force to update)",
+                    s.name, s.version
                 );
             }
         }

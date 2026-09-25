@@ -58,6 +58,7 @@ pub fn connectors_list(root: &Path) -> Result<Value, ToolError> {
             "version": summary.version,
             "summary": summary.meta.summary,
             "trust": trust_state,
+            "update_available": apb_core::connector::install::embedded_update(&summary.name),
             "functions": functions,
             "accounts": accounts,
         }));

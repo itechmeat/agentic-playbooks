@@ -82,6 +82,7 @@ const detail = (over: Partial<ConnectorDetail> = {}): ConnectorDetail => ({
   name: 'github',
   version: '1.0.0',
   installed: false,
+  updateAvailable: null,
   trust: 'not_installed',
   meta: {},
   bodyMd: '',
