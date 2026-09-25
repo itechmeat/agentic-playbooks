@@ -259,8 +259,8 @@ Unset, the node keeps the default: the last assistant message with any report
 block stripped. This keeps the recorded output intact when a host `Stop` hook or
 a guardrail appends a turn after the agent's real work finished, which would
 otherwise become the node's output. The other half of that hygiene lives on the
-profile: see PROFILES.md's `hermetic` guidance, which suppresses the appended
-turn at the source instead of filtering around it.
+profile: see PROFILES.md's "Agent environment" (the default `minimal` one
+suppresses the appended turn at the source instead of filtering around it).
 
 ### Warning: premature success in long-running orchestrator nodes
 

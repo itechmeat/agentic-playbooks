@@ -253,9 +253,9 @@ apb starts coding agents in their autonomous modes, in your working directory,
 with your environment minus the connector secrets, so an agent that follows
 injected instructions can still use its own tools: run commands, edit files,
 call other CLIs you are logged in to. Treat a node that reads the inbox as a
-node that runs untrusted input: keep its prompt's job narrow, prefer a
-`hermetic` profile, and run such playbooks where that agent's reach is
-acceptable.
+node that runs untrusted input: keep its prompt's job narrow, keep its
+profile on the default `minimal` environment, and run such playbooks where that
+agent's reach is acceptable.
 
 Two validator rules cover the playbook side. **V42**: a node grants inbox
 functions of a connector with no webhook block, so nothing could ever be

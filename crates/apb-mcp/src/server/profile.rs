@@ -93,6 +93,7 @@ impl WfMcp {
             fallbacks,
             soul,
             expected_digest,
+            environment,
             hermetic,
             zcode_mode,
         }): Parameters<ProfileWriteArgs>,
@@ -104,6 +105,13 @@ impl WfMcp {
         };
         let soul_requirement = match crate::profile_tools::parse_soul_requirement(soul.as_deref()) {
             Ok(r) => r,
+            Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
+        };
+        let environment = match apb_core::profile::AgentEnvironment::from_surface(
+            environment.as_deref(),
+            hermetic,
+        ) {
+            Ok(e) => e,
             Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
         };
         let zcode_mode = match zcode_mode
@@ -125,7 +133,7 @@ impl WfMcp {
                 executor,
                 expected_digest,
                 soul_requirement,
-                hermetic,
+                environment,
                 zcode_mode,
             },
         ))

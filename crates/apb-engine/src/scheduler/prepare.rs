@@ -200,9 +200,9 @@ pub(crate) fn snapshot_loaded_profile(
         skills: mskills,
         chain,
         ephemeral: eph.is_some(),
-        // Snapshot the profile's hermetic flag so post-start reads use the
-        // run's value, not the live profile (subtask S1).
-        hermetic: loaded.doc.hermetic,
+        // Snapshot the profile's environment so post-start reads use the
+        // run's value, not the live profile (issue #136 item 4).
+        hermetic: loaded.doc.environment() == apb_core::profile::AgentEnvironment::Minimal,
         zcode_mode: loaded.doc.zcode_mode,
     })
 }

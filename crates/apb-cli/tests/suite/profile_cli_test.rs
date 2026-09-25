@@ -195,7 +195,7 @@ fn profile_edit_handles_editor_with_arguments() {
 }
 
 #[test]
-fn profile_edit_preserves_hermetic_flag() {
+fn profile_edit_preserves_the_environment_opt_in() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("cfg")).unwrap();
     fs::create_dir_all(dir.path().join("home")).unwrap();
@@ -207,21 +207,16 @@ fn profile_edit_preserves_hermetic_flag() {
         ],
     );
 
-    // The owner enables hermetic isolation directly in profile.yaml (there is
-    // no `--hermetic` CLI write flag). Editing an unrelated field (SOUL only)
-    // must NOT silently strip that flag - otherwise a later run loses the
-    // hermetic session and re-exposes the user-scope Stop hook (#70 item 2).
+    // The owner opts the profile into the full environment directly in
+    // profile.yaml. Editing an unrelated field (SOUL only) must NOT silently
+    // strip that opt-in.
     let yaml_path = dir.path().join(".apb/profiles/p1/profile.yaml");
     let base = fs::read_to_string(&yaml_path).unwrap();
     assert!(
-        base.contains("hermetic: false"),
-        "precondition: fresh profile serializes hermetic: false, got: {base}"
+        !base.contains("environment") && !base.contains("hermetic"),
+        "precondition: a fresh profile has the default environment, got: {base}"
     );
-    fs::write(
-        &yaml_path,
-        base.replace("hermetic: false", "hermetic: true"),
-    )
-    .unwrap();
+    fs::write(&yaml_path, format!("{base}environment: full\n")).unwrap();
 
     // $EDITOR touches only SOUL.md (second arg); profile.yaml is left as-is.
     let ok_editor = dir.path().join("editor_soul.sh");
@@ -229,14 +224,14 @@ fn profile_edit_preserves_hermetic_flag() {
     let out = apb_with_editor(dir.path(), &ok_editor, &["profile", "edit", "p1"]);
     assert!(
         out.status.success(),
-        "edit of a hermetic profile failed: {}",
+        "edit of a full-environment profile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
     let written = fs::read_to_string(&yaml_path).unwrap();
     assert!(
-        written.contains("hermetic: true"),
-        "edit must preserve hermetic: true, got: {written}"
+        written.contains("environment: full"),
+        "edit must preserve environment: full, got: {written}"
     );
 }
 

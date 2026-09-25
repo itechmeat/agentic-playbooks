@@ -910,25 +910,38 @@ pub(crate) fn execute_node(
                 let mut timeout_continued = false;
                 // A resume that found no session is retried fresh once per step.
                 let mut lost_session_retried = false;
-                // Hermetic isolation (subtask S1): when the bound profile sets
-                // `hermetic: true`, claude/claude-code get an apb-owned minimal
-                // settings file (user plugins and hooks off) handed over via
-                // `--settings`. Any other agent has no such mechanism, so we warn
-                // and proceed without isolation rather than failing the run. The
-                // file content is fixed, so writing it once per step is enough.
-                let hermetic_settings: Option<PathBuf> = if entry.hermetic {
-                    if crate::adapter::agent_supports_hermetic(&step.agent) {
-                        Some(crate::adapter::write_hermetic_settings(run_dir)?)
+                // The minimal agent environment (issue #136 item 4, the
+                // profile default): claude/claude-code get an apb-owned settings
+                // file, only the project and local setting sources and only
+                // apb's own MCP servers. The profile's declared skills are then
+                // delivered through `--add-dir` (the user source that used to
+                // provide them is not loaded), except on an isolated node,
+                // whose working directory already holds them. Other agents have
+                // no such mechanism and run as configured. The file content is
+                // fixed, so writing it once per step is enough.
+                let hermetic_settings: Option<crate::adapter::HermeticEnv> =
+                    if entry.hermetic && crate::adapter::agent_supports_hermetic(&step.agent) {
+                        let skills_dir = if !isolated && !entry.skills.is_empty() {
+                            // Laid down fresh from the run snapshot for every
+                            // step, like an isolated node's copies.
+                            let dir = run_dir.join("agent-skills").join(node_id);
+                            match std::fs::remove_dir_all(&dir) {
+                                Ok(()) => {}
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                Err(e) => return Err(e.into()),
+                            }
+                            materialize_isolated_skills(run_dir, &entry, &dir)?;
+                            Some(dir)
+                        } else {
+                            None
+                        };
+                        Some(crate::adapter::HermeticEnv {
+                            settings: crate::adapter::write_hermetic_settings(run_dir, node_id)?,
+                            skills_dir,
+                        })
                     } else {
-                        eprintln!(
-                            "apb: warning: node `{node_id}` profile requests hermetic isolation but agent `{}` has no isolation mechanism; running without it",
-                            step.agent
-                        );
                         None
-                    }
-                } else {
-                    None
-                };
+                    };
                 // The node's own retry budget is walked by `try_i`; an
                 // INFRASTRUCTURE retry (spec 2026-08-05 section 2.3) does not
                 // advance it, which is why this is a while loop and not
@@ -983,6 +996,20 @@ pub(crate) fn execute_node(
                     // (skills_mode: materialized would then not reflect
                     // reality). For `isolation: none` - the shared workdir.
                     let attempt_workdir: PathBuf = if let Some((_, Some(wd))) = &continued {
+                        // The directory stays, the skills do not: an isolated
+                        // node's snapshot copies are laid down fresh for every
+                        // attempt, so the continued session cannot hand a
+                        // modified bundle to itself either.
+                        if isolated {
+                            for sub in [".agents/skills", ".claude/skills"] {
+                                match std::fs::remove_dir_all(wd.join(sub)) {
+                                    Ok(()) => {}
+                                    Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                                    Err(e) => return Err(e.into()),
+                                }
+                            }
+                            materialize_isolated_skills(run_dir, &entry, wd)?;
+                        }
                         wd.clone()
                     } else if isolated {
                         let wd = run_dir.join("work").join(node_id).join(attempt.to_string());

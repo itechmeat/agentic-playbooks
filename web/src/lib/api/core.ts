@@ -52,6 +52,9 @@ export interface ProfileWriteBody {
   skills?: string[]
   soul_requirement?: string
   expected_digest?: string | null
+  // Agent environment: 'minimal' (the default) or 'full', the opt-in to the
+  // operator's whole personal setup. Absent keeps the stored value.
+  environment?: 'minimal' | 'full'
 }
 
 export const fetchProfiles = () =>

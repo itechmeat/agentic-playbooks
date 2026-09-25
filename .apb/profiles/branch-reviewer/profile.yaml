@@ -6,4 +6,4 @@ executor:
   fallbacks: []
 soul: any
 skills: []
-hermetic: false
+environment: full

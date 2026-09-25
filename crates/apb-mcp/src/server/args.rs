@@ -480,9 +480,14 @@ pub struct ProfileWriteArgs {
     /// (optimistic concurrency). Absence means creating a new one.
     #[serde(default)]
     pub expected_digest: Option<String>,
-    /// When true, the executor launches with hermetic isolation (disables
-    /// user-scope plugins and hooks). Absent: an update keeps the stored flag,
-    /// a new profile gets false.
+    /// Agent environment: "minimal" (the default: apb's own settings, no user
+    /// plugins, MCP servers, skills or CLAUDE.md; the project's own ones and
+    /// the profile's skills still load) or "full" (the operator's whole
+    /// personal setup, for a profile that depends on a user-scope plugin,
+    /// skill or MCP server). Absent: an update keeps the stored value.
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// Deprecated spelling of `environment`: true = minimal, false = full.
     #[serde(default)]
     pub hermetic: Option<bool>,
     /// ZCode permission mode for the profile's zcode steps in a run that grants

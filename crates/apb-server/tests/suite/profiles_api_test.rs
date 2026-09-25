@@ -115,7 +115,7 @@ async fn profiles_list_then_create_then_trusted() {
 }
 
 #[tokio::test]
-async fn profile_update_preserves_hermetic_when_body_omits_it() {
+async fn profile_update_preserves_environment_when_body_omits_it() {
     let _guard = crate::common::env_lock().await;
     let proj = tempfile::tempdir().unwrap();
     let cfg = tempfile::tempdir().unwrap();
@@ -125,12 +125,12 @@ async fn profile_update_preserves_hermetic_when_body_omits_it() {
         std::env::set_var("HOME", home.path());
     }
     apb_core::registry::init_project(proj.path()).unwrap();
-    // Seed a hermetic profile on disk.
+    // Seed a profile that opted into the full environment.
     let dir = proj.path().join(".apb/profiles/herm");
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(
         dir.join("profile.yaml"),
-        "name: herm\ndescription: d\nexecutor:\n  agent: claude\n  model: haiku\nhermetic: true\n",
+        "name: herm\ndescription: d\nexecutor:\n  agent: claude\n  model: haiku\nenvironment: full\n",
     )
     .unwrap();
     std::fs::write(dir.join("SOUL.md"), "").unwrap();
@@ -143,10 +143,9 @@ async fn profile_update_preserves_hermetic_when_body_omits_it() {
     assert_eq!(status, StatusCode::OK, "GET failed: {got}");
     let digest = got["profile_digest"].as_str().expect("digest").to_string();
 
-    // POST an update that changes the description but carries no `hermetic`
-    // (the web body cannot express it). Forcing false here would silently
-    // strip the owner-set isolation (the #70 failure mode), so the stored
-    // flag must survive.
+    // POST an update that changes the description but carries no
+    // `environment` (the web body cannot express it). Resetting it here would
+    // silently strip the owner's opt-in, so the stored value must survive.
     let app = build_router(AppState::new(root.clone()));
     let (status, updated) = post_json(
         app,
@@ -165,8 +164,8 @@ async fn profile_update_preserves_hermetic_when_body_omits_it() {
 
     let written = std::fs::read_to_string(dir.join("profile.yaml")).unwrap();
     assert!(
-        written.contains("hermetic: true"),
-        "web update must preserve hermetic: true, got: {written}"
+        written.contains("environment: full"),
+        "web update must preserve environment: full, got: {written}"
     );
 
     unsafe {

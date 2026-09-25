@@ -43,10 +43,12 @@ pub struct ManifestProfile {
     /// bundle trust (the executor is ad-hoc, not part of the profile).
     #[serde(default)]
     pub ephemeral: bool,
-    /// The profile's `hermetic` flag (subtask S1), snapshotted so post-start
-    /// reads (retry, fallback, resume) use the run's value, not the live
-    /// profile. Old manifests written before this field parse as `false`
-    /// (serde default), mirroring `ephemeral`.
+    /// Whether the profile runs with the minimal agent environment (its
+    /// `environment`, issue #136 item 4; historically the `hermetic` flag),
+    /// snapshotted so post-start reads (retry, fallback, resume) use the run's
+    /// value, not the live profile. Old manifests written before this field
+    /// parse as `false` (serde default), so a run started with the old full
+    /// environment keeps it on resume.
     #[serde(default)]
     pub hermetic: bool,
     /// The profile's `zcode_mode`, snapshotted like `hermetic`: the mode its

@@ -426,3 +426,50 @@ fn a_resume_of_a_missing_session_starts_fresh_without_spending_a_retry() {
     assert!(!inv[2].resumed(), "{:?}", inv[2].args);
     assert!(inv[2].prompt().contains("Do the whole job."));
 }
+
+/// Item 4 of #136: a claude profile that says nothing about its environment
+/// runs with the minimal one (apb's settings, project and local setting
+/// sources only, only apb's MCP servers), and its declared skills still reach
+/// the agent through `--add-dir`. `environment: full` is the explicit opt-in
+/// to the operator's whole setup and gets none of those flags.
+#[test]
+fn the_default_agent_environment_is_minimal_and_full_is_an_opt_in() {
+    for (extra, minimal) in [("", true), ("environment: full\n", false)] {
+        let dir = tempfile::tempdir().unwrap();
+        init_project(dir.path()).unwrap();
+        seed_playbook(dir.path(), "one", &single("Do the whole job."));
+        common::seed_profile(dir.path(), "main", "claude", "haiku", &[]);
+        let profile = dir.path().join(".apb/profiles/main/profile.yaml");
+        let yaml = fs::read_to_string(&profile).unwrap();
+        fs::write(&profile, format!("{yaml}skills: [probe]\n{extra}")).unwrap();
+        let skill = dir.path().join(".agents/skills/probe");
+        fs::create_dir_all(&skill).unwrap();
+        fs::write(skill.join("SKILL.md"), "---\nname: probe\n---\n").unwrap();
+        let stub = recording_stub(dir.path(), OK);
+        assert_eq!(
+            run_with_stub(dir.path(), "one", &stub, None),
+            RunStatus::Succeeded
+        );
+
+        let inv = &invocations(dir.path())[0];
+        assert_eq!(
+            inv.flag("--setting-sources") == Some("project,local")
+                && inv.args.iter().any(|a| a == "--strict-mcp-config")
+                && inv.flag("--settings").is_some(),
+            minimal,
+            "{extra:?}: {:?}",
+            inv.args
+        );
+        match inv.flag("--add-dir") {
+            Some(skills) => {
+                assert!(minimal, "full environment needs no skills dir");
+                assert!(
+                    Path::new(skills)
+                        .join(".claude/skills/probe/SKILL.md")
+                        .is_file()
+                );
+            }
+            None => assert!(!minimal, "the declared skill must reach a minimal claude"),
+        }
+    }
+}

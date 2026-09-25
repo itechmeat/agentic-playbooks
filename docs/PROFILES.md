@@ -24,7 +24,7 @@ with two files:
     fallbacks:               # optional ordered chain; same role, different executor
       - { agent: codex, model: gpt-6-sol }
   soul: any                  # any | native_required (does the role need a native system-prompt channel)
-  hermetic: false            # optional; default false. See "Hermetic isolation" below
+  environment: full          # optional; default minimal. See "Agent environment" below
   zcode_mode: edit           # optional, zcode steps only: yolo (default) | edit. See "ZCode (zcode)"
   skills:                    # names (scope auto) or { name, scope }
     - coding-standards
@@ -38,45 +38,62 @@ with two files:
 Names must match `[a-z0-9][a-z0-9-]*`, at most 64 chars, and equal the
 directory name. Case-fold collisions are rejected.
 
-## Hermetic isolation
+## Agent environment
 
-`hermetic` is an optional boolean, default `false`. When `true`, an executor
-that supports settings isolation is launched with an apb-owned minimal settings
-profile that disables user-scope plugins and hooks, so a run does not inherit
-the operator's local agent configuration. Only `claude` and `claude-code`
-support this today (via their `--settings` flag); any other agent ignores the
-flag with a warning rather than failing the run. The flag is snapshotted into
-the run manifest at start, so a retry, fallback, or resume uses the value the
-run began with. Because `profile_digest` hashes the raw `profile.yaml`, setting
-`hermetic` changes the digest and therefore the bundle trust just like any
-other profile edit.
+`environment` says what an executor loads of the operator's own agent setup:
+`minimal` (the default, also when the key is absent) or `full`. A node agent is a
+batch worker: it runs once, reports, and exits. Loading every plugin, MCP server,
+user skill and personal instruction file installed on the machine costs thousands
+of tokens on every spawn (on one development setup, 2026-09-25: about 24k tokens of harness
+context for a claude spawn with the full setup, 18k with the minimal one, measured
+with `claude -p /context`, which needs no model call) and changes what the node
+does: a globally installed `Stop` hook can demand one more reply after the agent
+already reported, and a plugin can inject unrelated context.
 
-### Guidance: turn it on for production profiles
+With `minimal`, a claude or claude-code executor is launched with:
 
-Set `hermetic: true` on every profile a run actually depends on, and leave it off
-only for local throwaway experimentation. A node agent is a batch worker: it runs
-once, reports, and exits. It has no business inheriting the operator's personal
-plugins and hooks, and a globally installed hook (a `Stop` hook that demands one
-more reply, a plugin that injects unrelated context) can silently change what the
-node reports or make its completion signal fire later than the agent itself
-intended. A profile without `hermetic` is a profile that trusts whatever happens
-to be installed on the machine running it, which is rarely something a playbook
-author reviewed.
+- `--settings <run>/agent-settings/<node>.json`: an apb-owned settings file with no
+  hooks, no plugins and no auto-enabled project MCP servers;
+- `--setting-sources project,local`: the user's settings, `CLAUDE.md`, skills and
+  agents stay out, while the project's own `CLAUDE.md` and `.claude/skills` still
+  load;
+- `--strict-mcp-config`: only the MCP servers apb passes itself (the `ask_user`
+  server of a live interactive node);
+- `--add-dir <run>/agent-skills/<node>` when the profile declares `skills`: a
+  fresh copy of those skills from the run snapshot, so the profile's own skills
+  still reach the agent although the user source is not loaded (an isolated node
+  already has them in its working directory).
 
-What it does not do: it is not a sandbox. It does not isolate the filesystem, the
-network, or the project's working tree. A node that needs isolation from other
-concurrent branches touching the same files still needs the node's own `isolation`
-setting (`full`, `best_effort`, or `none`), which is an orthogonal concern.
-`hermetic` suppresses the operator's personal, machine-local agent configuration
-and says nothing about what the node's own prompt, skills, or connectors may do.
+`full` is the explicit opt-in to the operator's whole personal environment, as an
+interactive session would have it. Use it for a profile that depends on something
+only that environment provides: a skill that comes from a plugin (for example the
+superpowers review skills), a user-scope MCP server, or a user skill that is not
+listed in `skills`. Command-line tools (`gh`, `zg`, `code-ranker`, ...) and files
+read by path (`~/.agents/skills/<name>/SKILL.md`) are reachable either way:
+`environment` governs the agent's own configuration, not the shell.
 
-Pair it with `outputs.extract` on the node (a marker name on the node's `outputs`
-block, sibling to `outputs.files`; see HOWTO-authoring.md) as the other half of
-output hygiene. `hermetic` stops local hooks from appending extra turns to an
-agent's session in the first place; `outputs.extract` is the fallback when a host
-injects one anyway, or when the bound executor ignores the flag, because it scopes
-the node's recorded output to the agent's own marked block rather than to whatever
-an unrelated appended turn added on top.
+Only claude and claude-code have such a mechanism today. Other agents run as they
+are configured (codex already gets a run-scoped config home). The value is
+snapshotted into the run manifest at start, so a retry, fallback, or resume uses
+the environment the run began with, and a run started before this setting existed
+keeps the full environment it started with. Because `profile_digest` hashes the
+raw `profile.yaml`, setting `environment` changes the digest and therefore the
+bundle trust just like any other profile edit.
+
+`environment` is not a sandbox. It does not isolate the filesystem, the network, or
+the project's working tree; a node that needs isolation from concurrent branches
+still needs the node's own `isolation` setting. Pair it with `outputs.extract` on
+the node (see HOWTO-authoring.md) as the other half of output hygiene: the minimal
+environment stops local hooks from appending extra turns in the first place, and
+`outputs.extract` scopes the recorded output to the agent's own marked block when
+a host injects one anyway or the bound executor has no minimal environment.
+
+The older `hermetic` key is deprecated. It is still accepted in `profile.yaml`
+but selects nothing: every write path used to emit `hermetic: false` whether or
+not anyone chose it, so it cannot mean the opt-in, and `hermetic: true` is what
+the default does anyway. Rewrites drop it. On the write surfaces (`--hermetic`,
+the MCP and HTTP `hermetic` field) it is a deprecated alias: `true` means
+`minimal`, `false` means `full`.
 
 ## Scopes and resolution
 
@@ -149,10 +166,11 @@ CLI: `apb profile list | show | move | delete | write | edit`, `apb detect`,
 `apb adopt`, `apb subscriptions`, and `apb migrate` to convert legacy `executors`
 playbooks. `apb profile write --scope --agent --model [--fallback a:m ...]
 [--skill NAME ...] [--soul FILE] [--description ...] [--expected-digest DIGEST]
-[--hermetic true|false]` creates or updates a profile through the same logic as
-the MCP tool (validation, per-profile CAS lock, bundle auto-approve); a stale
-`--expected-digest` is a reported conflict. An update that omits `--hermetic`
-(or the MCP `hermetic` field, or the web editor) keeps the stored flag. `apb profile edit <name> [--scope]` opens `profile.yaml` and
+[--environment minimal|full] [--zcode-mode yolo|edit]` creates or updates a profile
+through the same logic as the MCP tool (validation, per-profile CAS lock, bundle
+auto-approve); a stale `--expected-digest` is a reported conflict. An update that
+omits `--environment` (or the MCP `environment` field, or the web editor) keeps
+the stored value. `apb profile edit <name> [--scope]` opens `profile.yaml` and
 `SOUL.md` in `$EDITOR` and saves with a CAS check against the digest read before
 editing, so a concurrent change is a conflict rather than a clobber.
 

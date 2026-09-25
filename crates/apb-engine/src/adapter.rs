@@ -413,21 +413,31 @@ pub struct AgentTask<'a> {
     /// (compaction, finish answers) that have no status file. Owned rather than
     /// borrowed because it is computed fresh per attempt in the retry loop.
     pub status_file: Option<std::path::PathBuf>,
-    /// Hermetic isolation (subtask S1). When the bound profile sets
-    /// `hermetic: true` AND the executor supports settings isolation
-    /// (claude/claude-code, see [`agent_supports_hermetic`]), the engine writes
-    /// an apb-owned minimal settings file (user plugins and hooks disabled) and
-    /// puts its path here; [`inject_hermetic_settings`] then adds claude's
-    /// `--settings <path>` flag. `None` for a non-hermetic profile, for an agent
-    /// without an isolation mechanism (the engine warns instead), and for
-    /// internal side-effect-free calls (compaction, finish answers).
-    pub hermetic_settings: Option<std::path::PathBuf>,
+    /// The minimal agent environment (issue #136 item 4, the profile's default
+    /// `environment: minimal`). Set for a claude/claude-code step (see
+    /// [`agent_supports_hermetic`]); [`inject_hermetic_settings`] turns it
+    /// into claude's flags. `None` for `environment: full`, for an agent
+    /// without such a mechanism, and for internal side-effect-free calls
+    /// (compaction, finish answers).
+    pub hermetic_settings: Option<HermeticEnv>,
 }
 
-/// Whether an agent exposes a settings-isolation mechanism apb can drive for a
-/// hermetic profile. Only claude/claude-code do (via the `--settings` flag);
-/// every other adapter has no such mechanism, so the engine ignores the
-/// `hermetic` flag for it with a warning rather than failing the run.
+/// What a claude step launched with the minimal environment gets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HermeticEnv {
+    /// apb's own settings file ([`HERMETIC_SETTINGS_JSON`]), via `--settings`.
+    pub settings: std::path::PathBuf,
+    /// A directory whose `.claude/skills` holds the profile's declared skills,
+    /// via `--add-dir`: the user setting source that would otherwise provide
+    /// them is not loaded. `None` when the profile declares none, or when an
+    /// isolated node already has them in its own working directory.
+    pub skills_dir: Option<std::path::PathBuf>,
+}
+
+/// Whether an agent exposes a settings-isolation mechanism apb can drive for
+/// the minimal environment. Only claude/claude-code do; every other agent runs
+/// as it is configured (codex already gets a run-scoped home, see
+/// `agent_home`).
 pub(crate) fn agent_supports_hermetic(agent: &str) -> bool {
     canonical_agent_id(agent) == "claude"
 }
@@ -440,20 +450,37 @@ pub(crate) fn agent_supports_hermetic(agent: &str) -> bool {
 /// - `enableAllProjectMcpServers: false` - project MCP servers are not
 ///   auto-enabled.
 ///
-/// Kept intentionally small and apb-owned; extend deliberately.
+/// Kept intentionally small and apb-owned; extend deliberately. The user
+/// settings file itself is not loaded at all (see [`inject_hermetic_settings`]).
 pub(crate) const HERMETIC_SETTINGS_JSON: &str =
     "{\n  \"hooks\": {},\n  \"enabledPlugins\": {},\n  \"enableAllProjectMcpServers\": false\n}\n";
 
-/// The run-dir path of the apb-owned hermetic settings file.
-pub(crate) fn hermetic_settings_path(run_dir: &Path) -> std::path::PathBuf {
-    run_dir.join("hermetic-settings.json")
+/// claude's flags for the minimal environment, after `--settings <file>`:
+/// only the project and local setting sources (the user's settings, CLAUDE.md,
+/// skills and agents stay out) and only the MCP servers passed with
+/// `--mcp-config` (apb's own ask-server on a live node). Checked with
+/// `claude -p /context`, which reports the loaded context without a model
+/// call: about 24k tokens of harness context before, 18k with these flags, on
+/// one development setup (2026-09-25).
+pub(crate) const HERMETIC_FLAGS: &[&str] =
+    &["--setting-sources", "project,local", "--strict-mcp-config"];
+
+/// The run-dir path of the apb-owned hermetic settings file for `node`. One
+/// file per node, not per run: parallel branches write theirs at the same
+/// time, and two atomic writes of one path race on its temp file.
+pub(crate) fn hermetic_settings_path(run_dir: &Path, node: &str) -> std::path::PathBuf {
+    run_dir.join("agent-settings").join(format!("{node}.json"))
 }
 
-/// Writes the apb-owned minimal settings file into the run dir (once; the
+/// Writes the apb-owned minimal settings file for `node` into the run dir (the
 /// content is fixed, so a repeat write is idempotent) and returns its path.
 /// Written atomically via `apb_core::fsutil`.
-pub(crate) fn write_hermetic_settings(run_dir: &Path) -> std::io::Result<std::path::PathBuf> {
-    let path = hermetic_settings_path(run_dir);
+pub(crate) fn write_hermetic_settings(
+    run_dir: &Path,
+    node: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let path = hermetic_settings_path(run_dir, node);
+    apb_core::fsutil::create_dir_under(run_dir, &run_dir.join("agent-settings"))?;
     apb_core::fsutil::atomic_write(&path, HERMETIC_SETTINGS_JSON.as_bytes())?;
     Ok(path)
 }
@@ -946,11 +973,16 @@ fn inject_ask_server(argv: &mut Vec<String>, task: &AgentTask, live: Option<&Liv
 /// gain a claude-only flag. The engine only sets `hermetic_settings` for an
 /// agent that [`agent_supports_hermetic`], so the guard here is belt-and-braces.
 fn inject_hermetic_settings(argv: &mut Vec<String>, task: &AgentTask) {
-    if let Some(path) = &task.hermetic_settings
+    if let Some(env) = &task.hermetic_settings
         && agent_supports_hermetic(task.agent)
     {
         argv.push("--settings".to_string());
-        argv.push(path.to_string_lossy().into_owned());
+        argv.push(env.settings.to_string_lossy().into_owned());
+        argv.extend(HERMETIC_FLAGS.iter().map(|f| f.to_string()));
+        if let Some(dir) = &env.skills_dir {
+            argv.push("--add-dir".to_string());
+            argv.push(dir.to_string_lossy().into_owned());
+        }
     }
 }
 
@@ -2017,7 +2049,7 @@ mod tests {
     fn hermetic_task<'a>(
         policy: &'a ConnectorEnvPolicy,
         agent: &'a str,
-        settings: Option<std::path::PathBuf>,
+        settings: Option<HermeticEnv>,
     ) -> AgentTask<'a> {
         AgentTask {
             prompt: "go",
@@ -2041,15 +2073,29 @@ mod tests {
     #[test]
     fn hermetic_settings_flag_injected_for_claude_and_absent_otherwise() {
         let policy = ConnectorEnvPolicy::default();
-        let path = std::path::PathBuf::from("/run/hermetic-settings.json");
-        // Claude with a hermetic settings file -> argv gains `--settings <path>`.
-        let claude = hermetic_task(&policy, "claude", Some(path.clone()));
+        let path = std::path::PathBuf::from("/run/agent-settings/n.json");
+        let env = HermeticEnv {
+            settings: path.clone(),
+            skills_dir: Some("/run/agent-skills/n".into()),
+        };
+        // Claude with a hermetic settings file -> argv gains `--settings <path>`,
+        // the source/MCP restriction and the skills directory.
+        let claude = hermetic_task(&policy, "claude", Some(env.clone()));
         let mut argv = vec!["-p".to_string()];
         inject_hermetic_settings(&mut argv, &claude);
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--settings" && w[1] == path.to_string_lossy()),
             "expected --settings <path> for a hermetic claude step, got {argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--setting-sources" && w[1] == "project,local")
+                && argv.iter().any(|a| a == "--strict-mcp-config")
+                && argv
+                    .windows(2)
+                    .any(|w| w[0] == "--add-dir" && w[1] == "/run/agent-skills/n"),
+            "got {argv:?}"
         );
         // No hermetic settings -> no flag.
         let plain = hermetic_task(&policy, "claude", None);
@@ -2058,7 +2104,7 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--settings"), "got {argv:?}");
         // A non-claude agent must never gain the claude-only flag, even if a
         // settings path was (wrongly) attached.
-        let other = hermetic_task(&policy, "codex", Some(path.clone()));
+        let other = hermetic_task(&policy, "codex", Some(env));
         let mut argv = vec!["-p".to_string()];
         inject_hermetic_settings(&mut argv, &other);
         assert!(!argv.iter().any(|a| a == "--settings"), "got {argv:?}");
@@ -2068,7 +2114,7 @@ mod tests {
     fn hermetic_settings_file_disables_hooks_and_plugins() {
         let dir = std::env::temp_dir().join(format!("apb-hermetic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = write_hermetic_settings(&dir).unwrap();
+        let path = write_hermetic_settings(&dir, "n").unwrap();
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(json["hooks"], serde_json::json!({}), "hooks must be empty");

@@ -150,14 +150,14 @@ pub struct ProfileWrite {
     /// creates a new profile.
     pub expected_digest: Option<String>,
     pub soul_requirement: SoulRequirement,
-    /// When true, the executor launches with hermetic isolation (disables
-    /// user-scope plugins and hooks). `None` keeps the stored profile's flag on
-    /// an update (false for a new profile), so a surface that cannot express
-    /// the flag never strips it.
-    pub hermetic: Option<bool>,
+    /// The agent environment (`minimal`, the default, or `full`, the opt-in
+    /// to the operator's whole personal setup). `None` keeps the stored
+    /// profile's value on an update (absent, so minimal, for a new profile),
+    /// so a surface that cannot express it never strips an opt-in.
+    pub environment: Option<apb_core::profile::AgentEnvironment>,
     /// The ZCode mode for the profile's zcode steps in an autonomous run.
     /// `None` keeps the stored value on an update (absent for a new profile),
-    /// like `hermetic`.
+    /// like `environment`.
     pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
 }
 
@@ -172,7 +172,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         executor,
         expected_digest,
         soul_requirement,
-        hermetic,
+        environment,
         zcode_mode,
     } = req;
     apb_core::profile::validate_profile_name(&name).map_err(ToolError::Engine)?;
@@ -209,7 +209,9 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         },
         soul: soul_requirement,
         skills,
-        hermetic: hermetic.unwrap_or(false),
+        // `minimal` is the default and is written as the absence of the key.
+        environment: environment.filter(|e| *e != apb_core::profile::AgentEnvironment::Minimal),
+        hermetic: None,
         zcode_mode,
     };
 
@@ -266,11 +268,12 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
                     "expected_digest does not match current".into(),
                 ));
             }
-            // An update that does not state `hermetic` keeps the stored flag
-            // (read under the lock, from the exact content the CAS matched).
+            // An update that does not state `environment` keeps the stored
+            // value (read under the lock, from the exact content the CAS
+            // matched).
             let stored = ProfileDoc::from_yaml(&cur_yaml).ok();
-            if hermetic.is_none() {
-                doc.hermetic = stored.as_ref().is_some_and(|d| d.hermetic);
+            if environment.is_none() {
+                doc.environment = stored.as_ref().and_then(|d| d.environment);
             }
             // Likewise `zcode_mode`.
             if zcode_mode.is_none() {

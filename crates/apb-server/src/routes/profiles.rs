@@ -148,14 +148,16 @@ pub(crate) struct ProfileWriteBody {
     soul_requirement: String,
     #[serde(default)]
     expected_digest: Option<String>,
-    /// Hermetic isolation flag. Absent (the current web editor cannot express
-    /// it) means "keep whatever the stored profile has" rather than force
-    /// `false`, so a web-initiated edit cannot silently strip an owner-set
-    /// hermetic profile.
+    /// Agent environment (`minimal` | `full`). Absent (the current web
+    /// editor cannot express it) means "keep whatever the stored profile has",
+    /// so a web-initiated edit cannot silently strip an owner's opt-in.
+    #[serde(default)]
+    environment: Option<String>,
+    /// Deprecated spelling of `environment`: `true` = minimal, `false` = full.
     #[serde(default)]
     hermetic: Option<bool>,
     /// ZCode mode (`yolo` | `edit`); absent keeps the stored value, like
-    /// `hermetic`.
+    /// `environment`.
     #[serde(default)]
     zcode_mode: Option<apb_core::profile::ZcodeMode>,
 }
@@ -192,6 +194,13 @@ pub(crate) async fn write_profile(
         Ok(r) => r,
         Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
     };
+    let environment = match apb_core::profile::AgentEnvironment::from_surface(
+        body.environment.as_deref(),
+        body.hermetic,
+    ) {
+        Ok(e) => e,
+        Err(e) => return (StatusCode::BAD_REQUEST, e).into_response(),
+    };
     let res = profile_tools::profile_write(
         &root,
         ProfileWrite {
@@ -211,8 +220,8 @@ pub(crate) async fn write_profile(
             },
             expected_digest: body.expected_digest,
             soul_requirement,
-            // Absent keeps the stored flag (profile_write decides under its lock).
-            hermetic: body.hermetic,
+            // Absent keeps the stored value (profile_write decides under its lock).
+            environment,
             zcode_mode: body.zcode_mode,
         },
     );
