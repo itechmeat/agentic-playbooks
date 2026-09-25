@@ -165,6 +165,47 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
     );
 }
 
+/// F18: docs/MCP.md is the tool reference agents and people read; every tool
+/// the router actually registers must be in it.
+#[test]
+fn every_registered_tool_is_documented_in_mcp_md() {
+    let doc = include_str!("../../../../docs/MCP.md");
+    let missing: Vec<String> = WfMcp::new(PathBuf::from("."))
+        .tool_router
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .filter(|name| !doc.contains(&format!("`{name}`")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "tools missing from docs/MCP.md: {missing:?}"
+    );
+}
+
+/// F18: `playbook_howto` hands agents docs/HOWTO-authoring.md; its node type
+/// list must name every node type the schema accepts.
+#[test]
+fn playbook_howto_lists_every_node_type() {
+    let howto = crate::tools::playbook_howto().unwrap()["howto"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let section = howto
+        .split("## Node types")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").nth(1))
+        .expect("HOWTO has a `## Node types` section with a type list");
+    let missing: Vec<&str> = apb_core::schema::NODE_TYPES
+        .into_iter()
+        .filter(|t| !section.contains(&format!("`{t}`")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "node types missing from the HOWTO list: {missing:?}"
+    );
+}
+
 #[test]
 fn playbook_interview_returns_the_embedded_guide() {
     let value = crate::tools::playbook_interview().unwrap();

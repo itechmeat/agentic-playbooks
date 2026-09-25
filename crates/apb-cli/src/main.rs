@@ -485,6 +485,33 @@ mod tests {
         registers_workspace(cli.command.as_ref())
     }
 
+    /// F18: llms.txt is what an agent reads to learn the CLI; its command
+    /// list must name every public subcommand clap registers.
+    #[test]
+    fn llms_txt_lists_every_public_command() {
+        use clap::CommandFactory;
+        let llms = include_str!("../../../llms.txt");
+        let section = llms
+            .split("## CLI commands")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("llms.txt has a `## CLI commands` section");
+        let missing: Vec<String> = Cli::command()
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set())
+            .map(|c| c.get_name().to_string())
+            .filter(|name| {
+                !section
+                    .lines()
+                    .any(|l| l.starts_with(&format!("apb {name} ")) || l == format!("apb {name}"))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "commands missing from llms.txt: {missing:?}"
+        );
+    }
+
     #[test]
     fn user_facing_commands_register_the_workspace() {
         assert!(registers(&["apb"]));

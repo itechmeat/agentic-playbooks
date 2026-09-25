@@ -85,14 +85,30 @@ apb list            playbooks and versions
 apb validate        validate playbook schema
 apb run <id>        run a playbook
 apb runs            list runs
+apb wait <run>      block until a run finishes, needs input or stops
 apb resume <run>    resume a paused or interrupted run
+apb stop <run>      stop a run
 apb review          decide a pending human_review node
-apb dashboard       web UI on port 7321
-apb mcp             stdio MCP server for coding agents
-apb doctor          diagnose environment
-apb detect          detect installed coding agents
+apb answer          answer an interactive node's pending question
+apb note            post a supervisor note to a run
+apb export          export a playbook (with layout) to a bundle file
+apb import          import a playbook bundle into this project
 apb profile         manage agent profiles
+apb connector       list or manage connectors
+apb detect          detect installed coding agents
+apb adopt           adoption readiness report for a playbook
+apb subscriptions   view or declare agent subscriptions
+apb suggestions     inspect and undo recorded suggestion decisions
 apb migrate         migrate schema 1 playbooks to schema 2
+apb doctor          diagnose environment, or one run with --run
+apb cache           inspect and manage the node result cache
+apb projects        list or manage the workspace registry
+apb dashboard       web UI on port 7321
+apb ingest          only the inbound webhook listener (headless)
+apb server          manage server-mode API keys
+apb dev             dev mode: Vite HMR frontend + API server (source tree)
+apb mcp             stdio MCP server for coding agents
+apb self-update     update apb to the latest release
 ```
 
 ## Architecture

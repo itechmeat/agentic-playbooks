@@ -290,7 +290,8 @@ engine's resilience features exist to handle.
 ## Node types
 
 `start`, `agent_task`, `script`, `prompt`, `condition`, `human_review`,
-`wait`, `finish`. A playbook needs exactly one `start` and at least one
+`wait`, `finish`, `playbook` (runs another playbook as a sub-run, see
+"Sub-playbooks" below). A playbook needs exactly one `start` and at least one
 `finish`. Edges connect node ids; conditional edges gate on node status,
 review status, an output substring match, or one structured field of a node's
 output.
