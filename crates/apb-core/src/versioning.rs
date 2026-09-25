@@ -259,9 +259,19 @@ pub fn save_definition(
 ) -> Result<String, VersioningError> {
     let version =
         create_version_with_override(root, id, yaml, None, version_override, make_current)?;
+    approve_written(root, id, &version, "saved");
+    Ok(version)
+}
+
+/// The trust half of a write through apb: approves the digest of
+/// `<id>/<version>/playbook.yaml` as `LocallyApproved`, because the user asked
+/// for that write. Shared by [`save_definition`] and [`restore_from_trash`].
+/// A failure to record trust does not undo the write (the definition is on
+/// disk either way); it is reported and the playbook stays untrusted.
+fn approve_written(root: &Path, id: &str, version: &str, what: &str) {
     let written = playbooks_dir(root)
         .join(id)
-        .join(&version)
+        .join(version)
         .join("playbook.yaml");
     let approved = fs::read_to_string(&written).and_then(|saved| {
         crate::trust::TrustStore::load().approve(
@@ -271,9 +281,8 @@ pub fn save_definition(
         )
     });
     if let Err(e) = approved {
-        eprintln!("apb: saved `{id}` {version} but could not record its trust: {e}");
+        eprintln!("apb: {what} `{id}` {version} but could not record its trust: {e}");
     }
-    Ok(version)
 }
 
 /// Creates immutable patch version from base version without changing current.
@@ -525,8 +534,43 @@ pub fn delete_playbook(root: &Path, id: &str, ts_millis: u128) -> Result<PathBuf
     Ok(dst)
 }
 
-/// Names of folders in `.apb/trash/`. If trash directory doesn't exist - empty list.
-pub fn list_trash(root: &Path) -> Result<Vec<String>, VersioningError> {
+/// One deleted playbook in `.apb/trash/`, as every surface lists it
+/// (dashboard, `apb trash list`, MCP `playbook_trash_list`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct TrashEntry {
+    /// The trash folder name `<id>-<deleted_at_ms>`: the exact handle a
+    /// restore takes when one id was deleted more than once.
+    pub name: String,
+    /// The playbook id it restores to.
+    pub id: String,
+    /// When it was deleted, in Unix milliseconds.
+    pub deleted_at_ms: u128,
+    /// Its versions in semver order; a restore brings all of them back.
+    pub versions: Vec<String>,
+    /// The version its `current` pointer names, if any.
+    pub current: Option<String>,
+    /// A playbook with this id exists again, so a restore would be refused
+    /// until that one is deleted.
+    pub conflict: bool,
+}
+
+/// What a restore brought back.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RestoredPlaybook {
+    pub id: String,
+    /// The trash entry it came from.
+    pub name: String,
+    /// The restored `current` version (its digest is now approved).
+    pub current: Option<String>,
+    pub versions: Vec<String>,
+}
+
+/// The deleted playbooks of the project at `root`, newest deletion first.
+/// Folders whose name is not `<id>-<millis>` (nothing apb wrote) are skipped.
+/// No trash directory - empty list.
+pub fn list_trash(root: &Path) -> Result<Vec<TrashEntry>, VersioningError> {
     let trash = trash_dir(root);
     if !trash.is_dir() {
         return Ok(Vec::new());
@@ -535,12 +579,36 @@ pub fn list_trash(root: &Path) -> Result<Vec<String>, VersioningError> {
     let mut out = Vec::new();
     for entry in fs::read_dir(&trash)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            out.push(entry.file_name().to_string_lossy().to_string());
+        if !entry.file_type()?.is_dir() {
+            continue;
         }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some((id, deleted_at_ms)) = parse_trash_name(&name) else {
+            continue;
+        };
+        let dir = entry.path();
+        out.push(TrashEntry {
+            conflict: playbooks_dir(root).join(&id).exists(),
+            versions: list_versions(&dir)?,
+            current: read_current_pointer(&dir),
+            name,
+            id,
+            deleted_at_ms,
+        });
     }
-    out.sort();
+    out.sort_by(|a, b| {
+        b.deleted_at_ms
+            .cmp(&a.deleted_at_ms)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     Ok(out)
+}
+
+fn read_current_pointer(playbook_dir: &Path) -> Option<String> {
+    fs::read_to_string(playbook_dir.join("current"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Saves canvas layout for version. Layout is mutable: overwriting
@@ -731,33 +799,66 @@ fn line_diff(from: &str, to: &str) -> String {
     out.join("\n")
 }
 
-/// Restores playbook from trash: `<id>-<ts>` -> `.apb/playbooks/<id>`.
-/// If `<id>` already exists - `Conflict`.
-pub fn restore_playbook(root: &Path, trash_name: &str) -> Result<String, VersioningError> {
-    if !is_safe_segment(trash_name) {
-        return Err(VersioningError::NotFound(trash_name.to_string()));
+/// Restores a deleted playbook: the one path behind the dashboard's Restore,
+/// `apb trash restore` and MCP `playbook_trash_restore`.
+///
+/// `name` is a trash entry name (`<id>-<millis>`) or a playbook id; an id
+/// picks its most recent deletion. The whole folder moves back to
+/// `.apb/playbooks/<id>`, so every version, the `current` pointer, layouts
+/// and provenance come back as they were (runs never moved). The restored
+/// current definition then gets the trust of any other write through apb
+/// (see [`save_definition`]): its digest is approved as `LocallyApproved`.
+///
+/// Errors: `NotFound` when nothing in the trash matches, `Conflict` when a
+/// playbook with that id exists again (nothing is moved then).
+pub fn restore_from_trash(root: &Path, name: &str) -> Result<RestoredPlaybook, VersioningError> {
+    if !is_safe_segment(name) {
+        return Err(VersioningError::NotFound(format!("`{name}` in trash")));
     }
+    let entries = list_trash(root)?;
+    let entry = entries
+        .iter()
+        .find(|e| e.name == name)
+        // Newest first, so the first match by id is its latest deletion.
+        .or_else(|| entries.iter().find(|e| e.id == name))
+        .ok_or_else(|| VersioningError::NotFound(format!("`{name}` in trash")))?;
 
-    let id = id_from_trash_name(trash_name)
-        .ok_or_else(|| VersioningError::NotFound(trash_name.to_string()))?;
-
-    let src = trash_dir(root).join(trash_name);
-    if !src.is_dir() {
-        return Err(VersioningError::NotFound(trash_name.to_string()));
-    }
-
-    let dst = playbooks_dir(root).join(&id);
+    let src = trash_dir(root).join(&entry.name);
+    let dst = playbooks_dir(root).join(&entry.id);
+    fs::create_dir_all(playbooks_dir(root))?;
+    let conflict = || {
+        VersioningError::Conflict(format!(
+            "a playbook `{}` exists again; delete or rename it, then restore `{}`",
+            entry.id, entry.name
+        ))
+    };
     if dst.exists() {
-        return Err(VersioningError::Conflict(format!(
-            "playbook `{id}` already exists"
-        )));
+        return Err(conflict());
     }
-
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)?;
+    // A playbook created with the same id between the check and the move
+    // makes the rename fail (the target is not empty), which is the same
+    // conflict.
+    match fs::rename(&src, &dst) {
+        Ok(()) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            return Err(conflict());
+        }
+        Err(e) => return Err(e.into()),
     }
-    fs::rename(&src, &dst)?;
-    Ok(id)
+    if let Some(current) = &entry.current {
+        approve_written(root, &entry.id, current, "restored");
+    }
+    Ok(RestoredPlaybook {
+        id: entry.id.clone(),
+        name: entry.name.clone(),
+        current: entry.current.clone(),
+        versions: entry.versions.clone(),
+    })
 }
 
 fn playbooks_dir(root: &Path) -> PathBuf {
@@ -842,19 +943,17 @@ fn trash_dir(root: &Path) -> PathBuf {
     root.join(".apb/trash")
 }
 
-/// Extracts `id` from trash folder name `<id>-<ts_millis>` (part before last `-`).
-fn id_from_trash_name(trash_name: &str) -> Option<String> {
+/// Splits a trash folder name `<id>-<ts_millis>` (at the last `-`) into the
+/// id and the deletion time.
+fn parse_trash_name(trash_name: &str) -> Option<(String, u128)> {
     let (id, ts) = trash_name.rsplit_once('-')?;
-    if id.is_empty() || ts.is_empty() {
-        return None;
-    }
-    if !ts.chars().all(|c| c.is_ascii_digit()) {
+    if id.is_empty() || ts.is_empty() || !ts.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
     if !is_safe_segment(id) {
         return None;
     }
-    Some(id.to_string())
+    Some((id.to_string(), ts.parse().ok()?))
 }
 
 fn schema_err(e: SchemaError) -> VersioningError {

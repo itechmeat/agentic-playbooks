@@ -146,6 +146,7 @@ dependencies = [
  "subtle",
  "tempfile",
  "thiserror",
+ "ts-rs",
  "uuid",
 ]
 

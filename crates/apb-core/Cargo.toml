@@ -36,5 +36,13 @@ regex = "1"
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# TypeScript declarations for the core types the dashboard consumes (the
+# trash listing), derived only under the `ts` feature: apb-server's contract
+# test turns it on to render `web/src/lib/api.gen.ts`.
+ts-rs = { version = "12", optional = true }
+
+[features]
+ts = ["dep:ts-rs"]
+
 [dev-dependencies]
 tempfile = "3.27.0"

@@ -3,9 +3,9 @@ use std::path::Path;
 
 use apb_core::registry::{Registry, init_project};
 use apb_core::versioning::{
-    VersioningError, create_patch_version, create_version, create_version_with_override,
-    delete_playbook, list_trash, next_minor_version, next_patch_version, read_provenance,
-    restore_playbook, save_layout, version_diff,
+    TrashEntry, VersioningError, create_patch_version, create_version,
+    create_version_with_override, delete_playbook, list_trash, next_minor_version,
+    next_patch_version, read_provenance, restore_from_trash, save_layout, version_diff,
 };
 
 const VALID: &str = include_str!("../fixtures/valid.yaml");
@@ -353,44 +353,126 @@ fn create_version_copies_scripts_from_base() {
     assert_eq!(content, "#!/bin/sh\necho ok\n");
 }
 
+/// The trash round trip every surface relies on (dashboard, `apb trash`, MCP):
+/// the listing tells what a deletion holds, and a restore brings the whole
+/// playbook back - every version, the current pointer, layouts - and trusts
+/// the restored definition like any other write through apb.
 #[test]
-fn delete_playbook_moves_to_trash_and_restore_brings_back() {
+fn trash_lists_a_deleted_playbook_and_restore_brings_it_all_back_trusted() {
+    let _cfg = crate::common::config_sandbox();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());
-
     let id = "implement-task";
-    let ts: u128 = 1_700_000_000_000;
-    let trash_name = format!("{id}-{ts}");
+    let v2 = create_version(
+        dir.path(),
+        id,
+        &VALID.replace("name: Implement Task", "name: Second"),
+        None,
+        true,
+    )
+    .unwrap();
 
-    let trashed = delete_playbook(dir.path(), id, ts).unwrap();
-    assert_eq!(trashed, dir.path().join(".apb/trash").join(&trash_name));
-    assert!(trashed.is_dir());
+    let ts: u128 = 1_700_000_000_000;
+    delete_playbook(dir.path(), id, ts).unwrap();
     assert!(!dir.path().join(".apb/playbooks").join(id).exists());
 
     let listed = list_trash(dir.path()).unwrap();
-    assert!(listed.contains(&trash_name));
+    assert_eq!(
+        listed,
+        vec![TrashEntry {
+            name: format!("{id}-{ts}"),
+            id: id.to_string(),
+            deleted_at_ms: ts,
+            versions: vec!["1.0.0".to_string(), v2.clone()],
+            current: Some(v2.clone()),
+            conflict: false,
+        }]
+    );
 
-    let restored_id = restore_playbook(dir.path(), &trash_name).unwrap();
-    assert_eq!(restored_id, id);
-    assert!(dir.path().join(".apb/playbooks").join(id).is_dir());
-    assert!(!trashed.exists());
-
-    let current =
-        fs::read_to_string(dir.path().join(".apb/playbooks").join(id).join("current")).unwrap();
-    assert_eq!(current.trim(), "1.0.0");
-
-    // a repeat restore when the id already exists -> Conflict
-    fs::create_dir_all(dir.path().join(".apb/trash").join(&trash_name)).unwrap();
-    fs::write(
+    // By id: the playbook's latest deletion.
+    let restored = restore_from_trash(dir.path(), id).unwrap();
+    assert_eq!(restored.id, id);
+    assert_eq!(restored.current.as_deref(), Some(v2.as_str()));
+    assert!(list_trash(dir.path()).unwrap().is_empty());
+    let reg = Registry::open(dir.path()).unwrap();
+    assert_eq!(reg.load(id, None).unwrap().playbook.name, "Second");
+    assert!(reg.load(id, Some("1.0.0")).is_ok());
+    assert!(
         dir.path()
-            .join(".apb/trash")
-            .join(&trash_name)
-            .join("marker"),
-        "x",
+            .join(".apb/playbooks")
+            .join(id)
+            .join("layouts/1.0.0.yaml")
+            .is_file()
+    );
+    let current_yaml = fs::read_to_string(
+        dir.path()
+            .join(".apb/playbooks")
+            .join(id)
+            .join(&v2)
+            .join("playbook.yaml"),
     )
     .unwrap();
-    let err = restore_playbook(dir.path(), &trash_name).unwrap_err();
-    assert!(matches!(err, VersioningError::Conflict(_)));
+    assert!(
+        apb_core::trust::TrustStore::load()
+            .is_approved(&apb_core::scope::digest_str(&current_yaml)),
+        "a restore trusts the restored definition, like a save"
+    );
+}
+
+/// A playbook with the same id created after the deletion wins: the restore
+/// is refused, nothing moves, and the listing flags the conflict up front.
+#[test]
+fn restore_refuses_when_the_id_exists_again_and_moves_nothing() {
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let id = "implement-task";
+    delete_playbook(dir.path(), id, 1).unwrap();
+    create_version(
+        dir.path(),
+        id,
+        &VALID.replace("name: Implement Task", "name: Newcomer"),
+        None,
+        true,
+    )
+    .unwrap();
+
+    let listed = list_trash(dir.path()).unwrap();
+    assert!(listed[0].conflict);
+    let err = restore_from_trash(dir.path(), id).unwrap_err();
+    assert!(matches!(err, VersioningError::Conflict(_)), "{err}");
+    assert!(err.to_string().contains("exists again"), "{err}");
+    assert_eq!(list_trash(dir.path()).unwrap().len(), 1);
+    let reg = Registry::open(dir.path()).unwrap();
+    assert_eq!(reg.load(id, None).unwrap().playbook.name, "Newcomer");
+}
+
+/// An id deleted twice has two trash entries: the exact entry name restores
+/// that one, the bare id the newest.
+#[test]
+fn restore_by_entry_name_picks_that_deletion() {
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let id = "implement-task";
+    delete_playbook(dir.path(), id, 100).unwrap();
+    seed(dir.path());
+    delete_playbook(dir.path(), id, 200).unwrap();
+    let names: Vec<String> = list_trash(dir.path())
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(names, vec![format!("{id}-200"), format!("{id}-100")]);
+
+    let restored = restore_from_trash(dir.path(), &format!("{id}-100")).unwrap();
+    assert_eq!(restored.name, format!("{id}-100"));
+    let left: Vec<String> = list_trash(dir.path())
+        .unwrap()
+        .into_iter()
+        .map(|e| e.name)
+        .collect();
+    assert_eq!(left, vec![format!("{id}-200")]);
 }
 
 #[test]
@@ -406,21 +488,15 @@ fn delete_playbook_missing_and_unsafe_id() {
 }
 
 #[test]
-fn restore_playbook_rejects_unsafe_trash_name() {
+fn restore_rejects_unknown_and_unsafe_names() {
     let dir = tempfile::tempdir().unwrap();
     init_project(dir.path()).unwrap();
 
-    let err = restore_playbook(dir.path(), "../evil-1").unwrap_err();
-    assert!(matches!(err, VersioningError::NotFound(_)));
-}
-
-#[test]
-fn list_trash_empty_when_no_trash_dir() {
-    let dir = tempfile::tempdir().unwrap();
-    init_project(dir.path()).unwrap();
-
-    let listed = list_trash(dir.path()).unwrap();
-    assert!(listed.is_empty());
+    for name in ["../evil-1", "no-such-apb"] {
+        let err = restore_from_trash(dir.path(), name).unwrap_err();
+        assert!(matches!(err, VersioningError::NotFound(_)), "{name}");
+    }
+    assert!(list_trash(dir.path()).unwrap().is_empty());
 }
 
 #[test]
