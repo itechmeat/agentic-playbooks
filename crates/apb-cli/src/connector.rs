@@ -30,9 +30,9 @@ pub(crate) enum ConnectorAction {
     /// Show one connector's manifest summary and account status
     Show { name: String },
     /// Call a connector function - the agent-facing call channel (also
-    /// usable by a human for debugging). Requires a run context: this
-    /// process must be spawned by the engine with `APB_RUN_DIR` and
-    /// `APB_NODE_ID` set.
+    /// usable by a human for debugging). A real call requires a run context:
+    /// this process must be spawned by the engine with `APB_RUN_DIR` and
+    /// `APB_NODE_ID` set. `--dry-run` also works outside a run.
     Call {
         name: String,
         function: String,
@@ -371,23 +371,6 @@ fn call_cmd(
     dry_run: bool,
     full: bool,
 ) -> ExitCode {
-    let run_dir = std::env::var("APB_RUN_DIR").ok();
-    let node_id = std::env::var("APB_NODE_ID").ok();
-    let (run_dir, node_id) = match (run_dir, node_id) {
-        (Some(r), Some(n)) => (r, n),
-        _ => {
-            print_call_result(&call_error_json(
-                "config",
-                "apb connector call requires a run context: set APB_RUN_DIR (the runs/<id> \
-                 directory of the current run) and APB_NODE_ID (the id of the node making the \
-                 call). Both are set automatically by the engine when a node executes a \
-                 connector call; outside a run, use the connector's healthcheck or `--dry-run` \
-                 inside a real run instead.",
-            ));
-            return ExitCode::FAILURE;
-        }
-    };
-
     let args_str = match args.as_deref() {
         None => "{}".to_string(),
         Some("-") => {
@@ -409,6 +392,44 @@ fn call_cmd(
             print_call_result(&call_error_json(
                 "invalid_args",
                 &format!("--args is not valid JSON: {e}"),
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let run_dir = std::env::var("APB_RUN_DIR").ok();
+    let node_id = std::env::var("APB_NODE_ID").ok();
+    let (run_dir, node_id) = match (run_dir, node_id) {
+        (Some(r), Some(n)) => (r, n),
+        // A dry run resolves no secret and executes nothing, so outside a run
+        // it renders against the live connector and account config (the
+        // dashboard playground's path) instead of refusing.
+        _ if dry_run => {
+            let (value, ok) = apb_engine::connector::call::play_call(
+                root,
+                name,
+                account.as_deref(),
+                function,
+                &parsed_args,
+                true,
+                full,
+            );
+            print_call_result(&value);
+            return if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        _ => {
+            print_call_result(&call_error_json(
+                "config",
+                "apb connector call requires a run context: set APB_RUN_DIR (the runs/<id> \
+                 directory of the current run) and APB_NODE_ID (the id of the node making the \
+                 call). Both are set automatically by the engine when a node executes a \
+                 connector call; outside a run, `--dry-run` renders the call without \
+                 executing it and `apb connector doctor` or the dashboard probe checks an \
+                 account.",
             ));
             return ExitCode::FAILURE;
         }

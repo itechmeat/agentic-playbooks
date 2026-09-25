@@ -287,8 +287,10 @@ apb connector init <name>       scaffold a new connector folder from a template
 ```
 
 `apb connector call` needs a run context (`APB_RUN_DIR` and `APB_NODE_ID`, set by
-the engine when a node executes a call); outside a run use `--dry-run` to render
-a call without executing it, or the dashboard healthcheck to probe an account.
+the engine when a node executes a call). Outside a run, `--dry-run` renders a
+call without executing it, against the live connector and account config (no
+secret is resolved, so no approval is needed); probe an account with the
+dashboard healthcheck.
 `--args -` reads the JSON arguments from stdin.
 
 ## Official connectors

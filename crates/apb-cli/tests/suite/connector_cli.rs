@@ -148,6 +148,41 @@ fn call_without_run_context_prints_config_error_json_and_exits_nonzero() {
 
 // --- env ------------------------------------------------------------------
 
+/// `--dry-run` renders a call without executing it or resolving secrets, so
+/// it needs no run context: outside a run it renders against the live
+/// connector and account config (the docs promise exactly this). The token's
+/// env var is deliberately unset and nothing is approved.
+#[test]
+fn call_dry_run_without_run_context_renders_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    write_widget_account(dir.path(), "WIDGET_DRY_RUN_TOKEN_UNSET");
+
+    let out = playbook(
+        dir.path(),
+        &[
+            "connector",
+            "call",
+            "widget",
+            "get_item",
+            "--args",
+            r#"{"id":"42"}"#,
+            "--dry-run",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "dry run outside a run: {stdout}");
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
+    assert_eq!(v["dry_run"], serde_json::json!(true), "{v}");
+    assert_eq!(
+        v["url"],
+        serde_json::json!("https://example.com/items/42"),
+        "{v}"
+    );
+}
+
 #[test]
 fn env_lists_the_scaffold_token_var_when_unset() {
     let dir = tempfile::tempdir().unwrap();
