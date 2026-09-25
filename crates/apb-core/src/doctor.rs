@@ -166,6 +166,12 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         refs.extend(playbook_profile_refs(playbook));
     }
     let mut seen_refs: BTreeSet<String> = BTreeSet::new();
+    // Loaded on the first profile that resolves: detection, the models table
+    // and the config's model policy (crate::model_check).
+    let mut model_cx: Option<crate::model_check::ModelContext> = None;
+    // A profile named both `x` and `{ name: x, scope: project }` resolves to
+    // the same file twice: judge its models once.
+    let mut model_checked: BTreeSet<std::path::PathBuf> = BTreeSet::new();
     for pref in refs {
         let key = format!("{:?}/{}", pref.scope, pref.name);
         if !seen_refs.insert(key) {
@@ -176,6 +182,31 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                 agents.insert(lp.doc.executor.agent.clone());
                 for f in &lp.doc.executor.fallbacks {
                     agents.insert(f.agent.clone());
+                }
+                if !model_checked.insert(lp.dir.clone()) {
+                    continue;
+                }
+                let cx = model_cx.get_or_insert_with(crate::model_check::ModelContext::load);
+                let ex = &lp.doc.executor;
+                let chain = std::iter::once((&ex.agent, &ex.model))
+                    .chain(ex.fallbacks.iter().map(|f| (&f.agent, &f.model)));
+                for (agent, model) in chain {
+                    use crate::model_check::ModelIssue;
+                    let Some(issue) = crate::model_check::check(agent, model, cx) else {
+                        continue;
+                    };
+                    // Installation is the agent check's job below, and an
+                    // unverifiable model is not a finding.
+                    let status = match issue {
+                        _ if issue.is_blocking() => CheckStatus::Fail,
+                        ModelIssue::Unknown(_) | ModelIssue::NotAvailable => CheckStatus::Warn,
+                        _ => continue,
+                    };
+                    r.push(
+                        status,
+                        format!("profile {}", pref.name),
+                        format!("{}: {}", issue.code(), issue.describe(agent, model)),
+                    );
                 }
             }
             Err(e) => r.push(
@@ -304,6 +335,18 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                     format!("no runtime in PATH (tried: {})", list.join(", ")),
                 ),
             },
+        }
+    }
+
+    // What a run of each playbook would need from this machine
+    // (crate::preflight): warnings, the run gate refuses on them.
+    for (id, playbook) in &loaded {
+        for (code, message) in crate::preflight::findings(root, playbook) {
+            r.push(
+                CheckStatus::Warn,
+                format!("playbook {id}"),
+                format!("{code}: {message}"),
+            );
         }
     }
 

@@ -56,6 +56,34 @@ pub struct GlobalConfig {
     /// Absent section means disabled, which is the historical behavior: apb
     /// opens no inbound port unless an operator asks for one.
     pub ingest: IngestConfig,
+    /// The user's rules for which models profiles may use (e.g. "keep routine
+    /// work on a smaller model"), enforced by `apb validate`, `apb doctor` and the adoption
+    /// report (`crate::model_check`). Empty means no rule.
+    pub model_policy: Vec<ModelRule>,
+}
+
+/// One `model_policy` rule: for `agent` (and, with `when`, only its models
+/// matching that glob), a profile model must match one of the `allow` globs.
+/// Globs match case-insensitively; an `@effort` suffix is ignored.
+///
+/// ```yaml
+/// model_policy:
+///   - agent: claude
+///     allow: ["*sonnet*", "*haiku*"]
+///     reason: keep routine work on a smaller model
+///   - agent: opencode
+///     when: "anthropic/*"
+///     allow: ["*haiku*"]
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRule {
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Transport used to communicate with the agent (spec 7.2).
@@ -308,8 +336,21 @@ impl GlobalConfig {
             return Ok(Self::default());
         }
         let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_yaml_ng::from_str(&raw)
-            .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))
+        let cfg: Self = serde_yaml_ng::from_str(&raw)
+            .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
+        // A policy glob that does not compile would match nothing and refuse
+        // every model its rule covers: report it where it is written instead.
+        for (i, rule) in cfg.model_policy.iter().enumerate() {
+            for g in rule.when.iter().chain(&rule.allow) {
+                if let Err(e) = globset::Glob::new(g) {
+                    return Err(format!(
+                        "invalid global config `{}`: model_policy[{i}]: bad glob `{g}`: {e}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(cfg)
     }
 
     /// Launch command for agent `id`, if it's described in the config.

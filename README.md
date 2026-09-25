@@ -107,7 +107,7 @@ Once installed, run `apb init` in a project to set it up. In an interactive term
 ```text
 apb init            create the .apb structure
 apb list            playbooks and versions
-apb validate        validate playbook schema
+apb validate        validate playbooks, profile models, requires and connectors
 apb run <id>        run a playbook (--overrides, --supervise, --detach, params)
 apb wait <run>      block until a run finishes, needs input or stops (exit code = verdict)
 apb runs            list runs

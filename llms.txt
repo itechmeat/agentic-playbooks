@@ -82,7 +82,7 @@ Run `apb init` in each project where you want to use playbooks. The MCP server d
 ```text
 apb init            create the .apb structure
 apb list            playbooks and versions
-apb validate        validate playbook schema
+apb validate        validate playbooks, profile models, requires and connectors
 apb run <id>        run a playbook
 apb runs            list runs
 apb wait <run>      block until a run finishes, needs input or stops

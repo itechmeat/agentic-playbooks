@@ -9,7 +9,7 @@
 use std::path::Path;
 
 use apb_core::agent_catalog;
-use apb_core::detect::{self, Authority};
+use apb_core::model_check;
 use apb_core::models_table::{self, OnboardingState, Subscription};
 use apb_core::profile::QualifiedProfileRef;
 use apb_core::profile_store::{self, PlaybookOrigin};
@@ -85,7 +85,7 @@ pub fn playbook_adopt_report(root: &Path, id: Option<&str>) -> Result<Value, Too
         Some(one) => vec![one.to_string()],
         None => reg.playbook_ids(),
     };
-    let agents = agent_catalog::agents(false);
+    let cx = model_check::ModelContext::load();
     let store = TrustStore::load();
     let mut reports = Vec::new();
     for wid in ids {
@@ -98,7 +98,7 @@ pub fn playbook_adopt_report(root: &Path, id: Option<&str>) -> Result<Value, Too
                 // (supervised: true) to surface its problems, even though
                 // supervision is only needed with --supervise.
                 for r in crate::policy::collect_profile_refs(&loaded.playbook, true) {
-                    adopt_check_profile(root, &r, &agents, &store, &mut findings);
+                    adopt_check_profile(root, &r, &cx, &store, &mut findings);
                 }
                 // A profile several nodes bind (or that is also the default
                 // and the supervisor) is one thing to fix: report each finding
@@ -122,7 +122,7 @@ pub fn playbook_adopt_report(root: &Path, id: Option<&str>) -> Result<Value, Too
 fn adopt_check_profile(
     root: &Path,
     r: &QualifiedProfileRef,
-    agents: &[detect::AgentInfo],
+    cx: &model_check::ModelContext,
     store: &TrustStore,
     findings: &mut Vec<Value>,
 ) {
@@ -141,7 +141,7 @@ fn adopt_check_profile(
                     .map(|f| (f.agent.as_str(), f.model.as_str())),
             );
             for (agent, model) in chain {
-                adopt_check_model(agent, model, &key, agents, findings);
+                adopt_check_model(agent, model, &key, cx, findings);
             }
         }
         Err(e) => {
@@ -151,74 +151,32 @@ fn adopt_check_profile(
     }
 }
 
-/// The code for model availability with an agent (spec 5.2 environment part):
-/// `model_not_available` only when authority is Full; otherwise `model_unverifiable`.
+/// One `(agent, model)` of a profile's executor chain, judged by the shared
+/// [`model_check`] (spec 5.2 environment part): availability is asserted only
+/// when detection authority is Full; zcode's allowlist and the config's
+/// `model_policy` block; an id outside apb's closed list for the agent is
+/// `model_unknown`.
 fn adopt_check_model(
     agent: &str,
     model: &str,
     profile_key: &str,
-    agents: &[detect::AgentInfo],
+    cx: &model_check::ModelContext,
     findings: &mut Vec<Value>,
 ) {
-    // apb's zcode allowlist is a hard gate, not a hint: a zcode model outside
-    // it fails before spawn (`zcode::spawn_env`), so adoption reports
-    // `model_not_allowed` instead of the softer unverifiable. The legacy
-    // plan-qualified spelling and effort suffixes are accepted here like
-    // everywhere else; custom providers pass. An allowed model is matched
-    // against the detected list by its bare id (no plan prefix, no effort).
-    let zcode_bare: String;
-    let match_id = if agent == apb_core::zcode::AGENT_ID {
-        let family = apb_core::zcode::home_dir()
-            .map(|h| apb_core::zcode::account_family(&h))
-            .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
-        if let Err(e) = apb_core::zcode::check_model_allowed(model, &family) {
-            findings.push(json!({
-                "code": "model_not_allowed",
-                "ref": profile_key,
-                "agent": agent,
-                "model": model,
-                "detail": e,
-            }));
-            return;
-        }
-        let canonical = apb_core::zcode::canonical_model(model, &family);
-        zcode_bare = canonical
-            .split_once('@')
-            .map_or(canonical.clone(), |(m, _)| m.to_string());
-        zcode_bare.as_str()
-    } else {
-        model
-    };
-    // Normalize the id to the detection probe the same way the invocation resolver does
-    // (claude-code -> claude), otherwise a profile on claude-code would give a false
-    // model_unverifiable instead of a real check against the claude probe.
-    let probe_id = apb_core::detect::canonical_agent_id(agent);
-    let Some(info) = agents.iter().find(|a| a.agent == probe_id) else {
-        // The agent is not among the built-in top six - nothing to check against.
-        findings.push(json!({ "code": "model_unverifiable", "ref": profile_key, "agent": agent, "model": model }));
+    let Some(issue) = model_check::check(agent, model, cx) else {
         return;
     };
-    if !info.installed {
-        findings.push(json!({ "code": "agent_not_installed", "ref": profile_key, "agent": agent }));
-        return;
-    }
-    match &info.models {
-        Some(m) if m.authority == Authority::Full => {
-            if !m.items.iter().any(|x| x == match_id) {
-                findings.push(json!({ "code": "model_not_available", "ref": profile_key, "agent": agent, "model": model }));
-            }
+    let mut f = json!({ "code": issue.code(), "ref": profile_key, "agent": agent });
+    match &issue {
+        model_check::ModelIssue::AgentNotInstalled => {}
+        model_check::ModelIssue::NotAllowed(detail)
+        | model_check::ModelIssue::PolicyViolation(detail) => {
+            f["model"] = json!(model);
+            f["detail"] = json!(detail);
         }
-        // Partial/Display/Static/no list - runnability is not guaranteed.
-        _ => {
-            if info
-                .models
-                .as_ref()
-                .is_none_or(|m| !m.items.iter().any(|x| x == match_id))
-            {
-                findings.push(json!({ "code": "model_unverifiable", "ref": profile_key, "agent": agent, "model": model }));
-            }
-        }
+        _ => f["model"] = json!(model),
     }
+    findings.push(f);
 }
 
 fn classify_profile_error(e: &profile_store::ProfileError) -> (&'static str, String) {
@@ -237,7 +195,7 @@ const SELECTION_RULES: &str = "\
 Pick agent and model from the task's purpose using the models table as a hint only. Match the purpose (coding, review, planning, writing, cheap-glue, vision-tasks, and so on) to a high-scoring model, then confirm the user has access (subscription or key). Prefer a fallback chain that degrades gracefully. The table is advisory: never hard-bind a node to a table entry, and never claim a model works without detection evidence.";
 
 const COVERAGE_SEMANTICS: &str = "\
-Model availability is only asserted when detection authority is Full: then a missing model is model_not_available. For Partial, Display, Static, or no list, treat availability as model_unverifiable and do not block on it. zcode is the exception: apb allows only GLM-5.3 and GLM-5.3-Flash (bare ids, optional @low|high|max effort) and reports any other zcode model as model_not_allowed, which does block.";
+Model availability is only asserted when detection authority is Full: then a missing model is model_not_available. For Partial, Display, Static, or no list, treat availability as model_unverifiable and do not block on it. Where apb keeps a closed model list (claude, codex, zcode), an id outside it (a typo, a retired model) is model_unknown: check it, it rarely runs. zcode is stricter: apb allows only GLM-5.3 and GLM-5.3-Flash (bare ids, optional @low|high|max effort) and reports any other zcode model as model_not_allowed, which does block. So does model_policy_violation: the user's global config has a model_policy rule the model breaks (for example an allowlist that keeps routine work on a smaller model); pick an allowed model instead.";
 
 const AUTHORIZATION_BOUNDS: &str = "\
 Create a project profile a directly requested playbook needs without extra questions. Ask the user before an unexpected global mutation or an initiative-driven change to a profile other playbooks already use. Cross-workspace profile mutations are not allowed.";

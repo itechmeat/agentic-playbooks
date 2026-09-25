@@ -16,7 +16,6 @@
 use std::path::Path;
 
 use crate::run_config::ChildExpectation;
-use apb_core::config::program_in_path;
 use apb_core::connector::config::account_digest;
 use apb_core::connector::resolve::resolve_playbook;
 use apb_core::connector::secrets::missing_vars;
@@ -877,25 +876,6 @@ fn check_profile_bundles(
     Ok(verified)
 }
 
-/// A safe relative path name: not absolute and without `..` components.
-/// Protection against `requires.files` serving as an existence oracle for
-/// arbitrary files (especially in foreign prepare_run before trust is
-/// confirmed) - see spec 5.2.
-fn is_safe_relative(p: &str) -> bool {
-    let path = std::path::Path::new(p);
-    if path.is_absolute() {
-        return false;
-    }
-    path.components().all(|c| {
-        !matches!(
-            c,
-            std::path::Component::ParentDir
-                | std::path::Component::Prefix(_)
-                | std::path::Component::RootDir
-        )
-    })
-}
-
 /// Lifecycle gate shared by the parent (`check_run` / `preflight`) and every
 /// sub-playbook child (`collect_children`): a draft or retired definition
 /// refuses with the SAME policy keys the parent uses, carrying `id` so the
@@ -929,25 +909,15 @@ fn check_digest_trust(id: &str, digest: &str, acknowledge_untrusted: bool) -> Re
 /// Checks `requires` applicability: files - only safe relative
 /// paths inside the root; commands - only program names (no path separators).
 fn check_requires(root: &Path, req: &apb_core::schema::Requires, id: &str) -> Result<(), Value> {
-    let mut missing: Vec<String> = Vec::new();
-    for f in &req.files {
-        if !is_safe_relative(f) {
-            return Err(json!({ "policy": "requires_unsafe_path", "id": id, "path": f }));
+    use apb_core::preflight::{RequiresRefusal, requires_unmet};
+    match requires_unmet(root, req) {
+        Ok(missing) if missing.is_empty() => Ok(()),
+        Ok(missing) => Err(json!({ "policy": "requires_unmet", "id": id, "missing": missing })),
+        Err(RequiresRefusal::UnsafePath(f)) => {
+            Err(json!({ "policy": "requires_unsafe_path", "id": id, "path": f }))
         }
-        if !root.join(f).exists() {
-            missing.push(format!("file:{f}"));
-        }
-    }
-    for c in &req.commands {
-        if c.contains('/') || c.contains('\\') {
-            return Err(json!({ "policy": "requires_unsafe_command", "id": id, "command": c }));
-        }
-        if !program_in_path(c) {
-            missing.push(format!("command:{c}"));
+        Err(RequiresRefusal::UnsafeCommand(c)) => {
+            Err(json!({ "policy": "requires_unsafe_command", "id": id, "command": c }))
         }
     }
-    if !missing.is_empty() {
-        return Err(json!({ "policy": "requires_unmet", "id": id, "missing": missing }));
-    }
-    Ok(())
 }

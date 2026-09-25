@@ -178,6 +178,45 @@ fn adopt_report_names_a_shared_profile_once() {
     }
 }
 
+/// The adoption report enforces the global config's `model_policy` like
+/// `apb validate` does: a profile model the policy does not allow is
+/// `model_policy_violation`, naming the rule.
+#[test]
+fn adopt_report_flags_a_model_the_config_policy_forbids() {
+    let _l = lock();
+    let c = setup();
+    let cfg = std::env::var_os("APB_CONFIG_DIR").unwrap();
+    std::fs::write(
+        Path::new(&cfg).join("config.yaml"),
+        "model_policy:\n  - agent: zcode\n    allow: [GLM-5.3]\n",
+    )
+    .unwrap();
+    let dir = c.root.join(".apb/profiles/zfull");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("profile.yaml"),
+        "name: zfull\ndescription: d\nexecutor:\n  agent: zcode\n  model: GLM-5.3-Flash@high\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("SOUL.md"), "").unwrap();
+    let playbook = "schema: 1\nid: wfp\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: zfull }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: done }\n";
+    seed_playbook(&c.root, "wfp", playbook);
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfp")).unwrap();
+    let findings = report["playbooks"][0]["findings"].as_array().unwrap();
+    let hit = findings
+        .iter()
+        .find(|f| f["code"] == "model_policy_violation")
+        .unwrap_or_else(|| panic!("no policy finding: {findings:?}"));
+    assert_eq!(hit["model"], "GLM-5.3-Flash@high");
+    assert!(
+        hit["detail"]
+            .as_str()
+            .unwrap()
+            .contains("allows only GLM-5.3"),
+        "{hit}"
+    );
+}
+
 /// zcode's allowlist is a hard gate in adoption: a model outside it is
 /// `model_not_allowed` naming the allowlist; the legacy
 /// `zai-individual/` spelling of an allowed model is not.

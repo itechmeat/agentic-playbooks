@@ -156,6 +156,98 @@ fn validate_refuses_a_zcode_profile_model_off_the_allowlist() {
         .stdout(predicate::str::contains("GLM-5.3-Flash"));
 }
 
+/// `apb validate` and `apb doctor` are the local preflight: besides the schema
+/// they check what a run would trip over on this machine, as warnings. A model
+/// id outside the agent's known list (a typo or a made-up id), a `requires`
+/// the machine does not meet, and a bound connector with no configured account
+/// all used to pass both commands silently (issue #137).
+#[test]
+fn validate_and_doctor_report_an_unknown_model_unmet_requires_and_an_unconfigured_connector() {
+    let dir = seeded_dir();
+    let cfg = tempfile::tempdir().unwrap();
+    playbook()
+        .args(["connector", "init", "widget"])
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .success();
+    fs::write(
+        dir.path().join(".apb/profiles/architect/profile.yaml"),
+        "name: architect\nexecutor:\n  agent: claude\n  model: claude-made-up-9\n",
+    )
+    .unwrap();
+    let pdir = dir.path().join(".apb/playbooks/needy");
+    fs::create_dir_all(pdir.join("1.0.0")).unwrap();
+    fs::write(
+        pdir.join("1.0.0/playbook.yaml"),
+        "schema: 2\nid: needy\nname: needy\nversion: 1.0.0\nrequires:\n  commands: [apb-no-such-command-137]\nnodes:\n  - { id: s, type: start }\n  - id: a\n    type: agent_task\n    prompt: hi\n    profile: { name: architect, scope: project }\n    expected_duration: 1m\n    connectors: [{ name: widget, functions: [ping] }]\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n",
+    )
+    .unwrap();
+    fs::write(pdir.join("current"), "1.0.0").unwrap();
+
+    playbook()
+        .arg("validate")
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "profile architect: warning model_unknown",
+        ))
+        .stdout(predicate::str::contains("claude-made-up-9"))
+        .stdout(predicate::str::contains("needy: warning requires_unmet"))
+        .stdout(predicate::str::contains("command:apb-no-such-command-137"))
+        .stdout(predicate::str::contains(
+            "needy: warning connector_unconfigured",
+        ));
+    let doctor = playbook()
+        .arg("doctor")
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .stdout(predicate::str::contains("command:apb-no-such-command-137"))
+        .stdout(predicate::str::contains("connector `widget`"));
+    // One finding per profile, however many ways the playbooks name it
+    // (`architect` and `{ name: architect, scope: project }`).
+    let out = String::from_utf8_lossy(&doctor.get_output().stdout).to_string();
+    assert_eq!(out.matches("claude-made-up-9").count(), 1, "{out}");
+}
+
+/// A `model_policy` in the global config (e.g. an org allowlist) is
+/// enforced by `apb validate`: a profile model the policy does not allow is an
+/// error, a model it allows passes.
+#[test]
+fn validate_refuses_a_profile_model_the_config_policy_forbids() {
+    let dir = seeded_dir();
+    let cfg = tempfile::tempdir().unwrap();
+    fs::write(
+        cfg.path().join("config.yaml"),
+        "model_policy:\n  - agent: zcode\n    allow: [GLM-5.3]\n    reason: org allowlist\n",
+    )
+    .unwrap();
+    let path = dir.path().join(".apb/profiles/architect/profile.yaml");
+    let profile =
+        |model: &str| format!("name: architect\nexecutor:\n  agent: zcode\n  model: {model}\n");
+    fs::write(&path, profile("GLM-5.3-Flash@high")).unwrap();
+    playbook()
+        .arg("validate")
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "profile architect: error model_policy_violation",
+        ))
+        .stdout(predicate::str::contains("org allowlist"));
+    fs::write(&path, profile("zai-individual/GLM-5.3@low")).unwrap();
+    playbook()
+        .arg("validate")
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .success();
+}
+
 #[test]
 fn list_without_apb_dir_fails() {
     let dir = tempfile::tempdir().unwrap();

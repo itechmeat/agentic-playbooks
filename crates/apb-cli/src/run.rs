@@ -302,6 +302,11 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
                             .unwrap_or_default()
                     );
                 }
+                // The local preflight (requires, connectors): warnings, since
+                // another machine may well meet them; the run gate refuses.
+                for (code, message) in apb_core::preflight::findings(root, &loaded.playbook) {
+                    println!("{id}: warning {code} {message}");
+                }
                 if report.is_valid() {
                     println!("{id}: OK");
                 } else {
@@ -324,32 +329,54 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
     }
 }
 
-/// Whole-project `apb validate` also checks the project profiles' models
-/// where apb enforces a closed list (zcode's allowlist): a refused model is
-/// an error, printed as `profile <name>: error zcode_model_not_allowed ...`.
-/// Returns whether every profile passed. An unreadable profile is left to the
-/// run-time resolver, which reports it with its own error.
+/// Whole-project `apb validate` also checks every project profile's models
+/// ([`apb_core::model_check`]): a model zcode's allowlist or the config's
+/// `model_policy` refuses is an error (`zcode_model_not_allowed`,
+/// `model_policy_violation`); one outside apb's list for its agent, or one the
+/// installed agent does not list, is a warning. Returns whether no profile had
+/// an error. An unreadable profile is left to the run-time resolver, which
+/// reports it with its own error.
 fn validate_profile_models(root: &Path, names: &[String]) -> bool {
-    let family = apb_core::zcode::home_dir()
-        .map(|h| apb_core::zcode::account_family(&h))
-        .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
+    use apb_core::model_check::{self, ModelIssue};
+    let docs: Vec<(&String, apb_core::profile::ProfileDoc)> = names
+        .iter()
+        .filter_map(|name| {
+            let path = root.join(".apb/profiles").join(name).join("profile.yaml");
+            let doc = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|y| apb_core::profile::ProfileDoc::from_yaml(&y).ok())?;
+            Some((name, doc))
+        })
+        .collect();
+    if docs.is_empty() {
+        return true;
+    }
+    let cx = model_check::ModelContext::load();
     let mut ok = true;
-    for name in names {
-        let path = root.join(".apb/profiles").join(name).join("profile.yaml");
-        let Some(doc) = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|y| apb_core::profile::ProfileDoc::from_yaml(&y).ok())
-        else {
-            continue;
-        };
+    for (name, doc) in &docs {
         let chain = std::iter::once((&doc.executor.agent, &doc.executor.model))
             .chain(doc.executor.fallbacks.iter().map(|f| (&f.agent, &f.model)));
         for (agent, model) in chain {
-            if agent != apb_core::zcode::AGENT_ID {
+            let Some(issue) = model_check::check(agent, model, &cx) else {
                 continue;
+            };
+            match &issue {
+                ModelIssue::NotAllowed(refusal) => {
+                    println!("profile {name}: error zcode_model_not_allowed {refusal}");
+                }
+                ModelIssue::PolicyViolation(_) => println!(
+                    "profile {name}: error {} {}",
+                    issue.code(),
+                    issue.describe(agent, model)
+                ),
+                ModelIssue::Unknown(_) | ModelIssue::NotAvailable => println!(
+                    "profile {name}: warning {} {}",
+                    issue.code(),
+                    issue.describe(agent, model)
+                ),
+                ModelIssue::AgentNotInstalled | ModelIssue::Unverifiable => {}
             }
-            if let Err(refusal) = apb_core::zcode::check_model_allowed(model, &family) {
-                println!("profile {name}: error zcode_model_not_allowed {refusal}");
+            if issue.is_blocking() {
                 ok = false;
             }
         }

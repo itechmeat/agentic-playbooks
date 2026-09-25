@@ -251,6 +251,47 @@ The dashboard never keeps its own copy. A reload always shows the lists of the
 `apb` that is running, and a rebuilt binary shows its new lists on the next
 reload without any cache to clear.
 
+## Checking a profile's models before a run
+
+`apb validate` (whole project), `apb doctor` and the adoption report
+(`apb adopt`, MCP `playbook_adopt_report`) judge every model of a profile's
+executor chain with one function, `apb_core::model_check`:
+
+| Finding | Means | validate | doctor | adopt |
+|---|---|---|---|---|
+| `model_not_allowed` | a zcode model outside `GLM-5.3` / `GLM-5.3-Flash` | error (`zcode_model_not_allowed`) | fail | finding |
+| `model_policy_violation` | the config's `model_policy` does not allow it | error | fail | finding |
+| `model_unknown` | outside apb's closed list for claude, codex or zcode (a typo, a retired id); claude's own aliases (`opus`, `sonnet`, `haiku`, `fable`, `opusplan`, `default`) and `[1m]` variants count as known | warning | warn | finding |
+| `model_not_available` | the installed agent lists its models with Full authority (`opencode models`) and this one is missing | warning | warn | finding |
+| `agent_not_installed`, `model_unverifiable` | nothing on this machine can confirm it | - | agent check | finding |
+
+### Model policy
+
+The global `config.yaml` can restrict which models profiles may use, for
+for example to keep routine work on a smaller model:
+
+```yaml
+model_policy:
+  - agent: claude
+    allow: ["*sonnet*", "*haiku*"]
+    reason: keep routine work on a smaller model
+  - agent: opencode
+    when: "anthropic/*"       # only the Anthropic models of opencode
+    allow: ["*haiku*"]
+```
+
+A rule covers one agent (`claude-code` counts as `claude`) and, with `when`,
+only the models matching that glob. A covered model must match one of the
+`allow` globs. Globs match case-insensitively, against the model as written and,
+for zcode, its canonical bare id, with any `@effort` suffix ignored, so
+`claude-sonnet-5` passes the claude rule above and `claude-opus-5-5` does not,
+and a zcode rule `allow: [GLM-5.3]` accepts `zai-individual/GLM-5.3@low` but
+not `GLM-5.3-Flash`. A glob that does not compile makes the config invalid. The policy is
+enforced where profiles are checked: `apb validate` fails on a violation,
+`apb doctor` reports it as a failure, and the adoption report lists it. It is
+the user's own rule, so it lives only in the global config, not in a project's
+`.apb/config.yaml`.
+
 ## ZCode (zcode)
 
 `agent: zcode` runs the headless CLI of Z.ai's ZCode desktop app. apb finds it
