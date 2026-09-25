@@ -48,7 +48,8 @@ pub enum WaitReason {
     /// decision; the answer channel is named in [`RunWaitResult::needs`].
     NeedsInput,
     /// The run is not progressing and nothing can answer it from here: it is
-    /// paused, or interrupted with no live driver (resume it).
+    /// paused, or interrupted with no live driver, including a driver that
+    /// died while the journal still read `running` (resume it).
     Stopped,
     /// The caller's timeout ran out while the run was still working.
     Timeout,
@@ -104,6 +105,9 @@ pub struct RunWaitResult {
     pub reason: WaitReason,
     pub status: RunStatus,
     pub needs: Option<NeedsInput>,
+    /// The drive claim at the last observation: `Some(false)` means the
+    /// process driving the run is gone and only a resume continues it.
+    pub driver_alive: Option<bool>,
     pub waited: Duration,
 }
 
@@ -223,6 +227,7 @@ fn result(reason: WaitReason, snap: RunSnapshot, started: Instant) -> RunWaitRes
         reason,
         status: snap.status,
         needs: snap.needs,
+        driver_alive: snap.driver_alive,
         waited: started.elapsed(),
     }
 }

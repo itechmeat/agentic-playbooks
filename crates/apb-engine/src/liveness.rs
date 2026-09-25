@@ -670,6 +670,13 @@ pub fn live_open_nodes(events: &[Event]) -> BTreeSet<String> {
 /// not yet journaled `AttemptFinished` - is deliberately left `Interrupted`
 /// here: `lost_nodes` is by design unaffected by this change, and a
 /// wait/signal park is never what that shape actually is.
+///
+/// A provably dead drive claim (`driver_alive == Some(false)`) wins over both
+/// repairs and over a pure `running`: the only process that could ever write
+/// this run's next event is gone, so whatever the journal last said, the run
+/// is `interrupted` until someone resumes it. Without this, a driver that died
+/// between two nodes left no open attempt behind, the fold kept reading
+/// `running`, and every wait on the run blocked until its own timeout.
 pub fn reported_run_status(
     events: &[Event],
     waiting: bool,
@@ -677,6 +684,12 @@ pub fn reported_run_status(
 ) -> crate::state::RunStatus {
     use crate::state::RunStatus;
     let pure = RunState::fold(events).run_status;
+    if pure.is_terminal() || pure == RunStatus::Paused {
+        return pure;
+    }
+    if driver_alive == Some(false) {
+        return RunStatus::Interrupted;
+    }
     if !matches!(pure, RunStatus::Interrupted) {
         return pure;
     }

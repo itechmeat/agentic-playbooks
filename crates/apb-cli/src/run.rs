@@ -871,7 +871,13 @@ pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> 
             ExitCode::from(3)
         }
         WaitReason::Stopped => {
-            println!("run {run_id} stopped ({status}): `apb resume {run_id}` continues it");
+            if res.driver_alive == Some(false) {
+                println!(
+                    "run {run_id} stopped ({status}): its driver is dead; `apb resume {run_id}` continues it"
+                );
+            } else {
+                println!("run {run_id} stopped ({status}): `apb resume {run_id}` continues it");
+            }
             ExitCode::from(4)
         }
         WaitReason::Timeout => {

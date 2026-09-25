@@ -209,6 +209,9 @@ pub fn run_wait_result(
             }
             _ => "the run is parked for a supervisor decision (pending_supervisor)",
         },
+        WaitReason::Stopped if res.driver_alive == Some(false) => {
+            "the run's driver is dead, so the run is interrupted; run_resume continues it"
+        }
         WaitReason::Stopped => "the run is paused or has no live driver; run_resume continues it",
         WaitReason::Timeout => {
             "still running: call run_wait again with the same arguments; do not poll run_status"
@@ -217,7 +220,10 @@ pub fn run_wait_result(
     let mut out = json!({
         "run_id": run_id,
         "reason": res.reason,
-        "run_status": status["run_status"],
+        // The status the wait decided on, not a second read's: a run that
+        // stopped on a dead driver must never come back as `running`.
+        "run_status": res.status.as_str(),
+        "driver_alive": res.driver_alive,
         "waited_ms": res.waited.as_millis() as u64,
         "nodes": counts,
         "next": next,

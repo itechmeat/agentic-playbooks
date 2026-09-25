@@ -19,7 +19,7 @@
   import { Badge } from '$lib/components/ui/badge'
   import * as Card from '$lib/components/ui/card'
   import * as Tabs from '$lib/components/ui/tabs'
-  import { runStatusClass } from '../lib/status'
+  import { runStatusClass, showsDriverDead } from '../lib/status'
   import { toast } from 'svelte-sonner'
   import TriangleAlert from '@lucide/svelte/icons/triangle-alert'
 
@@ -118,6 +118,9 @@
       >
         {detail.run_status}
       </Badge>
+      {#if showsDriverDead(detail.run_status, detail.driver_alive === false)}
+        <Badge variant="outline">needs resume</Badge>
+      {/if}
     {/if}
   {/snippet}
 </Topbar>

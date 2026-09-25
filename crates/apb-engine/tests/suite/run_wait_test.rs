@@ -262,6 +262,63 @@ fn a_resumed_waiter_keeps_the_grace_across_short_slices() {
     rx.recv_timeout(Duration::from_secs(5)).unwrap();
 }
 
+/// A pid that existed and is provably gone (spawned, waited for, reaped).
+fn dead_pid() -> u32 {
+    let mut child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg("exit 0")
+        .spawn()
+        .expect("spawn a throwaway child to borrow a pid from");
+    let pid = child.id();
+    child.wait().expect("reap the throwaway child");
+    pid
+}
+
+/// A driver that dies BETWEEN two nodes leaves no open attempt behind, so the
+/// journal alone still reads `running`, and nothing will ever write another
+/// line to it. The wait used to keep polling that run until its own timeout
+/// (`apb wait` without a timeout never returned, MCP `run_wait` answered
+/// `timeout` forever). A provably dead driver is a stop: the run is reported
+/// `interrupted`, and the wait returns well inside the caller's timeout.
+#[test]
+fn run_wait_stops_on_a_dead_driver_between_nodes() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut log = synthetic_run(dir.path(), "orphan");
+    log.append(EventPayload::NodeStarted {
+        node: "start".into(),
+        attempt: 1,
+    })
+    .unwrap();
+    log.append(EventPayload::NodeFinished {
+        node: "start".into(),
+        status: "succeeded".into(),
+        attempt: 1,
+        output: String::new(),
+        artifacts: Vec::new(),
+    })
+    .unwrap();
+    let run_dir = dir.path().join(".apb/runs/orphan");
+    fs::write(run_dir.join("driver.pid"), dead_pid().to_string()).unwrap();
+
+    let started = Instant::now();
+    let res = wait_run_with(
+        dir.path(),
+        "orphan",
+        Duration::from_secs(20),
+        Duration::from_millis(100),
+        Duration::from_millis(20),
+    )
+    .unwrap();
+
+    assert_eq!(res.reason, WaitReason::Stopped);
+    assert_eq!(res.status, RunStatus::Interrupted);
+    assert!(
+        started.elapsed() < Duration::from_secs(5),
+        "a dead driver must end the wait promptly, took {:?}",
+        started.elapsed()
+    );
+}
+
 /// The driver appends `events.jsonl` while waits read it, so a read can land
 /// in the middle of a line. That is a normal state of a live run, and it used
 /// to fail the whole wait (`apb wait` exited 2 mid-run, `run_wait` answered an
