@@ -2,8 +2,14 @@ use apb_core::projects::{self};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Json};
 
+/// GET /api/health: liveness plus the identity of the build serving it, so a
+/// dashboard tab can notice that the server was rebuilt under it.
 pub(crate) async fn health() -> Json<serde_json::Value> {
-    Json(serde_json::json!({ "status": "ok" }))
+    Json(serde_json::json!({
+        "status": "ok",
+        "build_id": crate::assets::build_id(),
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
 
 /// GET /api/projects: the reachable projects the global dashboard aggregates.

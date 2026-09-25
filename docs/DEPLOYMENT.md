@@ -478,6 +478,13 @@ event as an instruction to act twice.
 - Every response carries `X-Frame-Options: DENY`, so the dashboard cannot be
   framed. That does not depend on your proxy configuration, and a proxy should
   not strip it.
+- Caching: hashed files under `/assets/` are `Cache-Control: public,
+  max-age=31536000, immutable`; the page shell and every `/api/` answer are
+  `no-cache`, so a reload always gets the current build. Unknown `/api/` routes
+  and `/assets/` files are 404. Every response names the serving build in
+  `x-apb-build` (also `build_id` in `/api/health`); an open tab that sees a
+  different build than it loaded shows a reload banner. A proxy should pass
+  these headers through unchanged.
 - `apb dev` is a source-tree development command, not a deployment path. It
   serves the Vite dev server next to the API on the loopback interface. If keys
   exist, the developer signs in once through the Vite proxy like any other

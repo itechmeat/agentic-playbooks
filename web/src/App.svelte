@@ -7,6 +7,7 @@
   import PlaybookList from './pages/PlaybookList.svelte'
   import ChunkError from '$lib/components/ChunkError.svelte'
   import ChunkPending from '$lib/components/ChunkPending.svelte'
+  import StaleBuildBanner from '$lib/components/StaleBuildBanner.svelte'
   import { Toaster } from '$lib/components/ui/sonner'
   import { connectorRouteName, decodeSegment } from '$lib/route'
   import { ModeWatcher } from 'mode-watcher'
@@ -157,5 +158,6 @@
   <PlaybookList />
 {/if}
 
+<StaleBuildBanner />
 <ModeWatcher />
 <Toaster richColors closeButton position="bottom-right" />

@@ -161,6 +161,8 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             auth::auth_middleware,
         ))
+        // Outermost, so auth refusals carry the build header too.
+        .layer(axum::middleware::from_fn(assets::build_middleware))
         .with_state(state)
 }
 

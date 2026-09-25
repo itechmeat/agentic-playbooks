@@ -462,3 +462,78 @@ async fn put_playbook_approves_the_saved_digest() {
         "the dashboard save must approve the digest it wrote"
     );
 }
+
+// --- HTTP caching and build identity (issue #139 F8) ------------------------
+
+async fn raw_get(app: axum::Router, uri: &str) -> axum::response::Response {
+    app.oneshot(Request::get(uri).body(Body::empty()).unwrap())
+        .await
+        .unwrap()
+}
+
+fn header<'a>(res: &'a axum::response::Response, name: &str) -> Option<&'a str> {
+    res.headers().get(name).and_then(|v| v.to_str().ok())
+}
+
+/// An unknown API route or asset is a real 404, never the SPA shell with a
+/// 200: an old bundle calling a removed endpoint must see an error, not HTML
+/// it then fails to parse as JSON, and a lazy chunk that no longer exists
+/// must not be answered with HTML as JavaScript.
+#[tokio::test]
+async fn unknown_api_routes_and_assets_are_404() {
+    let dir = seed();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    for uri in ["/api/nope", "/api/playbooks/x/nope", "/assets/nope.js"] {
+        let res = raw_get(app.clone(), uri).await;
+        assert_eq!(res.status(), StatusCode::NOT_FOUND, "{uri}");
+    }
+}
+
+/// The shell is revalidated on every load, hashed assets are cached for
+/// good, the API is never served from cache, and every response names the
+/// build that served it. The shell carries the same build id, so a tab can
+/// tell when the server it talks to was rebuilt under it.
+#[tokio::test]
+async fn cache_policy_and_build_identity() {
+    let dir = seed();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+
+    let health = raw_get(app.clone(), "/api/health").await;
+    assert_eq!(header(&health, "cache-control"), Some("no-cache"));
+    let served_by = header(&health, "x-apb-build")
+        .expect("build header")
+        .to_string();
+    let bytes = health.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["build_id"], served_by.as_str());
+
+    let shell = raw_get(app.clone(), "/").await;
+    assert_eq!(shell.status(), StatusCode::OK);
+    assert_eq!(header(&shell, "cache-control"), Some("no-cache"));
+    let html = String::from_utf8(
+        shell
+            .into_body()
+            .collect()
+            .await
+            .unwrap()
+            .to_bytes()
+            .to_vec(),
+    )
+    .unwrap();
+    assert!(
+        html.contains(&format!(r#"<meta name="apb-build" content="{served_by}">"#)),
+        "the shell names its build: {html}"
+    );
+
+    let asset = html
+        .split('"')
+        .find(|s| s.starts_with("/assets/") && s.ends_with(".js"))
+        .expect("the shell references a hashed script")
+        .to_string();
+    let res = raw_get(app, &asset).await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert_eq!(
+        header(&res, "cache-control"),
+        Some("public, max-age=31536000, immutable")
+    );
+}

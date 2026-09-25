@@ -7,9 +7,11 @@
 // can act on. Both live in `../auth.svelte`, which imports nothing from here.
 
 import { apiHeaders, markUnauthenticated } from '../auth.svelte'
+import { BUILD_HEADER, noteServerBuild } from '../buildcheck'
 
 export async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: apiHeaders() })
+  noteServerBuild(res.headers.get(BUILD_HEADER))
   if (!res.ok) {
     if (res.status === 401) markUnauthenticated()
     throw new ApiError(`${url}: HTTP ${res.status}`, res.status)
@@ -37,6 +39,7 @@ export class ApiError extends Error {
 export async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   const headers = apiHeaders(init.headers as Record<string, string> | undefined)
   const res = await fetch(url, { ...init, headers })
+  noteServerBuild(res.headers.get(BUILD_HEADER))
   if (!res.ok) {
     if (res.status === 401) markUnauthenticated()
     const err = await errorMessage(res)

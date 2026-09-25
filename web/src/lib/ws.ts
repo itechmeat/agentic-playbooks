@@ -1,4 +1,5 @@
 import { refreshAuthStatus } from './auth.svelte'
+import { checkServerBuild } from './buildcheck'
 
 // Subscribe to server change events over the dashboard WebSocket. Filesystem
 // events are chatty and arrive steadily (~every few hundred ms) while a run
@@ -29,8 +30,12 @@ export function subscribeChanges(cb: () => void, minIntervalMs = 600): () => voi
   // in server mode the usual reason is an absent or expired session. Re-read
   // the auth status rather than retrying blind against a gate that will keep
   // refusing.
+  // A socket that was open and dropped usually means the server restarted,
+  // which on a reinstall means a new build: ask which one, once it is back.
   ws.onclose = () => {
-    if (!opened && !closed) void refreshAuthStatus()
+    if (closed) return
+    if (!opened) void refreshAuthStatus()
+    else for (const ms of [2000, 8000]) setTimeout(() => void checkServerBuild(), ms)
   }
   ws.onmessage = () => {
     if (closed) return
