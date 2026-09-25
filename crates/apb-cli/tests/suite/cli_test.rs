@@ -192,3 +192,55 @@ fn dashboard_is_visible_and_serve_alias_parses() {
         .success()
         .stdout(predicate::str::contains("Start the web dashboard"));
 }
+
+/// `apb trash`: the listing shows a deletion, a restore by id brings the
+/// playbook back, and a restore whose id is taken again is refused with exit
+/// code 1 and a message saying why (scripts tell it apart from not found, 2).
+#[test]
+fn trash_list_restore_and_conflict() {
+    let dir = seeded_dir();
+    apb_core::versioning::delete_playbook(dir.path(), "implement-task", 1_700_000_000_000).unwrap();
+
+    let out = playbook()
+        .args(["trash", "list", "--json"])
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let listed: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(listed[0]["name"], "implement-task-1700000000000");
+    playbook()
+        .args(["trash", "list"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("2023-11-14T22:13:20Z"));
+
+    playbook()
+        .args(["trash", "restore", "implement-task"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("restored implement-task"));
+    playbook()
+        .args(["validate", "implement-task"])
+        .current_dir(dir.path())
+        .assert()
+        .success();
+
+    apb_core::versioning::delete_playbook(dir.path(), "implement-task", 1).unwrap();
+    let vdir = dir.path().join(".apb/playbooks/implement-task/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), VALID).unwrap();
+    playbook()
+        .args(["trash", "restore", "implement-task"])
+        .current_dir(dir.path())
+        .assert()
+        .code(1)
+        .stderr(predicate::str::contains("exists again"));
+    playbook()
+        .args(["trash", "restore", "no-such"])
+        .current_dir(dir.path())
+        .assert()
+        .code(2);
+}

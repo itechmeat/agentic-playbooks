@@ -93,6 +93,7 @@ apb answer          answer an interactive node's pending question
 apb note            post a supervisor note to a run
 apb export          export a playbook (with layout) to a bundle file
 apb import          import a playbook bundle into this project
+apb trash           list deleted playbooks, restore one with its versions
 apb profile         manage agent profiles
 apb connector       list or manage connectors
 apb detect          detect installed coding agents
