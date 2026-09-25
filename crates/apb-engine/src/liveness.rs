@@ -4,7 +4,7 @@
 //! share one bias:
 //!
 //!   * is OS process `pid` running (`pid_alive`, `pid_is_live`);
-//!   * is a process really driving run `<id>` right now (`driver_is_live`);
+//!   * is a process really driving run `<id>` right now (`driver_alive`);
 //!   * what does the run journal say about attempts that never closed
 //!     (`open_attempts`, `node_times`, `lost_nodes`).
 //!
@@ -58,7 +58,7 @@ fn probeable_pid(pid: u32) -> Option<i32> {
 /// The raw primitive: does process `pid` exist? Cheaper than `process_probe`
 /// and enough where a pid cannot have been reused (the workdir lock, held for
 /// the lifetime of one process). Anything that must survive pid reuse wants
-/// `driver_is_live` instead.
+/// `driver_alive` instead.
 ///
 /// This is the `kill(pid, 0)` syscall, not a `kill -0` subprocess. The
 /// subprocess form was both a portability hazard (BSD and procps-ng `kill`
@@ -225,7 +225,7 @@ pub(crate) fn process_probe(pid: u32) -> Probe {
 /// Single-pid liveness with the module's bias: only a probe that positively
 /// reports "no such process" counts as dead.
 ///
-/// Unlike `driver_is_live` this does NOT defend against pid reuse - it cannot,
+/// Unlike `driver_pid_is_live` this does NOT defend against pid reuse - it cannot,
 /// because a bare pid carries no identity. Callers that hold a pid recorded
 /// long ago and would take a destructive action on "dead" want the argv-aware
 /// check; callers that only report a fact (`run_status`, `doctor --run`) want
@@ -242,30 +242,21 @@ pub fn pid_is_live(pid: u32) -> bool {
 // Driver liveness
 // ---------------------------------------------------------------------------
 
-/// Is a process really driving this run right now?
+/// Is the process `pid`, read from `driver.pid`, really driving this run?
 ///
 /// `driver.pid` alone cannot answer this. Drivers lead their own process group
 /// and are reaped promptly, so their pids are released and REUSED: a bare
 /// `kill -0` would happily succeed for a completely unrelated process that
 /// inherited the number, and we would leave a dead run unfinalized forever.
-///
 /// The disambiguator is free: a detached driver's argv carries
 /// `--run-id <id>`. Around that definitive signal the rule keeps the module's
 /// bias toward "live".
-pub fn driver_is_live(run_dir: &Path, run_id: &str) -> bool {
-    match crate::driver::read_driver_pid(run_dir) {
-        Some(pid) => driver_pid_is_live(pid, run_id),
-        None => false,
-    }
-}
-
-/// The same rule against a pid the caller has ALREADY read from `driver.pid`.
 ///
-/// Callers that need both the pid and the verdict must go through this rather
-/// than reading the file and then calling `driver_is_live`, which would read it
-/// a second time. A drive that finishes cleanly between the two reads removes
-/// the file, so the second read finds nothing and the pair reports "there is a
-/// driver, and it is dead" for a run that in fact just completed normally.
+/// Takes the pid the caller has ALREADY read: reading the file a second time
+/// would let a drive that finishes cleanly between the two reads (and removes
+/// the file) read as "there is a driver, and it is dead". Callers that want
+/// the run's whole drive claim, parent-driven children included, use
+/// [`driver_alive`].
 pub fn driver_pid_is_live(pid: u32, run_id: &str) -> bool {
     // A drive running on a thread of THIS process (the CLI's synchronous run,
     // the in-process background drive) needs no probing and cannot be a
@@ -658,7 +649,7 @@ pub fn live_open_nodes(events: &[Event]) -> BTreeSet<String> {
 ///
 /// `driver_alive` must be the caller's own `liveness::driver_alive(run_dir,
 /// run_id)` result (or the equivalent computed elsewhere), NOT
-/// `driver_is_live`/`driver_pid_is_live`: a sub-playbook child never writes
+/// `driver_pid_is_live`: a sub-playbook child never writes
 /// its own `driver.pid` (it writes `driven_by`, and follows its parent's
 /// drive claim - see `driver_alive`'s own doc), so a plain pid check reads a
 /// perfectly healthy, parent-driven child as driverless and this repair would
@@ -764,7 +755,6 @@ mod tests {
             std::process::id().to_string().as_bytes(),
         )
         .unwrap();
-        assert!(driver_is_live(dir.path(), "any-run"));
         assert_eq!(driver_alive(dir.path(), "any-run"), Some(true));
     }
 
@@ -896,13 +886,12 @@ mod tests {
         assert!(driver_pid_is_live(std::process::id(), "any-run"));
         // The file-reading entry point, on the same directory, correctly says
         // there is no driver - which is what a second read would have returned.
-        assert!(!driver_is_live(dir.path(), "any-run"));
+        assert_eq!(driver_alive(dir.path(), "any-run"), None);
     }
 
     #[test]
     fn a_missing_pid_file_means_no_driver() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!driver_is_live(dir.path(), "any-run"));
         // Reported as "nothing claims this run", not as "the claim is false".
         assert_eq!(driver_alive(dir.path(), "any-run"), None);
     }
@@ -1440,7 +1429,7 @@ edges:
     /// The glue a real caller runs: `progress::from_run_dir` must actually
     /// report `waiting_on` for the parked `w` node, and `liveness::driver_alive`
     /// (the parent-aware check every call site is required to use - NOT
-    /// `driver_is_live`) must actually report the live driver claim as
+    /// a bare pid check) must actually report the live driver claim as
     /// `Some(true)`, so the facts fed into the pure predicate above are the
     /// real ones a caller would compute.
     #[test]

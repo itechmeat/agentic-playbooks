@@ -72,7 +72,7 @@ pub fn read_driven_by(run_dir: &Path) -> Option<String> {
 ///
 /// `DriverPidGuard::claim` runs inside the child, and a full exec easily takes
 /// a hundred milliseconds to get there. For that whole window `driver.pid` did
-/// not exist, so `liveness::driver_is_live` reported no driver and a `stop_run`
+/// not exist, so `liveness::driver_alive` reported no driver and a `stop_run`
 /// landing in it took the dead-run branch: it finalized a run whose driver was
 /// only just starting, and the child then executed the whole run past its own
 /// terminal `RunAborted`. A caller that gets a run_id back and stops the run

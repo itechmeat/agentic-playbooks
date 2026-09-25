@@ -142,7 +142,10 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
     // it, exactly as `run_cancel` does.
     abort_children(root, run_id)?;
 
-    if crate::liveness::driver_is_live(&run_dir, run_id) {
+    // The same drive-claim answer every status surface reports: a sub-playbook
+    // child is driven in-process by its parent and owns no `driver.pid`, so a
+    // bare pid check would call it driverless and write over a live drive.
+    if crate::liveness::driver_alive(&run_dir, run_id) == Some(true) {
         return Ok(StopOutcome::SignaledLiveDriver);
     }
 
