@@ -99,6 +99,13 @@ Test everything: `cargo test --workspace`. A single test:
 Frontend (`web/`, bun + vite + vitest): `bun run test`, `bun run build`,
 `bun run check`.
 
+Generated TypeScript: `web/src/lib/api.gen.ts` (run payload types) and
+`web/src/lib/consts.gen.ts` (core constants) are rendered from the Rust side by
+`apb-server`'s `ts_contract` test, which fails when they drift. After changing
+a mirrored Rust type or constant, regenerate with
+`APB_WRITE_TS=1 cargo test -p apb-server --lib ts_contract` and commit the
+result; never edit the generated files by hand.
+
 Format and lint gates (must be clean):
 `cargo fmt --all -- --check` and
 `cargo clippy --workspace --all-targets -- -D warnings`.

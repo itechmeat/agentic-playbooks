@@ -545,8 +545,10 @@ async fn unknown_run_404() {
 async fn run_id_path_traversal_is_rejected() {
     let dir = seed_with_run();
 
-    // A target file outside the project directory that must not be accessible.
-    let secret_dir = dir.path().parent().unwrap().join("etc");
+    // A target outside the runs directory, where `.apb/runs/../../etc`
+    // resolves: the project root's `etc`, inside this test's own temp dir
+    // (planting it next to the temp dir leaked it into the shared temp).
+    let secret_dir = dir.path().join("etc");
     fs::create_dir_all(&secret_dir).unwrap();
     fs::write(secret_dir.join("playbook.yaml"), "schema: 1\nid: leaked\n").unwrap();
 

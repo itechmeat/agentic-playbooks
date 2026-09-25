@@ -43,7 +43,13 @@ fn apb_with_editor(dir: &Path, editor: &Path, args: &[&str]) -> std::process::Ou
 /// Like `apb_with_editor`, but $EDITOR is an arbitrary string (may carry
 /// arguments, e.g. "ed.sh --wait").
 fn apb_with_editor_str(dir: &Path, editor: &str, args: &[&str]) -> std::process::Output {
+    // `apb profile edit` stages the edit under the temp dir and keeps it on a
+    // failed save for recovery (the conflict case below): give the child a
+    // temp dir inside this test's own, so nothing outlives the test.
+    let tmp = dir.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
     crate::common::apb_std()
+        .env("TMPDIR", &tmp)
         .args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))

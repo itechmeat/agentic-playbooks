@@ -857,6 +857,7 @@ mod drift_resume {
         tempfile::TempDir,
         tempfile::TempDir,
         tempfile::TempDir,
+        tempfile::TempDir,
         String,
     ) {
         let proj = tempfile::tempdir().unwrap();
@@ -898,16 +899,17 @@ mod drift_resume {
             &stub,
             "#!/bin/sh\n# changed binary, different size now\necho done\n",
         );
-        // Keep `bin` alive by returning it alongside the roots.
-        std::mem::forget(bin);
-        (proj, home, cfg, res.run_id)
+        // `bin` is returned alongside the roots: the stub must outlive the
+        // resume, and the caller's drop removes it (forgetting it leaked a
+        // `stub.sh` folder into the temp dir on every run).
+        (proj, home, cfg, bin, res.run_id)
     }
 
     #[test]
     fn run_resume_surfaces_drift_error_inline_instead_of_detached_true() {
         let _l = lock();
         let _g = EnvGuard;
-        let (proj, _home, _cfg, run_id) = run_then_drift();
+        let (proj, _home, _cfg, _bin, run_id) = run_then_drift();
 
         // Without the override the tool must return the drift error itself,
         // NOT an Ok ack with `detached: true` for a run that would never move.
@@ -922,7 +924,7 @@ mod drift_resume {
     fn run_resume_override_passes_preflight_and_acks_with_override_note() {
         let _l = lock();
         let _g = EnvGuard;
-        let (proj, _home, _cfg, run_id) = run_then_drift();
+        let (proj, _home, _cfg, _bin, run_id) = run_then_drift();
 
         // With the override the preflight passes and the tool acks detached.
         // The detached child re-execs this test binary (no `__drive-run`
