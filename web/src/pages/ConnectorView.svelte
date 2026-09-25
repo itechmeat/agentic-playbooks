@@ -558,6 +558,18 @@
                             {/each}
                           </ul>
                         {/if}
+                        {#if Object.keys(a.cmd).length > 0}
+                          <!-- A secret read from a command: approving this
+                               account lets apb run the command, so it is shown
+                               right where the Approve button is. -->
+                          <ul class="mt-1 flex flex-col gap-0.5 text-xs">
+                            {#each Object.entries(a.cmd) as [k, c] (k)}
+                              <li class="text-warning">
+                                {k} runs <code class="font-mono">{c}</code>
+                              </li>
+                            {/each}
+                          </ul>
+                        {/if}
                       </Table.Cell>
                       <Table.Cell class="align-top whitespace-normal">
                         {#if a.missingEnv.length === 0}

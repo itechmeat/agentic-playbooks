@@ -56,6 +56,7 @@ interface ConnectorAccountDto {
   default: boolean
   fields: Record<string, string>
   missing_env: string[]
+  cmd?: Record<string, string>
   trust: ConnectorTrust
 }
 
@@ -64,6 +65,7 @@ const toConnectorAccount = (d: ConnectorAccountDto): ConnectorAccount => ({
   default: d.default,
   fields: d.fields,
   missingEnv: d.missing_env,
+  cmd: d.cmd ?? {},
   trust: d.trust,
 })
 

@@ -338,6 +338,10 @@ pub(crate) async fn get_connector_handler(
                 "default": a.default,
                 "fields": serde_json::Value::Object(fields),
                 "missing_env": missing_env,
+                // Secrets read from a command, `field -> command line`:
+                // approving the account authorizes apb to run each one, so
+                // the approval surface must show them (not secret values).
+                "cmd": config::cmd_refs(&public.doc, a),
                 "trust": acct_trust,
             })
         })

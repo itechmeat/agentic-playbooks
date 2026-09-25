@@ -35,6 +35,10 @@ export interface ConnectorAccount {
   // Names of env vars this account needs that do not currently resolve.
   // Never a value.
   missingEnv: string[]
+  // Secrets this account reads from a command, `field -> command line`.
+  // Approving the account lets apb run each command, so the approval row
+  // shows them. Never a secret value.
+  cmd: Record<string, string>
   trust: ConnectorTrust
 }
 

@@ -41,11 +41,21 @@ pub fn connectors_list(root: &Path) -> Result<Value, ToolError> {
                 })
             })
             .collect();
-        // Account NAMES only (never fields/env). Best-effort: a broken account
-        // config yields an empty account list, not a failed listing.
-        let accounts: Vec<String> = apb_core::connector::config::load_merged(root, &summary.name)
-            .map(|accts| accts.into_iter().map(|a| a.name).collect())
-            .unwrap_or_default();
+        // Account NAMES (never field or env values). Best-effort: a broken
+        // account config yields an empty account list, not a failed listing.
+        // Plus, per account, each secret read from a command with its command
+        // line: that is what approving the account authorizes apb to run, so
+        // an agent asking the user to approve must be able to show it.
+        let merged =
+            apb_core::connector::config::load_merged(root, &summary.name).unwrap_or_default();
+        let accounts: Vec<String> = merged.iter().map(|a| a.name.clone()).collect();
+        let account_commands: serde_json::Map<String, Value> = merged
+            .iter()
+            .filter_map(|a| {
+                let cmd = apb_core::connector::config::cmd_refs(&loaded.doc, a);
+                (!cmd.is_empty()).then(|| (a.name.clone(), json!(cmd)))
+            })
+            .collect();
         let trust_state = trust
             .status(
                 &loaded.digest,
@@ -61,6 +71,7 @@ pub fn connectors_list(root: &Path) -> Result<Value, ToolError> {
             "update_available": apb_core::connector::install::embedded_update(&summary.name),
             "functions": functions,
             "accounts": accounts,
+            "account_commands": account_commands,
         }));
     }
     Ok(json!({ "connectors": out }))

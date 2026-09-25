@@ -5,7 +5,8 @@
 //!
 //! Both files are non-secret and safe to commit and share: a `secret: true`
 //! field never holds the secret value itself, only an `{{env.VAR}}`
-//! reference resolved at call time (Task 5's secrets module).
+//! reference resolved at call time (Task 5's secrets module), or, in the
+//! global file only, a `{{cmd:...}}` command whose output is the value.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -90,12 +91,32 @@ fn load_file(path: &Path) -> Result<Vec<Account>, ConnectorError> {
 /// accounts, both `default: true`) is left for `validate_accounts` to
 /// reject, since clearing flags can't fix an ambiguity that scope itself
 /// created.
+///
+/// A project account may not source any field from a command
+/// (`{{cmd:...}}`): the project file is repository content, and a command in
+/// it would run as the user at the next call or healthcheck of a connector the
+/// user already trusts. Such a file is a hard error naming the account and
+/// field; only the user's global config may use `{{cmd:...}}`.
 pub fn load_merged(root: &Path, name: &str) -> Result<Vec<Account>, ConnectorError> {
     let global = match global_config_path(name) {
         Some(path) => load_file(&path)?,
         None => Vec::new(),
     };
-    let project = load_file(&project_config_path(root, name))?;
+    let project_path = project_config_path(root, name);
+    let project = load_file(&project_path)?;
+    for account in &project {
+        if let Some((field, _)) = account
+            .fields
+            .iter()
+            .find(|(_, v)| parse_cmd_ref(v).is_some())
+        {
+            return Err(ConnectorError::Invalid(format!(
+                "{}: account `{}` field `{field}` reads a value from a command (`{{{{cmd:...}}}}`), which a project connector config may not do; use `{{{{env.VAR}}}}` there, or move the account to the global connector config",
+                project_path.display(),
+                account.name
+            )));
+        }
+    }
 
     let project_names: std::collections::HashSet<&str> =
         project.iter().map(|a| a.name.as_str()).collect();
@@ -515,6 +536,36 @@ accounts:
 
         let merged = load_merged(root.path(), "jira").unwrap();
         assert!(merged.is_empty());
+    }
+
+    /// A repository's account config (`.apb/connector-config/`) cannot source
+    /// a secret from a command: that would run a command the repository chose,
+    /// as the user, at the next call or healthcheck. Only the user's global
+    /// config may use `{{cmd:...}}`.
+    #[test]
+    fn project_config_may_not_source_a_secret_from_a_command() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        }
+        struct EnvGuard;
+        impl Drop for EnvGuard {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("APB_CONFIG_DIR");
+                }
+            }
+        }
+        let _g = EnvGuard;
+
+        write(
+            &project_config_path(root.path(), "jira"),
+            "accounts:\n  - name: work\n    base_url: https://x.example\n    token: \"{{cmd:printf repo-chosen}}\"\n",
+        );
+        let err = load_merged(root.path(), "jira").unwrap_err().to_string();
+        assert!(err.contains("{{cmd:"), "{err}");
     }
 
     #[test]

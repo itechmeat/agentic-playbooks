@@ -69,6 +69,12 @@ field must be exactly one reference, either `{{env.VAR}}` or `{{cmd:<command>}}`
 `token: "{{cmd:gh auth token}}"`); a literal secret in a config file is a
 validation error. At most one `default: true` per merged list.
 
+`{{cmd:...}}` is allowed only in the global file. The project file is part of the
+repository, and a command in it would run as you at the next call or healthcheck
+of a connector you already trust, so a project account that sources any field
+from a command makes the connector's config fail to load, naming the account and
+field. Use `{{env.VAR}}` in a project file, or move the account to the global file.
+
 ## Secrets
 
 An `{{env.VAR}}` reference resolves at call time, in order: the process
@@ -108,9 +114,15 @@ apb connector approve <name> --account <acct>   # approve one account's non-secr
 ```
 
 Approving an account shows the concrete field values so you see exactly where
-secrets will be sent. `apb connector doctor` reports the trust status of every
-connector and account (approved, changed since approval, or never approved)
-alongside manifest, config, and env checks.
+secrets will be sent. A secret read from a command is shown with its command
+line wherever an account is approved from, because approving the account lets
+`apb` run that command: `apb connector show` and `approve --account` (`cmd`),
+the dashboard's account row, the MCP run gate's `unapproved_connector_account`
+refusal (`fields` and `cmd`), MCP `connectors_list` (`account_commands`), and
+`apb connector doctor` (a `secret command` row per such field). `apb connector
+doctor` reports the trust status of every connector and account (approved,
+changed since approval, or never approved) alongside manifest, config, and env
+checks.
 
 ## Binding a connector to a node
 

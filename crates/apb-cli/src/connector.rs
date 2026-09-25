@@ -270,6 +270,9 @@ fn show_cmd(root: &Path, name: &str) -> ExitCode {
                 "default": a.default,
                 "fields": Value::Object(fields),
                 "env": env,
+                // A secret read from a command: the command line, which
+                // approving the account authorizes apb to run (not a secret).
+                "cmd": config::cmd_refs(&loaded.doc, a),
             })
         })
         .collect();
@@ -291,8 +294,9 @@ fn show_cmd(root: &Path, name: &str) -> ExitCode {
 /// Approves the connector's current tree digest, or with `account` the current
 /// non-secret-field digest of that account (spec 7). Prints the concrete fields
 /// approved for an account so the user sees exactly what they trusted. Secret
-/// fields carry only their raw `{{env.VAR}}` reference in the config, never the
-/// value, so printing every field is safe.
+/// fields carry only their raw `{{env.VAR}}` or `{{cmd:...}}` reference in the
+/// config, never the value, so printing every field is safe; `cmd` names each
+/// command the approval lets apb run.
 fn approve_cmd(root: &Path, name: &str, account: Option<&str>) -> ExitCode {
     let loaded = match store::load(name) {
         Ok(l) => l,
@@ -349,6 +353,7 @@ fn approve_cmd(root: &Path, name: &str, account: Option<&str>) -> ExitCode {
                 "digest": digest,
                 "default": account.default,
                 "fields": Value::Object(fields),
+                "cmd": config::cmd_refs(&loaded.doc, account),
             }));
             ExitCode::SUCCESS
         }
@@ -556,6 +561,18 @@ fn doctor_cmd(root: &Path) -> ExitCode {
 
         push_connector_trust_check(&mut checks, &trust, name, &loaded.digest);
         for account in &accounts {
+            for (field, command) in config::cmd_refs(&loaded.doc, account) {
+                checks.push(Check {
+                    name: format!(
+                        "connector `{name}` account `{}`: secret command",
+                        account.name
+                    ),
+                    status: CheckStatus::Ok,
+                    detail: format!(
+                        "field `{field}` is read from the output of `{command}`; approving the account lets apb run it"
+                    ),
+                });
+            }
             let digest = config::account_digest(account);
             let approved = trust.is_approved(&digest);
             checks.push(Check {

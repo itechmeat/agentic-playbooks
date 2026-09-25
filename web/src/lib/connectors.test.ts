@@ -39,6 +39,7 @@ describe('accountReady', () => {
     default: true,
     fields: {},
     missingEnv: [],
+    cmd: {},
     trust: 'approved',
   }
 
@@ -96,6 +97,7 @@ const account: ConnectorAccount = {
   default: true,
   fields: {},
   missingEnv: [],
+  cmd: {},
   trust: 'unapproved',
 }
 

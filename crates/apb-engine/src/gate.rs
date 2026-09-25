@@ -489,7 +489,7 @@ fn check_connectors(
             let adigest = account_digest(account);
             if !store.is_approved(&adigest) && !unapproved_accounts.contains(&id) {
                 unapproved_accounts.push(id.clone());
-                account_fields.insert(id.clone(), account_display(account));
+                account_fields.insert(id.clone(), account_display(&resolved.loaded.doc, account));
             }
             accounts.insert(id, adigest);
         }
@@ -516,16 +516,25 @@ fn check_connectors(
 
 /// Non-secret display of an account for an approval prompt (spec 7: the user
 /// sees the concrete fields they approve). Every value is safe: a secret-marked
-/// field holds only its raw `{{env.VAR}}` reference in the config, never the
-/// resolved secret, so the whole `fields` map plus the `default` flag can be
-/// shown. This mirrors exactly what the account digest pins.
-fn account_display(account: &apb_core::connector::config::Account) -> Value {
+/// field holds only its raw `{{env.VAR}}` or `{{cmd:...}}` reference in the
+/// config, never the resolved secret, so the whole `fields` map plus the
+/// `default` flag can be shown. This mirrors exactly what the account digest
+/// pins. `cmd` names each secret read from a command, with the command line:
+/// approving the account authorizes apb to run it.
+fn account_display(
+    doc: &apb_core::connector::def::ConnectorDoc,
+    account: &apb_core::connector::config::Account,
+) -> Value {
     let fields: serde_json::Map<String, Value> = account
         .fields
         .iter()
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
-    json!({ "default": account.default, "fields": Value::Object(fields) })
+    json!({
+        "default": account.default,
+        "fields": Value::Object(fields),
+        "cmd": apb_core::connector::config::cmd_refs(doc, account),
+    })
 }
 
 /// Recursively collects and verifies the sub-playbook pins of `playbook`.

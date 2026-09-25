@@ -390,6 +390,36 @@ async fn detail_endpoint_carries_missing_env() {
     assert_eq!(acct1["fields"]["base_url"], "https://first.example.com");
 }
 
+/// The account detail the dashboard approves from names every secret that is
+/// sourced from a command, with the command line: approving the account
+/// authorizes running it.
+#[tokio::test]
+async fn detail_endpoint_shows_a_command_sourced_secret() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let global = config::global_config_path(CONNECTOR).unwrap();
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global,
+        "accounts:\n  - name: mine\n    base_url: https://mine.example.com\n    token: \"{{cmd:pass show tracker}}\"\n",
+    )
+    .unwrap();
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = json["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "mine")
+        .cloned()
+        .unwrap_or_else(|| panic!("account `mine` listed: {json}"));
+    assert_eq!(mine["cmd"]["token"], "pass show tracker", "{mine}");
+}
+
 /// Approves the fixture connector's tree digest and one account's digest -
 /// the healthcheck probe is trust-gated (fix round, spec 9: it resolves live
 /// secrets against the live config, so an unapproved connector/account must

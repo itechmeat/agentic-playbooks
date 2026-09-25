@@ -384,12 +384,22 @@ fn cmd_secret_passes_env_gate_without_executing_command() {
     p.set_mode(0o755);
     std::fs::set_permissions(&stub, p).unwrap();
 
-    // Rewrite acct1 to source its token from the command (no env var).
+    // Rewrite acct1 to source its token from the command (no env var). A
+    // command is allowed only in the user's global account config.
     let path = config::project_config_path(root.path(), CONNECTOR_NAME);
     std::fs::write(
         &path,
         format!(
-            "accounts:\n  - name: acct1\n    base_url: https://first.example.com\n    token: \"{{{{cmd:{}}}}}\"\n  - name: acct2\n    base_url: https://second.example.com\n    token: \"{{{{env.{TOKEN_B}}}}}\"\n",
+            "accounts:\n  - name: acct2\n    base_url: https://second.example.com\n    token: \"{{{{env.{TOKEN_B}}}}}\"\n"
+        ),
+    )
+    .unwrap();
+    let global = config::global_config_path(CONNECTOR_NAME).unwrap();
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global,
+        format!(
+            "accounts:\n  - name: acct1\n    base_url: https://first.example.com\n    token: \"{{{{cmd:{}}}}}\"\n",
             stub.to_string_lossy()
         ),
     )
