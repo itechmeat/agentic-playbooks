@@ -251,7 +251,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Restore a deleted playbook from the trash with all its versions. `name` is a trash entry name from playbook_trash_list or a playbook id (its latest deletion). The restored current version is approved like any save through apb. Refused with a conflict when a playbook with that id exists again; current workspace only",
+        description = "Restore a deleted playbook from the trash with all its versions. `name` is a trash entry name from playbook_trash_list or a playbook id (its latest deletion). The restored current version is approved like any save through apb when it has no scripts; with scripts it keeps the approval its digest already had. Refused with a conflict when a playbook with that id exists again; current workspace only",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_trash_restore(

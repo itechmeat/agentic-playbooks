@@ -80,6 +80,25 @@ pub struct PlaybookWriteArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrustListArgs {
+    /// Only approvals of this kind: `playbook`, `profile_bundle`,
+    /// `connector` or `connector_account`.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrustRevokeArgs {
+    /// A digest (`sha256:...`, exactly that approval) or an id (every
+    /// approval recorded under it, e.g. every version of a playbook).
+    pub target: String,
+    /// With an id: only approvals of this kind (`playbook`, `profile_bundle`,
+    /// `connector`, `connector_account`).
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct TrashRestoreArgs {
     /// A trash entry name (`<id>-<deleted_at_ms>`, from playbook_trash_list)
     /// or a playbook id, which restores that id's latest deletion.

@@ -76,3 +76,38 @@ pub fn connectors_list(root: &Path) -> Result<Value, ToolError> {
     }
     Ok(json!({ "connectors": out }))
 }
+
+fn parse_kind(kind: Option<&str>) -> Result<Option<apb_core::trust::Kind>, ToolError> {
+    match kind {
+        None => Ok(None),
+        Some(k) => apb_core::trust::Kind::parse(k).map(Some).ok_or_else(|| {
+            ToolError::Engine(format!(
+                "unknown kind `{k}`; use playbook, profile_bundle, connector or connector_account"
+            ))
+        }),
+    }
+}
+
+/// Every approval in the trust store (optionally of one kind): digest, id,
+/// kind, origin and approval time. The same listing as `apb trust list` and
+/// the dashboard's Trust view.
+pub fn trust_list(kind: Option<&str>) -> Result<Value, ToolError> {
+    let kind = parse_kind(kind)?;
+    let entries: Vec<apb_core::trust::TrustEntry> = apb_core::trust::TrustStore::load()
+        .entries()
+        .into_iter()
+        .filter(|e| kind.is_none_or(|k| k == e.kind))
+        .collect();
+    Ok(json!({ "approvals": entries }))
+}
+
+/// Revokes the approvals `target` names (a digest, or every approval under an
+/// id, optionally of one kind) through the one core path, and returns what
+/// was removed. Revoking only lowers trust.
+pub fn trust_revoke(target: &str, kind: Option<&str>) -> Result<Value, ToolError> {
+    let selector = apb_core::trust::TrustSelector::parse(target, parse_kind(kind)?);
+    let removed = apb_core::trust::TrustStore::load()
+        .revoke(&selector)
+        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    Ok(json!({ "revoked": removed }))
+}

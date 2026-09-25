@@ -45,7 +45,8 @@ Reads (read-only):
 | `run_report` | Short run summary |
 | `profile_list` | Profiles (project + global) with bundle trust status |
 | `profile_get` | Profile contents (profile.yaml + SOUL.md) and digests |
-| `connectors_list` | Installed connectors an `agent_task` can bind: version, trust, `update_available` (the built-in version when the installed copy differs), function names and configured account names; never account fields or secrets |
+| `connectors_list` | Installed connectors an `agent_task` can bind: version, trust, `update_available` (the built-in version when the installed copy differs), function names, configured account names and `account_commands` (per account, each secret read from a command, with the command line); never other account fields or secrets |
+| `trust_list` | The approvals in the user's trust store: `digest`, `id`, `kind` (`playbook`, `profile_bundle`, `connector`, `connector_account`), `origin_kind`, `approved_at_ms`; optional `kind` filter |
 | `agents_detect` | Agent detection: presence, version, category, local hints for models/providers/auth. The detection itself is local - apb runs `--version` and reads local config, makes no network requests of its own (what the third-party CLI does when actually run is not something apb controls) |
 | `profile_howto` | How to write profiles: format, selection rules, model table with assignments, subscriptions, detection (pull only when working with profiles) |
 | `playbook_adopt_report` | Adoption readiness: profile resolvability, skill presence, bundle trust, model availability by detection |
@@ -77,7 +78,8 @@ Mutations (destructive):
 | `playbook_create` | New playbook or a new minor version (creating via the tool approves the digest) |
 | `playbook_update` | New minor version of an existing playbook (approves the saved digest, like create) |
 | `playbook_delete` | Soft delete to trash (`.apb/trash/<id>-<millis>`; runs stay) |
-| `playbook_trash_restore` | Restore a trash entry by `name`, or a playbook id's latest deletion, with every version; the restored current version is approved like a save. A playbook that exists again under the id is a conflict and nothing moves. Current workspace only |
+| `playbook_trash_restore` | Restore a trash entry by `name`, or a playbook id's latest deletion, with every version; the restored current version is approved like a save when it has no scripts. A playbook that exists again under the id is a conflict and nothing moves. Current workspace only |
+| `trust_revoke` | Revoke approvals: `target` is a digest (exactly that approval) or an id (every approval under it; `kind` narrows it). Returns what was revoked. The same path as `apb trust revoke` and the dashboard's Trust view |
 | `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below). Only a run apb created on this machine resumes (`run_not_created_locally` otherwise, not bypassable); a run whose snapshot digest is not approved needs `acknowledge_untrusted: true` |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
 | `review_decide` | Decide a run's human_review node |
@@ -118,7 +120,9 @@ not migrate those approvals automatically, because that would approve
 whatever scripts are on disk now, which is exactly what the digest exists to
 catch. Re-approve such a playbook after reviewing its scripts: MCP
 `playbook_approve`, or confirm the next `playbook_run` with
-`acknowledge_untrusted: true`.
+`acknowledge_untrusted: true`. `trust_list` (and `apb trust list`, the
+dashboard's Trust view) shows every approval; `trust_revoke` removes one by
+digest, or all of an id's.
 `playbook_run` goes through a server-side gate: draft is rejected (only via
 `playbook_trial`), an unapproved digest requires `acknowledge_untrusted: true`
 after user confirmation, and running in another workspace only happens via the

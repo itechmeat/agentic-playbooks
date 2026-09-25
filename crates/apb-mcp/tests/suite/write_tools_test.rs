@@ -140,3 +140,36 @@ fn playbook_create_invalid_yaml_is_engine_error() {
     let loaded = reg.load("implement-task", None).unwrap();
     assert_eq!(loaded.version, "1.0.0");
 }
+
+/// MCP `trust_list` / `trust_revoke`: the listing shows the approvals, a
+/// revoke by id removes every approval of that id and returns them, and the
+/// listing no longer shows them.
+#[test]
+fn trust_list_and_revoke_by_id() {
+    use apb_core::trust::{Kind, OriginKind, TrustStore};
+    let _cfg = crate::common::config_sandbox();
+    let mut store = TrustStore::load();
+    for (digest, id) in [
+        ("sha256:d1", "demo"),
+        ("sha256:d2", "demo"),
+        ("sha256:k1", "keep"),
+    ] {
+        store
+            .approve_kind(digest, id, Kind::Playbook, OriginKind::LocallyApproved)
+            .unwrap();
+    }
+
+    let listed = apb_mcp::tools::trust_list(Some("playbook")).unwrap();
+    assert_eq!(listed["approvals"].as_array().unwrap().len(), 3, "{listed}");
+    let revoked = apb_mcp::tools::trust_revoke("demo", None).unwrap();
+    assert_eq!(revoked["revoked"].as_array().unwrap().len(), 2, "{revoked}");
+    let listed = apb_mcp::tools::trust_list(None).unwrap();
+    let ids: Vec<&str> = listed["approvals"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|e| e["id"].as_str())
+        .collect();
+    assert_eq!(ids, ["keep"]);
+    assert!(apb_mcp::tools::trust_list(Some("nonsense")).is_err());
+}

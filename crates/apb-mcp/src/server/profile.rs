@@ -44,6 +44,28 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "List the approvals in the user's trust store: digest, id, kind (playbook, profile_bundle, connector, connector_account), origin and approval time. Pass kind to filter.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn trust_list(
+        &self,
+        Parameters(TrustListArgs { kind }): Parameters<TrustListArgs>,
+    ) -> CallToolResult {
+        to_call_tool_result(crate::tools::trust_list(kind.as_deref()))
+    }
+
+    #[tool(
+        description = "Revoke approvals in the user's trust store: target is a digest (exactly that approval) or an id (every approval under it, e.g. every version of a playbook; kind narrows it). Returns what was revoked. The content then needs a new approval, or acknowledge_untrusted, to run. Ask the user before revoking anything they did not ask to revoke.",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn trust_revoke(
+        &self,
+        Parameters(TrustRevokeArgs { target, kind }): Parameters<TrustRevokeArgs>,
+    ) -> CallToolResult {
+        to_call_tool_result(crate::tools::trust_revoke(&target, kind.as_deref()))
+    }
+
+    #[tool(
         description = "Get a profile's full content (profile.yaml + SOUL.md) and digests.",
         annotations(read_only_hint = true)
     )]
@@ -55,7 +77,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Create or update an agent profile (agent+model+fallbacks, SOUL, skills). Update requires expected_digest (optimistic concurrency). Auto-approves the resulting bundle. Only for the current workspace. Create a project profile a directly requested playbook needs without extra questions; ask the user before an unexpected global mutation or an initiative-driven change to a profile other playbooks use.",
+        description = "Create or update an agent profile (agent+model+fallbacks, SOUL, skills). Update requires expected_digest (optimistic concurrency). Auto-approves the resulting bundle, except when skills the profile kept changed since it was last approved: then it returns trusted: false and skills_unapproved for the user to review. Only for the current workspace. Create a project profile a directly requested playbook needs without extra questions; ask the user before an unexpected global mutation or an initiative-driven change to a profile other playbooks use.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn profile_write(
