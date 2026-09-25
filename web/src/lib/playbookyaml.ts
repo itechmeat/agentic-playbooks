@@ -98,20 +98,6 @@ export function docToString(doc: Document): string {
   return doc.toString()
 }
 
-/** Starter template for a new playbook. */
-export const NEW_PLAYBOOK_TEMPLATE = `schema: 1
-id: new-playbook
-name: New Playbook
-version: 0.1.0
-
-nodes:
-  - id: start
-    type: start
-    title: Start
-  - id: done
-    type: finish
-    outcome: success
-
-edges:
-  - { from: start, to: done }
-`
+/** Starter template for a new playbook: generated from apb-core, so it always
+ * declares the schema this apb writes. */
+export { NEW_PLAYBOOK_TEMPLATE } from './api.gen'

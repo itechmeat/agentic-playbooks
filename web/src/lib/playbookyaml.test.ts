@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 import { toFlow } from './graph'
-import { parsePlaybook } from './playbookyaml'
+import { parse } from 'yaml'
+import { CURRENT_SCHEMA } from './api.gen'
+import { NEW_PLAYBOOK_TEMPLATE, parsePlaybook } from './playbookyaml'
+
+// F22: the editor's "New playbook" starts from a document in the schema this
+// apb writes, not a stale literal.
+describe('NEW_PLAYBOOK_TEMPLATE', () => {
+  it('declares the current schema', () => {
+    expect(parse(NEW_PLAYBOOK_TEMPLATE).schema).toBe(CURRENT_SCHEMA)
+  })
+})
 
 // Simplified sample shaped like crates/apb-core/tests/fixtures/valid.yaml
 const VALID_YAML = `schema: 1
