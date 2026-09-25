@@ -312,7 +312,7 @@ fn config_source_change_invalidates_cache_before_ttl() {
 /// `[model_providers.*]` annotation from `~/.codex/config.toml` stays
 /// file-based and is never gated on binary presence (regression that failed
 /// PR CI on clean Linux runners). The static model list, like claude's, is
-/// claimed only once codex is installed: exactly the seven models, default
+/// claimed only once codex is installed: exactly the table's list, default
 /// first, and never the `model` line of config.toml.
 #[test]
 fn codex_static_models_and_config_providers_without_binary() {
@@ -348,15 +348,7 @@ fn codex_static_models_and_config_providers_without_binary() {
     assert_eq!(models.authority, Authority::Static);
     assert_eq!(
         models.items,
-        vec![
-            "gpt-6-sol".to_string(),
-            "gpt-6-astra".to_string(),
-            "gpt-6-luna".to_string(),
-            "gpt-5.6-sol".to_string(),
-            "gpt-5.6-terra".to_string(),
-            "gpt-5.6-luna".to_string(),
-            "gpt-5.5".to_string(),
-        ],
+        apb_core::models_table::builtin().codex_static_models,
         "codex's static list, in table order"
     );
 }

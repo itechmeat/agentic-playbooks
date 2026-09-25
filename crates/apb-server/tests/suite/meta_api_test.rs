@@ -46,13 +46,17 @@ async fn agents_models_and_skills_endpoints() {
 
     let root = proj.path().to_path_buf();
 
-    // /api/agents: the ten built-in probes are always enumerated (claude,
-    // codex, agy, opencode, pi, hermes, grok, cursor, qoder, zcode).
+    // /api/agents: every built-in probe is always enumerated.
+    let probes = apb_core::detect::builtin_probes().len();
     let app = build_router(AppState::new(root.clone()));
     let (status, json) = get_json(app, "/api/agents").await;
     assert_eq!(status, StatusCode::OK);
     let agents = json["agents"].as_array().expect("agents array");
-    assert_eq!(agents.len(), 10, "expected the ten built-in probes: {json}");
+    assert_eq!(
+        agents.len(),
+        probes,
+        "expected every built-in probe: {json}"
+    );
     assert!(agents.iter().any(|a| a["agent"] == "claude"));
     assert!(agents.iter().any(|a| a["agent"] == "grok"));
     assert!(agents.iter().any(|a| a["agent"] == "cursor"));
@@ -86,15 +90,7 @@ async fn agents_models_and_skills_endpoints() {
         .collect();
     assert_eq!(
         codex_static,
-        [
-            "gpt-6-sol",
-            "gpt-6-astra",
-            "gpt-6-luna",
-            "gpt-5.6-sol",
-            "gpt-5.6-terra",
-            "gpt-5.6-luna",
-            "gpt-5.5"
-        ]
+        apb_core::models_table::builtin().codex_static_models
     );
     assert_eq!(ids(&json["options_by_agent"]["codex"]), codex_static);
     assert!(
@@ -120,12 +116,12 @@ async fn agents_models_and_skills_endpoints() {
             .as_array()
             .expect("agents in /api/models")
             .len(),
-        10
+        probes
     );
     // zcode's option set is apb's allowlist, bare ids.
     assert_eq!(
         ids(&json["options_by_agent"]["zcode"]),
-        ["GLM-5.3", "GLM-5.3-Flash"]
+        apb_core::zcode::model_list()
     );
 
     // An aggregator (no single vendor tie) keeps the whole curated table.

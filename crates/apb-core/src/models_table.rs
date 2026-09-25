@@ -809,9 +809,35 @@ mod tests {
         }
     }
 
+    /// Table-wide invariants a model refresh must keep, without naming any
+    /// model: ids are unique, every metered row is priced, and every model the
+    /// table's own closed lists offer has a full row (provenance is checked for
+    /// every row above). zcode's list is the Rust allowlist and is deliberately
+    /// unpriced: GLM-5.3 has no published metered price.
     #[test]
-    fn builtin_digest_is_stable_and_short() {
-        assert_eq!(builtin_digest(), builtin_digest());
-        assert_eq!(builtin_digest().len(), 16);
+    fn rows_are_unique_priced_and_back_every_static_list() {
+        let t = builtin();
+        let mut seen = std::collections::BTreeSet::new();
+        for m in &t.models {
+            assert!(seen.insert(m.id.as_str()), "duplicate model id `{}`", m.id);
+            if !(m.stt || m.tts) {
+                assert!(
+                    m.cost_in_usd_mtok.is_some() && m.cost_out_usd_mtok.is_some(),
+                    "model `{}` is missing a price",
+                    m.id
+                );
+            }
+        }
+        for id in t.claude_static_models.iter().chain(&t.codex_static_models) {
+            let m = t
+                .models
+                .iter()
+                .find(|m| &m.id == id)
+                .unwrap_or_else(|| panic!("static-list model `{id}` has no row"));
+            assert!(
+                m.context_tokens.is_some() && m.reasoning.is_some(),
+                "static-list model `{id}` is missing context or reasoning"
+            );
+        }
     }
 }
