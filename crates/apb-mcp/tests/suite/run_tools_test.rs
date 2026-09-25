@@ -976,3 +976,76 @@ fn run_report_reports_a_working_run_as_running() {
     assert_eq!(report["run_status"], "running", "report: {report}");
     assert_eq!(report["nodes"]["a"], "running", "report: {report}");
 }
+
+const GATED: &str = r#"
+schema: 1
+id: gated
+name: Gated
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, options: [approved, rejected] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
+/// The compact `run_wait` answer describes the observation the wait decided
+/// on, in one piece: a wait that returned `needs_input` for a review carries
+/// that `pending_review`, even when the gate is decided between the wait
+/// returning and the answer being built. It used to read the run a second
+/// time, so `reason` said needs_input while `pending_review` was missing.
+#[test]
+fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
+    use apb_engine::event::{EventLog, EventPayload};
+    use apb_engine::run_wait::{WaitReason, wait_run_with};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let run_dir = dir.path().join(".apb/runs/r1");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("playbook.yaml"), GATED).unwrap();
+    let mut log = EventLog::open(&run_dir).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "gated".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    log.append(EventPayload::ReviewRequested {
+        node: "gate".into(),
+        options: vec!["approved".into(), "rejected".into()],
+        title: None,
+        instruction: String::new(),
+        prompt: None,
+    })
+    .unwrap();
+
+    let res = wait_run_with(
+        dir.path(),
+        "r1",
+        Duration::from_secs(5),
+        Duration::from_millis(20),
+        Duration::from_millis(10),
+    )
+    .unwrap();
+    assert_eq!(res.reason, WaitReason::NeedsInput);
+
+    // The gate is decided after the wait returned.
+    log.append(EventPayload::ReviewDecided {
+        node: "gate".into(),
+        decision: "approved".into(),
+        note: String::new(),
+    })
+    .unwrap();
+
+    let out = apb_mcp::tools::run_wait_result(dir.path(), "r1", &res).unwrap();
+    assert_eq!(out["reason"], "needs_input");
+    assert_eq!(
+        out["pending_review"]["node"], "gate",
+        "the answer must carry the gate its reason is about: {out}"
+    );
+}

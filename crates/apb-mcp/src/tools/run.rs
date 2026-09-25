@@ -187,14 +187,13 @@ pub fn run_wait_result(
     res: &apb_engine::run_wait::RunWaitResult,
 ) -> Result<Value, ToolError> {
     use apb_engine::run_wait::WaitReason;
-    let status = run_status(root, run_id)?;
+    // Built from the observation the wait decided on, not a second read: a
+    // gate decided in between must not leave `reason: needs_input` without
+    // the `pending_*` it is about.
+    let view = &res.view;
     let mut counts: BTreeMap<String, u64> = BTreeMap::new();
-    if let Some(nodes) = status["nodes"].as_object() {
-        for v in nodes.values() {
-            if let Some(s) = v.as_str() {
-                *counts.entry(s.to_string()).or_default() += 1;
-            }
-        }
+    for s in view.nodes().into_values() {
+        *counts.entry(s).or_default() += 1;
     }
     let next = match res.reason {
         WaitReason::Finished => {
@@ -228,15 +227,30 @@ pub fn run_wait_result(
         "nodes": counts,
         "next": next,
     });
-    for key in [
-        "pending_question",
-        "pending_review",
-        "pending_supervisor",
-        "failure_reason",
-        "answer",
-    ] {
-        if !status[key].is_null() {
-            out[key] = status[key].clone();
+    let progress = view.progress.as_ref();
+    let dir = resolve_run_dir(root, run_id)?;
+    let fields = [
+        (
+            "pending_question",
+            json!(progress.and_then(|p| p.pending_question.clone())),
+        ),
+        (
+            "pending_review",
+            json!(progress.and_then(|p| p.pending_review.clone())),
+        ),
+        (
+            "pending_supervisor",
+            json!(progress.and_then(|p| p.pending_supervisor.clone())),
+        ),
+        ("failure_reason", json!(view.failure_reason())),
+        (
+            "answer",
+            json!(apb_engine::progress::run_answer(&dir, &view.events)),
+        ),
+    ];
+    for (key, value) in fields {
+        if !value.is_null() {
+            out[key] = value;
         }
     }
     Ok(out)

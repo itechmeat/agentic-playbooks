@@ -100,7 +100,7 @@ impl RunSnapshot {
 }
 
 /// The result of [`wait_run`].
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub struct RunWaitResult {
     pub reason: WaitReason,
     pub status: RunStatus,
@@ -109,12 +109,22 @@ pub struct RunWaitResult {
     /// process driving the run is gone and only a resume continues it.
     pub driver_alive: Option<bool>,
     pub waited: Duration,
+    /// The observation the wait decided on. A caller that reports more than
+    /// the fields above (pending gates, node counts, the answer) reads them
+    /// from here, never from a second read that may disagree with `reason`.
+    pub view: std::sync::Arc<crate::run_view::RunView>,
 }
 
 /// Reads the run once, through the same [`crate::run_view::RunView`] every
 /// status surface reports from.
 pub fn snapshot(run_dir: &Path, run_id: &str) -> Result<RunSnapshot, EngineError> {
-    let view = crate::run_view::RunView::load(run_dir, run_id)?;
+    Ok(snapshot_of(&crate::run_view::RunView::load(
+        run_dir, run_id,
+    )?))
+}
+
+/// The [`RunSnapshot`] of an already loaded view.
+fn snapshot_of(view: &crate::run_view::RunView) -> RunSnapshot {
     let needs = view.progress.as_ref().and_then(|p| {
         if p.pending_question.is_some() {
             Some(NeedsInput::Question)
@@ -126,11 +136,11 @@ pub fn snapshot(run_dir: &Path, run_id: &str) -> Result<RunSnapshot, EngineError
             None
         }
     });
-    Ok(RunSnapshot {
+    RunSnapshot {
         status: view.run_status,
         needs,
         driver_alive: view.driver_alive,
-    })
+    }
 }
 
 /// Blocks until run `run_id` finishes, needs input, stops, or `timeout`
@@ -190,11 +200,13 @@ impl RunWaiter {
     pub fn wait(&mut self, timeout: Duration) -> Result<RunWaitResult, EngineError> {
         let deadline = Instant::now() + timeout;
         loop {
-            let snap = snapshot(&self.run_dir, &self.run_id)?;
+            let view =
+                std::sync::Arc::new(crate::run_view::RunView::load(&self.run_dir, &self.run_id)?);
+            let snap = snapshot_of(&view);
             let now = Instant::now();
             match snap.stop_reason() {
                 Some(WaitReason::Finished) => {
-                    return Ok(result(WaitReason::Finished, snap, self.started));
+                    return Ok(result(WaitReason::Finished, snap, view, self.started));
                 }
                 Some(reason) => {
                     let since = match self.pending_since {
@@ -205,13 +217,13 @@ impl RunWaiter {
                         }
                     };
                     if now.duration_since(since) >= self.grace {
-                        return Ok(result(reason, snap, self.started));
+                        return Ok(result(reason, snap, view, self.started));
                     }
                 }
                 None => self.pending_since = None,
             }
             if now >= deadline {
-                return Ok(result(WaitReason::Timeout, snap, self.started));
+                return Ok(result(WaitReason::Timeout, snap, view, self.started));
             }
             sleep(
                 self.poll
@@ -222,13 +234,19 @@ impl RunWaiter {
     }
 }
 
-fn result(reason: WaitReason, snap: RunSnapshot, started: Instant) -> RunWaitResult {
+fn result(
+    reason: WaitReason,
+    snap: RunSnapshot,
+    view: std::sync::Arc<crate::run_view::RunView>,
+    started: Instant,
+) -> RunWaitResult {
     RunWaitResult {
         reason,
         status: snap.status,
         needs: snap.needs,
         driver_alive: snap.driver_alive,
         waited: started.elapsed(),
+        view,
     }
 }
 
