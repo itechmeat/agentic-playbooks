@@ -145,7 +145,7 @@ fn stdio_profile_write_run_then_skill_edit_refuses() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
+    let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
@@ -165,25 +165,27 @@ fn stdio_profile_write_run_then_skill_edit_refuses() {
         }
     });
 
-    // Handshake.
-    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
-    writeln!(stdin, "{init}").unwrap();
-    stdin.flush().unwrap();
-    // The initialize answer is the server's own readiness signal.
-    await_response(&rx, &mut child, 1, "initialize");
-    writeln!(
-        stdin,
-        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
-    )
-    .unwrap();
-    stdin.flush().unwrap();
-
+    // The guard owns the server from here on, so a failed handshake still
+    // kills and reaps it instead of leaving it writing into a dropped tempdir.
     let mut srv = Server {
         child,
         stdin,
         rx,
         next_id: 100,
     };
+
+    // Handshake.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+    writeln!(srv.stdin, "{init}").unwrap();
+    srv.stdin.flush().unwrap();
+    // The initialize answer is the server's own readiness signal.
+    await_response(&srv.rx, &mut srv.child, 1, "initialize");
+    writeln!(
+        srv.stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
+    srv.stdin.flush().unwrap();
 
     // profile_write: creates the arch profile (skill cs) and auto-approves its bundle.
     let r = srv.call(
