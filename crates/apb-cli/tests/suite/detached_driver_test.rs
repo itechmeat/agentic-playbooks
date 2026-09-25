@@ -820,3 +820,66 @@ impl Drop for McpSession {
         );
     }
 }
+
+/// Prepares a run of `id` the way a launcher does and releases its workdir
+/// lock, leaving a run directory a `__drive-run` can pick up.
+fn prepare_released(root: &Path, id: &str) -> String {
+    let prepared = apb_engine::prepare_supervised_background(
+        root,
+        id,
+        None,
+        apb_engine::RunOptions::default(),
+    )
+    .unwrap();
+    let run_id = prepared.run_id().to_string();
+    drop(prepared);
+    run_id
+}
+
+// Issue #139 F13: a driver whose workspace is deleted mid-node stops after the
+// node without re-creating the run directory (context.md, outputs, the control
+// cursor were all written with create_dir_all).
+#[test]
+fn a_driver_does_not_recreate_a_workspace_deleted_mid_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("midrun", 2);
+    seed(dir.path(), "midrun", &yaml, &script);
+    let run_id = prepare_released(dir.path(), "midrun");
+    let _guard = RunGuard::new(dir.path(), &run_id);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+
+    let mut driver = crate::common::apb_std()
+        .arg("__drive-run")
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--run-id")
+        .arg(&run_id)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until_driving(&run_dir);
+    fs::remove_dir_all(dir.path()).unwrap();
+    wait_with_deadline(&mut driver, POLL_DEADLINE, "the driver to stop");
+
+    assert!(
+        !dir.path().exists(),
+        "the driver re-created the deleted workspace: {:?}",
+        walk(dir.path())
+    );
+}
+
+/// Every path under `root`, for a failure message.
+fn walk(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        if let Ok(rd) = fs::read_dir(&p) {
+            for e in rd.flatten() {
+                stack.push(e.path());
+            }
+        }
+        out.push(p);
+    }
+    out
+}

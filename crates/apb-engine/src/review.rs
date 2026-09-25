@@ -107,7 +107,7 @@ fn check_review_target(run_dir: &Path, node: &str) -> Result<(), EngineError> {
 }
 
 pub fn post_review(run_dir: &Path, cmd: ReviewCommand) -> Result<u64, EngineError> {
-    std::fs::create_dir_all(run_dir)?;
+    crate::driver::ensure_run_dir(run_dir)?;
     check_review_target(run_dir, &cmd.node)?;
 
     let seq = read_reviews_after(run_dir, None)?.len() as u64;

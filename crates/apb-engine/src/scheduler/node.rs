@@ -835,7 +835,7 @@ pub(crate) fn execute_node(
                     // (idempotent); this is set for EVERY attempt, independent of
                     // any success_check.
                     let status_dir = run_dir.join("agent-status");
-                    std::fs::create_dir_all(&status_dir)?;
+                    apb_core::fsutil::create_dir_under(run_dir, &status_dir)?;
                     let status_file = status_dir.join(format!("{node_id}-{attempt}.json"));
                     // Stale status-file removal (issue #70 item 3): a resume or
                     // continue_from re-run can restart the attempt counter, so a
@@ -2438,7 +2438,7 @@ pub(crate) fn maybe_compact_context(
         Err(_) => return Ok(None),
     };
     let compact_file = "context_compact.md";
-    apb_core::fsutil::atomic_write(&run_dir.join(compact_file), summary.as_bytes())?;
+    apb_core::fsutil::atomic_write_under(run_dir, &run_dir.join(compact_file), summary.as_bytes())?;
     Ok(Some(EventPayload::ContextCompacted {
         compact_file: compact_file.to_string(),
         model,

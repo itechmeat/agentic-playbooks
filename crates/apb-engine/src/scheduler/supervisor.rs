@@ -39,7 +39,8 @@ pub fn spawn_supervisor_agent(
     let capabilities = vec!["observe".to_string(), "retry".to_string()];
     write_supervisor_session(root, run_id, &token, &capabilities)?;
 
-    apb_core::fsutil::atomic_write(
+    apb_core::fsutil::atomic_write_under(
+        &run_dir,
         &run_dir.join("supervisor").join("spawned_at"),
         apb_core::clock::now_ms().to_string().as_bytes(),
     )?;
@@ -91,7 +92,8 @@ pub fn spawn_supervisor_agent(
         );
         match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &connector_policy) {
             Ok(()) => {
-                apb_core::fsutil::atomic_write(
+                apb_core::fsutil::atomic_write_under(
+                    &run_dir,
                     &run_dir.join("supervisor").join("executor"),
                     format!("{}:{}", inv.agent_id, inv.model).as_bytes(),
                 )?;
@@ -148,19 +150,7 @@ pub(crate) fn supervisor_brief(
 /// Poll interval for control.jsonl while waiting in supervised mode.
 pub(crate) const AWAIT_CONTROL_POLL: Duration = Duration::from_millis(50);
 
-/// Fails once the run directory is gone (a deleted workspace). Every waiting
-/// loop checks it, because a missing journal reads as empty and appends go to
-/// the unlinked file, so a parked driver would otherwise poll forever.
-pub(crate) fn ensure_run_dir(run_dir: &Path) -> Result<(), EngineError> {
-    if run_dir.is_dir() {
-        Ok(())
-    } else {
-        Err(EngineError::NotFound(format!(
-            "run directory {} was removed",
-            run_dir.display()
-        )))
-    }
-}
+pub(crate) use crate::driver::ensure_run_dir;
 
 /// Blocks until the first command with seq greater than `cursor` that must be
 /// returned to the caller (Retry/ContinueFrom/Pause/Abort/Patch). Used only in
@@ -276,7 +266,7 @@ pub(crate) fn rebuild_context_md(run_dir: &Path) -> Result<(), EngineError> {
     let cfg = crate::run_config::read_run_config(run_dir)?;
     let header = crate::context::instruction_section(cfg.instruction.as_deref());
     let ctx_md = format!("{header}{}", build_context(&read_all(run_dir)?));
-    apb_core::fsutil::atomic_write(&run_dir.join("context.md"), ctx_md.as_bytes())?;
+    apb_core::fsutil::atomic_write_under(run_dir, &run_dir.join("context.md"), ctx_md.as_bytes())?;
     Ok(())
 }
 

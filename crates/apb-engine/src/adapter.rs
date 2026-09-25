@@ -1444,8 +1444,12 @@ impl ClaudeAdapter {
         });
 
         let mut sink = task.stream_log.and_then(|p| {
-            if let Some(parent) = p.parent() {
-                let _ = std::fs::create_dir_all(parent);
+            // `<run_dir>/agent-stream/<file>`: created under the run
+            // directory, never re-creating a deleted run.
+            if let Some(parent) = p.parent()
+                && let Some(run_dir) = parent.parent()
+            {
+                let _ = apb_core::fsutil::create_dir_under(run_dir, parent);
             }
             std::fs::OpenOptions::new()
                 .create(true)

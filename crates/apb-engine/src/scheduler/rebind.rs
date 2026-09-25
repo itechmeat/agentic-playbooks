@@ -42,7 +42,7 @@ pub(crate) fn read_overlay(run_dir: &Path) -> Result<RebindOverlay, EngineError>
 
 fn write_overlay(run_dir: &Path, overlay: &RebindOverlay) -> Result<(), EngineError> {
     let yaml = serde_yaml_ng::to_string(overlay).map_err(|e| EngineError::Yaml(e.to_string()))?;
-    apb_core::fsutil::atomic_write(&overlay_path(run_dir), yaml.as_bytes())?;
+    apb_core::fsutil::atomic_write_under(run_dir, &overlay_path(run_dir), yaml.as_bytes())?;
     Ok(())
 }
 

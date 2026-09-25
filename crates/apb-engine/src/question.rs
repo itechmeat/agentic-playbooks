@@ -54,7 +54,7 @@ pub fn post_question(
     question: &str,
     options: Vec<String>,
 ) -> Result<u64, EngineError> {
-    std::fs::create_dir_all(run_dir)?;
+    crate::driver::ensure_run_dir(run_dir)?;
 
     let seq = read_questions_after(run_dir, None)?.len() as u64;
 
@@ -216,7 +216,7 @@ fn append_answer(
     answer: &str,
     answered_by: &str,
 ) -> Result<u64, EngineError> {
-    std::fs::create_dir_all(run_dir)?;
+    crate::driver::ensure_run_dir(run_dir)?;
     let seq = read_answers_after(run_dir, None)?.len() as u64;
 
     let entry = PostedAnswer {
