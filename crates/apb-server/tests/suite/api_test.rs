@@ -634,6 +634,75 @@ async fn cache_policy_and_build_identity() {
     );
 }
 
+/// The dashboard shell (at `/` and at any client route) carries a
+/// Content-Security-Policy that only runs the server's own scripts: no inline
+/// script, no eval, no plugins, no foreign base URL, no framing. Style
+/// elements need this load's nonce, which the shell hands to the page and
+/// which differs per load; style attributes are refused except the empty one.
+/// The shell itself has no inline script, so the policy is one the build meets.
+#[tokio::test]
+async fn the_shell_carries_a_strict_content_security_policy() {
+    let dir = seed();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let mut nonces = Vec::new();
+    for uri in ["/", "/runs/some-run", "/"] {
+        let res = raw_get(app.clone(), uri).await;
+        assert_eq!(res.status(), StatusCode::OK, "{uri}");
+        let csp = header(&res, "content-security-policy")
+            .unwrap_or_else(|| panic!("{uri}: no content-security-policy"))
+            .to_string();
+        let directive = |name: &str| -> Vec<String> {
+            csp.split(';')
+                .map(str::trim)
+                .find_map(|d| d.strip_prefix(name).filter(|r| r.starts_with(' ')))
+                .map(|r| r.split_whitespace().map(str::to_string).collect())
+                .unwrap_or_default()
+        };
+        assert_eq!(directive("default-src"), ["'self'"], "{uri}: {csp}");
+        assert_eq!(directive("script-src"), ["'self'"], "{uri}: {csp}");
+        assert_eq!(directive("object-src"), ["'none'"], "{uri}: {csp}");
+        assert_eq!(directive("base-uri"), ["'none'"], "{uri}: {csp}");
+        assert_eq!(directive("frame-ancestors"), ["'none'"], "{uri}: {csp}");
+        assert!(!csp.contains("unsafe-eval"), "{uri}: {csp}");
+        assert!(!csp.contains("'unsafe-inline'"), "{uri}: {csp}");
+        // The only style attribute admitted is the empty one (its SHA-256).
+        assert_eq!(
+            directive("style-src-attr"),
+            [
+                "'unsafe-hashes'",
+                "'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='"
+            ],
+            "{uri}: {csp}"
+        );
+
+        let html = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec())
+            .unwrap();
+        for tag in html.split("<script").skip(1) {
+            let open = tag.split('>').next().unwrap_or_default();
+            assert!(
+                open.contains(" src="),
+                "{uri}: inline script in the shell: {tag}"
+            );
+        }
+        let nonce = html
+            .split(r#"<meta name="csp-nonce" content=""#)
+            .nth(1)
+            .and_then(|r| r.split('"').next())
+            .unwrap_or_else(|| panic!("{uri}: no csp-nonce meta"))
+            .to_string();
+        assert!(nonce.len() >= 22, "{uri}: nonce too short: {nonce}");
+        assert_eq!(
+            directive("style-src"),
+            ["'self'".to_string(), format!("'nonce-{nonce}'")],
+            "{uri}: {csp}"
+        );
+        nonces.push(nonce);
+    }
+    nonces.sort();
+    nonces.dedup();
+    assert_eq!(nonces.len(), 3, "a nonce is never reused: {nonces:?}");
+}
+
 /// The dashboard's Trust view over HTTP: the listing shows every approval, a
 /// revoke by id removes all of that id's approvals of the kind and returns
 /// them, and a target that matches nothing is a 404.

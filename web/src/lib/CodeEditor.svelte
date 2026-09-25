@@ -82,6 +82,12 @@
             cmYaml.yaml(),
             syntaxHighlighting(highlight),
             View.lineWrapping,
+            // CodeMirror injects its base theme as a <style> element; the
+            // dashboard's Content-Security-Policy admits it only with the
+            // per-page nonce the server puts in <meta name="csp-nonce">.
+            View.cspNonce.of(
+              document.querySelector('meta[name="csp-nonce"]')?.getAttribute('content') ?? '',
+            ),
             // Both are needed: `readOnly` refuses edits, `editable` also drops
             // the caret and the editing affordances, so a read-only view reads
             // as text rather than as an input that silently ignores you.
@@ -120,8 +126,7 @@
 <div bind:this={host} class="cm-host size-full min-h-0 overflow-hidden">
   {#if !view}
     <textarea
-      class="size-full resize-none whitespace-pre bg-background p-3 font-mono text-[13px] leading-relaxed text-foreground outline-none"
-      style="tab-size: 2;"
+      class="size-full resize-none whitespace-pre bg-background p-3 font-mono text-[13px] leading-relaxed text-foreground outline-none [tab-size:2]"
       spellcheck="false"
       autocomplete="off"
       autocapitalize="off"

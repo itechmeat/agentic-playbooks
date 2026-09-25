@@ -487,6 +487,12 @@ event as an instruction to act twice.
 - Every response carries `X-Frame-Options: DENY`, so the dashboard cannot be
   framed. That does not depend on your proxy configuration, and a proxy should
   not strip it.
+- The page shell carries a `Content-Security-Policy`: scripts, style sheets,
+  fonts and API calls only from the dashboard's own origin, no inline script
+  and no eval, style elements only with a per-load nonce, no plugins and no
+  framing. A proxy should pass it through unchanged and should not add a
+  second, looser policy; injecting scripts or styles into the page at the
+  proxy (analytics, banners) is blocked by it.
 - Caching: hashed files under `/assets/` are `Cache-Control: public,
   max-age=31536000, immutable`; the page shell and every `/api/` answer are
   `no-cache`, so a reload always gets the current build. Unknown `/api/` routes

@@ -61,22 +61,55 @@ fn not_found() -> Response {
         .into_response()
 }
 
-/// The shell with the build id injected before `</head>`.
+/// Content-Security-Policy of the dashboard shell, for one page load: only
+/// the server's own scripts, style sheets, fonts and API. The vite build has
+/// no inline script and no eval. The one `<style>` element the UI creates is
+/// CodeMirror's theme, admitted by `nonce` (a fresh CSPRNG value per load,
+/// handed to the page in `<meta name="csp-nonce">`). Style attributes are
+/// refused except the empty one: bits-ui restores `<body style="">` through
+/// `setAttribute` when it releases its scroll lock (the hash below), and
+/// without it a page stayed unscrollable and unclickable after the first
+/// select or dialog closed. Other inline styles the UI sets go through the
+/// CSSOM, which CSP does not govern. `data:` images cover the SVG icons the UI
+/// libraries inline.
+fn content_security_policy(nonce: &str) -> String {
+    format!(
+        "default-src 'self'; script-src 'self'; style-src 'self' 'nonce-{nonce}'; \
+         style-src-attr 'unsafe-hashes' 'sha256-47DEQpj8HBSa+/TImW+5JCeuQeRkm5NMpJWZG3hSuFU='; \
+         img-src 'self' data:; font-src 'self'; connect-src 'self'; object-src 'none'; \
+         base-uri 'none'; form-action 'self'; frame-ancestors 'none'"
+    )
+}
+
+/// The shell with the build id and this load's CSP nonce injected before
+/// `</head>`.
 fn shell() -> Response {
     let Some(file) = WebAssets::get("index.html") else {
         return (StatusCode::NOT_FOUND, "web assets not built").into_response();
     };
+    let Ok(nonce) = apb_core::server_auth::random_token() else {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "no randomness for the page nonce",
+        )
+            .into_response();
+    };
     let html = String::from_utf8_lossy(&file.data).replacen(
         "</head>",
         &format!(
-            "<meta name=\"apb-build\" content=\"{}\">\n  </head>",
+            "<meta name=\"apb-build\" content=\"{}\">\n  \
+             <meta name=\"csp-nonce\" content=\"{nonce}\">\n  </head>",
             build_id()
         ),
         1,
     );
+    let csp = content_security_policy(&nonce);
     with_cache(
         (
-            [(header::CONTENT_TYPE, "text/html; charset=utf-8".to_string())],
+            [
+                (header::CONTENT_TYPE, "text/html; charset=utf-8".to_string()),
+                (header::CONTENT_SECURITY_POLICY, csp),
+            ],
             html,
         )
             .into_response(),
