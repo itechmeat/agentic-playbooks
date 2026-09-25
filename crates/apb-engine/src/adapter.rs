@@ -799,6 +799,14 @@ pub trait AgentAdapter {
 /// a wait the server is still serving.
 pub const SUPERVISOR_MCP_TOOL_TIMEOUT_MS: u64 = 31 * 60 * 1000;
 
+/// Environment variable naming the role of the agent an `apb mcp` serves. apb
+/// sets it to [`MCP_ROLE_SUPERVISOR`] on the background supervisor agent it
+/// spawns; the agent's MCP servers inherit it, so the `apb mcp` that
+/// supervisor connects to serves only the supervisor and read-only tools.
+pub const MCP_ROLE_ENV: &str = "APB_MCP_ROLE";
+/// The [`MCP_ROLE_ENV`] value of a background supervisor agent.
+pub const MCP_ROLE_SUPERVISOR: &str = "supervisor";
+
 pub struct ClaudeAdapter {
     pub program: String,
     /// Declarative invocation form (argv template, prompt_via, SOUL delivery,
@@ -1798,6 +1806,10 @@ impl AgentAdapter for ClaudeAdapter {
                 SUPERVISOR_MCP_TOOL_TIMEOUT_MS.to_string(),
             );
         }
+        // The supervisor's limit is its capability set on the supervisor_*
+        // tools. Its `apb mcp` (inheriting this) must not also offer the
+        // operator's run-control and authoring tools, which take no token.
+        cmd.env(MCP_ROLE_ENV, MCP_ROLE_SUPERVISOR);
         let mut child = cmd.spawn().map_err(|e| {
             (
                 ErrorClass::ProcessExit,

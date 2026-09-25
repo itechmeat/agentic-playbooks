@@ -70,7 +70,7 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 fn agent_stub(dir: &Path, invocation_file: &Path) -> String {
     let path = dir.join("agent_stub.sh");
     let body = format!(
-        "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo \"MCP_TOOL_TIMEOUT=$MCP_TOOL_TIMEOUT\"; echo '---end---'; }} >> '{}'\n",
+        "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo \"MCP_TOOL_TIMEOUT=$MCP_TOOL_TIMEOUT\"; echo \"APB_MCP_ROLE=$APB_MCP_ROLE\"; echo '---end---'; }} >> '{}'\n",
         invocation_file.display()
     );
     common::write_sync(&path, &body);
@@ -257,6 +257,11 @@ fn initial_spawn_writes_brief_and_persists_session() {
         );
         assert!(content.contains(&want), "spawn must set {want}:\n{content}");
     }
+    // Its `apb mcp` inherits this and serves only the supervisor's tools.
+    assert!(
+        content.contains("APB_MCP_ROLE=supervisor"),
+        "spawn must mark the supervisor's MCP role:\n{content}"
+    );
 }
 
 // A pipeline with several prompt nodes (no agent_task), so drive passes
@@ -419,7 +424,7 @@ edges:
     fs::write(
         &claude_stub,
         format!(
-            "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo \"MCP_TOOL_TIMEOUT=$MCP_TOOL_TIMEOUT\"; echo '---end---'; }} >> '{}'\n",
+            "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo \"MCP_TOOL_TIMEOUT=$MCP_TOOL_TIMEOUT\"; echo \"APB_MCP_ROLE=$APB_MCP_ROLE\"; echo '---end---'; }} >> '{}'\n",
             invocation_file.display()
         ),
     )

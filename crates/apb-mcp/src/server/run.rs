@@ -579,6 +579,12 @@ impl WfMcp {
                     "error": "exactly_one_of_run_id_or_token_required",
                 })));
             }
+            (Some(_), None) if self.supervisor_role => {
+                return to_call_tool_result(Ok(json!({
+                    "error": "supervisor_session_requires_token",
+                    "detail": "a supervisor answers with its token (answered_by: supervisor); the run_id path answers as the human and is not available to a supervisor",
+                })));
+            }
             (Some(run_id), None) => {
                 let root = match self.effective_root(workspace.as_deref()) {
                     Ok(r) => r,

@@ -148,7 +148,15 @@ broken sub-playbook tree.
 
 Supervisor tools (`supervisor_*`) are only available inside a supervisor
 session (behind a session gate) and are not listed here as part of the normal
-surface. One is worth naming regardless, because its polling contract is easy
+surface. A supervisor's authority is its capability set
+(`supervisor.policy.capabilities`) on those token-bearing tools. The background
+supervisor agent that `apb run --supervise` spawns gets
+`APB_MCP_ROLE=supervisor` in its environment; an `apb mcp` started under it
+(agents pass their environment to their MCP servers) serves only the
+`supervisor_*` tools, the read-only tools and `run_answer`, whose `run_id`
+path (answering as the human) it refuses. The operator's run control
+(`run_stop`, `run_resume`, `review_decide`), authoring and run starts take no
+token, so they are not offered to a supervisor. One is worth naming regardless, because its polling contract is easy
 to get wrong: `supervisor_wait_event { token, after_seq, timeout_ms }` blocks
 until the run's next wake, a new human_review gate, the end of the run, or a
 timeout, whichever comes first. Pass `after_seq` as the response's
