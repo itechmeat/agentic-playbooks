@@ -177,6 +177,8 @@ mod retry_test;
 mod review_state_test;
 #[path = "suite/review_test.rs"]
 mod review_test;
+#[path = "suite/run_wait_test.rs"]
+mod run_wait_test;
 #[path = "suite/runner_registry_test.rs"]
 mod runner_registry_test;
 #[path = "suite/scheduler_test.rs"]

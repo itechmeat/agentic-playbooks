@@ -10,7 +10,7 @@ use crate::event::{EventPayload, WakeTrigger, read_all};
 use crate::state::RunState;
 
 /// A wake event handed to the calling code: the first `WakeRaised` after the cursor.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WakeEvent {
     pub seq: u64,
     pub trigger: WakeTrigger,
