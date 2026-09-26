@@ -391,6 +391,16 @@ pub fn reasoning_levels(builtin_config: &Path, model_id: &str) -> Option<Vec<Str
     found
 }
 
+/// The reasoning level apb fills in when a zcode model string names none
+/// (`GLM-5.3-Flash` without `@...`). ZCode's own default is the model's
+/// highest level (`max`), which made medium tasks take many minutes. On a
+/// realistic read-only review task (GLM-5.3-Flash, 2026-09) `low` found the
+/// same bug as `high` and `max` in 40-75 s instead of 7-9 min, with a third to
+/// a half of the tokens, so apb defaults to it. `@high` or `@max` (any
+/// offered level) in the profile's model string overrides it per profile. A
+/// model that does not offer this level falls back to ZCode's default.
+pub const DEFAULT_EFFORT: &str = "low";
+
 /// Makes a selection one ZCode will honor instead of silently replacing.
 ///
 /// ZCode rejects a default selection whose model is not on the plan, or that
@@ -398,8 +408,9 @@ pub fn reasoning_levels(builtin_config: &Path, model_id: &str) -> Option<Vec<Str
 /// first model of the first usable plan instead (GLM-5.3 at max effort, the
 /// most expensive one; verified 2026-09-25). So: the model must be one the
 /// built-in config enables on that plan, and a missing effort is filled with
-/// ZCode's own default, the model's highest level. Only `account:` plans are
-/// checked; a custom provider passes through.
+/// [`DEFAULT_EFFORT`] (or, when the model does not offer it, ZCode's own
+/// default, the model's highest level). Only `account:` plans are checked; a
+/// custom provider passes through.
 pub fn complete_selection(sel: &mut ModelSelection, builtin_config: &Path) -> Result<(), String> {
     if !sel.provider_id.starts_with("account:") {
         return Ok(());
@@ -436,7 +447,13 @@ pub fn complete_selection(sel: &mut ModelSelection, builtin_config: &Path) -> Re
         return Ok(());
     };
     match &sel.effort {
-        None => sel.effort = levels.last().cloned(),
+        None => {
+            sel.effort = levels
+                .iter()
+                .find(|l| *l == DEFAULT_EFFORT)
+                .or_else(|| levels.last())
+                .cloned();
+        }
         Some(e) if !levels.contains(e) => {
             return Err(format!(
                 "zcode effort `{e}` is not supported by `{}` (supported: {})",
@@ -988,12 +1005,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("b.json");
         std::fs::write(&f, FAKE_BUILTIN).unwrap();
+        // An omitted effort gets apb's default, not ZCode's own (the model's
+        // highest level, `max`, which made medium tasks take many minutes).
         let mut flash = parse_model("zai-individual/glm-5.3-flash", "zai", &known()).unwrap();
         complete_selection(&mut flash, &f).unwrap();
-        assert_eq!(flash.effort.as_deref(), Some("max"));
-        let mut low = parse_model("zai-individual/GLM-5.3-Flash@low", "zai", &known()).unwrap();
-        complete_selection(&mut low, &f).unwrap();
-        assert_eq!(low.effort.as_deref(), Some("low"));
+        assert_eq!(flash.effort.as_deref(), Some(DEFAULT_EFFORT));
+        assert_ne!(flash.effort.as_deref(), Some("max"));
+        // An explicit `@max` stays the per-profile override.
+        let mut max = parse_model("GLM-5.3@max", "zai", &known()).unwrap();
+        complete_selection(&mut max, &f).unwrap();
+        assert_eq!(max.effort.as_deref(), Some("max"));
+        let mut high = parse_model("zai-individual/GLM-5.3-Flash@high", "zai", &known()).unwrap();
+        complete_selection(&mut high, &f).unwrap();
+        assert_eq!(high.effort.as_deref(), Some("high"));
 
         let mut turbo = parse_model("zai-individual/GLM-5-Turbo", "zai", &known()).unwrap();
         let e = complete_selection(&mut turbo, &f).unwrap_err();
@@ -1085,6 +1109,24 @@ mod tests {
         // A plan the CLI is not logged in to is refused before any spawn.
         let err = spawn_env_in(home.path(), "zai-start/GLM-5.3", Some(&scoped)).unwrap_err();
         assert!(err.to_string().contains("not logged in"), "{err}");
+    }
+
+    /// A model that does not offer apb's default level gets ZCode's own
+    /// default (its highest level) rather than a level ZCode would refuse.
+    #[test]
+    fn a_model_without_the_default_level_gets_its_highest() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("b.json");
+        std::fs::write(
+            &f,
+            r#"{"config":{"modelConfigRules":{
+                "modelRules":[{"modelMatch":"GLM-5\\.3-Flash","config":{"optionSpecs":{"reasoningLevel":{"values":["high","max"]}}}}],
+                "builtinProviderModelRules":[{"modelId":"GLM-5.3-Flash","providerId":"account:zai-individual-coding-plan"}]}}}"#,
+        )
+        .unwrap();
+        let mut sel = parse_model("GLM-5.3-Flash", "zai", &known()).unwrap();
+        complete_selection(&mut sel, &f).unwrap();
+        assert_eq!(sel.effort.as_deref(), Some("max"));
     }
 
     #[test]

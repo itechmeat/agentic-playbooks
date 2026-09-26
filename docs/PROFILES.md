@@ -335,9 +335,12 @@ executor:
   of the account family ZCode is set to (`zai` unless ZCode's settings say
   `bigmodel`).
 - `@<effort>`: optional reasoning level (ZCode's effort setting): `@low`,
-  `@high` or `@max`. Omitted, apb fills in the model's highest level, which is
-  ZCode's own default. There is no profile-level effort field; the suffix is
-  zcode-only.
+  `@high` or `@max`. Omitted, apb fills in `low`. ZCode's own default is the
+  model's highest level, `max`, which made medium tasks take many minutes; on
+  a realistic review task `low` found the same bug as `high` and `max` in well
+  under a minute instead of seven to nine, with a third to a half of the
+  tokens. Write `@high` or `@max` in a profile that needs deeper reasoning.
+  There is no profile-level effort field; the suffix is zcode-only.
 - The older plan-qualified spelling `zai-individual/GLM-5.3-Flash@high` is
   still accepted for backward compatibility and means the same as
   `GLM-5.3-Flash@high`; the dashboard and the profile tools save the bare
