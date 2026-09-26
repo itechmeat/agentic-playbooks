@@ -890,6 +890,13 @@ its tool calls, the CLI's own session transcript (every tool call and result) is
 copied there as `session.jsonl`. Other agents keep their sessions in their own
 stores. `agent-stream/` still holds the streamed events of the `acp` transport.
 
+A transcript holds whatever the agent printed or read, secrets included, so it
+must never reach git. APB keeps `<project>/.apb/.gitignore` listing its
+machine-local paths (`workspace.local`, `runs/`, `cache/`, `trash/`,
+`backup-*/`, `workdir.lock`): `apb init` writes it and every run makes sure of
+it before its first node starts, adding only the lines that are missing and
+leaving your own lines as they are. Do not remove `runs/` from it.
+
 ### Interrupted attempts and reaping
 
 An attempt recorded `interrupted` ended without a verdict rather than with one: it
