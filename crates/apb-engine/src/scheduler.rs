@@ -43,6 +43,7 @@ pub use crate::run_config::RunMode;
 mod cache;
 mod control_apply;
 mod entry;
+mod handoff;
 mod journal;
 mod listing;
 mod live;

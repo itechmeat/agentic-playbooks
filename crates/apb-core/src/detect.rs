@@ -171,6 +171,19 @@ const BUILTIN_BINS: &[(&str, &str)] = &[
     (crate::zcode::AGENT_ID, crate::zcode::PATH_BIN),
 ];
 
+/// Built-in agents whose sessions apb can continue across attempts and nodes:
+/// apb learns the session id of every attempt (assigned at launch for claude,
+/// found by title for opencode, printed by codex and zcode) and the agent has
+/// a resume form. A warm session handoff (`continue_session`, issue #67 item
+/// 1) needs both; on any other agent the node starts a fresh agent.
+pub const SESSION_CONTINUING_AGENTS: &[&str] =
+    &["claude", "codex", "opencode", crate::zcode::AGENT_ID];
+
+/// Whether `agent_id` is one of [`SESSION_CONTINUING_AGENTS`] (aliases count).
+pub fn continues_sessions(agent_id: &str) -> bool {
+    SESSION_CONTINUING_AGENTS.contains(&canonical_agent_id(agent_id))
+}
+
 /// Legacy ids of built-in agents and the id each one stands for: profiles
 /// saved before `claude-code` was renamed `claude` still name it. The one copy
 /// of the alias; every per-agent decision reads [`canonical_agent_id`].

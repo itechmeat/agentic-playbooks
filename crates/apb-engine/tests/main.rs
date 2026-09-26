@@ -190,6 +190,9 @@ mod scheduler_test;
 mod script_node_test;
 #[path = "suite/script_test.rs"]
 mod script_test;
+#[cfg(unix)]
+#[path = "suite/session_handoff_test.rs"]
+mod session_handoff_test;
 #[path = "suite/state_test.rs"]
 mod state_test;
 #[cfg(unix)]

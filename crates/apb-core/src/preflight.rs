@@ -95,9 +95,10 @@ pub fn connector_problems(root: &Path, playbook: &Playbook) -> Vec<String> {
     out
 }
 
-/// Every reason [`requires_unmet`] and [`connector_problems`] give for
-/// `playbook`, as `(code, message)` pairs for a report: `requires_unmet`,
-/// `requires_unsafe` and `connector_unconfigured`.
+/// Every reason [`requires_unmet`], [`connector_problems`] and
+/// [`cold_handoffs`] give for `playbook`, as `(code, message)` pairs for a
+/// report: `requires_unmet`, `requires_unsafe`, `connector_unconfigured` and
+/// `session_handoff_cold`.
 pub fn findings(root: &Path, playbook: &Playbook) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     if let Some(req) = &playbook.requires {
@@ -119,6 +120,45 @@ pub fn findings(root: &Path, playbook: &Playbook) -> Vec<(&'static str, String)>
     }
     for problem in connector_problems(root, playbook) {
         out.push(("connector_unconfigured", problem));
+    }
+    for problem in cold_handoffs(root, playbook) {
+        out.push(("session_handoff_cold", problem));
+    }
+    out
+}
+
+/// One line per `continue_session` node whose bound agent cannot continue a
+/// session at all (issue #67 item 1): such a node always starts a fresh agent.
+/// A profile that does not resolve here is left to the run-time resolver.
+pub fn cold_handoffs(root: &Path, playbook: &Playbook) -> Vec<String> {
+    use crate::schema::NodeKind;
+    let mut out = Vec::new();
+    for node in &playbook.nodes {
+        let NodeKind::AgentTask {
+            continue_session: Some(source),
+            profile,
+            ..
+        } = &node.kind
+        else {
+            continue;
+        };
+        let Some(reference) = profile.as_ref().or(playbook.defaults.profile.as_ref()) else {
+            continue;
+        };
+        let Ok(loaded) = crate::profile_store::resolve_profile(
+            root,
+            crate::profile_store::PlaybookOrigin::Project,
+            reference,
+        ) else {
+            continue;
+        };
+        let agent = &loaded.doc.executor.agent;
+        if !crate::detect::continues_sessions(agent) {
+            out.push(format!(
+                "node `{}` continues the session of `{source}`, but its agent `{agent}` cannot continue a session, so it starts a fresh agent",
+                node.id
+            ));
+        }
     }
     out
 }

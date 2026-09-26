@@ -973,6 +973,8 @@ mod tests {
             skills_mode: None,
             pid: Some(4242),
             spawn_ms: Some(37),
+            model: None,
+            workdir: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"spawn_ms\":37"), "got {s}");
@@ -986,6 +988,7 @@ mod tests {
                 skills_mode,
                 pid,
                 spawn_ms,
+                ..
             } => {
                 assert_eq!(node, "a");
                 assert_eq!(attempt, 1);

@@ -161,3 +161,34 @@ fn a_racy_workdir_read_is_v38() {
     );
     assert!(has(&got, "V38", Severity::Warning), "{got:?}");
 }
+
+/// The profile-aware preflight (`apb validate`, `apb doctor`) warns when a
+/// `continue_session` node's agent cannot continue a session at all.
+#[test]
+fn preflight_warns_when_the_bound_agent_cannot_continue_a_session() {
+    let _cfg = crate::common::config_sandbox();
+    for (agent, warns) in [("claude", false), ("codex", false), ("grok", true)] {
+        let dir = tempfile::tempdir().unwrap();
+        let prof = dir.path().join(".apb/profiles/dev");
+        std::fs::create_dir_all(&prof).unwrap();
+        std::fs::write(
+            prof.join("profile.yaml"),
+            format!("name: dev\ndescription: t\nexecutor:\n  agent: {agent}\n  model: m\n"),
+        )
+        .unwrap();
+        std::fs::write(prof.join("SOUL.md"), "").unwrap();
+        let playbook = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: P\nversion: 1.0.0\ndefaults: { profile: dev }\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: x }\n  - { id: b, type: agent_task, prompt: y, continue_session: a }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: done }\n",
+        )
+        .unwrap();
+        let found: Vec<&str> = apb_core::preflight::findings(dir.path(), &playbook)
+            .into_iter()
+            .map(|(code, _)| code)
+            .collect();
+        assert_eq!(
+            found.contains(&"session_handoff_cold"),
+            warns,
+            "{agent}: {found:?}"
+        );
+    }
+}

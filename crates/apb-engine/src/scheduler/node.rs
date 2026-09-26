@@ -534,6 +534,7 @@ pub(crate) fn execute_node(
             question_timeout_seconds,
             default_answer,
             require_verdict,
+            continue_session,
             ..
         } => {
             // Live question-timeout enforcement inputs (spec 2026-07-20, Task 11
@@ -781,6 +782,45 @@ pub(crate) fn execute_node(
                     },
                 );
             }
+            // Warm session handoff (issue #67 item 1): the first attempt of a
+            // node with `continue_session` continues the session its source
+            // node finished in, when the journal shows the same executor in
+            // the same directory. An answer round already resumes its own
+            // session, so it is never a handoff.
+            let mut handoff_warm = false;
+            if let (Some(source), None) = (continue_session, &resume) {
+                let decision = super::handoff::decide(
+                    journaled.as_deref().unwrap_or(&[]),
+                    source,
+                    &steps[0].agent,
+                    &steps[0].model,
+                    &node_dir,
+                    isolated,
+                );
+                let (warm, reason) = match decision {
+                    super::handoff::Handoff::Warm { id, workdir } => {
+                        sessions.insert(
+                            (steps[0].agent.clone(), steps[0].model.clone()),
+                            KnownSession::Id {
+                                id,
+                                workdir: Some(workdir),
+                            },
+                        );
+                        (true, None)
+                    }
+                    super::handoff::Handoff::Cold(why) => (false, Some(why)),
+                };
+                handoff_warm = warm;
+                journal.append(EventPayload::SessionHandoff {
+                    node: node_id.to_string(),
+                    from_node: source.clone(),
+                    warm,
+                    reason,
+                })?;
+            }
+            // This node's own successful sessions must be findable when a
+            // later node continues them.
+            let handoff_source = super::handoff::is_source(playbook, node_id);
             // Set when the last attempt was killed at its deadline and the next
             // one continues its session (issue #136 item 3).
             let mut timeout_continuation = false;
@@ -971,9 +1011,10 @@ pub(crate) fn execute_node(
                     // for an answer round), only on the binding that left it, and
                     // only for an agent with a resume form.
                     let answer_round = resume.is_some() && attempt == 1;
+                    let handoff_round = handoff_warm && attempt == 1;
                     let continued: Option<(String, Option<PathBuf>)> = match &base_spec {
                         Some((_, program))
-                            if (attempt > 1 || answer_round)
+                            if (attempt > 1 || answer_round || handoff_round)
                                 && crate::invocation::resume_argv(&step.agent).is_some() =>
                         {
                             resolve_session(&mut sessions, &binding, program)
@@ -1093,6 +1134,12 @@ pub(crate) fn execute_node(
                     // not shift the node's cache key.
                     let attempt_prompt: std::borrow::Cow<'_, str> = match &continued {
                         Some(_) if answer_round => std::borrow::Cow::Borrowed(text.as_str()),
+                        // A handed-off session holds the earlier step, not
+                        // this one: it gets this node's whole prompt.
+                        Some(_) if handoff_round => std::borrow::Cow::Owned(format!(
+                            "{}\n\n{text}",
+                            super::handoff::HANDOFF_PREAMBLE
+                        )),
                         Some(_) => {
                             let why = if timeout_continuation {
                                 Continuation::Deadline
@@ -1392,11 +1439,15 @@ pub(crate) fn execute_node(
                             Some(crate::invocation::FreshSession::Titled { title, .. }),
                             Ok(report),
                             Some((_, program)),
-                        ) if report.question.is_some() => crate::invocation::lookup_titled_session(
-                            program,
-                            &attempt_workdir,
-                            title,
-                        ),
+                        ) if report.question.is_some()
+                            || (handoff_source && report.status == NodeStatus::Succeeded) =>
+                        {
+                            crate::invocation::lookup_titled_session(
+                                program,
+                                &attempt_workdir,
+                                title,
+                            )
+                        }
                         _ => None,
                     });
                     if let Some(id) = &session_now {
