@@ -1037,6 +1037,12 @@ pub(crate) fn execute_node(
                         }
                         None => adapter_for(&step.agent)?,
                     };
+                    // Desktop-history sync (`agents.zcode.ui_sync`).
+                    let adapter = crate::zcode_ui_sync::wrap_step(
+                        adapter,
+                        &step.agent,
+                        base_spec.as_ref().map(|(spec, _)| spec),
+                    );
                     // Where to stream the attempt's NDJSON events (acp transport); one
                     // file per attempt. The headless field ignores it.
                     let stream_log = run_dir

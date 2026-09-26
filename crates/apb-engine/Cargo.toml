@@ -50,3 +50,5 @@ ts = ["dep:ts-rs"]
 tempfile = "3.27.0"
 # Decodes the recorded XOAUTH2 SASL payload in the imap listener tests.
 base64 = "0.23"
+# Reads the fixture ZCode desktop task index in the zcode ui_sync tests.
+rusqlite.workspace = true

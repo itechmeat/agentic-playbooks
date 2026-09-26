@@ -259,6 +259,13 @@ pub struct AgentDef {
     /// itself.
     #[serde(default)]
     pub bins: Vec<String>,
+    /// Desktop-history sync (zcode only; other agents ignore it). `true`:
+    /// after every finished zcode session apb inserts a row into ZCode's
+    /// desktop task index so the session shows in the desktop app's history
+    /// (see `crate::zcode_tasks_index`). Best effort: a failed sync is a
+    /// warning, never a failed step. Absent or `false`: off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ui_sync: Option<bool>,
 }
 
 /// Whether an executable program exists on PATH (or at a direct path
@@ -361,6 +368,12 @@ impl GlobalConfig {
     /// Launch command for agent `id`, if it's described in the config.
     pub fn agent_program(&self, id: &str) -> Option<String> {
         self.agents.get(id).and_then(|a| a.program.clone())
+    }
+
+    /// Whether agent `id` opted into the desktop-history sync
+    /// (`agents.<id>.ui_sync: true`). Off by default.
+    pub fn agent_ui_sync(&self, id: &str) -> bool {
+        self.agents.get(id).and_then(|a| a.ui_sync).unwrap_or(false)
     }
 
     /// Transport for agent `id`; defaults to headless.

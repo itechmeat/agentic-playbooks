@@ -621,6 +621,29 @@ pub fn session_id(stdout: &str) -> Option<String> {
     found
 }
 
+/// The trace id (`traceId`) of the turn in zcode's `--json` stdout, `None`
+/// when the output carries none.
+pub fn trace_id(stdout: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .ok()?
+        .get("traceId")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The selection a zcode step with model string `model` runs with, the way
+/// [`spawn_env_in`] completes it (the effort filled in), for reporting only:
+/// `None` for an empty model (the user's own default) or one that does not
+/// resolve. No login or allowlist check: the step already ran.
+pub fn effective_selection(home: &Path, model: &str) -> Option<ModelSelection> {
+    let mut sel = parse_model(model, &account_family(home), &known_model_ids(home))?;
+    if let Some(builtin) = builtin_config_path(home) {
+        complete_selection(&mut sel, &builtin).ok()?;
+    }
+    Some(sel)
+}
+
 /// The personal provider config for one run: the user's own file (when
 /// readable) with `config.defaultModelSelection` replaced by `sel`, or a
 /// minimal valid config around `sel` when there is none. The user's file is
@@ -1127,6 +1150,30 @@ mod tests {
         let mut sel = parse_model("GLM-5.3-Flash", "zai", &known()).unwrap();
         complete_selection(&mut sel, &f).unwrap();
         assert_eq!(sel.effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn trace_id_is_read_from_the_json_result() {
+        assert_eq!(
+            trace_id("{\n  \"sessionId\": \"sess_1\",\n  \"traceId\": \"t-1\"\n}").as_deref(),
+            Some("t-1")
+        );
+        assert_eq!(trace_id("plain text"), None);
+        assert_eq!(trace_id("{\"traceId\": \"\"}"), None);
+    }
+
+    /// The selection reported for a finished step is the one it ran with:
+    /// canonical ids, the plan, and the effort apb filled in.
+    #[test]
+    fn effective_selection_reports_the_completed_selection() {
+        let home = fake_home();
+        let sel = effective_selection(home.path(), "glm-5.3-flash").unwrap();
+        assert_eq!(sel.provider_id, "account:zai-individual-coding-plan");
+        assert_eq!(sel.model_id, "GLM-5.3-Flash");
+        assert_eq!(sel.effort.as_deref(), Some(DEFAULT_EFFORT));
+        let high = effective_selection(home.path(), "GLM-5.3@high").unwrap();
+        assert_eq!(high.effort.as_deref(), Some("high"));
+        assert_eq!(effective_selection(home.path(), ""), None);
     }
 
     #[test]

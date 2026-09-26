@@ -448,3 +448,21 @@ fn the_workdir_queue_wait_defaults_on_and_zero_turns_it_off() {
         "zero is the explicit opt-out back to the immediate refusal"
     );
 }
+
+/// `agents.zcode.ui_sync` is the opt-in for the desktop-history sync: off by
+/// default, on only for the agent that sets it, and the flag alone does not
+/// turn the built-in agent into a custom one (no program, no invocation).
+#[test]
+fn zcode_ui_sync_is_an_opt_in_agent_setting() {
+    let off: GlobalConfig = serde_yaml_ng::from_str("port: 8080\n").unwrap();
+    assert!(!off.agent_ui_sync("zcode"));
+    let on: GlobalConfig =
+        serde_yaml_ng::from_str("agents:\n  zcode: { ui_sync: true }\n").unwrap();
+    assert!(on.agent_ui_sync("zcode"));
+    assert!(!on.agent_ui_sync("claude"));
+    assert_eq!(on.agent_program("zcode"), None);
+    assert!(on.agents["zcode"].invocation.is_none());
+    let explicit_off: GlobalConfig =
+        serde_yaml_ng::from_str("agents:\n  zcode: { ui_sync: false }\n").unwrap();
+    assert!(!explicit_off.agent_ui_sync("zcode"));
+}
