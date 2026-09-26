@@ -71,6 +71,8 @@ mod validate_duration_test;
 mod validate_goal_test;
 #[path = "suite/validate_inbox_test.rs"]
 mod validate_inbox_test;
+#[path = "suite/validate_node_io_test.rs"]
+mod validate_node_io_test;
 #[path = "suite/validate_profiles_test.rs"]
 mod validate_profiles_test;
 #[path = "suite/validate_semantics_test.rs"]

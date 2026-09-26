@@ -44,6 +44,7 @@ fn task<'a>(
         extract: None,
         status_file: None,
         hermetic_settings: None,
+        transcript_dir: None,
     }
 }
 

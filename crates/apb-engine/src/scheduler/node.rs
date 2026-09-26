@@ -534,6 +534,7 @@ pub(crate) fn execute_node(
             question_timeout_seconds,
             default_answer,
             require_verdict,
+            continue_session,
             ..
         } => {
             // Live question-timeout enforcement inputs (spec 2026-07-20, Task 11
@@ -544,6 +545,27 @@ pub(crate) fn execute_node(
             // consulted on the live path.
             let live_q_timeout: Option<u64> = *question_timeout_seconds;
             let live_default: Option<String> = default_answer.clone();
+            // The node's own directory (issue #67 item 4). An unresolvable
+            // `workdir` fails the node before anything is spawned.
+            let node_dir = match super::node_workdir::resolve(playbook, node_id, workdir, |t| {
+                render_node_prompt(
+                    run_dir,
+                    run_id,
+                    state,
+                    cfg,
+                    t,
+                    &playbook.context_budget(node_id),
+                )
+            })? {
+                Ok(dir) => dir,
+                Err(msg) => {
+                    return Ok(AttemptOutcome::Finished {
+                        status: NodeStatus::Failed,
+                        output: msg,
+                        events,
+                    });
+                }
+            };
             // On a `resume` re-invocation the follow-up prompt IS the user's
             // answer (the prior context lives in the agent's own session); an
             // ordinary attempt renders the node prompt (or takes the reprompt
@@ -728,8 +750,13 @@ pub(crate) fn execute_node(
             // success_check exists, and - in its stronger form - whenever a
             // verdict is REQUIRED (spec 2026-08-05 section 2.2); a plain node
             // keeps the report-only contract.
-            let status_note =
-                super::status_file::status_file_note(node.success_check.is_some(), require_verdict);
+            let status_note = super::status_file::status_file_note(
+                node.success_check.is_some(),
+                require_verdict,
+                node.outputs
+                    .as_ref()
+                    .map_or(&[][..], |o| o.fields.as_slice()),
+            );
             if first_turn && !status_note.is_empty() {
                 text = format!("{text}\n\n{status_note}");
             }
@@ -762,6 +789,45 @@ pub(crate) fn execute_node(
                     },
                 );
             }
+            // Warm session handoff (issue #67 item 1): the first attempt of a
+            // node with `continue_session` continues the session its source
+            // node finished in, when the journal shows the same executor in
+            // the same directory. An answer round already resumes its own
+            // session, so it is never a handoff.
+            let mut handoff_warm = false;
+            if let (Some(source), None) = (continue_session, &resume) {
+                let decision = super::handoff::decide(
+                    journaled.as_deref().unwrap_or(&[]),
+                    source,
+                    &steps[0].agent,
+                    &steps[0].model,
+                    &node_dir,
+                    isolated,
+                );
+                let (warm, reason) = match decision {
+                    super::handoff::Handoff::Warm { id, workdir } => {
+                        sessions.insert(
+                            (steps[0].agent.clone(), steps[0].model.clone()),
+                            KnownSession::Id {
+                                id,
+                                workdir: Some(workdir),
+                            },
+                        );
+                        (true, None)
+                    }
+                    super::handoff::Handoff::Cold(why) => (false, Some(why)),
+                };
+                handoff_warm = warm;
+                journal.append(EventPayload::SessionHandoff {
+                    node: node_id.to_string(),
+                    from_node: source.clone(),
+                    warm,
+                    reason,
+                })?;
+            }
+            // This node's own successful sessions must be findable when a
+            // later node continues them.
+            let handoff_source = super::handoff::is_source(playbook, node_id);
             // Set when the last attempt was killed at its deadline and the next
             // one continues its session (issue #136 item 3).
             let mut timeout_continuation = false;
@@ -896,16 +962,14 @@ pub(crate) fn execute_node(
                 let hermetic_settings: Option<crate::adapter::HermeticEnv> =
                     if entry.hermetic && crate::adapter::agent_supports_hermetic(&step.agent) {
                         let skills_dir = if !isolated && !entry.skills.is_empty() {
-                            // Laid down fresh from the run snapshot for every
-                            // step, like an isolated node's copies.
-                            let dir = run_dir.join("agent-skills").join(node_id);
-                            match std::fs::remove_dir_all(&dir) {
-                                Ok(()) => {}
-                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                                Err(e) => return Err(e.into()),
-                            }
-                            materialize_isolated_skills(run_dir, &entry, &dir)?;
-                            Some(dir)
+                            // One copy per profile bundle per run, at a path
+                            // every node of the profile shares, so the
+                            // agent's system portion stays byte-identical
+                            // across them and a provider prompt cache hits
+                            // (issue #67 item 7). Checked against the
+                            // snapshot digests before each step and laid
+                            // down again when it drifted.
+                            Some(super::skills_copy::shared_skills_dir(run_dir, &entry)?)
                         } else {
                             None
                         };
@@ -952,9 +1016,10 @@ pub(crate) fn execute_node(
                     // for an answer round), only on the binding that left it, and
                     // only for an agent with a resume form.
                     let answer_round = resume.is_some() && attempt == 1;
+                    let handoff_round = handoff_warm && attempt == 1;
                     let continued: Option<(String, Option<PathBuf>)> = match &base_spec {
                         Some((_, program))
-                            if (attempt > 1 || answer_round)
+                            if (attempt > 1 || answer_round || handoff_round)
                                 && crate::invocation::resume_argv(&step.agent).is_some() =>
                         {
                             resolve_session(&mut sessions, &binding, program)
@@ -982,7 +1047,7 @@ pub(crate) fn execute_node(
                                     Err(e) => return Err(e.into()),
                                 }
                             }
-                            materialize_isolated_skills(run_dir, &entry, wd)?;
+                            super::skills_copy::materialize_isolated_skills(run_dir, &entry, wd)?;
                         }
                         wd.clone()
                     } else if isolated {
@@ -995,10 +1060,10 @@ pub(crate) fn execute_node(
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                             Err(e) => return Err(e.into()),
                         }
-                        materialize_isolated_skills(run_dir, &entry, &wd)?;
+                        super::skills_copy::materialize_isolated_skills(run_dir, &entry, &wd)?;
                         wd
                     } else {
-                        workdir.to_path_buf()
+                        node_dir.clone()
                     };
                     // The invocation form of this attempt: the resume form for a
                     // continued session, else the base form plus whatever makes
@@ -1064,6 +1129,9 @@ pub(crate) fn execute_node(
                     // file is the normal case) so `read_status_file` after the run
                     // can only ever adopt a file THIS attempt actually wrote.
                     let _ = std::fs::remove_file(&status_file);
+                    // This attempt's raw output (issue #67 item 10), cleared
+                    // the same way when a re-run restarts the counter.
+                    let transcript_dir = super::transcript::attempt_dir(run_dir, node_id, attempt)?;
                     // This attempt's prompt. A continued session already holds the
                     // node prompt, so it gets only what happened since: the answer
                     // (answer round), the deadline note, or why the last attempt
@@ -1074,6 +1142,12 @@ pub(crate) fn execute_node(
                     // not shift the node's cache key.
                     let attempt_prompt: std::borrow::Cow<'_, str> = match &continued {
                         Some(_) if answer_round => std::borrow::Cow::Borrowed(text.as_str()),
+                        // A handed-off session holds the earlier step, not
+                        // this one: it gets this node's whole prompt.
+                        Some(_) if handoff_round => std::borrow::Cow::Owned(format!(
+                            "{}\n\n{text}",
+                            super::handoff::HANDOFF_PREAMBLE
+                        )),
                         Some(_) => {
                             let why = if timeout_continuation {
                                 Continuation::Deadline
@@ -1133,6 +1207,7 @@ pub(crate) fn execute_node(
                         // Hermetic isolation (subtask S1): Some only for a
                         // hermetic profile on an isolation-capable agent.
                         hermetic_settings: hermetic_settings.clone(),
+                        transcript_dir: Some(&transcript_dir),
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -1149,6 +1224,9 @@ pub(crate) fn execute_node(
                         std::cell::Cell::new(None);
                     let spawn_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
+                    let attempt_model = Some(step.model.clone());
+                    let attempt_transcript = Some(super::transcript::relative(node_id, attempt));
+                    let attempt_dir = Some(attempt_workdir.display().to_string());
                     let on_spawn = |pid: u32, spawn_ms: u64| {
                         spawn_at.set(Some(std::time::Instant::now()));
                         if let Err(e) = journal.append(EventPayload::AttemptStarted {
@@ -1159,6 +1237,9 @@ pub(crate) fn execute_node(
                             skills_mode: smode.clone(),
                             pid: Some(pid),
                             spawn_ms: Some(spawn_ms),
+                            model: attempt_model.clone(),
+                            workdir: attempt_dir.clone(),
+                            transcript: attempt_transcript.clone(),
                         }) {
                             *spawn_err.borrow_mut() = Some(e);
                         }
@@ -1345,6 +1426,28 @@ pub(crate) fn execute_node(
                         });
                     }
                     let spawn_instant = spawn_at.get();
+                    // The agent's own session transcript, next to the raw
+                    // output (claude keeps it outside the run).
+                    if spawn_instant.is_some() {
+                        let sid = match &outcome {
+                            Ok(report) => report.session.clone(),
+                            Err(_) => None,
+                        }
+                        .or_else(|| continued.as_ref().map(|(sid, _)| sid.clone()))
+                        .or_else(|| match &fresh {
+                            Some(crate::invocation::FreshSession::Assigned { id, .. }) => {
+                                Some(id.clone())
+                            }
+                            _ => None,
+                        });
+                        if let Some(sid) = sid {
+                            super::transcript::copy_agent_session(
+                                &step.agent,
+                                &sid,
+                                &transcript_dir,
+                            );
+                        }
+                    }
                     // Remember the session this attempt ran in (issue #136 item
                     // 2), so a later attempt on this binding can continue it.
                     // The id the agent printed wins; an assigned id stands in
@@ -1369,11 +1472,15 @@ pub(crate) fn execute_node(
                             Some(crate::invocation::FreshSession::Titled { title, .. }),
                             Ok(report),
                             Some((_, program)),
-                        ) if report.question.is_some() => crate::invocation::lookup_titled_session(
-                            program,
-                            &attempt_workdir,
-                            title,
-                        ),
+                        ) if report.question.is_some()
+                            || (handoff_source && report.status == NodeStatus::Succeeded) =>
+                        {
+                            crate::invocation::lookup_titled_session(
+                                program,
+                                &attempt_workdir,
+                                title,
+                            )
+                        }
                         _ => None,
                     });
                     if let Some(id) = &session_now {
@@ -1413,6 +1520,9 @@ pub(crate) fn execute_node(
                             skills_mode: Some(skills_mode.to_string()),
                             pid: None,
                             spawn_ms: None,
+                            model: attempt_model.clone(),
+                            workdir: attempt_dir.clone(),
+                            transcript: attempt_transcript.clone(),
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -1916,8 +2026,29 @@ pub(crate) fn execute_node(
             script,
             runner,
             timeout_seconds,
+            ..
         } => {
             let timeout = timeout_seconds.map(Duration::from_secs);
+            let workdir = match super::node_workdir::resolve(playbook, node_id, workdir, |t| {
+                render_node_prompt(
+                    run_dir,
+                    run_id,
+                    state,
+                    cfg,
+                    t,
+                    &playbook.context_budget(node_id),
+                )
+            })? {
+                Ok(dir) => dir,
+                Err(msg) => {
+                    return Ok(AttemptOutcome::Finished {
+                        status: NodeStatus::Failed,
+                        output: msg,
+                        events,
+                    });
+                }
+            };
+            let workdir = workdir.as_path();
             // Pass through cancel: in a parallel batch (join:any) the winning
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
@@ -2146,6 +2277,7 @@ pub(crate) fn execute_finish_answer(
                 status_file: None,
                 // Internal finish-answer composition: no hermetic isolation.
                 hermetic_settings: None,
+                transcript_dir: None,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -2167,6 +2299,9 @@ pub(crate) fn execute_finish_answer(
                     skills_mode: None,
                     pid: Some(pid),
                     spawn_ms: Some(spawn_ms),
+                    model: None,
+                    workdir: None,
+                    transcript: None,
                 }) {
                     *spawn_err.borrow_mut() = Some(e);
                 }
@@ -2191,6 +2326,9 @@ pub(crate) fn execute_finish_answer(
                     skills_mode: None,
                     pid: None,
                     spawn_ms: None,
+                    model: None,
+                    workdir: None,
+                    transcript: None,
                 })?;
             }
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -2247,47 +2385,6 @@ pub(crate) fn execute_finish_answer(
         NodeStatus::Failed
     };
     Ok((final_status, last_msg, events))
-}
-
-/// Materializes profile skills as REAL copies from the run snapshot into the
-/// isolated per-node workdir (completion-plan Task 3). The source is the snapshot
-/// (`run_dir/profiles/<scope>/<name>/skills/<sscope>/<sname>`), NOT the live
-/// `.agents/skills`: editing a skill after the run has started has no effect on
-/// the run. The `.claude/skills` bridge is aimed at the real copies via symlinks.
-/// The workdir is created even without skills (an isolated node execution directory).
-pub(crate) fn materialize_isolated_skills(
-    run_dir: &Path,
-    entry: &ManifestProfile,
-    workdir: &Path,
-) -> Result<(), EngineError> {
-    let skills_parent = workdir.join(".agents/skills");
-    std::fs::create_dir_all(&skills_parent)?;
-    for sk in &entry.skills {
-        let src = run_dir
-            .join("profiles")
-            .join(&entry.scope)
-            .join(&entry.name)
-            .join("skills")
-            .join(&sk.scope)
-            .join(&sk.name);
-        apb_core::fsutil::copy_tree(&src, &skills_parent.join(&sk.name))?;
-    }
-    if !entry.skills.is_empty() {
-        let claude_parent = workdir.join(".claude/skills");
-        // Fail-closed: the isolated node's workdir is fresh, so the
-        // `.claude/skills` bridge must be laid down cleanly. Any note here is a
-        // real failure (a symlink could not be created, etc.), not a benign case of
-        // "already exists/foreign bridge"; silently continuing would mean running the
-        // agent without skills visible via `.claude` and passing off an incorrect run as a success.
-        let notes = apb_core::skills::ensure_claude_bridge(&skills_parent, &claude_parent);
-        if !notes.is_empty() {
-            return Err(EngineError::Invalid(format!(
-                "isolated skill bridge failed: {}",
-                notes.join("; ")
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// The run id of the latest ChildRunStarted for `node_id`, if any.
@@ -2758,6 +2855,7 @@ pub(crate) fn maybe_compact_context(
         status_file: None,
         // Internal summarizer: no hermetic isolation.
         hermetic_settings: None,
+        transcript_dir: None,
     };
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.

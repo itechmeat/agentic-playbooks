@@ -550,6 +550,27 @@ mod tests {
         }
     }
 
+    /// The agents core names as able to continue a session (what `apb
+    /// validate` warns on for `continue_session`) are exactly those that have
+    /// a resume form here and whose session id apb learns: assigned or titled
+    /// at launch, or printed (codex, zcode).
+    #[test]
+    fn session_continuing_agents_have_a_resume_form() {
+        for agent in apb_core::detect::SESSION_CONTINUING_AGENTS {
+            assert!(resume_argv(agent).is_some(), "{agent}");
+        }
+        assert!(matches!(
+            fresh_session("claude", "t"),
+            FreshSession::Assigned { .. }
+        ));
+        assert!(matches!(
+            fresh_session("opencode", "t"),
+            FreshSession::Titled { .. }
+        ));
+        assert!(!apb_core::detect::continues_sessions("grok"));
+        assert!(apb_core::detect::continues_sessions("claude-code"));
+    }
+
     #[test]
     fn validate_rejects_two_prompt_slots_and_partial_placeholders() {
         let two = InvocationDef {

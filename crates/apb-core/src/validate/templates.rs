@@ -83,6 +83,15 @@ pub(crate) fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// The `workdir` templates of a playbook as `(owner node id, text)` pairs.
+pub(crate) fn workdir_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
+    playbook
+        .nodes
+        .iter()
+        .filter_map(|n| n.kind.workdir_template().map(|w| (n.id.as_str(), w)))
+        .collect()
+}
+
 /// V38 (warning): a template reads `nodes.<id>.output` or `nodes.<id>.report`
 /// (with or without a top-level field selector) where the graph does not order
 /// `<id>` before the reading node. At run time
@@ -113,7 +122,11 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
         FailurePolicy::Node(target) => Some(target.as_str()),
         _ => None,
     };
-    for (owner, text) in template_texts(playbook) {
+    // A `workdir` template races exactly like a prompt does (issue #67 item 4).
+    let texts = template_texts(playbook)
+        .into_iter()
+        .chain(workdir_texts(playbook));
+    for (owner, text) in texts {
         if Some(owner) == failure_handler {
             continue;
         }

@@ -957,6 +957,9 @@ fn seed_open_attempt_run(root: &std::path::Path, run_id: &str, pid: u32) {
         skills_mode: None,
         pid: Some(pid),
         spawn_ms: None,
+        model: None,
+        workdir: None,
+        transcript: None,
     })
     .unwrap();
     fs::write(run_dir.join("driver.pid"), format!("{pid}\n")).unwrap();

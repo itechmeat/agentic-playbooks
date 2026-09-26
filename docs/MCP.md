@@ -75,8 +75,8 @@ Mutations (destructive):
 | `playbook_approve` | Activation after trial/confirmation: lifecycle active, digest trusted |
 | `playbook_execute_plan` | Phase 2: execute a confirmed cross-workspace plan by `plan_token` |
 | `suggestion_dismiss` | Record the user's decline of a save-as-playbook suggestion: `kind` `soft` (a not-now decline whose silence escalates along the backoff schedule) or `hard` (an explicit never-again, the default so an old-style call is unchanged), a one-sentence `synopsis` of the action, and `scope` `project` (default) or `global`. The `pattern` must be a lowercase slug (`[a-z0-9][a-z0-9-]*`, at most 64 chars), so the record stays addressable by `apb suggestions` and the dashboard. Returns the stored record with the server-computed `snoozed_until`, plus a `diagnostics` array when the `suggestions:` config section is invalid or a broken store had to be moved aside. A project-scope dismiss on a directory with no `.apb` yet initializes it, since the call only happens on a root the user already connected apb to |
-| `playbook_create` | New playbook or a new minor version (creating via the tool approves the digest) |
-| `playbook_update` | New minor version of an existing playbook (approves the saved digest, like create) |
+| `playbook_create` | New playbook or a new minor version (creating via the tool approves the digest); a definition equal to the current version creates nothing and answers `unchanged: true` |
+| `playbook_update` | New minor version of an existing playbook (approves the saved digest, like create); `unchanged: true` when the definition did not change |
 | `playbook_delete` | Soft delete to trash (`.apb/trash/<id>-<millis>`; runs stay) |
 | `playbook_trash_restore` | Restore a trash entry by `name`, or a playbook id's latest deletion, with every version; the restored current version is approved like a save when it has no scripts. A playbook that exists again under the id is a conflict and nothing moves. Current workspace only |
 | `trust_revoke` | Revoke approvals: `target` is a digest (exactly that approval) or an id (every approval under it; `kind` narrows it). Returns what was revoked. The same path as `apb trust revoke` and the dashboard's Trust view |
@@ -104,7 +104,10 @@ the gate checked.
 
 A save through apb itself - `playbook_create` / `playbook_update`, the
 dashboard editor, `apb import` - goes through one save path
-(`apb_core::versioning::save_definition`) that approves the digest it wrote:
+(`apb_core::versioning::save_definition`). A definition equal to the current
+version (compared in the stored form, the `version:` field and formatting set
+aside) writes nothing: no version is created, trust is untouched and the
+answer carries `unchanged: true`. Otherwise the save approves the digest it wrote:
 the user asked for that write, so its result is trusted (the same rule as
 `profile_write`). A save writes YAML only and carries the base version's
 scripts along, so a result with scripts is approved only when its base was

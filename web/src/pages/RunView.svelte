@@ -295,6 +295,7 @@
               <li class="flex items-center gap-1.5">
                 <code class="rounded bg-muted px-1 py-0.5">{e.type}</code>
                 {#if e.node}<span class="text-muted-foreground">{e.node}</span>{/if}
+                {#if e.note}<span class="min-w-0 truncate text-muted-foreground" title={e.note}>{e.note}</span>{/if}
               </li>
             {/each}
           </ol>

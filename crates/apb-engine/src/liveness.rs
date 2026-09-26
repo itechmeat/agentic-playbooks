@@ -807,6 +807,9 @@ mod tests {
             skills_mode: None,
             pid,
             spawn_ms: None,
+            model: None,
+            workdir: None,
+            transcript: None,
         }
     }
 

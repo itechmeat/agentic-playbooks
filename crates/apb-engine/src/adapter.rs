@@ -177,21 +177,44 @@ struct PipeCollector {
 
 impl PipeCollector {
     /// Takes the child's piped stdout and stderr and starts draining them.
-    fn start(child: &mut Child) -> Self {
-        fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+    /// With `tee`, every chunk is also appended to `<tee>/stdout.log` and
+    /// `<tee>/stderr.log` as it arrives (issue #67 item 10), so the files hold
+    /// what the agent printed even when the attempt is killed. A file that
+    /// cannot be written only loses the copy, never the attempt.
+    fn start(child: &mut Child, tee: Option<&Path>) -> Self {
+        fn drain(
+            pipe: Option<impl std::io::Read + Send + 'static>,
+            tee: Option<std::path::PathBuf>,
+        ) -> mpsc::Receiver<Vec<u8>> {
             let (tx, rx) = mpsc::channel();
             std::thread::spawn(move || {
                 let mut buf = Vec::new();
+                let mut file = tee.and_then(|p| std::fs::File::create(p).ok());
                 if let Some(mut p) = pipe {
-                    let _ = p.read_to_end(&mut buf);
+                    let mut chunk = [0u8; 8192];
+                    loop {
+                        match p.read(&mut chunk) {
+                            Ok(0) => break,
+                            Ok(n) => {
+                                buf.extend_from_slice(&chunk[..n]);
+                                if let Some(f) = file.as_mut()
+                                    && f.write_all(&chunk[..n]).is_err()
+                                {
+                                    file = None;
+                                }
+                            }
+                            Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                            Err(_) => break,
+                        }
+                    }
                 }
                 let _ = tx.send(buf);
             });
             rx
         }
         PipeCollector {
-            stdout: drain(child.stdout.take()),
-            stderr: drain(child.stderr.take()),
+            stdout: drain(child.stdout.take(), tee.map(|d| d.join("stdout.log"))),
+            stderr: drain(child.stderr.take(), tee.map(|d| d.join("stderr.log"))),
         }
     }
 
@@ -420,6 +443,12 @@ pub struct AgentTask<'a> {
     /// without such a mechanism, and for internal side-effect-free calls
     /// (compaction, finish answers).
     pub hermetic_settings: Option<HermeticEnv>,
+    /// Where this attempt's raw output is kept (issue #67 item 10): the
+    /// headless transport tees the agent's stdout and stderr into
+    /// `stdout.log` and `stderr.log` here as they arrive, so a killed or
+    /// timed-out attempt still leaves what it printed. `None` for internal
+    /// calls (compaction, finish answers) and in tests that do not care.
+    pub transcript_dir: Option<&'a Path>,
 }
 
 /// What a claude step launched with the minimal environment gets.
@@ -1338,7 +1367,7 @@ impl ClaudeAdapter {
             cb(child.id(), started.elapsed().as_millis() as u64);
         }
         // Drain both streams from the start (see `PipeCollector`).
-        let pipes = PipeCollector::start(&mut child);
+        let pipes = PipeCollector::start(&mut child, task.transcript_dir);
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
         {
@@ -2110,6 +2139,7 @@ mod tests {
             extract: None,
             status_file: None,
             hermetic_settings: settings,
+            transcript_dir: None,
         }
     }
 
@@ -2313,6 +2343,7 @@ mod tests {
             extract,
             status_file: None,
             hermetic_settings: None,
+            transcript_dir: None,
         }
     }
 

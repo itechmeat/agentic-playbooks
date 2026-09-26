@@ -29,13 +29,34 @@ export interface EventJournalEntry {
   seq: number
   type: string
   node?: string | null
+  /** A short readable detail for the few kinds that carry one worth a glance. */
+  note?: string
 }
 
 // Pure function backing the run's full event journal view: every event the
-// backend logs renders here, regardless of kind. No branching on `type`, so
-// an event kind this file has never heard of (a future reliability event,
-// for instance) still renders its raw type/node instead of throwing or
-// being silently dropped.
+// backend logs renders here, regardless of kind. Only the optional note
+// branches on `type`, so an event kind this file has never heard of (a future
+// reliability event, for instance) still renders its raw type/node instead of
+// throwing or being silently dropped.
 export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
-  return events.map((e) => ({ seq: e.seq, type: e.type, node: e.node ?? null }))
+  return events.map((e) => ({ seq: e.seq, type: e.type, node: e.node ?? null, note: eventNote(e) }))
+}
+
+// The detail line of an event kind that has one (issue #67): how a session
+// handoff started, which declared output fields a node left out, and where an
+// attempt's transcript is. Every other kind has none.
+function eventNote(e: WfEvent): string | undefined {
+  const r = e as unknown as Record<string, unknown>
+  switch (e.type) {
+    case 'session_handoff':
+      return r.warm
+        ? `warm: continues the session of ${String(r.from_node ?? '')}`
+        : `cold${r.reason ? ` (${String(r.reason)})` : ''}`
+    case 'output_fields_missing':
+      return Array.isArray(r.fields) ? `missing fields: ${r.fields.join(', ')}` : undefined
+    case 'attempt_started':
+      return typeof r.transcript === 'string' ? `transcript: ${r.transcript}` : undefined
+    default:
+      return undefined
+  }
 }

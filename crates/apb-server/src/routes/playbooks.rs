@@ -69,9 +69,13 @@ pub(crate) async fn create_playbook(
         Err(e) => return e,
     };
     match save_definition(&root, &body.id, &body.yaml, None, true) {
-        Ok(version) => (
-            StatusCode::CREATED,
-            Json(serde_json::json!({ "id": body.id, "version": version })),
+        Ok(saved) => (
+            if saved.unchanged {
+                StatusCode::OK
+            } else {
+                StatusCode::CREATED
+            },
+            Json(saved.answer(&body.id)),
         )
             .into_response(),
         Err(e) => versioning_error(e),
@@ -96,7 +100,7 @@ pub(crate) async fn update_playbook(
         return (StatusCode::NOT_FOUND, format!("playbook `{id}` not found")).into_response();
     }
     match save_definition(&root, &id, &body.yaml, None, true) {
-        Ok(version) => Json(serde_json::json!({ "id": id, "version": version })).into_response(),
+        Ok(saved) => Json(saved.answer(&id)).into_response(),
         Err(e) => versioning_error(e),
     }
 }

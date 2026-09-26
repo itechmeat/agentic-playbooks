@@ -64,7 +64,9 @@ fn cache_eligible<'a>(playbook: &'a Playbook, node_id: &str, cfg: &RunConfig) ->
         return None;
     }
     let node = playbook.node(node_id)?;
-    if node.cache_mode() != CacheMode::Auto {
+    // A node with its own `workdir` (issue #67 item 4) runs outside the tree
+    // the cache fingerprints and stores into, so it never participates.
+    if node.cache_mode() != CacheMode::Auto || node.kind.workdir_template().is_some() {
         return None;
     }
     match &node.kind {
@@ -562,10 +564,33 @@ pub(crate) fn settle(
         .as_ref()
         .map(|o| o.files.clone())
         .unwrap_or_default();
-    if declared.is_empty() && ctx.is_none() {
-        return (Vec::new(), Vec::new());
-    }
     let mut events = Vec::new();
+    // Declared named outputs (issue #67 item 4): a warning per execution that
+    // left any of them out, never a failure.
+    if let Some(fields) = node.outputs.as_ref().map(|o| &o.fields)
+        && !fields.is_empty()
+    {
+        let parsed: Option<serde_json::Map<String, serde_json::Value>> =
+            serde_json::from_str(output).ok();
+        let missing: Vec<String> = fields
+            .iter()
+            .filter(|f| {
+                parsed
+                    .as_ref()
+                    .is_none_or(|o| o.get(f.as_str()).is_none_or(|v| v.is_null()))
+            })
+            .cloned()
+            .collect();
+        if !missing.is_empty() {
+            events.push(EventPayload::OutputFieldsMissing {
+                node: node_id.to_string(),
+                fields: missing,
+            });
+        }
+    }
+    if declared.is_empty() && ctx.is_none() {
+        return (Vec::new(), events);
+    }
     match capture_artifacts(node, run_dir, workdir) {
         Ok(captured) => {
             if !declared.is_empty() && captured.is_empty() {

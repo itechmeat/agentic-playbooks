@@ -74,12 +74,30 @@ pub(crate) const INTERRUPTION_NOTE: &str = concat!(
 /// file was introduced; a `require_verdict` node is told the stronger form (the
 /// verdict is mandatory, [`VERDICT_REQUIRED_NOTE`]). A plain node keeps the
 /// historical report-only contract.
-pub(crate) fn status_file_note(has_success_check: bool, require_verdict: bool) -> String {
-    match (require_verdict, has_success_check) {
+///
+/// Declared output `fields` (issue #67 item 4) deliver the note too, followed
+/// by the exact keys the `outputs` object must carry: they are how the node
+/// publishes its named values, and the status file is the channel for them.
+pub(crate) fn status_file_note(
+    has_success_check: bool,
+    require_verdict: bool,
+    fields: &[String],
+) -> String {
+    let mut note = match (require_verdict, has_success_check || !fields.is_empty()) {
         (true, _) => format!("{STATUS_FILE_NOTE} {VERDICT_REQUIRED_NOTE}"),
         (false, true) => STATUS_FILE_NOTE.to_string(),
-        (false, false) => String::new(),
+        (false, false) => return String::new(),
+    };
+    if !fields.is_empty() {
+        let keys: Vec<String> = fields.iter().map(|f| format!("`{f}`")).collect();
+        note.push_str(&format!(
+            " This step publishes named outputs: write the status file with an outputs object \
+             that carries these keys, each a string (or a number or boolean): {}. \
+             Later steps read them by name.",
+            keys.join(", ")
+        ));
     }
+    note
 }
 
 /// The engine's interpretation of a per-attempt status file: the reported
@@ -185,15 +203,15 @@ mod tests {
 
     #[test]
     fn note_gated_on_success_check() {
-        assert!(status_file_note(true, false).contains("APB_STATUS_FILE"));
-        assert_eq!(status_file_note(false, false), "");
+        assert!(status_file_note(true, false, &[]).contains("APB_STATUS_FILE"));
+        assert_eq!(status_file_note(false, false, &[]), "");
     }
 
     // Spec 2026-08-05 section 2.2: `require_verdict` alone (no success_check)
     // must still deliver the contract, and in its stronger form.
     #[test]
     fn require_verdict_delivers_the_stronger_note_without_a_success_check() {
-        let note = status_file_note(false, true);
+        let note = status_file_note(false, true, &[]);
         assert!(note.contains("APB_STATUS_FILE"), "got: {note}");
         assert!(note.contains("REQUIRES the verdict"), "got: {note}");
         // M2 of the Task 5 review: the note must not promise a same-executor
@@ -214,7 +232,7 @@ mod tests {
         // The stronger note is additive: the base contract is still in there.
         assert!(note.starts_with(STATUS_FILE_NOTE), "got: {note}");
         // A success_check does not change what a require_verdict node is told.
-        assert_eq!(note, status_file_note(true, true));
+        assert_eq!(note, status_file_note(true, true, &[]));
     }
 
     // The fresh attempt after an interruption is told to look for existing work

@@ -257,22 +257,84 @@ pub fn create_version_with_override(
 /// so a trust-store write failure is reported on stderr rather than turning
 /// a completed save into an error (the playbook then runs only with an
 /// explicit acknowledge, like any untrusted one).
+///
+/// A save whose definition equals the current version's (issue #67 item 9:
+/// compared in the stored, normalized form with the `version:` field set
+/// aside, so a re-sent copy or a bare version bump counts as no change)
+/// writes nothing: no version is created and the current one is returned
+/// with [`Saved::unchanged`] set. Trust is untouched, because nothing new was
+/// written. An explicit `version_override` always creates that version.
 pub fn save_definition(
     root: &Path,
     id: &str,
     yaml: &str,
     version_override: Option<&str>,
     make_current: bool,
-) -> Result<String, VersioningError> {
+) -> Result<Saved, VersioningError> {
     let base = if is_safe_segment(id) {
         read_current_pointer(&playbooks_dir(root).join(id))
     } else {
         None
     };
+    if version_override.is_none()
+        && let Some(current) = base.as_deref()
+        && same_definition(&playbooks_dir(root).join(id), current, id, yaml)
+    {
+        return Ok(Saved {
+            version: current.to_string(),
+            unchanged: true,
+        });
+    }
     let version =
         create_version_with_override(root, id, yaml, None, version_override, make_current)?;
     approve_written(root, id, &version, base.as_deref(), "saved");
-    Ok(version)
+    Ok(Saved {
+        version,
+        unchanged: false,
+    })
+}
+
+/// What [`save_definition`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Saved {
+    /// The version the definition now lives in: the new one, or the current
+    /// one when nothing changed.
+    pub version: String,
+    /// The definition equaled the current version's, so no version was
+    /// created.
+    pub unchanged: bool,
+}
+
+impl Saved {
+    /// The answer every save surface (MCP, HTTP) gives for playbook `id`: the
+    /// version, plus `unchanged: true` when nothing was written.
+    pub fn answer(&self, id: &str) -> serde_json::Value {
+        if self.unchanged {
+            serde_json::json!({ "id": id, "version": self.version, "unchanged": true })
+        } else {
+            serde_json::json!({ "id": id, "version": self.version })
+        }
+    }
+}
+
+/// Whether `yaml`, stored as playbook `id`, would be the same definition as
+/// `<playbook_dir>/<version>`: both sides go through the exact serialization
+/// a save writes, with the version field and the id pinned, so formatting,
+/// comments and the version number do not count as a change. Anything that
+/// does not parse is a change (the save then reports its own error).
+fn same_definition(playbook_dir: &Path, version: &str, id: &str, yaml: &str) -> bool {
+    let normalized = |text: &str| -> Option<String> {
+        let mut playbook = Playbook::from_yaml(text).ok()?;
+        playbook.id = id.to_string();
+        playbook_yaml_for_version(&playbook, version).ok()
+    };
+    let Ok(stored) = fs::read_to_string(playbook_dir.join(version).join("playbook.yaml")) else {
+        return false;
+    };
+    match (normalized(&stored), normalized(yaml)) {
+        (Some(a), Some(b)) => a == b,
+        _ => false,
+    }
 }
 
 /// The trust half of a write through apb: approves the digest of

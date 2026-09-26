@@ -139,6 +139,9 @@ mod migrate_test;
 #[path = "suite/missing_input_test.rs"]
 mod missing_input_test;
 #[cfg(unix)]
+#[cfg(unix)]
+#[path = "suite/named_outputs_test.rs"]
+mod named_outputs_test;
 #[path = "suite/output_field_test.rs"]
 mod output_field_test;
 #[path = "suite/overrides_run_test.rs"]
@@ -157,6 +160,9 @@ mod process_group_test;
 mod profile_run_test;
 #[path = "suite/progress_api_test.rs"]
 mod progress_api_test;
+#[cfg(unix)]
+#[path = "suite/prompt_cache_test.rs"]
+mod prompt_cache_test;
 #[path = "suite/question_channel_test.rs"]
 mod question_channel_test;
 #[cfg(unix)]
@@ -187,6 +193,9 @@ mod scheduler_test;
 mod script_node_test;
 #[path = "suite/script_test.rs"]
 mod script_test;
+#[cfg(unix)]
+#[path = "suite/session_handoff_test.rs"]
+mod session_handoff_test;
 #[path = "suite/state_test.rs"]
 mod state_test;
 #[cfg(unix)]
@@ -207,6 +216,9 @@ mod supervisor_commands_test;
 #[cfg(unix)]
 #[path = "suite/token_economy_test.rs"]
 mod token_economy_test;
+#[cfg(unix)]
+#[path = "suite/transcript_test.rs"]
+mod transcript_test;
 #[path = "suite/unhandled_failure_test.rs"]
 mod unhandled_failure_test;
 #[path = "suite/wait_test.rs"]

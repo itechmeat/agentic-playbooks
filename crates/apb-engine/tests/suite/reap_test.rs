@@ -230,6 +230,9 @@ fn attempt_started(node: &str, pid: Option<u32>) -> EventPayload {
         skills_mode: None,
         pid,
         spawn_ms: None,
+        model: None,
+        workdir: None,
+        transcript: None,
     }
 }
 

@@ -1011,6 +1011,9 @@ fn journal_attempt_started(run_dir: &Path, attempt: u32) {
         skills_mode: None,
         pid: None,
         spawn_ms: None,
+        model: None,
+        workdir: None,
+        transcript: None,
     })
     .unwrap();
 }

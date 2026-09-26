@@ -23,6 +23,7 @@
     EDITOR_NODE_KINDS,
     removeEdge,
     removeNode,
+    saveNotice,
     suggestNodeId,
     updateNode,
     type NodeKind,
@@ -354,7 +355,8 @@
       const result = isNew
         ? await createPlaybook(targetId, yamlText, ws)
         : await updatePlaybook(targetId, yamlText, ws)
-      toast.success(isNew ? `Created "${result.id}"` : `Saved "${result.id}"`)
+      const notice = saveNotice(result, isNew)
+      toast[notice.kind](notice.title, { description: notice.description })
       location.hash = `#/playbook/${encodeURIComponent(ws)}/${encodeURIComponent(result.id)}`
     } catch (e) {
       toast.error('Save failed', { description: String(e) })
@@ -493,6 +495,7 @@
               onChange={onNodePatch}
               {revision}
               workspace={isNew ? targetWorkspace : workspace}
+              nodes={lastValidModel?.nodes ?? []}
             />
           </div>
         </div>

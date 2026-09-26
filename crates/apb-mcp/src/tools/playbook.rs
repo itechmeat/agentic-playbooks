@@ -14,11 +14,12 @@ use serde_json::{Value, json};
 /// Creates a new playbook or a new minor version of an existing one, through
 /// the one save path (`save_definition`), which also approves the saved digest.
 pub fn playbook_create(root: &Path, id: &str, yaml: &str) -> Result<Value, ToolError> {
-    let version = save_definition(root, id, yaml, None, true)?;
-    Ok(json!({ "id": id, "version": version }))
+    let saved = save_definition(root, id, yaml, None, true)?;
+    Ok(saved.answer(id))
 }
 
-/// Updates an existing playbook (a new minor version). If the id does not exist - NotFound.
+/// Updates an existing playbook (a new minor version, or none when the
+/// definition did not change). If the id does not exist - NotFound.
 pub fn playbook_update(root: &Path, id: &str, yaml: &str) -> Result<Value, ToolError> {
     if !is_safe_segment(id) {
         return Err(ToolError::NotFound(id.to_string()));
@@ -27,8 +28,8 @@ pub fn playbook_update(root: &Path, id: &str, yaml: &str) -> Result<Value, ToolE
     if !dir.is_dir() {
         return Err(ToolError::NotFound(id.to_string()));
     }
-    let version = save_definition(root, id, yaml, None, true)?;
-    Ok(json!({ "id": id, "version": version }))
+    let saved = save_definition(root, id, yaml, None, true)?;
+    Ok(saved.answer(id))
 }
 
 /// Soft-deletes a playbook into trash.

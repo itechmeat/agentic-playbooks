@@ -42,6 +42,7 @@ fn claude_adapter_success_via_stub() {
             extract: None,
             status_file: None,
             hermetic_settings: None,
+            transcript_dir: None,
         })
         .unwrap();
     assert_eq!(report.status, NodeStatus::Succeeded);
@@ -72,6 +73,7 @@ fn claude_adapter_nonzero_exit_is_process_exit() {
             extract: None,
             status_file: None,
             hermetic_settings: None,
+            transcript_dir: None,
         })
         .unwrap_err();
     assert!(matches!(err.0, ErrorClass::ProcessExit));
@@ -123,6 +125,7 @@ fn hermes_adapter_sends_z_flag_prefixed_soul_and_model_flag() {
             extract: None,
             status_file: None,
             hermetic_settings: None,
+            transcript_dir: None,
         })
         .unwrap();
     let argv: Vec<&str> = report
@@ -187,6 +190,7 @@ fn a_dash_led_prompt_never_reaches_an_agent_as_an_option() {
                     extract: None,
                     status_file: None,
                     hermetic_settings: None,
+                    transcript_dir: None,
                 })
                 .unwrap();
             let argv: Vec<&str> = report

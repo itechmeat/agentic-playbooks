@@ -118,6 +118,9 @@ fn open_attempt_marks_interrupted() {
                 skills_mode: None,
                 pid: Some(4242),
                 spawn_ms: None,
+                model: None,
+                workdir: None,
+                transcript: None,
             },
         ),
     ];
@@ -194,6 +197,9 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 skills_mode: None,
                 pid: Some(1001),
                 spawn_ms: None,
+                model: None,
+                workdir: None,
+                transcript: None,
             },
         ),
         ev(
@@ -227,6 +233,9 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 skills_mode: None,
                 pid: Some(1002),
                 spawn_ms: None,
+                model: None,
+                workdir: None,
+                transcript: None,
             },
         ),
     ];

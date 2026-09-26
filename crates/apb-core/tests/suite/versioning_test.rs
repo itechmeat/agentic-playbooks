@@ -776,3 +776,40 @@ fn save_refuses_a_binding_to_an_installed_broken_connector_with_v42() {
         other => panic!("expected a V42 validation refusal, got {other:?}"),
     }
 }
+
+/// Issue #67 item 9: a save whose normalized definition equals the current
+/// version (only the `version:` field differs, or nothing at all) creates no
+/// version, so a no-op save can never produce a version nobody meant to write.
+#[test]
+fn a_save_without_a_definition_change_creates_no_version() {
+    let _cfg = crate::common::config_sandbox();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let id = "implement-task";
+    let pb_dir = dir.path().join(".apb/playbooks").join(id);
+    let before = apb_core::registry::list_versions(&pb_dir).unwrap();
+
+    // The same definition, re-serialized with another version number.
+    let stored = fs::read_to_string(pb_dir.join("1.0.0/playbook.yaml")).unwrap();
+    let bumped = stored.replace("version: 1.0.0", "version: 1.7.0");
+    assert_ne!(stored, bumped, "fixture must carry the version field");
+    for yaml in [stored.as_str(), bumped.as_str(), VALID] {
+        let saved =
+            apb_core::versioning::save_definition(dir.path(), id, yaml, None, true).unwrap();
+        assert_eq!(saved.version, "1.0.0");
+        assert!(saved.unchanged, "no definition change: {yaml}");
+    }
+    assert_eq!(apb_core::registry::list_versions(&pb_dir).unwrap(), before);
+
+    // A real change still creates a version.
+    let edited = VALID.replace("name: Implement Task", "name: Edited");
+    let saved = apb_core::versioning::save_definition(dir.path(), id, &edited, None, true).unwrap();
+    assert!(!saved.unchanged);
+    assert_ne!(saved.version, "1.0.0");
+
+    // An explicit version override is honored even without a change.
+    let saved = apb_core::versioning::save_definition(dir.path(), id, &edited, Some("3.0.0"), true)
+        .unwrap();
+    assert_eq!(saved.version, "3.0.0");
+    assert!(!saved.unchanged);
+}

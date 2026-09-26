@@ -5,6 +5,7 @@ import {
   addNode,
   removeEdge,
   removeNode,
+  saveNotice,
   suggestNodeId,
   updateNode,
 } from './playbookedit'
@@ -305,5 +306,29 @@ describe('round-trip field preservation', () => {
     const withSup = docOf(FULL_YAML + 'supervisor:\n  policy: { capabilities: [observe] }\n')
     const edited = updateNode(withSup, 'plan', { prompt: 'x' })
     expect(edited.toString()).toContain('supervisor:')
+  })
+})
+
+describe('saveNotice', () => {
+  it('names the created playbook on a new save', () => {
+    expect(saveNotice({ id: 'demo', version: '1.0.0' }, true)).toEqual({
+      kind: 'success',
+      title: 'Created "demo"',
+    })
+  })
+
+  it('names the new version on an update', () => {
+    expect(saveNotice({ id: 'demo', version: '1.2.0' }, false)).toEqual({
+      kind: 'success',
+      title: 'Saved "demo" as 1.2.0',
+    })
+  })
+
+  it('says nothing was written when the definition did not change', () => {
+    expect(saveNotice({ id: 'demo', version: '1.1.0', unchanged: true }, false)).toEqual({
+      kind: 'info',
+      title: 'No changes to save',
+      description: '"demo" stays at 1.1.0; no new version was created.',
+    })
   })
 })

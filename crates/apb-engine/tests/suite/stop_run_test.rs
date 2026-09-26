@@ -325,6 +325,9 @@ fn seed_abandoned_run(root: &Path, run_id: &str) -> PathBuf {
         skills_mode: None,
         pid: Some(999_999),
         spawn_ms: None,
+        model: None,
+        workdir: None,
+        transcript: None,
     })
     .unwrap();
     run_dir
@@ -1062,6 +1065,9 @@ fn a_note_the_crashed_driver_never_applied_survives_a_stop() {
             skills_mode: None,
             pid: Some(999_999),
             spawn_ms: None,
+            model: None,
+            workdir: None,
+            transcript: None,
         })
         .unwrap();
     }
@@ -1464,6 +1470,9 @@ fn a_note_posted_after_a_stop_survives_the_resume_that_applies_the_stop() {
             skills_mode: None,
             pid: Some(999_999),
             spawn_ms: None,
+            model: None,
+            workdir: None,
+            transcript: None,
         })
         .unwrap();
     }

@@ -59,10 +59,15 @@ With `minimal`, a claude or claude-code executor is launched with:
   load;
 - `--strict-mcp-config`: only the MCP servers apb passes itself (the `ask_user`
   server of a live interactive node);
-- `--add-dir <run>/agent-skills/<node>` when the profile declares `skills`: a
-  fresh copy of those skills from the run snapshot, so the profile's own skills
-  still reach the agent although the user source is not loaded (an isolated node
-  already has them in its working directory).
+- `--add-dir <run>/agent-skills/bundle-<digest>` when the profile declares
+  `skills`: a copy of those skills from the run snapshot, so the profile's own
+  skills still reach the agent although the user source is not loaded (an
+  isolated node already has them in its working directory). The copy is shared
+  by every node of the profile in the run and checked against the snapshot
+  digests before every attempt (laid down again when an attempt changed it).
+  One path per profile keeps the agent's system portion byte-identical across
+  those nodes, which is what lets a provider prompt cache hit: the directories
+  an agent is pointed at are part of its system prompt.
 
 `full` is the explicit opt-in to the operator's whole personal environment, as an
 interactive session would have it. Use it for a profile that depends on something
