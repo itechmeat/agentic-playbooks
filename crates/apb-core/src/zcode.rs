@@ -427,11 +427,15 @@ pub fn complete_selection(sel: &mut ModelSelection, builtin_config: &Path) -> Re
     }
     let pairs = builtin_plan_models(builtin_config);
     let plan = plan_alias(&sel.provider_id).unwrap_or_else(|| sel.provider_id.clone());
-    if !pairs.is_empty()
-        && !pairs
-            .iter()
-            .any(|(p, m)| *p == sel.provider_id && *m == sel.model_id)
-    {
+    // Model ids match case-insensitively, like everywhere else here; ZCode
+    // itself compares exactly, so the config's spelling is written back.
+    let offered_here = pairs
+        .iter()
+        .find(|(p, m)| *p == sel.provider_id && m.eq_ignore_ascii_case(&sel.model_id));
+    if let Some((_, spelled)) = offered_here {
+        sel.model_id = spelled.clone();
+    }
+    if !pairs.is_empty() && offered_here.is_none() {
         let offered: Vec<&str> = pairs
             .iter()
             .filter(|(p, _)| *p == sel.provider_id)
@@ -1132,6 +1136,26 @@ mod tests {
         // A plan the CLI is not logged in to is refused before any spawn.
         let err = spawn_env_in(home.path(), "zai-start/GLM-5.3", Some(&scoped)).unwrap_err();
         assert!(err.to_string().contains("not logged in"), "{err}");
+    }
+
+    /// `complete_selection` is public and may get a selection that did not
+    /// come through `parse_model`: its model id is matched against the plan's
+    /// models case-insensitively, like every other ZCode id here, and
+    /// rewritten to the config's spelling (ZCode itself compares exactly and
+    /// would silently replace a differently cased id).
+    #[test]
+    fn complete_selection_matches_model_ids_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("b.json");
+        std::fs::write(&f, FAKE_BUILTIN).unwrap();
+        let mut sel = ModelSelection {
+            provider_id: "account:zai-individual-coding-plan".into(),
+            model_id: "glm-5.3-flash".into(),
+            effort: None,
+        };
+        complete_selection(&mut sel, &f).unwrap();
+        assert_eq!(sel.model_id, "GLM-5.3-Flash");
+        assert_eq!(sel.effort.as_deref(), Some(DEFAULT_EFFORT));
     }
 
     /// A model that does not offer apb's default level gets ZCode's own
