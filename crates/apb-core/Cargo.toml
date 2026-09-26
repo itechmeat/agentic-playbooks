@@ -29,6 +29,8 @@ subtle.workspace = true
 # to find a model's reasoning levels (a selection without one is rejected by
 # ZCode and silently replaced by a different model).
 regex = "1"
+# zcode `ui_sync` (see `zcode_tasks_index`).
+rusqlite.workspace = true
 
 # Group termination of the agent-detection probe tree (Unix): kill(-pgid,
 # SIGKILL) as a syscall rather than a `kill -KILL -<pgid>` subprocess, whose

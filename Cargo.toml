@@ -41,6 +41,9 @@ globset = "0.4"
 base64 = "0.23"
 getrandom = "0.4"
 subtle = "2.6"
+# zcode `ui_sync`: writes one row into ZCode's desktop task index (a SQLite
+# database). Bundled, so no system libsqlite3 is needed on any target.
+rusqlite = { version = "0.40", features = ["bundled"] }
 # Native IMAP execution for the `imap` connector function kind (spec 3.2, wave
 # 2): blocking client over a plaintext or rustls stream, silent-read discipline
 # (BODY.PEEK, EXAMINE) enforced by the engine.

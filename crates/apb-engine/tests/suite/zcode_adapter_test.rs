@@ -420,6 +420,127 @@ fn a_profile_asking_for_zcode_edit_mode_runs_with_mode_edit() {
     assert_eq!(modes, vec!["build", "edit"]);
 }
 
+/// A fake desktop task index (schema only, as ZCode desktop creates it) in
+/// the fake home.
+fn fake_tasks_index(home: &Path) -> std::path::PathBuf {
+    let db = home.join(apb_core::zcode_tasks_index::HOME_REL_TASKS_INDEX);
+    fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let schema = fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../apb-core/tests/fixtures/zcode/tasks-index-schema.sql"
+    ))
+    .unwrap();
+    let con = rusqlite::Connection::open(&db).unwrap();
+    con.execute_batch("PRAGMA journal_mode = WAL;").unwrap();
+    con.execute_batch(&schema).unwrap();
+    db
+}
+
+/// Runs the one-node `zplan` playbook on a stub zcode that prints a real
+/// `--json` result, with `config_extra` appended under `agents.zcode`.
+fn run_zplan_with(dir: &Path, home: &Path, config_extra: &str) -> apb_engine::scheduler::RunResult {
+    let root = dir.join("proj");
+    let cfg = dir.join("cfg");
+    fs::create_dir_all(&root).unwrap();
+    fs::create_dir_all(&cfg).unwrap();
+    fake_zcode_home(home);
+    init_project_with(&root);
+    common::seed_profile(&root, "main", "zcode", "GLM-5.3-Flash@low", &[]);
+    let profile = root.join(".apb/profiles/main/profile.yaml");
+    let yaml = fs::read_to_string(&profile).unwrap();
+    fs::write(&profile, format!("{yaml}zcode_mode: edit\n")).unwrap();
+    let mut doc: serde_json::Value = serde_json::from_str(&fixture("json_plan.json")).unwrap();
+    doc["response"] =
+        serde_json::Value::String("done\n\n```yaml\nstatus: success\nsummary: ok\n```".into());
+    let json = dir.join("result.json");
+    fs::write(&json, serde_json::to_string_pretty(&doc).unwrap()).unwrap();
+    let stub = stub_zcode(dir, &format!("cat '{}'", json.display()));
+    fs::write(
+        cfg.join("config.yaml"),
+        format!("agents:\n  zcode:\n    program: {stub}\n{config_extra}"),
+    )
+    .unwrap();
+    let _env = ZcodeRunEnv::set(&[("HOME", home), ("APB_CONFIG_DIR", &cfg)]);
+    run(&root, "zplan", None, RunOptions::default()).unwrap()
+}
+
+/// With `agents.zcode.ui_sync: true` a finished zcode session gets one row in
+/// the desktop task index, keyed the way the desktop keys this workspace on
+/// this host, carrying the model, effort and mode the session really ran with.
+#[test]
+fn a_zcode_session_with_ui_sync_lands_in_the_desktop_task_index() {
+    use apb_core::zcode_tasks_index as idx;
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let db = fake_tasks_index(&home);
+    let res = run_zplan_with(dir.path(), &home, "    ui_sync: true\n");
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    let con = rusqlite::Connection::open(&db).unwrap();
+    let n: i64 = con
+        .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 1);
+    let text = |col: &str| -> Option<String> {
+        con.query_row(&format!("SELECT {col} FROM tasks"), [], |r| r.get(0))
+            .unwrap()
+    };
+    assert_eq!(
+        text("task_id").unwrap(),
+        "sess_00000000-0000-4000-8000-000000000001"
+    );
+    assert_eq!(text("provider").unwrap(), "glm");
+    assert_eq!(text("mode").unwrap(), "edit");
+    assert_eq!(
+        text("model").unwrap(),
+        "account:zai-individual-coding-plan/GLM-5.3-Flash"
+    );
+    let path = text("workspace_path").unwrap();
+    assert!(path.ends_with("proj"), "{path}");
+    let identity = text("workspace_identity");
+    let host = idx::detect_host(&idx::HostFacts::current()).unwrap();
+    assert_eq!(identity, idx::workspace_identity(&host, &path));
+    assert_eq!(
+        text("workspace_key").unwrap(),
+        idx::workspace_key(&path, identity.as_deref())
+    );
+    let meta = text("meta_json").unwrap();
+    let meta: serde_json::Value = serde_json::from_str(&meta).unwrap();
+    assert_eq!(meta["thoughtLevel"], "low");
+    assert_eq!(meta["traceId"], "00000000-0000-4000-8000-0000000000a1");
+    assert_eq!(meta["status"], "completed");
+}
+
+/// The sync is opt-in: without `ui_sync` the index is never touched.
+#[test]
+fn without_ui_sync_the_desktop_task_index_is_left_alone() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let db = fake_tasks_index(&home);
+    let res = run_zplan_with(dir.path(), &home, "");
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let n: i64 = rusqlite::Connection::open(&db)
+        .unwrap()
+        .query_row("SELECT COUNT(*) FROM tasks", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(n, 0);
+}
+
+/// A failed sync is a warning, never a failed step: no desktop index at all
+/// (desktop not installed), and apb does not create one.
+#[test]
+fn a_failed_ui_sync_never_fails_the_step() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path().join("home");
+    let res = run_zplan_with(dir.path(), &home, "    ui_sync: true\n");
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    assert!(
+        !home
+            .join(apb_core::zcode_tasks_index::HOME_REL_TASKS_INDEX)
+            .exists()
+    );
+}
+
 fn init_project_with(root: &Path) {
     apb_core::registry::init_project(root).unwrap();
     let vdir = root.join(".apb/playbooks/zplan/1.0.0");

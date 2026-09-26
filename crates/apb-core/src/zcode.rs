@@ -391,6 +391,16 @@ pub fn reasoning_levels(builtin_config: &Path, model_id: &str) -> Option<Vec<Str
     found
 }
 
+/// The reasoning level apb fills in when a zcode model string names none
+/// (`GLM-5.3-Flash` without `@...`). ZCode's own default is the model's
+/// highest level (`max`), which made medium tasks take many minutes. On a
+/// realistic read-only review task (GLM-5.3-Flash, 2026-09) `low` found the
+/// same bug as `high` and `max` in 40-75 s instead of 7-9 min, with a third to
+/// a half of the tokens, so apb defaults to it. `@high` or `@max` (any
+/// offered level) in the profile's model string overrides it per profile. A
+/// model that does not offer this level falls back to ZCode's default.
+pub const DEFAULT_EFFORT: &str = "low";
+
 /// Makes a selection one ZCode will honor instead of silently replacing.
 ///
 /// ZCode rejects a default selection whose model is not on the plan, or that
@@ -398,8 +408,9 @@ pub fn reasoning_levels(builtin_config: &Path, model_id: &str) -> Option<Vec<Str
 /// first model of the first usable plan instead (GLM-5.3 at max effort, the
 /// most expensive one; verified 2026-09-25). So: the model must be one the
 /// built-in config enables on that plan, and a missing effort is filled with
-/// ZCode's own default, the model's highest level. Only `account:` plans are
-/// checked; a custom provider passes through.
+/// [`DEFAULT_EFFORT`] (or, when the model does not offer it, ZCode's own
+/// default, the model's highest level). Only `account:` plans are checked; a
+/// custom provider passes through.
 pub fn complete_selection(sel: &mut ModelSelection, builtin_config: &Path) -> Result<(), String> {
     if !sel.provider_id.starts_with("account:") {
         return Ok(());
@@ -416,11 +427,15 @@ pub fn complete_selection(sel: &mut ModelSelection, builtin_config: &Path) -> Re
     }
     let pairs = builtin_plan_models(builtin_config);
     let plan = plan_alias(&sel.provider_id).unwrap_or_else(|| sel.provider_id.clone());
-    if !pairs.is_empty()
-        && !pairs
-            .iter()
-            .any(|(p, m)| *p == sel.provider_id && *m == sel.model_id)
-    {
+    // Model ids match case-insensitively, like everywhere else here; ZCode
+    // itself compares exactly, so the config's spelling is written back.
+    let offered_here = pairs
+        .iter()
+        .find(|(p, m)| *p == sel.provider_id && m.eq_ignore_ascii_case(&sel.model_id));
+    if let Some((_, spelled)) = offered_here {
+        sel.model_id = spelled.clone();
+    }
+    if !pairs.is_empty() && offered_here.is_none() {
         let offered: Vec<&str> = pairs
             .iter()
             .filter(|(p, _)| *p == sel.provider_id)
@@ -436,7 +451,13 @@ pub fn complete_selection(sel: &mut ModelSelection, builtin_config: &Path) -> Re
         return Ok(());
     };
     match &sel.effort {
-        None => sel.effort = levels.last().cloned(),
+        None => {
+            sel.effort = levels
+                .iter()
+                .find(|l| *l == DEFAULT_EFFORT)
+                .or_else(|| levels.last())
+                .cloned();
+        }
         Some(e) if !levels.contains(e) => {
             return Err(format!(
                 "zcode effort `{e}` is not supported by `{}` (supported: {})",
@@ -602,6 +623,29 @@ pub fn session_id(stdout: &str) -> Option<String> {
         }
     }
     found
+}
+
+/// The trace id (`traceId`) of the turn in zcode's `--json` stdout, `None`
+/// when the output carries none.
+pub fn trace_id(stdout: &str) -> Option<String> {
+    serde_json::from_str::<serde_json::Value>(stdout.trim())
+        .ok()?
+        .get("traceId")?
+        .as_str()
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+}
+
+/// The selection a zcode step with model string `model` runs with, the way
+/// [`spawn_env_in`] completes it (the effort filled in), for reporting only:
+/// `None` for an empty model (the user's own default) or one that does not
+/// resolve. No login or allowlist check: the step already ran.
+pub fn effective_selection(home: &Path, model: &str) -> Option<ModelSelection> {
+    let mut sel = parse_model(model, &account_family(home), &known_model_ids(home))?;
+    if let Some(builtin) = builtin_config_path(home) {
+        complete_selection(&mut sel, &builtin).ok()?;
+    }
+    Some(sel)
 }
 
 /// The personal provider config for one run: the user's own file (when
@@ -988,12 +1032,19 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let f = dir.path().join("b.json");
         std::fs::write(&f, FAKE_BUILTIN).unwrap();
+        // An omitted effort gets apb's default, not ZCode's own (the model's
+        // highest level, `max`, which made medium tasks take many minutes).
         let mut flash = parse_model("zai-individual/glm-5.3-flash", "zai", &known()).unwrap();
         complete_selection(&mut flash, &f).unwrap();
-        assert_eq!(flash.effort.as_deref(), Some("max"));
-        let mut low = parse_model("zai-individual/GLM-5.3-Flash@low", "zai", &known()).unwrap();
-        complete_selection(&mut low, &f).unwrap();
-        assert_eq!(low.effort.as_deref(), Some("low"));
+        assert_eq!(flash.effort.as_deref(), Some(DEFAULT_EFFORT));
+        assert_ne!(flash.effort.as_deref(), Some("max"));
+        // An explicit `@max` stays the per-profile override.
+        let mut max = parse_model("GLM-5.3@max", "zai", &known()).unwrap();
+        complete_selection(&mut max, &f).unwrap();
+        assert_eq!(max.effort.as_deref(), Some("max"));
+        let mut high = parse_model("zai-individual/GLM-5.3-Flash@high", "zai", &known()).unwrap();
+        complete_selection(&mut high, &f).unwrap();
+        assert_eq!(high.effort.as_deref(), Some("high"));
 
         let mut turbo = parse_model("zai-individual/GLM-5-Turbo", "zai", &known()).unwrap();
         let e = complete_selection(&mut turbo, &f).unwrap_err();
@@ -1085,6 +1136,68 @@ mod tests {
         // A plan the CLI is not logged in to is refused before any spawn.
         let err = spawn_env_in(home.path(), "zai-start/GLM-5.3", Some(&scoped)).unwrap_err();
         assert!(err.to_string().contains("not logged in"), "{err}");
+    }
+
+    /// `complete_selection` is public and may get a selection that did not
+    /// come through `parse_model`: its model id is matched against the plan's
+    /// models case-insensitively, like every other ZCode id here, and
+    /// rewritten to the config's spelling (ZCode itself compares exactly and
+    /// would silently replace a differently cased id).
+    #[test]
+    fn complete_selection_matches_model_ids_case_insensitively() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("b.json");
+        std::fs::write(&f, FAKE_BUILTIN).unwrap();
+        let mut sel = ModelSelection {
+            provider_id: "account:zai-individual-coding-plan".into(),
+            model_id: "glm-5.3-flash".into(),
+            effort: None,
+        };
+        complete_selection(&mut sel, &f).unwrap();
+        assert_eq!(sel.model_id, "GLM-5.3-Flash");
+        assert_eq!(sel.effort.as_deref(), Some(DEFAULT_EFFORT));
+    }
+
+    /// A model that does not offer apb's default level gets ZCode's own
+    /// default (its highest level) rather than a level ZCode would refuse.
+    #[test]
+    fn a_model_without_the_default_level_gets_its_highest() {
+        let dir = tempfile::tempdir().unwrap();
+        let f = dir.path().join("b.json");
+        std::fs::write(
+            &f,
+            r#"{"config":{"modelConfigRules":{
+                "modelRules":[{"modelMatch":"GLM-5\\.3-Flash","config":{"optionSpecs":{"reasoningLevel":{"values":["high","max"]}}}}],
+                "builtinProviderModelRules":[{"modelId":"GLM-5.3-Flash","providerId":"account:zai-individual-coding-plan"}]}}}"#,
+        )
+        .unwrap();
+        let mut sel = parse_model("GLM-5.3-Flash", "zai", &known()).unwrap();
+        complete_selection(&mut sel, &f).unwrap();
+        assert_eq!(sel.effort.as_deref(), Some("max"));
+    }
+
+    #[test]
+    fn trace_id_is_read_from_the_json_result() {
+        assert_eq!(
+            trace_id("{\n  \"sessionId\": \"sess_1\",\n  \"traceId\": \"t-1\"\n}").as_deref(),
+            Some("t-1")
+        );
+        assert_eq!(trace_id("plain text"), None);
+        assert_eq!(trace_id("{\"traceId\": \"\"}"), None);
+    }
+
+    /// The selection reported for a finished step is the one it ran with:
+    /// canonical ids, the plan, and the effort apb filled in.
+    #[test]
+    fn effective_selection_reports_the_completed_selection() {
+        let home = fake_home();
+        let sel = effective_selection(home.path(), "glm-5.3-flash").unwrap();
+        assert_eq!(sel.provider_id, "account:zai-individual-coding-plan");
+        assert_eq!(sel.model_id, "GLM-5.3-Flash");
+        assert_eq!(sel.effort.as_deref(), Some(DEFAULT_EFFORT));
+        let high = effective_selection(home.path(), "GLM-5.3@high").unwrap();
+        assert_eq!(high.effort.as_deref(), Some("high"));
+        assert_eq!(effective_selection(home.path(), ""), None);
     }
 
     #[test]

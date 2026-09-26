@@ -31,6 +31,7 @@ mod stall;
 pub mod state;
 pub mod stop;
 pub mod workdir;
+pub mod zcode_ui_sync;
 
 pub use error::EngineError;
 pub use hooks::{generate_hooks, hook_path, read_hooks};

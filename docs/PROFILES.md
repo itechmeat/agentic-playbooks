@@ -335,9 +335,12 @@ executor:
   of the account family ZCode is set to (`zai` unless ZCode's settings say
   `bigmodel`).
 - `@<effort>`: optional reasoning level (ZCode's effort setting): `@low`,
-  `@high` or `@max`. Omitted, apb fills in the model's highest level, which is
-  ZCode's own default. There is no profile-level effort field; the suffix is
-  zcode-only.
+  `@high` or `@max`. Omitted, apb fills in `low`. ZCode's own default is the
+  model's highest level, `max`, which made medium tasks take many minutes; on
+  a realistic review task `low` found the same bug as `high` and `max` in well
+  under a minute instead of seven to nine, with a third to a half of the
+  tokens. Write `@high` or `@max` in a profile that needs deeper reasoning.
+  There is no profile-level effort field; the suffix is zcode-only.
 - The older plan-qualified spelling `zai-individual/GLM-5.3-Flash@high` is
   still accepted for backward compatibility and means the same as
   `GLM-5.3-Flash@high`; the dashboard and the profile tools save the bare
@@ -385,6 +388,39 @@ the Start (free), Team and Idle plans the desktop offers are desktop-only.
 Because ZCode silently runs its first usable plan when asked for one it cannot
 use, apb refuses such a step before spawning (an auth-class failure that the
 fallback chain skips) instead of letting it spend the paid plan.
+
+Desktop history (`ui_sync`, opt-in). Sessions the headless CLI runs are not
+listed in the ZCode desktop app: the desktop lists sessions from its own task
+index (`~/.zcode/v2/tasks-index.sqlite`), which the CLI does not write. To see
+apb's zcode sessions there, turn the sync on in the global config:
+
+```yaml
+agents:
+  zcode:
+    ui_sync: true
+```
+
+After every successful zcode attempt apb then inserts one row for the session
+into that index, shaped like the rows the desktop writes (provider `glm`, the
+model as `<plan provider id>/<model>`, the effort, the `--mode` the session ran
+with, title `apb: <node> (<run id>)`). The row is filed under the workspace the
+way the desktop files it:
+
+- under WSL, `remote:wsl:<distro>:<user>:<path>`, the identity of a project the
+  desktop opened through its WSL remote connection; the distro and user are
+  read at runtime (`$WSL_DISTRO_NAME`, else `wslpath -w /`; the process user).
+  A project the desktop opened by its `\\wsl.localhost\...` path is a local
+  Windows workspace with its own index on the Windows side, which apb does not
+  write, so the session shows only under a project opened as a WSL remote;
+- anywhere else, the plain working directory path, the key of a local project.
+
+The write is best effort: apb opens the existing index only (it never creates
+one or changes its schema), takes SQLite's write lock the way the desktop does,
+retries a few times while the desktop holds it, and uses `INSERT OR IGNORE`,
+so a row the desktop already has (a resumed session, a renamed title) is never
+changed. Any failure (no index, a busy or changed database, a WSL host whose
+distro cannot be told) is a warning on the run's stderr; the step's result is
+never affected. Other agents ignore `ui_sync`.
 
 Fallbacks. A spend or quota stop (Z.ai `Usage limit reached`,
 `Weekly/Monthly Limit Exhausted`, `Insufficient balance`) is a budget failure
