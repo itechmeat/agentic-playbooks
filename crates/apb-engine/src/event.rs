@@ -98,6 +98,18 @@ pub enum EventPayload {
         /// failed before the callback could run.
         #[serde(default)]
         spawn_ms: Option<u64>,
+        /// The model of the executor this attempt ran (issue #67 item 1): with
+        /// `agent`, the binding a later node's `continue_session` must match to
+        /// continue this attempt's session. `None` for old logs and for
+        /// attempts journaled outside an agent_task.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        /// The directory the attempt's process ran in (issue #67 items 1 and
+        /// 4): the node's resolved `workdir`, an isolated node's own directory,
+        /// or the execution root. `None` for old logs and for attempts
+        /// journaled outside an agent_task.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workdir: Option<String>,
     },
     /// The attempt's agent process has exited and the drive is finishing the
     /// attempt: reading its status file, capturing its session, running the
@@ -463,6 +475,30 @@ pub enum EventPayload {
     /// carries the reason when capture itself failed (an unreadable match, a path
     /// escaping its scope root). Fields default per the additive convention; old
     /// logs never carry the variant at all.
+    /// A successful node's output lacks fields it declares in
+    /// `outputs.fields` (issue #67 item 4): the output is not a JSON object,
+    /// or the object has no such key. A warning only; the node keeps its
+    /// status. `fields` lists the missing ones in declaration order.
+    OutputFieldsMissing {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        fields: Vec<String>,
+    },
+    /// How a node with `continue_session` started (issue #67 item 1): `warm`
+    /// when its first attempt continued the session of `from_node`, else cold
+    /// (a fresh agent, as without the field) with the `reason`. Journaled once
+    /// per execution, before the first attempt.
+    SessionHandoff {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        from_node: String,
+        #[serde(default)]
+        warm: bool,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
+    },
     DeliverableMissing {
         #[serde(default)]
         node: String,

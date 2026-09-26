@@ -299,7 +299,9 @@ impl RunState {
                 // the workspace, not a run-state transition: the node succeeded
                 // and its `NodeFinished` (with whatever WAS captured) carries the
                 // state effect.
-                EventPayload::DeliverableMissing { .. } => {}
+                EventPayload::DeliverableMissing { .. }
+                | EventPayload::OutputFieldsMissing { .. }
+                | EventPayload::SessionHandoff { .. } => {}
                 // Every hop the drive loop journaled, whatever kind of edge it
                 // crossed. The counting rule is on the flags: a policy route
                 // traversed no declared edge, and an `uncounted` record is a

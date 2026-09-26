@@ -544,6 +544,20 @@ pub(crate) fn execute_node(
             // consulted on the live path.
             let live_q_timeout: Option<u64> = *question_timeout_seconds;
             let live_default: Option<String> = default_answer.clone();
+            // The node's own directory (issue #67 item 4). An unresolvable
+            // `workdir` fails the node before anything is spawned.
+            let node_dir = match super::node_workdir::resolve(
+                playbook, run_dir, run_id, state, cfg, node_id, workdir,
+            )? {
+                Ok(dir) => dir,
+                Err(msg) => {
+                    return Ok(AttemptOutcome::Finished {
+                        status: NodeStatus::Failed,
+                        output: msg,
+                        events,
+                    });
+                }
+            };
             // On a `resume` re-invocation the follow-up prompt IS the user's
             // answer (the prior context lives in the agent's own session); an
             // ordinary attempt renders the node prompt (or takes the reprompt
@@ -728,8 +742,13 @@ pub(crate) fn execute_node(
             // success_check exists, and - in its stronger form - whenever a
             // verdict is REQUIRED (spec 2026-08-05 section 2.2); a plain node
             // keeps the report-only contract.
-            let status_note =
-                super::status_file::status_file_note(node.success_check.is_some(), require_verdict);
+            let status_note = super::status_file::status_file_note(
+                node.success_check.is_some(),
+                require_verdict,
+                node.outputs
+                    .as_ref()
+                    .map_or(&[][..], |o| o.fields.as_slice()),
+            );
             if first_turn && !status_note.is_empty() {
                 text = format!("{text}\n\n{status_note}");
             }
@@ -998,7 +1017,7 @@ pub(crate) fn execute_node(
                         materialize_isolated_skills(run_dir, &entry, &wd)?;
                         wd
                     } else {
-                        workdir.to_path_buf()
+                        node_dir.clone()
                     };
                     // The invocation form of this attempt: the resume form for a
                     // continued session, else the base form plus whatever makes
@@ -1149,6 +1168,8 @@ pub(crate) fn execute_node(
                         std::cell::Cell::new(None);
                     let spawn_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
+                    let attempt_model = Some(step.model.clone());
+                    let attempt_dir = Some(attempt_workdir.display().to_string());
                     let on_spawn = |pid: u32, spawn_ms: u64| {
                         spawn_at.set(Some(std::time::Instant::now()));
                         if let Err(e) = journal.append(EventPayload::AttemptStarted {
@@ -1159,6 +1180,8 @@ pub(crate) fn execute_node(
                             skills_mode: smode.clone(),
                             pid: Some(pid),
                             spawn_ms: Some(spawn_ms),
+                            model: attempt_model.clone(),
+                            workdir: attempt_dir.clone(),
                         }) {
                             *spawn_err.borrow_mut() = Some(e);
                         }
@@ -1413,6 +1436,8 @@ pub(crate) fn execute_node(
                             skills_mode: Some(skills_mode.to_string()),
                             pid: None,
                             spawn_ms: None,
+                            model: attempt_model.clone(),
+                            workdir: attempt_dir.clone(),
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -1916,8 +1941,22 @@ pub(crate) fn execute_node(
             script,
             runner,
             timeout_seconds,
+            ..
         } => {
             let timeout = timeout_seconds.map(Duration::from_secs);
+            let workdir = match super::node_workdir::resolve(
+                playbook, run_dir, run_id, state, cfg, node_id, workdir,
+            )? {
+                Ok(dir) => dir,
+                Err(msg) => {
+                    return Ok(AttemptOutcome::Finished {
+                        status: NodeStatus::Failed,
+                        output: msg,
+                        events,
+                    });
+                }
+            };
+            let workdir = workdir.as_path();
             // Pass through cancel: in a parallel batch (join:any) the winning
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
@@ -2167,6 +2206,8 @@ pub(crate) fn execute_finish_answer(
                     skills_mode: None,
                     pid: Some(pid),
                     spawn_ms: Some(spawn_ms),
+                    model: None,
+                    workdir: None,
                 }) {
                     *spawn_err.borrow_mut() = Some(e);
                 }
@@ -2191,6 +2232,8 @@ pub(crate) fn execute_finish_answer(
                     skills_mode: None,
                     pid: None,
                     spawn_ms: None,
+                    model: None,
+                    workdir: None,
                 })?;
             }
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);

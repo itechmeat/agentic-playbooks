@@ -183,6 +183,8 @@ mod tests {
                     skills_mode: None,
                     pid: None,
                     spawn_ms: None,
+                    model: None,
+                    workdir: None,
                 },
             ],
             reaped_pid(),

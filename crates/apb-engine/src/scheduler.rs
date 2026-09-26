@@ -47,6 +47,7 @@ mod journal;
 mod listing;
 mod live;
 mod node;
+mod node_workdir;
 mod patch;
 mod prepare;
 mod rebind;

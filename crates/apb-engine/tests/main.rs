@@ -139,6 +139,9 @@ mod migrate_test;
 #[path = "suite/missing_input_test.rs"]
 mod missing_input_test;
 #[cfg(unix)]
+#[cfg(unix)]
+#[path = "suite/named_outputs_test.rs"]
+mod named_outputs_test;
 #[path = "suite/output_field_test.rs"]
 mod output_field_test;
 #[path = "suite/overrides_run_test.rs"]

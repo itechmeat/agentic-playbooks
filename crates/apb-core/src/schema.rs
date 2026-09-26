@@ -221,6 +221,15 @@ pub struct NodeFiles {
     /// behavior. Honored only on `outputs` of agent_task nodes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub extract: Option<String>,
+    /// Named outputs a node publishes (issue #67 item 4), declared on
+    /// `outputs`. An agent_task is told to write exactly these keys into the
+    /// `outputs` object of its status file (which becomes the node output as
+    /// JSON); a script prints a JSON object on stdout. Later nodes read one
+    /// with `{{nodes.<id>.output.<field>}}` or an `output_field` edge. A
+    /// successful execution whose output lacks a declared field journals an
+    /// `output_fields_missing` warning; it never fails the node.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<String>,
 }
 
 impl Playbook {
@@ -356,6 +365,19 @@ impl Node {
 }
 
 impl NodeKind {
+    /// The node's `workdir` template (issue #67 item 4): the directory an
+    /// agent_task or a script runs in, rendered with the prompt template
+    /// engine and resolved against the execution root. `None` for every other
+    /// kind and when unset (or blank): the node runs in the execution root.
+    pub fn workdir_template(&self) -> Option<&str> {
+        match self {
+            NodeKind::AgentTask { workdir, .. } | NodeKind::Script { workdir, .. } => {
+                workdir.as_deref().filter(|w| !w.trim().is_empty())
+            }
+            _ => None,
+        }
+    }
+
     /// Whether executing this node spawns an agent: an `agent_task`, or a
     /// `finish` that composes its answer from the run context via a `prompt`.
     /// The single source of truth for "an agent runs here" (review M3). The
@@ -982,12 +1004,25 @@ pub enum NodeKind {
         /// Falls back to `defaults.require_verdict` when unset here.
         #[serde(default, skip_serializing_if = "is_false")]
         require_verdict: bool,
+        /// Warm session handoff (issue #67 item 1): the id of an earlier
+        /// agent_task whose agent session this node's first attempt continues,
+        /// sending this node's prompt as the next message instead of starting
+        /// a fresh agent. Warm only when the source's session is known, the
+        /// executor (agent and model) is the same, the agent can resume a
+        /// session and both nodes run in the same directory; otherwise the
+        /// node starts cold, as without the field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        continue_session: Option<String>,
     },
     Script {
         script: String,
         runner: String,
         #[serde(default)]
         timeout_seconds: Option<u64>,
+        /// The directory the script runs in (issue #67 item 4), a template like
+        /// the agent_task `workdir`. Absent: the execution root.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workdir: Option<String>,
     },
     Prompt {
         prompt: String,

@@ -10,6 +10,7 @@
 mod connectors;
 mod graph;
 mod nodes;
+mod phase2;
 mod templates;
 
 use std::collections::{HashMap, HashSet, VecDeque};
@@ -30,6 +31,7 @@ use nodes::{
     check_cache, check_expected_duration, check_finish, check_goal, check_interactive,
     check_isolation, check_playbook_ref, check_scripts, check_success_check, check_trigger,
 };
+use phase2::{check_declared_fields, check_session_handoff, check_workdir};
 use templates::{check_cross_branch_reads, check_refs, check_templates};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -162,6 +164,9 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_isolation(playbook, &mut r); // V16
         check_trigger(playbook, &mut r); // V17
         check_goal(playbook, &mut r); // V41
+        check_session_handoff(playbook, &mut r); // V44, V45
+        check_declared_fields(playbook, &mut r); // V46
+        check_workdir(playbook, &mut r); // V47
     }
     r
 }

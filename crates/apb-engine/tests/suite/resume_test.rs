@@ -127,6 +127,8 @@ fn attempt_started(node: &str) -> EventPayload {
         skills_mode: None,
         pid: Some(4242),
         spawn_ms: None,
+        model: None,
+        workdir: None,
     }
 }
 

@@ -113,7 +113,11 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
         FailurePolicy::Node(target) => Some(target.as_str()),
         _ => None,
     };
-    for (owner, text) in template_texts(playbook) {
+    // A `workdir` template races exactly like a prompt does (issue #67 item 4).
+    let texts = template_texts(playbook)
+        .into_iter()
+        .chain(super::phase2::workdir_texts(playbook));
+    for (owner, text) in texts {
         if Some(owner) == failure_handler {
             continue;
         }
