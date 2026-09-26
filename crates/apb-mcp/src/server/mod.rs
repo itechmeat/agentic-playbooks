@@ -318,6 +318,7 @@ impl WfMcp {
         expected_connectors: BTreeMap<String, String>,
         expected_connector_accounts: BTreeMap<String, String>,
         continued_from: Option<String>,
+        worktree: Option<String>,
         warnings: Vec<String>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
@@ -337,6 +338,7 @@ impl WfMcp {
             expected_connectors,
             expected_connector_accounts,
             continued_from,
+            worktree,
         );
         let value = match started {
             Ok(v) => v,

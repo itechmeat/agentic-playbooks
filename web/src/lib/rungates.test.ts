@@ -28,6 +28,7 @@ const detail = (events: Partial<WfEvent>[], p: ProgressSummary, status: RunDetai
   outputs: {},
   instruction: null,
   params: {},
+  worktree: null,
   model: null,
   layout: null,
   hooks: {},

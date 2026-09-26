@@ -2632,13 +2632,16 @@ pub(crate) fn run_playbook_node(
     let predecessor_child =
         latest_child_run(&events, node_id).filter(|id| run_is_terminal(root, id).unwrap_or(false));
 
-    let opts = child_run_options(
+    let mut opts = child_run_options(
         pin,
         child_instruction,
         run_id,
         cfg.depth + 1,
         predecessor_child,
     );
+    // A child works in its parent's tree (issue #67 item 8): it runs under the
+    // parent's lock, so it must not wander back into the execution root.
+    opts.worktree = RunState::fold(&events).worktree;
 
     // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
     let t = PrepareTarget {
@@ -2678,6 +2681,7 @@ pub(crate) fn run_playbook_node(
         StartMode::Rerun,
         cp.run_id.clone(),
         RunMode::Autonomous,
+        &mut cp.guard,
     )?;
     // Child may have mirrored wakes onto this parent log while we held it open
     // (issue #45 finding 8). Re-sync next_seq before any further parent appends.

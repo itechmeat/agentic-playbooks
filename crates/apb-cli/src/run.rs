@@ -398,6 +398,7 @@ pub(crate) fn run_cmd(
     no_cache: bool,
     refresh_cache: bool,
     continued_from: Option<String>,
+    worktree: Option<String>,
 ) -> ExitCode {
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
@@ -466,6 +467,7 @@ pub(crate) fn run_cmd(
             &param_args,
             allow_shared_workdir,
             continued_from.as_deref(),
+            worktree.as_deref(),
         );
     }
     let mut opts = RunOptions {
@@ -486,6 +488,7 @@ pub(crate) fn run_cmd(
         // answer, who can retry, not an event source whose event dies with the
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
+        worktree,
         // The `expected_*` pins come from the run gate (`gate_run`).
         ..Default::default()
     };
@@ -529,6 +532,7 @@ pub(crate) fn run_cmd(
 /// run (before drive starts) - and only then prints
 /// "supervised run started: <run_id>" and returns control without waiting
 /// for the run itself to finish.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn spawn_detached_supervised(
     root: &Path,
     name: &str,
@@ -537,6 +541,7 @@ pub(crate) fn spawn_detached_supervised(
     param_args: &[String],
     allow_shared_workdir: bool,
     continued_from: Option<&str>,
+    worktree: Option<&str>,
 ) -> ExitCode {
     let exe = match apb_core::fsutil::reexec_exe() {
         Ok(e) => e,
@@ -567,6 +572,9 @@ pub(crate) fn spawn_detached_supervised(
     }
     if let Some(pred) = continued_from {
         cmd.arg("--continued-from").arg(pred);
+    }
+    if let Some(tree) = worktree {
+        cmd.arg("--worktree").arg(tree);
     }
     cmd.arg("--handshake").arg(&handshake);
     cmd.current_dir(root);
@@ -626,6 +634,7 @@ pub(crate) fn drive_supervised_child(
     params: Vec<String>,
     allow_shared_workdir: bool,
     continued_from: Option<String>,
+    worktree: Option<String>,
     handshake: &Path,
 ) -> ExitCode {
     let mut parsed = BTreeMap::new();
@@ -661,6 +670,7 @@ pub(crate) fn drive_supervised_child(
         // answer, who can retry, not an event source whose event dies with the
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
+        worktree,
         // The `expected_*` pins come from the run gate (`gate_run`).
         ..Default::default()
     };

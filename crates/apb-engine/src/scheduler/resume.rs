@@ -475,9 +475,15 @@ pub(crate) fn resume_inner(
     // Mirrors prepare's predicate (`NodeKind::takes_workdir_lock`): a resumed
     // parent with a sub-playbook node (or a finish-with-prompt agent node)
     // still takes the shared workdir lock.
+    // The lock covers the run's working tree once one is journaled (issue #67
+    // item 8), so resuming a run over its own worktree does not wait on a run
+    // in the execution root.
     let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
-    let _guard = if is_write {
-        acquire(root, allow_shared_workdir)?
+    let tree = RunState::fold(&read_all(&run_dir)?)
+        .worktree
+        .map(PathBuf::from);
+    let mut guard = if is_write {
+        acquire_tree(root, tree.as_deref(), allow_shared_workdir)?
     } else {
         None
     };
@@ -496,6 +502,7 @@ pub(crate) fn resume_inner(
         decision.mode,
         run_id.to_string(),
         mode,
+        &mut guard,
     )
 }
 

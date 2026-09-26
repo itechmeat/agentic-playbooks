@@ -315,8 +315,9 @@ root:
 name a path: `params.*`, `run.instruction`, `nodes.<id>.output` (or one field of
 it) and `nodes.<id>.review_decision`. Anything else is a **V47** error, and so is
 `workdir` together with `isolation` (an isolated node runs in its own
-directory). The rendered path is resolved against the execution root (an
-absolute path is kept) and must be an existing directory when the node starts.
+directory). The rendered path is resolved against the run's working tree (the
+execution root when the run has none, see [Run working tree](#run-working-tree-worktree);
+an absolute path is kept) and must be an existing directory when the node starts.
 An empty render (the value it reads was never published) or a missing directory
 fails the node, without spawning anything, with a message naming the rendered
 value. It never falls back to the execution root: running a gate in the wrong
@@ -325,8 +326,83 @@ the graph does not order before the node is a **V38** warning, as for prompts.
 
 Each attempt's directory is recorded on its `attempt_started` event
 (`workdir`). A node with a `workdir` is not cache-eligible (the cache
-fingerprints and stores into the execution root), and its `outputs.files` globs
-still match against the execution root.
+fingerprints the run's tree), and its `outputs.files` globs still match against
+the run's tree.
+
+When every node of a run should work in one tree, declare the run working tree
+instead of repeating `workdir` on each node: it also scopes the run's busy lock.
+
+### Run working tree (worktree)
+
+A run can have a working tree of its own, typically a git worktree of the
+project checked out on the branch the run is about:
+
+```yaml
+worktree: "{{nodes.assess.output.working_tree}}"   # or "{{params.tree}}"
+nodes:
+  - id: assess
+    type: agent_task
+    prompt: "Create or find the worktree for the PR and publish it."
+    outputs: { fields: [working_tree] }
+```
+
+Every `agent_task` and `script` without its own `workdir` runs in that tree, and
+a node's own relative `workdir` resolves against it. The tree is resolved once
+per run and journaled as `worktree_resolved` (`path`, `source`, `node`):
+
+- **at start**, when the caller passes one (`apb run --worktree <dir>`, MCP
+  `playbook_run` `worktree`, the dashboard API's `worktree` field), which wins
+  over the playbook, or when the playbook's `worktree` reads only `params.*`;
+- **when a node succeeds**, when `worktree` reads that node's output
+  (`nodes.<id>.output` or one field of it). The nodes before it run in the
+  execution root; every node after it runs in the tree. Sub-playbook runs work
+  in their parent's tree.
+
+The path is resolved against the execution root (an absolute path is kept) and
+must be an existing directory that belongs to the project: a directory inside
+it, or a git worktree of its repository. A tree passed at start that does not
+qualify refuses the start; one published by a node fails the run before the
+next node, never falls back to the execution root. `run_status` (MCP), the
+dashboard's run page and `GET /api/runs/<id>` show the tree (`worktree`).
+
+The template may read only `params.*` and the output of **one** `agent_task` or
+`script` node; anything else is a **V48** error, and a field the source node
+does not declare in `outputs.fields` is a **V46** warning.
+
+**Busy lock.** A write-run holds a busy lock for the checkout it works in, so
+two runs over the same tree still take turns (or queue, from the dashboard),
+while runs over different git worktrees run side by side. A run in the
+execution root, or in a plain directory of the root's own checkout (whose files
+are the root's files), uses the project lock `.apb/workdir.lock` as before; a
+run in a separate git worktree uses `.apb/locks/tree-<digest>.lock` in the
+execution root, keyed by that worktree's top level (a worktree never grows an
+`.apb` of its own). A tree resolved by a node moves the lock: the tree's lock is
+taken first, then the project lock is released. `apb doctor --run <id>` reports
+the lock of the run's tree.
+
+### Declared cache key (cache.key)
+
+`cache: auto` keys a node's result on its definition, rendered prompt, profile
+bundle, executor, connectors and a fingerprint of the workspace (the whole git
+work tree, or the `inputs.files` globs). A node whose result depends on
+something else, such as a PR dossier that depends on the PR's head commit,
+misses on every unrelated edit to the tree. Declare what it depends on instead:
+
+```yaml
+- id: collect
+  type: agent_task
+  prompt: "Collect the discussion of PR {{params.pr}} into the dossier."
+  cache: { mode: auto, key: "{{nodes.probe.output.head_sha}}", ttl: 7d }
+```
+
+With a `key`, the rendered key takes the place of the workspace fingerprint in
+the cache key; everything else stays in it. Admission is unchanged: the node
+must leave the workspace as it found it (declared `outputs.files` aside) and
+make only read-only connector calls, so a cached result can never hide a side
+effect. A key that renders empty (the value it reads was never published) skips
+the cache for that execution. The key may read what a `workdir` may read
+(**V49** error otherwise); `key` without `mode: auto`, on a node with its own
+`workdir`, or a key that reads nothing and has no `ttl` is a **V49** warning.
 
 ### Warning: premature success in long-running orchestrator nodes
 
@@ -893,7 +969,7 @@ stores. `agent-stream/` still holds the streamed events of the `acp` transport.
 A transcript holds whatever the agent printed or read, secrets included, so it
 must never reach git. APB keeps `<project>/.apb/.gitignore` listing its
 machine-local paths (`workspace.local`, `runs/`, `cache/`, `trash/`,
-`backup-*/`, `workdir.lock`): `apb init` writes it and every run makes sure of
+`backup-*/`, `workdir.lock`, `locks/`): `apb init` writes it and every run makes sure of
 it before its first node starts, adding only the lines that are missing and
 leaving your own lines as they are. Do not remove `runs/` from it.
 

@@ -29,6 +29,7 @@ pub mod scope;
 pub mod server_auth;
 pub mod skills;
 pub mod store;
+pub mod template;
 pub mod trust;
 pub mod validate;
 pub mod versioning;

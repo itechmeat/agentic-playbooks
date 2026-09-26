@@ -55,16 +55,94 @@ impl Drop for WorkdirGuard {
     }
 }
 
-/// Where the workdir lock lives. `pub(crate)` so `run_doctor` can report the
-/// lock holder without a second copy of the path convention.
+/// Where the workdir lock of the execution root lives. `pub(crate)` so
+/// `run_doctor` can report the lock holder without a second copy of the path
+/// convention.
 pub(crate) fn lock_path(root: &Path) -> PathBuf {
     root.join(".apb/workdir.lock")
 }
 
+/// Where the busy lock of the tree a run works in lives (issue #67 item 8).
+///
+/// The lock belongs to the checkout the tree is part of, not to the exact
+/// directory: a tree in the execution root's own checkout (the root itself or
+/// any directory in it) shares the historical `.apb/workdir.lock`, because its
+/// files are the root's files, while a separate git worktree gets its own lock
+/// under the execution root's `.apb/locks/`, named by a digest of its
+/// canonical top level. So two runs over different git worktrees of one
+/// project never contend, and two runs whose trees overlap always do. The
+/// lock lives in the execution root, so a worktree never grows an `.apb` of
+/// its own. Outside git, a directory inside the execution root counts as the
+/// root and any other directory as its own tree.
+pub fn tree_lock_path(root: &Path, tree: Option<&Path>) -> PathBuf {
+    let Some(tree) = tree else {
+        return lock_path(root);
+    };
+    let canon = |p: &Path| p.canonicalize().unwrap_or_else(|_| p.to_path_buf());
+    let (root_c, tree_c) = (canon(root), canon(tree));
+    let identity = match (
+        git_path(&tree_c, "--show-toplevel"),
+        git_path(&root_c, "--show-toplevel"),
+    ) {
+        (Some(tree_top), Some(root_top)) if tree_top == root_top => root_c.clone(),
+        (Some(tree_top), _) => tree_top,
+        (None, _) if tree_c.starts_with(&root_c) => root_c.clone(),
+        (None, _) => tree_c,
+    };
+    if identity == root_c {
+        return lock_path(root);
+    }
+    let digest = apb_core::content::sha256_hex(identity.to_string_lossy().as_bytes());
+    let short: String = digest
+        .trim_start_matches("sha256:")
+        .chars()
+        .take(16)
+        .collect();
+    root.join(".apb/locks").join(format!("tree-{short}.lock"))
+}
+
+/// An absolute, canonical path git reports for `dir` (`--show-toplevel`,
+/// `--git-common-dir`); `None` outside git or when git is unavailable. Only
+/// `rev-parse` runs, which reads no index and runs no hooks.
+pub(crate) fn git_path(dir: &Path, what: &str) -> Option<PathBuf> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(["rev-parse", "--path-format=absolute", what])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_COMMON_DIR")
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let path = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    PathBuf::from(path).canonicalize().ok()
+}
+
 /// Writes the lock naming `pid`, inside the workspace's existing `.apb`: a
-/// driver of a deleted workspace must not re-create it.
+/// driver of a deleted workspace must not re-create it (a tree lock's
+/// `.apb/locks` may be created, `.apb` itself never).
 fn write_lock(lock_path: &Path, pid: u32) -> std::io::Result<()> {
-    let apb_dir = lock_path.parent().unwrap_or(lock_path);
+    let parent = lock_path.parent().unwrap_or(lock_path);
+    let apb_dir = match parent.file_name() {
+        Some(name) if name == "locks" => {
+            // A `locks` that is a symlink (say, committed into a cloned
+            // repository) would carry the lock file out of the project.
+            if parent
+                .symlink_metadata()
+                .is_ok_and(|m| m.file_type().is_symlink())
+            {
+                return Err(std::io::Error::other(format!(
+                    "`{}` is a symlink, refusing to write a lock through it",
+                    parent.display()
+                )));
+            }
+            parent.parent().unwrap_or(parent)
+        }
+        _ => parent,
+    };
     atomic_write_under(apb_dir, lock_path, pid.to_string().as_bytes())
 }
 
@@ -79,16 +157,30 @@ pub(crate) fn lock_holder(path: &Path) -> Option<u32> {
     }
 }
 
+/// Takes the execution root's workdir lock. See [`acquire_tree`].
 pub fn acquire(root: &Path, allow_shared: bool) -> Result<Option<WorkdirGuard>, EngineError> {
+    acquire_tree(root, None, allow_shared)
+}
+
+/// Takes the busy lock of `tree` (the execution root when `None`), refusing
+/// with `WorkdirBusy` while a live process holds it.
+pub fn acquire_tree(
+    root: &Path,
+    tree: Option<&Path>,
+    allow_shared: bool,
+) -> Result<Option<WorkdirGuard>, EngineError> {
     if allow_shared {
         return Ok(None);
     }
-    let lock_path = lock_path(root);
+    acquire_at(tree_lock_path(root, tree))
+}
+
+fn acquire_at(lock_path: PathBuf) -> Result<Option<WorkdirGuard>, EngineError> {
     if let Some(pid) = lock_holder(&lock_path)
         && pid_alive(pid)
     {
         return Err(EngineError::WorkdirBusy(format!(
-            "another write-run holds the workdir (pid {pid}); use worktree or --allow-shared-workdir"
+            "another write-run holds the workdir (pid {pid}); give this run its own worktree or use --allow-shared-workdir"
         )));
     }
     // No lock, or a stale one - overwrite it.
@@ -112,7 +204,7 @@ pub fn acquire(root: &Path, allow_shared: bool) -> Result<Option<WorkdirGuard>, 
 ///   * no lock, or a stale one: acquire normally (the parent died before it
 ///     could hand anything over).
 pub fn acquire_handover(root: &Path) -> Result<Option<WorkdirGuard>, EngineError> {
-    acquire_handover_within(root, HANDOVER_WAIT)
+    acquire_handover_within(root, None, HANDOVER_WAIT)
 }
 
 /// `acquire_handover` with a caller-chosen ceiling, never shorter than
@@ -122,10 +214,11 @@ pub fn acquire_handover(root: &Path) -> Result<Option<WorkdirGuard>, EngineError
 /// poll, so they get one deadline rather than two.
 pub fn acquire_handover_within(
     root: &Path,
+    tree: Option<&Path>,
     wait: Duration,
 ) -> Result<Option<WorkdirGuard>, EngineError> {
     wait_for_workdir(
-        root,
+        tree_lock_path(root, tree),
         wait.max(HANDOVER_WAIT),
         HANDOVER_STEP,
         LockWait::Handover,
@@ -149,7 +242,23 @@ pub fn acquire_queued(
     wait: Duration,
     stopped: &mut dyn FnMut() -> bool,
 ) -> Result<Option<WorkdirGuard>, EngineError> {
-    wait_for_workdir(root, wait, QUEUE_STEP, LockWait::Queue { stopped })
+    acquire_queued_tree(root, None, wait, stopped)
+}
+
+/// [`acquire_queued`] for the busy lock of `tree` (the execution root when
+/// `None`).
+pub fn acquire_queued_tree(
+    root: &Path,
+    tree: Option<&Path>,
+    wait: Duration,
+    stopped: &mut dyn FnMut() -> bool,
+) -> Result<Option<WorkdirGuard>, EngineError> {
+    wait_for_workdir(
+        tree_lock_path(root, tree),
+        wait,
+        QUEUE_STEP,
+        LockWait::Queue { stopped },
+    )
 }
 
 /// Which of the two waits `wait_for_workdir` is performing. They differ in
@@ -167,12 +276,11 @@ enum LockWait<'a> {
 /// The poll shared by both waits: retry `acquire` every `step` until it
 /// succeeds, `wait` elapses, or (queue only) the run is stopped.
 fn wait_for_workdir(
-    root: &Path,
+    lock_path: PathBuf,
     wait: Duration,
     step: Duration,
     mut mode: LockWait<'_>,
 ) -> Result<Option<WorkdirGuard>, EngineError> {
-    let lock_path = lock_path(root);
     let deadline = Instant::now() + wait;
     loop {
         if matches!(mode, LockWait::Handover) && lock_holder(&lock_path) == Some(std::process::id())
@@ -182,7 +290,7 @@ fn wait_for_workdir(
                 armed: true,
             }));
         }
-        match acquire(root, false) {
+        match acquire_at(lock_path.clone()) {
             Err(EngineError::WorkdirBusy(msg)) => {
                 if let LockWait::Queue { stopped } = &mut mode
                     && (*stopped)()

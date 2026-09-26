@@ -1237,3 +1237,87 @@ fn a_declared_deliverable_is_captured_without_any_cache_config() {
         "capture must not imply any cache activity"
     );
 }
+
+// A declared cache key (issue #67 item 6): the node states what its result
+// depends on (`{{params.head}}` here, a probe's named output in practice), and
+// that replaces the workspace fingerprint in the key.
+const KEYED_PLAYBOOK: &str = r#"
+schema: 1
+id: cachewf
+name: Cache Playbook
+version: 1.0.0
+params:
+  - { name: head, type: text }
+nodes:
+  - { id: start, type: start }
+  - id: lint
+    type: script
+    script: "scripts/lint.sh"
+    runner: sh
+    cache: { mode: auto, key: "{{params.head}}" }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: lint }
+  - { from: lint, to: done }
+"#;
+
+fn seed_keyed(root: &Path, script_body: &str) {
+    seed(root, script_body);
+    std::fs::write(
+        root.join(".apb/playbooks/cachewf/1.0.0/playbook.yaml"),
+        KEYED_PLAYBOOK,
+    )
+    .unwrap();
+}
+
+fn run_keyed(root: &Path, head: &str) -> Vec<Event> {
+    let mut opts = RunOptions::default();
+    opts.params.insert("head".into(), head.into());
+    let res = run(root, "cachewf", None, opts).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap()
+}
+
+// An edit to the tree the node does not depend on keeps the entry; a new key
+// value misses.
+#[test]
+fn a_declared_key_survives_an_unrelated_workspace_change() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_keyed(root, CLEAN_SCRIPT);
+
+    let ev1 = run_keyed(root, "abc");
+    assert!(has_stored(&ev1, "lint"), "run 1 stores");
+    std::fs::write(root.join("src/work.txt"), "changed\n").unwrap();
+
+    let ev2 = run_keyed(root, "abc");
+    assert!(
+        hit_source(&ev2, "lint").is_some(),
+        "same key, changed tree: a hit"
+    );
+    assert_eq!(run_count(root), 1, "the script did not run again");
+
+    let ev3 = run_keyed(root, "def");
+    assert!(has_miss(&ev3, "lint"), "a new key value misses");
+    assert_eq!(run_count(root), 2);
+}
+
+// A key does not relax admission: a node that dirties the tree is still
+// never stored, and a key that renders empty skips the cache altogether.
+#[test]
+fn a_declared_key_still_requires_a_clean_workspace_and_a_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_keyed(root, DIRTY_SCRIPT);
+    let ev = run_keyed(root, "abc");
+    assert!(
+        rejected_reason(&ev, "lint").is_some_and(|r| r.contains("workspace")),
+        "a dirtying node is rejected"
+    );
+
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed_keyed(root, CLEAN_SCRIPT);
+    let ev = run_keyed(root, "");
+    assert!(!any_cache_event(&ev), "an empty key skips the cache");
+}

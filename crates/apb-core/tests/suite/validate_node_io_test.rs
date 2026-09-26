@@ -1,6 +1,7 @@
 //! Validation of `continue_session` (V44 error, V45 warning), reads of
-//! undeclared output fields (V46 warning) and the node `workdir` template
-//! (V47 error), the fields issue #67 added.
+//! undeclared output fields (V46 warning), the node `workdir` template
+//! (V47 error), the run `worktree` template (V48 error) and a declared
+//! `cache.key` (V49), the fields issue #67 added.
 
 use apb_core::schema::Playbook;
 use apb_core::validate::{Severity, ValidationContext, validate};
@@ -210,4 +211,89 @@ fn parallel_continuations_of_one_session_are_a_warning() {
         chain,
     );
     assert!(!has(&got, "V45", Severity::Warning), "{got:?}");
+}
+
+/// `(code, severity)` of every issue for a playbook with `top` added at the
+/// top level (params, worktree), a probe `a` and a worker `b`.
+fn issues_top(top: &str, nodes: &str) -> Vec<(&'static str, Severity)> {
+    let yaml = format!(
+        "schema: 2\nid: p\nname: P\nversion: 1.0.0\n{top}\ndefaults: {{ profile: dev }}\nnodes:\n  - {{ id: start, type: start }}\n{nodes}  - {{ id: done, type: finish, outcome: success }}\nedges:\n{CHAIN}"
+    );
+    let playbook = Playbook::from_yaml(&yaml).unwrap();
+    validate(&playbook, &ctx())
+        .issues
+        .iter()
+        .map(|i| (i.code, i.severity))
+        .collect()
+}
+
+const PROBE_AND_WORK: &str = "  - { id: a, type: agent_task, prompt: x, outputs: { fields: [tree] } }\n  - { id: b, type: agent_task, prompt: y }\n";
+
+#[test]
+fn a_worktree_template_reads_params_or_one_producing_node() {
+    for top in [
+        "params:\n  - { name: t, type: text }\nworktree: \"{{params.t}}\"",
+        "worktree: \"{{nodes.a.output.tree}}\"",
+        "worktree: \"../trees/{{nodes.a.output}}\"",
+    ] {
+        let got = issues_top(top, PROBE_AND_WORK);
+        assert!(!got.iter().any(|(c, _)| *c == "V48"), "{top}: {got:?}");
+    }
+    for top in [
+        "worktree: \"{{run.context}}\"",
+        "worktree: \"{{params.undeclared}}\"",
+        "worktree: \"{{nodes.a.review_decision}}\"",
+        "worktree: \"{{nodes.a.output.tree}}/{{nodes.b.output}}\"",
+        "worktree: \"{{nodes.missing.output}}\"",
+    ] {
+        let got = issues_top(top, PROBE_AND_WORK);
+        assert!(has(&got, "V48", Severity::Error), "{top}: {got:?}");
+    }
+    let got = issues_top(
+        "worktree: \"{{nodes.a.output}}\"",
+        "  - { id: a, type: prompt, prompt: x }\n  - { id: b, type: agent_task, prompt: y }\n",
+    );
+    assert!(
+        has(&got, "V48", Severity::Error),
+        "a prompt node produces no tree: {got:?}"
+    );
+    let got = issues_top("worktree: \"{{nodes.a.output.other}}\"", PROBE_AND_WORK);
+    assert!(
+        has(&got, "V46", Severity::Warning),
+        "an undeclared field is V46: {got:?}"
+    );
+}
+
+#[test]
+fn a_declared_cache_key_is_validated() {
+    let node = |cache: &str| {
+        format!(
+            "  - {{ id: a, type: agent_task, prompt: x, outputs: {{ fields: [head] }} }}\n  - {{ id: b, type: agent_task, prompt: y, cache: {cache} }}\n"
+        )
+    };
+    let clean = issues_top(
+        "",
+        &node("{ mode: auto, key: \"{{nodes.a.output.head}}\" }"),
+    );
+    assert!(!clean.iter().any(|(c, _)| *c == "V49"), "{clean:?}");
+
+    let bad_read = issues_top("", &node("{ mode: auto, key: \"{{run.context}}\" }"));
+    assert!(has(&bad_read, "V49", Severity::Error), "{bad_read:?}");
+
+    let off = issues_top("", &node("{ key: \"{{nodes.a.output.head}}\" }"));
+    assert!(has(&off, "V49", Severity::Warning), "mode off: {off:?}");
+
+    let constant = issues_top("", &node("{ mode: auto, key: v1 }"));
+    assert!(
+        has(&constant, "V49", Severity::Warning),
+        "a constant key without ttl: {constant:?}"
+    );
+    let constant_ttl = issues_top("", &node("{ mode: auto, key: v1, ttl: 1h }"));
+    assert!(
+        !constant_ttl.iter().any(|(c, _)| *c == "V49"),
+        "{constant_ttl:?}"
+    );
+
+    let undeclared = issues_top("", &node("{ mode: auto, key: \"{{nodes.a.output.sha}}\" }"));
+    assert!(has(&undeclared, "V46", Severity::Warning), "{undeclared:?}");
 }

@@ -71,6 +71,13 @@ pub struct PlaybookRunArgs {
     /// run to the predecessor in runs_list/run_status.
     #[serde(default)]
     pub continued_from: Option<String>,
+    /// The run's working tree: a directory (absolute, or relative to the
+    /// project) that agent and script nodes run in and whose busy lock the
+    /// run takes, so runs over different git worktrees do not wait on each
+    /// other. Overrides the playbook's `worktree`. Omit to let the playbook
+    /// decide (the project root when it declares none).
+    #[serde(default)]
+    pub worktree: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

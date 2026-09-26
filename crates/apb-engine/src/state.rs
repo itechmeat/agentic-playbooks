@@ -193,6 +193,10 @@ pub struct RunState {
     /// the failure - `run_status`/doctor only read it while `run_status` is
     /// `Failed`, so a stale value from an earlier attempt is harmless.
     pub failure_reason: Option<FailureReason>,
+    /// The run's working tree (issue #67 item 8), folded from the first
+    /// `WorktreeResolved`: the directory agent_task and script nodes without
+    /// their own `workdir` run in. `None`: the execution root.
+    pub worktree: Option<String>,
 }
 
 impl RunState {
@@ -243,6 +247,11 @@ impl RunState {
                 // admitted, its parameters are on disk, and it is waiting for
                 // the workdir rather than for anybody to decide anything.
                 EventPayload::RunQueued { .. } => {}
+                EventPayload::WorktreeResolved { path, .. } => {
+                    if s.worktree.is_none() {
+                        s.worktree = Some(path.clone());
+                    }
+                }
                 EventPayload::RunFinished { outcome } => {
                     s.run_status = match outcome.as_str() {
                         "succeeded" => RunStatus::Succeeded,

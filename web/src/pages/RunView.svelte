@@ -120,6 +120,15 @@
   </div>
 {/if}
 
+<!-- The run's working tree (issue #67 item 8): where its agent and script
+     nodes run and what its busy lock covers. Absent: the project root. -->
+{#if detail?.worktree}
+  <div class="flex items-center gap-2 border-b border-border px-4 py-1.5 text-xs">
+    <span class="font-semibold text-muted-foreground">Working tree</span>
+    <span class="truncate font-mono" title={detail.worktree}>{detail.worktree}</span>
+  </div>
+{/if}
+
 <!-- Why a failed run ended. The answer below is what the playbook composed on
      purpose; this is what the engine recorded when it could not finish, and
      until now it was only reachable through `apb doctor --run`. -->

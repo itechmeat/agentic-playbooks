@@ -207,6 +207,10 @@ pub(crate) struct RunBody {
     /// Run id to continue as a fresh run (issue #42 finding 10).
     #[serde(default)]
     continued_from: Option<String>,
+    /// The run's working tree (issue #67 item 8): overrides the playbook's
+    /// `worktree`; the run locks this tree instead of the project root.
+    #[serde(default)]
+    worktree: Option<String>,
 }
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
@@ -256,6 +260,7 @@ pub(crate) async fn run_playbook_handler(
         instruction: body.instruction,
         params: body.params,
         continued_from: body.continued_from,
+        worktree: body.worktree,
         // A busy workdir queues the start instead of refusing it (see the
         // handler doc): the caller is answered with a run id and the run's
         // parameters are already persisted, so nothing depends on the caller

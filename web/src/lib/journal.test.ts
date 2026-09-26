@@ -67,6 +67,8 @@ describe('runEventJournal notes', () => {
       { seq: 3, ts: 3, type: 'output_fields_missing', node: 'a', fields: ['tree', 'verdict'] },
       { seq: 4, ts: 4, type: 'attempt_started', node: 'a', attempt: 1, transcript: 'attempts/a-1' },
       { seq: 5, ts: 5, type: 'node_started', node: 'a' },
+      { seq: 6, ts: 6, type: 'worktree_resolved', path: '/src/wt', source: 'node', node: 'a' },
+      { seq: 7, ts: 7, type: 'worktree_resolved', path: '/src/wt', source: 'caller' },
     ] as never)
     expect(entries.map((e) => e.note)).toEqual([
       'warm: continues the session of a',
@@ -74,6 +76,8 @@ describe('runEventJournal notes', () => {
       'missing fields: tree, verdict',
       'transcript: attempts/a-1',
       undefined,
+      'working tree: /src/wt (published by a)',
+      'working tree: /src/wt (from caller)',
     ])
   })
 })

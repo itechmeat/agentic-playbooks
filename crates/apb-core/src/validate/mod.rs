@@ -27,7 +27,9 @@ use graph::{
     check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,
     check_joins, check_reachability, check_start_finish, check_unique_ids,
 };
-use node_io::{check_declared_fields, check_session_handoff, check_workdir};
+use node_io::{
+    check_cache_key, check_declared_fields, check_session_handoff, check_workdir, check_worktree,
+};
 use nodes::{
     check_cache, check_expected_duration, check_finish, check_goal, check_interactive,
     check_isolation, check_playbook_ref, check_scripts, check_success_check, check_trigger,
@@ -167,6 +169,8 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
         check_session_handoff(playbook, &mut r); // V44, V45
         check_declared_fields(playbook, &mut r); // V46
         check_workdir(playbook, &mut r); // V47
+        check_worktree(playbook, &mut r); // V48
+        check_cache_key(playbook, &mut r); // V49
     }
     r
 }

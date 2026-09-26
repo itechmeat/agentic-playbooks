@@ -4,6 +4,7 @@
 use super::graph::must_have_finished;
 use super::*;
 use crate::graphutil::{adjacency, reachable_from};
+pub(crate) use crate::template::refs as template_refs;
 
 pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
     let params: HashSet<&str> = playbook.params.iter().map(|p| p.name.as_str()).collect();
@@ -92,6 +93,16 @@ pub(crate) fn workdir_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
         .collect()
 }
 
+/// The declared cache key templates of a playbook (issue #67 item 6) as
+/// `(owner node id, text)` pairs.
+pub(crate) fn cache_key_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
+    playbook
+        .nodes
+        .iter()
+        .filter_map(|n| n.cache_key_template().map(|k| (n.id.as_str(), k)))
+        .collect()
+}
+
 /// V38 (warning): a template reads `nodes.<id>.output` or `nodes.<id>.report`
 /// (with or without a top-level field selector) where the graph does not order
 /// `<id>` before the reading node. At run time
@@ -123,9 +134,12 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
         _ => None,
     };
     // A `workdir` template races exactly like a prompt does (issue #67 item 4).
+    // So does a declared cache key (item 6): a racy read keys the node on a
+    // value that may not exist yet.
     let texts = template_texts(playbook)
         .into_iter()
-        .chain(workdir_texts(playbook));
+        .chain(workdir_texts(playbook))
+        .chain(cache_key_texts(playbook));
     for (owner, text) in texts {
         if Some(owner) == failure_handler {
             continue;
@@ -181,24 +195,6 @@ pub(crate) const V13_KNOWN_NAMESPACES: &str = "; known namespaces: params.*, nod
     nodes.<id>.report, nodes.<id>.output.<field>, nodes.<id>.report.<field>, \
     nodes.<id>.review_note, nodes.<id>.review_decision, nodes.<id>.rejected_output, \
     run.instruction, run.context, run.hooks.*";
-
-pub(crate) fn template_refs(text: &str) -> Vec<String> {
-    // no regex dependency: manual scan for {{ ... }}
-    let mut out = Vec::new();
-    let bytes = text.as_bytes();
-    let mut i = 0;
-    while i + 1 < bytes.len() {
-        if &bytes[i..i + 2] == b"{{"
-            && let Some(end) = text[i + 2..].find("}}")
-        {
-            out.push(text[i + 2..i + 2 + end].trim().to_string());
-            i += 2 + end + 2;
-            continue;
-        }
-        i += 1;
-    }
-    out
-}
 
 pub(crate) fn check_refs(playbook: &Playbook, ctx: &ValidationContext, r: &mut ValidationReport) {
     // Checking a profile reference (schema 2): scope:project in a global

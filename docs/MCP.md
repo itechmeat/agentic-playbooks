@@ -39,7 +39,7 @@ Reads (read-only):
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
 | `runs_list` | List of runs |
-| `run_status` | Current run status (nodes, outputs) |
+| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root) |
 | `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status` |
 | `run_events` | Run events, optionally from a given seq |
 | `run_report` | Short run summary |
@@ -69,7 +69,7 @@ Mutations (destructive):
 
 | Tool | What it does |
 | --- | --- |
-| `playbook_run` | Run a playbook (spawns agents, changes project files). Server-side policy gate: draft/untrusted/cross-workspace are rejected |
+| `playbook_run` | Run a playbook (spawns agents, changes project files). Server-side policy gate: draft/untrusted/cross-workspace are rejected. `worktree` gives the run its own working tree (a directory in the project or a git worktree of it): its nodes run there and it does not wait on runs over other trees |
 | `playbook_capture` | Distill an action into a draft playbook in the chosen scope (not executed until trial) |
 | `playbook_trial` | Trial run of a draft against the effects matrix: filesystem writes go into a git worktree with a diff; irreversible effects are forbidden. Accepts an `instruction`, exactly like `playbook_run` |
 | `playbook_approve` | Activation after trial/confirmation: lifecycle active, digest trusted |

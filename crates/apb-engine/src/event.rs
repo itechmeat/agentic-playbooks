@@ -234,6 +234,20 @@ pub enum EventPayload {
         #[serde(default)]
         reason: String,
     },
+    /// The run's working tree was resolved (issue #67 item 8): from here on
+    /// every agent_task and script without its own `workdir` runs in `path`
+    /// (absolute, canonical), and the run's busy lock covers that tree.
+    /// `source` says where it came from: `caller` (passed at start),
+    /// `playbook` (the `worktree` template over params, at start) or `node`
+    /// (the template over `node`'s output, when that node succeeded). Written
+    /// once per run; the fold keeps the first. Additive: old logs never carry
+    /// the variant, and a run without it runs in the execution root.
+    WorktreeResolved {
+        path: String,
+        source: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
+    },
     /// A resume restarted the run from `from_node` (Task 3: resume rework).
     /// Folds to `Running`, replacing the old `RunPaused { reason: "resume
     /// from X" }` marker that used to leave the folded status stuck on paused
