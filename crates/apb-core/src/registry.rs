@@ -18,6 +18,7 @@ pub fn init_project(root: &Path) -> io::Result<()> {
     if !config.exists() {
         atomic_write(&config, DEFAULT_CONFIG.as_bytes())?;
     }
+    crate::workspace::ensure_local_ignored(root);
     Ok(())
 }
 

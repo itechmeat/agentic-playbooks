@@ -102,3 +102,64 @@ fn a_timed_out_attempt_keeps_what_it_printed() {
     let out = fs::read_to_string(t[0].join("stdout.log")).unwrap();
     assert!(out.contains("ran the gate: 3 red"), "{out}");
 }
+
+/// Whether git ignores `rel` (a path under `root`), by the real
+/// `git check-ignore` rather than a re-implementation of its rules.
+fn git_ignores(root: &Path, rel: &str) -> bool {
+    std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args(["-c", "core.excludesFile=/dev/null"])
+        .args(["check-ignore", "-q", "--no-index", rel])
+        .status()
+        .unwrap()
+        .success()
+}
+
+/// A project whose own `.gitignore` says nothing about `.apb/` and that has
+/// no `.apb/.gitignore` yet: the run makes `.apb/runs/` ignored before the
+/// first attempt writes its transcript, so a `git add -A` during or after
+/// the run cannot pick one up.
+#[test]
+fn a_run_git_ignores_its_transcripts_before_the_first_attempt() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    init_project(root).unwrap();
+    // A project that predates the ignore list, or whose `.apb/` came from a
+    // clone: nothing ignores the run directory yet.
+    let _ = fs::remove_file(root.join(".apb/.gitignore"));
+    let git = |args: &[&str]| {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(root)
+            .args(args)
+            .status()
+            .unwrap()
+            .success();
+        assert!(ok, "git {args:?} failed");
+    };
+    git(&["init", "-q"]);
+    fs::write(root.join(".gitignore"), "target/\n").unwrap();
+    assert!(!git_ignores(root, ".apb/runs/x/attempts/y"));
+    seed_playbook(root, "one", &playbook(""));
+    common::seed_profile(root, "main", "claude", "haiku", &[]);
+    // The stub records, while the attempt runs, whether git ignores the
+    // transcript path at that moment.
+    let probe = root.join("probe");
+    let stub = recording_stub(
+        root,
+        &format!(
+            "if git -C '{root}' -c core.excludesFile=/dev/null check-ignore -q --no-index .apb/runs/x/attempts/y; then echo yes > '{probe}'; else echo no > '{probe}'; fi; {OK}",
+            root = root.display(),
+            probe = probe.display()
+        ),
+    );
+    let (outcome, run_dir) = run_one(root, &stub, &root.join("none"));
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert_eq!(fs::read_to_string(&probe).unwrap().trim(), "yes");
+    let t = transcripts(&run_dir);
+    let rel = t[0].join("stdout.log");
+    let rel = rel.strip_prefix(root).unwrap().to_str().unwrap();
+    assert!(git_ignores(root, rel), "{rel} is not git-ignored");
+    assert!(git_ignores(root, ".apb/runs/x/attempts/y"));
+}
