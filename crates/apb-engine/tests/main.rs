@@ -160,6 +160,9 @@ mod process_group_test;
 mod profile_run_test;
 #[path = "suite/progress_api_test.rs"]
 mod progress_api_test;
+#[cfg(unix)]
+#[path = "suite/prompt_cache_test.rs"]
+mod prompt_cache_test;
 #[path = "suite/question_channel_test.rs"]
 mod question_channel_test;
 #[cfg(unix)]

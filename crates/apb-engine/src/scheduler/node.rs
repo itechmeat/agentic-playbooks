@@ -955,16 +955,14 @@ pub(crate) fn execute_node(
                 let hermetic_settings: Option<crate::adapter::HermeticEnv> =
                     if entry.hermetic && crate::adapter::agent_supports_hermetic(&step.agent) {
                         let skills_dir = if !isolated && !entry.skills.is_empty() {
-                            // Laid down fresh from the run snapshot for every
-                            // step, like an isolated node's copies.
-                            let dir = run_dir.join("agent-skills").join(node_id);
-                            match std::fs::remove_dir_all(&dir) {
-                                Ok(()) => {}
-                                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-                                Err(e) => return Err(e.into()),
-                            }
-                            materialize_isolated_skills(run_dir, &entry, &dir)?;
-                            Some(dir)
+                            // One copy per profile bundle per run, at a path
+                            // every node of the profile shares, so the
+                            // agent's system portion stays byte-identical
+                            // across them and a provider prompt cache hits
+                            // (issue #67 item 7). Checked against the
+                            // snapshot digests before each step and laid
+                            // down again when it drifted.
+                            Some(super::skills_copy::shared_skills_dir(run_dir, &entry)?)
                         } else {
                             None
                         };

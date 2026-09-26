@@ -53,6 +53,7 @@ mod patch;
 mod prepare;
 mod rebind;
 mod resume;
+mod skills_copy;
 mod status_file;
 mod supervisor;
 
