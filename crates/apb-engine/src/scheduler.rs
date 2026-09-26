@@ -32,7 +32,7 @@ use crate::run_config::{
 use crate::script::run_script;
 use crate::signals::read_signals_after;
 use crate::state::{NodeStatus, RunState, RunStatus};
-use crate::workdir::{acquire, acquire_handover_within, acquire_queued};
+use crate::workdir::{acquire_handover_within, acquire_queued_tree, acquire_tree};
 
 /// Run mode: autonomous (as in phases 1-3, behavior unchanged) or supervised
 /// (the engine stops on a wake event and waits for a command). Defined in
@@ -57,6 +57,7 @@ mod skills_copy;
 mod status_file;
 mod supervisor;
 mod transcript;
+mod worktree;
 
 pub(crate) use control_apply::{ControlScan, scan_control};
 pub(crate) use entry::Prepared;
@@ -344,10 +345,11 @@ fn drive(
     start_mode: StartMode,
     run_id: String,
     mode: RunMode,
+    lock: &mut Option<crate::workdir::WorkdirGuard>,
 ) -> Result<RunResult, EngineError> {
     let run_id_for_failure = run_id.clone();
     match drive_inner(
-        playbook, run_dir, root, log, cfg, start_node, start_mode, run_id, mode,
+        playbook, run_dir, root, log, cfg, start_node, start_mode, run_id, mode, lock,
     ) {
         Ok(r) => Ok(r),
         Err(e) => {
@@ -385,6 +387,7 @@ fn drive_inner(
     start_mode: StartMode,
     run_id: String,
     mode: RunMode,
+    lock: &mut Option<crate::workdir::WorkdirGuard>,
 ) -> Result<RunResult, EngineError> {
     // Publish who is driving this run, for as long as the drive lasts
     // (Task 7 / issue #45 finding 10). Top-level runs own `driver.pid`;
@@ -393,7 +396,6 @@ fn drive_inner(
     // dedicated driver of the child. The guard removes the claim on every
     // exit path.
     let _driver_claim = crate::driver::DriveClaim::claim(run_dir, cfg.parent_run.as_deref());
-    let workdir = root.to_path_buf();
     // Adapter env scrubbing (spec 4.3): the union of every env var name
     // referenced by ANY installed connector config (both scopes), computed once
     // per run and removed from every spawned agent's environment - even runs
@@ -584,7 +586,30 @@ fn drive_inner(
             )?;
         }
 
-        let state = RunState::fold(&read_all(run_dir)?);
+        let mut state = RunState::fold(&read_all(run_dir)?);
+        // A `worktree` template over a node's output resolves as soon as that
+        // node has succeeded: the busy lock moves onto the tree first, then
+        // the tree is journaled, and every node from here on runs in it.
+        if let Some((tree, node)) =
+            worktree::resolve_from_node(&playbook, root, run_dir, &run_id, &state, cfg)?
+        {
+            worktree::move_lock(root, run_dir, &tree, cfg, lock)?;
+            log.append(EventPayload::WorktreeResolved {
+                path: tree.to_string_lossy().into_owned(),
+                source: "node".into(),
+                node: Some(node),
+            })?;
+            state = RunState::fold(&read_all(run_dir)?);
+        }
+        // Where agent_task and script nodes without their own `workdir` run:
+        // the run's working tree once it is resolved (issue #67 item 8), else
+        // the execution root. Taken from the fold on every iteration, because
+        // a node can resolve the tree mid-run.
+        let workdir = state
+            .worktree
+            .as_deref()
+            .map(PathBuf::from)
+            .unwrap_or_else(|| root.to_path_buf());
         let node_kind = playbook
             .node(&current)
             .ok_or_else(|| EngineError::NotFound(current.clone()))?
@@ -907,6 +932,8 @@ fn drive_inner(
                             cache::ProbeContext {
                                 pre_fingerprint: pre_fps.get(n.as_str()).map(String::as_str),
                                 batch_member: true,
+                                store_root: Some(root),
+                                declared_key: None,
                             },
                         )?;
                         let (events, hit) = match probe {
@@ -1890,7 +1917,10 @@ fn drive_inner(
                 &run_id,
                 &state,
                 cfg,
-                cache::ProbeContext::default(),
+                cache::ProbeContext {
+                    store_root: Some(root),
+                    ..Default::default()
+                },
             )? {
                 cache::CacheProbe::Hit {
                     output,

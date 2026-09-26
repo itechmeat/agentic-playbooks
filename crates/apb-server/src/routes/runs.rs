@@ -38,6 +38,9 @@ pub struct RunDetail {
     pub outputs: std::collections::BTreeMap<String, String>,
     pub instruction: Option<String>,
     pub params: std::collections::BTreeMap<String, String>,
+    /// The run's working tree (issue #67 item 8), once resolved; null means
+    /// the nodes run in the project root.
+    pub worktree: Option<String>,
     /// The run's playbook snapshot; null for very old runs without one.
     #[cfg_attr(
         test,
@@ -158,6 +161,7 @@ pub(crate) async fn get_run_handler(
         failure_reason,
         driver_alive: view.driver_alive,
         nodes,
+        worktree: view.state.worktree.clone(),
         outputs: view.state.outputs,
         instruction: cfg.instruction,
         params: cfg.params,

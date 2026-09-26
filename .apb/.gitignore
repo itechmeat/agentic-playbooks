@@ -4,3 +4,4 @@ cache/
 trash/
 backup-*/
 workdir.lock
+locks/

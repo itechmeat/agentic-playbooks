@@ -165,6 +165,13 @@ enum Command {
         /// Links the new run to the predecessor in `apb runs`.
         #[arg(long = "continued-from", value_name = "RUN_ID")]
         continued_from: Option<String>,
+        /// The run's working tree: agent and script nodes run in this
+        /// directory (absolute, or relative to the project) and the run takes
+        /// its busy lock instead of the project's, so runs over different git
+        /// worktrees do not wait on each other. Overrides the playbook's
+        /// `worktree`
+        #[arg(long, value_name = "DIR")]
+        worktree: Option<String>,
     },
     /// List runs
     Runs,
@@ -290,6 +297,9 @@ enum Command {
         /// spawn boundary.
         #[arg(long = "continued-from", value_name = "RUN_ID")]
         continued_from: Option<String>,
+        /// The run's working tree, forwarded from `apb run --worktree`.
+        #[arg(long, value_name = "DIR")]
+        worktree: Option<String>,
         /// Handshake file: written with the run_id as soon as the run is
         /// prepared (before drive starts), so the parent process can report
         /// it and exit without waiting for the run itself to finish.
@@ -393,6 +403,7 @@ fn main() -> ExitCode {
             no_cache,
             refresh_cache,
             continued_from,
+            worktree,
         }) => run_cmd(
             &root,
             &name,
@@ -406,6 +417,7 @@ fn main() -> ExitCode {
             no_cache,
             refresh_cache,
             continued_from,
+            worktree,
         ),
         Some(Command::Runs) => runs_cmd(&root),
         Some(Command::Resume {
@@ -462,6 +474,7 @@ fn main() -> ExitCode {
             params,
             allow_shared_workdir,
             continued_from,
+            worktree,
             handshake,
         }) => drive_supervised_child(
             &root,
@@ -471,6 +484,7 @@ fn main() -> ExitCode {
             params,
             allow_shared_workdir,
             continued_from,
+            worktree,
             &handshake,
         ),
         // Deliberately uses the `--root` it was given, not the process cwd:

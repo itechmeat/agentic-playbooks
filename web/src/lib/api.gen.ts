@@ -168,6 +168,11 @@ driver_alive: boolean | null,
  */
 nodes: { [key in string]: string }, outputs: { [key in string]: string }, instruction: string | null, params: { [key in string]: string }, 
 /**
+ * The run's working tree (issue #67 item 8), once resolved; null means
+ * the nodes run in the project root.
+ */
+worktree: string | null, 
+/**
  * The run's playbook snapshot; null for very old runs without one.
  */
 model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[]; defaults?: { on_failure?: string } | null } | null, layout: WfLayout | null, hooks: { [key in string]: string }, 

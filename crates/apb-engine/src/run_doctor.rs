@@ -69,7 +69,10 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     checks.extend(attempt_checks(events));
     checks.extend(autonomy_check(&run_dir));
     checks.push(driver_check(&run_dir, run_id));
-    checks.push(workdir_lock_check(root));
+    checks.push(workdir_lock_check(
+        root,
+        view.state.worktree.as_deref().map(Path::new),
+    ));
     checks.push(control_check(&run_dir)?);
     checks.push(supervisor_action_check(events));
     Ok(checks)
@@ -347,12 +350,14 @@ fn driver_check(run_dir: &Path, run_id: &str) -> RunCheck {
     }
 }
 
-/// The project-wide workdir lock. A lock held by a dead pid blocks every
-/// future write-run in this project, and nothing clears it until the next
-/// `acquire` notices - so it is worth naming even though the run being
-/// diagnosed may not be the one that leaked it.
-fn workdir_lock_check(root: &Path) -> RunCheck {
-    let path = crate::workdir::lock_path(root);
+/// The busy lock of the tree the run works in: the project-wide workdir
+/// lock, or the lock of the run's own working tree once it has one (issue #67
+/// item 8). A lock held by a dead pid blocks every future write-run over that
+/// tree, and nothing clears it until the next `acquire` notices - so it is
+/// worth naming even though the run being diagnosed may not be the one that
+/// leaked it.
+fn workdir_lock_check(root: &Path, tree: Option<&Path>) -> RunCheck {
+    let path = crate::workdir::tree_lock_path(root, tree);
     let Some(pid) = crate::workdir::lock_holder(&path) else {
         return RunCheck::new(OK, "workdir lock", "not held");
     };

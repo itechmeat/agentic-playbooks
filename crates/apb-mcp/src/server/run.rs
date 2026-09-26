@@ -221,6 +221,7 @@ impl WfMcp {
             acknowledge_untrusted,
             scope,
             continued_from,
+            worktree,
         }): Parameters<PlaybookRunArgs>,
     ) -> CallToolResult {
         // Definition scope: a global playbook runs in the current project.
@@ -286,6 +287,7 @@ impl WfMcp {
                 permit.connectors,
                 permit.connector_accounts,
                 continued_from,
+                worktree,
                 warnings,
             );
         }
@@ -304,6 +306,7 @@ impl WfMcp {
                 expected_connectors: permit.connectors,
                 expected_connector_accounts: permit.connector_accounts,
                 continued_from,
+                worktree,
                 ..Default::default()
             };
             if background == Some(true) {
@@ -339,6 +342,7 @@ impl WfMcp {
                     permit.connectors,
                     permit.connector_accounts,
                     continued_from,
+                    worktree,
                 ),
                 &warnings,
             ));
@@ -356,6 +360,7 @@ impl WfMcp {
                 permit.connectors,
                 permit.connector_accounts,
                 continued_from,
+                worktree,
             ),
             &warnings,
         ))

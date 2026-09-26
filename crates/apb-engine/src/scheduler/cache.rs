@@ -53,6 +53,15 @@ pub(crate) struct ProbeContext<'a> {
     /// This node runs as a member of a concurrent batch, whose siblings write
     /// into the same workspace by design.
     pub batch_member: bool,
+    /// Where the cache store lives: the execution root's `.apb/cache`. The
+    /// workspace fingerprint is taken over the tree the node runs in, which
+    /// is a different directory once the run has its own working tree (issue
+    /// #67 item 8); the store stays in the project so a worktree never grows
+    /// an `.apb` of its own. `None`: the node's workdir.
+    pub store_root: Option<&'a Path>,
+    /// The node's rendered `cache.key` (issue #67 item 6), set by [`probe`]:
+    /// when present it stands in for the workspace fingerprint in the key.
+    pub declared_key: Option<&'a str>,
 }
 
 /// The single definition of "this node participates in the cache at all":
@@ -173,6 +182,15 @@ pub(crate) fn prepare(
         },
     };
 
+    // A declared key replaces the workspace fingerprint in the cache key
+    // (issue #67 item 6): the author has said what the result depends on, so
+    // an unrelated change to the tree no longer misses. The fingerprint is
+    // still taken above, because admission still requires the node to leave
+    // the workspace as it found it.
+    let key_basis = match probe_ctx.declared_key {
+        Some(k) => format!("declared-key:{}", sha256_hex(k.as_bytes())),
+        None => fingerprint.clone(),
+    };
     let node_def = serde_json::to_string(node).ok()?;
     let key = cache_key(&KeyParts {
         format: apb_core::cache::CACHE_FORMAT,
@@ -184,12 +202,12 @@ pub(crate) fn prepare(
         agent: agent_model.map(|(a, _)| a),
         model: agent_model.map(|(_, m)| m),
         connector_digests,
-        workspace_fingerprint: &fingerprint,
+        workspace_fingerprint: &key_basis,
     });
 
     Some(NodeCacheCtx {
         key,
-        store: CacheStore::open(workdir),
+        store: CacheStore::open(probe_ctx.store_root.unwrap_or(workdir)),
         ttl: node.cache_ttl_seconds(),
         pre_fingerprint: fingerprint,
         node_id: node_id.to_string(),
@@ -471,6 +489,31 @@ pub(crate) fn probe(
         agent_model = Some((agent, model));
         connector_digests = digests;
     }
+    // A declared cache key, rendered unclipped so a clip note (which names
+    // this run's directory) can never leak into it. A key that renders empty
+    // (the value it reads was never published) skips the cache for this
+    // execution rather than keying every such execution alike.
+    let declared_key: Option<String> =
+        match playbook.node(node_id).and_then(|n| n.cache_key_template()) {
+            Some(template) => {
+                let rendered = render_node_prompt(
+                    run_dir,
+                    run_id,
+                    state,
+                    cfg,
+                    template,
+                    &apb_core::schema::ContextBudget::UNLIMITED,
+                )?;
+                if rendered.trim().is_empty() {
+                    return Ok(CacheProbe::Miss {
+                        ctx: None,
+                        events: Vec::new(),
+                    });
+                }
+                Some(rendered)
+            }
+            None => None,
+        };
     let ctx = prepare(
         playbook,
         node_id,
@@ -481,7 +524,10 @@ pub(crate) fn probe(
         bundle_digest.as_deref(),
         agent_model.as_ref().map(|(a, m)| (a.as_str(), m.as_str())),
         connector_digests,
-        probe_ctx,
+        ProbeContext {
+            declared_key: declared_key.as_deref(),
+            ..probe_ctx
+        },
     );
     let already_finished = state.nodes.get(node_id).is_some_and(|st| st.is_finished());
     let entry = match already_finished {

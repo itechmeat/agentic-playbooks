@@ -363,6 +363,33 @@ pub(crate) fn build_run_manifest(
     Ok(manifest)
 }
 
+/// Claims a fresh run directory `<id>-<ms>` and opens its journal. The
+/// directory is created exclusively: two starts of one playbook in the same
+/// millisecond (now an ordinary case, since runs over different worktrees no
+/// longer wait on each other) used to share one directory, and the loser's
+/// start-up failure landed in the winner's journal. A taken id moves on to the
+/// next millisecond value instead.
+fn allocate_run(root: &Path, id: &str) -> Result<(String, PathBuf, EventLog), EngineError> {
+    let runs = root.join(".apb/runs");
+    std::fs::create_dir_all(&runs)?;
+    let mut ms = apb_core::clock::now_ms();
+    for _ in 0..1000 {
+        let run_id = format!("{id}-{ms}");
+        let run_dir = runs.join(&run_id);
+        match std::fs::create_dir(&run_dir) {
+            Ok(()) => {
+                let log = EventLog::open(&run_dir)?;
+                return Ok((run_id, run_dir, log));
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => ms += 1,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Err(EngineError::Invalid(format!(
+        "cannot allocate a run id for `{id}`: every candidate is taken"
+    )))
+}
+
 pub(crate) fn prepare_run_target(
     t: &PrepareTarget,
     id: &str,
@@ -443,11 +470,39 @@ pub(crate) fn prepare_run_target(
     // lock before the first node (`Prepared::claim_queued_workdir`). Nothing
     // has been written yet at this point, so a refusal here still leaves no
     // trace behind, exactly as before.
+    // Schema-default fill (review I6/R1-I2): every declared param that the
+    // caller did NOT supply falls back to its `default` from the playbook
+    // schema. This is the SINGLE normalization point for ALL runs - top-level
+    // and sub-playbook children (which arrive here with an empty params map)
+    // alike - so a playbook that relies on a param default renders the default
+    // instead of the empty string the template renderer substitutes for a
+    // missing param.
+    let mut params = opts.params.clone();
+    for p in &playbook.params {
+        if let Some(default) = &p.default
+            && !params.contains_key(&p.name)
+        {
+            params.insert(p.name.clone(), stringify_param_default(default));
+        }
+    }
+
+    // The run's working tree (issue #67 item 8), when it is known at start:
+    // passed by the caller, or the playbook's `worktree` template over params.
+    // Resolved before the lock, because the tree is what the lock covers, and
+    // before anything is written, so a tree that does not exist refuses the
+    // start without leaving a run behind.
+    let worktree =
+        super::worktree::resolve_at_start(&playbook, root, opts.worktree.as_deref(), &params)?;
+
     let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
     let mut queued_workdir = None;
     let mut queued_reason = String::new();
     let guard = if is_write {
-        match acquire(root, opts.allow_shared_workdir) {
+        match acquire_tree(
+            root,
+            worktree.as_ref().map(|w| w.path.as_path()),
+            opts.allow_shared_workdir,
+        ) {
             Err(EngineError::WorkdirBusy(msg)) if opts.workdir_queue_wait.is_some() => {
                 queued_workdir = opts.workdir_queue_wait;
                 queued_reason = msg;
@@ -459,12 +514,10 @@ pub(crate) fn prepare_run_target(
         None
     };
 
-    let run_id = format!("{id}-{}", apb_core::clock::now_ms());
-    let run_dir = root.join(".apb/runs").join(&run_id);
     if let Some(ref pred) = opts.continued_from {
         crate::run_lineage::validate_continued_from(root, pred, id)?;
     }
-    let mut log = EventLog::create(&run_dir)?;
+    let (run_id, run_dir, mut log) = allocate_run(root, id)?;
     // Every run path (CLI, MCP, dashboard, detached driver, child runs) comes
     // through here, and nothing but the event log is in the run yet: make sure
     // `.apb/.gitignore` covers the run directory before any node output or
@@ -526,22 +579,6 @@ pub(crate) fn prepare_run_target(
             prep_try(&mut log, reg.read_instruction_draft(id))?.filter(|s| !s.trim().is_empty())
         }
     };
-
-    // Schema-default fill (review I6/R1-I2): every declared param that the
-    // caller did NOT supply falls back to its `default` from the playbook
-    // schema. This is the SINGLE normalization point for ALL runs - top-level
-    // and sub-playbook children (which arrive here with an empty params map)
-    // alike - so a playbook that relies on a param default renders the default
-    // instead of the empty string the template renderer substitutes for a
-    // missing param.
-    let mut params = opts.params.clone();
-    for p in &playbook.params {
-        if let Some(default) = &p.default
-            && !params.contains_key(&p.name)
-        {
-            params.insert(p.name.clone(), stringify_param_default(default));
-        }
-    }
 
     let cfg = RunConfig {
         params,
@@ -631,6 +668,13 @@ pub(crate) fn prepare_run_target(
             reason: queued_reason,
         })?;
     }
+    if let Some(w) = &worktree {
+        log.append(EventPayload::WorktreeResolved {
+            path: w.path.to_string_lossy().into_owned(),
+            source: w.source.into(),
+            node: None,
+        })?;
+    }
     if let Some(ref pred) = opts.continued_from {
         prep_try(
             &mut log,
@@ -646,6 +690,7 @@ pub(crate) fn prepare_run_target(
         cfg,
         guard,
         queued_workdir,
+        worktree: worktree.map(|w| w.path),
         start_node,
         mode: opts.mode,
     })

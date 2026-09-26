@@ -43,8 +43,9 @@ export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
 }
 
 // The detail line of an event kind that has one (issue #67): how a session
-// handoff started, which declared output fields a node left out, and where an
-// attempt's transcript is. Every other kind has none.
+// handoff started, which declared output fields a node left out, where an
+// attempt's transcript is, and which working tree the run moved into. Every
+// other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -56,6 +57,10 @@ function eventNote(e: WfEvent): string | undefined {
       return Array.isArray(r.fields) ? `missing fields: ${r.fields.join(', ')}` : undefined
     case 'attempt_started':
       return typeof r.transcript === 'string' ? `transcript: ${r.transcript}` : undefined
+    case 'worktree_resolved':
+      return typeof r.path === 'string'
+        ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`
+        : undefined
     default:
       return undefined
   }

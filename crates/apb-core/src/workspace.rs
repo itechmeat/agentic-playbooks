@@ -28,6 +28,7 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "trash/",
     "backup-*/",
     "workdir.lock",
+    "locks/",
 ];
 
 /// The workspace id recorded in `<root>/.apb/workspace.local`, read only when

@@ -75,6 +75,13 @@ pub struct RunOptions {
     /// being told "busy, your event is your problem" and its event being
     /// persisted as a run that starts when the engine is free.
     pub workdir_queue_wait: Option<Duration>,
+    /// The run's working tree, passed by the caller (issue #67 item 8): a
+    /// directory, absolute or relative to the execution root, that agent_task
+    /// and script nodes without their own `workdir` run in and whose busy
+    /// lock the run takes instead of the execution root's. Wins over the
+    /// playbook's `worktree` template. `None`: the playbook decides, and
+    /// without a template the run works in the execution root as before.
+    pub worktree: Option<String>,
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry
@@ -100,6 +107,10 @@ pub(crate) struct Prepared {
     /// why the two cannot be collapsed into one field: whoever drives the run
     /// has to claim the lock before the first node, and has this long to do it.
     pub(crate) queued_workdir: Option<Duration>,
+    /// The working tree resolved at start (issue #67 item 8), whose lock
+    /// `guard` holds or `queued_workdir` still has to claim. `None`: the
+    /// execution root (or a tree a node resolves later).
+    pub(crate) worktree: Option<PathBuf>,
     pub(crate) start_node: String,
     pub(crate) mode: RunMode,
 }
@@ -118,7 +129,7 @@ impl Prepared {
             return Ok(());
         };
         let run_dir = self.run_dir.clone();
-        let claimed = acquire_queued(root, wait, &mut || {
+        let claimed = acquire_queued_tree(root, self.worktree.as_deref(), wait, &mut || {
             // A stop posted while the run sits in the queue must not have to
             // wait for the workdir to free before it takes effect.
             matches!(crate::control::pending_stop_seq(&run_dir), Ok(Some(_)))
@@ -189,6 +200,7 @@ pub fn run(
         StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
+        &mut p.guard,
     )
 }
 
@@ -219,6 +231,7 @@ pub fn run_resolved(
         StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
+        &mut p.guard,
     )
 }
 
@@ -328,6 +341,7 @@ pub fn drive_prepared(root: &Path, prepared: PreparedRun) -> Result<RunResult, E
         StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
+        &mut p.guard,
     );
     if res.is_err() {
         let _ = p.log.append(EventPayload::RunFinished {
@@ -445,13 +459,18 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
     // The persisted ceiling covers both; without it a queued detached run
     // would give up after the five seconds meant for a sub-millisecond
     // handover.
+    //
+    // The lock covers the run's working tree when preparation resolved one
+    // (issue #67 item 8): the journal already names it, and the parent handed
+    // over exactly that tree's lock.
     let is_write = playbook.nodes.iter().any(|n| n.kind.takes_workdir_lock());
-    let _guard = if is_write {
+    let tree = state.worktree.as_deref().map(Path::new);
+    let mut guard = if is_write {
         let wait = cfg
             .workdir_queue_wait_ms
             .map(Duration::from_millis)
             .unwrap_or_default();
-        acquire_handover_within(root, wait)?
+        acquire_handover_within(root, tree, wait)?
     } else {
         None
     };
@@ -466,6 +485,7 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
         StartMode::Rerun,
         run_id.to_string(),
         cfg.mode,
+        &mut guard,
     );
     // Same defensive backstop as `drive_prepared`: `drive` no longer returns
     // `Err` in practice (issue #42 finding 3), but without this an internal

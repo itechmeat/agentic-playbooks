@@ -1,9 +1,10 @@
-//! Rules for the node fields added by issue #67: the warm session handoff
-//! (`continue_session`, V44/V45), declared output fields (V46) and the node
-//! `workdir` template (V47).
+//! Rules for the fields added by issue #67: the warm session handoff
+//! (`continue_session`, V44/V45), declared output fields (V46), the node
+//! `workdir` template (V47), the run working tree (`worktree`, V48) and a
+//! declared cache key (`cache.key`, V49).
 
 use super::graph::must_have_finished;
-use super::templates::{template_refs, template_texts, workdir_texts};
+use super::templates::{cache_key_texts, template_refs, template_texts, workdir_texts};
 use super::*;
 
 /// V44 (error): `continue_session` must name another `agent_task` of the
@@ -117,14 +118,20 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
             );
         }
     };
-    let mut texts = template_texts(playbook);
-    texts.extend(workdir_texts(playbook));
+    let mut texts: Vec<(Option<&str>, &str)> = template_texts(playbook)
+        .into_iter()
+        .chain(workdir_texts(playbook))
+        .chain(cache_key_texts(playbook))
+        .map(|(owner, text)| (Some(owner), text))
+        .collect();
+    // The run working tree belongs to no node.
+    texts.extend(playbook.worktree_template().map(|w| (None, w)));
     for (owner, text) in texts {
         for cap in template_refs(text) {
             if let ["nodes", source, "output" | "report", field] =
                 cap.split('.').collect::<Vec<&str>>().as_slice()
             {
-                report(Some(owner), source, field, r);
+                report(owner, source, field, r);
             }
         }
     }
@@ -135,26 +142,30 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
     }
 }
 
+/// Whether a template reference names a plain value a path or a key can be
+/// built from: `params.<declared>`, `run.instruction`, a node's output (or
+/// one field of it), report or review decision, of a node that exists. The
+/// set `workdir` (V47) and `cache.key` (V49) templates may read.
+fn value_ref_ok(playbook: &Playbook, cap: &str) -> bool {
+    match cap.split('.').collect::<Vec<&str>>().as_slice() {
+        ["params", p] => playbook.params.iter().any(|d| d.name == *p),
+        ["run", "instruction"] => true,
+        ["nodes", id, "output" | "report" | "review_decision"] => playbook.node(id).is_some(),
+        ["nodes", id, "output" | "report", field] => {
+            playbook.node(id).is_some() && !field.trim().is_empty()
+        }
+        _ => false,
+    }
+}
+
 /// V47 (error): a `workdir` template may read only what can name a path -
 /// `params.*`, `run.instruction`, a node's output (or one field of it) and a
 /// review decision - of a node that exists; and a node cannot combine
 /// `workdir` with `isolation` (an isolated node runs in its own directory).
 pub(crate) fn check_workdir(playbook: &Playbook, r: &mut ValidationReport) {
-    let params: HashSet<&str> = playbook.params.iter().map(|p| p.name.as_str()).collect();
     for (owner, text) in workdir_texts(playbook) {
         for cap in template_refs(text) {
-            let ok = match cap.split('.').collect::<Vec<&str>>().as_slice() {
-                ["params", p] => params.contains(p),
-                ["run", "instruction"] => true,
-                ["nodes", id, "output" | "report" | "review_decision"] => {
-                    playbook.node(id).is_some()
-                }
-                ["nodes", id, "output" | "report", field] => {
-                    playbook.node(id).is_some() && !field.trim().is_empty()
-                }
-                _ => false,
-            };
-            if !ok {
+            if !value_ref_ok(playbook, &cap) {
                 r.error(
                     "V47",
                     Some(owner),
@@ -176,6 +187,102 @@ pub(crate) fn check_workdir(playbook: &Playbook, r: &mut ValidationReport) {
                 "V47",
                 Some(&node.id),
                 "workdir cannot be combined with isolation: an isolated node runs in its own directory".to_string(),
+            );
+        }
+    }
+}
+
+/// V48 (error): the run `worktree` template may read only `params.*` and the
+/// output (or one field of it) of ONE `agent_task` or `script` node: the tree
+/// is resolved either at run start (params only) or when that node succeeds,
+/// and a template over two nodes would have no single moment to resolve at.
+pub(crate) fn check_worktree(playbook: &Playbook, r: &mut ValidationReport) {
+    let Some(text) = playbook.worktree_template() else {
+        return;
+    };
+    let mut sources: Vec<String> = Vec::new();
+    for cap in template_refs(text) {
+        let ok = match cap.split('.').collect::<Vec<&str>>().as_slice() {
+            ["params", p] => playbook.params.iter().any(|d| d.name == *p),
+            ["nodes", id, "output"] => producing_node(playbook, id),
+            ["nodes", id, "output", field] => {
+                producing_node(playbook, id) && !field.trim().is_empty()
+            }
+            _ => false,
+        };
+        if !ok {
+            r.error(
+                "V48",
+                None,
+                format!(
+                    "worktree template `{{{{{cap}}}}}` is not allowed; a worktree may read params.* and nodes.<id>.output or nodes.<id>.output.<field> of an agent_task or script node"
+                ),
+            );
+            continue;
+        }
+        if let ["nodes", id, ..] = cap.split('.').collect::<Vec<&str>>().as_slice()
+            && !sources.iter().any(|s| s == id)
+        {
+            sources.push((*id).to_string());
+        }
+    }
+    if sources.len() > 1 {
+        r.error(
+            "V48",
+            None,
+            format!(
+                "worktree reads the outputs of several nodes ({}); it must be resolvable when one node succeeds",
+                sources.join(", ")
+            ),
+        );
+    }
+}
+
+fn producing_node(playbook: &Playbook, id: &str) -> bool {
+    playbook
+        .node(id)
+        .is_some_and(|n| matches!(n.kind, NodeKind::AgentTask { .. } | NodeKind::Script { .. }))
+}
+
+/// V49: a declared `cache.key`. Error: the template reads something that is
+/// not a plain value (the same set a `workdir` may read). Warnings: the key
+/// has no effect (cache mode off, or a node with its own `workdir`, which
+/// never caches), or it reads nothing at all and has no `ttl`, so the first
+/// stored result replays until someone refreshes the cache.
+pub(crate) fn check_cache_key(playbook: &Playbook, r: &mut ValidationReport) {
+    for node in &playbook.nodes {
+        let Some(key) = node.cache_key_template() else {
+            continue;
+        };
+        let refs = template_refs(key);
+        for cap in &refs {
+            if !value_ref_ok(playbook, cap) {
+                r.error(
+                    "V49",
+                    Some(&node.id),
+                    format!(
+                        "cache key template `{{{{{cap}}}}}` is not allowed; a key may read params.*, run.instruction, nodes.<id>.output, nodes.<id>.output.<field> and nodes.<id>.review_decision of an existing node"
+                    ),
+                );
+            }
+        }
+        if node.cache_mode() != CacheMode::Auto {
+            r.warn(
+                "V49",
+                Some(&node.id),
+                "cache.key has no effect: the cache mode is off (set mode: auto)".to_string(),
+            );
+        } else if node.kind.workdir_template().is_some() {
+            r.warn(
+                "V49",
+                Some(&node.id),
+                "cache.key has no effect: a node with its own workdir is never cached".to_string(),
+            );
+        } else if refs.is_empty() && node.cache_ttl_seconds().is_none() {
+            r.warn(
+                "V49",
+                Some(&node.id),
+                "cache.key reads nothing, so the first stored result replays until the cache is refreshed; read what the result depends on or set a ttl".to_string(),
             );
         }
     }

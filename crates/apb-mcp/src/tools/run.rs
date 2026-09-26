@@ -28,6 +28,7 @@ pub fn playbook_run(
     expected_connectors: BTreeMap<String, String>,
     expected_connector_accounts: BTreeMap<String, String>,
     continued_from: Option<String>,
+    worktree: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -52,6 +53,7 @@ pub fn playbook_run(
         // answer, who can retry, not an event source whose event dies with the
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
+        worktree,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -80,6 +82,7 @@ pub fn playbook_run_background(
     expected_connectors: BTreeMap<String, String>,
     expected_connector_accounts: BTreeMap<String, String>,
     continued_from: Option<String>,
+    worktree: Option<String>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -104,6 +107,7 @@ pub fn playbook_run_background(
         // answer, who can retry, not an event source whose event dies with the
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
+        worktree,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -145,6 +149,10 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "nodes": view.nodes(),
         "node_times": node_times,
         "driver_alive": view.driver_alive,
+        // The run's working tree (issue #67 item 8): where its agent and
+        // script nodes run and what its busy lock covers; null means the
+        // project root.
+        "worktree": view.state.worktree,
         "outputs": view.state.outputs,
         "progress": view.progress,
         "pending_question": pending_question,
@@ -411,6 +419,7 @@ pub fn playbook_run_supervised(
     expected_connectors: BTreeMap<String, String>,
     expected_connector_accounts: BTreeMap<String, String>,
     continued_from: Option<String>,
+    worktree: Option<String>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
@@ -438,6 +447,7 @@ pub fn playbook_run_supervised(
         // answer, who can retry, not an event source whose event dies with the
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
+        worktree,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

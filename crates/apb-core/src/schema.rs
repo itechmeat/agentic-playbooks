@@ -111,6 +111,16 @@ pub struct Playbook {
     /// policy uses effective = inferred ∪ declared (see `effects`).
     #[serde(default)]
     pub effects: Vec<Effect>,
+    /// The run's working tree (issue #67 item 8): the directory every
+    /// agent_task and script without its own `workdir` runs in, and the tree
+    /// the run's busy lock covers, so runs over different trees never contend.
+    /// A template: one that reads only `params.*` is resolved at run start;
+    /// one that reads a node's output (`nodes.<id>.output[.<field>]`) is
+    /// resolved once that node has succeeded, and the nodes before it run in
+    /// the execution root. A tree the caller passes at start wins over this
+    /// field. Relative paths resolve against the execution root.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub worktree: Option<String>,
     pub nodes: Vec<Node>,
     pub edges: Vec<Edge>,
 }
@@ -204,6 +214,16 @@ pub struct CacheConfig {
     pub mode: CacheMode,
     #[serde(default)]
     pub ttl: Option<String>,
+    /// A declared cache key (issue #67 item 6): a template over what the
+    /// node's result really depends on, typically a named output of a cheap
+    /// probe node (`{{nodes.probe.output.head_sha}}`). With a key the
+    /// workspace fingerprint leaves the cache key, so an unrelated edit to
+    /// the tree no longer invalidates the entry; the rendered prompt, the
+    /// profile bundle, the executor and the connectors stay in it, and
+    /// admission still requires an unchanged workspace. An empty render
+    /// skips the cache for that execution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
 }
 
 /// File globs a node declares as inputs (fingerprint refinement) or outputs
@@ -247,6 +267,24 @@ impl Playbook {
     }
     pub fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)
+    }
+
+    /// The run working tree template (issue #67 item 8), `None` when unset
+    /// or blank.
+    pub fn worktree_template(&self) -> Option<&str> {
+        self.worktree.as_deref().filter(|w| !w.trim().is_empty())
+    }
+
+    /// The node whose output the `worktree` template reads, if it reads one:
+    /// the tree is then resolved when that node succeeds, not at run start.
+    /// Validation (V48) allows at most one such node.
+    pub fn worktree_source_node(&self) -> Option<String> {
+        crate::template::refs(self.worktree_template()?)
+            .into_iter()
+            .find_map(|r| match r.split('.').collect::<Vec<&str>>().as_slice() {
+                ["nodes", id, ..] => Some((*id).to_string()),
+                _ => None,
+            })
     }
 
     /// The context budget a node's prompt is rendered with: each limit comes
@@ -348,6 +386,15 @@ impl Node {
             None => CacheMode::Off,
             Some(CacheSpec::Mode(m)) => *m,
             Some(CacheSpec::Config(c)) => c.mode,
+        }
+    }
+
+    /// The node's declared cache key template (full form only), `None` when
+    /// unset or blank: the key then carries the workspace fingerprint.
+    pub fn cache_key_template(&self) -> Option<&str> {
+        match &self.cache {
+            Some(CacheSpec::Config(c)) => c.key.as_deref().filter(|k| !k.trim().is_empty()),
+            _ => None,
         }
     }
 

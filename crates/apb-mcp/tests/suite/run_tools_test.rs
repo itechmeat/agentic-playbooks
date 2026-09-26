@@ -71,6 +71,7 @@ fn run_then_inspect() {
         Default::default(),
         Default::default(),
         None,
+        None,
     )
     .unwrap();
     assert_eq!(run["outcome"], "succeeded");
@@ -115,6 +116,7 @@ fn playbook_run_workdir_busy_is_conflict() {
         Default::default(),
         Default::default(),
         None,
+        None,
     )
     .unwrap_err();
     assert!(
@@ -141,6 +143,7 @@ fn runs_list_and_status_expose_lineage_fields() {
         Default::default(),
         Default::default(),
         None,
+        None,
     )
     .unwrap();
     let first_id = first["run_id"].as_str().unwrap().to_string();
@@ -157,6 +160,7 @@ fn runs_list_and_status_expose_lineage_fields() {
         Default::default(),
         Default::default(),
         Some(first_id.clone()),
+        None,
     )
     .unwrap();
     let second_id = second["run_id"].as_str().unwrap().to_string();
@@ -451,6 +455,7 @@ fn run_status_carries_answer_key() {
         Default::default(),
         Default::default(),
         None,
+        None,
     )
     .unwrap();
     let run_id = started["run_id"].as_str().unwrap();
@@ -479,6 +484,7 @@ fn run_status_children_empty_for_childless_run() {
         None,
         Default::default(),
         Default::default(),
+        None,
         None,
     )
     .unwrap();
@@ -1049,5 +1055,75 @@ fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
     assert_eq!(
         out["pending_review"]["node"], "gate",
         "the answer must carry the gate its reason is about: {out}"
+    );
+}
+
+/// Issue #67 item 8: a run started over its own working tree takes that
+/// tree's busy lock, so a write-run holding the project root does not refuse
+/// it, and `run_status` reports the tree (null for a run in the root).
+#[test]
+fn a_run_over_its_own_worktree_is_not_blocked_by_the_root_and_reports_it() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_scripted(dir.path());
+    let scripts = dir.path().join(".apb/playbooks/scripted/1.0.0/scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("work.sh"), "pwd\n").unwrap();
+    // A linked git worktree of the project, as `git worktree add wt` makes.
+    fs::write(dir.path().join(".gitignore"), ".apb/\n").unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "c1",
+        ],
+        &["worktree", "add", "-q", "wt"],
+    ] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(dir.path())
+            .args(["-c", "commit.gpgsign=false"])
+            .args(args)
+            .output()
+            .unwrap()
+            .status
+            .success();
+        assert!(ok, "git {args:?}");
+    }
+    let _root_held = apb_engine::workdir::acquire(dir.path(), false)
+        .unwrap()
+        .unwrap();
+    let start = |worktree: Option<&str>| {
+        playbook_run(
+            dir.path(),
+            "scripted",
+            None,
+            BTreeMap::new(),
+            None,
+            None,
+            None,
+            None,
+            Default::default(),
+            Default::default(),
+            None,
+            worktree.map(str::to_string),
+        )
+    };
+    assert!(start(None).is_err(), "the root is held");
+    let run = start(Some("wt")).unwrap();
+    assert_eq!(run["outcome"], "succeeded");
+    let status = run_status(dir.path(), run["run_id"].as_str().unwrap()).unwrap();
+    let tree = dir.path().join("wt").canonicalize().unwrap();
+    assert_eq!(status["worktree"], tree.to_str().unwrap());
+    assert_eq!(
+        status["outputs"]["work"].as_str().map(str::trim),
+        tree.to_str(),
+        "the script ran in the tree"
     );
 }
