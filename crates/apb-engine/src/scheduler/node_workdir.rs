@@ -5,19 +5,17 @@
 
 use super::*;
 
-/// The directory `node_id` runs in: `Ok(root)` when the node declares no
+/// The directory `node_id` runs in, its `workdir` template rendered by
+/// `render` (the prompt renderer): `Ok(root)` when the node declares no
 /// `workdir`, the resolved directory when it does, and `Err(message)` when the
 /// template renders empty or names no existing directory. The error is a node
 /// failure, never a silent fallback to the execution root: running a gate in
 /// the wrong tree and reporting it green is the failure this field prevents.
 pub(crate) fn resolve(
     playbook: &Playbook,
-    run_dir: &Path,
-    run_id: &str,
-    state: &RunState,
-    cfg: &RunConfig,
     node_id: &str,
     root: &Path,
+    render: impl FnOnce(&str) -> Result<String, EngineError>,
 ) -> Result<Result<PathBuf, String>, EngineError> {
     let Some(template) = playbook
         .node(node_id)
@@ -25,14 +23,7 @@ pub(crate) fn resolve(
     else {
         return Ok(Ok(root.to_path_buf()));
     };
-    let rendered = super::node::render_node_prompt(
-        run_dir,
-        run_id,
-        state,
-        cfg,
-        template,
-        &playbook.context_budget(node_id),
-    )?;
+    let rendered = render(template)?;
     let rendered = rendered.trim();
     if rendered.is_empty() {
         return Ok(Err(format!(

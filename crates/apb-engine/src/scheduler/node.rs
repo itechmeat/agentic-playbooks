@@ -547,9 +547,16 @@ pub(crate) fn execute_node(
             let live_default: Option<String> = default_answer.clone();
             // The node's own directory (issue #67 item 4). An unresolvable
             // `workdir` fails the node before anything is spawned.
-            let node_dir = match super::node_workdir::resolve(
-                playbook, run_dir, run_id, state, cfg, node_id, workdir,
-            )? {
+            let node_dir = match super::node_workdir::resolve(playbook, node_id, workdir, |t| {
+                render_node_prompt(
+                    run_dir,
+                    run_id,
+                    state,
+                    cfg,
+                    t,
+                    &playbook.context_budget(node_id),
+                )
+            })? {
                 Ok(dir) => dir,
                 Err(msg) => {
                     return Ok(AttemptOutcome::Finished {
@@ -1040,7 +1047,7 @@ pub(crate) fn execute_node(
                                     Err(e) => return Err(e.into()),
                                 }
                             }
-                            materialize_isolated_skills(run_dir, &entry, wd)?;
+                            super::skills_copy::materialize_isolated_skills(run_dir, &entry, wd)?;
                         }
                         wd.clone()
                     } else if isolated {
@@ -1053,7 +1060,7 @@ pub(crate) fn execute_node(
                             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
                             Err(e) => return Err(e.into()),
                         }
-                        materialize_isolated_skills(run_dir, &entry, &wd)?;
+                        super::skills_copy::materialize_isolated_skills(run_dir, &entry, &wd)?;
                         wd
                     } else {
                         node_dir.clone()
@@ -2022,9 +2029,16 @@ pub(crate) fn execute_node(
             ..
         } => {
             let timeout = timeout_seconds.map(Duration::from_secs);
-            let workdir = match super::node_workdir::resolve(
-                playbook, run_dir, run_id, state, cfg, node_id, workdir,
-            )? {
+            let workdir = match super::node_workdir::resolve(playbook, node_id, workdir, |t| {
+                render_node_prompt(
+                    run_dir,
+                    run_id,
+                    state,
+                    cfg,
+                    t,
+                    &playbook.context_budget(node_id),
+                )
+            })? {
                 Ok(dir) => dir,
                 Err(msg) => {
                     return Ok(AttemptOutcome::Finished {
@@ -2371,47 +2385,6 @@ pub(crate) fn execute_finish_answer(
         NodeStatus::Failed
     };
     Ok((final_status, last_msg, events))
-}
-
-/// Materializes profile skills as REAL copies from the run snapshot into the
-/// isolated per-node workdir (completion-plan Task 3). The source is the snapshot
-/// (`run_dir/profiles/<scope>/<name>/skills/<sscope>/<sname>`), NOT the live
-/// `.agents/skills`: editing a skill after the run has started has no effect on
-/// the run. The `.claude/skills` bridge is aimed at the real copies via symlinks.
-/// The workdir is created even without skills (an isolated node execution directory).
-pub(crate) fn materialize_isolated_skills(
-    run_dir: &Path,
-    entry: &ManifestProfile,
-    workdir: &Path,
-) -> Result<(), EngineError> {
-    let skills_parent = workdir.join(".agents/skills");
-    std::fs::create_dir_all(&skills_parent)?;
-    for sk in &entry.skills {
-        let src = run_dir
-            .join("profiles")
-            .join(&entry.scope)
-            .join(&entry.name)
-            .join("skills")
-            .join(&sk.scope)
-            .join(&sk.name);
-        apb_core::fsutil::copy_tree(&src, &skills_parent.join(&sk.name))?;
-    }
-    if !entry.skills.is_empty() {
-        let claude_parent = workdir.join(".claude/skills");
-        // Fail-closed: the isolated node's workdir is fresh, so the
-        // `.claude/skills` bridge must be laid down cleanly. Any note here is a
-        // real failure (a symlink could not be created, etc.), not a benign case of
-        // "already exists/foreign bridge"; silently continuing would mean running the
-        // agent without skills visible via `.claude` and passing off an incorrect run as a success.
-        let notes = apb_core::skills::ensure_claude_bridge(&skills_parent, &claude_parent);
-        if !notes.is_empty() {
-            return Err(EngineError::Invalid(format!(
-                "isolated skill bridge failed: {}",
-                notes.join("; ")
-            )));
-        }
-    }
-    Ok(())
 }
 
 /// The run id of the latest ChildRunStarted for `node_id`, if any.

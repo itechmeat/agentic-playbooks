@@ -36,7 +36,7 @@ pub(crate) fn shared_skills_dir(
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.into()),
         }
-        super::node::materialize_isolated_skills(run_dir, entry, &dir)?;
+        materialize_isolated_skills(run_dir, entry, &dir)?;
     }
     Ok(dir)
 }
@@ -62,4 +62,45 @@ fn intact(dir: &Path, entry: &ManifestProfile) -> bool {
     entry.skills.iter().all(|s| {
         apb_core::content::tree_digest(&skills.join(&s.name), &limits).is_ok_and(|d| d == s.digest)
     })
+}
+
+/// Materializes profile skills as REAL copies from the run snapshot into the
+/// isolated per-node workdir (completion-plan Task 3). The source is the snapshot
+/// (`run_dir/profiles/<scope>/<name>/skills/<sscope>/<sname>`), NOT the live
+/// `.agents/skills`: editing a skill after the run has started has no effect on
+/// the run. The `.claude/skills` bridge is aimed at the real copies via symlinks.
+/// The workdir is created even without skills (an isolated node execution directory).
+pub(crate) fn materialize_isolated_skills(
+    run_dir: &Path,
+    entry: &ManifestProfile,
+    workdir: &Path,
+) -> Result<(), EngineError> {
+    let skills_parent = workdir.join(".agents/skills");
+    std::fs::create_dir_all(&skills_parent)?;
+    for sk in &entry.skills {
+        let src = run_dir
+            .join("profiles")
+            .join(&entry.scope)
+            .join(&entry.name)
+            .join("skills")
+            .join(&sk.scope)
+            .join(&sk.name);
+        apb_core::fsutil::copy_tree(&src, &skills_parent.join(&sk.name))?;
+    }
+    if !entry.skills.is_empty() {
+        let claude_parent = workdir.join(".claude/skills");
+        // Fail-closed: the isolated node's workdir is fresh, so the
+        // `.claude/skills` bridge must be laid down cleanly. Any note here is a
+        // real failure (a symlink could not be created, etc.), not a benign case of
+        // "already exists/foreign bridge"; silently continuing would mean running the
+        // agent without skills visible via `.claude` and passing off an incorrect run as a success.
+        let notes = apb_core::skills::ensure_claude_bridge(&skills_parent, &claude_parent);
+        if !notes.is_empty() {
+            return Err(EngineError::Invalid(format!(
+                "isolated skill bridge failed: {}",
+                notes.join("; ")
+            )));
+        }
+    }
+    Ok(())
 }

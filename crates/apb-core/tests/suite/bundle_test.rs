@@ -190,7 +190,7 @@ fn version_less_bundle_auto_assigns_exactly_as_today() {
         apb_bundle: 1,
         id: "va".to_string(),
         version: String::new(),
-        playbook: PLAYBOOK.to_string(),
+        playbook: PLAYBOOK.replace("name: Valid Agent", "name: Valid Agent Two"),
         layout: None,
     };
 
@@ -198,6 +198,13 @@ fn version_less_bundle_auto_assigns_exactly_as_today() {
     // falls back to the ordinary next-minor auto-assign.
     let assigned = import_bundle(b.path(), &bundle, true).unwrap();
     assert_eq!(assigned, "1.1.0");
+
+    // The same definition again is no change (issue #67 item 9): nothing is
+    // written and the import lands on the current version.
+    let again = import_bundle(b.path(), &bundle, true).unwrap();
+    assert_eq!(again, "1.1.0");
+    let versions = apb_core::registry::list_versions(&b.path().join(".apb/playbooks/va")).unwrap();
+    assert_eq!(versions, vec!["1.0.0".to_string(), "1.1.0".to_string()]);
 }
 
 #[test]

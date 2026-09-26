@@ -3,7 +3,7 @@
 //! `workdir` template (V47).
 
 use super::graph::must_have_finished;
-use super::templates::template_refs;
+use super::templates::{template_refs, template_texts, workdir_texts};
 use super::*;
 
 /// V44 (error): `continue_session` must name another `agent_task` of the
@@ -117,7 +117,7 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
             );
         }
     };
-    let mut texts = super::templates::template_texts(playbook);
+    let mut texts = template_texts(playbook);
     texts.extend(workdir_texts(playbook));
     for (owner, text) in texts {
         for cap in template_refs(text) {
@@ -133,15 +133,6 @@ pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationRepor
             report(Some(&edge.from), node, field, r);
         }
     }
-}
-
-/// The `workdir` templates of a playbook as `(owner node id, text)` pairs.
-pub(crate) fn workdir_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
-    playbook
-        .nodes
-        .iter()
-        .filter_map(|n| n.kind.workdir_template().map(|w| (n.id.as_str(), w)))
-        .collect()
 }
 
 /// V47 (error): a `workdir` template may read only what can name a path -
