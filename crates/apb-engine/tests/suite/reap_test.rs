@@ -232,6 +232,7 @@ fn attempt_started(node: &str, pid: Option<u32>) -> EventPayload {
         spawn_ms: None,
         model: None,
         workdir: None,
+        transcript: None,
     }
 }
 

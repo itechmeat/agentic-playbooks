@@ -1013,6 +1013,7 @@ fn journal_attempt_started(run_dir: &Path, attempt: u32) {
         spawn_ms: None,
         model: None,
         workdir: None,
+        transcript: None,
     })
     .unwrap();
 }

@@ -120,6 +120,7 @@ fn open_attempt_marks_interrupted() {
                 spawn_ms: None,
                 model: None,
                 workdir: None,
+                transcript: None,
             },
         ),
     ];
@@ -198,6 +199,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 spawn_ms: None,
                 model: None,
                 workdir: None,
+                transcript: None,
             },
         ),
         ev(
@@ -233,6 +235,7 @@ fn multi_attempt_open_after_finished_marks_interrupted() {
                 spawn_ms: None,
                 model: None,
                 workdir: None,
+                transcript: None,
             },
         ),
     ];

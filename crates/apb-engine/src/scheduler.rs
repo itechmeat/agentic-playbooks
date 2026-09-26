@@ -56,6 +56,7 @@ mod resume;
 mod skills_copy;
 mod status_file;
 mod supervisor;
+mod transcript;
 
 pub(crate) use control_apply::{ControlScan, scan_control};
 pub(crate) use entry::Prepared;

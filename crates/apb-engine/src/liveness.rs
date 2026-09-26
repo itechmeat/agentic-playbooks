@@ -809,6 +809,7 @@ mod tests {
             spawn_ms: None,
             model: None,
             workdir: None,
+            transcript: None,
         }
     }
 

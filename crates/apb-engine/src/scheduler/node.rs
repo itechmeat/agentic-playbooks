@@ -1122,6 +1122,9 @@ pub(crate) fn execute_node(
                     // file is the normal case) so `read_status_file` after the run
                     // can only ever adopt a file THIS attempt actually wrote.
                     let _ = std::fs::remove_file(&status_file);
+                    // This attempt's raw output (issue #67 item 10), cleared
+                    // the same way when a re-run restarts the counter.
+                    let transcript_dir = super::transcript::attempt_dir(run_dir, node_id, attempt)?;
                     // This attempt's prompt. A continued session already holds the
                     // node prompt, so it gets only what happened since: the answer
                     // (answer round), the deadline note, or why the last attempt
@@ -1197,6 +1200,7 @@ pub(crate) fn execute_node(
                         // Hermetic isolation (subtask S1): Some only for a
                         // hermetic profile on an isolation-capable agent.
                         hermetic_settings: hermetic_settings.clone(),
+                        transcript_dir: Some(&transcript_dir),
                     };
                     // Spawn-time attempt journaling. The adapter invokes `on_spawn`
                     // right after the agent process starts, so `attempt_started`
@@ -1214,6 +1218,7 @@ pub(crate) fn execute_node(
                     let spawn_err: std::cell::RefCell<Option<EngineError>> =
                         std::cell::RefCell::new(None);
                     let attempt_model = Some(step.model.clone());
+                    let attempt_transcript = Some(super::transcript::relative(node_id, attempt));
                     let attempt_dir = Some(attempt_workdir.display().to_string());
                     let on_spawn = |pid: u32, spawn_ms: u64| {
                         spawn_at.set(Some(std::time::Instant::now()));
@@ -1227,6 +1232,7 @@ pub(crate) fn execute_node(
                             spawn_ms: Some(spawn_ms),
                             model: attempt_model.clone(),
                             workdir: attempt_dir.clone(),
+                            transcript: attempt_transcript.clone(),
                         }) {
                             *spawn_err.borrow_mut() = Some(e);
                         }
@@ -1413,6 +1419,28 @@ pub(crate) fn execute_node(
                         });
                     }
                     let spawn_instant = spawn_at.get();
+                    // The agent's own session transcript, next to the raw
+                    // output (claude keeps it outside the run).
+                    if spawn_instant.is_some() {
+                        let sid = match &outcome {
+                            Ok(report) => report.session.clone(),
+                            Err(_) => None,
+                        }
+                        .or_else(|| continued.as_ref().map(|(sid, _)| sid.clone()))
+                        .or_else(|| match &fresh {
+                            Some(crate::invocation::FreshSession::Assigned { id, .. }) => {
+                                Some(id.clone())
+                            }
+                            _ => None,
+                        });
+                        if let Some(sid) = sid {
+                            super::transcript::copy_agent_session(
+                                &step.agent,
+                                &sid,
+                                &transcript_dir,
+                            );
+                        }
+                    }
                     // Remember the session this attempt ran in (issue #136 item
                     // 2), so a later attempt on this binding can continue it.
                     // The id the agent printed wins; an assigned id stands in
@@ -1487,6 +1515,7 @@ pub(crate) fn execute_node(
                             spawn_ms: None,
                             model: attempt_model.clone(),
                             workdir: attempt_dir.clone(),
+                            transcript: attempt_transcript.clone(),
                         })?;
                     }
                     let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -2234,6 +2263,7 @@ pub(crate) fn execute_finish_answer(
                 status_file: None,
                 // Internal finish-answer composition: no hermetic isolation.
                 hermetic_settings: None,
+                transcript_dir: None,
             };
             // Spawn-time attempt journaling (identical shape to execute_node):
             // `on_spawn` journals attempt_started with the child pid before the
@@ -2257,6 +2287,7 @@ pub(crate) fn execute_finish_answer(
                     spawn_ms: Some(spawn_ms),
                     model: None,
                     workdir: None,
+                    transcript: None,
                 }) {
                     *spawn_err.borrow_mut() = Some(e);
                 }
@@ -2283,6 +2314,7 @@ pub(crate) fn execute_finish_answer(
                     spawn_ms: None,
                     model: None,
                     workdir: None,
+                    transcript: None,
                 })?;
             }
             let duration_ms = spawn_instant.map(|t| t.elapsed().as_millis() as u64);
@@ -2850,6 +2882,7 @@ pub(crate) fn maybe_compact_context(
         status_file: None,
         // Internal summarizer: no hermetic isolation.
         hermetic_settings: None,
+        transcript_dir: None,
     };
     // The compacted context is the summarizer's full reply body (issue #42
     // finding 1), not its one-line report summary.

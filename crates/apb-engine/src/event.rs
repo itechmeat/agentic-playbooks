@@ -110,6 +110,13 @@ pub enum EventPayload {
         /// journaled outside an agent_task.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         workdir: Option<String>,
+        /// The run-relative directory holding this attempt's raw output
+        /// (issue #67 item 10): `stdout.log` and `stderr.log` as the agent
+        /// printed them and, for claude, `session.jsonl`, the CLI's own
+        /// transcript of the session with every tool call. `None` for old
+        /// logs and for attempts journaled outside an agent_task.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        transcript: Option<String>,
     },
     /// The attempt's agent process has exited and the drive is finishing the
     /// attempt: reading its status file, capturing its session, running the
@@ -975,6 +982,7 @@ mod tests {
             spawn_ms: Some(37),
             model: None,
             workdir: None,
+            transcript: None,
         };
         let s = serde_json::to_string(&p).unwrap();
         assert!(s.contains("\"spawn_ms\":37"), "got {s}");
