@@ -102,6 +102,8 @@ export interface VersionDiff {
 export interface WriteResult {
   id: string
   version: string
+  /** The definition equaled the current version: nothing was written. */
+  unchanged?: boolean
 }
 
 export interface VersionProvenance {

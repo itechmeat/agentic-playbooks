@@ -102,7 +102,8 @@ pub fn import_bundle(
         &bundle.playbook,
         version_override,
         make_current,
-    )?;
+    )?
+    .version;
     if let Some(layout) = &bundle.layout {
         let layout_yaml =
             serde_yaml_ng::to_string(layout).map_err(|e| BundleError::Yaml(e.to_string()))?;

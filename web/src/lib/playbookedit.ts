@@ -143,3 +143,29 @@ export function suggestNodeId(doc: Document, kind: string): string {
   while (existing.has(`${kind}-${n}`)) n++
   return `${kind}-${n}`
 }
+
+/** What the editor tells the user after a save (issue #67 item 9). */
+export interface SaveNotice {
+  kind: 'success' | 'info'
+  title: string
+  description?: string
+}
+
+/**
+ * The toast for a save answer: a new playbook, a new version, or - when the
+ * definition equaled the current version - that nothing was written.
+ */
+export function saveNotice(
+  result: { id: string; version: string; unchanged?: boolean },
+  isNew: boolean,
+): SaveNotice {
+  if (result.unchanged) {
+    return {
+      kind: 'info',
+      title: 'No changes to save',
+      description: `"${result.id}" stays at ${result.version}; no new version was created.`,
+    }
+  }
+  if (isNew) return { kind: 'success', title: `Created "${result.id}"` }
+  return { kind: 'success', title: `Saved "${result.id}" as ${result.version}` }
+}
