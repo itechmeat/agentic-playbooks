@@ -22,7 +22,8 @@ code-ranker, see below).
 
 - `apb-core` - domain layer, no async. Playbook schema (`schema.rs`,
   `Playbook::from_yaml`), validator (`validate/`, codes V01+, one module per
-  rule family: `graph`, `nodes`, `connectors`, `templates`), profiles
+  rule family: `graph`, `nodes`, `connectors`, `templates`, `node_io` for
+  `continue_session`, declared output fields and node `workdir`), profiles
   (`profile.rs` types incl. `ProfileError`, `profile_store.rs` scope resolution
   and bundle trust, `skills.rs`), registry and versioning, schema 1->2 migrator
   (`schema_migrate.rs`), free agent detection (`detect.rs`), curated models table
@@ -34,7 +35,10 @@ code-ranker, see below).
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan, `supervisor` heartbeat and wake park, `node` execution,
   `journal` event-log folds, `status_file` the attempt verdict contract, `resume`,
-  `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`), attempt failure
+  `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`, `handoff` the warm
+  session handoff between nodes, `node_workdir` a node's templated working
+  directory, `skills_copy` the shared per-profile skills copy, `transcript`
+  per-attempt output), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution
   (`invocation.rs`), agent adapters (`adapter.rs`), the append-only event log

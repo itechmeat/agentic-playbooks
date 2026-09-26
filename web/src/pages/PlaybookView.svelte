@@ -306,7 +306,7 @@
         </div>
         <div class="min-h-0 flex-1 overflow-auto">
           <div class="mx-auto w-full max-w-5xl pb-6">
-            <NodePanel {id} node={selectedNode} {workspace} readonly />
+            <NodePanel {id} node={selectedNode} {workspace} nodes={playbookNodes} readonly />
           </div>
         </div>
       </div>

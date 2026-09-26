@@ -1,4 +1,4 @@
-//! Rules for the issue #67 phase 2 node fields: the warm session handoff
+//! Rules for the node fields added by issue #67: the warm session handoff
 //! (`continue_session`, V44/V45), declared output fields (V46) and the node
 //! `workdir` template (V47).
 

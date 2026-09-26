@@ -495,6 +495,7 @@
               onChange={onNodePatch}
               {revision}
               workspace={isNew ? targetWorkspace : workspace}
+              nodes={lastValidModel?.nodes ?? []}
             />
           </div>
         </div>

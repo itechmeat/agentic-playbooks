@@ -22,6 +22,7 @@
   import * as Select from '$lib/components/ui/select'
   import Combobox from '$lib/components/Combobox.svelte'
   import Trash2 from '@lucide/svelte/icons/trash-2'
+  import { fieldsToField, fieldToOutputs, sessionSources } from './nodeio'
 
   let {
     id,
@@ -30,6 +31,7 @@
     revision = 0,
     workspace = '',
     readonly = false,
+    nodes = [],
   }: {
     id: string
     node: PlaybookNode
@@ -41,7 +43,11 @@
     /// scrollbars and their selection (a prompt has to stay readable), the
     /// controls that only exist to change something are disabled or gone.
     readonly?: boolean
+    /// Every node of the playbook, for the continue_session picker.
+    nodes?: { id: string; type: string }[]
   } = $props()
+
+  const sessionOptions = $derived(sessionSources(nodes, node.id))
 
   const kind = $derived(node.type)
 
@@ -161,6 +167,9 @@
         success_check: sc.value,
         playbook: playbookRefToField(n.playbook),
         instruction: str(n.instruction),
+        workdir: str(n.workdir),
+        continue_session: str(n.continue_session),
+        output_fields: fieldsToField(n.outputs),
       }
     })
   })
@@ -343,6 +352,10 @@
     f[key] = raw
     onChange?.(raw === '' ? { [key]: undefined } : { [key]: raw })
   }
+  function setOutputFields(raw: string) {
+    f.output_fields = raw
+    onChange?.({ outputs: fieldToOutputs(raw, node.outputs) })
+  }
   function setNum(key: string, raw: string) {
     f[key] = raw
     if (raw === '') {
@@ -377,6 +390,12 @@
       <option value={`${p.scope}/${p.name}`}>
         {p.trusted ? '' : '(untrusted) '}{p.scope}/{p.name}
       </option>
+    {/each}
+  </datalist>
+
+  <datalist id="apb-session-options">
+    {#each sessionOptions as n (n)}
+      <option value={n}>{n}</option>
     {/each}
   </datalist>
 
@@ -481,6 +500,37 @@
           {readonly}
           value={f.timeout_seconds}
           oninput={(e) => setNum('timeout_seconds', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('continue_session', 'np-continue')}
+        <Input
+          id="np-continue"
+          list="apb-session-options"
+          placeholder="(fresh agent)"
+          {readonly}
+          value={f.continue_session}
+          oninput={(e) => setStr('continue_session', e.currentTarget.value.trim())}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('workdir', 'np-workdir')}
+        <Input
+          id="np-workdir"
+          placeholder="(execution root)"
+          {readonly}
+          value={f.workdir}
+          oninput={(e) => setStr('workdir', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field class="md:col-span-2">
+        {@render fieldHead('output_fields', 'np-fields')}
+        <Input
+          id="np-fields"
+          placeholder="none, e.g. working_tree, verdict"
+          {readonly}
+          value={f.output_fields}
+          oninput={(e) => setOutputFields(e.currentTarget.value)}
         />
       </Field.Field>
       <Field.Field class="md:col-span-2">
@@ -652,6 +702,26 @@
           {readonly}
           value={f.timeout_seconds}
           oninput={(e) => setNum('timeout_seconds', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field>
+        {@render fieldHead('workdir', 'np-sworkdir')}
+        <Input
+          id="np-sworkdir"
+          placeholder="(execution root)"
+          {readonly}
+          value={f.workdir}
+          oninput={(e) => setStr('workdir', e.currentTarget.value)}
+        />
+      </Field.Field>
+      <Field.Field class="md:col-span-2">
+        {@render fieldHead('output_fields', 'np-sfields')}
+        <Input
+          id="np-sfields"
+          placeholder="none, e.g. verdict (print them as a JSON object)"
+          {readonly}
+          value={f.output_fields}
+          oninput={(e) => setOutputFields(e.currentTarget.value)}
         />
       </Field.Field>
     {:else if kind === 'condition'}

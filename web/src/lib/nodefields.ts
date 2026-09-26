@@ -45,6 +45,18 @@ export const NODE_FIELDS = {
     label: 'Max retries',
     hint: 'Extra attempts after a failed one before the node is final. Empty inherits the playbook default, which is 0 - one attempt and no retry.',
   },
+  workdir: {
+    label: 'Working directory',
+    hint: 'Where the node runs instead of the execution root, for example a git worktree an earlier node published. A template like the prompt: {{ nodes.<id>.output.<field> }}, {{ params.name }} or a plain path; relative paths start at the execution root. If it renders empty or names no existing directory, the node fails instead of running in the wrong tree.',
+  },
+  continue_session: {
+    label: 'Continue session of',
+    hint: 'An earlier agent node whose agent session this node continues: its first attempt resumes that session and sends this prompt as the next message, so the agent keeps what it already learned. Works for claude, codex, opencode and zcode when both nodes run on the same agent and model in the same directory; otherwise the node starts a fresh agent as usual.',
+  },
+  output_fields: {
+    label: 'Output fields',
+    hint: 'Named values this node publishes, comma separated. An agent is told to write exactly these keys into its status file; a script prints them as a JSON object. Later nodes read one as {{ nodes.<id>.output.<field> }} or route on it with an output_field edge. A missing field is reported as a warning event, never a failure.',
+  },
   timeout_seconds: {
     label: 'Timeout, seconds',
     hint: 'Wall-clock limit for a single attempt. When it expires the attempt is cancelled and counts as a failure, so a retry budget still applies. Empty inherits the playbook default, which is no limit.',

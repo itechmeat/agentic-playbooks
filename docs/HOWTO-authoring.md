@@ -18,6 +18,12 @@ A playbook is a YAML document with these top-level fields:
 - `trigger`, `requires`, `effects`, `goal` (see below)
 - `nodes` (list) and `edges` (list)
 
+Every save through apb (`playbook_create` / `playbook_update`, the dashboard
+editor, `apb import`) creates a new immutable version, except when the
+definition equals the current version apart from its `version:` field and
+formatting: then nothing is written, the current version and its trust stay as
+they are, and the answer says `unchanged: true`.
+
 ## Visual editor and graph check
 
 The dashboard renders a playbook as a top-to-bottom graph, and the canvas is
@@ -136,16 +142,16 @@ the rejected attempt claimed.
 
 ### Status file (APB_STATUS_FILE)
 
-When a node carries a `success_check`, each attempt is handed an
-`APB_STATUS_FILE` environment variable pointing at a per-attempt JSON file in
-the run directory. The agent MAY write its final verdict there as
+Each agent_task attempt is handed an `APB_STATUS_FILE` environment variable
+pointing at a per-attempt JSON file in the run directory. The agent MAY write its final verdict there as
 `{"status": "success"|"failure", "outputs": { ... }}`, where `outputs` is an
 object of values the step should expose to later steps. The engine reads that
 file first to decide the attempt's status and outputs, and falls back to the
 existing marker and text parsing when the file is absent, unreadable, or
-invalid. The prompt builder appends a note describing this contract only when
-the node has a `success_check`; nodes without one keep the report-only
-contract.
+invalid. The prompt builder appends a note describing this contract when the
+node has a `success_check`, sets `require_verdict` or declares `outputs.fields`
+(then naming the keys to write, see "Named outputs" below); other nodes keep
+the report-only contract.
 
 When the status file supplies a non-empty `outputs` object, that object
 replaces the node output before the `success_check` runs, so a `marker` check
@@ -261,6 +267,66 @@ a guardrail appends a turn after the agent's real work finished, which would
 otherwise become the node's output. The other half of that hygiene lives on the
 profile: see PROFILES.md's "Agent environment" (the default `minimal` one
 suppresses the appended turn at the source instead of filtering around it).
+
+### Named outputs (outputs.fields)
+
+A node can declare the named values it publishes:
+
+```yaml
+- id: assess
+  type: agent_task
+  prompt: "find the worktree of the PR branch and whether review comments are open"
+  profile: dev
+  outputs:
+    fields: [working_tree, open_comments]
+```
+
+On an `agent_task`, the declaration puts the status-file contract into the
+prompt (even without a `success_check`) and names the exact keys to write under
+`outputs`: `{"status": "success", "outputs": {"working_tree": "...",
+"open_comments": "none"}}`. That object becomes the node output as JSON, as for
+any status file, so later nodes read one value by name:
+`{{nodes.assess.output.working_tree}}` in a template, or an `output_field` edge
+condition on `open_comments`. A `script` node publishes named outputs by
+printing a JSON object on stdout, which is already its output.
+
+After a successful execution, a declared field missing from the output (the
+output is not a JSON object, or it has no such key) journals an
+`output_fields_missing` warning event naming the missing fields. It never
+fails the node, the same policy as `deliverable_missing`. Validation warns
+(**V46**) when a template or an `output_field` condition reads a field that the
+source node's `outputs.fields` does not declare. A node that declares nothing is
+not checked.
+
+### Node working directory (workdir)
+
+An `agent_task` or a `script` node can run somewhere other than the execution
+root:
+
+```yaml
+- id: gate
+  type: script
+  script: scripts/gate.sh
+  runner: sh
+  workdir: "{{nodes.assess.output.working_tree}}"
+```
+
+`workdir` is a template rendered like a prompt, but it may read only what can
+name a path: `params.*`, `run.instruction`, `nodes.<id>.output` (or one field of
+it) and `nodes.<id>.review_decision`. Anything else is a **V47** error, and so is
+`workdir` together with `isolation` (an isolated node runs in its own
+directory). The rendered path is resolved against the execution root (an
+absolute path is kept) and must be an existing directory when the node starts.
+An empty render (the value it reads was never published) or a missing directory
+fails the node, without spawning anything, with a message naming the rendered
+value. It never falls back to the execution root: running a gate in the wrong
+tree and reporting it green is the failure this field exists to prevent. A read
+the graph does not order before the node is a **V38** warning, as for prompts.
+
+Each attempt's directory is recorded on its `attempt_started` event
+(`workdir`). A node with a `workdir` is not cache-eligible (the cache
+fingerprints and stores into the execution root), and its `outputs.files` globs
+still match against the execution root.
 
 ### Warning: premature success in long-running orchestrator nodes
 
@@ -770,6 +836,59 @@ sessions by it), so an isolated node's continuation runs in the directory of the
 attempt it continues instead of a fresh one. If the agent answers that the
 session does not exist, the engine drops it and starts fresh once, without
 spending a retry.
+
+### Continuing another node's session (continue_session)
+
+Consecutive nodes on the same profile often need the same understanding of the
+repository: an `assess` node reads the code, an `implement` node acts on it. A
+fresh agent for the second node rebuilds all of that. `continue_session` lets
+it continue the first node's agent session instead:
+
+```yaml
+- { id: assess, type: agent_task, profile: dev, prompt: "assess the change" }
+- { id: implement, type: agent_task, profile: dev, prompt: "implement it", continue_session: assess }
+```
+
+The node's first attempt resumes the session in which the named node's latest
+successful attempt finished, and sends this node's whole prompt (task, skills
+line, connector block, contracts) as the next message; the SOUL is not sent
+again, the session carries it. The handoff is warm only when all of these hold:
+
+- the source attempt recorded a session id (see "Retries continue the session"
+  for how each agent's id is found);
+- the source ran on the same agent and model as this node's primary executor;
+- the agent can resume a session: `claude`, `codex`, `opencode` and `zcode`;
+- both nodes run in the same directory: neither is isolated and their
+  `workdir`s resolve to the same place (agents key sessions by directory).
+
+Otherwise the node starts a fresh agent, exactly as without the field. Either
+way the run journals `session_handoff` with `warm: true|false` and, when cold,
+the reason. A handed-off session the agent no longer has is dropped and the node
+starts fresh once, without spending a retry. Retries after a warm start continue
+the session as any retry does, and a fallback to another executor starts fresh.
+
+Validation: **V44** (error) when `continue_session` names an unknown node, the
+node itself, or a node that is not an `agent_task`. **V45** (warning) when the
+handoff can already be seen to start cold: nothing orders the source before the
+node, the two bind different profiles, either is isolated, their `workdir`s
+differ, or another node continues the same session and may run at the same
+time. `apb validate` and `apb doctor` also warn `session_handoff_cold` when the
+bound agent cannot resume a session at all.
+
+The continuing node's prompt should say what to do next, not repeat the
+context: the session already holds the source's work. Reading
+`{{nodes.<source>.output}}` still works, but sends that output a second time.
+
+### Attempt transcripts
+
+Every agent attempt keeps its raw output in
+`<run dir>/attempts/<node>-<attempt>/`, named on the attempt's
+`attempt_started` event (`transcript`): `stdout.log` and `stderr.log` hold what
+the agent printed, written as it arrives, so an attempt killed at its deadline
+still leaves what it said and ran. For `claude`, whose text output does not show
+its tool calls, the CLI's own session transcript (every tool call and result) is
+copied there as `session.jsonl`. Other agents keep their sessions in their own
+stores. `agent-stream/` still holds the streamed events of the `acp` transport.
 
 ### Interrupted attempts and reaping
 

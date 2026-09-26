@@ -1,6 +1,6 @@
-//! Validation of the issue #67 phase 2 fields: `continue_session` (V44 error,
-//! V45 warning), reads of undeclared output fields (V46 warning) and the node
-//! `workdir` template (V47 error).
+//! Validation of `continue_session` (V44 error, V45 warning), reads of
+//! undeclared output fields (V46 warning) and the node `workdir` template
+//! (V47 error), the fields issue #67 added.
 
 use apb_core::schema::Playbook;
 use apb_core::validate::{Severity, ValidationContext, validate};
