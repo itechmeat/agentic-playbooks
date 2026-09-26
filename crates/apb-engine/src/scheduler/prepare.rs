@@ -200,9 +200,10 @@ pub(crate) fn snapshot_loaded_profile(
         skills: mskills,
         chain,
         ephemeral: eph.is_some(),
-        // Snapshot the profile's hermetic flag so post-start reads use the
-        // run's value, not the live profile (subtask S1).
-        hermetic: loaded.doc.hermetic,
+        // Snapshot the profile's environment so post-start reads use the
+        // run's value, not the live profile (issue #136 item 4).
+        hermetic: loaded.doc.environment() == apb_core::profile::AgentEnvironment::Minimal,
+        zcode_mode: loaded.doc.zcode_mode,
     })
 }
 
@@ -232,7 +233,7 @@ pub(crate) fn build_run_manifest(
         }
     }
     // The supervisor binding is created ONLY when the run is actually supervised
-    // by an external agent (`supervised` = supervisor_expected). In that case the
+    // by an external agent (`supervised` = the mode is agent-supervised). In that case the
     // executor is supervisor.profile OR defaults.profile, EVEN without a `supervisor:`
     // section (so `--supervise` with just defaults.profile brings up an agent). For
     // an autonomous (and self-supervised) run there is no binding: otherwise the run
@@ -371,7 +372,7 @@ pub(crate) fn prepare_run_target(
     let root = t.execution_root.as_path();
     let reg = Registry::open_dir(&t.definition_parent)?;
     let loaded = reg.load(id, version)?;
-    let digest = apb_core::scope::digest_str(&loaded.yaml);
+    let digest = loaded.trust_digest()?;
     // Anti-TOCTOU: if the caller checked trust against a specific digest, it
     // must match the actually loaded content - otherwise the file was swapped
     // between the check and the run (spec 9).
@@ -404,18 +405,19 @@ pub(crate) fn prepare_run_target(
     } else {
         PlaybookOrigin::Project
     };
-    let ctx = ValidationContext {
-        profiles: reg.profiles(),
-        playbook_origin: origin,
-        // The run is about to snapshot these connectors, so the inbox rules
-        // are checkable here and worth checking: a node granting inbox
-        // functions of a connector that cannot receive anything would park
-        // forever on an empty inbox.
-        connectors: apb_core::connector::resolve::validation_facts(),
-    };
+    let ctx = ValidationContext::for_registry(&reg, origin);
     let report = validate(&playbook, &ctx);
-    if report.issues.iter().any(|i| i.severity == Severity::Error) {
-        return Err(EngineError::Invalid(format!("playbook `{id}` is invalid")));
+    let errors: Vec<String> = report
+        .issues
+        .iter()
+        .filter(|i| i.severity == Severity::Error)
+        .map(|i| format!("{} {}", i.code, i.message))
+        .collect();
+    if !errors.is_empty() {
+        return Err(EngineError::Invalid(format!(
+            "playbook `{id}` is invalid: {}",
+            errors.join("; ")
+        )));
     }
 
     let start_node = playbook
@@ -485,6 +487,21 @@ pub(crate) fn prepare_run_target(
         .join(id)
         .join(&loaded.version);
     prep_try(&mut log, copy_scripts(&version_dir, &run_dir))?;
+    // The copy is what script nodes execute, so verify THE COPY against the
+    // digest checked above (and against the caller's permit through it): a
+    // script swapped between loading the definition and copying it must not
+    // run under an approval that never covered it.
+    let copied = apb_core::scope::definition_digest(&loaded.yaml, &run_dir)
+        .map_err(|e| EngineError::Invalid(format!("run scripts cannot be digested: {e}")));
+    let copied = prep_try(&mut log, copied)?;
+    if copied != digest {
+        return prep_try(
+            &mut log,
+            Err(EngineError::Invalid(format!(
+                "playbook `{id}` changed since it was checked (scripts digest mismatch)"
+            ))),
+        );
+    }
     // The run's webhook hook secrets (for wait nodes, spec 6.7).
     prep_try(&mut log, crate::hooks::generate_hooks(&run_dir, &playbook))?;
 
@@ -524,7 +541,6 @@ pub(crate) fn prepare_run_target(
     let cfg = RunConfig {
         params,
         instruction,
-        supervisor_expected: opts.supervisor_expected,
         max_patches_per_run: opts.max_patches_per_run,
         context_max_bytes: opts.context_max_bytes,
         context_compact_model: opts.context_compact_model.clone(),
@@ -570,7 +586,7 @@ pub(crate) fn prepare_run_target(
             &opts.expected_connectors,
             &opts.expected_connector_accounts,
             opts.overrides.as_ref(),
-            opts.supervisor_expected,
+            opts.mode.expects_supervisor_agent(),
         ),
     )?;
     let profiles_prov: Vec<ProfileProvenance> = manifest
@@ -585,6 +601,10 @@ pub(crate) fn prepare_run_target(
     if !manifest.is_empty() {
         prep_try(&mut log, crate::manifest::write(&run_dir, &manifest))?;
     }
+    // Mark the directory as created by this installation (after the
+    // write-once manifest, which the stamp covers), so a resume can tell it
+    // from a run directory that arrived with the repository.
+    prep_try(&mut log, apb_core::run_origin::stamp(&run_dir, &run_id))?;
 
     log.append(EventPayload::RunStarted {
         playbook: id.into(),
@@ -623,6 +643,5 @@ pub(crate) fn prepare_run_target(
         queued_workdir,
         start_node,
         mode: opts.mode,
-        supervisor_expected: opts.supervisor_expected,
     })
 }

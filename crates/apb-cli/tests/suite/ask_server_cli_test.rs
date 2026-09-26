@@ -15,7 +15,7 @@
 //! milliseconds rather than a real minute.
 
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
@@ -58,7 +58,7 @@ fn spawn_sidecar(
     let run_dir = tmp.path().join(run);
     std::fs::create_dir_all(&run_dir).unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let mut child = crate::common::apb_std()
         .args([
             "__ask-server",
             "--run",
@@ -279,7 +279,7 @@ fn sidecar_exits_on_stdin_eof_with_an_in_flight_ask_user() {
 
 #[test]
 fn missing_run_dir_exits_nonzero_naming_the_var() {
-    let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let out = crate::common::apb_std()
         .args([
             "__ask-server",
             "--run",
@@ -309,7 +309,7 @@ fn mismatched_run_dir_basename_exits_nonzero() {
     // basename is `other`, but --run says `runx`: a mis-injected sidecar.
     let dir = tmp.path().join("other");
     std::fs::create_dir_all(&dir).unwrap();
-    let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let out = crate::common::apb_std()
         .args([
             "__ask-server",
             "--run",

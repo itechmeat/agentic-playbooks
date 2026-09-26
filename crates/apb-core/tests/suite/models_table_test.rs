@@ -27,38 +27,43 @@ impl Drop for EnvGuard {
     }
 }
 
+/// A builtin row with every field set (a static-list model always has one),
+/// so an overlay test can tell "preserved" from "cleared" without naming a
+/// model that the next refresh may retire.
+fn builtin_row() -> models_table::ModelRow {
+    let t = models_table::builtin();
+    let id = t.claude_static_models[0].clone();
+    t.models.into_iter().find(|m| m.id == id).unwrap()
+}
+
 #[test]
 fn overlay_adds_model_overrides_price_and_brings_subscriptions() {
     let _l = lock();
     let _g = EnvGuard;
     let cfg = tempfile::tempdir().unwrap();
     with_cfg(cfg.path());
+    let builtin = builtin_row();
     std::fs::write(
         cfg.path().join("models.yaml"),
-        "models:\n  - { id: claude-opus-4-8, vendor: anthropic, cost_in_usd_mtok: 1.5 }\n  - { id: local-llm, vendor: self, reasoning: medium }\nsubscriptions:\n  - { agent: claude, plan: max, coverage: full }\n  - { agent: opencode }\n",
+        format!(
+            "models:\n  - {{ id: {}, cost_in_usd_mtok: 1.5 }}\n  - {{ id: local-llm, vendor: self, reasoning: medium }}\nsubscriptions:\n  - {{ agent: claude, plan: max, coverage: full }}\n  - {{ agent: opencode }}\n",
+            builtin.id
+        ),
     )
     .unwrap();
 
     let t = models_table::load_merged().unwrap();
     // Field-wise merge: overriding ONE price doesn't reset the existing
     // model's other fields to their defaults.
-    let opus = t.models.iter().find(|m| m.id == "claude-opus-4-8").unwrap();
-    assert_eq!(opus.cost_in_usd_mtok, Some(1.5));
+    let opus = t.models.iter().find(|m| m.id == builtin.id).unwrap();
     assert_eq!(
-        opus.cost_out_usd_mtok,
-        Some(25.0),
-        "untouched output price must be preserved"
+        (opus.cost_in_usd_mtok, opus.cost_out_usd_mtok),
+        (Some(1.5), builtin.cost_out_usd_mtok),
+        "only the patched price changes"
     );
-    assert_eq!(
-        opus.context_tokens,
-        Some(1000000),
-        "untouched context must be preserved"
-    );
-    assert_eq!(opus.vendor, "anthropic", "untouched vendor preserved");
-    assert!(
-        !opus.source_url.is_empty(),
-        "untouched provenance preserved"
-    );
+    let rest =
+        |m: &models_table::ModelRow| (m.vendor.clone(), m.context_tokens, m.source_url.clone());
+    assert_eq!(rest(opus), rest(&builtin), "untouched fields preserved");
     // The new model was added.
     assert!(t.models.iter().any(|m| m.id == "local-llm"));
     // Subscriptions come only from the overlay.
@@ -76,20 +81,27 @@ fn overlay_null_clears_nullable_builtin_field() {
     with_cfg(cfg.path());
     // An explicit `null` clears a builtin value to unknown (different from "the
     // field is absent from the patch", which leaves it untouched).
+    let builtin = builtin_row();
     std::fs::write(
         cfg.path().join("models.yaml"),
-        "models:\n  - { id: claude-opus-4-8, reasoning: null, context_tokens: null }\n",
+        format!(
+            "models:\n  - {{ id: {}, reasoning: null, context_tokens: null }}\n",
+            builtin.id
+        ),
     )
     .unwrap();
     let t = models_table::load_merged().unwrap();
-    let opus = t.models.iter().find(|m| m.id == "claude-opus-4-8").unwrap();
+    let opus = t.models.iter().find(|m| m.id == builtin.id).unwrap();
     assert_eq!(opus.reasoning, None, "explicit null must clear reasoning");
     assert_eq!(
         opus.context_tokens, None,
         "explicit null must clear context_tokens"
     );
     // A price untouched by the patch is preserved (absent != null).
-    assert!(opus.cost_in_usd_mtok.is_some(), "untouched price preserved");
+    assert_eq!(
+        opus.cost_in_usd_mtok, builtin.cost_in_usd_mtok,
+        "untouched price preserved"
+    );
 }
 
 #[test]
@@ -187,107 +199,4 @@ fn onboarding_roundtrip_and_declined() {
         models_table::onboarding::read().unwrap(),
         OnboardingState::Declined
     );
-}
-
-/// Curated xAI rows back the grok agent's model suggestions (spec 2026-07-21).
-/// grok-4.5 is the CLI's own default model, so it must be present; every xAI
-/// row carries the full provenance triple the table requires.
-#[test]
-fn builtin_table_carries_curated_xai_rows() {
-    let t = models_table::builtin();
-    let xai: Vec<_> = t.models.iter().filter(|m| m.vendor == "xai").collect();
-    assert!(
-        xai.len() >= 2,
-        "expected curated xAI rows, found {}",
-        xai.len()
-    );
-    assert!(
-        xai.iter().any(|m| m.id == "grok-4.5"),
-        "grok-4.5 (the Grok CLI default model) must be curated"
-    );
-    for m in &xai {
-        assert!(
-            m.cost_in_usd_mtok.is_some() && m.cost_out_usd_mtok.is_some(),
-            "xAI row `{}` is missing a price",
-            m.id
-        );
-        assert!(
-            !m.source_url.is_empty(),
-            "xAI row `{}` is missing source_url",
-            m.id
-        );
-        assert!(
-            !m.checked_at.is_empty(),
-            "xAI row `{}` is missing checked_at",
-            m.id
-        );
-        assert!(
-            !m.price_basis.is_empty(),
-            "xAI row `{}` is missing price_basis",
-            m.id
-        );
-    }
-}
-
-/// The 2026-08-15 refresh drops `grok-4` (superseded by 4.3/4.5/4.6) and
-/// `llama-4-maverick`/the Meta section (first-party Llama API wound down);
-/// neither dropped id may resurface in the built-in table.
-#[test]
-fn builtin_table_drops_grok_4_and_llama_4_maverick() {
-    let t = models_table::builtin();
-    assert!(
-        !t.models.iter().any(|m| m.id == "grok-4"),
-        "grok-4 must be dropped, superseded by grok-4.3/4.5/4.6"
-    );
-    assert!(
-        !t.models.iter().any(|m| m.id == "llama-4-maverick"),
-        "llama-4-maverick must be dropped along with the Meta section"
-    );
-    assert!(
-        !t.models.iter().any(|m| m.vendor == "meta"),
-        "no meta-vendor row should remain"
-    );
-    for p in &t.purposes {
-        for s in &p.scores {
-            assert_ne!(s.model, "grok-4", "purpose `{}` still cites grok-4", p.id);
-            assert_ne!(
-                s.model, "llama-4-maverick",
-                "purpose `{}` still cites llama-4-maverick",
-                p.id
-            );
-        }
-    }
-}
-
-/// The 2026-08-15 refresh adds new-vendor rows (moonshot, zhipu) and new
-/// entries for existing vendors (anthropic, xai, alibaba); each must parse
-/// with the expected vendor and full provenance.
-#[test]
-fn builtin_table_carries_2026_08_15_refresh_rows() {
-    let t = models_table::builtin();
-    let expect: &[(&str, &str)] = &[
-        ("claude-opus-5", "anthropic"),
-        ("grok-4.6", "xai"),
-        ("qwen3.8-max", "alibaba"),
-        ("kimi-k3", "moonshot"),
-        ("glm-5.2", "zhipu"),
-    ];
-    for (id, vendor) in expect {
-        let m = t
-            .models
-            .iter()
-            .find(|m| m.id == *id)
-            .unwrap_or_else(|| panic!("expected curated row `{id}`"));
-        assert_eq!(m.vendor, *vendor, "row `{id}` has the wrong vendor");
-        assert!(
-            m.cost_in_usd_mtok.is_some() && m.cost_out_usd_mtok.is_some(),
-            "row `{id}` is missing a price"
-        );
-        assert!(!m.source_url.is_empty(), "row `{id}` is missing source_url");
-        assert!(!m.checked_at.is_empty(), "row `{id}` is missing checked_at");
-        assert!(
-            !m.price_basis.is_empty(),
-            "row `{id}` is missing price_basis"
-        );
-    }
 }

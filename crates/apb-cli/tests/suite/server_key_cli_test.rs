@@ -4,14 +4,9 @@
 //! (other suites in this binary spawn concurrently).
 
 use std::path::Path;
-use std::process::Command;
-
-fn apb_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_apb")
-}
 
 fn run(cfg: &Path, args: &[&str]) -> (String, String, bool) {
-    let out = Command::new(apb_bin())
+    let out = crate::common::apb_std()
         .args(["server"])
         .args(args)
         .env("APB_CONFIG_DIR", cfg)

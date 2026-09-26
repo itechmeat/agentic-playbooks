@@ -21,6 +21,38 @@ pub fn init_project(root: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// `(major, minor, patch)` of a version name, `None` for anything that is not
+/// exactly `major.minor.patch`.
+pub fn parse_version(s: &str) -> Option<(u32, u32, u32)> {
+    let mut parts = s.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    parts.next().is_none().then_some((major, minor, patch))
+}
+
+/// The stored versions of the playbook at `playbook_dir`, oldest first in
+/// semver order (`1.9.0` before `1.10.0`). The one version listing behind
+/// `apb list`, MCP `playbook_list`, `/api/playbooks` and the version history:
+/// a version is a directory whose name parses as `major.minor.patch`, so
+/// `layouts/`, `meta/` and a `.tmp-<version>-<nanos>` left by an interrupted
+/// save are never listed.
+pub fn list_versions(playbook_dir: &Path) -> io::Result<Vec<String>> {
+    let mut versions: Vec<((u32, u32, u32), String)> = Vec::new();
+    for entry in fs::read_dir(playbook_dir)? {
+        let entry = entry?;
+        if !entry.file_type()?.is_dir() {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        if let Some(key) = parse_version(&name) {
+            versions.push((key, name));
+        }
+    }
+    versions.sort();
+    Ok(versions.into_iter().map(|(_, name)| name).collect())
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum RegistryError {
     #[error("playbook `{0}` not found")]
@@ -35,6 +67,8 @@ pub enum RegistryError {
     Schema(#[from] SchemaError),
     #[error("layout parse error: {0}")]
     Layout(String),
+    #[error("scripts of `{0}` cannot be digested: {1}")]
+    Scripts(String, String),
 }
 
 /// Checks that a path segment is safe to join: non-empty and does not
@@ -71,8 +105,23 @@ pub struct PlaybookSummary {
 pub struct LoadedPlaybook {
     pub playbook: Playbook,
     pub yaml: String,
+    /// The trust digest of this version, or why it has none; read it through
+    /// [`LoadedPlaybook::trust_digest`].
+    digest: Result<String, String>,
     pub layout: Option<serde_json::Value>,
     pub version: String,
+}
+
+impl LoadedPlaybook {
+    /// The trust digest of this version ([`crate::scope::definition_digest`]):
+    /// `playbook.yaml` plus the version's `scripts/`. Every approval, gate and
+    /// run pin uses this one value. An error when the scripts cannot be
+    /// digested: such a version can be neither approved nor run.
+    pub fn trust_digest(&self) -> Result<String, RegistryError> {
+        self.digest.clone().map_err(|e| {
+            RegistryError::Scripts(format!("{}@{}", self.playbook.id, self.version), e)
+        })
+    }
 }
 
 pub struct Registry {
@@ -137,16 +186,9 @@ impl Registry {
             // Enumerating the version dirs must not be fatal either: a single
             // unreadable playbook directory should be skipped like the other
             // broken cases above, not abort the whole listing.
-            let Ok(version_entries) = fs::read_dir(entry.path()) else {
+            let Ok(versions) = list_versions(&entry.path()) else {
                 continue;
             };
-            let mut versions: Vec<String> = version_entries
-                .filter_map(Result::ok)
-                .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
-                .map(|e| e.file_name().to_string_lossy().to_string())
-                .filter(|name| name != "layouts" && name != "meta")
-                .collect();
-            versions.sort();
             out.push(PlaybookSummary {
                 id,
                 name: loaded.playbook.name.clone(),
@@ -251,6 +293,12 @@ impl Registry {
         }
         let yaml = fs::read_to_string(&yaml_path)?;
         let playbook = Playbook::from_yaml(&yaml)?;
+        // A version whose scripts cannot be digested (a symlink leaving the
+        // tree, an unsupported entry) still loads, so it can be viewed, fixed
+        // and saved; it just has no trust digest, so nothing can approve or
+        // run it.
+        let digest =
+            crate::scope::definition_digest(&yaml, &base.join(&version)).map_err(|e| e.to_string());
         if playbook.version != version {
             return Err(RegistryError::VersionMismatch {
                 file: playbook.version.clone(),
@@ -269,6 +317,7 @@ impl Registry {
         Ok(LoadedPlaybook {
             playbook,
             yaml,
+            digest,
             layout,
             version,
         })

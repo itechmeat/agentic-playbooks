@@ -20,7 +20,7 @@ Using a match: on a confident match to an active, trusted playbook, name it in o
 
 Running policy: the server refuses drafts and untrusted playbooks until trial or acknowledgement. Effects beyond the request (network, secrets, deploys, irreversible) need confirmation.
 
-Human gates: run_status, supervisor_wait_event and supervisor_run_inspect return pending_review at a human_review gate. Relay its instruction in the user's language with the options, then record it with review_decide. Frozen until then; repeat while pending.
+Waiting: follow a background run with run_wait, never poll run_status. Gates: run_wait and supervisor_wait_event return pending_review. Relay its instruction in the user's language with the options, then record it with review_decide. The run is frozen until then.
 
 Profiles: a node binds its executor only through a profile (agent, model, fallbacks, role prompt, skills). Call profile_list to reuse one, profile_howto for format.
 

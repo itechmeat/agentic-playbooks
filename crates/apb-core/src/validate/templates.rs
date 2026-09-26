@@ -28,7 +28,7 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
                 [
                     "nodes",
                     nid,
-                    "output" | "report" | "review_note" | "rejected_output",
+                    "output" | "report" | "review_note" | "review_decision" | "rejected_output",
                 ] => nodes.contains(nid),
                 // One top-level field of a JSON-object output, the template twin
                 // of the `output_field` edge condition (spec 2026-08-05 section
@@ -166,8 +166,8 @@ pub(crate) fn check_cross_branch_reads(playbook: &Playbook, r: &mut ValidationRe
 /// the one they got wrong.
 pub(crate) const V13_KNOWN_NAMESPACES: &str = "; known namespaces: params.*, nodes.<id>.output, \
     nodes.<id>.report, nodes.<id>.output.<field>, nodes.<id>.report.<field>, \
-    nodes.<id>.review_note, nodes.<id>.rejected_output, run.instruction, run.context, \
-    run.hooks.*";
+    nodes.<id>.review_note, nodes.<id>.review_decision, nodes.<id>.rejected_output, \
+    run.instruction, run.context, run.hooks.*";
 
 pub(crate) fn template_refs(text: &str) -> Vec<String> {
     // no regex dependency: manual scan for {{ ... }}

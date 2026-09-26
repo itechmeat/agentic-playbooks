@@ -5,6 +5,7 @@
   import PlayCircle from '@lucide/svelte/icons/play-circle'
   import UserCog from '@lucide/svelte/icons/user-cog'
   import Plug from '@lucide/svelte/icons/plug'
+  import ShieldCheck from '@lucide/svelte/icons/shield-check'
   import LogOut from '@lucide/svelte/icons/log-out'
   import { Button } from '$lib/components/ui/button'
   import { authState, logout } from '$lib/auth.svelte'
@@ -29,7 +30,7 @@
     title,
     actions,
   }: {
-    active?: 'playbooks' | 'runs' | 'profiles' | 'connectors' | ''
+    active?: 'playbooks' | 'runs' | 'profiles' | 'connectors' | 'trust' | ''
     title?: Snippet
     actions?: Snippet
   } = $props()
@@ -39,6 +40,7 @@
     { key: 'runs', label: 'Runs', href: '#/runs', icon: PlayCircle },
     { key: 'profiles', label: 'Profiles', href: '#/profiles', icon: UserCog },
     { key: 'connectors', label: 'Connectors', href: '#/connectors', icon: Plug },
+    { key: 'trust', label: 'Approvals', href: '#/trust', icon: ShieldCheck },
   ] as const
 </script>
 

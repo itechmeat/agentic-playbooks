@@ -8,6 +8,8 @@ mod selfupdate;
 mod serve;
 mod server;
 mod suggestions;
+mod trash;
+mod trust;
 mod util;
 
 use std::path::PathBuf;
@@ -24,12 +26,14 @@ use crate::manage::{
 use crate::profile::{ProfileAction, profile_cmd};
 use crate::run::{
     answer_cmd, drive_run_child, drive_supervised_child, note_cmd, resume_cmd, review_cmd, run_cmd,
-    run_doctor, run_list, run_validate, runs_cmd, stop_cmd,
+    run_doctor, run_list, run_validate, runs_cmd, stop_cmd, wait_cmd,
 };
 use crate::selfupdate::run_self_update;
 use crate::serve::{ask_server_cmd, dashboard, dev_cmd, ingest_cmd, mcp_cmd};
 use crate::server::{ServerAction, server_cmd};
 use crate::suggestions::{SuggestionsAction, suggestions_cmd};
+use crate::trash::{TrashAction, trash_cmd};
+use crate::trust::{TrustAction, trust_cmd};
 use crate::util::{resolve_bind, resolve_port};
 
 #[derive(Parser)]
@@ -86,7 +90,7 @@ enum Command {
     },
     /// List playbooks and versions
     List,
-    /// Validate playbook schema
+    /// Validate playbooks, profile models, requires and connectors
     Validate { name: Option<String> },
     /// Diagnose environment (agents, executors, profiles, runners, playbooks),
     /// or one run's health with --run
@@ -114,6 +118,16 @@ enum Command {
         #[arg(long)]
         no_current: bool,
     },
+    /// List deleted playbooks or restore one with all its versions
+    Trash {
+        #[command(subcommand)]
+        action: TrashAction,
+    },
+    /// List the approvals in the trust store, or revoke them
+    Trust {
+        #[command(subcommand)]
+        action: TrustAction,
+    },
     /// Run a playbook
     Run {
         name: String,
@@ -130,6 +144,10 @@ enum Command {
         /// background supervisor agent and watches its heartbeat
         #[arg(long)]
         supervise: bool,
+        /// Start the run in a detached background process, print its id and
+        /// return at once; follow it with `apb wait <run_id>`
+        #[arg(long, conflicts_with = "supervise")]
+        detach: bool,
         /// Run-level overrides YAML file (spec 11): swap models/executors
         /// without creating a new version
         #[arg(long)]
@@ -163,6 +181,17 @@ enum Command {
         /// (the accepted drift is recorded as an event in the run log).
         #[arg(long = "allow-environment-drift")]
         allow_environment_drift: bool,
+    },
+    /// Block until a run finishes, needs input (a question, a review, a
+    /// supervisor decision) or stops, then print why. A single call that
+    /// costs an agent nothing while it blocks, unlike polling `apb runs`.
+    /// Exit codes: 0 succeeded, 1 failed or aborted, 3 needs input,
+    /// 4 paused or driverless, 5 timeout, 2 error
+    Wait {
+        run_id: String,
+        /// Give up after this many seconds (default: no limit)
+        #[arg(long, value_name = "SECS")]
+        timeout: Option<u64>,
     },
     /// Stop a run: interrupt whatever node it is executing right now, and
     /// finalize it outright if the process driving it is gone
@@ -307,6 +336,21 @@ enum Command {
     },
 }
 
+/// Whether this invocation auto-registers its cwd in the project registry.
+/// The hidden re-exec targets (`__drive-supervised`, `__drive-run`,
+/// `__ask-server`) are spawned by an apb process that already registered the
+/// project, so they must not: `__drive-run` works on its `--root`, not its cwd,
+/// and `__ask-server` inherits the coding agent's cwd, which can be any
+/// directory.
+fn registers_workspace(command: Option<&Command>) -> bool {
+    !matches!(
+        command,
+        Some(
+            Command::DriveSupervised { .. } | Command::DriveRun { .. } | Command::AskServer { .. }
+        )
+    )
+}
+
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let root = std::env::current_dir().expect("cwd");
@@ -316,8 +360,15 @@ fn main() -> ExitCode {
     // command. Done at the process entry point rather than in WfMcp::new, so
     // that constructing the server in tests does not write to the real
     // ~/.config/playbook.
-    if root.join(".apb").is_dir() {
+    if registers_workspace(cli.command.as_ref()) && root.join(".apb").is_dir() {
         apb_core::projects::touch(&root);
+    }
+    // The key that stamps the runs this installation creates (see
+    // `apb_core::run_origin`), so an MCP resume can refuse a run directory
+    // that came with a repository. Created on first use; best effort, like the
+    // registration above: without it runs are simply unstamped.
+    if registers_workspace(cli.command.as_ref()) {
+        let _ = apb_core::run_origin::ensure_key();
     }
     match cli.command {
         Some(Command::Init) => run_init(&root),
@@ -328,6 +379,8 @@ fn main() -> ExitCode {
             export_cmd(&root, &name, version.as_deref(), out.as_deref())
         }
         Some(Command::Import { file, no_current }) => import_cmd(&root, &file, !no_current),
+        Some(Command::Trash { action }) => trash_cmd(&root, action),
+        Some(Command::Trust { action }) => trust_cmd(action),
         Some(Command::Run {
             name,
             version,
@@ -335,6 +388,7 @@ fn main() -> ExitCode {
             params,
             allow_shared_workdir,
             supervise,
+            detach,
             overrides,
             no_cache,
             refresh_cache,
@@ -347,6 +401,7 @@ fn main() -> ExitCode {
             params,
             allow_shared_workdir,
             supervise,
+            detach,
             overrides.as_deref(),
             no_cache,
             refresh_cache,
@@ -364,6 +419,7 @@ fn main() -> ExitCode {
             allow_environment_drift,
         ),
         Some(Command::Stop { run_id }) => stop_cmd(&root, &run_id),
+        Some(Command::Wait { run_id, timeout }) => wait_cmd(&root, &run_id, timeout),
         Some(Command::Note { run_id, text }) => note_cmd(&root, &run_id, &text),
         Some(Command::Review {
             run_id,
@@ -440,5 +496,78 @@ fn main() -> ExitCode {
                 ExitCode::from(2)
             }
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn registers(args: &[&str]) -> bool {
+        let cli = Cli::try_parse_from(args).expect("args parse");
+        registers_workspace(cli.command.as_ref())
+    }
+
+    /// F18: llms.txt is what an agent reads to learn the CLI; its command
+    /// list must name every public subcommand clap registers.
+    #[test]
+    fn llms_txt_lists_every_public_command() {
+        use clap::CommandFactory;
+        let llms = include_str!("../../../llms.txt");
+        let section = llms
+            .split("## CLI commands")
+            .nth(1)
+            .and_then(|rest| rest.split("\n## ").next())
+            .expect("llms.txt has a `## CLI commands` section");
+        let missing: Vec<String> = Cli::command()
+            .get_subcommands()
+            .filter(|c| !c.is_hide_set())
+            .map(|c| c.get_name().to_string())
+            .filter(|name| {
+                !section
+                    .lines()
+                    .any(|l| l.starts_with(&format!("apb {name} ")) || l == format!("apb {name}"))
+            })
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "commands missing from llms.txt: {missing:?}"
+        );
+    }
+
+    #[test]
+    fn user_facing_commands_register_the_workspace() {
+        assert!(registers(&["apb"]));
+        assert!(registers(&["apb", "list"]));
+        assert!(registers(&["apb", "mcp"]));
+    }
+
+    #[test]
+    fn internal_reexec_targets_do_not_register_the_workspace() {
+        assert!(!registers(&[
+            "apb",
+            "__drive-run",
+            "--root",
+            "/r",
+            "--run-id",
+            "x"
+        ]));
+        assert!(!registers(&[
+            "apb",
+            "__drive-supervised",
+            "pb",
+            "--handshake",
+            "/h"
+        ]));
+        assert!(!registers(&[
+            "apb",
+            "__ask-server",
+            "--run",
+            "r",
+            "--node",
+            "n",
+            "--attempt",
+            "1"
+        ]));
     }
 }

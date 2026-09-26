@@ -88,7 +88,7 @@ pub(crate) fn scan_control(
             }
             Control::ContextAppend { note } => {
                 log.append(EventPayload::SupervisorAction {
-                    action: "context_append".into(),
+                    action: crate::event::supervisor_action::CONTEXT_APPEND.into(),
                     node: None,
                     detail: note,
                 })?;

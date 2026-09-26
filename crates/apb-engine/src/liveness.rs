@@ -4,7 +4,7 @@
 //! share one bias:
 //!
 //!   * is OS process `pid` running (`pid_alive`, `pid_is_live`);
-//!   * is a process really driving run `<id>` right now (`driver_is_live`);
+//!   * is a process really driving run `<id>` right now (`driver_alive`);
 //!   * what does the run journal say about attempts that never closed
 //!     (`open_attempts`, `node_times`, `lost_nodes`).
 //!
@@ -58,7 +58,7 @@ fn probeable_pid(pid: u32) -> Option<i32> {
 /// The raw primitive: does process `pid` exist? Cheaper than `process_probe`
 /// and enough where a pid cannot have been reused (the workdir lock, held for
 /// the lifetime of one process). Anything that must survive pid reuse wants
-/// `driver_is_live` instead.
+/// `driver_alive` instead.
 ///
 /// This is the `kill(pid, 0)` syscall, not a `kill -0` subprocess. The
 /// subprocess form was both a portability hazard (BSD and procps-ng `kill`
@@ -225,7 +225,7 @@ pub(crate) fn process_probe(pid: u32) -> Probe {
 /// Single-pid liveness with the module's bias: only a probe that positively
 /// reports "no such process" counts as dead.
 ///
-/// Unlike `driver_is_live` this does NOT defend against pid reuse - it cannot,
+/// Unlike `driver_pid_is_live` this does NOT defend against pid reuse - it cannot,
 /// because a bare pid carries no identity. Callers that hold a pid recorded
 /// long ago and would take a destructive action on "dead" want the argv-aware
 /// check; callers that only report a fact (`run_status`, `doctor --run`) want
@@ -238,34 +238,39 @@ pub fn pid_is_live(pid: u32) -> bool {
     !matches!(process_probe(pid), Probe::NotFound)
 }
 
+/// Whether `pid` is a live `apb` process. For a record naming an apb process
+/// (the dashboard's `serve.lock`): a pid that was reused by an unrelated
+/// program reads as gone. Biased toward "live" when the probe cannot tell.
+pub fn apb_pid_is_live(pid: u32) -> bool {
+    if pid == std::process::id() {
+        return true;
+    }
+    match process_probe(pid) {
+        Probe::NotFound => false,
+        Probe::Unknown => true,
+        Probe::Running(argv) => argv_program_is_apb(&argv),
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Driver liveness
 // ---------------------------------------------------------------------------
 
-/// Is a process really driving this run right now?
+/// Is the process `pid`, read from `driver.pid`, really driving this run?
 ///
 /// `driver.pid` alone cannot answer this. Drivers lead their own process group
 /// and are reaped promptly, so their pids are released and REUSED: a bare
 /// `kill -0` would happily succeed for a completely unrelated process that
 /// inherited the number, and we would leave a dead run unfinalized forever.
-///
 /// The disambiguator is free: a detached driver's argv carries
 /// `--run-id <id>`. Around that definitive signal the rule keeps the module's
 /// bias toward "live".
-pub fn driver_is_live(run_dir: &Path, run_id: &str) -> bool {
-    match crate::driver::read_driver_pid(run_dir) {
-        Some(pid) => driver_pid_is_live(pid, run_id),
-        None => false,
-    }
-}
-
-/// The same rule against a pid the caller has ALREADY read from `driver.pid`.
 ///
-/// Callers that need both the pid and the verdict must go through this rather
-/// than reading the file and then calling `driver_is_live`, which would read it
-/// a second time. A drive that finishes cleanly between the two reads removes
-/// the file, so the second read finds nothing and the pair reports "there is a
-/// driver, and it is dead" for a run that in fact just completed normally.
+/// Takes the pid the caller has ALREADY read: reading the file a second time
+/// would let a drive that finishes cleanly between the two reads (and removes
+/// the file) read as "there is a driver, and it is dead". Callers that want
+/// the run's whole drive claim, parent-driven children included, use
+/// [`driver_alive`].
 pub fn driver_pid_is_live(pid: u32, run_id: &str) -> bool {
     // A drive running on a thread of THIS process (the CLI's synchronous run,
     // the in-process background drive) needs no probing and cannot be a
@@ -415,6 +420,9 @@ pub struct OpenAttempt {
     /// over `started_ms` for ordering against later journal entries: two
     /// events can share a wall-clock millisecond, but seq never ties.
     pub started_seq: u64,
+    /// The drive journaled `attempt_exited`: it saw the process exit and is
+    /// finishing the attempt (issue #107).
+    pub exited: bool,
 }
 
 /// Every attempt still open at the end of the journal, ordered by node then
@@ -422,13 +430,28 @@ pub struct OpenAttempt {
 /// separate because the fold deliberately throws away the pid and the
 /// timestamp, which are exactly what liveness needs.
 pub fn open_attempts(events: &[Event]) -> Vec<OpenAttempt> {
-    let mut open: BTreeMap<(String, u32), (u128, u64, Option<u32>)> = BTreeMap::new();
+    let mut open: BTreeMap<(String, u32), OpenAttempt> = BTreeMap::new();
     for e in events {
         match &e.payload {
             EventPayload::AttemptStarted {
                 node, attempt, pid, ..
             } => {
-                open.insert((node.clone(), *attempt), (e.ts, e.seq, *pid));
+                open.insert(
+                    (node.clone(), *attempt),
+                    OpenAttempt {
+                        node: node.clone(),
+                        attempt: *attempt,
+                        pid: *pid,
+                        started_ms: e.ts,
+                        started_seq: e.seq,
+                        exited: false,
+                    },
+                );
+            }
+            EventPayload::AttemptExited { node, attempt } => {
+                if let Some(a) = open.get_mut(&(node.clone(), *attempt)) {
+                    a.exited = true;
+                }
             }
             EventPayload::AttemptFinished { node, attempt, .. } => {
                 open.remove(&(node.clone(), *attempt));
@@ -442,17 +465,7 @@ pub fn open_attempts(events: &[Event]) -> Vec<OpenAttempt> {
             _ => {}
         }
     }
-    open.into_iter()
-        .map(
-            |((node, attempt), (started_ms, started_seq, pid))| OpenAttempt {
-                node,
-                attempt,
-                pid,
-                started_ms,
-                started_seq,
-            },
-        )
-        .collect()
+    open.into_values().collect()
 }
 
 /// Per-node timings surfaced by `run_status`. Without these "is it stuck or
@@ -614,6 +627,33 @@ pub fn lost_nodes(events: &[Event]) -> BTreeSet<String> {
         .collect()
 }
 
+/// Nodes whose open attempt's process is gone but whose drive journaled the
+/// exit itself (`attempt_exited`) and is finishing the attempt: reading its
+/// status file, running its `success_check` (issue #107). Under a live drive
+/// these are in flight, not lost; the reporting functions below apply that
+/// only when the caller knows the drive claim holds. The entry reaper still
+/// sees them in [`dead_open_attempts`]: a new drive only starts once the old
+/// one is gone, and then nothing will finish them.
+pub fn finishing_nodes(events: &[Event]) -> BTreeSet<String> {
+    dead_open_attempts(events)
+        .into_iter()
+        .filter(|a| a.exited)
+        .map(|a| a.node)
+        .collect()
+}
+
+/// [`lost_nodes`] as a reader with the run's drive claim should report them:
+/// under a live drive, an attempt the drive itself saw exit is being finished,
+/// not lost.
+fn reported_lost_nodes(events: &[Event], driver_alive: Option<bool>) -> BTreeSet<String> {
+    let mut lost = lost_nodes(events);
+    if driver_alive == Some(true) {
+        let finishing = finishing_nodes(events);
+        lost.retain(|n| !finishing.contains(n));
+    }
+    lost
+}
+
 /// Nodes whose currently open attempt process is still alive. The pure fold
 /// maps an open `attempt_started` to `interrupted` (crash-shape for offline
 /// readers); live reporting must re-promote those nodes to running so an
@@ -658,18 +698,27 @@ pub fn live_open_nodes(events: &[Event]) -> BTreeSet<String> {
 ///
 /// `driver_alive` must be the caller's own `liveness::driver_alive(run_dir,
 /// run_id)` result (or the equivalent computed elsewhere), NOT
-/// `driver_is_live`/`driver_pid_is_live`: a sub-playbook child never writes
+/// `driver_pid_is_live`: a sub-playbook child never writes
 /// its own `driver.pid` (it writes `driven_by`, and follows its parent's
 /// drive claim - see `driver_alive`'s own doc), so a plain pid check reads a
 /// perfectly healthy, parent-driven child as driverless and this repair would
 /// never fire for it.
 ///
-/// This does NOT fix every transient `Interrupted` flicker a caller might see.
-/// A run genuinely mid-crash - the agent process just exited, `lost_nodes` is
-/// non-empty, but the drive thread is still running `success_check` and has
-/// not yet journaled `AttemptFinished` - is deliberately left `Interrupted`
-/// here: `lost_nodes` is by design unaffected by this change, and a
-/// wait/signal park is never what that shape actually is.
+/// A third repair (issue #107) covers the window between an agent process
+/// exiting and the drive journaling its `AttemptFinished`, while the drive
+/// reads the status file and runs `success_check`. The pid is gone, so the
+/// attempt is in `lost_nodes`; but the drive journaled `AttemptExited` when it
+/// saw the exit, so under a live drive claim (`driver_alive == Some(true)`)
+/// that attempt is being finished and the run reads `running`. An exited pid
+/// without that event, or under a claim that is absent or dead, is still
+/// reported as it was: real information about a crash.
+///
+/// A provably dead drive claim (`driver_alive == Some(false)`) wins over both
+/// repairs and over a pure `running`: the only process that could ever write
+/// this run's next event is gone, so whatever the journal last said, the run
+/// is `interrupted` until someone resumes it. Without this, a driver that died
+/// between two nodes left no open attempt behind, the fold kept reading
+/// `running`, and every wait on the run blocked until its own timeout.
 pub fn reported_run_status(
     events: &[Event],
     waiting: bool,
@@ -677,14 +726,25 @@ pub fn reported_run_status(
 ) -> crate::state::RunStatus {
     use crate::state::RunStatus;
     let pure = RunState::fold(events).run_status;
+    if pure.is_terminal() || pure == RunStatus::Paused {
+        return pure;
+    }
+    if driver_alive == Some(false) {
+        return RunStatus::Interrupted;
+    }
     if !matches!(pure, RunStatus::Interrupted) {
         return pure;
     }
     if !live_open_nodes(events).is_empty() {
         return RunStatus::Running;
     }
-    let parked_on_wait =
-        waiting && lost_nodes(events).is_empty() && matches!(driver_alive, Some(true));
+    // Issue #107: the agent exited and the live drive is finishing the attempt.
+    if driver_alive == Some(true) && !finishing_nodes(events).is_empty() {
+        return RunStatus::Running;
+    }
+    let parked_on_wait = waiting
+        && reported_lost_nodes(events, driver_alive).is_empty()
+        && matches!(driver_alive, Some(true));
     if parked_on_wait {
         return RunStatus::Running;
     }
@@ -694,22 +754,38 @@ pub fn reported_run_status(
 /// Per-node status string for live reporting: pure fold, with `lost` for a
 /// dead attempt pid and `running` for a live open attempt that the pure fold
 /// would otherwise call `interrupted` (issue #45 finding 9).
-pub fn reported_node_statuses(events: &[Event]) -> BTreeMap<String, String> {
+///
+/// `driver_alive` is the run's drive claim, as for [`reported_run_status`].
+/// When it is provably dead, a node still reading `running` becomes
+/// `interrupted`, like the run: no process will journal its verdict. Without
+/// this, a node whose work never journaled a pid (a script node, a spawn that
+/// recorded none) read `running` forever under an `interrupted` run, because
+/// only a journaled pid can make a node `lost`.
+pub fn reported_node_statuses(
+    events: &[Event],
+    driver_alive: Option<bool>,
+) -> BTreeMap<String, String> {
     let state = RunState::fold(events);
-    let lost = lost_nodes(events);
-    let live = live_open_nodes(events);
+    let lost = reported_lost_nodes(events, driver_alive);
+    let mut live = live_open_nodes(events);
+    if driver_alive == Some(true) {
+        live.extend(finishing_nodes(events));
+    }
+    let driver_dead = driver_alive == Some(false);
     state
         .nodes
         .iter()
         .map(|(k, v)| {
             let status = if lost.contains(k) {
-                LOST.to_string()
+                LOST
+            } else if driver_dead && (live.contains(k) || *v == NodeStatus::Running) {
+                NodeStatus::Interrupted.as_str()
             } else if live.contains(k) {
-                NodeStatus::Running.as_str().to_string()
+                NodeStatus::Running.as_str()
             } else {
-                v.as_str().to_string()
+                v.as_str()
             };
-            (k.clone(), status)
+            (k.clone(), status.to_string())
         })
         .collect()
 }
@@ -751,7 +827,6 @@ mod tests {
             std::process::id().to_string().as_bytes(),
         )
         .unwrap();
-        assert!(driver_is_live(dir.path(), "any-run"));
         assert_eq!(driver_alive(dir.path(), "any-run"), Some(true));
     }
 
@@ -883,13 +958,12 @@ mod tests {
         assert!(driver_pid_is_live(std::process::id(), "any-run"));
         // The file-reading entry point, on the same directory, correctly says
         // there is no driver - which is what a second read would have returned.
-        assert!(!driver_is_live(dir.path(), "any-run"));
+        assert_eq!(driver_alive(dir.path(), "any-run"), None);
     }
 
     #[test]
     fn a_missing_pid_file_means_no_driver() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(!driver_is_live(dir.path(), "any-run"));
         // Reported as "nothing claims this run", not as "the claim is false".
         assert_eq!(driver_alive(dir.path(), "any-run"), None);
     }
@@ -1314,7 +1388,9 @@ mod tests {
             crate::state::RunStatus::Running
         );
         assert_eq!(
-            reported_node_statuses(&events).get("a").map(String::as_str),
+            reported_node_statuses(&events, None)
+                .get("a")
+                .map(String::as_str),
             Some("running")
         );
         assert!(live_open_nodes(&events).contains("a"));
@@ -1427,7 +1503,7 @@ edges:
     /// The glue a real caller runs: `progress::from_run_dir` must actually
     /// report `waiting_on` for the parked `w` node, and `liveness::driver_alive`
     /// (the parent-aware check every call site is required to use - NOT
-    /// `driver_is_live`) must actually report the live driver claim as
+    /// a bare pid check) must actually report the live driver claim as
     /// `Some(true)`, so the facts fed into the pure predicate above are the
     /// real ones a caller would compute.
     #[test]
@@ -1567,5 +1643,58 @@ edges:
         .unwrap();
 
         assert_eq!(driver_alive(&child_dir, "child-2"), Some(true));
+    }
+
+    /// Issue #107: an attempt whose pid is gone reads `running` only when the
+    /// drive journaled `attempt_exited` for it AND the drive claim holds. The
+    /// same exit without that event, or under a claim that is absent or dead,
+    /// is still a crash to report; and the entry reaper still sees the
+    /// attempt, since a new drive only starts once the old one is gone.
+    #[test]
+    fn an_exited_attempt_reads_running_only_under_a_live_drive_that_journaled_it() {
+        use crate::state::RunStatus;
+        let started = vec![
+            ev(
+                0,
+                1_000,
+                EventPayload::NodeStarted {
+                    node: "a".into(),
+                    attempt: 1,
+                },
+            ),
+            ev(1, 2_000, attempt_started("a", 1, Some(u32::MAX))),
+        ];
+        let mut exited = started.clone();
+        exited.push(ev(
+            2,
+            3_000,
+            EventPayload::AttemptExited {
+                node: "a".into(),
+                attempt: 1,
+            },
+        ));
+        let cases = [
+            (&exited, Some(true), RunStatus::Running, "running"),
+            (&exited, None, RunStatus::Interrupted, LOST),
+            (&exited, Some(false), RunStatus::Interrupted, LOST),
+            (&started, Some(true), RunStatus::Interrupted, LOST),
+        ];
+        for (events, driver, run, node) in cases {
+            assert_eq!(
+                reported_run_status(events, false, driver),
+                run,
+                "{driver:?} exited={}",
+                events.len() == 3
+            );
+            assert_eq!(
+                reported_node_statuses(events, driver)
+                    .get("a")
+                    .map(String::as_str),
+                Some(node),
+                "{driver:?} exited={}",
+                events.len() == 3
+            );
+        }
+        assert_eq!(dead_open_attempts(&exited).len(), 1, "still reapable");
     }
 }

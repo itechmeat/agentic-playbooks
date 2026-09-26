@@ -45,8 +45,17 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 /// through the engine with the options the tool would have used. The tool's
 /// own launch path is covered end-to-end against the real binary in
 /// `apb-cli/tests/suite/detached_driver_test.rs`.
-fn start_supervised_in_process(root: &Path, id: &str, params: BTreeMap<String, String>) -> String {
-    apb_engine::run_background(
+///
+/// Returns the run id and a guard that ends the drive before the test's
+/// TempDir goes: declared after the TempDir, it drops first. A drive thread
+/// still writing while the TempDir is being removed would otherwise leave a
+/// half-deleted run tree behind.
+fn start_supervised_in_process(
+    root: &Path,
+    id: &str,
+    params: BTreeMap<String, String>,
+) -> (String, InProcessRun) {
+    let run_id = apb_engine::run_background(
         root,
         id,
         None,
@@ -56,7 +65,37 @@ fn start_supervised_in_process(root: &Path, id: &str, params: BTreeMap<String, S
             ..Default::default()
         },
     )
-    .unwrap()
+    .unwrap();
+    let guard = InProcessRun {
+        root: root.to_path_buf(),
+        run_id: run_id.clone(),
+    };
+    (run_id, guard)
+}
+
+/// See [`start_supervised_in_process`]: on drop, stops the run unless it
+/// already ended and waits (bounded) for its drive to journal the end.
+struct InProcessRun {
+    root: std::path::PathBuf,
+    run_id: String,
+}
+
+impl Drop for InProcessRun {
+    fn drop(&mut self) {
+        let ended = || {
+            run_status(&self.root, &self.run_id)
+                .ok()
+                .and_then(|s| s["run_status"].as_str().map(str::to_string))
+                .is_some_and(|s| matches!(s.as_str(), "succeeded" | "failed" | "aborted"))
+        };
+        if !ended() {
+            let _ = apb_engine::stop_run(&self.root, &self.run_id);
+        }
+        let start = Instant::now();
+        while !ended() && start.elapsed() < POLL_DEADLINE {
+            std::thread::sleep(POLL_STEP);
+        }
+    }
 }
 
 fn set_executable(path: &Path) {
@@ -154,7 +193,7 @@ fn supervised_no_agent_run_reaches_succeeded() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     wait_for_status(dir.path(), &run_id, "succeeded");
 }
@@ -234,7 +273,7 @@ fn supervised_wake_context_append_and_retry_recovers() {
         std::env::set_var("APB_AGENT_CMD", &prog);
     }
 
-    let run_id = start_supervised_in_process(dir.path(), "supflow_mcp", BTreeMap::new());
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "supflow_mcp", BTreeMap::new());
 
     let wake = poll_until("a non-null wake from supervisor_wait_event", || {
         let out = supervisor_wait_event(dir.path(), &run_id, None, Some(2_000)).unwrap();
@@ -345,7 +384,7 @@ fn interrupt_attempt_posts_command() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     let v = interrupt_attempt(dir.path(), &run_id, Some("wedged"), None).unwrap();
     assert!(
@@ -390,7 +429,7 @@ fn interrupt_attempt_forwards_the_targeted_node() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     let v = interrupt_attempt(dir.path(), &run_id, Some("branch is wedged"), Some("work")).unwrap();
     assert!(
@@ -432,7 +471,7 @@ fn supervisor_report_write_then_read() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
     wait_for_status(dir.path(), &run_id, "succeeded");
 
     supervisor_report(dir.path(), &run_id, "final summary").unwrap();
@@ -449,7 +488,7 @@ fn run_continue_from_posts_command() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     let v = run_continue_from(dir.path(), &run_id, "note").unwrap();
     assert!(
@@ -590,7 +629,7 @@ fn write_supervisor_session_is_findable_without_in_memory_table() {
 
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
-    let run_id = start_supervised_in_process(dir.path(), "noagent_sv", params);
+    let (run_id, _drive) = start_supervised_in_process(dir.path(), "noagent_sv", params);
 
     apb_engine::write_supervisor_session(
         dir.path(),
@@ -604,4 +643,80 @@ fn write_supervisor_session_is_findable_without_in_memory_table() {
     let (found_run_id, caps) = found.expect("expected sv-disk-1 to resolve from disk");
     assert_eq!(found_run_id, run_id);
     assert_eq!(caps, vec!["observe".to_string(), "retry".to_string()]);
+}
+
+/// Token economy: the wait answer carries the cursor for the next call and
+/// caps a huge wake detail (a failed node's whole output) to its tail, so the
+/// supervisor does not pay for it on every later turn.
+#[test]
+fn supervisor_wait_event_returns_a_cursor_and_clips_huge_details() {
+    use apb_engine::event::{EventLog, EventPayload, WakeTrigger};
+    let dir = tempfile::tempdir().unwrap();
+    let rd = dir.path().join(".apb/runs/big");
+    let mut log = EventLog::create(&rd).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "w".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    let detail = format!("{}FATAL: the real error", "x".repeat(100_000));
+    let wake = log
+        .append(EventPayload::WakeRaised {
+            trigger: WakeTrigger::NodeFailed,
+            node: "impl".into(),
+            detail,
+        })
+        .unwrap();
+    log.append(EventPayload::RunFinished {
+        outcome: "failed".into(),
+    })
+    .unwrap();
+
+    let out = supervisor_wait_event(dir.path(), "big", None, Some(2_000)).unwrap();
+    assert_eq!(out["reason"], "wake");
+    assert_eq!(out["next_after_seq"], wake.seq);
+    assert_eq!(out["wake"]["detail_truncated"], true);
+    let kept = out["wake"]["detail"].as_str().unwrap();
+    assert!(kept.len() < 17 * 1024, "kept {} bytes", kept.len());
+    assert!(kept.ends_with("FATAL: the real error"));
+
+    let out = supervisor_wait_event(dir.path(), "big", Some(wake.seq), Some(2_000)).unwrap();
+    assert_eq!(out["reason"], "ended");
+    assert!(out["wake"].is_null());
+    assert_eq!(out["next_after_seq"], wake.seq);
+}
+
+/// Token economy: node outputs are not shipped a third time inside `events`
+/// unless the supervisor asks for the raw texts.
+#[test]
+fn run_inspect_elides_long_event_texts_unless_asked() {
+    use apb_engine::event::{EventLog, EventPayload, WakeTrigger};
+    let dir = tempfile::tempdir().unwrap();
+    let rd = dir.path().join(".apb/runs/ins");
+    let mut log = EventLog::create(&rd).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "w".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    let big = "y".repeat(20_000);
+    log.append(EventPayload::WakeRaised {
+        trigger: WakeTrigger::NodeFailed,
+        node: "impl".into(),
+        detail: big.clone(),
+    })
+    .unwrap();
+
+    let compact = sv_run_inspect(dir.path(), "ins").unwrap();
+    let text = compact["events"].to_string();
+    assert!(!text.contains(&big), "events must not repeat the long text");
+    assert!(text.contains("bytes elided"));
+    // The wake itself still carries the full detail.
+    assert_eq!(
+        compact["wakes"][0]["detail"].as_str().unwrap().len(),
+        20_000
+    );
+
+    let full = apb_mcp::tools::sv_run_inspect_with(dir.path(), "ins", true).unwrap();
+    assert!(full["events"].to_string().contains(&big));
 }

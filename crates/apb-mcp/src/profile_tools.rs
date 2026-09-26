@@ -44,12 +44,22 @@ fn compute_bundle_for(
     scope: ProfileScope,
     name: &str,
 ) -> Result<String, ProfileError> {
+    compute_bundle_pairs(root, scope, name).map(|(_pairs, bundle)| bundle)
+}
+
+/// The bundle digest together with its `(qualified skill ref, skill digest)`
+/// pairs, for a profile on disk.
+fn compute_bundle_pairs(
+    root: &Path,
+    scope: ProfileScope,
+    name: &str,
+) -> Result<(Vec<(String, String)>, String), ProfileError> {
     let r = apb_core::profile::QualifiedProfileRef {
         name: name.to_string(),
         scope,
     };
-    let (_loaded, _pairs, bundle) = profile_store::compute_bundle(root, origin_for(scope), &r)?;
-    Ok(bundle)
+    let (_loaded, pairs, bundle) = profile_store::compute_bundle(root, origin_for(scope), &r)?;
+    Ok((pairs, bundle))
 }
 
 /// A list of profiles in both scopes with bundle trust status.
@@ -140,9 +150,15 @@ pub struct ProfileWrite {
     /// creates a new profile.
     pub expected_digest: Option<String>,
     pub soul_requirement: SoulRequirement,
-    /// When true, the executor launches with hermetic isolation (disables
-    /// user-scope plugins and hooks). Default false.
-    pub hermetic: bool,
+    /// The agent environment (`minimal`, the default, or `full`, the opt-in
+    /// to the operator's whole personal setup). `None` keeps the stored
+    /// profile's value on an update (absent, so minimal, for a new profile),
+    /// so a surface that cannot express it never strips an opt-in.
+    pub environment: Option<apb_core::profile::AgentEnvironment>,
+    /// The ZCode mode for the profile's zcode steps in an autonomous run.
+    /// `None` keeps the stored value on an update (absent for a new profile),
+    /// like `environment`.
+    pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
 }
 
 /// Create/update a profile (CAS under a per-profile lock, spec 9.1).
@@ -156,30 +172,48 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         executor,
         expected_digest,
         soul_requirement,
-        hermetic,
+        environment,
+        zcode_mode,
     } = req;
     apb_core::profile::validate_profile_name(&name).map_err(ToolError::Engine)?;
     let scope_enum = parse_scope(&scope)?;
     let parent = scope_dir(root, scope_enum)?;
     std::fs::create_dir_all(&parent).map_err(|e| ToolError::Engine(e.to_string()))?;
 
-    let doc = ProfileDoc {
+    // zcode models: stored in the canonical bare spelling (the legacy
+    // `zai-individual/` prefix is accepted and dropped) and refused outside
+    // apb's allowlist, for the primary and every fallback.
+    let zcode_model = |agent: &str, model: String| -> Result<String, ToolError> {
+        if agent != apb_core::zcode::AGENT_ID {
+            return Ok(model);
+        }
+        let family = apb_core::zcode::home_dir()
+            .map(|h| apb_core::zcode::account_family(&h))
+            .unwrap_or_else(|| apb_core::zcode::DEFAULT_FAMILY.to_string());
+        apb_core::zcode::check_model_allowed(&model, &family).map_err(ToolError::Engine)?;
+        Ok(apb_core::zcode::canonical_model(&model, &family))
+    };
+    let primary_model = zcode_model(&executor.agent, executor.model)?;
+    let mut fallbacks = Vec::with_capacity(executor.fallbacks.len());
+    for (agent, model) in executor.fallbacks {
+        let model = zcode_model(&agent, model)?;
+        fallbacks.push(ProfileFallback { agent, model });
+    }
+    let mut doc = ProfileDoc {
         name: name.clone(),
         description,
         executor: ProfileExecutor {
             agent: executor.agent,
-            model: executor.model,
-            fallbacks: executor
-                .fallbacks
-                .into_iter()
-                .map(|(agent, model)| ProfileFallback { agent, model })
-                .collect(),
+            model: primary_model,
+            fallbacks,
         },
         soul: soul_requirement,
         skills,
-        hermetic,
+        // `minimal` is the default and is written as the absence of the key.
+        environment: environment.filter(|e| *e != apb_core::profile::AgentEnvironment::Minimal),
+        hermetic: None,
+        zcode_mode,
     };
-    let yaml = serde_yaml_ng::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
 
     // Validation: the agent is known (builtin or config) - both the primary and EVERY
     // fallback; an unknown agent is a refusal, not a warning (spec 9.1).
@@ -234,8 +268,28 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
                     "expected_digest does not match current".into(),
                 ));
             }
+            // An update that does not state `environment` keeps the stored
+            // value (read under the lock, from the exact content the CAS
+            // matched).
+            let stored = ProfileDoc::from_yaml(&cur_yaml).ok();
+            if environment.is_none() {
+                doc.environment = stored.as_ref().and_then(|d| d.environment);
+            }
+            // Likewise `zcode_mode`.
+            if zcode_mode.is_none() {
+                doc.zcode_mode = stored.and_then(|d| d.zcode_mode);
+            }
         }
     }
+    let yaml = serde_yaml_ng::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;
+    // The bundle as it stands before this write (old profile, live skills),
+    // read under the lock: whether its skill content was approved decides
+    // below whether the write may vouch for the skills it keeps.
+    let prior = if exists {
+        compute_bundle_pairs(root, scope_enum, &name).ok()
+    } else {
+        None
+    };
 
     // Publish as a whole directory (not two independent files): assemble into
     // staging, then swap under the already-held lock (writers are serialized by
@@ -272,30 +326,61 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
     }
 
     let profile_digest = apb_core::profile::profile_digest(&yaml, &soul_md);
-    // Bundle from the live tree (just written) + auto-approve.
-    let bundle = compute_bundle_for(root, scope_enum, &name)
+    // Bundle from the live tree (just written) + auto-approve. The write
+    // authored profile.yaml and SOUL.md, not the skills, so it vouches only
+    // for skill content that was already approved: a skill the profile kept
+    // is vouched for when the bundle before the write was approved, a skill
+    // this write newly names (or a new profile's skills) by the user's choice
+    // in this write. A kept skill whose content changed since the last
+    // approval leaves the bundle untrusted, and is returned for consent.
+    let (pairs, bundle) = compute_bundle_pairs(root, scope_enum, &name)
         .map_err(|e| ToolError::Engine(e.to_string()))?;
     let mut trust = TrustStore::load();
+    let skills_unapproved: Vec<Value> = match &prior {
+        None => Vec::new(),
+        Some((prior_pairs, prior_bundle)) => {
+            let prior_ok = trust.is_approved(prior_bundle);
+            pairs
+                .iter()
+                .filter(|(r, d)| {
+                    prior_pairs
+                        .iter()
+                        .find(|(pr, _)| pr == r)
+                        .is_some_and(|(_, pd)| !(prior_ok && pd == d))
+                })
+                .map(|(r, d)| json!({ "skill": r, "digest": d }))
+                .collect()
+        }
+    };
     let mut trust_write_failed = false;
-    if trust
-        .approve_kind(
-            &bundle,
-            &name,
-            Kind::ProfileBundle,
-            OriginKind::AgentGenerated,
-        )
-        .is_err()
+    if skills_unapproved.is_empty()
+        && trust
+            .approve_kind(
+                &bundle,
+                &name,
+                Kind::ProfileBundle,
+                OriginKind::AgentGenerated,
+            )
+            .is_err()
     {
         trust_write_failed = true;
     }
-    Ok(json!({
+    let mut out = json!({
         "name": name,
         "scope": scope,
         "profile_digest": profile_digest,
         "bundle_digest": bundle,
+        "trusted": skills_unapproved.is_empty() && !trust_write_failed,
         "warnings": warnings,
         "trust_write_failed": trust_write_failed,
-    }))
+    });
+    if !skills_unapproved.is_empty() {
+        out["skills_unapproved"] = json!(skills_unapproved);
+        out["detail"] = json!(
+            "these skills changed since the profile was last approved; review them, then run with acknowledge_untrusted: true after user confirmation"
+        );
+    }
+    Ok(out)
 }
 
 /// Moving a profile between scopes: copy semantics (spec 4.2). The source
@@ -351,7 +436,7 @@ pub fn profile_move(root: &Path, name: &str, from: &str, to: &str) -> Result<Val
                 .to_string(),
         ));
     }
-    copy_dir(&src, &dst).map_err(|e| ToolError::Engine(e.to_string()))?;
+    apb_core::fsutil::copy_tree(&src, &dst).map_err(|e| ToolError::Engine(e.to_string()))?;
     Ok(json!({ "name": name, "from": from, "to": to, "copied": true }))
 }
 
@@ -429,21 +514,6 @@ fn playbook_references(playbook: &apb_core::schema::Playbook, name: &str) -> boo
         .nodes
         .iter()
         .any(|n| matches!(&n.kind, NodeKind::AgentTask { profile, .. } if matches(profile)))
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
-    }
-    Ok(())
 }
 
 /// Skills for profile_write from a plain list of strings (scope auto).

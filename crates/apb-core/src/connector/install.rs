@@ -220,6 +220,120 @@ pub fn install_official(name: &str, force: bool) -> Result<InstallReport, Instal
     })
 }
 
+/// What [`reconcile_official`] did with one installed official connector whose
+/// files differ from the copy embedded in the running binary.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reconciled {
+    /// The installed tree was a pristine copy an earlier apb installed (its
+    /// digest is trusted with origin `Bundled`), so it was replaced by the
+    /// embedded version.
+    Updated {
+        name: String,
+        from_version: String,
+        to_version: String,
+    },
+    /// The installed tree carries local changes (or an approval the user gave
+    /// by hand), so it was left alone; the embedded version is offered as an
+    /// update instead (`apb connector install <name> --force`).
+    UpdateAvailable {
+        name: String,
+        installed_version: String,
+        embedded_version: String,
+    },
+    /// The installed copy was pristine but replacing it failed.
+    Failed { name: String, error: String },
+}
+
+/// Whether the files under `dir` are exactly the embedded `official` files:
+/// the same relative paths with the same bytes, nothing more, nothing less.
+fn matches_embedded(dir: &std::path::Path, official: &official::OfficialConnector) -> bool {
+    fn collect(
+        base: &std::path::Path,
+        dir: &std::path::Path,
+        out: &mut std::collections::BTreeMap<String, Vec<u8>>,
+    ) -> std::io::Result<()> {
+        for entry in std::fs::read_dir(dir)? {
+            let entry = entry?;
+            let path = entry.path();
+            let ty = entry.file_type()?;
+            if ty.is_dir() {
+                collect(base, &path, out)?;
+            } else {
+                let rel = path
+                    .strip_prefix(base)
+                    .map_err(std::io::Error::other)?
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                out.insert(rel, std::fs::read(&path)?);
+            }
+        }
+        Ok(())
+    }
+    let mut on_disk = std::collections::BTreeMap::new();
+    collect(dir, dir, &mut on_disk).is_ok() && on_disk == official.files
+}
+
+/// The embedded version of `name` when it is an official connector whose
+/// installed copy differs from the one in this binary (`None` when it matches,
+/// is not installed, or is not official). Read-only: the one "update
+/// available" check every connector listing uses.
+pub fn embedded_update(name: &str) -> Option<String> {
+    let official = official::get(name)?;
+    let dir = store::connectors_dir()?.join(name);
+    if !dir.is_dir() || matches_embedded(&dir, &official) {
+        return None;
+    }
+    Some(official.version)
+}
+
+/// Brings installed official connectors in line with the copies embedded in
+/// the running binary after an upgrade. A copy that is exactly what an earlier
+/// apb installed (its tree digest is trusted with origin `Bundled`) is replaced
+/// by the embedded version, trust included; a copy with local changes is left
+/// alone and reported as [`Reconciled::UpdateAvailable`]. Connectors that
+/// already match, and non-official connectors, produce no entry.
+pub fn reconcile_official() -> Vec<Reconciled> {
+    let trust = crate::trust::TrustStore::load();
+    let limits = crate::content::TreeLimits::default();
+    let Some(base) = store::connectors_dir() else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    for installed in store::list() {
+        let Some(official) = official::get(&installed.name) else {
+            continue;
+        };
+        let dir = base.join(&installed.name);
+        if matches_embedded(&dir, &official) {
+            continue;
+        }
+        let pristine = crate::content::tree_digest(&dir, &limits)
+            .ok()
+            .and_then(|d| trust.origin(&d))
+            == Some(crate::trust::OriginKind::Bundled);
+        if !pristine {
+            out.push(Reconciled::UpdateAvailable {
+                name: installed.name,
+                installed_version: installed.version,
+                embedded_version: official.version,
+            });
+            continue;
+        }
+        out.push(match install_official(&installed.name, true) {
+            Ok(report) => Reconciled::Updated {
+                name: installed.name,
+                from_version: installed.version,
+                to_version: report.version,
+            },
+            Err(e) => Reconciled::Failed {
+                name: installed.name,
+                error: e.to_string(),
+            },
+        });
+    }
+    out
+}
+
 /// Removes the installed connector `name`, that is the single directory
 /// `<config_dir>/connectors/<name>/`.
 ///
@@ -469,6 +583,65 @@ mod tests {
         let accounts = super::super::config::load_merged(project.path(), EMBEDDED).unwrap();
         let names: Vec<&str> = accounts.iter().map(|a| a.name.as_str()).collect();
         assert_eq!(names, vec!["work", "side"]);
+        drop(cfg);
+    }
+
+    /// F20: after an upgrade, a pristine installed copy (the bytes an earlier
+    /// apb installed, trusted as `Bundled`) is replaced by the embedded
+    /// version, while a copy with local edits is kept and only reported.
+    #[test]
+    fn reconcile_updates_pristine_copies_and_reports_edited_ones() {
+        let _lock = crate::env_test_lock();
+        let (cfg, _guard) = set_config_dir();
+        let limits = crate::content::TreeLimits::default();
+        let base = cfg.path().join("connectors");
+
+        // `github` as an older apb shipped it: different bytes, installed and
+        // trusted with origin Bundled by that older binary.
+        install_official("github", false).unwrap();
+        let old = base.join("github");
+        std::fs::write(old.join("README.md"), "# github: older release\n").unwrap();
+        let old_digest = crate::content::tree_digest(&old, &limits).unwrap();
+        crate::trust::TrustStore::load()
+            .approve_kind(
+                &old_digest,
+                "github",
+                crate::trust::Kind::Connector,
+                crate::trust::OriginKind::Bundled,
+            )
+            .unwrap();
+        // `slack` with a local edit the user approved by hand.
+        install_official("slack", false).unwrap();
+        let edited = base.join("slack");
+        std::fs::write(edited.join("NOTES.md"), "mine").unwrap();
+        let edited_digest = crate::content::tree_digest(&edited, &limits).unwrap();
+        crate::trust::TrustStore::load()
+            .approve_kind(
+                &edited_digest,
+                "slack",
+                crate::trust::Kind::Connector,
+                crate::trust::OriginKind::LocallyApproved,
+            )
+            .unwrap();
+        assert!(embedded_update("github").is_some());
+
+        let outcome = reconcile_official();
+
+        let github = official::get("github").unwrap();
+        assert!(matches_embedded(&old, &github), "pristine copy updated");
+        assert!(embedded_update("github").is_none());
+        assert!(edited.join("NOTES.md").is_file(), "local edit kept");
+        assert!(outcome.contains(&Reconciled::Updated {
+            name: "github".into(),
+            from_version: github.version.clone(),
+            to_version: github.version.clone(),
+        }));
+        assert!(
+            outcome
+                .iter()
+                .any(|r| matches!(r, Reconciled::UpdateAvailable { name, .. } if name == "slack")),
+            "{outcome:?}"
+        );
         drop(cfg);
     }
 

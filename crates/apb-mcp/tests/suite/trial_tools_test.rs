@@ -229,14 +229,14 @@ fn global_draft_can_be_trialed_and_approved() {
 }
 
 /// A stub agent script: the claude adapter's argv template is
-/// `-p {prompt} --model {model}`, so `$2` is the rendered prompt. The stub
+/// `-p --model {model} -- {prompt}`, so the last argument is the rendered prompt. The stub
 /// overwrites a tracked file with it, so a run's rendered prompt shows up in
 /// `git diff` the same way the WRITER fixture's file write does.
 fn stub_agent_echoing_prompt_to_file(dir: &Path, out_file: &str) -> String {
     let path = dir.join("stub-agent.sh");
     std::fs::write(
         &path,
-        format!("#!/bin/sh\nprintf '%s' \"$2\" > {out_file}\necho done\n"),
+        format!("#!/bin/sh\nfor last; do :; done\nprintf '%s' \"$last\" > {out_file}\necho done\n"),
     )
     .unwrap();
     let mut perm = fs::metadata(&path).unwrap().permissions();

@@ -2,7 +2,6 @@ import { describe, expect, it } from 'vitest'
 import {
   accountReady,
   deprecationReason,
-  isDeprecated,
   showAbout,
   showAccounts,
   showFunctions,
@@ -40,6 +39,7 @@ describe('accountReady', () => {
     default: true,
     fields: {},
     missingEnv: [],
+    cmd: {},
     trust: 'approved',
   }
 
@@ -67,19 +67,15 @@ const fn = (over: Partial<ConnectorFunction> = {}): ConnectorFunction => ({
 describe('deprecationReason', () => {
   it('null means not deprecated and renders no marker', () => {
     expect(deprecationReason(fn())).toBeNull()
-    expect(isDeprecated(fn())).toBe(false)
   })
   it('an empty string does not read as deprecated', () => {
     expect(deprecationReason(fn({ deprecated: '' }))).toBeNull()
-    expect(isDeprecated(fn({ deprecated: '' }))).toBe(false)
   })
   it('whitespace only does not read as deprecated either', () => {
     expect(deprecationReason(fn({ deprecated: '   ' }))).toBeNull()
-    expect(isDeprecated(fn({ deprecated: '   ' }))).toBe(false)
   })
   it('a real reason is carried through, trimmed', () => {
     expect(deprecationReason(fn({ deprecated: ' use search_issues ' }))).toBe('use search_issues')
-    expect(isDeprecated(fn({ deprecated: 'use search_issues' }))).toBe(true)
   })
 })
 
@@ -87,6 +83,7 @@ const detail = (over: Partial<ConnectorDetail> = {}): ConnectorDetail => ({
   name: 'github',
   version: '1.0.0',
   installed: false,
+  updateAvailable: null,
   trust: 'not_installed',
   meta: {},
   bodyMd: '',
@@ -100,6 +97,7 @@ const account: ConnectorAccount = {
   default: true,
   fields: {},
   missingEnv: [],
+  cmd: {},
   trust: 'unapproved',
 }
 

@@ -857,6 +857,7 @@ mod drift_resume {
         tempfile::TempDir,
         tempfile::TempDir,
         tempfile::TempDir,
+        tempfile::TempDir,
         String,
     ) {
         let proj = tempfile::tempdir().unwrap();
@@ -898,16 +899,17 @@ mod drift_resume {
             &stub,
             "#!/bin/sh\n# changed binary, different size now\necho done\n",
         );
-        // Keep `bin` alive by returning it alongside the roots.
-        std::mem::forget(bin);
-        (proj, home, cfg, res.run_id)
+        // `bin` is returned alongside the roots: the stub must outlive the
+        // resume, and the caller's drop removes it (forgetting it leaked a
+        // `stub.sh` folder into the temp dir on every run).
+        (proj, home, cfg, bin, res.run_id)
     }
 
     #[test]
     fn run_resume_surfaces_drift_error_inline_instead_of_detached_true() {
         let _l = lock();
         let _g = EnvGuard;
-        let (proj, _home, _cfg, run_id) = run_then_drift();
+        let (proj, _home, _cfg, _bin, run_id) = run_then_drift();
 
         // Without the override the tool must return the drift error itself,
         // NOT an Ok ack with `detached: true` for a run that would never move.
@@ -922,7 +924,7 @@ mod drift_resume {
     fn run_resume_override_passes_preflight_and_acks_with_override_note() {
         let _l = lock();
         let _g = EnvGuard;
-        let (proj, _home, _cfg, run_id) = run_then_drift();
+        let (proj, _home, _cfg, _bin, run_id) = run_then_drift();
 
         // With the override the preflight passes and the tool acks detached.
         // The detached child re-execs this test binary (no `__drive-run`
@@ -948,4 +950,104 @@ mod drift_resume {
                 .status();
         }
     }
+}
+
+/// `run_report` promises the `run_status` shape, but it folded the journal on
+/// its own, with no liveness: an agent that is still working has an open
+/// attempt, which the bare fold calls `interrupted`, so a supervisor was told
+/// `running` by one tool and `interrupted` by the other for the same run.
+#[test]
+fn run_report_reports_a_working_run_as_running() {
+    let dir = tempfile::tempdir().unwrap();
+    let run_dir = bare_run_dir(dir.path(), "r-report");
+    let agent = Sleeper::spawn();
+    let agent_pid = agent.pid();
+    fs::write(run_dir.join("driver.pid"), std::process::id().to_string()).unwrap();
+    fs::write(
+        run_dir.join("events.jsonl"),
+        format!(
+            "{{\"seq\":0,\"ts\":1,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}}\n\
+             {{\"seq\":1,\"ts\":2,\"type\":\"node_started\",\"node\":\"a\",\"attempt\":1}}\n\
+             {{\"seq\":2,\"ts\":3,\"type\":\"attempt_started\",\"node\":\"a\",\"attempt\":1,\"agent\":\"stub\",\"pid\":{agent_pid}}}\n"
+        ),
+    )
+    .unwrap();
+
+    let report = apb_mcp::tools::run_report(dir.path(), "r-report").unwrap();
+
+    assert_eq!(report["run_status"], "running", "report: {report}");
+    assert_eq!(report["nodes"]["a"], "running", "report: {report}");
+}
+
+const GATED: &str = r#"
+schema: 1
+id: gated
+name: Gated
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: gate, type: human_review, options: [approved, rejected] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
+/// The compact `run_wait` answer describes the observation the wait decided
+/// on, in one piece: a wait that returned `needs_input` for a review carries
+/// that `pending_review`, even when the gate is decided between the wait
+/// returning and the answer being built. It used to read the run a second
+/// time, so `reason` said needs_input while `pending_review` was missing.
+#[test]
+fn run_wait_answer_is_built_from_the_observation_the_wait_decided_on() {
+    use apb_engine::event::{EventLog, EventPayload};
+    use apb_engine::run_wait::{WaitReason, wait_run_with};
+    use std::time::Duration;
+
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let run_dir = dir.path().join(".apb/runs/r1");
+    fs::create_dir_all(&run_dir).unwrap();
+    fs::write(run_dir.join("playbook.yaml"), GATED).unwrap();
+    let mut log = EventLog::open(&run_dir).unwrap();
+    log.append(EventPayload::RunStarted {
+        playbook: "gated".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    log.append(EventPayload::ReviewRequested {
+        node: "gate".into(),
+        options: vec!["approved".into(), "rejected".into()],
+        title: None,
+        instruction: String::new(),
+        prompt: None,
+    })
+    .unwrap();
+
+    let res = wait_run_with(
+        dir.path(),
+        "r1",
+        Duration::from_secs(5),
+        Duration::from_millis(20),
+        Duration::from_millis(10),
+    )
+    .unwrap();
+    assert_eq!(res.reason, WaitReason::NeedsInput);
+
+    // The gate is decided after the wait returned.
+    log.append(EventPayload::ReviewDecided {
+        node: "gate".into(),
+        decision: "approved".into(),
+        note: String::new(),
+    })
+    .unwrap();
+
+    let out = apb_mcp::tools::run_wait_result(dir.path(), "r1", &res).unwrap();
+    assert_eq!(out["reason"], "needs_input");
+    assert_eq!(
+        out["pending_review"]["node"], "gate",
+        "the answer must carry the gate its reason is about: {out}"
+    );
 }

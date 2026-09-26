@@ -22,15 +22,39 @@ export function escapeHtml(s: string): string {
   return s.replace(/[&<>"']/g, (c) => ESCAPES[c] ?? c)
 }
 
-// Only schemes that cannot execute script are kept. Anything else (including
-// `javascript:` and `data:`) renders as plain text instead of a link.
-function safeUrl(raw: string): string | null {
+// A base only for classifying relative links; it never reaches the output.
+const RELATIVE_BASE = 'https://relative.invalid/'
+const SAFE_PROTOCOLS = new Set(['http:', 'https:', 'mailto:'])
+
+// Only http, https and mailto links survive; anything else (including
+// `javascript:` and `data:`) renders as plain text instead of a link. The
+// scheme is decided by the URL parser, which is what the browser will do with
+// the href, not by a pattern on the raw string: a parser strips leading
+// control characters and whitespace that a regex anchored at `^` would not
+// see past. A URL containing any control character is refused outright.
+export function safeUrl(raw: string): string | null {
   const u = raw.trim()
   if (u === '') return null
+  // eslint-disable-next-line no-control-regex
+  if (/[\u0000-\u001f\u007f]/.test(u)) return null
+  let parsed: URL
+  try {
+    parsed = new URL(u, RELATIVE_BASE)
+  } catch {
+    return null
+  }
+  if (!SAFE_PROTOCOLS.has(parsed.protocol)) return null
+  // A protocol-relative `//host/...` link leaves the page without saying so.
   if (u.startsWith('//')) return null
-  if (/^(https?:|mailto:)/i.test(u)) return u
-  if (/^[a-z][a-z0-9+.-]*:/i.test(u)) return null
   return u
+}
+
+// An external link (a connector's homepage): an absolute http or https URL,
+// or nothing.
+export function safeExternalUrl(raw: string | null | undefined): string | null {
+  const u = safeUrl(raw ?? '')
+  if (u === null) return null
+  return /^https?:\/\//i.test(u) ? u : null
 }
 
 const CODE_CLASS = 'rounded bg-muted px-1 py-0.5 font-mono text-[0.85em]'

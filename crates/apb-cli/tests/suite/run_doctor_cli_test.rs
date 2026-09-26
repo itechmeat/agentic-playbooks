@@ -15,7 +15,7 @@ use std::fs;
 use std::path::Path;
 
 fn apb() -> Command {
-    Command::cargo_bin("apb").unwrap()
+    crate::common::apb()
 }
 
 /// A real pid that is reliably absent: a child spawned, waited for and reaped,
@@ -226,6 +226,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
             chain: vec![invocation],
             ephemeral: false,
             hermetic: false,
+            zcode_mode: None,
         }],
         node_bindings: std::collections::BTreeMap::from([(
             "a".to_string(),

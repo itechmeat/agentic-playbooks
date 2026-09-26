@@ -34,3 +34,38 @@ async fn watcher_emits_runs_changed_on_run_file() {
     }
     assert!(saw_runs, "expected a runs_changed event");
 }
+
+/// F21: the machine-wide dashboard subscribes to changes of global profiles,
+/// installed connectors, connector accounts and trust too, so an edit made by
+/// the CLI or MCP there reaches an open dashboard without a navigation.
+#[tokio::test]
+async fn global_watcher_emits_on_global_config_changes() {
+    let sandbox = crate::common::config_sandbox().await;
+    let cfg = std::path::PathBuf::from(std::env::var_os("APB_CONFIG_DIR").unwrap());
+    fs::create_dir_all(cfg.join("profiles/p")).unwrap();
+    let state = AppState::new_global();
+    let mut rx = state.events.subscribe();
+    let _w = apb_server::watch::spawn_global_watcher(state.events.clone()).unwrap();
+    tokio::time::sleep(Duration::from_millis(300)).await;
+
+    for (what, path) in [
+        ("a global profile", cfg.join("profiles/p/profile.yaml")),
+        ("trust", cfg.join("trust.json")),
+    ] {
+        fs::write(&path, "x: 1\n").unwrap();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+        let mut saw = false;
+        while tokio::time::Instant::now() < deadline {
+            match tokio::time::timeout(Duration::from_secs(1), rx.recv()).await {
+                Ok(Ok(msg)) if msg.contains("config_changed") => {
+                    saw = true;
+                    break;
+                }
+                Ok(Ok(_)) | Err(_) => continue,
+                Ok(Err(_closed)) => break,
+            }
+        }
+        assert!(saw, "expected config_changed after writing {what}");
+    }
+    drop(sandbox);
+}

@@ -36,13 +36,17 @@ Reads (read-only):
 | `playbook_interview` | Tier 2: the interview guide for building a playbook from a user interview (pull only when the user describes a process to automate) |
 | `playbook_get` | Playbook definition by id and (optional) version; `detail` selects `summary` (default: interface only, no node prompt bodies) or `full` (complete authoring payload) |
 | `playbook_validate` | Validate a playbook, list of issues |
-| `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing) |
+| `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
+| `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
 | `runs_list` | List of runs |
 | `run_status` | Current run status (nodes, outputs) |
+| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status` |
 | `run_events` | Run events, optionally from a given seq |
 | `run_report` | Short run summary |
 | `profile_list` | Profiles (project + global) with bundle trust status |
 | `profile_get` | Profile contents (profile.yaml + SOUL.md) and digests |
+| `connectors_list` | Installed connectors an `agent_task` can bind: version, trust, `update_available` (the built-in version when the installed copy differs), function names, configured account names and `account_commands` (per account, each secret read from a command, with the command line); never other account fields or secrets |
+| `trust_list` | The approvals in the user's trust store: `digest`, `id`, `kind` (`playbook`, `profile_bundle`, `connector`, `connector_account`), `origin_kind`, `approved_at_ms`; optional `kind` filter |
 | `agents_detect` | Agent detection: presence, version, category, local hints for models/providers/auth. The detection itself is local - apb runs `--version` and reads local config, makes no network requests of its own (what the third-party CLI does when actually run is not something apb controls) |
 | `profile_howto` | How to write profiles: format, selection rules, model table with assignments, subscriptions, detection (pull only when working with profiles) |
 | `playbook_adopt_report` | Adoption readiness: profile resolvability, skill presence, bundle trust, model availability by detection |
@@ -53,6 +57,11 @@ workspaces; without it, the current project is used. Structural workspace-
 resolution errors (in `effective_root` and `playbook_prepare_run`):
 `workspace_unreachable` - the workspace path was removed or is unreachable;
 `workspace_unknown` - the id is not registered in the registry.
+A workspace's id is its `.apb/workspace.local` (a regular file, gitignored);
+apb does not follow a symlinked `workspace.local`, and it does not move a
+registered id to another directory while the original directory still holds
+it (a copied checkout keeps its own registration off until it gets its own id:
+delete the copied `workspace.local`).
 
 `playbook_catalog` returns both `dismissed_patterns` (the slug list, unchanged) and `suppressed_suggestions`: the active suggestion-decision records for the current project, merged from the project store `.apb/suggestions.json` and the global `<config-dir>/suggestions.json`, each with `pattern`, `synopsis`, `kind`, `scope`, `declines` and `snoozed_until`. Matching a candidate action against those records is done by the meaning of the synopsis, on the agent side; the server does no language processing. Both fields fold into `catalog_revision`, so an `unchanged: true` response stays correct after any dismiss write. Timing defaults are `soft_backoff_days: [1, 7, 30, 90]` and `hard_ttl_days: 90`, overridable per key by a `suggestions:` section in the global `config.yaml` and in the project `.apb/config.yaml` (project wins). `apb suggestions list|allow|reset` and the dashboard's silenced-suggestions section manage the same records.
 
@@ -67,11 +76,14 @@ Mutations (destructive):
 | `playbook_execute_plan` | Phase 2: execute a confirmed cross-workspace plan by `plan_token` |
 | `suggestion_dismiss` | Record the user's decline of a save-as-playbook suggestion: `kind` `soft` (a not-now decline whose silence escalates along the backoff schedule) or `hard` (an explicit never-again, the default so an old-style call is unchanged), a one-sentence `synopsis` of the action, and `scope` `project` (default) or `global`. The `pattern` must be a lowercase slug (`[a-z0-9][a-z0-9-]*`, at most 64 chars), so the record stays addressable by `apb suggestions` and the dashboard. Returns the stored record with the server-computed `snoozed_until`, plus a `diagnostics` array when the `suggestions:` config section is invalid or a broken store had to be moved aside. A project-scope dismiss on a directory with no `.apb` yet initializes it, since the call only happens on a root the user already connected apb to |
 | `playbook_create` | New playbook or a new minor version (creating via the tool approves the digest) |
-| `playbook_update` | New minor version of an existing playbook |
-| `playbook_delete` | Soft delete to trash |
-| `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below) |
+| `playbook_update` | New minor version of an existing playbook (approves the saved digest, like create) |
+| `playbook_delete` | Soft delete to trash (`.apb/trash/<id>-<millis>`; runs stay) |
+| `playbook_trash_restore` | Restore a trash entry by `name`, or a playbook id's latest deletion, with every version; the restored current version is approved like a save when it has no scripts. A playbook that exists again under the id is a conflict and nothing moves. Current workspace only |
+| `trust_revoke` | Revoke approvals: `target` is a digest (exactly that approval) or an id (every approval under it; `kind` narrows it). Returns what was revoked. The same path as `apb trust revoke` and the dashboard's Trust view |
+| `run_resume` | Resume a run, optionally from a node. Returns immediately (see Detached runs below). Only a run apb created on this machine resumes (`run_not_created_locally` otherwise, not bypassable); a run whose snapshot digest is not approved needs `acknowledge_untrusted: true` |
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
 | `review_decide` | Decide a run's human_review node |
+| `run_progress_report` | Report cycle progress from inside a run: `done` of `total` iterations of the current cycle group, optional `label`; pass your own node id (`APB_NODE_ID`) when branches run concurrently |
 | `run_answer` | Answer a pending interactive question on a run (an `agent_task` with `interactive: true`); plain `run_id` path posts `answered_by: "human"`, supervisor-token path posts `answered_by: "supervisor"` |
 | `profile_write` | Create/update a profile (CAS via expected_digest, auto-approves the bundle); current workspace only |
 | `profile_move` | Copy a profile between scopes (the source remains) |
@@ -82,25 +94,89 @@ Mutations (destructive):
 
 Match confidence and execution risk are kept separate (spec 9). A playbook
 carries a lifecycle (`draft`/`active`/`retired`) and trust tied to a content
-digest: any file change (an edit outside apb, a git pull) drops trust.
+digest of the version: its `playbook.yaml` plus every file under its
+`scripts/` (`apb_core::scope::definition_digest`). Any file change (an edit
+outside apb, a git pull, a changed script) drops trust, and the same YAML
+shipped with other scripts is not the approved content. A version without
+scripts digests exactly as its YAML alone. A run copies the scripts into its
+run directory and refuses to start when the copy does not match the digest
+the gate checked.
+
+A save through apb itself - `playbook_create` / `playbook_update`, the
+dashboard editor, `apb import` - goes through one save path
+(`apb_core::versioning::save_definition`) that approves the digest it wrote:
+the user asked for that write, so its result is trusted (the same rule as
+`profile_write`). A save writes YAML only and carries the base version's
+scripts along, so a result with scripts is approved only when its base was
+approved and the scripts are unchanged. A restore from the trash
+(`playbook_trash_restore`, the dashboard's Trash view, `apb trash restore`)
+goes through one path too (`apb_core::versioning::restore_from_trash`) and
+approves the restored current version the same way when it has no scripts;
+with scripts it keeps the approval its digest already had.
+
+Upgrading to a build whose digest covers scripts invalidates the approvals of
+playbooks that have scripts (playbooks without scripts keep theirs). apb does
+not migrate those approvals automatically, because that would approve
+whatever scripts are on disk now, which is exactly what the digest exists to
+catch. Re-approve such a playbook after reviewing its scripts: MCP
+`playbook_approve`, or confirm the next `playbook_run` with
+`acknowledge_untrusted: true`. `trust_list` (and `apb trust list`, the
+dashboard's Trust view) shows every approval; `trust_revoke` removes one by
+digest, or all of an id's.
 `playbook_run` goes through a server-side gate: draft is rejected (only via
 `playbook_trial`), an unapproved digest requires `acknowledge_untrusted: true`
 after user confirmation, and running in another workspace only happens via the
-two-phase `playbook_prepare_run` / `playbook_execute_plan`. The
+two-phase `playbook_prepare_run` / `playbook_execute_plan`.
+`playbook_execute_plan` runs the same gate in the target workspace, with the
+caller's `acknowledge_untrusted`: the parent and every sub-playbook child must
+be approved (or acknowledged), and the verified child pins go to the engine,
+so a child that changes after the check is refused when it would start. The
 read-only/destructive annotations remain client hints; enforcement lives on
 the server.
 
+A resume executes what the run directory holds, and a run directory lives in
+the workspace, so a repository can ship one. apb stamps every run it prepares
+with an HMAC keyed by a per-installation secret (`<config-dir>/run-origin.key`,
+created on first use), and MCP `run_resume` refuses a directory without a valid
+stamp (`run_not_created_locally`, an acknowledge does not bypass it). It then
+gates the snapshot's digest (its `playbook.yaml` plus its `scripts/`) like a
+start. Runs created before the stamp existed resume from the dashboard or
+`apb resume`, where the person resuming is the confirmation.
+
+The dashboard's Run button and `apb run` (with or without `--detach` or
+`--supervise`) go through the same gate (`apb_engine::gate::check_run`). The
+person starting the run there is the confirmation, so an unapproved digest is
+acknowledged for them; everything else refuses on every surface: a draft or
+retired playbook, unmet `requires`, an unapproved connector or account, and a
+broken sub-playbook tree.
+
 Supervisor tools (`supervisor_*`) are only available inside a supervisor
 session (behind a session gate) and are not listed here as part of the normal
-surface. One is worth naming regardless, because its polling contract is easy
+surface. A supervisor's authority is its capability set
+(`supervisor.policy.capabilities`) on those token-bearing tools. The background
+supervisor agent that `apb run --supervise` spawns gets
+`APB_MCP_ROLE=supervisor` in its environment; an `apb mcp` started under it
+(agents pass their environment to their MCP servers) serves only the
+`supervisor_*` tools, the read-only tools and `run_answer`, whose `run_id`
+path (answering as the human) it refuses. The operator's run control
+(`run_stop`, `run_resume`, `review_decide`), authoring and run starts take no
+token, so they are not offered to a supervisor. One is worth naming regardless, because its polling contract is easy
 to get wrong: `supervisor_wait_event { token, after_seq, timeout_ms }` blocks
-until the run's next wake, or a timeout, whichever comes first. Pass
-`after_seq` as the `seq` of the last wake you already saw (omit it on the
-first call); the response's `wake.seq` becomes your next `after_seq`, so you
-walk the wake stream forward instead of re-scanning wakes you already
-handled. `timeout_ms` bounds the block (default 25000). `wake: null` means
-the run already reached a terminal state, or the call simply timed out with
-nothing new - the caller decides whether to wait again.
+until the run's next wake, a new human_review gate, the end of the run, or a
+timeout, whichever comes first. Pass `after_seq` as the response's
+`next_after_seq` (omit it on the first call), so you walk the event stream
+forward instead of re-scanning wakes you already handled. `reason` says why
+it returned: `wake`, `review` (relay `pending_review`), `ended` or `timeout`.
+`timeout_ms` bounds the block (default 50000, max 1800000). Every return is a
+model turn for the supervisor, so pass the largest value the host's tool-call
+limit allows: the server refreshes the supervisor heartbeat while it blocks
+(so a long wait never reads as a lost supervisor) and sends progress
+notifications every 15 s when the call carries a progress token. On `timeout`,
+just call again. A wake's `detail` is capped at its last 16 KiB
+(`detail_truncated: true`); `supervisor_run_inspect` has the full output.
+`supervisor_run_inspect` itself elides texts over 512 bytes inside `events`
+(they repeat `outputs`, `context` and `wakes`); pass `full_events: true` for
+the raw journal.
 
 An interactive `agent_task` node (`interactive: true`) can park a run on a
 question mid-attempt; `run_status`'s `pending_question` (`{ node, question,
@@ -126,6 +202,14 @@ grants; the default when the key is absent is all of them
 `supervisor_context_append`, `supervisor_interrupt_attempt`); `patch_playbook`
 gates `supervisor_patch_playbook`.
 
+`supervisor_node_retry` and `supervisor_run_continue_from` also act while the
+run is parked on an undecided `human_review` gate, the moment a supervisor
+often notices that an earlier node went wrong: the driver withdraws the open
+review (a `review_withdrawn` event; the gate is no longer pending and the
+decision surfaces refuse it), moves to the named node, and asks for the review
+again when the gate is reached anew. A `supervisor_patch_playbook` queued behind
+such a directive is applied right after it.
+
 `rebind` gates `supervisor_rebind_profile { token, node, profile, scope?,
 acknowledge_untrusted?, reason? }`, the sanctioned escape hatch for switching a
 node's executor profile mid-run when its bound agent is wedged (a service that
@@ -147,7 +231,7 @@ up the new profile.
 
 ### Instruction source precedence
 
-An `agent_task` (and finish-with-prompt) attempt assembles instructions from three sources: the node template (`prompt` in the playbook), the run-level `instruction`, and applied supervisor notes from `supervisor_context_append`. The engine appends the run instruction and the supervisor notes to the rendered template as explicit trailing sections on every new attempt, so both reach the executor even when the template references neither `{{run.context}}` nor `{{run.instruction}}`; the run instruction lands in its own `## run instruction` section and the notes in a trailing supervisor notes block. When the template does reference `{{run.context}}`, the instruction and any notes also appear inside that context header, and the duplication is idempotent and intentional. On conflict the engine frames the higher sources as overrides: supervisor notes override the run instruction, and the run instruction overrides the node template's boilerplate. The notes block header and a short trailing `## instruction precedence` section state this order explicitly; neither re-embeds the full instruction text. When both the run instruction is empty and no notes are applied, the prompt is left byte-unchanged (no spurious framing).
+An `agent_task` (and finish-with-prompt) attempt assembles instructions from three sources: the node template (`prompt` in the playbook), the run-level `instruction`, and applied supervisor notes from `supervisor_context_append`. The engine appends the run instruction and the supervisor notes to the rendered template as explicit trailing sections on every new attempt, so both reach the executor even when the template references neither `{{run.context}}` nor `{{run.instruction}}`; the run instruction lands in its own `## run instruction` section and the notes in a trailing supervisor notes block. When the template does reference `{{run.context}}`, the context already leads with the `## run instruction` section, so the trailing copy is left out and the instruction appears exactly once; applied notes also appear inside the context, next to their trailing block. On conflict the engine frames the higher sources as overrides: supervisor notes override the run instruction, and the run instruction overrides the node template's boilerplate. The notes block header and a short trailing `## instruction precedence` section state this order explicitly; neither re-embeds the full instruction text. When both the run instruction is empty and no notes are applied, the prompt is left byte-unchanged (no spurious framing).
 
 ## Asynchronous run model
 
@@ -157,8 +241,18 @@ tool call (for example, ChatGPT Apps at around 60 seconds). That's why
 
 - `playbook_run` with `background: true` starts the run in the background and
   returns `run_id` **immediately**, without waiting for completion.
-- The client then polls `run_status` (or `run_events` with an increasing
-  `seq`) until the status becomes terminal (`succeeded` / `failed`).
+- The client then calls `run_wait { run_id, timeout_ms }`, which blocks
+  server-side and returns only when the run finishes (`reason: finished`),
+  needs input (`needs_input`, with `pending_question`, `pending_review` or
+  `pending_supervisor`), is paused or driverless (`stopped`), or `timeout_ms`
+  runs out (`timeout`: call it again). Do not poll `run_status` in a loop:
+  every call is a model turn that re-reads the whole conversation plus every
+  node output, while `run_wait` costs one turn per decision. `timeout_ms`
+  defaults to 50000 (under the strictest ~60 s host limits) and goes up to
+  1800000; pass the largest value your host allows. Progress notifications go
+  out every 15 s when the call carries a progress token. A gate must stay
+  pending for 1.5 s before `run_wait` reports it, so a wait right after
+  `run_answer` or `review_decide` does not return the gate just answered.
 - If the run hits a human_review node, the client resolves it via
   `review_decide`, and the run continues.
 - If the run hits an interactive `agent_task` node that asked a question
@@ -168,6 +262,15 @@ tool call (for example, ChatGPT Apps at around 60 seconds). That's why
 Without `background: true`, behavior is unchanged: `playbook_run` blocks
 until completion and returns the result. This remains the default for
 backward compatibility.
+
+The CLI has the same shape for an agent that drives apb through a shell:
+`apb run <id> --detach` prints the run id and returns at once, and
+`apb wait <run_id> [--timeout SECS]` blocks until the run finishes, needs
+input or stops. Run `apb wait` as one background command and act on its exit
+code (0 succeeded, 1 failed or aborted, 3 needs input, 4 paused or
+driverless, 5 timeout); no status polling, no tokens while it blocks. A plain
+`apb run <id>` also blocks, but it cannot report a gate: it just keeps waiting
+until someone answers it.
 
 ## Detached runs, resume, and stop
 
@@ -195,8 +298,8 @@ restarts), `advance_past_finished` (nothing was interrupted; the run
 continues past the last finished node without re-running it),
 `parallel_fallback` (two or more branches were cut, so the run restarts from
 the last finished node), or `explicit_from_node` (the caller named
-`from_node`). Poll `run_status` / `run_events` afterward the same way you
-would for a `background: true` run.
+`from_node`). Follow it with `run_wait` the same way you would for a
+`background: true` run.
 
 When the run still has an unapplied stop in its control queue, the ack also
 carries `"stops_on_pending_abort": true` and a `note` saying so. Control

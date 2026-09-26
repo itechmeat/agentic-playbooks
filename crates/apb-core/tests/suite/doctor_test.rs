@@ -226,6 +226,53 @@ fn claude_code_agent_normalizes_to_claude_probe_no_false_not_found() {
     }
 }
 
+/// zcode lives off PATH (`~/.zcode/server/agents/glm/zcode-agent`): doctor
+/// must report it installed from there, and warn when its standalone CLI has
+/// no plan login, which otherwise surfaces only as a failed run.
+#[cfg(unix)]
+#[test]
+fn zcode_is_found_off_path_and_a_missing_login_warns() {
+    let _l = env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let home = tempfile::tempdir().unwrap();
+    let bin = tempfile::tempdir().unwrap();
+    let glm = home.path().join(".zcode/server/agents/glm");
+    fs::create_dir_all(&glm).unwrap();
+    write_stub(&glm, "zcode-agent");
+    let saved_path = std::env::var("PATH").ok();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        std::env::set_var("HOME", home.path());
+        std::env::set_var("PATH", bin.path());
+    }
+
+    let proj = tempfile::tempdir().unwrap();
+    init_project(proj.path()).unwrap();
+    seed_playbook(proj.path(), "va", VALID_AGENT);
+    seed_profile(proj.path(), "main", "zcode");
+    let report = diagnose(proj.path());
+    let find = |name: &str| report.checks.iter().find(|c| c.name == name).cloned();
+    let installed = find("agent zcode").expect("agent zcode checked");
+    let login = find("agent zcode login");
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+        std::env::remove_var("HOME");
+        match saved_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+    }
+    assert_eq!(installed.status, CheckStatus::Ok, "{}", installed.detail);
+    let login = login.expect("a missing zcode login must be reported");
+    assert_eq!(login.status, CheckStatus::Warn);
+    assert!(
+        login.detail.contains("zcode-agent login"),
+        "{}",
+        login.detail
+    );
+}
+
 #[test]
 fn global_scope_profile_ref_is_resolved() {
     let _l = env_lock();
@@ -268,6 +315,40 @@ fn global_scope_profile_ref_is_resolved() {
     unsafe {
         std::env::remove_var("APB_CONFIG_DIR");
     }
+}
+
+/// F28: a finish node with a prompt runs an agent through its profile, and
+/// the run gate checks that profile; doctor must check it too, or it reports
+/// "OK" for an agent the run will refuse to start without.
+#[test]
+fn doctor_checks_the_profile_of_a_finish_with_prompt() {
+    let _l = env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    let gdir = cfg.path().join("profiles/closer");
+    fs::create_dir_all(&gdir).unwrap();
+    fs::write(
+        gdir.join("profile.yaml"),
+        "name: closer\ndescription: t\nexecutor:\n  agent: codex\n  model: o1\n",
+    )
+    .unwrap();
+    fs::write(gdir.join("SOUL.md"), "").unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    init_project(proj.path()).unwrap();
+    let playbook = "schema: 2\nid: f\nname: F\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success, prompt: \"sum up\", profile: { name: closer, scope: global } }\nedges:\n  - { from: start, to: done }\n";
+    seed_playbook(proj.path(), "f", playbook);
+
+    let report = diagnose(proj.path());
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+    assert!(
+        report.checks.iter().any(|c| c.name == "agent codex"),
+        "the finish node's agent must be checked: {:?}",
+        report.checks
+    );
 }
 
 /// The `suggestions:` timing section of both config files has exactly one

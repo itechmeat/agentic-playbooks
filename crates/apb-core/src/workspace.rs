@@ -15,20 +15,44 @@ use sha2::{Digest, Sha256};
 
 const WORKSPACE_FILE: &str = "workspace.local";
 
+/// The workspace id recorded in `<root>/.apb/workspace.local`, read only when
+/// that file is a regular file (not followed through a symlink): a checkout
+/// whose identity file is a link to another project's would otherwise claim
+/// that project's id. `None` when the file is missing, empty or not a regular
+/// file. The one read of a workspace's identity (registration, reachability).
+pub fn read_id(root: &Path) -> Option<String> {
+    let path = root.join(".apb").join(WORKSPACE_FILE);
+    let meta = std::fs::symlink_metadata(&path).ok()?;
+    if !meta.file_type().is_file() {
+        return None;
+    }
+    let id = std::fs::read_to_string(&path).ok()?.trim().to_string();
+    (!id.is_empty()).then_some(id)
+}
+
 /// Reads or creates the local `workspace_id` in `<root>/.apb/workspace.local`.
 /// Also ensures that `<root>/.apb/.gitignore` ignores this file (otherwise a
 /// clone would drag the id along and collide with the original). Best-effort
 /// for the gitignore: a failed append does not prevent returning the id.
+///
+/// A `workspace.local` that exists but is not a regular file (a symlink, a
+/// directory) is refused with `InvalidData` rather than followed or replaced:
+/// it is not this workspace's identity.
 pub fn ensure_id(root: &Path) -> std::io::Result<String> {
     let playbook = root.join(".apb");
     std::fs::create_dir_all(&playbook)?;
     let path = playbook.join(WORKSPACE_FILE);
-    if let Ok(existing) = std::fs::read_to_string(&path) {
-        let trimmed = existing.trim();
-        if !trimmed.is_empty() {
-            ensure_gitignored(&playbook);
-            return Ok(trimmed.to_string());
-        }
+    if let Ok(meta) = std::fs::symlink_metadata(&path)
+        && !meta.file_type().is_file()
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("{} is not a regular file", path.display()),
+        ));
+    }
+    if let Some(existing) = read_id(root) {
+        ensure_gitignored(&playbook);
+        return Ok(existing);
     }
     let id = format!("ws-{}", uuid::Uuid::new_v4().simple());
     // Atomic creation: only if the file doesn't exist yet. On a race (two

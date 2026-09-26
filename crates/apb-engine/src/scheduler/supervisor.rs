@@ -3,11 +3,6 @@
 
 use super::*;
 
-pub(crate) fn next_supervisor_token() -> String {
-    let n = SUPERVISOR_TOKEN_COUNTER.fetch_add(1, Ordering::Relaxed);
-    format!("sv-{}-{n}", apb_core::clock::now_ms())
-}
-
 /// Spawns a background supervisor agent for run `run_id`: mints a
 /// token, persists the session and the baseline `supervisor/spawned_at` (so
 /// heartbeat monitoring can detect the agent's silence even before its first
@@ -33,13 +28,14 @@ pub fn spawn_supervisor_agent(
         return Ok(None);
     }
 
-    let token = next_supervisor_token();
+    let token = crate::inspect::mint_supervisor_token()?;
     // Default capabilities for 4c - restricted by policy - to be refined
     // later (see the carry-over note in the Phase 4c plan).
     let capabilities = vec!["observe".to_string(), "retry".to_string()];
     write_supervisor_session(root, run_id, &token, &capabilities)?;
 
-    apb_core::fsutil::atomic_write(
+    apb_core::fsutil::atomic_write_under(
+        &run_dir,
         &run_dir.join("supervisor").join("spawned_at"),
         apb_core::clock::now_ms().to_string().as_bytes(),
     )?;
@@ -48,23 +44,17 @@ pub fn spawn_supervisor_agent(
     // Task 9): SOUL is delivered per the invocation form, skill names go in as an
     // advisory string in the brief (the supervisor works in the project's shared
     // workdir; skill content is never embedded into the prompt).
-    let mut brief = format!(
-        "You are the background supervisor agent for playbook run `{run_id}` \
-         (playbook `{}` version `{}`). Connect to this project's `apb mcp` server and loop: \
-         call supervisor_wait_event with token `{token}` to wait for the next wake, then \
-         diagnose the run with supervisor_run_inspect, intervene as needed via \
-         supervisor_node_retry, supervisor_run_continue_from, supervisor_run_pause, \
-         supervisor_run_abort or supervisor_context_append, and once the run reaches a \
-         terminal state submit your final findings with supervisor_report.",
-        playbook.id, playbook.version,
-    );
-    if !entry.skills.is_empty() {
+    // The brief is built per chain element (below): the wait length it asks
+    // for depends on the agent's MCP tool-call limit.
+    let skills_line = if entry.skills.is_empty() {
+        String::new()
+    } else {
         let names: Vec<&str> = entry.skills.iter().map(|s| s.name.as_str()).collect();
-        brief = format!(
-            "{brief}\n\nRelevant skills: {} - use them via your skills mechanism",
+        format!(
+            "\n\nRelevant skills: {} - use them via your skills mechanism",
             names.join(", ")
-        );
-    }
+        )
+    };
     let soul = if entry.soul.trim().is_empty() {
         None
     } else {
@@ -88,9 +78,17 @@ pub fn spawn_supervisor_agent(
             program: inv.canonical_executable.to_string_lossy().into_owned(),
             spec: inv.spec.clone(),
         };
+        let brief = supervisor_brief(
+            run_id,
+            playbook,
+            &token,
+            supervisor_wait_ms(&inv.agent_id),
+            &skills_line,
+        );
         match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &connector_policy) {
             Ok(()) => {
-                apb_core::fsutil::atomic_write(
+                apb_core::fsutil::atomic_write_under(
+                    &run_dir,
                     &run_dir.join("supervisor").join("executor"),
                     format!("{}:{}", inv.agent_id, inv.model).as_bytes(),
                 )?;
@@ -104,8 +102,51 @@ pub fn spawn_supervisor_agent(
     })))
 }
 
+/// The `timeout_ms` a spawned supervisor is told to pass to
+/// `supervisor_wait_event`. Every time the wait returns empty-handed the
+/// supervisor spends a model turn re-reading its whole conversation, so the
+/// wait should be as long as the agent's MCP tool-call limit allows. Claude
+/// Code's limit is set for the supervisor process (`MCP_TOOL_TIMEOUT`, see
+/// `ClaudeAdapter::spawn_supervisor`), so it can block for the server maximum;
+/// other agents keep under the ~60 s default of the strictest hosts (Codex).
+pub(crate) fn supervisor_wait_ms(agent_id: &str) -> u64 {
+    if apb_core::detect::canonical_agent_id(agent_id) == "claude" {
+        crate::run_wait::RUN_WAIT_MAX_MS
+    } else {
+        crate::run_wait::RUN_WAIT_DEFAULT_MS
+    }
+}
+
+/// The spawned supervisor's brief. It spells out the idle-wait discipline:
+/// a timed-out wait means "call again", never a diagnosis round, because each
+/// extra tool call is a paid model turn while the run is simply healthy.
+pub(crate) fn supervisor_brief(
+    run_id: &str,
+    playbook: &Playbook,
+    token: &str,
+    wait_ms: u64,
+    skills_line: &str,
+) -> String {
+    format!(
+        "You are the background supervisor agent for playbook run `{run_id}` \
+         (playbook `{}` version `{}`). Connect to this project's `apb mcp` server and loop: \
+         call supervisor_wait_event with token `{token}` and timeout_ms {wait_ms} to wait \
+         for the next wake; it blocks server-side and keeps your heartbeat alive. When it \
+         returns reason `timeout`, call it again at once with after_seq set to the returned \
+         next_after_seq, with no other calls and no commentary. On a wake, diagnose from \
+         the wake detail first and call supervisor_run_inspect only if that is not enough \
+         (it returns the whole run), then intervene as needed via supervisor_node_retry, \
+         supervisor_run_continue_from, supervisor_run_pause, supervisor_run_abort or \
+         supervisor_context_append. Once the run reaches a terminal state, submit your \
+         final findings with supervisor_report and stop.{skills_line}",
+        playbook.id, playbook.version,
+    )
+}
+
 /// Poll interval for control.jsonl while waiting in supervised mode.
 pub(crate) const AWAIT_CONTROL_POLL: Duration = Duration::from_millis(50);
+
+pub(crate) use crate::driver::ensure_run_dir;
 
 /// Blocks until the first command with seq greater than `cursor` that must be
 /// returned to the caller (Retry/ContinueFrom/Pause/Abort/Patch). Used only in
@@ -124,11 +165,12 @@ pub(crate) fn await_control(
 ) -> Result<(Control, u64), EngineError> {
     let mut cursor = cursor;
     loop {
+        ensure_run_dir(run_dir)?;
         for entry in read_control_after(run_dir, cursor)? {
             match entry.cmd {
                 Control::ContextAppend { note } => {
                     log.append(EventPayload::SupervisorAction {
-                        action: "context_append".into(),
+                        action: crate::event::supervisor_action::CONTEXT_APPEND.into(),
                         node: None,
                         detail: note,
                     })?;
@@ -216,11 +258,32 @@ pub(crate) fn drain_progress_after_execute(
 /// config carries a non-empty instruction (Task 4 completion-plan defect 3),
 /// matching what `build_context_for_render` prepends for the actual node-prompt
 /// rendering path - see `instruction_section`.
+///
+/// It also materializes each node's latest full output as
+/// `node-outputs/<node>.md` (issue #136 item 1): a prompt receives recorded
+/// output clipped to its context budget, and every clip names that file, so
+/// the file must exist by the time the next node renders. A file whose content
+/// is already current is not rewritten.
 pub(crate) fn rebuild_context_md(run_dir: &Path) -> Result<(), EngineError> {
     let cfg = crate::run_config::read_run_config(run_dir)?;
     let header = crate::context::instruction_section(cfg.instruction.as_deref());
-    let ctx_md = format!("{header}{}", build_context(&read_all(run_dir)?));
-    apb_core::fsutil::atomic_write(&run_dir.join("context.md"), ctx_md.as_bytes())?;
+    let events = read_all(run_dir)?;
+    let ctx_md = format!("{header}{}", build_context(&events));
+    apb_core::fsutil::atomic_write_under(run_dir, &run_dir.join("context.md"), ctx_md.as_bytes())?;
+    for (node, output) in &RunState::fold(&events).outputs {
+        let path = crate::context::node_output_path(run_dir, node);
+        if path.parent() != Some(run_dir.join(crate::context::NODE_OUTPUTS_DIR).as_path()) {
+            continue;
+        }
+        if std::fs::read(&path).is_ok_and(|on_disk| on_disk == output.as_bytes()) {
+            continue;
+        }
+        apb_core::fsutil::create_dir_under(
+            run_dir,
+            &run_dir.join(crate::context::NODE_OUTPUTS_DIR),
+        )?;
+        apb_core::fsutil::atomic_write_under(run_dir, &path, output.as_bytes())?;
+    }
     Ok(())
 }
 
@@ -239,7 +302,7 @@ pub(crate) fn monitor_supervisor_heartbeat(
     supervisor_lost_logged: &mut bool,
 ) -> Result<(), EngineError> {
     // Heartbeat monitoring: only for runs explicitly expecting an external
-    // background agent (`supervisor_expected`). Silence is measured either from
+    // background agent (`RunMode::AgentSupervised`). Silence is measured either from
     // the last heartbeat, or (as long as the agent has never checked in) from the
     // moment it was spawned - `supervisor_silence_ms` covers both cases.
     // The threshold is configurable via `APB_SUPERVISOR_HEARTBEAT_MS` (tests
@@ -251,7 +314,7 @@ pub(crate) fn monitor_supervisor_heartbeat(
     let threshold_ms: u128 = std::env::var("APB_SUPERVISOR_HEARTBEAT_MS")
         .ok()
         .and_then(|v| v.parse().ok())
-        .unwrap_or(60_000u128);
+        .unwrap_or(crate::run_wait::SUPERVISOR_LOSS_THRESHOLD.as_millis());
     if should_declare_lost(silence, threshold_ms, *supervisor_lost_logged) {
         log.append(EventPayload::SupervisorLost {
             detail: "supervisor heartbeat lost".into(),
@@ -260,6 +323,51 @@ pub(crate) fn monitor_supervisor_heartbeat(
         let _ = spawn_supervisor_agent(root, run_id, playbook);
     }
     Ok(())
+}
+
+/// Applies a directive that moves the run to a named node - `Retry` (run it
+/// again, optionally with a one-shot prompt override) or `ContinueFrom` - and
+/// consumes it: journals the `SupervisorAction`, then persists the cursor, then
+/// points `current` at the node. Shared by the two places a driver waits for
+/// one: a supervised park on a failed node and a park on an undecided
+/// `human_review` gate. Any other command is left untouched (`Ok(false)`).
+pub(crate) fn apply_move_directive(
+    run_dir: &Path,
+    log: &mut EventLog,
+    control_cursor: &mut Option<u64>,
+    prompt_overrides: &mut BTreeMap<String, String>,
+    current: &mut String,
+    cmd: Control,
+    seq: u64,
+) -> Result<bool, EngineError> {
+    let (node, action, override_text) = match cmd {
+        Control::Retry {
+            node,
+            prompt_override,
+        } => (
+            node,
+            crate::event::supervisor_action::NODE_RETRY,
+            prompt_override,
+        ),
+        Control::ContinueFrom { node } => (
+            node,
+            crate::event::supervisor_action::RUN_CONTINUE_FROM,
+            None,
+        ),
+        _ => return Ok(false),
+    };
+    log.append(EventPayload::SupervisorAction {
+        action: action.into(),
+        node: Some(node.clone()),
+        detail: override_text.clone().unwrap_or_default(),
+    })?;
+    *control_cursor = Some(seq);
+    write_control_cursor(run_dir, seq)?;
+    if let Some(p) = override_text {
+        prompt_overrides.insert(node.clone(), p);
+    }
+    *current = node;
+    Ok(true)
 }
 
 /// What a supervised park decided once a command arrived.
@@ -400,32 +508,16 @@ pub(crate) fn park_for_supervisor(
             // not fail the run, just wait for the next command on the same node.
             Control::ContextAppend { .. } => continue,
             Control::Progress { .. } => continue,
-            Control::Retry {
-                node,
-                prompt_override,
-            } => {
-                log.append(EventPayload::SupervisorAction {
-                    action: "node_retry".into(),
-                    node: Some(node.clone()),
-                    detail: prompt_override.clone().unwrap_or_default(),
-                })?;
-                *control_cursor = Some(seq);
-                write_control_cursor(run_dir, seq)?;
-                if let Some(p) = prompt_override {
-                    prompt_overrides.insert(node.clone(), p);
-                }
-                *current = node;
-                break;
-            }
-            Control::ContinueFrom { node } => {
-                log.append(EventPayload::SupervisorAction {
-                    action: "run_continue_from".into(),
-                    node: Some(node.clone()),
-                    detail: String::new(),
-                })?;
-                *control_cursor = Some(seq);
-                write_control_cursor(run_dir, seq)?;
-                *current = node;
+            directive @ (Control::Retry { .. } | Control::ContinueFrom { .. }) => {
+                apply_move_directive(
+                    run_dir,
+                    log,
+                    control_cursor,
+                    prompt_overrides,
+                    current,
+                    directive,
+                    seq,
+                )?;
                 break;
             }
             Control::Patch {
@@ -676,5 +768,19 @@ mod tests {
             .filter(|e| matches!(e.payload, EventPayload::RunProgress { .. }))
             .count();
         assert_eq!(count, 0);
+    }
+}
+
+#[cfg(test)]
+mod token_economy_tests {
+    use super::supervisor_wait_ms;
+
+    #[test]
+    fn claude_supervisors_wait_long_and_others_stay_under_host_limits() {
+        assert_eq!(supervisor_wait_ms("claude"), 1_800_000);
+        assert_eq!(supervisor_wait_ms("claude-code"), 1_800_000);
+        for agent in ["codex", "opencode", "zcode", "custom"] {
+            assert!(supervisor_wait_ms(agent) < 60_000, "{agent}");
+        }
     }
 }

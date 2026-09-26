@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, mpsc};
 use std::time::Duration;
 
@@ -67,7 +67,7 @@ pub(crate) use journal::{
     last_question_asked_ts, last_wait_started_ts, node_finished_count,
     node_has_unanswered_channel_question, node_primary_invocation, node_started_count,
     question_answered_count, question_asked_count, questions_answered_before_seq,
-    questions_asked_before_seq, review_decided_count, review_requested_count, wait_ended_count,
+    questions_asked_before_seq, review_decided_count, review_open_count, wait_ended_count,
     wait_signalled_count, wait_started_count,
 };
 pub use listing::{RunSummary, list_runs};
@@ -235,11 +235,6 @@ fn resolved_max_parallel(playbook: &Playbook, cfg: &RunConfig) -> usize {
         .unwrap_or(DEFAULT_MAX_PARALLEL)
 }
 
-/// Counter for generating unique supervisor tokens within a single engine
-/// process (in addition to the timestamp in the token itself - in case of
-/// several spawns within the same millisecond).
-static SUPERVISOR_TOKEN_COUNTER: AtomicU64 = AtomicU64::new(0);
-
 /// Returns (playbook id, run's active version). The active version is
 /// the latest `RunMigrated.to_version`; if there were no migrations - `RunStarted.version`.
 /// Used by the `playbook_patch` tool to choose the base of the patch version.
@@ -345,20 +340,10 @@ fn drive(
     start_mode: StartMode,
     run_id: String,
     mode: RunMode,
-    supervisor_expected: bool,
 ) -> Result<RunResult, EngineError> {
     let run_id_for_failure = run_id.clone();
     match drive_inner(
-        playbook,
-        run_dir,
-        root,
-        log,
-        cfg,
-        start_node,
-        start_mode,
-        run_id,
-        mode,
-        supervisor_expected,
+        playbook, run_dir, root, log, cfg, start_node, start_mode, run_id, mode,
     ) {
         Ok(r) => Ok(r),
         Err(e) => {
@@ -396,7 +381,6 @@ fn drive_inner(
     start_mode: StartMode,
     run_id: String,
     mode: RunMode,
-    supervisor_expected: bool,
 ) -> Result<RunResult, EngineError> {
     // Publish who is driving this run, for as long as the drive lasts
     // (Task 7 / issue #45 finding 10). Top-level runs own `driver.pid`;
@@ -489,7 +473,7 @@ fn drive_inner(
     // the validator (V11) only requires that a loop pass through such a node,
     // while enforcing the actual repeat-count limit is the engine's job.
     let mut cond_visits: BTreeMap<String, u32> = BTreeMap::new();
-    // Heartbeat monitoring of the background agent (only when supervisor_expected):
+    // Heartbeat monitoring of the background agent (only for an agent-supervised run):
     // we log SupervisorLost and respawn ONCE for the whole
     // drive loop - see the check at the start of each iteration below.
     let mut supervisor_lost_logged = false;
@@ -561,6 +545,7 @@ fn drive_inner(
     let mut steps = 0usize;
 
     loop {
+        supervisor::ensure_run_dir(run_dir)?;
         if steps >= max_steps {
             return Err(EngineError::Invalid(format!(
                 "run exceeded {max_steps} steps without reaching a finish node"
@@ -585,7 +570,7 @@ fn drive_inner(
             ControlScan::Proceed => {}
         }
 
-        if supervisor_expected {
+        if mode.expects_supervisor_agent() {
             monitor_supervisor_heartbeat(
                 root,
                 &run_id,
@@ -666,13 +651,30 @@ fn drive_inner(
             } else {
                 String::new()
             };
-            let outcome = match o {
-                Outcome::Success => RunStatus::Succeeded,
-                Outcome::Failure => RunStatus::Failed,
+            // The declared outcome is honest only if no failure was carried
+            // here past every route (issue #106): an unconditional edge moves
+            // on from a failed node without handling the failure, and a
+            // success finish must not paper over it.
+            let unhandled = match o {
+                Outcome::Success => parallel::unhandled_failure(&playbook, &read_all(run_dir)?),
+                Outcome::Failure => None,
             };
-            let s = match o {
-                Outcome::Success => "succeeded",
-                Outcome::Failure => "failed",
+            if let Some(node) = &unhandled {
+                log.append(EventPayload::RunError {
+                    node: Some(node.clone()),
+                    reason: format!(
+                        "node `{node}` failed and no route handled the failure: it went on \
+                         along an unconditional edge, so the run cannot finish as succeeded"
+                    ),
+                })?;
+            }
+            let outcome = match (o, &unhandled) {
+                (Outcome::Success, None) => RunStatus::Succeeded,
+                _ => RunStatus::Failed,
+            };
+            let s = match outcome {
+                RunStatus::Succeeded => "succeeded",
+                _ => "failed",
             };
             log.append(EventPayload::NodeFinished {
                 node: current.clone(),
@@ -860,7 +862,7 @@ fn drive_inner(
                     }
                     // A pause: no NEW work, and NOTHING is written off. A paused
                     // run is resumable and `Cancelled` is terminal for
-                    // `parallel::is_terminal`, so journaling a queued member
+                    // `NodeStatus::is_finished`, so journaling a queued member
                     // here would make `pending_heads` skip it forever and the
                     // resume would silently drop that branch. The gate's
                     // POSITION is shared with the abort; its effect is not.
@@ -1123,7 +1125,7 @@ fn drive_inner(
                 // right after its own NodeFinished, and before any of the
                 // autonomous failure policy below (which the sequential path also
                 // skips by continuing out of the park).
-                if mode == RunMode::Supervised {
+                if mode.parks_on_failure() {
                     let failed: Vec<(String, NodeStatus, String)> = batch
                         .iter()
                         .filter_map(|n| batch_results.iter().find(|(bn, _, _)| bn == n))
@@ -1258,7 +1260,7 @@ fn drive_inner(
                 // #42 finding 4) so a supervising agent, or any reader of the
                 // log alone, can tell the owner an action is expected, what the
                 // options are, and how to answer.
-                if review_requested_count(&events, &current) <= decided {
+                if review_open_count(&events, &current) == 0 {
                     let title = playbook.node(&current).and_then(|n| n.title.clone());
                     let instruction = crate::progress::review_instruction(
                         &current,
@@ -1268,11 +1270,47 @@ fn drive_inner(
                     );
                     log.append(EventPayload::ReviewRequested {
                         node: current.clone(),
-                        options: options.clone(),
+                        options: apb_core::schema::effective_review_options(options),
                         title,
                         instruction,
                         prompt: prompt.clone(),
                     })?;
+                }
+                // A directive that moves the run elsewhere (`node_retry`,
+                // `run_continue_from`) is what a supervisor sends when it sees,
+                // parked on this gate, that an earlier node went wrong. The
+                // top-of-loop scan leaves exactly such a directive at the head
+                // of the pending commands (it answers a wake, and a gate raises
+                // none), so it is applied here: the open request is withdrawn
+                // - no one can decide a gate the run has left - and the run
+                // moves on. Reaching the gate again asks anew.
+                if let Some(entry) = read_control_after(run_dir, control_cursor)?
+                    .into_iter()
+                    .next()
+                    && matches!(
+                        entry.cmd,
+                        Control::Retry { .. } | Control::ContinueFrom { .. }
+                    )
+                {
+                    let reason = match &entry.cmd {
+                        Control::Retry { node, .. } => format!("node_retry `{node}`"),
+                        Control::ContinueFrom { node } => format!("run_continue_from `{node}`"),
+                        _ => String::new(),
+                    };
+                    log.append(EventPayload::ReviewWithdrawn {
+                        node: current.clone(),
+                        reason,
+                    })?;
+                    supervisor::apply_move_directive(
+                        run_dir,
+                        log,
+                        &mut control_cursor,
+                        &mut prompt_overrides,
+                        &mut current,
+                        entry.cmd,
+                        entry.seq,
+                    )?;
+                    continue;
                 }
                 std::thread::sleep(AWAIT_CONTROL_POLL);
                 continue;
@@ -1421,8 +1459,8 @@ fn drive_inner(
             // moves mid-run because the manifest is immutable.
             let (prim_agent, prim_interaction) = node_primary_invocation(run_dir, &current)?
                 .unwrap_or_else(|| (String::new(), Interaction::Reprompt));
-            let live_exe: Option<std::path::PathBuf> = std::env::current_exe().ok();
-            let live_claude = prim_agent == "claude" || prim_agent == "claude-code";
+            let live_exe: Option<std::path::PathBuf> = apb_core::fsutil::reexec_exe().ok();
+            let live_claude = apb_core::detect::canonical_agent_id(&prim_agent) == "claude";
             let live_injectable =
                 prim_interaction == Interaction::Live && live_claude && live_exe.is_some();
             // Downgrade reason when the ceiling is `Live` but injection is
@@ -1519,18 +1557,8 @@ fn drive_inner(
                                         detail,
                                     })?;
                                 }
-                                let node_prompt = match &node_kind {
-                                    NodeKind::AgentTask { prompt, .. } => prompt.clone(),
-                                    _ => String::new(),
-                                };
                                 let ov = build_reprompt_override(
-                                    run_dir,
-                                    &run_id,
-                                    &state,
-                                    cfg,
-                                    &node_prompt,
-                                    &events,
-                                    &current,
+                                    run_dir, &run_id, &state, cfg, &playbook, &events, &current,
                                 )?;
                                 prompt_overrides.insert(current.clone(), ov);
                             }
@@ -1788,18 +1816,8 @@ fn drive_inner(
                                     output.trim()
                                 ),
                             })?;
-                            let node_prompt = match &node_kind {
-                                NodeKind::AgentTask { prompt, .. } => prompt.clone(),
-                                _ => String::new(),
-                            };
                             let ov = build_reprompt_override(
-                                run_dir,
-                                &run_id,
-                                &state,
-                                cfg,
-                                &node_prompt,
-                                &events,
-                                &current,
+                                run_dir, &run_id, &state, cfg, &playbook, &events, &current,
                             )?;
                             prompt_overrides.insert(current.clone(), ov);
                             continue;
@@ -1992,9 +2010,7 @@ fn drive_inner(
 
         // Supervisor mode: a failed/timed-out node raises a wake and waits for a
         // supervisor command instead of autonomously taking a fallback edge.
-        if mode == RunMode::Supervised
-            && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut)
-        {
+        if mode.parks_on_failure() && matches!(status, NodeStatus::Failed | NodeStatus::TimedOut) {
             match park_for_supervisor(
                 root,
                 run_dir,

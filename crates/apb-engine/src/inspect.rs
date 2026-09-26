@@ -6,11 +6,12 @@ use std::time::{Duration, Instant};
 use serde::{Deserialize, Serialize};
 
 use crate::error::EngineError;
-use crate::event::{EventPayload, WakeTrigger, read_all};
+use crate::event::{EventPayload, WakeTrigger};
+use crate::run_view::read_events;
 use crate::state::RunState;
 
 /// A wake event handed to the calling code: the first `WakeRaised` after the cursor.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct WakeEvent {
     pub seq: u64,
     pub trigger: WakeTrigger,
@@ -50,7 +51,7 @@ pub fn wait_wake(
     let cursor: i128 = after_seq.map(i128::from).unwrap_or(-1);
     let deadline = Instant::now() + timeout;
     loop {
-        let events = read_all(&run_dir)?;
+        let events = read_events(&run_dir)?;
         for event in &events {
             if i128::from(event.seq) <= cursor {
                 continue;
@@ -87,21 +88,20 @@ pub fn wait_wake(
 /// (phase 4b) will be a thin wrapper around it.
 pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, EngineError> {
     let run_dir = resolve_run_dir(root, run_id)?;
-    let events = read_all(&run_dir)?;
-    let state = RunState::fold(&events);
+    // The same run view `run_status` reports from: a live open attempt, or a
+    // run parked on a wait with a live driver, reads running here too, and a
+    // dead driver reads interrupted.
+    let view = crate::run_view::RunView::load(&run_dir, run_id)?;
+    let nodes = view.nodes();
+    let crate::run_view::RunView {
+        events,
+        state,
+        progress,
+        run_status,
+        ..
+    } = view;
 
     let context = std::fs::read_to_string(run_dir.join("context.md")).unwrap_or_default();
-
-    // Same live overlay as `run_status` (issue #45 finding 9, and issue
-    // #102.4 cause B for a wait/signal park): a live open attempt, or a run
-    // parked on a wait with a live driver, must not report as interrupted
-    // here either. `progress` is computed once and reused below for the
-    // pending-gate fields.
-    let nodes = crate::liveness::reported_node_statuses(&events);
-    let progress = crate::progress::from_run_dir(&run_dir, &events);
-    let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
-    let driver_alive = crate::liveness::driver_alive(&run_dir, run_id);
-    let run_status = crate::liveness::reported_run_status(&events, waiting, driver_alive);
 
     let wakes: Vec<serde_json::Value> = events
         .iter()
@@ -164,7 +164,7 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
 pub fn write_supervisor_report(root: &Path, run_id: &str, text: &str) -> Result<(), EngineError> {
     let run_dir = resolve_run_dir(root, run_id)?;
     let report_path = run_dir.join("supervisor").join("report.md");
-    apb_core::fsutil::atomic_write(&report_path, text.as_bytes())?;
+    apb_core::fsutil::atomic_write_under(&run_dir, &report_path, text.as_bytes())?;
     Ok(())
 }
 
@@ -198,7 +198,7 @@ pub fn supervisor_report_or_summary(root: &Path, run_id: &str) -> Result<String,
         return Ok(report);
     }
 
-    let events = read_all(&run_dir)?;
+    let events = read_events(&run_dir)?;
     let state = RunState::fold(&events);
 
     let mut out = String::new();
@@ -260,6 +260,23 @@ pub struct PersistedSession {
     pub capabilities: Vec<String>,
 }
 
+/// Mints a supervisor token: `sv-` plus 32 bytes from the OS CSPRNG in
+/// unpadded base64url. The token is the supervisor tools' only credential and
+/// is handed to an agent process, so it must not be guessable from the clock
+/// or from a counter. Every surface that issues one (the MCP server and the
+/// background supervisor spawn) goes through here.
+pub fn mint_supervisor_token() -> Result<String, EngineError> {
+    let body = apb_core::server_auth::random_token()
+        .map_err(|e| EngineError::Io(std::io::Error::other(e.to_string())))?;
+    Ok(format!("sv-{body}"))
+}
+
+/// The fingerprint a supervisor session is stored and looked up under. The
+/// raw token never reaches disk or a lookup table.
+pub fn supervisor_token_fingerprint(token: &str) -> String {
+    apb_core::content::sha256_hex(token.as_bytes())
+}
+
 /// Writes the supervisor session to `run_dir/supervisor/session.json`
 /// atomically. Only the token's fingerprint reaches disk, not the token itself.
 pub fn write_supervisor_session(
@@ -271,11 +288,11 @@ pub fn write_supervisor_session(
     let run_dir = resolve_run_dir(root, run_id)?;
     let session_path = run_dir.join("supervisor").join("session.json");
     let session = PersistedSession {
-        token_hash: apb_core::content::sha256_hex(token.as_bytes()),
+        token_hash: supervisor_token_fingerprint(token),
         capabilities: capabilities.to_vec(),
     };
     let bytes = serde_json::to_vec(&session).map_err(|e| EngineError::Yaml(e.to_string()))?;
-    apb_core::fsutil::atomic_write(&session_path, &bytes)?;
+    apb_core::fsutil::atomic_write_under(&run_dir, &session_path, &bytes)?;
     Ok(())
 }
 
@@ -291,6 +308,7 @@ pub fn find_session_by_token(
     if !runs_dir.is_dir() {
         return Ok(None);
     }
+    let presented = supervisor_token_fingerprint(token);
     for entry in std::fs::read_dir(&runs_dir)? {
         let entry = match entry {
             Ok(e) => e,
@@ -314,8 +332,9 @@ pub fn find_session_by_token(
             Err(_) => continue,
         };
         // Compare the fingerprint of the presented token with the stored
-        // fingerprint: the token itself is never stored on disk.
-        if session.token_hash == apb_core::content::sha256_hex(token.as_bytes()) {
+        // fingerprint (the token itself is never stored on disk), in constant
+        // time.
+        if apb_core::server_auth::ct_eq_str(&session.token_hash, &presented) {
             return Ok(Some((run_id, session.capabilities)));
         }
     }
@@ -327,7 +346,8 @@ pub fn find_session_by_token(
 pub fn touch_heartbeat(root: &Path, run_id: &str) -> Result<(), EngineError> {
     let run_dir = resolve_run_dir(root, run_id)?;
     let heartbeat_path = run_dir.join("supervisor").join("heartbeat");
-    apb_core::fsutil::atomic_write(
+    apb_core::fsutil::atomic_write_under(
+        &run_dir,
         &heartbeat_path,
         apb_core::clock::now_ms().to_string().as_bytes(),
     )?;

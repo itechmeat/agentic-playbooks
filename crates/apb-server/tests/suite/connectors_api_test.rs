@@ -390,6 +390,36 @@ async fn detail_endpoint_carries_missing_env() {
     assert_eq!(acct1["fields"]["base_url"], "https://first.example.com");
 }
 
+/// The account detail the dashboard approves from names every secret that is
+/// sourced from a command, with the command line: approving the account
+/// authorizes running it.
+#[tokio::test]
+async fn detail_endpoint_shows_a_command_sourced_secret() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let global = config::global_config_path(CONNECTOR).unwrap();
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    std::fs::write(
+        &global,
+        "accounts:\n  - name: mine\n    base_url: https://mine.example.com\n    token: \"{{cmd:pass show tracker}}\"\n",
+    )
+    .unwrap();
+
+    let app = build_router(AppState::new(root.path().to_path_buf()));
+    let (status, json) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    assert_eq!(status, StatusCode::OK);
+    let mine = json["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "mine")
+        .cloned()
+        .unwrap_or_else(|| panic!("account `mine` listed: {json}"));
+    assert_eq!(mine["cmd"]["token"], "pass show tracker", "{mine}");
+}
+
 /// Approves the fixture connector's tree digest and one account's digest -
 /// the healthcheck probe is trust-gated (fix round, spec 9: it resolves live
 /// secrets against the live config, so an unapproved connector/account must
@@ -807,6 +837,77 @@ async fn detail_endpoint_without_workspace_returns_connector() {
         1,
         "each account is listed once in the machine-wide view: {json}"
     );
+}
+
+/// The machine-wide connector page offers Approve, Probe and the playground
+/// for the account rows it lists without a workspace, so those three call-path
+/// endpoints must find the account the same way the listing did: in the
+/// reachable project that configures it. They used to demand `?workspace=`
+/// and answered every click from the global view with a 400.
+#[tokio::test]
+async fn account_actions_without_workspace_use_the_listed_account() {
+    let _guard = crate::common::env_lock().await;
+    let cfg = tempfile::tempdir().unwrap();
+    let root = tempfile::tempdir().unwrap();
+    let _g = setup(cfg.path(), root.path());
+    let _token = set_var(TOKEN_VAR, "secret-value");
+    let (_id, _reg) = register_workspace(root.path());
+
+    for body in [
+        serde_json::json!({ "name": CONNECTOR }),
+        serde_json::json!({ "name": CONNECTOR, "account": "acct1" }),
+    ] {
+        let app = build_router(AppState::new_global());
+        let (status, json) = post_json(app, "/api/connectors/approve", body).await;
+        assert_eq!(status, StatusCode::OK, "workspace-less approve: {json}");
+    }
+    let app = build_router(AppState::new_global());
+    let (_, detail) = get_json(app, &format!("/api/connectors/{CONNECTOR}")).await;
+    let acct = detail["accounts"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["name"] == "acct1")
+        .cloned()
+        .expect("acct1 listed");
+    assert_eq!(
+        acct["trust"], "approved",
+        "the listed account is approved: {detail}"
+    );
+
+    let app = build_router(AppState::new_global());
+    let (status, probe) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/healthcheck/acct1"),
+        serde_json::json!({}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "workspace-less probe: {probe}");
+    assert_eq!(probe["ok"], serde_json::json!(true), "probe: {probe}");
+
+    let app = build_router(AppState::new_global());
+    let (status, call) = post_json(
+        app,
+        &format!("/api/connectors/{CONNECTOR}/call"),
+        serde_json::json!({ "function": "list_items", "args": {}, "dry_run": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "workspace-less dry run: {call}");
+    assert_eq!(
+        call["url"],
+        serde_json::json!("https://first.example.com/items"),
+        "the default account of the listing renders: {call}"
+    );
+
+    // An account no reachable project configures is a 404, not a 400.
+    let app = build_router(AppState::new_global());
+    let (status, _) = post_json(
+        app,
+        "/api/connectors/approve",
+        serde_json::json!({ "name": CONNECTOR, "account": "nobody" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
 // --- usage stats (task 17.5, spec 9's dropped "usage stats" bullet) --------

@@ -208,6 +208,18 @@ fn v13_accepts_nodes_rejected_output_reference() {
 }
 
 #[test]
+fn v13_accepts_the_review_decision_of_a_node() {
+    // `nodes.<id>.review_decision` is the option a human_review gate was
+    // decided with, the text twin of the edge that routed on it: a node after a
+    // multi-option gate reads it instead of the whole run context.
+    let good = VALID.replace("{{nodes.lint.output}}", "{{nodes.lint.review_decision}}");
+    assert!(
+        !error_codes(&good).contains(&"V13"),
+        "nodes.<id>.review_decision must resolve at save time"
+    );
+}
+
+#[test]
 fn v13_accepts_a_top_level_field_selector_on_output_and_report() {
     // `{{nodes.<id>.output.<field>}}` projects ONE top-level field of a node
     // output that parses as a JSON object, with the exact `output_field` edge
@@ -285,7 +297,8 @@ fn v13_message_includes_variable_and_known_namespaces() {
         issue.message.contains(
             "known namespaces: params.*, nodes.<id>.output, nodes.<id>.report, \
              nodes.<id>.output.<field>, nodes.<id>.report.<field>, nodes.<id>.review_note, \
-             nodes.<id>.rejected_output, run.instruction, run.context, run.hooks.*"
+             nodes.<id>.review_decision, nodes.<id>.rejected_output, run.instruction, \
+             run.context, run.hooks.*"
         ),
         "message must carry the exact known-namespaces suffix: {}",
         issue.message

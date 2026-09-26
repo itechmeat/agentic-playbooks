@@ -771,7 +771,7 @@ fn a_stop_during_a_batch_kills_the_members_in_flight() {
 }
 
 /// #77(B), the sharpest trap: a PAUSE stops admission and writes NOTHING off.
-/// `Cancelled` is terminal for `parallel::is_terminal`, so journaling a queued
+/// `Cancelled` is terminal for `NodeStatus::is_finished`, so journaling a queued
 /// member cancelled here would make the resume skip it forever and silently
 /// drop that branch.
 #[cfg(unix)]
@@ -1532,5 +1532,43 @@ fn a_note_posted_after_a_stop_survives_the_resume_that_applies_the_stop() {
             .unwrap_or_default()
             .contains(note),
         "the note must reach the run context"
+    );
+}
+
+/// A sub-playbook child never owns a `driver.pid`: its parent's drive runs it
+/// in-process and the child records only `driven_by`. `stop` used to ask the
+/// bare pid question, read that healthy child as driverless and append its own
+/// `RunAborted` while the parent's drive was still writing the same journal,
+/// even though `run_status` reported `driver_alive: true` for it. The stop must
+/// take the same liveness answer every status surface takes: hand the abort to
+/// the live driver and write nothing itself.
+#[test]
+fn stop_of_a_parent_driven_child_leaves_the_journal_to_the_live_parent_drive() {
+    let dir = tempfile::tempdir().unwrap();
+    init_project(dir.path()).unwrap();
+    let runs = dir.path().join(".apb/runs");
+    let parent = runs.join("parent-1");
+    let child = runs.join("child-1");
+    for (run_dir, playbook) in [(&parent, "p"), (&child, "c")] {
+        let mut log = EventLog::create(run_dir).unwrap();
+        log.append(EventPayload::RunStarted {
+            playbook: playbook.into(),
+            version: "1.0.0".into(),
+        })
+        .unwrap();
+    }
+    // The parent is driven by a live process (ours), the child by the parent.
+    fs::write(parent.join("driver.pid"), std::process::id().to_string()).unwrap();
+    fs::write(child.join("driven_by"), "parent-1").unwrap();
+
+    let outcome = stop_run(dir.path(), "child-1").unwrap();
+
+    assert_eq!(outcome, StopOutcome::SignaledLiveDriver);
+    let events = read_all(&child).unwrap();
+    assert!(
+        !events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunAborted { .. })),
+        "the live parent drive owns the child's terminal event, got {events:?}"
     );
 }

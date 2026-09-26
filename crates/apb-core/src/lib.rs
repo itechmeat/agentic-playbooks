@@ -1,3 +1,4 @@
+pub mod agent_catalog;
 pub mod bundle;
 pub mod cache;
 pub mod clock;
@@ -13,12 +14,15 @@ pub mod fingerprint;
 pub mod fsutil;
 pub mod graphutil;
 pub mod migration;
+pub mod model_check;
 pub mod models_table;
 pub mod overrides;
+pub mod preflight;
 pub mod profile;
 pub mod profile_store;
 pub mod projects;
 pub mod registry;
+pub mod run_origin;
 pub mod schema;
 pub mod schema_migrate;
 pub mod scope;
@@ -29,6 +33,7 @@ pub mod trust;
 pub mod validate;
 pub mod versioning;
 pub mod workspace;
+pub mod zcode;
 
 /// Shared lock for unit tests that touch process-global env
 /// (`APB_CONFIG_DIR` etc.): tests within one crate run on parallel threads of

@@ -11,9 +11,73 @@ pub enum SchemaError {
     LegacyExecutors,
 }
 
+/// The playbook schema this apb writes. Schema 1 (executors) only survives
+/// as the input of `apb migrate`: `Playbook::from_yaml` refuses it, so every
+/// playbook that parses is a schema-2 playbook.
+pub const CURRENT_SCHEMA: u32 = 2;
+
+/// A playbook without a `schema:` key parsed, so it is a current one.
 fn default_schema() -> u32 {
-    1
+    CURRENT_SCHEMA
 }
+
+/// The starter document for a new playbook (the dashboard's "New playbook"
+/// editor). Minimal and valid: a start and a finish node.
+pub fn new_playbook_template() -> String {
+    format!(
+        "schema: {CURRENT_SCHEMA}
+id: new-playbook
+name: New Playbook
+version: 0.1.0
+
+nodes:
+  - id: start
+    type: start
+    title: Start
+  - id: done
+    type: finish
+    outcome: success
+
+edges:
+  - {{ from: start, to: done }}
+"
+    )
+}
+
+/// How a fan-in node waits for its incoming branches: the `join` value of an
+/// incoming edge. The one reading of those strings, shared by the validator
+/// (V36/V37) and the engine's join readiness.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum JoinMode {
+    All,
+    Any,
+}
+
+impl JoinMode {
+    /// `None` for a value that is neither `all` nor `any`.
+    pub fn parse(s: &str) -> Option<JoinMode> {
+        match s {
+            "all" => Some(JoinMode::All),
+            "any" => Some(JoinMode::Any),
+            _ => None,
+        }
+    }
+}
+
+/// Every node `type` tag, in declaration order. [`NodeKind::type_str`] reads
+/// from it, so this is the one list of node types (the dashboard's generated
+/// types, the authoring guide's doc test).
+pub const NODE_TYPES: [&str; 9] = [
+    "start",
+    "agent_task",
+    "script",
+    "prompt",
+    "condition",
+    "human_review",
+    "wait",
+    "finish",
+    "playbook",
+];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Playbook {
@@ -175,6 +239,80 @@ impl Playbook {
     pub fn node(&self, id: &str) -> Option<&Node> {
         self.nodes.iter().find(|n| n.id == id)
     }
+
+    /// The context budget a node's prompt is rendered with: each limit comes
+    /// from the node's own `context`, else `defaults.context`, else the
+    /// engine default ([`ContextBudget::DEFAULT`]). An unknown node gets the
+    /// playbook-level budget.
+    pub fn context_budget(&self, node_id: &str) -> ContextBudget {
+        let node = self.node(node_id).and_then(|n| n.context);
+        let defaults = self.defaults.context;
+        let pick = |f: fn(&ContextLimits) -> Option<u64>, fallback: usize| -> usize {
+            node.as_ref()
+                .and_then(f)
+                .or_else(|| defaults.as_ref().and_then(f))
+                .map_or(fallback, |v| usize::try_from(v).unwrap_or(usize::MAX))
+        };
+        ContextBudget {
+            max_bytes: pick(|l| l.max_bytes, ContextBudget::DEFAULT.max_bytes),
+            section_max_bytes: pick(
+                |l| l.section_max_bytes,
+                ContextBudget::DEFAULT.section_max_bytes,
+            ),
+            output_max_bytes: pick(
+                |l| l.output_max_bytes,
+                ContextBudget::DEFAULT.output_max_bytes,
+            ),
+        }
+    }
+}
+
+/// How much recorded run output a node's prompt may carry (issue #136 item
+/// 1), as written under `defaults.context` or a node's own `context`. Every
+/// field is optional and falls back field by field (node, then defaults, then
+/// the engine default); `0` lifts that limit. Output beyond a limit is clipped
+/// in the prompt only: the full text stays on disk and the clip names the
+/// file that holds it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextLimits {
+    /// Total size of `{{run.context}}`. When the sections exceed it, the
+    /// oldest ones are replaced by a one-line pointer until it fits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_bytes: Option<u64>,
+    /// Size of one node's section inside `{{run.context}}`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub section_max_bytes: Option<u64>,
+    /// Size of one `{{nodes.<id>.output}}` (or `.report`, or a field of it)
+    /// reference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub output_max_bytes: Option<u64>,
+}
+
+/// The resolved limits of [`ContextLimits`] for one node, in bytes; `0` means
+/// unlimited.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ContextBudget {
+    pub max_bytes: usize,
+    pub section_max_bytes: usize,
+    pub output_max_bytes: usize,
+}
+
+impl ContextBudget {
+    /// The engine defaults: about 16k tokens of run context, 2k per section
+    /// and 8k per direct output reference.
+    pub const DEFAULT: ContextBudget = ContextBudget {
+        max_bytes: 64 * 1024,
+        section_max_bytes: 8 * 1024,
+        output_max_bytes: 32 * 1024,
+    };
+
+    /// No limit at all: the whole recorded output, as before the budgets.
+    pub const UNLIMITED: ContextBudget = ContextBudget {
+        max_bytes: 0,
+        section_max_bytes: 0,
+        output_max_bytes: 0,
+    };
 }
 
 impl Node {
@@ -315,17 +453,17 @@ impl NodeKind {
     /// variant is a compile error here until its tag is decided, so a derived
     /// summary can never silently mislabel a new kind.
     pub fn type_str(&self) -> &'static str {
-        match self {
-            NodeKind::Start => "start",
-            NodeKind::AgentTask { .. } => "agent_task",
-            NodeKind::Script { .. } => "script",
-            NodeKind::Prompt { .. } => "prompt",
-            NodeKind::Condition { .. } => "condition",
-            NodeKind::HumanReview { .. } => "human_review",
-            NodeKind::Wait { .. } => "wait",
-            NodeKind::Finish { .. } => "finish",
-            NodeKind::Playbook { .. } => "playbook",
-        }
+        NODE_TYPES[match self {
+            NodeKind::Start => 0,
+            NodeKind::AgentTask { .. } => 1,
+            NodeKind::Script { .. } => 2,
+            NodeKind::Prompt { .. } => 3,
+            NodeKind::Condition { .. } => 4,
+            NodeKind::HumanReview { .. } => 5,
+            NodeKind::Wait { .. } => 6,
+            NodeKind::Finish { .. } => 7,
+            NodeKind::Playbook { .. } => 8,
+        }]
     }
 }
 
@@ -390,6 +528,10 @@ pub struct Defaults {
     /// default`; `1` serializes every fan-out. Absent means the run decides.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_parallel: Option<usize>,
+    /// Playbook-wide context budget for node prompts (issue #136 item 1). See
+    /// [`ContextLimits`]; a node's own `context` wins field by field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextLimits>,
 }
 
 /// For `skip_serializing_if` on additive boolean flags: a `false` value is
@@ -406,6 +548,10 @@ fn is_false(b: &bool) -> bool {
 /// nowhere to go means, which is why declaring it lets a playbook delete the
 /// pile of `node_status: failure` edges into a negative finish node and keep
 /// only the branches that actually handle something.
+///
+/// An unconditional edge out of a failed node moves the run on but does not
+/// handle the failure: a run that reaches a success finish carrying such a
+/// failure ends failed (`apb_engine::parallel::unhandled_failure`).
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum FailurePolicy {
     /// Today's behavior: an unhandled failure is an engine error, because the
@@ -710,6 +856,10 @@ pub struct Node {
     /// unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub success_check: Option<SuccessCheck>,
+    /// This node's context budget (issue #136 item 1), overriding
+    /// `defaults.context` field by field. See [`ContextLimits`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context: Option<ContextLimits>,
     #[serde(flatten)]
     pub kind: NodeKind,
 }
@@ -756,6 +906,24 @@ impl SuccessCheck {
             SuccessCheck::Marker { marker } => Some(marker),
             SuccessCheck::Script(_) => None,
         }
+    }
+}
+
+/// The decisions a `human_review` gate offers when it declares none.
+pub const DEFAULT_REVIEW_OPTIONS: [&str; 2] = ["approve", "reject"];
+
+/// The decisions a `human_review` gate actually offers: its declared
+/// `options`, or [`DEFAULT_REVIEW_OPTIONS`] when it declares none. The one
+/// reading every surface (the review event, `pending_review`, the owner
+/// instruction) uses, so a gate without options still shows buttons.
+pub fn effective_review_options(options: &[String]) -> Vec<String> {
+    if options.is_empty() {
+        DEFAULT_REVIEW_OPTIONS
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    } else {
+        options.to_vec()
     }
 }
 
@@ -829,6 +997,10 @@ pub enum NodeKind {
         max_loops: Option<u32>,
     },
     HumanReview {
+        /// The decisions a reviewer can pick. Optional: an empty or absent list
+        /// means [`DEFAULT_REVIEW_OPTIONS`]; read it through
+        /// [`effective_review_options`], never directly.
+        #[serde(default)]
         options: Vec<String>,
         /// Optional guidance shown to the reviewer at the gate (issue #102.9),
         /// rendered into the owner-facing review instruction above the
@@ -934,7 +1106,9 @@ pub struct Edge {
     #[serde(default)]
     pub fallback: bool,
     #[serde(default)]
-    pub join: Option<String>, // all | any; executed in phase 2, but parsed already now
+    /// `all` | `any` ([`JoinMode`]); kept as the raw string so the validator
+    /// can name a value that is neither (V36).
+    pub join: Option<String>,
     /// Bounded-loop cap (spec 2026-07-20-run-reliability): the maximum number
     /// of times this edge may be traversed in a run. A cycle is legal only when
     /// it contains at least one edge carrying this field (validator V11). Once
@@ -1018,6 +1192,41 @@ pub enum StatusEq {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// NODE_TYPES is the one list of node type tags (the dashboard's generated
+    /// types and the authoring guide are checked against it): every tag in it
+    /// must parse as that node kind, and every kind must report its own tag.
+    #[test]
+    fn node_types_are_exactly_the_serde_tags() {
+        let body = [
+            "{ id: n0, type: start }",
+            "{ id: n1, type: agent_task, prompt: p }",
+            "{ id: n2, type: script, script: s, runner: sh }",
+            "{ id: n3, type: prompt, prompt: p }",
+            "{ id: n4, type: condition }",
+            "{ id: n5, type: human_review }",
+            "{ id: n6, type: wait, wait_for: { type: timer, seconds: 1 }, timeout_seconds: 5 }",
+            "{ id: n7, type: finish, outcome: success }",
+            "{ id: n8, type: playbook, playbook: other }",
+        ]
+        .map(|n| format!("  - {n}\n"))
+        .concat();
+        let pb = Playbook::from_yaml(&format!(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n{body}edges: []\n"
+        ))
+        .unwrap();
+        let tags: Vec<&str> = pb.nodes.iter().map(|n| n.kind.type_str()).collect();
+        assert_eq!(tags, NODE_TYPES);
+    }
+
+    /// The new-playbook starter is a current, valid playbook.
+    #[test]
+    fn new_playbook_template_is_current_and_valid() {
+        let pb = Playbook::from_yaml(&new_playbook_template()).unwrap();
+        assert_eq!(pb.schema, CURRENT_SCHEMA);
+        let report = crate::validate::validate(&pb, &Default::default());
+        assert!(report.is_valid(), "{:?}", report.issues);
+    }
 
     #[test]
     fn parses_cache_shorthand_and_full_form() {

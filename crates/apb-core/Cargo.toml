@@ -25,12 +25,24 @@ hmac.workspace = true
 base64.workspace = true
 getrandom.workspace = true
 subtle.workspace = true
+# zcode: evaluates ZCode's built-in `modelMatch` rules (JS-compatible subset)
+# to find a model's reasoning levels (a selection without one is rejected by
+# ZCode and silently replaced by a different model).
+regex = "1"
 
 # Group termination of the agent-detection probe tree (Unix): kill(-pgid,
 # SIGKILL) as a syscall rather than a `kill -KILL -<pgid>` subprocess, whose
 # argument parsing differs between BSD kill (macOS) and procps-ng kill (Linux).
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
+
+# TypeScript declarations for the core types the dashboard consumes (the
+# trash listing), derived only under the `ts` feature: apb-server's contract
+# test turns it on to render `web/src/lib/api.gen.ts`.
+ts-rs = { version = "12", optional = true }
+
+[features]
+ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 tempfile = "3.27.0"

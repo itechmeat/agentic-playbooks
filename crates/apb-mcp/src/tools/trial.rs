@@ -8,7 +8,7 @@ use super::ToolError;
 use super::run::build_duration_table_from;
 use apb_core::registry::Registry;
 use apb_engine::RunOptions;
-use apb_engine::event::read_all;
+use apb_engine::run_view::read_events;
 use apb_engine::state::{RunState, RunStatus};
 use serde_json::{Value, json};
 
@@ -44,7 +44,7 @@ fn truncate_on_char_boundary(s: &mut String, max: usize) {
 fn poll_terminal(run_dir: &Path) -> String {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
-        if let Ok(events) = read_all(run_dir) {
+        if let Ok(events) = read_events(run_dir) {
             let state = RunState::fold(&events);
             if matches!(
                 state.run_status,
@@ -87,7 +87,7 @@ pub fn playbook_trial(
     let reg = Registry::open_dir(&definition_parent).map_err(ToolError::from)?;
     let loaded = reg.load(id, version)?;
     let effects = apb_core::effects::effective(&loaded.playbook);
-    let digest = apb_core::scope::digest_str(&loaded.yaml);
+    let digest = loaded.trust_digest()?;
 
     if effects.contains(&Effect::Irreversible) {
         return Ok(json!({ "rejected": "trial_forbidden_irreversible", "id": id }));
@@ -151,7 +151,7 @@ pub fn playbook_trial(
                 }
                 truncate_on_char_boundary(&mut diff, 64 * 1024);
                 let measured = apb_engine::progress::node_durations_seconds(
-                    &read_all(&run_dir).unwrap_or_default(),
+                    &read_events(&run_dir).unwrap_or_default(),
                 );
                 let durations = build_duration_table_from(&loaded.playbook, &measured);
                 let _ = git(root, &["worktree", "remove", "--force", &scratch_str]);
@@ -181,7 +181,7 @@ pub fn playbook_trial(
     let run_dir = root.join(".apb/runs").join(&run_id);
     let status = poll_terminal(&run_dir);
     let measured =
-        apb_engine::progress::node_durations_seconds(&read_all(&run_dir).unwrap_or_default());
+        apb_engine::progress::node_durations_seconds(&read_events(&run_dir).unwrap_or_default());
     let durations = build_duration_table_from(&loaded.playbook, &measured);
     Ok(json!({
         "run_id": run_id,
@@ -245,6 +245,10 @@ pub fn playbook_prepare_run(
         .iter()
         .map(|p| json!({ "ref": p.key, "bundle": p.bundle, "trusted": store.is_approved(&p.bundle) }))
         .collect();
+    // Every sub-playbook the plan runs, with its own trust, so the user sees
+    // the whole tree they confirm (`node` is the path of playbook-node ids).
+    let mut children: Vec<Value> = Vec::new();
+    list_children(&pf.children, "", &store, &mut children);
     let token = crate::plan::encode(&payload);
     Ok(json!({
         "plan": {
@@ -255,10 +259,36 @@ pub fn playbook_prepare_run(
             "effects": pf.effects,
             "trusted": trusted,
             "profiles": profiles,
+            "children": children,
             "params": params,
         },
         "plan_token": token,
     }))
+}
+
+/// Flattens a sub-playbook pin tree for a plan: one entry per child, depth
+/// first, with the digest the plan pins and whether it is approved.
+fn list_children(
+    tree: &BTreeMap<String, apb_engine::run_config::ChildExpectation>,
+    prefix: &str,
+    store: &apb_core::trust::TrustStore,
+    out: &mut Vec<Value>,
+) {
+    for (node, child) in tree {
+        let path = if prefix.is_empty() {
+            node.clone()
+        } else {
+            format!("{prefix}/{node}")
+        };
+        out.push(json!({
+            "node": path,
+            "id": child.id,
+            "version": child.version,
+            "digest": child.playbook_digest,
+            "trusted": store.is_approved(&child.playbook_digest),
+        }));
+        list_children(&child.children, &path, store, out);
+    }
 }
 
 /// Activates a playbook after a successful trial or explicit confirmation (spec
@@ -278,7 +308,7 @@ pub fn playbook_approve(
     };
     let reg = Registry::open_dir(&definition_parent).map_err(ToolError::from)?;
     let loaded = reg.load(id, version)?;
-    let digest = apb_core::scope::digest_str(&loaded.yaml);
+    let digest = loaded.trust_digest()?;
     let playbook_dir = definition_parent.join("playbooks").join(id);
     apb_core::trust::write_lifecycle(&playbook_dir, apb_core::trust::Lifecycle::Active)
         .map_err(|e| ToolError::Engine(e.to_string()))?;

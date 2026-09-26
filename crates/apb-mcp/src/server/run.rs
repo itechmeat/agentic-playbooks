@@ -5,11 +5,12 @@
 
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::CallToolResult;
-use rmcp::{tool, tool_router};
+use rmcp::service::RequestContext;
+use rmcp::{RoleServer, tool, tool_router};
 use serde_json::json;
 
 use super::args::*;
-use super::{WfMcp, to_call_tool_result, with_warnings};
+use super::{WfMcp, sliced_wait, to_call_tool_result, with_warnings};
 use crate::tools::{self, ToolError};
 
 #[tool_router(router = run_router, vis = "pub(crate)")]
@@ -120,73 +121,46 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        // A repeat preflight: the digest must not have drifted between prepare and execute.
-        let pf = match crate::policy::preflight(&root_b, &payload.id, Some(&payload.version)) {
-            Ok(p) => p,
-            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
-        };
-        if pf.digest != payload.digest {
-            return to_call_tool_result(Ok(
-                json!({ "error": "plan_stale", "detail": "playbook changed since prepare" }),
-            ));
-        }
-        // A drift in a profile or skill between prepare and execute also breaks the plan.
-        let now_profiles: Vec<crate::plan::PlanProfile> = crate::policy::playbook_profile_bundles(
-            &root_b,
-            &payload.id,
-            Some(&payload.version),
-            false,
-        )
-        .into_iter()
-        .map(|(key, bundle)| crate::plan::PlanProfile { key, bundle })
-        .collect();
-        if now_profiles != payload.profiles {
-            return to_call_tool_result(Ok(
-                json!({ "error": "plan_stale", "detail": "profile or skill changed since prepare" }),
-            ));
-        }
-        // Trust: an unapproved digest requires the user's explicit confirmation
-        // (spec 9). preflight does not check trust - we do it here, so an
-        // untrusted playbook of another workspace is not run silently.
-        if acknowledge_untrusted != Some(true)
-            && !apb_core::trust::TrustStore::load().is_approved(&payload.digest)
-        {
-            return to_call_tool_result(Ok(json!({
-                "policy_refusal": {
-                    "policy": "untrusted_requires_acknowledge",
-                    "id": payload.id,
-                    "digest": payload.digest,
-                    "detail": "re-run execute_plan with acknowledge_untrusted: true after user confirmation",
-                }
-            })));
-        }
-        // Trust of the plan's profiles: every bundle from the signed plan must
-        // be approved (or an explicit acknowledge). Otherwise a trusted
-        // playbook with an untrusted profile would run without confirmation
-        // (spec 5.1).
-        if acknowledge_untrusted != Some(true) {
-            let store = apb_core::trust::TrustStore::load();
-            let untrusted: Vec<String> = payload
-                .profiles
-                .iter()
-                .filter(|p| !store.is_approved(&p.bundle))
-                .map(|p| p.key.clone())
-                .collect();
-            if !untrusted.is_empty() {
-                return to_call_tool_result(Ok(json!({
-                    "policy_refusal": {
-                        "policy": "untrusted_profile_requires_acknowledge",
-                        "profiles": untrusted,
-                        "detail": "re-run execute_plan with acknowledge_untrusted: true after user confirmation",
-                    }
-                })));
-            }
-        }
+        // The run gate, in the target workspace, exactly as `playbook_run` runs
+        // it locally: lifecycle, `requires`, the parent's digest and profile
+        // trust, and the whole sub-playbook tree (every child's digest and
+        // profile trust, with its pins), each gated by the caller's
+        // acknowledge. Its permit is what the engine gets, so a child that
+        // drifts after this check is refused at spawn too.
         let wref = apb_core::scope::PlaybookRef {
             origin: apb_core::scope::Origin::Project { workspace_id: None },
             id: payload.id.clone(),
             version: Some(payload.version.clone()),
         };
+        let permit = match crate::policy::check_run(
+            &root_b,
+            &wref,
+            acknowledge_untrusted == Some(true),
+            false,
+        ) {
+            Ok(p) => p,
+            Err(refusal) => return to_call_tool_result(Ok(json!({ "policy_refusal": refusal }))),
+        };
+        // The plan the user confirmed must still be what runs: the digest and
+        // the profile bundles the gate verified equal the signed plan's.
+        if permit.playbook_digest != payload.digest {
+            return to_call_tool_result(Ok(
+                json!({ "error": "plan_stale", "detail": "playbook changed since prepare" }),
+            ));
+        }
+        let now_profiles: Vec<crate::plan::PlanProfile> = permit
+            .profile_bundles
+            .iter()
+            .map(|(key, bundle)| crate::plan::PlanProfile {
+                key: key.clone(),
+                bundle: bundle.clone(),
+            })
+            .collect();
+        if now_profiles != payload.profiles {
+            return to_call_tool_result(Ok(
+                json!({ "error": "plan_stale", "detail": "profile or skill changed since prepare" }),
+            ));
+        }
         let resolved = match apb_core::store::resolve(&root_b, &wref) {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Err(ToolError::from(e))),
@@ -218,9 +192,12 @@ impl WfMcp {
             params: payload.params.clone(),
             expected_digest: Some(payload.digest.clone()),
             expected_profile_bundles: Some(expected_bundles),
+            expected_children: Some(permit.children),
             ..Default::default()
         };
-        match apb_engine::run_background_resolved(&resolved, opts) {
+        // Driven by a detached process, like every other background start:
+        // the run must not die with this MCP session.
+        match apb_engine::start_detached_resolved(&resolved, opts) {
             Ok(run_id) => to_call_tool_result(Ok(json!({
                 "run_ref": { "workspace_id": payload.workspace_id, "run_id": run_id }
             }))),
@@ -229,7 +206,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately",
+        description = "Run a playbook with the given parameters and instruction. Pass supervise: \"self\" to run it in the background under the caller's supervision and receive a supervisor token; pass background: true to start it in the background and get a run_id immediately, then follow it with run_wait (not by polling run_status). Without either, the call blocks until the run ends",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn playbook_run(
@@ -274,7 +251,7 @@ impl WfMcp {
         // the window would give the engine a different set). The MCP path
         // (autonomous / supervise:"self") does not spawn an external
         // supervisor agent -> supervised: false (matches the manifest, where
-        // supervisor_expected is also false for these modes).
+        // neither mode is RunMode::AgentSupervised).
         let permit = match crate::policy::check_run(
             &self.root,
             &wref,
@@ -400,7 +377,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Get the current status of a run, including liveness: `driver_alive` (null when no process claims the run), `node_times` with each node's start and the age and pid of its open attempt (plus `past_estimate`, true once an open attempt is running past its `expected_duration`), and the node status `lost` for a node whose attempt process is gone. Use `node_times` to tell a slow node from a stuck one, and `apb doctor --run <id>` for a full per-run diagnosis.",
+        description = "Get the current status of a run, including liveness: `driver_alive` (null when no process claims the run), `node_times` with each node's start and the age and pid of its open attempt (plus `past_estimate`, true once an open attempt is running past its `expected_duration`), and the node status `lost` for a node whose attempt process is gone. Use `node_times` to tell a slow node from a stuck one, and `apb doctor --run <id>` for a full per-run diagnosis. The answer is large (every node output); to wait for a run to finish or need input, call run_wait instead of calling this repeatedly.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn run_status(
@@ -412,6 +389,47 @@ impl WfMcp {
             Err(e) => return to_call_tool_result(Ok(e)),
         };
         to_call_tool_result(tools::run_status(&root, &run_id))
+    }
+
+    #[tool(
+        description = "Wait for a run without spending turns: blocks server-side until the run finishes, needs input (a question, a human_review gate, a supervisor decision), stops (paused or driverless), or timeout_ms runs out, then returns a compact result with `reason` and `next`. Use this after playbook_run with background: true, run_resume, run_answer or review_decide, instead of polling run_status: every status call is a model turn. Pass the largest timeout_ms your host's tool timeout allows (default 50000, max 1800000); progress notifications are sent while it blocks. On reason timeout, call run_wait again with the same arguments.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn run_wait(
+        &self,
+        Parameters(RunWaitArgs {
+            run_id,
+            workspace,
+            timeout_ms,
+        }): Parameters<RunWaitArgs>,
+        ctx: RequestContext<RoleServer>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        let total = tools::wait_timeout(timeout_ms);
+        // One waiter across all slices, so a gate's grace is not restarted
+        // at every slice boundary.
+        let waiter = match apb_engine::run_wait::RunWaiter::new(&root, &run_id) {
+            Ok(w) => std::sync::Mutex::new(w),
+            Err(e) => return to_call_tool_result(Err(ToolError::from(e))),
+        };
+        let res = sliced_wait(
+            &ctx,
+            total,
+            format!("waiting for run `{run_id}`"),
+            move |slice| {
+                let mut w = waiter
+                    .lock()
+                    .map_err(|_| ToolError::Engine("run_wait: poisoned waiter".into()))?;
+                let res = w.wait(slice)?;
+                let done = res.reason != apb_engine::run_wait::WaitReason::Timeout;
+                Ok((res, done))
+            },
+        )
+        .await;
+        to_call_tool_result(res.and_then(|res| tools::run_wait_result(&root, &run_id, &res)))
     }
 
     #[tool(
@@ -488,7 +506,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Resume a run, optionally from a given node. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway.",
+        description = "Resume a run, optionally from a given node. Only a run apb created on this machine can be resumed; a run whose playbook snapshot is not approved needs acknowledge_untrusted: true after user confirmation, like playbook_run. Returns the drift error inline (instead of detaching) when an agent binary changed since run start; pass allow_environment_drift to proceed anyway.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn run_resume(
@@ -497,6 +515,7 @@ impl WfMcp {
             run_id,
             from_node,
             allow_environment_drift,
+            acknowledge_untrusted,
             workspace,
         }): Parameters<RunResumeArgs>,
     ) -> CallToolResult {
@@ -504,6 +523,11 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
+        if let Err(refusal) =
+            crate::policy::check_resume(&root, &run_id, acknowledge_untrusted == Some(true))
+        {
+            return to_call_tool_result(Ok(json!({ "policy_refusal": refusal })));
+        }
         to_call_tool_result(tools::run_resume(
             &root,
             &run_id,
@@ -553,6 +577,12 @@ impl WfMcp {
             (Some(_), Some(_)) | (None, None) => {
                 return to_call_tool_result(Ok(json!({
                     "error": "exactly_one_of_run_id_or_token_required",
+                })));
+            }
+            (Some(_), None) if self.supervisor_role => {
+                return to_call_tool_result(Ok(json!({
+                    "error": "supervisor_session_requires_token",
+                    "detail": "a supervisor answers with its token (answered_by: supervisor); the run_id path answers as the human and is not available to a supervisor",
                 })));
             }
             (Some(run_id), None) => {

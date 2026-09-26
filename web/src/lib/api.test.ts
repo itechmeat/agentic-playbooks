@@ -4,9 +4,11 @@ import {
   createPlaybook,
   deletePlaybook,
   fetchDiff,
+  fetchModelCatalog,
   fetchInputDraft,
   fetchPlaybook,
   postAnswer,
+  runPlaybook,
   saveInputDraft,
   saveLayout,
   updatePlaybook,
@@ -279,5 +281,27 @@ describe('401 handling', () => {
     fetchMock.mockResolvedValueOnce(jsonResponse({ error: 'auth' }, 401))
     await expect(fetchPlaybook('demo')).rejects.toThrow(/HTTP 401/)
     expect(get(auth)).toEqual({ required: true, authenticated: false, checked: true })
+  })
+})
+
+describe('fetchModelCatalog', () => {
+  // The lists change with every build, so no copy may be kept between calls.
+  it('asks the server on every call', async () => {
+    fetchMock.mockImplementation(async () => jsonResponse({}))
+    await fetchModelCatalog()
+    await fetchModelCatalog()
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(fetchMock).toHaveBeenCalledWith('/api/models', { headers: H })
+  })
+})
+
+describe('runPlaybook', () => {
+  it('names the run gate refusal instead of a bare status', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ policy: 'requires_unmet', id: 'p', missing: ['file:NEEDED.md'] }, 409),
+    )
+    const err = runPlaybook('p').catch((e: unknown) => e)
+    await expect(err).resolves.toMatchObject({ status: 409, code: 'requires_unmet' })
+    await expect(err).resolves.toHaveProperty('message', expect.stringMatching(/requires_unmet/))
   })
 })

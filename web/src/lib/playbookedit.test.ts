@@ -22,7 +22,7 @@ params:
 executors:
   main:
     agent: claude-code
-    model: claude-fable-5
+    model: claude-fable-5-1
 
 defaults:
   executor: main

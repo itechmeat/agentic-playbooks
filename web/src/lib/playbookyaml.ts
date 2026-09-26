@@ -76,24 +76,6 @@ export function parsePlaybook(text: string): { model?: PlaybookModel; error?: st
   }
 }
 
-// NOTE (for Task 3, structural edits): this function serializes ONLY
-// id/name/nodes/edges - the PlaybookModel type doesn't contain other fields. A
-// round trip through parsePlaybook -> serializePlaybook WILL LOSE
-// schema/version/params/executors/defaults/supervisor. This is currently safe:
-// the editor keeps YAML as the source of truth and sends raw text on save,
-// serializePlaybook is not involved here. Before Task 3 starts writing
-// structural edits back into YAML, either the model needs to be extended to
-// cover all top-level fields, or edits need to go through the YAML document's
-// AST from the `yaml` package (Document), preserving the other fields.
-export function serializePlaybook(model: PlaybookModel): string {
-  return YAML.stringify({
-    id: model.id,
-    name: model.name,
-    nodes: model.nodes,
-    edges: model.edges,
-  })
-}
-
 /**
  * Parses YAML into a Document (the yaml package's AST), preserving comments
  * and order. Used for structural edits via wfedit (field and edge mutations)
@@ -116,20 +98,6 @@ export function docToString(doc: Document): string {
   return doc.toString()
 }
 
-/** Starter template for a new playbook. */
-export const NEW_PLAYBOOK_TEMPLATE = `schema: 1
-id: new-playbook
-name: New Playbook
-version: 0.1.0
-
-nodes:
-  - id: start
-    type: start
-    title: Start
-  - id: done
-    type: finish
-    outcome: success
-
-edges:
-  - { from: start, to: done }
-`
+/** Starter template for a new playbook: generated from apb-core, so it always
+ * declares the schema this apb writes. */
+export { NEW_PLAYBOOK_TEMPLATE } from './consts.gen'

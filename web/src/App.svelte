@@ -7,6 +7,7 @@
   import PlaybookList from './pages/PlaybookList.svelte'
   import ChunkError from '$lib/components/ChunkError.svelte'
   import ChunkPending from '$lib/components/ChunkPending.svelte'
+  import StaleBuildBanner from '$lib/components/StaleBuildBanner.svelte'
   import { Toaster } from '$lib/components/ui/sonner'
   import { connectorRouteName, decodeSegment } from '$lib/route'
   import { ModeWatcher } from 'mode-watcher'
@@ -41,6 +42,8 @@
   const loadProfileEdit = () => import('./pages/ProfileEdit.svelte')
   const loadConnectorList = () => import('./pages/ConnectorList.svelte')
   const loadConnectorView = () => import('./pages/ConnectorView.svelte')
+  const loadTrashList = () => import('./pages/TrashList.svelte')
+  const loadTrustList = () => import('./pages/TrustList.svelte')
 
   const dec = decodeSegment
 
@@ -71,6 +74,8 @@
     if (h.startsWith('#/playbook/')) return { ...base, page: 'playbook', ...wsId(h.slice(11)) }
     if (h.startsWith('#/run/')) return { ...base, page: 'run', ...wsId(h.slice(6)) }
     if (h.startsWith('#/runs')) return { ...base, page: 'runs' }
+    if (h === '#/trash') return { ...base, page: 'trash' }
+    if (h === '#/trust') return { ...base, page: 'trust' }
     if (h === '#/profiles') return { ...base, page: 'profiles' }
     if (h === '#/profile-new') return { ...base, page: 'profile-new' }
     if (h.startsWith('#/profile-edit/'))
@@ -123,6 +128,18 @@
   {:then { default: Page }}
     <Page />
   {:catch error}<ChunkError {error} />{/await}
+{:else if route.page === 'trash'}
+  {#await loadTrashList()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page />
+  {:catch error}<ChunkError {error} />{/await}
+{:else if route.page === 'trust'}
+  {#await loadTrustList()}
+    <ChunkPending />
+  {:then { default: Page }}
+    <Page />
+  {:catch error}<ChunkError {error} />{/await}
 {:else if route.page === 'profiles'}
   {#await loadProfileList()}
     <ChunkPending />
@@ -157,5 +174,10 @@
   <PlaybookList />
 {/if}
 
-<ModeWatcher />
+<StaleBuildBanner />
+<!-- The dashboard's Content-Security-Policy allows no inline script or
+     <style> element: this is a client-rendered page, so the head script
+     (an SSR flash guard) is not needed, and the transition-disabling <style>
+     mode-watcher would inject on a theme change is turned off. -->
+<ModeWatcher disableTransitions={false} disableHeadScriptInjection />
 <Toaster richColors closeButton position="bottom-right" />

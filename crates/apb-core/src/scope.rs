@@ -90,6 +90,52 @@ pub fn digest_str(yaml: &str) -> String {
     format!("sha256:{}", crate::content::hex_lower(&h.finalize()))
 }
 
+/// The trust digest of a playbook version: what an approval covers and what a
+/// run permit pins. It covers `playbook.yaml` AND every file under the
+/// version's `scripts/` (the code script nodes and `success_check` run), so a
+/// changed script, or the same YAML shipped with other scripts, is content
+/// nobody approved.
+///
+/// A version without scripts (no `scripts/` directory, or an empty one)
+/// digests to exactly [`digest_str`] of its YAML, so approvals recorded before
+/// scripts were covered keep holding for those playbooks. With scripts the
+/// digest is a domain-tagged hash over the YAML and the
+/// [`crate::content::tree_digest`] of `scripts/` (sorted, length-prefixed,
+/// symlinks by their in-tree target; a symlink leaving the tree or an
+/// unsupported entry is an error, never a silently partial digest).
+///
+/// `version_dir` is the directory holding `scripts/`: the definition's
+/// `<id>/<version>` directory, or a run directory holding the copy a run
+/// starts with.
+pub fn definition_digest(
+    yaml: &str,
+    version_dir: &std::path::Path,
+) -> Result<String, crate::content::ContentError> {
+    let scripts = version_dir.join("scripts");
+    let meta = match std::fs::symlink_metadata(&scripts) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(digest_str(yaml)),
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.file_type().is_dir() {
+        return Err(crate::content::ContentError::Unsupported(scripts));
+    }
+    if std::fs::read_dir(&scripts)?.next().is_none() {
+        return Ok(digest_str(yaml));
+    }
+    let tree = crate::content::tree_digest(&scripts, &crate::content::TreeLimits::default())?;
+    let mut h = Sha256::new();
+    h.update(b"apb-definition-v1\0");
+    for field in [yaml.as_bytes(), tree.as_bytes()] {
+        h.update((field.len() as u64).to_le_bytes());
+        h.update(field);
+    }
+    Ok(format!(
+        "sha256:{}",
+        crate::content::hex_lower(&h.finalize())
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

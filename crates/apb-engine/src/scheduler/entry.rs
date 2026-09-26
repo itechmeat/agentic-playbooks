@@ -12,17 +12,16 @@ pub struct RunOptions {
     pub instruction: Option<String>,
     pub params: BTreeMap<String, String>,
     pub allow_shared_workdir: bool,
+    /// Autonomous, session-supervised, or supervised by a background agent the
+    /// engine spawns after preparation and heartbeat-monitors (see `drive`).
     pub mode: RunMode,
-    /// The run waits for an external background agent - the engine spawns it
-    /// itself after preparation and will watch its heartbeat (see `drive`). For
-    /// requests without an external agent (supervise:"self", regular autonomous) stays false.
-    pub supervisor_expected: bool,
     /// Limit of supervisor patches within one run. `None` gives a value of 5.
     pub max_patches_per_run: Option<u32>,
     /// Context size threshold in bytes for compaction (spec 8.5). `None`/0
     /// means compaction is disabled.
     pub context_max_bytes: Option<usize>,
-    /// Model used for context compaction. `None` -> "haiku".
+    /// Model used for context compaction. `None` ->
+    /// [`crate::run_config::DEFAULT_COMPACT_MODEL`].
     pub context_compact_model: Option<String>,
     /// Run-level overrides (spec 11): different models/executors without a new version.
     pub overrides: Option<apb_core::overrides::RunOverrides>,
@@ -103,7 +102,6 @@ pub(crate) struct Prepared {
     pub(crate) queued_workdir: Option<Duration>,
     pub(crate) start_node: String,
     pub(crate) mode: RunMode,
-    pub(crate) supervisor_expected: bool,
 }
 
 impl Prepared {
@@ -191,7 +189,6 @@ pub fn run(
         StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
-        p.supervisor_expected,
     )
 }
 
@@ -222,7 +219,6 @@ pub fn run_resolved(
         StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
-        p.supervisor_expected,
     )
 }
 
@@ -300,9 +296,9 @@ pub(crate) fn prepare_supervised_background_target(
     // not for regular background runs without expecting a supervisor. Best
     // effort: a spawn failure (no executor, agent program not found) must not
     // bring down the run itself - drive will continue without external oversight,
-    // and heartbeat monitoring (if supervisor_expected) will log SupervisorLost
+    // and heartbeat monitoring (agent-supervised runs) will log SupervisorLost
     // and attempt a respawn itself.
-    if p.supervisor_expected && p.mode == RunMode::Supervised {
+    if p.mode.expects_supervisor_agent() {
         let _ = spawn_supervisor_agent(&t.execution_root, &p.run_id, &p.playbook);
     }
 
@@ -332,7 +328,6 @@ pub fn drive_prepared(root: &Path, prepared: PreparedRun) -> Result<RunResult, E
         StartMode::Rerun,
         p.run_id.clone(),
         p.mode,
-        p.supervisor_expected,
     );
     if res.is_err() {
         let _ = p.log.append(EventPayload::RunFinished {
@@ -471,7 +466,6 @@ pub fn drive_run_from_dir(root: &Path, run_id: &str) -> Result<RunResult, Engine
         StartMode::Rerun,
         run_id.to_string(),
         cfg.mode,
-        cfg.supervisor_expected,
     );
     // Same defensive backstop as `drive_prepared`: `drive` no longer returns
     // `Err` in practice (issue #42 finding 3), but without this an internal

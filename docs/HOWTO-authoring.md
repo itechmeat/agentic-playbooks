@@ -30,6 +30,27 @@ graph page and read the rendered branches back, the way a human reviewer
 would. This is advisory only, no code path depends on `agent-browser`; a
 plain manual look is equally valid.
 
+## Deleting and restoring a playbook
+
+Deleting a playbook (the dashboard's Delete, MCP `playbook_delete`) moves its
+whole folder to `.apb/trash/<id>-<deleted_at_ms>`; its runs stay where they
+are. The trash is listed and restored through one core path
+(`apb_core::versioning::restore_from_trash`) from every surface:
+
+- dashboard: Playbooks, then Trash, grouped by project, with the deletion time
+  and a Restore button per entry;
+- CLI: `apb trash list [--json]` and `apb trash restore <name|id>` (exit 1 on a
+  conflict, 2 when nothing matches);
+- MCP: `playbook_trash_list` and `playbook_trash_restore`.
+
+A restore takes a trash entry name or a playbook id (its latest deletion) and
+brings back every version, the `current` pointer, layouts and provenance. The
+restored current version is trusted like any save through apb (its digest is
+approved) when it has no scripts; a version with scripts keeps whatever
+approval its digest already had. When a playbook with that id exists again, the restore is refused
+and nothing moves: the listing flags such an entry (`conflict`), and the
+dashboard says so on its card. Delete or rename the newer playbook first.
+
 ## Executor binding: profiles
 
 An `agent_task` node binds its executor only through a profile. A profile
@@ -238,8 +259,8 @@ Unset, the node keeps the default: the last assistant message with any report
 block stripped. This keeps the recorded output intact when a host `Stop` hook or
 a guardrail appends a turn after the agent's real work finished, which would
 otherwise become the node's output. The other half of that hygiene lives on the
-profile: see PROFILES.md's `hermetic` guidance, which suppresses the appended
-turn at the source instead of filtering around it.
+profile: see PROFILES.md's "Agent environment" (the default `minimal` one
+suppresses the appended turn at the source instead of filtering around it).
 
 ### Warning: premature success in long-running orchestrator nodes
 
@@ -290,7 +311,8 @@ engine's resilience features exist to handle.
 ## Node types
 
 `start`, `agent_task`, `script`, `prompt`, `condition`, `human_review`,
-`wait`, `finish`. A playbook needs exactly one `start` and at least one
+`wait`, `finish`, `playbook` (runs another playbook as a sub-run, see
+"Sub-playbooks" below). A playbook needs exactly one `start` and at least one
 `finish`. Edges connect node ids; conditional edges gate on node status,
 review status, an output substring match, or one structured field of a node's
 output.
@@ -317,12 +339,16 @@ a V13 validation error:
   validation like any other unknown namespace.
 - `nodes.<id>.review_note` - the reviewer's note from a `human_review` node's
   decision.
+- `nodes.<id>.review_decision` - the option a `human_review` node was decided
+  with (for example `approve`), so a node after a multi-option gate can act on
+  it without reading the whole `run.context`. Empty until the gate is decided.
 - `nodes.<id>.rejected_output` - the agent report text a `success_check`
   discarded on the node's last rejected attempt (see Success checks). Empty when
   the node was never rejected; a later rejection overwrites an earlier one.
 - `run.instruction` - the run's input prompt (see below).
 - `run.context` - the accumulated run context (params, instruction, node
   outputs, reviews, hooks), the same text a finish-with-prompt agent sees.
+  Bounded by the node's context budget (see "Context budget" below).
 - `run.hooks.*` - the relative signal URL for a `wait` node's hook key
   (`run.hooks.<key>` renders `/api/hooks/<run-id>/<secret>`). Posting to that
   URL only unblocks the wait; the request body is discarded, not stored or
@@ -364,6 +390,45 @@ shape of it, not in the graph. One anomaly per node execution lists all of that
 node's holes. A finish node composing an answer is checked the same way; a node
 served from the cache is not, because neither its execution nor its capture runs.
 
+### Context budget (how much recorded output a prompt gets)
+
+Recorded output reaches a prompt through `run.context` and `nodes.<id>.output`
+(or `.report`, or a field of either), and both are bounded so a verbose node or
+a long loop does not grow every later prompt. The budget is deterministic (no
+model call) and loses nothing: the full text stays on disk, and every cut names
+the file that holds it, so the agent can read more when it needs to.
+
+- `run.context` keeps only the latest run of each node. An earlier run of the
+  same node (a loop pass, a re-run) shrinks to its heading and a pointer to the
+  run's `context.md`, which holds every run.
+- Each remaining node section is clipped to `section_max_bytes`, with a note
+  naming `<run dir>/node-outputs/<node>.md` (the node's latest full output).
+- When the whole context still exceeds `max_bytes`, the oldest node outputs are
+  replaced by a pointer to their file until it fits. The newest output is always
+  kept, and supervisor notes are never cut.
+- A `nodes.<id>.output` reference is clipped to `output_max_bytes` the same way.
+
+The engine defaults are `max_bytes: 65536`, `section_max_bytes: 8192` and
+`output_max_bytes: 32768` (about 16k, 2k and 8k tokens). Set them playbook-wide
+under `defaults.context` or per node under the node's own `context`; each field
+falls back on its own (node, then defaults, then the engine default), and `0`
+lifts that limit:
+
+```yaml
+defaults:
+  profile: developer
+  context: { max_bytes: 32768 }
+nodes:
+  - id: review
+    type: agent_task
+    profile: reviewer
+    prompt: "Review this diff:\n\n{{nodes.implement.output}}"
+    context: { output_max_bytes: 0 }   # this node needs the whole diff
+```
+
+A finish-with-prompt composer is bounded the same way. The budget changes the
+rendered prompt, so it also moves the node's cache key.
+
 ## Human review and conditional edges
 
 A `human_review` node pauses the run for a human decision:
@@ -372,9 +437,11 @@ A `human_review` node pauses the run for a human decision:
 - { id: review, type: human_review, options: [approve, reject] }
 ```
 
-`options` is a required list of strings: the choices a reviewer can pick.
+`options` is a list of strings: the choices a reviewer can pick. It is optional:
+an empty or absent list offers the defaults `approve` and `reject`.
 `review_decide` records one of them as the node's decision, plus a free-form
-note (available downstream as `{{nodes.review.review_note}}`).
+note (available downstream as `{{nodes.review.review_decision}}` and
+`{{nodes.review.review_note}}`).
 
 An optional `prompt` gives the reviewer guidance, shown above the options in
 the owner-facing instruction and in the web review panel:
@@ -594,6 +661,18 @@ handle something (a review that routes into a fix, a check that routes into a
 retry) stay exactly as they are. Only the edges that led nowhere but the end of
 the run disappear.
 
+An unconditional edge (no `condition`, not a `fallback`) is taken whatever the
+node's status, so it moves the run past a failure without handling it. A run
+that reaches a `finish outcome: success` node carrying such a failure ends
+**failed**, with a run error naming the node: a delegated `type: playbook`
+child that failed, followed by one arrow onward, must not read as success. A
+failure counts as handled when, after it, the run takes a conditional or
+`fallback` edge out of the failed node, the `on_failure` route, an edge into
+an explicit `join` (which weighs the delivered failure), or any conditional
+edge that reads the failed node (for example `build -> check`, then `check ->
+fix` on `node_status: build equals failure`). Only the node's latest result
+counts, so a retry or a loop that later succeeds leaves nothing behind.
+
 The web canvas marks a node whose failure the policy handles with `stop on
 failure` or `on failure: <node>`, so the branch that is no longer drawn is
 still visible.
@@ -627,10 +706,19 @@ The classifier is a curated table over the failure text, checked in that order,
 because a spend limit and an expired token are both routinely delivered as a 429.
 A plain "agent timed out" is deliberately NOT transient: that wording is the
 engine's own deadline kill, and reading it as infrastructure would hand every
-timed-out node extra same-executor attempts it never had. The one exception is a
-`require_verdict` node, where a timeout or a dropped transport says the work may
-well have continued and is worth one more attempt on the same executor, so those
-count as transient unless the text says something more specific.
+timed-out node extra same-executor attempts it never had. That holds for a
+`require_verdict` node too, where a dropped transport does count as transient
+(unless the text says something more specific) but a deadline kill does not:
+re-running a whole job from scratch because it ran out of time spends the full
+cost again on the same outcome. Instead, when the killed attempt's session can be
+resumed (see "Retries continue the session" below), a `require_verdict` node gets
+exactly ONE continuation of that session per chain step, with a short "continue
+where you stopped" prompt, journaled as a `supervisor_action` with action
+`timeout_continuation`; it spends neither the node's retries nor the
+infrastructure budget. Without a resumable session the step is abandoned like
+any other timeout (next fallback step, or the node ends `timed_out`). A node
+without `require_verdict` keeps the plain rule: a deadline kill moves on to the
+fallback chain.
 
 A `transient` failure is retried on the SAME executor out of a separate
 infrastructure budget that never touches `max_retries`: the node's own retry count
@@ -652,6 +740,36 @@ will not. That suppression lives for one node execution and is not persisted. A
 resume, a supervisor retry, or the next node walks the chain from the top again
 and hits the same expired credential unless a human fixed it in between, which is
 the point: between two drives, someone may have.
+
+### Retries continue the session
+
+A retry does not start over. When an attempt fails and the next attempt runs on
+the same agent AND model (a node retry, an infrastructure retry, a deadline
+continuation, or a fallback chain that comes back to that binding), it resumes
+the failed attempt's own agent session and sends only what happened: the
+failure text (clipped to 2 KiB), the interruption note for a verdict-less exit,
+or the deadline note, plus any supervisor notes and, when the node has a status
+file contract, a one-line reminder to write the verdict. The node prompt, the
+SOUL and the skills are not re-sent: the session holds them. A fallback to a
+different agent or model always starts fresh with the full prompt.
+
+How the session is found, per agent:
+
+- `claude`: apb assigns the id at launch (`--session-id`), so even an attempt
+  killed at its deadline can be resumed (`--resume <id>`).
+- `opencode`: apb titles the session at launch (`--title`) and finds it by that
+  title with `opencode session list --format json`. An attempt killed before its
+  first reply persisted no session; then there is nothing to resume.
+- `codex`: the `session id:` line of its stderr header, `zcode`: the `sessionId`
+  of its `--json` reply, and any agent that prints an id in its output: only an
+  attempt that exited on its own can be resumed.
+- Every other agent, and an agent without a resume form, starts fresh.
+
+A continued session keeps the working directory it started in (agents key their
+sessions by it), so an isolated node's continuation runs in the directory of the
+attempt it continues instead of a fresh one. If the agent answers that the
+session does not exist, the engine drops it and starts fresh once, without
+spending a retry.
 
 ### Interrupted attempts and reaping
 

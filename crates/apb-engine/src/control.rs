@@ -95,7 +95,7 @@ impl Control {
             Control::ContinueFrom { .. } => "continue_from",
             Control::Pause => "pause",
             Control::Abort { .. } => "abort",
-            Control::ContextAppend { .. } => "context_append",
+            Control::ContextAppend { .. } => crate::event::supervisor_action::CONTEXT_APPEND,
             Control::Progress { .. } => "progress",
             Control::Patch { .. } => "patch",
             Control::Interrupt { .. } => "interrupt",
@@ -112,7 +112,7 @@ pub struct ControlEntry {
 }
 
 pub fn post_control(run_dir: &Path, cmd: Control) -> Result<u64, EngineError> {
-    std::fs::create_dir_all(run_dir)?;
+    crate::driver::ensure_run_dir(run_dir)?;
 
     let seq = read_control_after(run_dir, None)?.len() as u64;
 
@@ -179,7 +179,8 @@ pub fn read_control_cursor(run_dir: &Path) -> Result<Option<u64>, EngineError> {
 /// resumed drive - or a fresh wake within the same drive - never re-applies an
 /// entry a prior pass already consumed.
 pub fn write_control_cursor(run_dir: &Path, seq: u64) -> Result<(), EngineError> {
-    Ok(apb_core::fsutil::atomic_write(
+    Ok(apb_core::fsutil::atomic_write_under(
+        run_dir,
         &run_dir.join("control.cursor"),
         seq.to_string().as_bytes(),
     )?)

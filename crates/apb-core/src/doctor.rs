@@ -43,20 +43,16 @@ impl DoctorReport {
     }
 }
 
-/// Qualified references to playbook profiles (nodes + supervisor, accounting
-/// for defaults) - including global-scope ones that may not be among the
+/// Qualified references to playbook profiles (every node that runs an agent,
+/// through the same `NodeKind::effective_profile_ref` the run gate uses, plus
+/// the supervisor) - including global-scope ones that may not be among the
 /// project profiles.
 fn playbook_profile_refs(playbook: &Playbook) -> Vec<QualifiedProfileRef> {
-    let mut out = Vec::new();
-    for n in &playbook.nodes {
-        if let NodeKind::AgentTask { profile, .. } = &n.kind
-            && let Some(p) = profile
-                .clone()
-                .or_else(|| playbook.defaults.profile.clone())
-        {
-            out.push(p);
-        }
-    }
+    let mut out: Vec<QualifiedProfileRef> = playbook
+        .nodes
+        .iter()
+        .filter_map(|n| n.kind.effective_profile_ref(&playbook.defaults))
+        .collect();
     if let Some(s) = &playbook.supervisor
         && let Some(p) = s
             .profile
@@ -66,16 +62,6 @@ fn playbook_profile_refs(playbook: &Playbook) -> Vec<QualifiedProfileRef> {
         out.push(p);
     }
     out
-}
-
-/// Normalizes an agent id to a detect probe id the same way the invocation
-/// resolver does: `claude-code` -> `claude` (shared `claude` binary). Other
-/// ids pass through as-is.
-fn detect_probe_id(agent: &str) -> &str {
-    match agent {
-        "claude-code" => "claude",
-        other => other,
-    }
 }
 
 /// Environment diagnostics: global config, playbook and profile registry,
@@ -160,7 +146,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     }
 
     // Agents: collect the ones mentioned through node profiles; status
-    // comes from the free detect for the built-in nine, and for the rest -
+    // comes from the free detect for the built-in ten, and for the rest -
     // a fallback to checking the program in PATH.
     let mut agents: BTreeSet<String> = BTreeSet::new();
     // Resolve the union of: (a) the flat list of project profiles (catches
@@ -180,6 +166,12 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         refs.extend(playbook_profile_refs(playbook));
     }
     let mut seen_refs: BTreeSet<String> = BTreeSet::new();
+    // Loaded on the first profile that resolves: detection, the models table
+    // and the config's model policy (crate::model_check).
+    let mut model_cx: Option<crate::model_check::ModelContext> = None;
+    // A profile named both `x` and `{ name: x, scope: project }` resolves to
+    // the same file twice: judge its models once.
+    let mut model_checked: BTreeSet<std::path::PathBuf> = BTreeSet::new();
     for pref in refs {
         let key = format!("{:?}/{}", pref.scope, pref.name);
         if !seen_refs.insert(key) {
@@ -191,6 +183,31 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                 for f in &lp.doc.executor.fallbacks {
                     agents.insert(f.agent.clone());
                 }
+                if !model_checked.insert(lp.dir.clone()) {
+                    continue;
+                }
+                let cx = model_cx.get_or_insert_with(crate::model_check::ModelContext::load);
+                let ex = &lp.doc.executor;
+                let chain = std::iter::once((&ex.agent, &ex.model))
+                    .chain(ex.fallbacks.iter().map(|f| (&f.agent, &f.model)));
+                for (agent, model) in chain {
+                    use crate::model_check::ModelIssue;
+                    let Some(issue) = crate::model_check::check(agent, model, cx) else {
+                        continue;
+                    };
+                    // Installation is the agent check's job below, and an
+                    // unverifiable model is not a finding.
+                    let status = match issue {
+                        _ if issue.is_blocking() => CheckStatus::Fail,
+                        ModelIssue::Unknown(_) | ModelIssue::NotAvailable => CheckStatus::Warn,
+                        _ => continue,
+                    };
+                    r.push(
+                        status,
+                        format!("profile {}", pref.name),
+                        format!("{}: {}", issue.code(), issue.describe(agent, model)),
+                    );
+                }
             }
             Err(e) => r.push(
                 CheckStatus::Fail,
@@ -200,7 +217,7 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         }
     }
     // Detect spawns binaries - we call it only if at least one agent from
-    // the built-in nine is mentioned (otherwise the PATH fallback is enough;
+    // the built-in ten is mentioned (otherwise the PATH fallback is enough;
     // tests stay fast).
     let detect_ids: BTreeSet<String> = crate::detect::builtin_probes()
         .iter()
@@ -212,14 +229,14 @@ pub fn diagnose(root: &Path) -> DoctorReport {
     // binary.
     let want_detect = agents
         .iter()
-        .any(|a| detect_ids.contains(detect_probe_id(a)));
+        .any(|a| detect_ids.contains(crate::detect::canonical_agent_id(a)));
     let detected = if want_detect {
-        crate::detect::detect(false)
+        crate::agent_catalog::agents(false)
     } else {
         Vec::new()
     };
     for agent in &agents {
-        let probe_id = detect_probe_id(agent);
+        let probe_id = crate::detect::canonical_agent_id(agent);
         // An agent program explicitly set in the config takes priority over
         // detect: detect probes the fixed names of the six, but here the
         // agent may point at a custom binary (agents.<id>.program).
@@ -252,6 +269,23 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                     format!("agent {agent}"),
                     format!("installed ({ver}){authority}"),
                 );
+                // zcode's headless CLI needs its own `zcode-agent login`: the
+                // desktop app's login does not give it a plan identity, and
+                // every run then fails with "Select a model before continuing".
+                if probe_id == crate::zcode::AGENT_ID
+                    && info
+                        .auth
+                        .as_ref()
+                        .is_some_and(|a| a.kind == crate::detect::AuthKind::None)
+                {
+                    r.push(
+                        CheckStatus::Warn,
+                        format!("agent {agent} login"),
+                        "standalone CLI not logged in to any Z.ai plan: run \
+                         `~/.zcode/server/agents/glm/zcode-agent login` once"
+                            .to_string(),
+                    );
+                }
             } else {
                 r.push(
                     CheckStatus::Warn,
@@ -304,11 +338,20 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         }
     }
 
+    // What a run of each playbook would need from this machine
+    // (crate::preflight): warnings, the run gate refuses on them.
     for (id, playbook) in &loaded {
-        let ctx = ValidationContext {
-            profiles: profiles.clone(),
-            ..Default::default()
-        };
+        for (code, message) in crate::preflight::findings(root, playbook) {
+            r.push(
+                CheckStatus::Warn,
+                format!("playbook {id}"),
+                format!("{code}: {message}"),
+            );
+        }
+    }
+
+    let ctx = ValidationContext::for_registry(&reg, PlaybookOrigin::Project);
+    for (id, playbook) in &loaded {
         let report = validate(playbook, &ctx);
         let errors = report
             .issues

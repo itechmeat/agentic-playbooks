@@ -189,6 +189,20 @@ Two boundary rulings recorded after the Task 5 review:
   for infrastructure failures belong to the classification work in 2.3, which
   must give this shape the bounded Transient retry treatment.
 
+  Amended by issue #136 (token economy, round 2): the Transient treatment now
+  applies to `Transport` only. A deadline kill (`Timeout`) is not an
+  infrastructure fault, and re-running the whole job twice at full cost
+  (the two infrastructure retries) spent the most tokens on the least likely
+  recovery. Instead the killed attempt, still labeled `interrupted` and
+  classified `agent`, gets at most ONE continuation of its own agent session
+  per chain step, with a short "continue where you stopped" prompt and a
+  journaled `supervisor_action { action: "timeout_continuation" }`; it spends
+  neither `max_retries` nor the infrastructure budget. When no session can be
+  resumed (the agent has no resume form, or no id is known for the killed
+  attempt) the step breaks to the fallback chain like any other timeout. See
+  HOWTO-authoring.md, "Retries continue the session", for how the session is
+  found per agent.
+
 ### 2.3 Decision: infrastructure failure classification with bounded backoff (#71 item 2, #74 finding 2)
 
 A new curated classifier (a pattern table module in `apb-engine`, same spirit

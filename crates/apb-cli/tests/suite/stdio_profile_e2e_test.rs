@@ -9,9 +9,52 @@
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::fs::PermissionsExt;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::{self, Receiver};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+
+/// Anti-hang ceiling for one MCP response, not a performance budget: every
+/// assertion here is about what the server answered, never about how fast.
+/// The wait also ends the moment the server process exits, so a crash fails
+/// at once and by name; this ceiling only turns a live server that never
+/// answers into a named failure before nextest's per-test ceiling. It used to
+/// be 10s for the handshake and 20s per call, which a starved machine (a full
+/// workspace build next to the test) could exceed while the server was
+/// merely slow.
+const RESPONSE_CEILING: Duration = Duration::from_secs(120);
+
+/// Waits for the JSON-RPC response with `id`: returns it as soon as it arrives,
+/// fails at once if the server exits first, and fails by name after
+/// [`RESPONSE_CEILING`] if a live server never answers.
+fn await_response(
+    rx: &Receiver<String>,
+    child: &mut Child,
+    id: i64,
+    what: &str,
+) -> serde_json::Value {
+    let needle = format!("\"id\":{id}");
+    let started = Instant::now();
+    loop {
+        match rx.recv_timeout(Duration::from_millis(200)) {
+            Ok(line) if line.contains(&needle) => {
+                return serde_json::from_str(&line)
+                    .unwrap_or_else(|e| panic!("bad json for {what}: {e}: {line}"));
+            }
+            Ok(_) => continue,
+            Err(mpsc::RecvTimeoutError::Disconnected) => {
+                panic!("server stdout closed before the response to {what} (id {id})")
+            }
+            Err(mpsc::RecvTimeoutError::Timeout) => {}
+        }
+        if let Ok(Some(status)) = child.try_wait() {
+            panic!("server exited ({status}) before answering {what} (id {id})");
+        }
+        assert!(
+            started.elapsed() < RESPONSE_CEILING,
+            "server alive but no response to {what} (id {id}) after {RESPONSE_CEILING:?}"
+        );
+    }
+}
 
 const PLAYBOOK: &str = r#"
 schema: 1
@@ -54,18 +97,7 @@ impl Server {
         });
         writeln!(self.stdin, "{req}").unwrap();
         self.stdin.flush().unwrap();
-        let needle = format!("\"id\":{id}");
-        for _ in 0..40 {
-            let line = self
-                .rx
-                .recv_timeout(Duration::from_secs(20))
-                .unwrap_or_else(|_| panic!("no response to {name} (id {id})"));
-            if line.contains(&needle) {
-                return serde_json::from_str(&line)
-                    .unwrap_or_else(|e| panic!("bad json for {name}: {e}: {line}"));
-            }
-        }
-        panic!("no matching response for {name} (id {id})");
+        await_response(&self.rx, &mut self.child, id, name)
     }
 }
 
@@ -93,7 +125,7 @@ fn stdio_profile_write_run_then_skill_edit_refuses() {
     let stub = make_stub(bin.path());
 
     // init + seed skill.
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .arg("init")
         .current_dir(proj.path())
         .output()
@@ -102,7 +134,7 @@ fn stdio_profile_write_run_then_skill_edit_refuses() {
     fs::create_dir_all(&skill).unwrap();
     fs::write(skill.join("SKILL.md"), "v1").unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let mut child = crate::common::apb_std()
         .arg("mcp")
         .current_dir(proj.path())
         .env("APB_AGENT_CMD", &stub)
@@ -113,7 +145,7 @@ fn stdio_profile_write_run_then_skill_edit_refuses() {
         .stderr(Stdio::null())
         .spawn()
         .unwrap();
-    let mut stdin = child.stdin.take().unwrap();
+    let stdin = child.stdin.take().unwrap();
     let stdout = child.stdout.take().unwrap();
     let (tx, rx) = mpsc::channel::<String>();
     std::thread::spawn(move || {
@@ -133,25 +165,27 @@ fn stdio_profile_write_run_then_skill_edit_refuses() {
         }
     });
 
-    // Handshake.
-    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
-    writeln!(stdin, "{init}").unwrap();
-    stdin.flush().unwrap();
-    rx.recv_timeout(Duration::from_secs(10))
-        .expect("initialize response");
-    writeln!(
-        stdin,
-        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
-    )
-    .unwrap();
-    stdin.flush().unwrap();
-
+    // The guard owns the server from here on, so a failed handshake still
+    // kills and reaps it instead of leaving it writing into a dropped tempdir.
     let mut srv = Server {
         child,
         stdin,
         rx,
         next_id: 100,
     };
+
+    // Handshake.
+    let init = r#"{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"t","version":"0"}}}"#;
+    writeln!(srv.stdin, "{init}").unwrap();
+    srv.stdin.flush().unwrap();
+    // The initialize answer is the server's own readiness signal.
+    await_response(&srv.rx, &mut srv.child, 1, "initialize");
+    writeln!(
+        srv.stdin,
+        r#"{{"jsonrpc":"2.0","method":"notifications/initialized"}}"#
+    )
+    .unwrap();
+    srv.stdin.flush().unwrap();
 
     // profile_write: creates the arch profile (skill cs) and auto-approves its bundle.
     let r = srv.call(

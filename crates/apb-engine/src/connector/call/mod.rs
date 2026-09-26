@@ -16,7 +16,8 @@ mod auth;
 pub(crate) mod encode;
 mod response;
 
-use account::{account_selection_error, select_account, select_live_account};
+pub use account::select_live_account;
+use account::{account_selection_error, select_account};
 use auth::{non_secret_fields, resolve_secrets};
 use encode::{
     base64_encode, encode_args_for_url, encode_component, encode_form_body, encode_path_segment,
@@ -864,7 +865,7 @@ fn prepare_play_call(
         // Trust gate (spec 2026-07-18-connectors-design section 9): a live
         // call resolves LIVE secrets and sends them to the LIVE config's
         // base_url, so an unapproved or changed connector/account must
-        // never be callable - the same guard `apb_mcp::policy::check_connectors`
+        // never be callable - the same guard `crate::gate::check_connectors`
         // applies before a real run, checked here before anything below
         // touches a secret. Connector digest first (a changed folder is a
         // bigger deal than one account), then the target account's own

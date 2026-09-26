@@ -8,7 +8,7 @@ use assert_cmd::Command;
 use predicates::prelude::*;
 
 fn apb() -> Command {
-    Command::cargo_bin("apb").unwrap()
+    crate::common::apb()
 }
 
 fn seeded() -> tempfile::TempDir {

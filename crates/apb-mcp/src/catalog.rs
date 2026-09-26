@@ -49,14 +49,6 @@ pub struct CatalogEntry {
     pub digest: String,
 }
 
-fn lifecycle_str(lc: Lifecycle) -> &'static str {
-    match lc {
-        Lifecycle::Draft => "draft",
-        Lifecycle::Active => "active",
-        Lifecycle::Retired => "retired",
-    }
-}
-
 /// Collects entries for one scope. Broken definitions do not crash the catalog -
 /// they land in `diagnostics`. `origin` builds the ref (project origin leaves
 /// workspace_id=None - "current workspace").
@@ -71,7 +63,9 @@ fn collect_scope(
     for id in reg.playbook_ids() {
         match reg.load(&id, None) {
             Ok(loaded) => {
-                let digest = digest_str(&loaded.yaml);
+                // A version with no trust digest (undigestable scripts) is
+                // simply not trusted.
+                let digest = loaded.trust_digest().unwrap_or_default();
                 let playbook_dir = parent.join("playbooks").join(&id);
                 let lifecycle = read_lifecycle(&playbook_dir);
                 let effects: Vec<Effect> = effective(&loaded.playbook).into_iter().collect();
@@ -82,7 +76,7 @@ fn collect_scope(
                         version: Some(loaded.version.clone()),
                     },
                     name: loaded.playbook.name.clone(),
-                    lifecycle: lifecycle_str(lifecycle).to_string(),
+                    lifecycle: Lifecycle::as_str(lifecycle).to_string(),
                     trusted: trust.is_approved(&digest),
                     trigger: loaded.playbook.trigger.clone(),
                     effective_effects: effects,

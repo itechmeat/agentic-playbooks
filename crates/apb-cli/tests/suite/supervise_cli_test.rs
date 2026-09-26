@@ -33,7 +33,7 @@ const POLL_DEADLINE: Duration = Duration::from_secs(10);
 const POLL_STEP: Duration = Duration::from_millis(50);
 
 fn playbook() -> Command {
-    Command::cargo_bin("apb").unwrap()
+    crate::common::apb()
 }
 
 // A playbook without agent_task: start -> prompt -> finish, the run finishes

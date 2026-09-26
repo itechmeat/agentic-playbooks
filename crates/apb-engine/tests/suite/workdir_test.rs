@@ -12,7 +12,6 @@ fn run_config_round_trips() {
     let cfg = RunConfig {
         params,
         instruction: Some("careful".into()),
-        supervisor_expected: false,
         max_patches_per_run: None,
         context_max_bytes: None,
         context_compact_model: None,

@@ -1,11 +1,21 @@
-//! The server-side run policy gate (spec 9). Checks what cannot be
-//! trusted to the host model's discipline: lifecycle, digest-based trust,
-//! the cross-workspace boundary, and applicability preflight. Returns a structural
-//! refusal (JSON) that the tool hands back to the agent as-is.
+//! The run policy gate (spec 9): the ONE pre-start check every launch
+//! surface runs - MCP `playbook_run`, the dashboard's `POST
+//! /api/playbooks/{id}/run`, and the CLI's `apb run` / `apb run --supervise`.
+//! Checks lifecycle (draft/retired), `requires` applicability, digest-based
+//! playbook and profile-bundle trust, connector and account trust, and the
+//! sub-playbook tree, and returns a [`RunPermit`] the caller hands to the
+//! engine verbatim ([`RunPermit::apply`]). A refusal is structural JSON the
+//! surface passes on as-is.
+//!
+//! The surfaces differ in exactly one knob, `acknowledge_untrusted`: an agent
+//! (MCP) must confirm with the user first and passes it only after that; a
+//! person clicking Run in the dashboard or typing `apb run` IS that
+//! confirmation, so those surfaces pass `true`. Connector and account trust
+//! ignore the knob on every surface (secret egress).
 
 use std::path::Path;
 
-use apb_core::config::program_in_path;
+use crate::run_config::ChildExpectation;
 use apb_core::connector::config::account_digest;
 use apb_core::connector::resolve::resolve_playbook;
 use apb_core::connector::secrets::missing_vars;
@@ -13,9 +23,8 @@ use apb_core::profile::ProfileScope;
 use apb_core::profile_store::{self, PlaybookOrigin};
 use apb_core::registry::Registry;
 use apb_core::schema::{Effect, NodeKind, Playbook};
-use apb_core::scope::{Origin, PlaybookRef, digest_str};
+use apb_core::scope::{Origin, PlaybookRef};
 use apb_core::trust::{Lifecycle, TrustStore, account_trust_id, read_lifecycle};
-use apb_engine::run_config::ChildExpectation;
 use serde_json::{Value, json};
 
 /// String name of an effect, for plans/catalog.
@@ -30,19 +39,15 @@ pub fn effect_str(e: &Effect) -> &'static str {
     }
 }
 
-/// The two connector permit maps the gate produces: `connector name -> tree
-/// digest` and `"connector/account" -> account digest`. Handed to the engine
-/// verbatim as `expected_connectors` / `expected_connector_accounts`.
-pub type ConnectorPermitMaps = (
-    std::collections::BTreeMap<String, String>,
-    std::collections::BTreeMap<String, String>,
-);
-
 /// Preflight facts for the two-phase contract (spec 7).
 pub struct Preflight {
     pub version: String,
     pub digest: String,
     pub effects: Vec<String>,
+    /// The sub-playbook tree the plan will run, keyed by the parent's
+    /// playbook-node id, so the consent surface can show every child and its
+    /// trust, not only the parent's.
+    pub children: std::collections::BTreeMap<String, ChildExpectation>,
 }
 
 /// Preflight of the definition in a given root: lifecycle (draft/retired are rejected)
@@ -63,8 +68,9 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
     // C): the parent's effective effects UNION every pinned child's, recursively.
     // Reuse the same walk `check_run` uses so both derive the identical union
     // from one resolution. A cross-workspace playbook is always project-scoped
-    // here; `acknowledge_untrusted: true` skips trust marking (trust is enforced
-    // separately at execute-plan time), keeping preflight read-only.
+    // here; `acknowledge_untrusted: true` skips trust marking, keeping preflight
+    // read-only: trust for the parent AND every child is enforced when the plan
+    // executes, by running `check_run` in the target workspace.
     let origin = Origin::Project { workspace_id: None };
     let tree = resolve_tree(root, &loaded.playbook, &origin, id, true)?;
     let effects = tree
@@ -74,8 +80,11 @@ pub fn preflight(root: &Path, id: &str, version: Option<&str>) -> Result<Preflig
         .collect();
     Ok(Preflight {
         version: loaded.version.clone(),
-        digest: digest_str(&loaded.yaml),
+        digest: loaded
+            .trust_digest()
+            .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?,
         effects,
+        children: tree.children,
     })
 }
 
@@ -110,6 +119,40 @@ pub struct RunPermit {
     /// time, so the user is told up front rather than only discovering it mid-run.
     /// Never a refusal channel - a refusal is an `Err(Value)` from the gate.
     pub warnings: Vec<String>,
+}
+
+/// The gate for an agent resuming an existing run (MCP `run_resume`). A
+/// resume executes what the run directory holds - its playbook snapshot, its
+/// scripts copy, its manifest - so it gets the consent a start gets:
+/// - the directory must carry this installation's stamp
+///   ([`apb_core::run_origin`]): a run directory that came with a repository
+///   is refused outright (`run_not_created_locally`), acknowledged or not;
+/// - the snapshot's digest (its `playbook.yaml` plus its `scripts/`, the same
+///   [`apb_core::scope::definition_digest`] a start pins) must be approved,
+///   unless the caller acknowledged after confirming with the user.
+pub fn check_resume(root: &Path, run_id: &str, acknowledge_untrusted: bool) -> Result<(), Value> {
+    if !apb_core::registry::is_safe_segment(run_id) {
+        return Err(json!({ "policy": "not_found", "detail": format!("run `{run_id}`") }));
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        return Err(json!({ "policy": "not_found", "detail": format!("run `{run_id}`") }));
+    }
+    if !apb_core::run_origin::verify(&run_dir, run_id) {
+        return Err(json!({
+            "policy": "run_not_created_locally",
+            "run_id": run_id,
+            "detail": "this run directory was not created by apb on this machine (it may have come with the repository); it cannot be resumed through MCP. Start the playbook again instead",
+        }));
+    }
+    let yaml = std::fs::read_to_string(run_dir.join("playbook.yaml"))
+        .map_err(|e| json!({ "policy": "not_found", "detail": e.to_string() }))?;
+    let digest = apb_core::scope::definition_digest(&yaml, &run_dir)
+        .map_err(|e| json!({ "policy": "snapshot_unreadable", "detail": e.to_string() }))?;
+    let id = apb_core::schema::Playbook::from_yaml(&yaml)
+        .map(|p| p.id)
+        .unwrap_or_default();
+    check_digest_trust(&id, &digest, acknowledge_untrusted)
 }
 
 /// One-pass walk of a playbook's sub-playbook tree (spec C), shared by the local
@@ -162,6 +205,25 @@ fn resolve_tree(
     })
 }
 
+impl RunPermit {
+    /// Hands the permit to the engine verbatim: the digest, the verified
+    /// profile bundles, the child pins and the connector maps become the
+    /// run's `expected_*` pins, so the engine refuses any drift between this
+    /// check and the run's snapshot (anti-TOCTOU). The one exception is the
+    /// profile-bundle map of a run with non-empty `overrides`: the gate sees
+    /// the definition, not the ephemeral executor, so combining the two would
+    /// be a false key-set mismatch (see the invariant in `build_run_manifest`);
+    /// such a run keeps every other pin.
+    pub fn apply(self, opts: &mut crate::RunOptions) {
+        let has_overrides = opts.overrides.as_ref().is_some_and(|o| !o.is_empty());
+        opts.expected_digest = Some(self.playbook_digest);
+        opts.expected_profile_bundles = (!has_overrides).then_some(self.profile_bundles);
+        opts.expected_children = Some(self.children);
+        opts.expected_connectors = self.connectors;
+        opts.expected_connector_accounts = self.connector_accounts;
+    }
+}
+
 /// Checks whether a run is permitted. `Ok(RunPermit)` - the run may proceed (digest +
 /// verified bundle map); `Err(value)` - a structural policy refusal.
 /// `supervised` - whether the run will actually spawn an EXTERNAL supervisor
@@ -210,7 +272,9 @@ pub fn check_run(
     check_lifecycle(&playbook_dir, &wref.id)?;
 
     // Digest-based trust: unapproved content requires an explicit acknowledge.
-    let digest = digest_str(&loaded.yaml);
+    let digest = loaded
+        .trust_digest()
+        .map_err(|e| json!({ "policy": "definition_unreadable", "detail": e.to_string() }))?;
     check_digest_trust(&wref.id, &digest, acknowledge_untrusted)?;
 
     // Profile bundle trust (spec 5.1): the profile plus the actual content of its
@@ -225,8 +289,7 @@ pub fn check_run(
     )?;
 
     // Connector trust (spec 6 step 1, 7) for this playbook, then the
-    // sub-playbook pins (spec C) - ONE walk, shared verbatim with the ungated
-    // seam (`connector_permit_maps_with_children`), see `walk_connectors_and_tree`.
+    // sub-playbook pins (spec C) - ONE walk, see `walk_connectors_and_tree`.
     let GateWalk {
         connectors,
         connector_accounts,
@@ -262,64 +325,9 @@ pub fn check_run(
     })
 }
 
-/// Public seam for the connector trust gate PLUS the sub-playbook pin walk
-/// (spec 6 step 1 and 7, spec C), for a caller that does not go through the
-/// full `check_run` policy gate but still must never start a run with an empty
-/// (and therefore vacuously-refusing, or worse silently-unverified) permit map:
-/// the dashboard's `POST /api/playbooks/{id}/run` handler in `apb-server` and
-/// the CLI's `apb run` / `__drive-supervised` paths, neither of which has an
-/// MCP tool call in front of it. Runs the EXACT SAME resolution and trust
-/// checks `check_run` runs for its own connector and children steps, in one
-/// pass, so a dashboard- or CLI-started run gets the identical
-/// connector/account trust decision an MCP-started run would - for the
-/// playbook itself AND for every `type: playbook` child it delegates to.
-/// Callers must never reimplement either walk at the call site - always come
-/// back through here (anti-TOCTOU: the map handed to the engine is exactly the
-/// map that was verified, never a recomputation).
-///
-/// `origin`/`playbook_id` identify the playbook being started; they drive
-/// `scope: auto` resolution of its children and cycle detection.
-///
-/// Trust semantics, deliberately matched to what these two paths already do
-/// for the playbook itself: they pass no `expected_digest` and no
-/// `expected_profile_bundles`, i.e. they do not gate playbook-digest or
-/// profile-bundle trust at all, so imposing that on a CHILD would make a child
-/// stricter than its own parent on the same path. The walk therefore runs with
-/// `acknowledge_untrusted: true`, exactly as `preflight` does: lifecycle
-/// (draft/retired), `requires`, cycles, and - because `check_connectors`
-/// deliberately ignores that flag - the full connector and account trust gate
-/// are all still enforced for every child. Connector trust guards secret
-/// egress and is never bypassable, on any path, at any depth.
-pub fn connector_permit_maps_with_children(
-    root: &Path,
-    playbook: &Playbook,
-    origin: &Origin,
-    playbook_id: &str,
-) -> Result<ConnectorPermitTree, Value> {
-    let walk = walk_connectors_and_tree(root, playbook, origin, playbook_id, true)?;
-    // The seam needs the maps and the pins; the consent-time warnings
-    // (finding 11) and the recursive effects union are surfaced by the full
-    // `check_run` gate and by `preflight`, so they are dropped here.
-    Ok((
-        (walk.connectors, walk.connector_accounts),
-        walk.tree.children,
-    ))
-}
-
-/// The two connector permit maps of a playbook plus the verified pins of its
-/// sub-playbook children, keyed by playbook-node id. The caller hands the maps
-/// to the engine as `expected_connectors`/`expected_connector_accounts` and the
-/// pins as `expected_children`, verbatim.
-pub type ConnectorPermitTree = (
-    ConnectorPermitMaps,
-    std::collections::BTreeMap<String, ChildExpectation>,
-);
-
-/// One pass of the two walks every run-start path needs: the connector trust
-/// gate for the playbook itself, then its sub-playbook tree. Kept as a single
-/// function so `check_run` and the ungated seam share ONE implementation and
-/// one refusal order (connector refusals before tree refusals), rather than
-/// two call sites that could drift apart.
+/// One pass of the two walks a run start needs: the connector trust gate for
+/// the playbook itself, then its sub-playbook tree, in one refusal order
+/// (connector refusals before tree refusals).
 struct GateWalk {
     connectors: std::collections::BTreeMap<String, String>,
     connector_accounts: std::collections::BTreeMap<String, String>,
@@ -484,7 +492,7 @@ fn check_connectors(
             let adigest = account_digest(account);
             if !store.is_approved(&adigest) && !unapproved_accounts.contains(&id) {
                 unapproved_accounts.push(id.clone());
-                account_fields.insert(id.clone(), account_display(account));
+                account_fields.insert(id.clone(), account_display(&resolved.loaded.doc, account));
             }
             accounts.insert(id, adigest);
         }
@@ -511,16 +519,25 @@ fn check_connectors(
 
 /// Non-secret display of an account for an approval prompt (spec 7: the user
 /// sees the concrete fields they approve). Every value is safe: a secret-marked
-/// field holds only its raw `{{env.VAR}}` reference in the config, never the
-/// resolved secret, so the whole `fields` map plus the `default` flag can be
-/// shown. This mirrors exactly what the account digest pins.
-fn account_display(account: &apb_core::connector::config::Account) -> Value {
+/// field holds only its raw `{{env.VAR}}` or `{{cmd:...}}` reference in the
+/// config, never the resolved secret, so the whole `fields` map plus the
+/// `default` flag can be shown. This mirrors exactly what the account digest
+/// pins. `cmd` names each secret read from a command, with the command line:
+/// approving the account authorizes apb to run it.
+fn account_display(
+    doc: &apb_core::connector::def::ConnectorDoc,
+    account: &apb_core::connector::config::Account,
+) -> Value {
     let fields: serde_json::Map<String, Value> = account
         .fields
         .iter()
         .map(|(k, v)| (k.clone(), json!(v)))
         .collect();
-    json!({ "default": account.default, "fields": Value::Object(fields) })
+    json!({
+        "default": account.default,
+        "fields": Value::Object(fields),
+        "cmd": apb_core::connector::config::cmd_refs(doc, account),
+    })
 }
 
 /// Recursively collects and verifies the sub-playbook pins of `playbook`.
@@ -859,25 +876,6 @@ fn check_profile_bundles(
     Ok(verified)
 }
 
-/// A safe relative path name: not absolute and without `..` components.
-/// Protection against `requires.files` serving as an existence oracle for
-/// arbitrary files (especially in foreign prepare_run before trust is
-/// confirmed) - see spec 5.2.
-fn is_safe_relative(p: &str) -> bool {
-    let path = std::path::Path::new(p);
-    if path.is_absolute() {
-        return false;
-    }
-    path.components().all(|c| {
-        !matches!(
-            c,
-            std::path::Component::ParentDir
-                | std::path::Component::Prefix(_)
-                | std::path::Component::RootDir
-        )
-    })
-}
-
 /// Lifecycle gate shared by the parent (`check_run` / `preflight`) and every
 /// sub-playbook child (`collect_children`): a draft or retired definition
 /// refuses with the SAME policy keys the parent uses, carrying `id` so the
@@ -911,25 +909,15 @@ fn check_digest_trust(id: &str, digest: &str, acknowledge_untrusted: bool) -> Re
 /// Checks `requires` applicability: files - only safe relative
 /// paths inside the root; commands - only program names (no path separators).
 fn check_requires(root: &Path, req: &apb_core::schema::Requires, id: &str) -> Result<(), Value> {
-    let mut missing: Vec<String> = Vec::new();
-    for f in &req.files {
-        if !is_safe_relative(f) {
-            return Err(json!({ "policy": "requires_unsafe_path", "id": id, "path": f }));
+    use apb_core::preflight::{RequiresRefusal, requires_unmet};
+    match requires_unmet(root, req) {
+        Ok(missing) if missing.is_empty() => Ok(()),
+        Ok(missing) => Err(json!({ "policy": "requires_unmet", "id": id, "missing": missing })),
+        Err(RequiresRefusal::UnsafePath(f)) => {
+            Err(json!({ "policy": "requires_unsafe_path", "id": id, "path": f }))
         }
-        if !root.join(f).exists() {
-            missing.push(format!("file:{f}"));
-        }
-    }
-    for c in &req.commands {
-        if c.contains('/') || c.contains('\\') {
-            return Err(json!({ "policy": "requires_unsafe_command", "id": id, "command": c }));
-        }
-        if !program_in_path(c) {
-            missing.push(format!("command:{c}"));
+        Err(RequiresRefusal::UnsafeCommand(c)) => {
+            Err(json!({ "policy": "requires_unsafe_command", "id": id, "command": c }))
         }
     }
-    if !missing.is_empty() {
-        return Err(json!({ "policy": "requires_unmet", "id": id, "missing": missing }));
-    }
-    Ok(())
 }

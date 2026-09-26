@@ -1,9 +1,4 @@
 use std::path::Path;
-use std::process::Command;
-
-fn apb_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_apb")
-}
 
 fn init(dir: &Path) {
     apb_core::registry::init_project(dir).unwrap();
@@ -11,7 +6,7 @@ fn init(dir: &Path) {
 
 /// Runs `playbook projects ...` in directory `cwd` with a shared APB_CONFIG_DIR.
 fn run_projects(cfg: &Path, cwd: &Path, args: &[&str]) -> (String, String) {
-    let out = Command::new(apb_bin())
+    let out = crate::common::apb_std()
         .args(["projects"])
         .args(args)
         .current_dir(cwd)
@@ -38,9 +33,8 @@ fn projects_list_and_remove() {
     // commands in two projects register both (list on its own also does not
     // touch it - the touch is tied to running inside the project directory,
     // so we register via `apb list` in each).
-    let list_bin = apb_bin();
     for dir in [a.path(), b.path()] {
-        Command::new(list_bin)
+        crate::common::apb_std()
             .arg("list")
             .current_dir(dir)
             .env("APB_CONFIG_DIR", cfg.path())

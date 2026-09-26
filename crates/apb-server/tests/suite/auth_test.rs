@@ -15,20 +15,23 @@ use http_body_util::BodyExt;
 use std::sync::Arc;
 use tower::ServiceExt;
 
-/// Issues a key whose id is not an all-digit string, revoking and retrying
-/// until it gets one.
+/// Issues a key whose id the YAML writer leaves unquoted, revoking and
+/// retrying until it gets one.
 ///
 /// A `KeyRecord` serializes to a fixed-width record, which is what makes a
 /// revoke-then-issue reproduce the same file length. The one exception is the
-/// id: it is the first 8 hex chars of the hash, and when those happen to be all
-/// digits the YAML writer quotes the value to preserve its string type, adding
-/// two bytes. Two keys that disagree on that make the file lengths differ for a
-/// reason unrelated to what the same-tick test is about, so the ids are pinned
-/// to the unquoted form rather than the precondition being left to a coin flip.
+/// id: it is the first 8 hex chars of the hash, and when those read as a YAML
+/// number (all digits, or an exponent form such as `0e123456`) the YAML writer
+/// quotes the value to preserve its string type, adding two bytes. The check
+/// asks the writer itself rather than guessing its rules: filtering only
+/// all-digit ids let the exponent form through. Two keys that disagree on that
+/// make the file lengths differ for a reason unrelated to what the same-tick
+/// test is about, so the ids are pinned to the unquoted form rather than the
+/// precondition being left to a coin flip.
 fn issue_unquoted_id(path: &std::path::Path) -> (String, apb_core::server_auth::KeyRecord) {
     loop {
         let (key, record) = server_auth::issue_into(path).unwrap();
-        if !record.id.bytes().all(|b| b.is_ascii_digit()) {
+        if serde_yaml_ng::to_string(&record.id).unwrap().trim_end() == record.id {
             return (key, record);
         }
         server_auth::revoke_in(path, &record.id).unwrap();
@@ -712,4 +715,82 @@ async fn revoking_the_last_key_on_a_key_requiring_server_stops_the_keyless_pass_
          through: {body}"
     );
     assert_eq!(body["error"], "auth");
+}
+
+// --- DNS rebinding and cross-site writes on the keyless dashboard -----------
+
+/// A keyless dashboard answers only requests addressed to it by a loopback
+/// name: a page on a rebound DNS name (`Host: attacker.example:7321`) reaches
+/// 127.0.0.1 but must get 403, on the API and on the WebSocket, while the
+/// dashboard's own names keep working.
+#[tokio::test]
+async fn a_keyless_dashboard_refuses_a_foreign_host() {
+    let dir = seed();
+    let state = AppState::new(dir.path().to_path_buf());
+    for path in ["/api/projects", "/api/runs", "/api/ws"] {
+        let (status, _) = send(
+            &state,
+            Request::get(path)
+                .header("host", "attacker.example:7321")
+                .header("origin", "http://attacker.example:7321")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{path} under a foreign Host");
+    }
+    for host in ["127.0.0.1:7321", "localhost:7321", "[::1]:7321"] {
+        let (status, _) = send(
+            &state,
+            Request::get("/api/runs")
+                .header("host", host)
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "the dashboard's own name {host}");
+    }
+}
+
+/// A cross-site write to the keyless dashboard (a `text/plain` form post from
+/// another site, which needs no CORS preflight) is refused with 403 `csrf`;
+/// the same write with the dashboard's marker header, or from the same
+/// origin, is not.
+#[tokio::test]
+async fn a_keyless_dashboard_refuses_a_cross_site_write() {
+    let dir = seed();
+    let state = AppState::new(dir.path().to_path_buf());
+    let write = |extra: &[(&str, &str)]| {
+        let mut req = Request::post("/api/connectors/nope/uninstall")
+            .header("host", "127.0.0.1:7321")
+            .header("content-type", "text/plain");
+        for (k, v) in extra {
+            req = req.header(*k, *v);
+        }
+        req.body(Body::from("x")).unwrap()
+    };
+    let (status, body) = send(
+        &state,
+        write(&[
+            ("origin", "http://attacker.example"),
+            ("sec-fetch-site", "cross-site"),
+        ]),
+    )
+    .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"], "csrf", "{body}");
+
+    for extra in [
+        vec![
+            ("origin", "http://127.0.0.1:7321"),
+            (CSRF_HEADER, CSRF_VALUE),
+        ],
+        vec![
+            ("origin", "http://127.0.0.1:7321"),
+            ("sec-fetch-site", "same-origin"),
+        ],
+    ] {
+        let (status, body) = send(&state, write(&extra)).await;
+        assert_ne!(status, StatusCode::FORBIDDEN, "{extra:?}: {body}");
+    }
 }

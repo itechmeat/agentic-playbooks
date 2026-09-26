@@ -23,7 +23,7 @@ pub(crate) fn resolve_port(flag: Option<u16>) -> u16 {
             .ok()
             .and_then(|c| c.port)
     })
-    .unwrap_or(7321)
+    .unwrap_or(apb_core::config::DEFAULT_PORT)
 }
 
 /// Bind address for the dashboard: the `--bind` flag, then `server.bind` from

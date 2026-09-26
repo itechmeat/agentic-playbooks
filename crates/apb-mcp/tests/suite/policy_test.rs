@@ -170,3 +170,60 @@ fn check_run_returns_verified_digest() {
     let permit = check_run(proj.path(), &wref("d2"), false, false).unwrap();
     assert_eq!(permit.playbook_digest, digest_str(&y));
 }
+
+const SCRIPTED: &str = "schema: 1\nid: s\nname: s\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: lint, type: script, script: \"scripts/lint.sh\", runner: sh }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: lint }\n  - { from: lint, to: done }\n";
+
+fn seed_scripted(root: &Path, script: &str) {
+    init_project(root).unwrap();
+    let vdir = root.join(".apb/playbooks/s/1.0.0");
+    std::fs::create_dir_all(vdir.join("scripts")).unwrap();
+    std::fs::write(vdir.join("playbook.yaml"), SCRIPTED).unwrap();
+    std::fs::write(vdir.join("scripts/lint.sh"), script).unwrap();
+    std::fs::write(root.join(".apb/playbooks/s/current"), "1.0.0").unwrap();
+}
+
+/// An approval covers the scripts a playbook runs, not only its YAML: the
+/// same YAML with other scripts (another checkout, a changed script) is
+/// content the user never approved.
+#[test]
+fn approval_does_not_cover_other_or_changed_scripts() {
+    let _cfg = crate::common::config_sandbox();
+    let a = tempfile::tempdir().unwrap();
+    let b = tempfile::tempdir().unwrap();
+    seed_scripted(a.path(), "echo reviewed\n");
+    seed_scripted(b.path(), "echo never-reviewed\n");
+    apb_mcp::tools::playbook_approve(a.path(), "s", None, "project").unwrap();
+    assert!(check_run(a.path(), &wref("s"), false, false).is_ok());
+
+    let refusal = check_run(b.path(), &wref("s"), false, false).unwrap_err();
+    assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
+
+    std::fs::write(
+        a.path().join(".apb/playbooks/s/1.0.0/scripts/lint.sh"),
+        "echo changed\n",
+    )
+    .unwrap();
+    let refusal = check_run(a.path(), &wref("s"), false, false).unwrap_err();
+    assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
+}
+
+/// Scripts that cannot be digested (a symlink out of the version) leave the
+/// playbook loadable, to view and fix, but with nothing to approve: the gate
+/// refuses it even with an acknowledge.
+#[cfg(unix)]
+#[test]
+fn undigestable_scripts_still_load_but_never_run() {
+    let _cfg = crate::common::config_sandbox();
+    let a = tempfile::tempdir().unwrap();
+    seed_scripted(a.path(), "echo ok\n");
+    std::os::unix::fs::symlink(
+        "/etc/hostname",
+        a.path().join(".apb/playbooks/s/1.0.0/scripts/outside"),
+    )
+    .unwrap();
+    let reg = apb_core::registry::Registry::open(a.path()).unwrap();
+    let loaded = reg.load("s", None).unwrap();
+    assert!(loaded.trust_digest().is_err());
+    let refusal = check_run(a.path(), &wref("s"), true, false).unwrap_err();
+    assert_eq!(refusal["policy"], "definition_unreadable", "{refusal}");
+}

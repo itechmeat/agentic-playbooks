@@ -16,68 +16,48 @@ use apb_engine::{
 
 use crate::util::open_registry;
 
-/// Resolves the two connector permit maps for a playbook, plus the verified
-/// pins of every `type: playbook` child it delegates to, before it runs
-/// through the CLI (foreground `apb run` and the `__drive-supervised` child
-/// alike). A playbook that binds no connector and has no sub-playbook node
-/// gets the same empty maps and `None` pins `RunOptions` always defaulted to;
-/// this is what keeps such a playbook's behavior byte-for-byte unchanged.
-///
-/// This is the same seam the dashboard's `run_playbook_handler` uses
-/// (`apb-server/src/routes/playbooks.rs`) and the same trust gate an
-/// MCP-started run goes through (`policy::check_run`): without it the engine
-/// would see empty `expected_connectors`/`expected_connector_accounts` and
-/// refuse ANY connector-binding run with the opaque "connector bindings
-/// present but no connector permit" message, even though nothing was actually
-/// checked - and, one level down (issue #102.1), a child spawned without a pin
-/// would die with exactly that message the moment a parent delegated to a
-/// connector-binding sub-playbook. Both walks happen in ONE gate pass and are
-/// never reimplemented here (anti-TOCTOU). On `Err` this returns a
-/// ready-to-print, actionable message (see `connector_refusal_message`)
-/// instead of the raw refusal JSON.
-fn connector_permits_for(
+/// Runs the one run gate every launch surface uses
+/// (`apb_engine::gate::check_run`) for a CLI start - foreground `apb run`,
+/// `--detach`, and the `__drive-supervised` child alike - and hands the permit
+/// to `opts` verbatim (anti-TOCTOU). A draft or retired playbook, unmet
+/// `requires`, an untrusted connector or account, or a broken sub-playbook
+/// tree is refused before anything is written. The person typing `apb run` is
+/// the trust confirmation, so untrusted playbook and profile content is
+/// acknowledged (MCP asks the user first); connector trust is never
+/// bypassable. `supervised` is true only when an external supervisor agent
+/// will be spawned, so its profile joins the verified bundle set. Consent-time
+/// warnings go to stderr. On `Err` this returns a ready-to-print, actionable
+/// message (see `gate_refusal_message`).
+fn gate_run(
     root: &Path,
     name: &str,
     version: Option<&str>,
-) -> Result<PlaybookRunPermits, String> {
-    let reg = Registry::open(root).map_err(|e| format!("no project here: {e} (run `apb init`)"))?;
-    let loaded = reg
-        .load(name, version)
-        .map_err(|e| format!("cannot load playbook `{name}`: {e}"))?;
-    let ((connectors, accounts), children) = apb_mcp::policy::connector_permit_maps_with_children(
-        root,
-        &loaded.playbook,
-        &apb_core::scope::Origin::Project { workspace_id: None },
-        name,
-    )
-    .map_err(|refusal| connector_refusal_message(&refusal))?;
-    // No sub-playbook node means no pin to carry: keep `None` so nothing
-    // changes for a playbook without children.
-    Ok((
-        connectors,
-        accounts,
-        (!children.is_empty()).then_some(children),
-    ))
+    supervised: bool,
+    opts: &mut RunOptions,
+) -> Result<(), String> {
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: name.to_string(),
+        version: version.map(str::to_string),
+    };
+    let permit = apb_engine::gate::check_run(root, &wref, true, supervised)
+        .map_err(|refusal| gate_refusal_message(&refusal))?;
+    for w in &permit.warnings {
+        eprintln!("warning: {w}");
+    }
+    permit.apply(opts);
+    Ok(())
 }
 
-/// What a CLI run start needs from the gate: the two connector permit maps and
-/// the sub-playbook pins (`None` when the playbook has no `type: playbook`
-/// node), handed to `RunOptions` verbatim.
-type PlaybookRunPermits = (
-    BTreeMap<String, String>,
-    BTreeMap<String, String>,
-    Option<BTreeMap<String, apb_engine::run_config::ChildExpectation>>,
-);
-
-/// Turns a connector-gate refusal (see `apb_mcp::policy::check_run`'s
-/// connector step) into an actionable CLI message: names the policy code and,
+/// Turns a run-gate refusal (see `apb_engine::gate::check_run`) into an
+/// actionable CLI message: names the policy code and,
 /// for a trust refusal, points at the exact `apb connector approve` invocation
 /// that clears it; for a missing-env refusal, at `apb connector env --write`.
 /// Falls back to printing the refusal verbatim for a policy code this
 /// function does not special-case (e.g. `connector_unresolved`, `not_found`),
 /// so a future refusal kind still surfaces something useful rather than
 /// nothing.
-fn connector_refusal_message(refusal: &serde_json::Value) -> String {
+fn gate_refusal_message(refusal: &serde_json::Value) -> String {
     let policy = refusal
         .get("policy")
         .and_then(|v| v.as_str())
@@ -215,7 +195,7 @@ fn doctor_run(root: &Path, run_id: &str) -> ExitCode {
 /// events.jsonl simply omits the line rather than failing the whole report.
 fn print_pending_question_check(root: &Path, run_id: &str) {
     let run_dir = root.join(".apb/runs").join(run_id);
-    let Ok(events) = apb_engine::event::read_all(&run_dir) else {
+    let Ok(events) = apb_engine::run_view::read_events(&run_dir) else {
         return;
     };
     if let Some(pq) =
@@ -291,20 +271,16 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
         Ok(r) => r,
         Err(c) => return c,
     };
+    let validate_all = name.is_none();
+    // Whole-project validation enumerates by directory, not through the
+    // listing: `Registry::list` drops a playbook that fails to load, which
+    // would hide exactly the definitions a validator exists to report.
     let names: Vec<String> = match name {
         Some(n) => vec![n],
-        None => match reg.list() {
-            Ok(l) => l.into_iter().map(|w| w.id).collect(),
-            Err(e) => {
-                eprintln!("list failed: {e}");
-                return ExitCode::from(2);
-            }
-        },
+        None => reg.playbook_ids(),
     };
-    let ctx = ValidationContext {
-        profiles: reg.profiles(),
-        ..Default::default()
-    };
+    let ctx =
+        ValidationContext::for_registry(&reg, apb_core::profile_store::PlaybookOrigin::Project);
     let mut failed = false;
     for id in names {
         match reg.load(&id, None) {
@@ -326,6 +302,11 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
                             .unwrap_or_default()
                     );
                 }
+                // The local preflight (requires, connectors): warnings, since
+                // another machine may well meet them; the run gate refuses.
+                for (code, message) in apb_core::preflight::findings(root, &loaded.playbook) {
+                    println!("{id}: warning {code} {message}");
+                }
                 if report.is_valid() {
                     println!("{id}: OK");
                 } else {
@@ -338,11 +319,69 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
             }
         }
     }
+    if validate_all && !validate_profile_models(root, &ctx.profiles) {
+        failed = true;
+    }
     if failed {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
     }
+}
+
+/// Whole-project `apb validate` also checks every project profile's models
+/// ([`apb_core::model_check`]): a model zcode's allowlist or the config's
+/// `model_policy` refuses is an error (`zcode_model_not_allowed`,
+/// `model_policy_violation`); one outside apb's list for its agent, or one the
+/// installed agent does not list, is a warning. Returns whether no profile had
+/// an error. An unreadable profile is left to the run-time resolver, which
+/// reports it with its own error.
+fn validate_profile_models(root: &Path, names: &[String]) -> bool {
+    use apb_core::model_check::{self, ModelIssue};
+    let docs: Vec<(&String, apb_core::profile::ProfileDoc)> = names
+        .iter()
+        .filter_map(|name| {
+            let path = root.join(".apb/profiles").join(name).join("profile.yaml");
+            let doc = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|y| apb_core::profile::ProfileDoc::from_yaml(&y).ok())?;
+            Some((name, doc))
+        })
+        .collect();
+    if docs.is_empty() {
+        return true;
+    }
+    let cx = model_check::ModelContext::load();
+    let mut ok = true;
+    for (name, doc) in &docs {
+        let chain = std::iter::once((&doc.executor.agent, &doc.executor.model))
+            .chain(doc.executor.fallbacks.iter().map(|f| (&f.agent, &f.model)));
+        for (agent, model) in chain {
+            let Some(issue) = model_check::check(agent, model, &cx) else {
+                continue;
+            };
+            match &issue {
+                ModelIssue::NotAllowed(refusal) => {
+                    println!("profile {name}: error zcode_model_not_allowed {refusal}");
+                }
+                ModelIssue::PolicyViolation(_) => println!(
+                    "profile {name}: error {} {}",
+                    issue.code(),
+                    issue.describe(agent, model)
+                ),
+                ModelIssue::Unknown(_) | ModelIssue::NotAvailable => println!(
+                    "profile {name}: warning {} {}",
+                    issue.code(),
+                    issue.describe(agent, model)
+                ),
+                ModelIssue::AgentNotInstalled | ModelIssue::Unverifiable => {}
+            }
+            if issue.is_blocking() {
+                ok = false;
+            }
+        }
+    }
+    ok
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -354,6 +393,7 @@ pub(crate) fn run_cmd(
     params: Vec<String>,
     allow_shared_workdir: bool,
     supervise: bool,
+    detach: bool,
     overrides_path: Option<&Path>,
     no_cache: bool,
     refresh_cache: bool,
@@ -428,39 +468,43 @@ pub(crate) fn run_cmd(
             continued_from.as_deref(),
         );
     }
-    let (expected_connectors, expected_connector_accounts, expected_children) =
-        match connector_permits_for(root, name, version) {
-            Ok(permits) => permits,
-            Err(msg) => {
-                eprintln!("run failed: {msg}");
-                return ExitCode::from(2);
-            }
-        };
-    let opts = RunOptions {
+    let mut opts = RunOptions {
         instruction,
         params: parsed,
         allow_shared_workdir,
         mode: RunMode::Autonomous,
-        supervisor_expected: false,
         max_patches_per_run: None,
         context_max_bytes: None,
         context_compact_model: None,
         overrides,
-        expected_digest: None,
-        expected_profile_bundles: None,
         parent_run: None,
         continued_from,
         depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
         cache,
         max_parallel: None,
         // Fail-fast on a busy workdir: this caller is a person waiting on the
         // answer, who can retry, not an event source whose event dies with the
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
+        // The `expected_*` pins come from the run gate (`gate_run`).
+        ..Default::default()
     };
+    if let Err(msg) = gate_run(root, name, version, false, &mut opts) {
+        eprintln!("run failed: {msg}");
+        return ExitCode::from(2);
+    }
+    if detach {
+        return match apb_engine::start_detached(root, name, version, opts) {
+            Ok(run_id) => {
+                println!("run started: {run_id}");
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("run failed: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
     match run(root, name, version, opts) {
         Ok(res) => {
             println!("run {} finished: {}", res.run_id, res.outcome.as_str());
@@ -494,7 +538,7 @@ pub(crate) fn spawn_detached_supervised(
     allow_shared_workdir: bool,
     continued_from: Option<&str>,
 ) -> ExitCode {
-    let exe = match std::env::current_exe() {
+    let exe = match apb_core::fsutil::reexec_exe() {
         Ok(e) => e,
         Err(e) => {
             eprintln!("run failed: cannot resolve own executable: {e}");
@@ -599,39 +643,31 @@ pub(crate) fn drive_supervised_child(
             }
         }
     }
-    let (expected_connectors, expected_connector_accounts, expected_children) =
-        match connector_permits_for(root, name, version) {
-            Ok(permits) => permits,
-            Err(msg) => {
-                let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
-                return ExitCode::from(2);
-            }
-        };
-    let opts = RunOptions {
+    let mut opts = RunOptions {
         instruction,
         params: parsed,
         allow_shared_workdir,
-        mode: RunMode::Supervised,
-        supervisor_expected: true,
+        mode: RunMode::AgentSupervised,
         max_patches_per_run: None,
         context_max_bytes: None,
         context_compact_model: None,
         overrides: None,
-        expected_digest: None,
-        expected_profile_bundles: None,
         parent_run: None,
         continued_from,
         depth: 0,
-        expected_children,
-        expected_connectors,
-        expected_connector_accounts,
         cache: Default::default(),
         max_parallel: None,
         // Fail-fast on a busy workdir: this caller is a person waiting on the
         // answer, who can retry, not an event source whose event dies with the
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
+        // The `expected_*` pins come from the run gate (`gate_run`).
+        ..Default::default()
     };
+    if let Err(msg) = gate_run(root, name, version, true, &mut opts) {
+        let _ = atomic_write(handshake, format!("ERR: {msg}").as_bytes());
+        return ExitCode::from(2);
+    }
     let prepared = match prepare_supervised_background(root, name, version, opts) {
         Ok(p) => p,
         Err(e) => {
@@ -782,6 +818,61 @@ pub(crate) fn resume_cmd(
 /// process is driving the run any more - a driver that crashed, taking the run
 /// down with it and leaving it reading `running` forever - the stop finalizes
 /// the run itself. `stop_run` validates `run_id` and existence.
+/// `apb wait`: blocks on the run with no model in the loop and reports why it
+/// returned. The exit code carries the verdict so a shell caller needs no
+/// parsing: 0 succeeded, 1 failed/aborted, 3 needs input, 4 stopped, 5 timeout.
+pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> ExitCode {
+    use apb_engine::run_wait::{NeedsInput, WaitReason, wait_run};
+    // No limit by default: an agent runs this as one background command and is
+    // notified when it exits. A century is "no limit" without overflow.
+    let timeout = Duration::from_secs(timeout_secs.unwrap_or(100 * 365 * 24 * 3600));
+    let res = match wait_run(root, run_id, timeout) {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("wait failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let status = res.status.as_str();
+    match res.reason {
+        WaitReason::Finished => {
+            println!("run {run_id} finished: {status}");
+            if res.status == RunStatus::Succeeded {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::from(1)
+            }
+        }
+        WaitReason::NeedsInput => {
+            let how = match res.needs {
+                Some(NeedsInput::Question) => {
+                    format!("a question is pending: `apb answer {run_id} <text>`")
+                }
+                Some(NeedsInput::Review) => format!(
+                    "a human review is pending: `apb review {run_id} <node> --decision <option>`"
+                ),
+                _ => "a supervisor decision is pending".to_string(),
+            };
+            println!("run {run_id} needs input ({status}): {how}; then `apb wait {run_id}` again");
+            ExitCode::from(3)
+        }
+        WaitReason::Stopped => {
+            if res.driver_alive == Some(false) {
+                println!(
+                    "run {run_id} stopped ({status}): its driver is dead; `apb resume {run_id}` continues it"
+                );
+            } else {
+                println!("run {run_id} stopped ({status}): `apb resume {run_id}` continues it");
+            }
+            ExitCode::from(4)
+        }
+        WaitReason::Timeout => {
+            println!("run {run_id} still {status} after the timeout");
+            ExitCode::from(5)
+        }
+    }
+}
+
 pub(crate) fn stop_cmd(root: &Path, run_id: &str) -> ExitCode {
     match stop_run(root, run_id) {
         Ok(StopOutcome::SignaledLiveDriver) => {

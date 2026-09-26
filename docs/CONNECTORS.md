@@ -42,6 +42,10 @@ Both files ship inside the connector folder, so `apb connector install <name>` m
 
 Neither file is read at run time, and neither is used by the dashboard, which renders `PUBLIC.md`. They are covered by the connector's tree digest like every other file in the folder, so editing one drops connector trust until it is approved again.
 
+## Upgrades
+
+An installed official connector is a copy of the one embedded in the `apb` binary. When the dashboard starts (an upgrade restarts it), every installed copy that is exactly what an earlier `apb` installed, meaning its tree digest is trusted with origin `bundled`, is replaced by the embedded version, trust included. A copy with local changes is left alone: `apb connector list`, MCP `connectors_list` and the dashboard report it with `update_available` (the built-in version), and `apb connector install <name> --force` or the dashboard's "Update to the built-in version" replaces it.
+
 ## Configuring accounts
 
 An account tells the connector where to send a call and which secret to use. The
@@ -64,6 +68,12 @@ field must be exactly one reference, either `{{env.VAR}}` or `{{cmd:<command>}}`
 (a command whose stdout is the secret, resolved at call time, e.g.
 `token: "{{cmd:gh auth token}}"`); a literal secret in a config file is a
 validation error. At most one `default: true` per merged list.
+
+`{{cmd:...}}` is allowed only in the global file. The project file is part of the
+repository, and a command in it would run as you at the next call or healthcheck
+of a connector you already trust, so a project account that sources any field
+from a command makes the connector's config fail to load, naming the account and
+field. Use `{{env.VAR}}` in a project file, or move the account to the global file.
 
 ## Secrets
 
@@ -104,9 +114,15 @@ apb connector approve <name> --account <acct>   # approve one account's non-secr
 ```
 
 Approving an account shows the concrete field values so you see exactly where
-secrets will be sent. `apb connector doctor` reports the trust status of every
-connector and account (approved, changed since approval, or never approved)
-alongside manifest, config, and env checks.
+secrets will be sent. A secret read from a command is shown with its command
+line wherever an account is approved from, because approving the account lets
+`apb` run that command: `apb connector show` and `approve --account` (`cmd`),
+the dashboard's account row, the MCP run gate's `unapproved_connector_account`
+refusal (`fields` and `cmd`), MCP `connectors_list` (`account_commands`), and
+`apb connector doctor` (a `secret command` row per such field). `apb connector
+doctor` reports the trust status of every connector and account (approved,
+changed since approval, or never approved) alongside manifest, config, and env
+checks.
 
 ## Binding a connector to a node
 
@@ -227,10 +243,19 @@ acknowledging what it processed.
 **Inbox content is untrusted.** It is written by whoever can reach the
 callback URL, which is the first apb input not authored by the operator. The
 node prompt says so to the agent, and the dashboard marks it when it renders
-it, but the real protection is the grant: give an inbox-reading node the
-narrowest `functions:` allowlist and a `max_calls` budget it can live with,
-and never let the same node hold a write-capable grant it would not want a
-stranger to steer.
+it. Neither stops a message from steering the agent that reads it.
+
+A grant limits only what the node can do through apb's connector calls: give an
+inbox-reading node the narrowest `functions:` allowlist and a `max_calls` budget
+it can live with, and never let the same node hold a write-capable grant it
+would not want a stranger to steer. A grant does not confine the agent itself.
+apb starts coding agents in their autonomous modes, in your working directory,
+with your environment minus the connector secrets, so an agent that follows
+injected instructions can still use its own tools: run commands, edit files,
+call other CLIs you are logged in to. Treat a node that reads the inbox as a
+node that runs untrusted input: keep its prompt's job narrow, keep its
+profile on the default `minimal` environment, and run such playbooks where that
+agent's reach is acceptable.
 
 Two validator rules cover the playbook side. **V42**: a node grants inbox
 functions of a connector with no webhook block, so nothing could ever be
@@ -262,8 +287,10 @@ apb connector init <name>       scaffold a new connector folder from a template
 ```
 
 `apb connector call` needs a run context (`APB_RUN_DIR` and `APB_NODE_ID`, set by
-the engine when a node executes a call); outside a run use `--dry-run` to render
-a call without executing it, or the dashboard healthcheck to probe an account.
+the engine when a node executes a call). Outside a run, `--dry-run` renders a
+call without executing it, against the live connector and account config (no
+secret is resolved, so no approval is needed); probe an account with the
+dashboard healthcheck.
 `--args -` reads the JSON arguments from stdin.
 
 ## Official connectors

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { renderMarkdown } from './markdown'
+import { renderMarkdown, safeExternalUrl } from './markdown'
 
 describe('renderMarkdown blocks', () => {
   it('renders headings', () => {
@@ -74,6 +74,14 @@ describe('renderMarkdown sanitising', () => {
     expect(html).toContain('click')
   })
 
+  it('drops a link whose scheme hides behind a leading control character', () => {
+    // A URL parser strips leading C0 controls, so this href would resolve to
+    // a javascript: URL even though the raw string does not start with one.
+    const html = renderMarkdown('[x](\u0001javascript:alert(1))')
+    expect(html).not.toContain('<a ')
+    expect(html).not.toContain('javascript:')
+  })
+
   it('drops a data: link', () => {
     const html = renderMarkdown('[x](data:text/html,<script>alert(1)</script>)')
     expect(html).not.toContain('data:text/html')
@@ -88,5 +96,15 @@ describe('renderMarkdown sanitising', () => {
 
   it('escapes an ampersand once', () => {
     expect(renderMarkdown('a & b')).toContain('a &amp; b')
+  })
+})
+
+describe('safeExternalUrl', () => {
+  it('keeps only an absolute http or https URL', () => {
+    expect(safeExternalUrl('https://example.com/docs')).toBe('https://example.com/docs')
+    expect(safeExternalUrl('http://example.com')).toBe('http://example.com')
+    for (const bad of ['javascript:alert(1)', '\u0001javascript:alert(1)', 'mailto:a@b.c', '/docs', '', null]) {
+      expect(safeExternalUrl(bad)).toBeNull()
+    }
   })
 })

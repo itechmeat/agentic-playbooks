@@ -31,13 +31,6 @@ pub(crate) fn append_patch_rejected(
     Ok(PatchResult::Rejected)
 }
 
-pub(crate) fn is_terminal_node_status(status: NodeStatus) -> bool {
-    !matches!(
-        status,
-        NodeStatus::Pending | NodeStatus::Ready | NodeStatus::Running
-    )
-}
-
 pub(crate) fn apply_patch(
     root: &Path,
     run_dir: &Path,
@@ -99,7 +92,7 @@ pub(crate) fn apply_patch(
     let executed: Vec<String> = state
         .nodes
         .iter()
-        .filter_map(|(node, status)| is_terminal_node_status(*status).then_some(node.clone()))
+        .filter_map(|(node, status)| status.has_executed().then_some(node.clone()))
         .collect();
     if let Err(error) = validate_migration(playbook, &loaded.playbook, &executed, &continue_from) {
         return append_patch_rejected(log, error.to_string());

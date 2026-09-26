@@ -37,7 +37,7 @@ function clamp(percent: number): number {
 export function nextDisplay(
   prev: ProgressDisplayState | null,
   runKey: string,
-  next: ProgressSummary,
+  next: Pick<ProgressSummary, 'percent' | 'plan_key'>,
 ): ProgressDisplayState {
   const percent = clamp(next.percent)
   if (!prev || prev.runKey !== runKey) {

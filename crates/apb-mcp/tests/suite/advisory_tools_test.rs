@@ -161,6 +161,92 @@ fn adopt_report_emits_expected_codes() {
     );
 }
 
+/// A profile several nodes share is one thing to fix, so the report names each
+/// of its findings once, not once per node that binds it (issue #137).
+#[test]
+fn adopt_report_names_a_shared_profile_once() {
+    let _l = lock();
+    let c = setup();
+    seed_profile(&c.root, "shared", "customx", "");
+    let playbook = "schema: 1\nid: wfs\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: shared }\n  - { id: b, type: agent_task, prompt: \"do\", profile: shared }\n  - { id: c, type: agent_task, prompt: \"do\", profile: shared }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: c }\n  - { from: c, to: done }\n";
+    seed_playbook(&c.root, "wfs", playbook);
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfs")).unwrap();
+    let findings = report["playbooks"][0]["findings"].as_array().unwrap();
+    for code in ["untrusted", "model_unverifiable"] {
+        let n = findings.iter().filter(|f| f["code"] == code).count();
+        assert_eq!(n, 1, "`{code}` once for the shared profile: {findings:?}");
+    }
+}
+
+/// The adoption report enforces the global config's `model_policy` like
+/// `apb validate` does: a profile model the policy does not allow is
+/// `model_policy_violation`, naming the rule.
+#[test]
+fn adopt_report_flags_a_model_the_config_policy_forbids() {
+    let _l = lock();
+    let c = setup();
+    let cfg = std::env::var_os("APB_CONFIG_DIR").unwrap();
+    std::fs::write(
+        Path::new(&cfg).join("config.yaml"),
+        "model_policy:\n  - agent: zcode\n    allow: [GLM-5.3]\n",
+    )
+    .unwrap();
+    let dir = c.root.join(".apb/profiles/zfull");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("profile.yaml"),
+        "name: zfull\ndescription: d\nexecutor:\n  agent: zcode\n  model: GLM-5.3-Flash@high\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("SOUL.md"), "").unwrap();
+    let playbook = "schema: 1\nid: wfp\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: zfull }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: done }\n";
+    seed_playbook(&c.root, "wfp", playbook);
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfp")).unwrap();
+    let findings = report["playbooks"][0]["findings"].as_array().unwrap();
+    let hit = findings
+        .iter()
+        .find(|f| f["code"] == "model_policy_violation")
+        .unwrap_or_else(|| panic!("no policy finding: {findings:?}"));
+    assert_eq!(hit["model"], "GLM-5.3-Flash@high");
+    assert!(
+        hit["detail"]
+            .as_str()
+            .unwrap()
+            .contains("allows only GLM-5.3"),
+        "{hit}"
+    );
+}
+
+/// zcode's allowlist is a hard gate in adoption: a model outside it is
+/// `model_not_allowed` naming the allowlist; the legacy
+/// `zai-individual/` spelling of an allowed model is not.
+#[test]
+fn adopt_report_flags_a_zcode_model_off_the_allowlist() {
+    let _l = lock();
+    let c = setup();
+    seed_profile(&c.root, "zbad", "zcode", "");
+    let dir = c.root.join(".apb/profiles/zok");
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("profile.yaml"),
+        "name: zok\ndescription: d\nexecutor:\n  agent: zcode\n  model: zai-individual/GLM-5.3-Flash@high\n",
+    )
+    .unwrap();
+    std::fs::write(dir.join("SOUL.md"), "").unwrap();
+    let playbook = "schema: 1\nid: wfz\nname: W\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: a, type: agent_task, prompt: \"do\", profile: zbad }\n  - { id: b, type: agent_task, prompt: \"do\", profile: zok }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: done }\n";
+    seed_playbook(&c.root, "wfz", playbook);
+    let report = advisory_tools::playbook_adopt_report(&c.root, Some("wfz")).unwrap();
+    let findings = report["playbooks"][0]["findings"].as_array().unwrap();
+    let not_allowed: Vec<&serde_json::Value> = findings
+        .iter()
+        .filter(|f| f["code"] == "model_not_allowed")
+        .collect();
+    assert_eq!(not_allowed.len(), 1, "{findings:?}");
+    assert_eq!(not_allowed[0]["model"], "m1");
+    let detail = not_allowed[0]["detail"].as_str().unwrap();
+    assert!(detail.contains("GLM-5.3-Flash"), "{detail}");
+}
+
 #[test]
 fn adopt_report_flags_missing_skill() {
     let _l = lock();

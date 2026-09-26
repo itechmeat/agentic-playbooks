@@ -1,7 +1,7 @@
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
-use apb_core::fsutil::atomic_write;
+use apb_core::fsutil::atomic_write_under;
 
 use crate::error::EngineError;
 use crate::liveness::pid_alive;
@@ -41,7 +41,7 @@ impl WorkdirGuard {
     /// guard stops owning it, so there is no window in which the workdir is
     /// unlocked and a competing write-run could slip in.
     pub fn hand_over(mut self, pid: u32) -> Result<(), EngineError> {
-        atomic_write(&self.lock_path, pid.to_string().as_bytes())?;
+        write_lock(&self.lock_path, pid)?;
         self.disarm();
         Ok(())
     }
@@ -59,6 +59,13 @@ impl Drop for WorkdirGuard {
 /// lock holder without a second copy of the path convention.
 pub(crate) fn lock_path(root: &Path) -> PathBuf {
     root.join(".apb/workdir.lock")
+}
+
+/// Writes the lock naming `pid`, inside the workspace's existing `.apb`: a
+/// driver of a deleted workspace must not re-create it.
+fn write_lock(lock_path: &Path, pid: u32) -> std::io::Result<()> {
+    let apb_dir = lock_path.parent().unwrap_or(lock_path);
+    atomic_write_under(apb_dir, lock_path, pid.to_string().as_bytes())
 }
 
 pub(crate) fn lock_holder(path: &Path) -> Option<u32> {
@@ -85,7 +92,7 @@ pub fn acquire(root: &Path, allow_shared: bool) -> Result<Option<WorkdirGuard>, 
         )));
     }
     // No lock, or a stale one - overwrite it.
-    atomic_write(&lock_path, std::process::id().to_string().as_bytes())?;
+    write_lock(&lock_path, std::process::id())?;
     Ok(Some(WorkdirGuard {
         lock_path,
         armed: true,

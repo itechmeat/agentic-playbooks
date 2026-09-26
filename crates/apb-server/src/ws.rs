@@ -7,7 +7,10 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 
 /// A request extractor that admits the WebSocket upgrade only when its `Origin`
-/// is same-origin (or absent). It is listed BEFORE [`WebSocketUpgrade`] in the
+/// is same-origin (or absent) and, on a keyless dashboard, names one of the
+/// dashboard's own hosts ([`crate::auth::AuthState::host_allowed`]): a page
+/// on a rebound DNS name is same-origin with itself, so the same-origin rule
+/// alone would admit it. It is listed BEFORE [`WebSocketUpgrade`] in the
 /// handler so the origin gate runs first: `WebSocketUpgrade` itself rejects a
 /// non-upgradable connection with 426, which would otherwise mask this check.
 pub(crate) struct SameOrigin;
@@ -15,12 +18,21 @@ pub(crate) struct SameOrigin;
 impl<S> FromRequestParts<S> for SameOrigin
 where
     S: Send + Sync,
+    std::sync::Arc<crate::auth::AuthState>: axum::extract::FromRef<S>,
 {
     type Rejection = Response;
 
-    async fn from_request_parts(parts: &mut Parts, _state: &S) -> Result<Self, Self::Rejection> {
+    async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
+        use axum::extract::FromRef;
+        let auth = std::sync::Arc::<crate::auth::AuthState>::from_ref(state);
         let authority = parts.uri.authority().map(|a| a.as_str());
-        if origin_allowed(&parts.headers, authority) {
+        let origin_host = parts
+            .headers
+            .get(header::ORIGIN)
+            .and_then(|v| v.to_str().ok())
+            .map(|o| o.split_once("://").map_or(o, |(_, rest)| rest));
+        let own_host_only = auth.enabled() || auth.host_allowed(origin_host);
+        if origin_allowed(&parts.headers, authority) && own_host_only {
             Ok(SameOrigin)
         } else {
             Err((StatusCode::FORBIDDEN, "cross-origin websocket refused").into_response())

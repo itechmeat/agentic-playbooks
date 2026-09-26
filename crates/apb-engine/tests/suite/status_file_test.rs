@@ -825,9 +825,11 @@ fn defaults_require_verdict_interrupts_a_verdictless_attempt() {
     let _env = common::env_lock();
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path(), "sfd", DEFAULTS_VERDICT_PLAYBOOK);
+    // Appends, so the dump keeps the first attempt's full prompt: the retry
+    // continues that attempt's session with a short continuation prompt.
     let dump = dir.path().join("argv-dump.txt");
     let script = format!(
-        "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"{}\"\nprintf 'mid-work, nothing recorded\\n'\n",
+        "#!/bin/sh\nprintf '%s\\n' \"$@\" >> \"{}\"\nprintf 'mid-work, nothing recorded\\n'\n",
         dump.display()
     );
     let prog = stub_agent(dir.path(), &script);

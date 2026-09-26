@@ -44,6 +44,28 @@ impl WfMcp {
     }
 
     #[tool(
+        description = "List the approvals in the user's trust store: digest, id, kind (playbook, profile_bundle, connector, connector_account), origin and approval time. Pass kind to filter.",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn trust_list(
+        &self,
+        Parameters(TrustListArgs { kind }): Parameters<TrustListArgs>,
+    ) -> CallToolResult {
+        to_call_tool_result(crate::tools::trust_list(kind.as_deref()))
+    }
+
+    #[tool(
+        description = "Revoke approvals in the user's trust store: target is a digest (exactly that approval) or an id (every approval under it, e.g. every version of a playbook; kind narrows it). Returns what was revoked. The content then needs a new approval, or acknowledge_untrusted, to run. Ask the user before revoking anything they did not ask to revoke.",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn trust_revoke(
+        &self,
+        Parameters(TrustRevokeArgs { target, kind }): Parameters<TrustRevokeArgs>,
+    ) -> CallToolResult {
+        to_call_tool_result(crate::tools::trust_revoke(&target, kind.as_deref()))
+    }
+
+    #[tool(
         description = "Get a profile's full content (profile.yaml + SOUL.md) and digests.",
         annotations(read_only_hint = true)
     )]
@@ -55,7 +77,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Create or update an agent profile (agent+model+fallbacks, SOUL, skills). Update requires expected_digest (optimistic concurrency). Auto-approves the resulting bundle. Only for the current workspace. Create a project profile a directly requested playbook needs without extra questions; ask the user before an unexpected global mutation or an initiative-driven change to a profile other playbooks use.",
+        description = "Create or update an agent profile (agent+model+fallbacks, SOUL, skills). Update requires expected_digest (optimistic concurrency). Auto-approves the resulting bundle, except when skills the profile kept changed since it was last approved: then it returns trusted: false and skills_unapproved for the user to review. Only for the current workspace. Create a project profile a directly requested playbook needs without extra questions; ask the user before an unexpected global mutation or an initiative-driven change to a profile other playbooks use.",
         annotations(destructive_hint = true)
     )]
     pub(crate) async fn profile_write(
@@ -71,7 +93,9 @@ impl WfMcp {
             fallbacks,
             soul,
             expected_digest,
+            environment,
             hermetic,
+            zcode_mode,
         }): Parameters<ProfileWriteArgs>,
     ) -> CallToolResult {
         let executor = crate::profile_tools::ExecutorInput {
@@ -81,6 +105,21 @@ impl WfMcp {
         };
         let soul_requirement = match crate::profile_tools::parse_soul_requirement(soul.as_deref()) {
             Ok(r) => r,
+            Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
+        };
+        let environment = match apb_core::profile::AgentEnvironment::from_surface(
+            environment.as_deref(),
+            hermetic,
+        ) {
+            Ok(e) => e,
+            Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
+        };
+        let zcode_mode = match zcode_mode
+            .as_deref()
+            .map(apb_core::profile::ZcodeMode::parse)
+            .transpose()
+        {
+            Ok(m) => m,
             Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
         };
         to_call_tool_result(crate::profile_tools::profile_write(
@@ -94,7 +133,8 @@ impl WfMcp {
                 executor,
                 expected_digest,
                 soul_requirement,
-                hermetic: hermetic.unwrap_or(false),
+                environment,
+                zcode_mode,
             },
         ))
     }
@@ -126,7 +166,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Detect installed coding agents: presence, version, category, and local model/provider/auth hints. Detection is local - apb runs each agent's --version and reads local config, and makes no network request of its own (it does not control a spawned agent's network when apb runs). Cached; pass refresh to re-probe.",
+        description = "Detect installed coding agents: presence, version, category, local model/provider/auth hints, and options_by_agent (the model ids apb offers per agent, the same lists the dashboard shows). Detection is local - apb runs each agent's --version and reads local config, and makes no network request of its own (it does not control a spawned agent's network when apb runs). Cached; pass refresh to re-probe.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn agents_detect(

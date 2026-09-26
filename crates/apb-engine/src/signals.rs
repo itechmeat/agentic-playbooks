@@ -34,7 +34,7 @@ pub struct SignalEntry {
 }
 
 pub fn post_signal(run_dir: &Path, cmd: SignalCommand) -> Result<u64, EngineError> {
-    std::fs::create_dir_all(run_dir)?;
+    crate::driver::ensure_run_dir(run_dir)?;
     // The lock covers the whole critical section: without it two concurrent
     // posts both read the same count and both write that number.
     let _lock = apb_core::fsutil::lock_dir(run_dir, SIGNALS_LOCK)?;

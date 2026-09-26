@@ -9,15 +9,15 @@ import type {
   VersionInfo,
   PlaybookDetail,
   PlaybookSummary,
+  RestoredPlaybook,
+  TrashListEntry,
+  TrustEntry,
+  TrustKind,
+  TrustRevoked,
   WriteResult,
 } from '../types'
 import type { RemoveResult, SuggestionRecord } from '../suggestions'
-import { cachedJson } from '../sessioncache'
 import { getJson, jsonHeaders, pb, qs, requestJson, run } from './http'
-
-/** TTL for the cached agent/model lookups: they only change when the CLI
- * environment changes, so an hour is a safe amount of staleness to accept. */
-export const LOOKUP_CACHE_TTL_MS = 60 * 60 * 1000
 
 export const fetchProjects = () => getJson<Project[]>('/api/projects')
 
@@ -52,6 +52,9 @@ export interface ProfileWriteBody {
   skills?: string[]
   soul_requirement?: string
   expected_digest?: string | null
+  // Agent environment: 'minimal' (the default) or 'full', the opt-in to the
+  // operator's whole personal setup. Absent keeps the stored value.
+  environment?: 'minimal' | 'full'
 }
 
 export const fetchProfiles = () =>
@@ -60,8 +63,17 @@ export const fetchProfiles = () =>
 export const fetchProfile = (name: string, scope: string, workspace = '') =>
   getJson<ProfileDetail>(`/api/profiles/${encodeURIComponent(name)}${qs({ scope, workspace })}`)
 
+/** What a profile save returns. `skills_unapproved` lists skills the profile
+ * kept whose content changed since it was last approved: the save does not
+ * vouch for them, so the profile stays untrusted until the user confirms. */
+export type ProfileWriteResult = {
+  name: string
+  trusted?: boolean
+  skills_unapproved?: { skill: string; digest: string }[]
+}
+
 export const writeProfile = (body: ProfileWriteBody, workspace = '') =>
-  requestJson<{ name: string }>(`/api/profiles${qs({ workspace })}`, {
+  requestJson<ProfileWriteResult>(`/api/profiles${qs({ workspace })}`, {
     method: 'POST',
     headers: jsonHeaders,
     body: JSON.stringify(body),
@@ -80,13 +92,6 @@ export interface AgentInfo {
   category?: string
   models?: { items: string[]; authority: string } | null
 }
-export const fetchAgents = () =>
-  getJson<{ agents: AgentInfo[] }>('/api/agents').then((r) => r.agents)
-
-// CLI agent detection is slow server-side; cache it client-side so opening a
-// second profile editor right after the first does not refetch it.
-export const fetchAgentsCached = () =>
-  cachedJson('apb.cache.agents', LOOKUP_CACHE_TTL_MS, fetchAgents)
 
 export interface ModelRow {
   id: string
@@ -98,23 +103,27 @@ export interface ModelRow {
 // curated table filtered to that agent's vendor (or the whole table for an
 // aggregator), annotated `detected` when the agent's local config/detected
 // model list also names it. Detection only annotates or extends this list,
-// it never replaces it - see `apb_core::models_table::model_options_for_agent`.
+// it never replaces it; for zcode (apb's allowlist) and codex (its static
+// list) the list is closed and detection only annotates it - see
+// `apb_core::models_table::model_options_for_agent`.
 export interface ModelOption {
   id: string
   vendor: string
   detected: boolean
 }
-export const fetchModels = () =>
-  getJson<{
-    models: ModelRow[]
-    claude_static: string[]
-    options_by_agent: Record<string, ModelOption[]>
-  }>('/api/models')
 
-// Same rationale as fetchAgentsCached: the curated models table plus
-// per-agent detection is slow to assemble and rarely changes.
-export const fetchModelsCached = () =>
-  cachedJson('apb.cache.models', LOOKUP_CACHE_TTL_MS, fetchModels)
+/** The agent/model catalog, as the server computes it (`GET /api/models`,
+ * `apb_core::agent_catalog`). The server is the only source of truth for
+ * these lists: the client never persists them, so a reload always shows what
+ * the running `apb` offers. Agents and options come from one snapshot. */
+export interface ModelCatalog {
+  models: ModelRow[]
+  claude_static: string[]
+  codex_static: string[]
+  agents: AgentInfo[]
+  options_by_agent: Record<string, ModelOption[]>
+}
+export const fetchModelCatalog = () => getJson<ModelCatalog>('/api/models')
 
 export interface AvailableSkill {
   name: string
@@ -192,6 +201,28 @@ export const updatePlaybook = (id: string, yaml: string, workspace = '') =>
 export const deletePlaybook = (id: string, workspace = '') =>
   requestJson<{ trashed: string }>(`${pb(id)}${qs({ workspace })}`, {
     method: 'DELETE',
+  })
+
+// The playbook trash of every project; a restore answers 409 with a readable
+// message when a playbook with that id exists again.
+export const fetchTrash = () => getJson<TrashListEntry[]>('/api/trash')
+
+export const restoreFromTrash = (name: string, workspace = '') =>
+  requestJson<RestoredPlaybook>(
+    `/api/trash/${encodeURIComponent(name)}/restore${qs({ workspace })}`,
+    { method: 'POST' },
+  )
+
+// The approvals in the trust store, and their revocation: `target` is a
+// digest (exactly that approval) or an id (every approval under it, narrowed
+// by `kind`). A target that matches nothing answers 404.
+export const fetchTrust = () => getJson<TrustEntry[]>('/api/trust')
+
+export const revokeTrust = (target: string, kind?: TrustKind) =>
+  requestJson<TrustRevoked>('/api/trust/revoke', {
+    method: 'POST',
+    headers: jsonHeaders,
+    body: JSON.stringify({ target, kind }),
   })
 
 export const setFrozen = (id: string, frozen: boolean, workspace = '') =>

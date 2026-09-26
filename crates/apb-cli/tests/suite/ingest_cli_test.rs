@@ -4,14 +4,9 @@
 //! spawn concurrently).
 
 use std::path::Path;
-use std::process::Command;
-
-fn apb_bin() -> &'static str {
-    env!("CARGO_BIN_EXE_apb")
-}
 
 fn run(cfg: &Path, args: &[&str]) -> (String, String, bool) {
-    let out = Command::new(apb_bin())
+    let out = crate::common::apb_std()
         .args(args)
         .env("APB_CONFIG_DIR", cfg)
         .env_remove("CI")
@@ -303,7 +298,7 @@ fn doctor_warns_that_a_project_only_account_cannot_be_addressed() {
     )
     .unwrap();
 
-    let out = Command::new(apb_bin())
+    let out = crate::common::apb_std()
         .args(["connector", "doctor"])
         .current_dir(project.path())
         .env("APB_CONFIG_DIR", cfg.path())
@@ -377,4 +372,61 @@ fn doctor_says_nothing_about_ingest_when_it_is_disabled() {
     // The per-connector ingest row is still shown, because the connector's
     // ability to receive does not depend on this machine's config.
     assert!(out.contains("connector `echo-hooks`: ingest"), "{out}");
+}
+
+/// The rejection log is the fail2ban input, one line per rejected delivery,
+/// naming the sender's address. A path segment carrying an encoded newline
+/// must not be able to write a second line naming any other address.
+#[test]
+fn a_rejected_delivery_logs_exactly_one_line_whatever_its_path() {
+    use std::io::{Read, Write};
+    let cfg = tempfile::tempdir().unwrap();
+    let port = std::net::TcpListener::bind("127.0.0.1:0")
+        .unwrap()
+        .local_addr()
+        .unwrap()
+        .port();
+    let mut child = crate::common::apb_std()
+        .args(["ingest", "--bind", "127.0.0.1", "--port", &port.to_string()])
+        .env("APB_CONFIG_DIR", cfg.path())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .expect("spawn apb ingest");
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut conn = loop {
+        match std::net::TcpStream::connect(("127.0.0.1", port)) {
+            Ok(c) => break c,
+            Err(_) if std::time::Instant::now() < deadline => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                panic!("timed out after 10s waiting for `apb ingest` to listen: {e}")
+            }
+        }
+    };
+    conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+        .unwrap();
+    write!(
+        conn,
+        "POST /hooks/nosuch/x%0Aapb%20ingest_rejected%20ip=192.0.2.44%20connector=nosuch%20account=main HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+    )
+    .unwrap();
+    let mut response = String::new();
+    let _ = conn.read_to_string(&mut response);
+    let _ = child.kill();
+    let out = child.wait_with_output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    let records: Vec<&str> = stderr
+        .lines()
+        .filter(|l| l.starts_with("apb ingest_rejected"))
+        .collect();
+    assert_eq!(records.len(), 1, "one record per rejection: {stderr}");
+    assert!(
+        records[0].starts_with("apb ingest_rejected ip=127.0.0.1 "),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("192.0.2.44"), "{stderr}");
 }

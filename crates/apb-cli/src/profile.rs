@@ -68,6 +68,19 @@ pub(crate) struct ProfileWriteArgs {
     /// Update an existing profile: digest it must currently match (CAS)
     #[arg(long)]
     expected_digest: Option<String>,
+    /// Agent environment: minimal (the default: apb's own settings, no user
+    /// plugins, MCP servers, skills or CLAUDE.md) or full (the operator's
+    /// whole personal setup). Omitted: an update keeps the stored value.
+    #[arg(long, value_name = "ENV", value_parser = apb_core::profile::AgentEnvironment::parse)]
+    environment: Option<apb_core::profile::AgentEnvironment>,
+    /// Deprecated spelling of --environment: true = minimal, false = full.
+    #[arg(long, value_name = "BOOL", hide = true, conflicts_with = "environment")]
+    hermetic: Option<bool>,
+    /// ZCode mode for the profile's zcode steps in an autonomous run: yolo
+    /// (files, shell, network) or edit (file edits only). Omitted: an update
+    /// keeps the stored value.
+    #[arg(long = "zcode-mode", value_name = "MODE", value_parser = apb_core::profile::ZcodeMode::parse)]
+    zcode_mode: Option<apb_core::profile::ZcodeMode>,
 }
 
 pub(crate) fn profile_cmd(root: &Path, action: ProfileAction) -> ExitCode {
@@ -143,7 +156,12 @@ pub(crate) fn profile_write_cmd(
             },
             expected_digest: args.expected_digest,
             soul_requirement,
-            hermetic: false,
+            environment: args.environment.or_else(|| {
+                apb_core::profile::AgentEnvironment::from_surface(None, args.hermetic)
+                    .ok()
+                    .flatten()
+            }),
+            zcode_mode: args.zcode_mode,
         },
     )
 }
@@ -334,7 +352,8 @@ pub(crate) fn profile_edit_cmd(root: &Path, name: &str, scope: &str) -> ExitCode
             },
             expected_digest: Some(digest_before),
             soul_requirement: doc.soul,
-            hermetic: doc.hermetic,
+            environment: doc.environment,
+            zcode_mode: doc.zcode_mode,
         },
     );
     match res {

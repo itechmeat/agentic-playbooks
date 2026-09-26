@@ -281,10 +281,41 @@ edges:
   - { from: wait, to: done }
 "#;
 
+/// A run parked on webhook-wait, driven on a background thread. Dropping it
+/// stops the run and joins the thread BEFORE the temp dir goes: a drive still
+/// parked on the wait would otherwise outlive the test and write the run's
+/// files back into the shared temp dir after the directory was removed.
+struct WebhookRun {
+    dir: tempfile::TempDir,
+    run_id: String,
+    secret: String,
+    drive: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Drop for WebhookRun {
+    fn drop(&mut self) {
+        let _ = apb_engine::stop_run(self.dir.path(), &self.run_id);
+        let Some(drive) = self.drive.take() else {
+            return;
+        };
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        while !drive.is_finished() {
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "timed out after 30s waiting for the webhook run `{}` to stop",
+                    self.run_id
+                );
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let _ = drive.join();
+    }
+}
+
 // A run parked on webhook-wait: prepare generates hooks.json, drive waits
 // for the signal in the background (we don't send it - a running run is
 // enough for the endpoint test).
-fn seed_webhook_run() -> (tempfile::TempDir, String, String) {
+fn seed_webhook_run() -> WebhookRun {
     let dir = tempfile::tempdir().unwrap();
     apb_core::registry::init_project(dir.path()).unwrap();
     let vdir = dir.path().join(".apb/playbooks/hooky/1.0.0");
@@ -292,7 +323,7 @@ fn seed_webhook_run() -> (tempfile::TempDir, String, String) {
     fs::write(vdir.join("playbook.yaml"), WEBHOOK_WF).unwrap();
     fs::write(dir.path().join(".apb/playbooks/hooky/current"), "1.0.0").unwrap();
     let root = dir.path().to_path_buf();
-    std::thread::spawn(move || {
+    let drive = std::thread::spawn(move || {
         let _ = apb_engine::run(&root, "hooky", None, apb_engine::RunOptions::default());
     });
     // Wait for the run and its hooks.json to appear. Bounded: the run is
@@ -329,12 +360,18 @@ fn seed_webhook_run() -> (tempfile::TempDir, String, String) {
     )
     .unwrap();
     let secret = hooks.get("ci").unwrap().clone();
-    (dir, run_id, secret)
+    WebhookRun {
+        dir,
+        run_id,
+        secret,
+        drive: Some(drive),
+    }
 }
 
 #[tokio::test]
 async fn post_hook_with_valid_secret_signals() {
-    let (dir, run_id, secret) = seed_webhook_run();
+    let run = seed_webhook_run();
+    let (dir, run_id, secret) = (&run.dir, run.run_id.clone(), run.secret.clone());
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let (status, json) = post_json(
         app,
@@ -356,7 +393,8 @@ async fn post_hook_with_valid_secret_signals() {
 
 #[tokio::test]
 async fn post_hook_with_wrong_secret_404() {
-    let (dir, run_id, _secret) = seed_webhook_run();
+    let run = seed_webhook_run();
+    let (dir, run_id) = (&run.dir, run.run_id.clone());
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let (status, _) = post_json(
         app,
@@ -369,7 +407,8 @@ async fn post_hook_with_wrong_secret_404() {
 
 #[tokio::test]
 async fn run_detail_exposes_hooks() {
-    let (dir, run_id, _secret) = seed_webhook_run();
+    let run = seed_webhook_run();
+    let (dir, run_id) = (&run.dir, run.run_id.clone());
     let app = build_router(AppState::new(dir.path().to_path_buf()));
     let (status, json) = get_json(app, &format!("/api/runs/{run_id}")).await;
     assert_eq!(status, StatusCode::OK);
@@ -545,8 +584,10 @@ async fn unknown_run_404() {
 async fn run_id_path_traversal_is_rejected() {
     let dir = seed_with_run();
 
-    // A target file outside the project directory that must not be accessible.
-    let secret_dir = dir.path().parent().unwrap().join("etc");
+    // A target outside the runs directory, where `.apb/runs/../../etc`
+    // resolves: the project root's `etc`, inside this test's own temp dir
+    // (planting it next to the temp dir leaked it into the shared temp).
+    let secret_dir = dir.path().join("etc");
     fs::create_dir_all(&secret_dir).unwrap();
     fs::write(secret_dir.join("playbook.yaml"), "schema: 1\nid: leaked\n").unwrap();
 
@@ -1066,5 +1107,70 @@ async fn run_detail_tolerates_a_torn_trailing_event_line() {
         json["events"].as_array().unwrap().len(),
         complete.lines().count(),
         "every complete line is still reported"
+    );
+}
+
+/// The detail's `children` used to fold each child's journal on its own, with
+/// no liveness at all, while the parent's own status beside it (and MCP
+/// `run_status`'s children) went through the live overlay. A healthy child
+/// whose agent is working has an open attempt, which the bare fold calls
+/// `interrupted`, so the dashboard showed a working child as interrupted.
+#[tokio::test]
+async fn run_detail_reports_a_working_child_run_as_running() {
+    let dir = seed_with_run();
+    let runs = dir.path().join(".apb/runs");
+    // Our own pid stands in for both the parent's driver and the child's
+    // agent: alive by definition and never a reused number.
+    seed_open_attempt_run(dir.path(), "child-1", std::process::id());
+    fs::remove_file(runs.join("child-1/driver.pid")).unwrap();
+    fs::write(runs.join("child-1/driven_by"), "parent-1").unwrap();
+    fs::create_dir_all(runs.join("parent-1")).unwrap();
+    let mut log = apb_engine::event::EventLog::open(&runs.join("parent-1")).unwrap();
+    log.append(apb_engine::event::EventPayload::RunStarted {
+        playbook: "noagent".into(),
+        version: "1.0.0".into(),
+    })
+    .unwrap();
+    log.append(apb_engine::event::EventPayload::ChildRunStarted {
+        node_id: "sub".into(),
+        run_id: "child-1".into(),
+    })
+    .unwrap();
+    fs::write(
+        runs.join("parent-1/driver.pid"),
+        std::process::id().to_string(),
+    )
+    .unwrap();
+
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app, "/api/runs/parent-1").await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(json["children"][0]["run_id"], "child-1", "detail: {json}");
+    assert_eq!(json["children"][0]["status"], "running", "detail: {json}");
+}
+
+/// The dashboard's Run button goes through the same run gate as MCP
+/// `playbook_run`: a draft playbook is refused with the gate's structural
+/// refusal (409 `draft_requires_trial`) and no run is written. It used to
+/// start, because the handler only checked connector trust.
+#[tokio::test]
+async fn post_playbook_run_refuses_a_draft_playbook() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path());
+    apb_core::trust::write_lifecycle(
+        &dir.path().join(".apb/playbooks/scripted"),
+        apb_core::trust::Lifecycle::Draft,
+    )
+    .unwrap();
+    let res = post_script_run(AppState::new(dir.path().to_path_buf())).await;
+    assert_eq!(res.status(), StatusCode::CONFLICT);
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["policy"], "draft_requires_trial", "got {body}");
+    let runs = dir.path().join(".apb/runs");
+    assert!(
+        !runs.exists() || fs::read_dir(&runs).unwrap().count() == 0,
+        "a refused start writes no run"
     );
 }

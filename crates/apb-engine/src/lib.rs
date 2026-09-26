@@ -7,6 +7,7 @@ pub mod driver;
 pub mod error;
 pub mod event;
 pub mod failure_class;
+pub mod gate;
 pub mod hooks;
 pub mod inspect;
 pub mod invocation;
@@ -21,6 +22,8 @@ pub mod review;
 pub mod run_config;
 pub mod run_doctor;
 mod run_lineage;
+pub mod run_view;
+pub mod run_wait;
 pub mod scheduler;
 pub mod script;
 pub mod signals;
@@ -32,9 +35,10 @@ pub mod workdir;
 pub use error::EngineError;
 pub use hooks::{generate_hooks, hook_path, read_hooks};
 pub use inspect::{
-    PersistedSession, WakeEvent, find_session_by_token, heartbeat_age_ms, read_supervisor_report,
-    run_inspect, should_declare_lost, supervisor_report_or_summary, supervisor_silence_ms,
-    touch_heartbeat, wait_wake, write_supervisor_report, write_supervisor_session,
+    PersistedSession, WakeEvent, find_session_by_token, heartbeat_age_ms, mint_supervisor_token,
+    read_supervisor_report, run_inspect, should_declare_lost, supervisor_report_or_summary,
+    supervisor_silence_ms, supervisor_token_fingerprint, touch_heartbeat, wait_wake,
+    write_supervisor_report, write_supervisor_session,
 };
 pub use liveness::{
     NodeTimes, driver_alive, lost_nodes, node_times, reported_node_statuses, reported_run_status,

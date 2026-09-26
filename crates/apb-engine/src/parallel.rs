@@ -10,21 +10,7 @@ use apb_core::schema::{Edge, EdgeCondition, Playbook, StatusEq, output_field_val
 
 use crate::state::{NodeStatus, RunState};
 
-/// Join mode (the `join` field on incoming edges). Default is `All`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum JoinMode {
-    All,
-    Any,
-}
-
-impl JoinMode {
-    fn parse(s: &str) -> JoinMode {
-        match s {
-            "any" => JoinMode::Any,
-            _ => JoinMode::All,
-        }
-    }
-}
+pub use apb_core::schema::JoinMode;
 
 /// Readiness of a join node to execute, based on incoming branch statuses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -35,17 +21,6 @@ pub enum JoinReadiness {
     ReadySuccess,
     /// Ready, but one or more branches failed - the join is considered failed (spec 8.4).
     ReadyFailure,
-}
-
-fn is_terminal(s: NodeStatus) -> bool {
-    matches!(
-        s,
-        NodeStatus::Succeeded
-            | NodeStatus::Failed
-            | NodeStatus::TimedOut
-            | NodeStatus::Skipped
-            | NodeStatus::Cancelled
-    )
 }
 
 fn succeeded(s: NodeStatus) -> bool {
@@ -108,6 +83,100 @@ fn edge_available(edge: &Edge, state: &RunState) -> bool {
         }
         None => true,
     }
+}
+
+/// Whether `cond` reads the result of `node` (its status or its output).
+fn condition_reads(cond: &EdgeCondition, node: &str) -> bool {
+    match cond {
+        EdgeCondition::NodeStatus { node: n, .. }
+        | EdgeCondition::OutputMatch { node: n, .. }
+        | EdgeCondition::OutputField { node: n, .. } => n == node,
+        EdgeCondition::ReviewStatus { .. } => false,
+    }
+}
+
+/// The first node whose failure no route handled (issue #106), in journal
+/// order, or `None`.
+///
+/// An unconditional edge carries the run on whatever its source's status, so
+/// it does not handle a failure: it only moves past it. A node's LATEST
+/// finish counts (a retry or a loop that later succeeds leaves nothing
+/// behind), and a failure (`failed` or `timed_out`) is handled when, after
+/// it, the run took any hop that deliberately looked at it:
+///
+/// - a conditional or `fallback` edge out of the failed node, or the
+///   `defaults.on_failure` policy route;
+/// - an unconditional edge into an explicit `join`, whose verdict weighs the
+///   delivered failure;
+/// - any conditional edge whose condition reads the failed node (the
+///   `build -> check`, `check -> fix on build == failure` shape).
+///
+/// A failure that left the node only along unconditional edges and was never
+/// looked at again is unhandled, and a run must not report success over it.
+/// A failed node the run never left (a stop, a dead end) is not this
+/// function's business.
+pub fn unhandled_failure(playbook: &Playbook, events: &[crate::event::Event]) -> Option<String> {
+    use crate::event::EventPayload;
+    let mut last_failure: std::collections::BTreeMap<&str, usize> = Default::default();
+    let mut order: Vec<&str> = Vec::new();
+    for (i, e) in events.iter().enumerate() {
+        if let EventPayload::NodeFinished { node, status, .. } = &e.payload {
+            if matches!(
+                NodeStatus::from_label(status),
+                NodeStatus::Failed | NodeStatus::TimedOut
+            ) {
+                if !order.contains(&node.as_str()) {
+                    order.push(node);
+                }
+                last_failure.insert(node, i);
+            } else {
+                last_failure.remove(node.as_str());
+            }
+        }
+    }
+    order
+        .into_iter()
+        .find(|node| {
+            let Some(&at) = last_failure.get(node) else {
+                return false;
+            };
+            let mut left = false;
+            for e in &events[at + 1..] {
+                let EventPayload::EdgeTraversed {
+                    from,
+                    to,
+                    via_policy,
+                    ..
+                } = &e.payload
+                else {
+                    continue;
+                };
+                let edges: Vec<&Edge> = playbook
+                    .edges
+                    .iter()
+                    .filter(|x| &x.from == from && &x.to == to)
+                    .collect();
+                if from == node {
+                    left = true;
+                    let into_join = matches!(join_kind(playbook, to), Some(JoinKind::Explicit(_)));
+                    if *via_policy
+                        || into_join
+                        || edges.iter().any(|x| x.condition.is_some() || x.fallback)
+                    {
+                        return false;
+                    }
+                }
+                if edges.iter().any(|x| {
+                    x.condition
+                        .as_ref()
+                        .is_some_and(|c| condition_reads(c, node))
+                }) {
+                    return false;
+                }
+            }
+            left
+        })
+        .map(str::to_string)
 }
 
 /// The outgoing edges of `from` actually SELECTED for traversal, mirroring
@@ -217,7 +286,7 @@ pub fn join_mode(playbook: &Playbook, node: &str) -> JoinMode {
     incoming(playbook, node)
         .iter()
         .find_map(|e| e.join.as_deref())
-        .map(JoinMode::parse)
+        .map(|s| JoinMode::parse(s).unwrap_or(JoinMode::All))
         .unwrap_or(JoinMode::All)
 }
 
@@ -260,7 +329,7 @@ fn live_nodes(playbook: &Playbook, state: &RunState, active: &[String]) -> BTree
         }
     }
     while let Some(id) = queue.pop_front() {
-        let next: BTreeSet<String> = match is_terminal(status_of(state, &id)) {
+        let next: BTreeSet<String> = match status_of(state, &id).is_finished() {
             true => routed_targets(playbook, &id, state),
             false => playbook
                 .edges
@@ -344,11 +413,11 @@ fn routed_targets(playbook: &Playbook, node: &str, state: &RunState) -> BTreeSet
 pub fn pending_heads(playbook: &Playbook, state: &RunState) -> Vec<String> {
     let mut heads: BTreeSet<String> = BTreeSet::new();
     for (node, status) in &state.nodes {
-        if !is_terminal(*status) {
+        if !status.is_finished() {
             continue;
         }
         for s in routed_targets(playbook, node, state) {
-            if !is_terminal(status_of(state, &s)) {
+            if !status_of(state, &s).is_finished() {
                 heads.insert(s);
             }
         }
@@ -366,7 +435,7 @@ fn arrival(
     live: &BTreeSet<String>,
 ) -> Arrival {
     let status = status_of(state, source);
-    if !is_terminal(status) {
+    if !status.is_finished() {
         // Still to run, or dead: nothing that can still execute leads here.
         return match live.contains(source) {
             true => Arrival::Pending,

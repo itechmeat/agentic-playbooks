@@ -34,7 +34,11 @@ user a question, apb uses one of three transports, best available first:
 2. **resume**: the agent prints a question marker and exits; apb re-invokes
    it with the answer once a human replies. Requires headless session resume
    with full state, and the session id must be obtainable from a headless
-   run's output.
+   run's output. The answer round's prompt is only the answer plus one line
+   pointing back at the session's own instructions: the node's standing
+   contracts (skills, connector grants, the question protocol, the status
+   file and the report block) already live in the resumed session and are
+   not sent again.
 3. **reprompt**: the floor. Fresh invocation carrying the full Q&A
    transcript in the prompt. Works with any agent, loses in-flight state.
 
@@ -54,6 +58,15 @@ runs after the engine's runtime downgrade:
 | OpenCode | no flag; `opencode.json` only, with an open project-scope detection bug | effectively hard-capped around 30-120 s regardless of config (open issues) | `--session <id>` / `--continue`; two distinct problems, not one: (1) a completed one-shot `opencode run` surfaces no session id in its output for apb to capture (the "Session not found" bug this row already tracked); (2) separately, an invocation killed before its first assistant message never persists a session at all, so even a caller with a correctly captured id has nothing to resume, because the session simply does not exist yet. Case (2) is strictly harder than case (1): fixing the id-surfacing bug upstream would not fix it. | declared `resume`, runs as **reprompt** (needs verification): same no-session-id downgrade as codex |
 | Hermes Agent | not documented; `config.yaml` / `hermes mcp add` only | not documented | `--resume` / `--continue` documented; combination with `-z` one-shot unverified | declared `resume`, runs as **reprompt** (needs verification): same no-session-id downgrade as codex |
 | Antigravity CLI | no; persistent config files only | not documented | no: `-p` never surfaces a conversation id (open upstream issue #7) | **reprompt** (shipped, unchanged) |
+| ZCode (Z.ai, `zcode-agent` 0.16.9) | no flag; `~/.zcode/cli/config.json` `mcp.servers` only | per-server `timeoutMs` | yes, `--resume sess_...` with `-p`; `--json` surfaces `sessionId`, which apb captures | **resume** (verified 2026-09-25 end to end on GLM-5.3-Flash: the answer round re-entered the captured session, no downgrade) |
+
+Since issue #136 apb knows more sessions than the matrix above says an agent
+prints: it assigns every fresh claude attempt its session id at launch
+(`--session-id`), reads the `session id:` line of codex's stderr header, and
+titles every opencode session (`--title`) so it can find it with `opencode
+session list --format json`. So a claude answer round under a `resume` ceiling
+resumes instead of downgrading, and the same sessions let a retry continue the
+failed attempt (HOWTO-authoring.md, "Retries continue the session").
 
 Every downgrade (`live` -> `resume`, `resume` -> `reprompt`) is journaled as
 `SupervisorAction { action: "interaction_downgraded", node, detail }`, so a

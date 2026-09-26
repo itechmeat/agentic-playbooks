@@ -214,11 +214,22 @@ pub(crate) fn build_reprompt_override(
     run_id: &str,
     state: &RunState,
     cfg: &RunConfig,
-    node_prompt: &str,
+    playbook: &Playbook,
     events: &[Event],
     node: &str,
 ) -> Result<String, EngineError> {
-    let base = render_node_prompt(run_dir, run_id, state, cfg, node_prompt)?;
+    let node_prompt = match playbook.node(node).map(|n| &n.kind) {
+        Some(NodeKind::AgentTask { prompt, .. }) => prompt.as_str(),
+        _ => "",
+    };
+    let base = render_node_prompt(
+        run_dir,
+        run_id,
+        state,
+        cfg,
+        node_prompt,
+        &playbook.context_budget(node),
+    )?;
     let visit_start = current_visit_start_seq(events, node);
     let prior_q = questions_asked_before_seq(events, node, visit_start);
     let prior_a = questions_answered_before_seq(events, node, visit_start);
@@ -470,11 +481,11 @@ pub(crate) fn resume_inner(
     } else {
         None
     };
-    // 4a: resume is always autonomous; supervised resume - subject of phase 4b.
-    // supervisor_expected is taken from persistent run cfg (not recreated) -
-    // if the original run awaited external supervision, heartbeat-monitoring continues
-    // to work even after resume.
-    let supervisor_expected = cfg.supervisor_expected;
+    // The persisted mode, as a resume drives it (`RunMode::on_resume`): an
+    // agent-supervised run keeps its supervisor agent (heartbeat monitoring
+    // and parking both continue), a session-supervised one resumes
+    // autonomous, since the session that supervised it is gone.
+    let mode = cfg.mode.on_resume();
     drive(
         playbook,
         &run_dir,
@@ -484,8 +495,7 @@ pub(crate) fn resume_inner(
         decision.start_node,
         decision.mode,
         run_id.to_string(),
-        RunMode::Autonomous,
-        supervisor_expected,
+        mode,
     )
 }
 

@@ -5,6 +5,7 @@
     fetchConnector,
     fetchConnectorStats,
     installConnector,
+    revokeTrust,
     runConnectorHealthcheck,
     uninstallConnector,
     type HealthcheckResult,
@@ -35,7 +36,7 @@
   } from '../lib/connectorstats'
   import { fetchConnectorInbox, fetchConnectorInboxEvents } from '../lib/api'
   import type { ConnectorInbox, InboxEventRow } from '../lib/connectorinbox'
-  import { renderMarkdown } from '../lib/markdown'
+  import { renderMarkdown, safeExternalUrl } from '../lib/markdown'
   import { subscribeChanges } from '../lib/ws'
   import Topbar from '$lib/components/Topbar.svelte'
   import PageScroll from '$lib/components/PageScroll.svelte'
@@ -51,6 +52,7 @@
   import { toast } from 'svelte-sonner'
   import * as Alert from '$lib/components/ui/alert'
   import ShieldCheck from '@lucide/svelte/icons/shield-check'
+  import ShieldOff from '@lucide/svelte/icons/shield-off'
   import Plug from '@lucide/svelte/icons/plug'
   import Unplug from '@lucide/svelte/icons/unplug'
   import Replace from '@lucide/svelte/icons/replace'
@@ -281,6 +283,26 @@
     }
   }
 
+  // Revoking goes through the one trust path (`POST /api/trust/revoke`): every
+  // approval of this connector, or of `connector/account`, so it reads
+  // unapproved until approved again.
+  async function revoke(account: string | null) {
+    approving = account ?? ''
+    try {
+      if (account) {
+        await revokeTrust(`${name}/${account}`, 'connector_account')
+      } else {
+        await revokeTrust(name, 'connector')
+      }
+      toast.success(account ? `Revoked account "${account}"` : 'Revoked connector approval')
+      await load(loadToken)
+    } catch (e) {
+      toast.error('Revoke failed', { description: String(e) })
+    } finally {
+      approving = null
+    }
+  }
+
   async function probe(account: ConnectorAccount) {
     probing = account.name
     try {
@@ -300,6 +322,9 @@
   const outcomeTone = (r: HealthcheckResult) => (r.ok ? 'ok' : 'danger') as keyof typeof badgeClass
 
   const fieldEntries = (a: ConnectorAccount) => Object.entries(a.fields)
+  // Connector metadata is untrusted (a folder can be installed from disk):
+  // the homepage becomes a link only as an absolute http(s) URL.
+  const homepage = $derived(safeExternalUrl(detail?.meta.homepage))
 
   // The breadcrumb shows the same label as the card below it, falling back to
   // the slug while the detail is still loading or the name is unknown.
@@ -336,6 +361,17 @@
       <Button size="sm" class="max-sm:px-2" onclick={() => approve(null)} disabled={approving !== null}>
         {#if approving === ''}<Spinner data-icon="inline-start" />{:else}<ShieldCheck data-icon="inline-start" />{/if}
         <span class="max-sm:sr-only">Approve connector</span>
+      </Button>
+    {:else if installed && detail && detail.trust === 'approved'}
+      <Button
+        size="sm"
+        variant="outline"
+        class="max-sm:px-2"
+        onclick={() => revoke(null)}
+        disabled={approving !== null}
+      >
+        {#if approving === ''}<Spinner data-icon="inline-start" />{:else}<ShieldOff data-icon="inline-start" />{/if}
+        <span class="max-sm:sr-only">Revoke approval</span>
       </Button>
     {/if}
   {/snippet}
@@ -386,9 +422,9 @@
             {#if detail.meta.publisher}
               <span>by {detail.meta.publisher}</span>
             {/if}
-            {#if detail.meta.homepage}
+            {#if homepage}
               <a
-                href={detail.meta.homepage}
+                href={homepage}
                 target="_blank"
                 rel="noreferrer"
                 class="inline-flex items-center gap-1 text-primary hover:underline"
@@ -407,6 +443,29 @@
               Connecting installs the connector files locally. Any account configuration you had
               before is kept in a separate store and is picked up again automatically.
             </p>
+          {/if}
+          {#if installed && detail.updateAvailable && !forceOffered}
+            <Alert.Root>
+              <Replace />
+              <Alert.Title>The built-in version differs</Alert.Title>
+              <Alert.Description>
+                <p>
+                  The installed files differ from the v{detail.updateAvailable} built into this apb,
+                  usually because they were edited locally (an untouched copy is updated when the
+                  dashboard starts). Updating overwrites the installed files with the built-in copy,
+                  which is trusted as shipped. Account configuration is not affected.
+                </p>
+                <Button
+                  size="sm"
+                  variant="outline"
+                  onclick={() => connect(true)}
+                  disabled={busy !== null}
+                >
+                  {#if busy === 'connect'}<Spinner data-icon="inline-start" />{:else}<Replace data-icon="inline-start" />{/if}
+                  Update to the built-in version
+                </Button>
+              </Alert.Description>
+            </Alert.Root>
           {/if}
           {#if forceOffered}
             <Alert.Root variant="destructive">
@@ -535,6 +594,18 @@
                             {/each}
                           </ul>
                         {/if}
+                        {#if Object.keys(a.cmd).length > 0}
+                          <!-- A secret read from a command: approving this
+                               account lets apb run the command, so it is shown
+                               right where the Approve button is. -->
+                          <ul class="mt-1 flex flex-col gap-0.5 text-xs">
+                            {#each Object.entries(a.cmd) as [k, c] (k)}
+                              <li class="text-warning">
+                                {k} runs <code class="font-mono">{c}</code>
+                              </li>
+                            {/each}
+                          </ul>
+                        {/if}
                       </Table.Cell>
                       <Table.Cell class="align-top whitespace-normal">
                         {#if a.missingEnv.length === 0}
@@ -576,6 +647,17 @@
                                 >
                                   {#if approving === a.name}<Spinner data-icon="inline-start" />{:else}<ShieldCheck data-icon="inline-start" />{/if}
                                   <span class="max-sm:sr-only">Approve</span>
+                                </Button>
+                              {:else}
+                                <Button
+                                  size="sm"
+                                  variant="outline"
+                                  class="max-sm:px-2"
+                                  onclick={() => revoke(a.name)}
+                                  disabled={approving !== null}
+                                >
+                                  {#if approving === a.name}<Spinner data-icon="inline-start" />{:else}<ShieldOff data-icon="inline-start" />{/if}
+                                  <span class="max-sm:sr-only">Revoke</span>
                                 </Button>
                               {/if}
                               <span

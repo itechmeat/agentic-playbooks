@@ -1,3 +1,4 @@
+use apb_core::detect::canonical_agent_id;
 use std::io::{BufRead, BufReader, Write as _};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
@@ -164,33 +165,76 @@ fn wait_bounded(child: &mut Child, budget: Duration) -> Option<std::io::Result<E
     }
 }
 
-/// `child.wait_with_output()` with a deadline, so a grandchild holding the
-/// pipes open cannot stall the drive. The collecting thread is abandoned on a
-/// timeout rather than joined: it owns nothing the caller needs, and joining
-/// it is the very wait being bounded.
-fn wait_with_output_bounded(
-    child: Child,
-    budget: Duration,
-    program: &str,
-) -> Result<std::process::Output, (ErrorClass, String)> {
-    let (tx, rx) = mpsc::channel();
-    std::thread::spawn(move || {
-        let _ = tx.send(child.wait_with_output());
-    });
-    match rx.recv_timeout(budget) {
-        Ok(Ok(output)) => Ok(output),
-        Ok(Err(e)) => Err((
-            ErrorClass::ProcessExit,
-            format!("collect `{program}` output failed: {e}"),
-        )),
-        Err(_) => Err((
-            ErrorClass::Timeout,
-            format!(
-                "`{program}` exited but its stdout/stderr were still held open {budget:?} later, \
-                 so its output could not be collected: a descendant that outlived it inherited \
-                 the pipes"
-            ),
-        )),
+/// A spawned agent's stdout and stderr, read to EOF on their own threads from
+/// the moment it is spawned. Reading only after the process exits deadlocked
+/// any agent that wrote more than a pipe buffer (64 KiB on Linux) to either
+/// stream: the write blocked, so the process never exited and the attempt ran
+/// into its deadline (or forever without one).
+struct PipeCollector {
+    stdout: mpsc::Receiver<Vec<u8>>,
+    stderr: mpsc::Receiver<Vec<u8>>,
+}
+
+impl PipeCollector {
+    /// Takes the child's piped stdout and stderr and starts draining them.
+    fn start(child: &mut Child) -> Self {
+        fn drain(pipe: Option<impl std::io::Read + Send + 'static>) -> mpsc::Receiver<Vec<u8>> {
+            let (tx, rx) = mpsc::channel();
+            std::thread::spawn(move || {
+                let mut buf = Vec::new();
+                if let Some(mut p) = pipe {
+                    let _ = p.read_to_end(&mut buf);
+                }
+                let _ = tx.send(buf);
+            });
+            rx
+        }
+        PipeCollector {
+            stdout: drain(child.stdout.take()),
+            stderr: drain(child.stderr.take()),
+        }
+    }
+
+    /// The collected streams once both reached EOF, within `budget`, so a
+    /// grandchild holding the pipes open cannot stall the drive. The reading
+    /// threads are abandoned on a timeout rather than joined: they own nothing
+    /// the caller needs.
+    fn finish(
+        self,
+        mut child: Child,
+        budget: Duration,
+        program: &str,
+    ) -> Result<std::process::Output, (ErrorClass, String)> {
+        let deadline = Instant::now() + budget;
+        let held_open = || {
+            (
+                ErrorClass::Timeout,
+                format!(
+                    "`{program}` exited but its stdout/stderr were still held open {budget:?} later, \
+                     so its output could not be collected: a descendant that outlived it inherited \
+                     the pipes"
+                ),
+            )
+        };
+        let stdout = self
+            .stdout
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| held_open())?;
+        let stderr = self
+            .stderr
+            .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+            .map_err(|_| held_open())?;
+        let status = child.wait().map_err(|e| {
+            (
+                ErrorClass::ProcessExit,
+                format!("collect `{program}` output failed: {e}"),
+            )
+        })?;
+        Ok(std::process::Output {
+            status,
+            stdout,
+            stderr,
+        })
     }
 }
 
@@ -266,6 +310,46 @@ fn apply_agent_home(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorCla
     }
 }
 
+/// Sets the environment a spawned zcode needs (see
+/// `apb_core::zcode::spawn_env`): the built-in provider config location, and a
+/// run-scoped personal provider config carrying the attempt's model selection
+/// as ZCode's default selection. zcode has no `--model` flag, so this IS
+/// its model passing. The scoped copy lives in the run's agent home
+/// (`agent-home/zcode/<node>`) when the attempt belongs to a run. A no-op for
+/// every other agent.
+fn apply_zcode_env(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorClass, String)> {
+    if task.agent != apb_core::zcode::AGENT_ID {
+        return Ok(());
+    }
+    let scoped = task
+        .connector_policy
+        .run_dir
+        .as_deref()
+        .map(|d| d.join("agent-home").join("zcode").join(task.node));
+    let env = apb_core::zcode::spawn_env(task.model, scoped.as_deref()).map_err(|e| {
+        (
+            ErrorClass::ProcessExit,
+            format!("prepare zcode provider config failed: {e}"),
+        )
+    })?;
+    for (name, value) in env {
+        cmd.env(name, value);
+    }
+    Ok(())
+}
+
+/// The reply text of an attempt's stdout. zcode's `--json` wraps the reply in
+/// a JSON object (`response`); every other agent prints the reply itself.
+/// Falls back to the raw stdout when the expected shape is absent.
+fn reply_text(agent: &str, stdout: &str) -> String {
+    if agent == apb_core::zcode::AGENT_ID
+        && let Some(r) = apb_core::zcode::response_text(stdout)
+    {
+        return r.trim().to_string();
+    }
+    stdout.to_string()
+}
+
 pub struct AgentTask<'a> {
     pub prompt: &'a str,
     pub model: &'a str,
@@ -329,23 +413,33 @@ pub struct AgentTask<'a> {
     /// (compaction, finish answers) that have no status file. Owned rather than
     /// borrowed because it is computed fresh per attempt in the retry loop.
     pub status_file: Option<std::path::PathBuf>,
-    /// Hermetic isolation (subtask S1). When the bound profile sets
-    /// `hermetic: true` AND the executor supports settings isolation
-    /// (claude/claude-code, see [`agent_supports_hermetic`]), the engine writes
-    /// an apb-owned minimal settings file (user plugins and hooks disabled) and
-    /// puts its path here; [`inject_hermetic_settings`] then adds claude's
-    /// `--settings <path>` flag. `None` for a non-hermetic profile, for an agent
-    /// without an isolation mechanism (the engine warns instead), and for
-    /// internal side-effect-free calls (compaction, finish answers).
-    pub hermetic_settings: Option<std::path::PathBuf>,
+    /// The minimal agent environment (issue #136 item 4, the profile's default
+    /// `environment: minimal`). Set for a claude/claude-code step (see
+    /// [`agent_supports_hermetic`]); [`inject_hermetic_settings`] turns it
+    /// into claude's flags. `None` for `environment: full`, for an agent
+    /// without such a mechanism, and for internal side-effect-free calls
+    /// (compaction, finish answers).
+    pub hermetic_settings: Option<HermeticEnv>,
 }
 
-/// Whether an agent exposes a settings-isolation mechanism apb can drive for a
-/// hermetic profile. Only claude/claude-code do (via the `--settings` flag);
-/// every other adapter has no such mechanism, so the engine ignores the
-/// `hermetic` flag for it with a warning rather than failing the run.
+/// What a claude step launched with the minimal environment gets.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HermeticEnv {
+    /// apb's own settings file ([`HERMETIC_SETTINGS_JSON`]), via `--settings`.
+    pub settings: std::path::PathBuf,
+    /// A directory whose `.claude/skills` holds the profile's declared skills,
+    /// via `--add-dir`: the user setting source that would otherwise provide
+    /// them is not loaded. `None` when the profile declares none, or when an
+    /// isolated node already has them in its own working directory.
+    pub skills_dir: Option<std::path::PathBuf>,
+}
+
+/// Whether an agent exposes a settings-isolation mechanism apb can drive for
+/// the minimal environment. Only claude/claude-code do; every other agent runs
+/// as it is configured (codex already gets a run-scoped home, see
+/// `agent_home`).
 pub(crate) fn agent_supports_hermetic(agent: &str) -> bool {
-    matches!(agent, "claude" | "claude-code")
+    canonical_agent_id(agent) == "claude"
 }
 
 /// The apb-owned minimal claude settings written for a hermetic run. It is the
@@ -356,20 +450,37 @@ pub(crate) fn agent_supports_hermetic(agent: &str) -> bool {
 /// - `enableAllProjectMcpServers: false` - project MCP servers are not
 ///   auto-enabled.
 ///
-/// Kept intentionally small and apb-owned; extend deliberately.
+/// Kept intentionally small and apb-owned; extend deliberately. The user
+/// settings file itself is not loaded at all (see [`inject_hermetic_settings`]).
 pub(crate) const HERMETIC_SETTINGS_JSON: &str =
     "{\n  \"hooks\": {},\n  \"enabledPlugins\": {},\n  \"enableAllProjectMcpServers\": false\n}\n";
 
-/// The run-dir path of the apb-owned hermetic settings file.
-pub(crate) fn hermetic_settings_path(run_dir: &Path) -> std::path::PathBuf {
-    run_dir.join("hermetic-settings.json")
+/// claude's flags for the minimal environment, after `--settings <file>`:
+/// only the project and local setting sources (the user's settings, CLAUDE.md,
+/// skills and agents stay out) and only the MCP servers passed with
+/// `--mcp-config` (apb's own ask-server on a live node). Checked with
+/// `claude -p /context`, which reports the loaded context without a model
+/// call: about 24k tokens of harness context before, 18k with these flags, on
+/// one development setup (2026-09-25).
+pub(crate) const HERMETIC_FLAGS: &[&str] =
+    &["--setting-sources", "project,local", "--strict-mcp-config"];
+
+/// The run-dir path of the apb-owned hermetic settings file for `node`. One
+/// file per node, not per run: parallel branches write theirs at the same
+/// time, and two atomic writes of one path race on its temp file.
+pub(crate) fn hermetic_settings_path(run_dir: &Path, node: &str) -> std::path::PathBuf {
+    run_dir.join("agent-settings").join(format!("{node}.json"))
 }
 
-/// Writes the apb-owned minimal settings file into the run dir (once; the
+/// Writes the apb-owned minimal settings file for `node` into the run dir (the
 /// content is fixed, so a repeat write is idempotent) and returns its path.
 /// Written atomically via `apb_core::fsutil`.
-pub(crate) fn write_hermetic_settings(run_dir: &Path) -> std::io::Result<std::path::PathBuf> {
-    let path = hermetic_settings_path(run_dir);
+pub(crate) fn write_hermetic_settings(
+    run_dir: &Path,
+    node: &str,
+) -> std::io::Result<std::path::PathBuf> {
+    let path = hermetic_settings_path(run_dir, node);
+    apb_core::fsutil::create_dir_under(run_dir, &run_dir.join("agent-settings"))?;
     apb_core::fsutil::atomic_write(&path, HERMETIC_SETTINGS_JSON.as_bytes())?;
     Ok(path)
 }
@@ -646,16 +757,34 @@ pub struct AgentReport {
 /// Transport: resume). No parser is invented for an output shape we do not
 /// produce today: a plain-text line simply never matches.
 pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
-    match agent_id {
-        "claude" | "claude-code" => capture_json_string_field(raw, &["session_id"]),
+    match canonical_agent_id(agent_id) {
+        "claude" => capture_json_string_field(raw, &["session_id"]),
         "codex" => capture_json_string_field(raw, &["session_id", "conversation_id"]),
         "opencode" => capture_json_string_field(raw, &["session_id", "sessionID"]),
         "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
         "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
         "cursor" => capture_json_string_field(raw, &["chatId", "chat_id", "session_id"]),
         "qoder" => capture_json_string_field(raw, &["session_id"]),
+        // zcode's `--json` prints one PRETTY-printed object, so the per-line
+        // scan above cannot see it; the zcode parser reads the whole document
+        // (and the stream-json `result` line as well).
+        "zcode" => apb_core::zcode::session_id(raw),
         _ => None,
     }
+}
+
+/// Captures a session id an agent prints in a human-readable header on stderr
+/// rather than in its output: `codex exec` opens with a block that holds a
+/// `session id: <uuid>` line (checked against the 0.157 binary). `None` for
+/// every other agent and when no such line is present.
+pub fn capture_session_header(agent_id: &str, stderr: &str) -> Option<String> {
+    if canonical_agent_id(agent_id) != "codex" {
+        return None;
+    }
+    stderr.lines().find_map(|line| {
+        let id = line.trim().strip_prefix("session id:")?.trim();
+        (!id.is_empty() && !id.contains(char::is_whitespace)).then(|| id.to_string())
+    })
 }
 
 /// Scans each line of `raw` as a top-level JSON object and returns the LAST
@@ -749,6 +878,19 @@ pub trait AgentAdapter {
     }
 }
 
+/// `MCP_TOOL_TIMEOUT` handed to a spawned supervisor: a little over the
+/// 30-minute server maximum of `supervisor_wait_event`, so the host never cuts
+/// a wait the server is still serving.
+pub const SUPERVISOR_MCP_TOOL_TIMEOUT_MS: u64 = 31 * 60 * 1000;
+
+/// Environment variable naming the role of the agent an `apb mcp` serves. apb
+/// sets it to [`MCP_ROLE_SUPERVISOR`] on the background supervisor agent it
+/// spawns; the agent's MCP servers inherit it, so the `apb mcp` that
+/// supervisor connects to serves only the supervisor and read-only tools.
+pub const MCP_ROLE_ENV: &str = "APB_MCP_ROLE";
+/// The [`MCP_ROLE_ENV`] value of a background supervisor agent.
+pub const MCP_ROLE_SUPERVISOR: &str = "supervisor";
+
 pub struct ClaudeAdapter {
     pub program: String,
     /// Declarative invocation form (argv template, prompt_via, SOUL delivery,
@@ -758,26 +900,65 @@ pub struct ClaudeAdapter {
     pub spec: InvocationDef,
 }
 
+/// An agent command line as the adapter assembles it: the options, the
+/// trailing positional prompt kept apart so flags added later still land in
+/// front of it, and an optional stdin payload.
+struct AgentCommand {
+    /// Everything before the end-of-options marker; callers append their own
+    /// flags here.
+    argv: Vec<String>,
+    /// `--` and the prompt when the form passes the prompt as a trailing
+    /// positional (a `--` element right before `{prompt}`), else empty.
+    tail: Vec<String>,
+    stdin: Option<String>,
+}
+
+impl AgentCommand {
+    /// The complete argv (options, then the prompt tail) and the stdin payload.
+    fn into_parts(self) -> (Vec<String>, Option<String>) {
+        let mut argv = self.argv;
+        argv.extend(self.tail);
+        (argv, self.stdin)
+    }
+}
+
 /// Builds argv (without the program name) and an optional stdin payload from
 /// the invocation form. The `{prompt}`/`{model}` placeholders are substituted
 /// as whole elements. SOUL: with `prefix` it is prepended before the prompt,
 /// with `native` it goes out as a separate `soul_flag <soul>`. An empty SOUL
 /// is not delivered.
+///
+/// A prompt is text, never an option. A `--` element right before `{prompt}`
+/// marks it as a trailing positional: the pair is emitted last, after every
+/// other element and every flag appended later, so nothing the prompt starts
+/// with can be parsed as an option. Where the form has no such marker (the
+/// prompt is an option's value, `-p <text>`), a prompt that starts with `-` is
+/// sent with a leading newline, because several parsers refuse or misread an
+/// option value that looks like an option.
 fn build_command(
     spec: &InvocationDef,
     prompt: &str,
     model: &str,
     soul: Option<&str>,
     grant_autonomy: bool,
-) -> (Vec<String>, Option<String>) {
+) -> AgentCommand {
     let soul = soul.filter(|s| !s.is_empty());
     let effective_prompt = match (spec.soul, soul) {
         (SoulDelivery::Prefix, Some(s)) => format!("{s}\n\n---\n\n{prompt}"),
         _ => prompt.to_string(),
     };
     let mut argv: Vec<String> = Vec::with_capacity(spec.argv.len() + 2);
-    for a in &spec.argv {
+    let mut tail: Vec<String> = Vec::new();
+    let mut elements = spec.argv.iter().peekable();
+    while let Some(a) = elements.next() {
         match a.as_str() {
+            "--" if elements.peek().is_some_and(|n| n.as_str() == "{prompt}") => {
+                elements.next();
+                tail = vec!["--".to_string(), effective_prompt.clone()];
+            }
+            "{prompt}" if effective_prompt.starts_with('-') => {
+                argv.push(format!("\n{effective_prompt}"))
+            }
             "{prompt}" => argv.push(effective_prompt.clone()),
             "{model}" => argv.push(model.to_string()),
             other => argv.push(other.to_string()),
@@ -797,11 +978,11 @@ fn build_command(
     if grant_autonomy {
         argv.extend(spec.autonomous_args.iter().cloned());
     }
-    let stdin_payload = match spec.prompt_via {
+    let stdin = match spec.prompt_via {
         PromptVia::Stdin => Some(effective_prompt),
         PromptVia::Argv => None,
     };
-    (argv, stdin_payload)
+    AgentCommand { argv, tail, stdin }
 }
 
 /// Appends the live `--mcp-config` sidecar injection to `argv` when this is a
@@ -812,7 +993,7 @@ fn build_command(
 /// configured servers.
 fn inject_ask_server(argv: &mut Vec<String>, task: &AgentTask, live: Option<&LiveHooks>) {
     if let Some(lh) = live
-        && (task.agent == "claude" || task.agent == "claude-code")
+        && canonical_agent_id(task.agent) == "claude"
     {
         argv.push("--mcp-config".to_string());
         argv.push(ask_server_mcp_config(
@@ -831,11 +1012,16 @@ fn inject_ask_server(argv: &mut Vec<String>, task: &AgentTask, live: Option<&Liv
 /// gain a claude-only flag. The engine only sets `hermetic_settings` for an
 /// agent that [`agent_supports_hermetic`], so the guard here is belt-and-braces.
 fn inject_hermetic_settings(argv: &mut Vec<String>, task: &AgentTask) {
-    if let Some(path) = &task.hermetic_settings
+    if let Some(env) = &task.hermetic_settings
         && agent_supports_hermetic(task.agent)
     {
         argv.push("--settings".to_string());
-        argv.push(path.to_string_lossy().into_owned());
+        argv.push(env.settings.to_string_lossy().into_owned());
+        argv.extend(HERMETIC_FLAGS.iter().map(|f| f.to_string()));
+        if let Some(dir) = &env.skills_dir {
+            argv.push("--add-dir".to_string());
+            argv.push(dir.to_string_lossy().into_owned());
+        }
     }
 }
 
@@ -1106,15 +1292,16 @@ impl ClaudeAdapter {
         control: Option<&ControlHooks>,
     ) -> Result<AgentReport, (ErrorClass, String)> {
         let prompt = transport_prompt(task);
-        let (mut argv, stdin_payload) = build_command(
+        let mut built = build_command(
             &self.spec,
             &prompt,
             task.model,
             task.soul,
             task.grant_autonomy,
         );
-        inject_ask_server(&mut argv, task, live);
-        inject_hermetic_settings(&mut argv, task);
+        inject_ask_server(&mut built.argv, task, live);
+        inject_hermetic_settings(&mut built.argv, task);
+        let (argv, stdin_payload) = built.into_parts();
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(task.workdir)
@@ -1131,6 +1318,8 @@ impl ClaudeAdapter {
         // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
         // spawned codex cannot inherit the user's interactive MCP config.
         apply_agent_home(&mut cmd, task)?;
+        // zcode's provider config and model selection (no `--model` flag).
+        apply_zcode_env(&mut cmd, task)?;
         // Per-attempt status file (subtask S2): the agent may write its final
         // verdict as JSON here, which the engine reads before the textual report.
         if let Some(sf) = &task.status_file {
@@ -1148,6 +1337,8 @@ impl ClaudeAdapter {
         if let Some(cb) = on_spawn {
             cb(child.id(), started.elapsed().as_millis() as u64);
         }
+        // Drain both streams from the start (see `PipeCollector`).
+        let pipes = PipeCollector::start(&mut child);
         if let Some(payload) = &stdin_payload
             && let Some(mut si) = child.stdin.take()
         {
@@ -1225,7 +1416,7 @@ impl ClaudeAdapter {
         // block for the lifetime of that daemon. Tearing the group down first
         // is what makes EOF actually arrive.
         kill_process_group(child.id());
-        let output = wait_with_output_bounded(child, drain_budget(), &self.program)?;
+        let output = pipes.finish(child, drain_budget(), &self.program)?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
         // Signal termination is a failure before anything else is read (issue
@@ -1252,26 +1443,29 @@ impl ClaudeAdapter {
         }
         // Status comes from the structured report block (spec 6.2); the node
         // output is the reply body with that block stripped, and raw is the full
-        // stdout for debugging/streaming.
-        let report = interpret_report(&stdout);
+        // stdout for debugging/streaming. The reply is stdout itself except for
+        // an agent that wraps it in JSON (zcode's `--json`).
+        let reply = reply_text(task.agent, &stdout);
+        let report = interpret_report(&reply);
         // Node-output contract (Finding 2 of issue #56): when the node set
         // `outputs.extract`, the output is the LAST `<tag>...</tag>` block in
         // stdout, if present. Status/summary/session/question stay as derived
         // from the report block above - only `output` is overridden.
         let output = task
             .extract
-            .and_then(|tag| extract_marker(&stdout, tag))
+            .and_then(|tag| extract_marker(&reply, tag))
             .unwrap_or(report.output);
         // Marker scan (spec 2026-07-20): an interactive node's agent may ask a
         // question instead of finishing. The scan is gated on `task.interactive`
         // and hard-fails on malformed JSON naming the node; a non-interactive
         // node's literal marker text is simply ignored.
-        let question = scan_question(&stdout, task)?;
+        let question = scan_question(&reply, task)?;
         // Session capture (spec 2026-07-20, Task 7): pull the agent's session id
         // from its output so the answer round can resume the same session. The
         // plain headless `-p` form carries no session id, so this is normally
         // `None`; the stream path below is where claude surfaces one.
-        let session = capture_session(task.agent, &stdout);
+        let session = capture_session(task.agent, &stdout)
+            .or_else(|| capture_session_header(task.agent, &stderr));
         Ok(AgentReport {
             status: report.status,
             output,
@@ -1310,18 +1504,19 @@ impl ClaudeAdapter {
         // Base argv comes from the invocation form; claude-specific streaming
         // flags (stream-json) are layered on top. In the first iteration,
         // acp = claude.
-        let (mut argv, _stdin) = build_command(
+        let mut built = build_command(
             &self.spec,
             &prompt,
             task.model,
             task.soul,
             task.grant_autonomy,
         );
-        inject_ask_server(&mut argv, task, live);
-        inject_hermetic_settings(&mut argv, task);
-        argv.push("--output-format".to_string());
-        argv.push("stream-json".to_string());
-        argv.push("--verbose".to_string());
+        inject_ask_server(&mut built.argv, task, live);
+        inject_hermetic_settings(&mut built.argv, task);
+        built.argv.push("--output-format".to_string());
+        built.argv.push("stream-json".to_string());
+        built.argv.push("--verbose".to_string());
+        let (argv, _stdin) = built.into_parts();
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(task.workdir)
@@ -1334,6 +1529,8 @@ impl ClaudeAdapter {
         // Agent config isolation (spec 2026-07-21): a run-scoped config home so a
         // spawned codex cannot inherit the user's interactive MCP config.
         apply_agent_home(&mut cmd, task)?;
+        // zcode's provider config and model selection (no `--model` flag).
+        apply_zcode_env(&mut cmd, task)?;
         // Per-attempt status file (subtask S2): the agent may write its final
         // verdict as JSON here, which the engine reads before the textual report.
         if let Some(sf) = &task.status_file {
@@ -1389,8 +1586,12 @@ impl ClaudeAdapter {
         });
 
         let mut sink = task.stream_log.and_then(|p| {
-            if let Some(parent) = p.parent() {
-                let _ = std::fs::create_dir_all(parent);
+            // `<run_dir>/agent-stream/<file>`: created under the run
+            // directory, never re-creating a deleted run.
+            if let Some(parent) = p.parent()
+                && let Some(run_dir) = parent.parent()
+            {
+                let _ = apb_core::fsutil::create_dir_under(run_dir, parent);
             }
             std::fs::OpenOptions::new()
                 .create(true)
@@ -1713,7 +1914,8 @@ impl AgentAdapter for ClaudeAdapter {
         // The supervisor keeps the default permission posture for now; its
         // intervention path is the supervisor_* MCP tools, not autonomous
         // file/network actions in the run workdir.
-        let (argv, stdin_payload) = build_command(&self.spec, brief, model, soul, false);
+        let (argv, stdin_payload) =
+            build_command(&self.spec, brief, model, soul, false).into_parts();
         let mut cmd = Command::new(&self.program);
         cmd.args(&argv)
             .current_dir(workdir)
@@ -1727,6 +1929,21 @@ impl AgentAdapter for ClaudeAdapter {
         // Connector env isolation (spec 4.3): the supervisor is a spawned agent
         // too, so its inherited connector tokens are scrubbed before spawn.
         policy.apply(&mut cmd);
+        // Let a Claude Code supervisor block in `supervisor_wait_event` for as
+        // long as the server allows (30 min) instead of returning to the model
+        // every few seconds: each return is a paid turn. The variable is
+        // Claude Code's MCP tool-call timeout; other agents ignore it. A value
+        // the operator set explicitly wins.
+        if std::env::var_os("MCP_TOOL_TIMEOUT").is_none() {
+            cmd.env(
+                "MCP_TOOL_TIMEOUT",
+                SUPERVISOR_MCP_TOOL_TIMEOUT_MS.to_string(),
+            );
+        }
+        // The supervisor's limit is its capability set on the supervisor_*
+        // tools. Its `apb mcp` (inheriting this) must not also offer the
+        // operator's run-control and authoring tools, which take no token.
+        cmd.env(MCP_ROLE_ENV, MCP_ROLE_SUPERVISOR);
         let mut child = cmd.spawn().map_err(|e| {
             (
                 ErrorClass::ProcessExit,
@@ -1756,39 +1973,13 @@ pub fn adapter_for(agent: &str) -> Result<Box<dyn AgentAdapter>, EngineError> {
     // agent").
     let global = apb_core::config::GlobalConfig::load().unwrap_or_default();
     let spec = crate::invocation::spec_for(agent, &global)?;
-    let program = global
-        .agent_program(agent)
-        .unwrap_or_else(|| default_program(agent));
+    let program = crate::invocation::program_for(agent, &global);
     Ok(Box::new(ClaudeAdapter { program, spec }))
-}
-
-/// Default binary name for built-in agents when not set in config:
-/// claude/claude-code -> "claude", others - the id itself (codex, opencode, agy).
-fn default_program(agent: &str) -> String {
-    match agent {
-        "claude" | "claude-code" => "claude".to_string(),
-        // cursor is installed as `cursor-agent`; the bare `cursor` binary is
-        // the GUI editor CLI, not the headless agent.
-        "cursor" => "cursor-agent".to_string(),
-        other => other.to_string(),
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// cursor is installed as `cursor-agent`; the bare `cursor` binary is the
-    /// GUI editor CLI. `default_program` must resolve the agent id to the
-    /// detected binary so `adapter_for` spawns the right executable.
-    #[test]
-    fn default_program_maps_cursor_to_its_binary() {
-        assert_eq!(default_program("cursor"), "cursor-agent");
-        assert_eq!(default_program("grok"), "grok");
-        assert_eq!(default_program("codex"), "codex");
-        assert_eq!(default_program("claude"), "claude");
-        assert_eq!(default_program("claude-code"), "claude");
-    }
 
     /// A failing agent explains itself on whichever stream it likes, and the
     /// explanation is all the node output has to offer. Losing stdout used to
@@ -1836,7 +2027,7 @@ mod tests {
     #[test]
     fn build_command_appends_autonomous_args_when_granted() {
         let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
-        let (argv, _) = build_command(&spec, "hello", "claude-opus-4-8", None, true);
+        let (argv, _) = build_command(&spec, "hello", "claude-opus-5-5", None, true).into_parts();
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--permission-mode" && w[1] == "bypassPermissions"),
@@ -1847,21 +2038,20 @@ mod tests {
     #[test]
     fn build_command_omits_autonomous_args_when_not_granted() {
         let spec = crate::invocation::builtin("claude").expect("builtin claude spec");
-        let (argv, _) = build_command(&spec, "hello", "claude-opus-4-8", None, false);
+        let (argv, _) = build_command(&spec, "hello", "claude-opus-5-5", None, false).into_parts();
         assert!(
             !argv.iter().any(|a| a == "bypassPermissions"),
             "must not grant permissions without autonomy, got {argv:?}"
         );
     }
 
-    /// qoder is the only builtin combining a trailing positional `{prompt}`
-    /// with `SoulDelivery::Native`: the SOUL and the autonomy flags are
-    /// appended AFTER the positional prompt, not before it like claude/grok
-    /// (whose `{prompt}` sits mid-argv). Pins the fully assembled command,
-    /// not just `spec.argv`, so a future change to `build_command`'s append
-    /// order is caught here.
+    /// qoder combines a trailing positional `{prompt}` with
+    /// `SoulDelivery::Native`: the SOUL and the autonomy flags are appended to
+    /// the options, and the prompt still comes last, after `--`. Pins the
+    /// fully assembled command, not just `spec.argv`, so a future change to
+    /// `build_command`'s append order is caught here.
     #[test]
-    fn build_command_assembles_qoder_soul_and_autonomy_after_the_positional_prompt() {
+    fn build_command_assembles_qoder_soul_and_autonomy_before_the_trailing_prompt() {
         let spec = crate::invocation::builtin("qoder").expect("builtin qoder spec");
         let (argv, stdin) = build_command(
             &spec,
@@ -1869,7 +2059,8 @@ mod tests {
             "qwen3.8-max",
             Some("You are a careful reviewer."),
             true,
-        );
+        )
+        .into_parts();
         assert_eq!(
             argv,
             vec![
@@ -1878,11 +2069,12 @@ mod tests {
                 "text",
                 "--model",
                 "qwen3.8-max",
-                "do the thing",
                 "--append-system-prompt",
                 "You are a careful reviewer.",
                 "--permission-mode",
                 "bypass_permissions",
+                "--",
+                "do the thing",
             ]
         );
         assert_eq!(stdin, None);
@@ -1900,7 +2092,7 @@ mod tests {
     fn hermetic_task<'a>(
         policy: &'a ConnectorEnvPolicy,
         agent: &'a str,
-        settings: Option<std::path::PathBuf>,
+        settings: Option<HermeticEnv>,
     ) -> AgentTask<'a> {
         AgentTask {
             prompt: "go",
@@ -1924,15 +2116,29 @@ mod tests {
     #[test]
     fn hermetic_settings_flag_injected_for_claude_and_absent_otherwise() {
         let policy = ConnectorEnvPolicy::default();
-        let path = std::path::PathBuf::from("/run/hermetic-settings.json");
-        // Claude with a hermetic settings file -> argv gains `--settings <path>`.
-        let claude = hermetic_task(&policy, "claude", Some(path.clone()));
+        let path = std::path::PathBuf::from("/run/agent-settings/n.json");
+        let env = HermeticEnv {
+            settings: path.clone(),
+            skills_dir: Some("/run/agent-skills/n".into()),
+        };
+        // Claude with a hermetic settings file -> argv gains `--settings <path>`,
+        // the source/MCP restriction and the skills directory.
+        let claude = hermetic_task(&policy, "claude", Some(env.clone()));
         let mut argv = vec!["-p".to_string()];
         inject_hermetic_settings(&mut argv, &claude);
         assert!(
             argv.windows(2)
                 .any(|w| w[0] == "--settings" && w[1] == path.to_string_lossy()),
             "expected --settings <path> for a hermetic claude step, got {argv:?}"
+        );
+        assert!(
+            argv.windows(2)
+                .any(|w| w[0] == "--setting-sources" && w[1] == "project,local")
+                && argv.iter().any(|a| a == "--strict-mcp-config")
+                && argv
+                    .windows(2)
+                    .any(|w| w[0] == "--add-dir" && w[1] == "/run/agent-skills/n"),
+            "got {argv:?}"
         );
         // No hermetic settings -> no flag.
         let plain = hermetic_task(&policy, "claude", None);
@@ -1941,7 +2147,7 @@ mod tests {
         assert!(!argv.iter().any(|a| a == "--settings"), "got {argv:?}");
         // A non-claude agent must never gain the claude-only flag, even if a
         // settings path was (wrongly) attached.
-        let other = hermetic_task(&policy, "codex", Some(path.clone()));
+        let other = hermetic_task(&policy, "codex", Some(env));
         let mut argv = vec!["-p".to_string()];
         inject_hermetic_settings(&mut argv, &other);
         assert!(!argv.iter().any(|a| a == "--settings"), "got {argv:?}");
@@ -1951,7 +2157,7 @@ mod tests {
     fn hermetic_settings_file_disables_hooks_and_plugins() {
         let dir = std::env::temp_dir().join(format!("apb-hermetic-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
-        let path = write_hermetic_settings(&dir).unwrap();
+        let path = write_hermetic_settings(&dir, "n").unwrap();
         let json: serde_json::Value =
             serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
         assert_eq!(json["hooks"], serde_json::json!({}), "hooks must be empty");

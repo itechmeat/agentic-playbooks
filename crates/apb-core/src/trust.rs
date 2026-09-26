@@ -32,7 +32,8 @@ pub enum Lifecycle {
 }
 
 impl Lifecycle {
-    fn as_str(self) -> &'static str {
+    /// The wire and on-disk name (`draft` / `active` / `retired`).
+    pub fn as_str(self) -> &'static str {
         match self {
             Lifecycle::Draft => "draft",
             Lifecycle::Active => "active",
@@ -52,12 +53,25 @@ impl Lifecycle {
 /// Where the definition came from (spec 3.1). Affects the starting trust:
 /// `repository_provided` always starts out untrusted.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[serde(rename_all = "snake_case")]
 pub enum OriginKind {
     Bundled,
     AgentGenerated,
     LocallyApproved,
     RepositoryProvided,
+}
+
+impl OriginKind {
+    /// The wire and on-disk name (`bundled`, `agent_generated`, ...).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            OriginKind::Bundled => "bundled",
+            OriginKind::AgentGenerated => "agent_generated",
+            OriginKind::LocallyApproved => "locally_approved",
+            OriginKind::RepositoryProvided => "repository_provided",
+        }
+    }
 }
 
 /// Reads the definition's lifecycle from `<playbook_dir>/lifecycle`. No file or
@@ -78,7 +92,8 @@ pub fn write_lifecycle(playbook_dir: &Path, lc: Lifecycle) -> std::io::Result<()
 /// What kind of object is approved. `#[serde(default)]` yields `Playbook` for
 /// records created before profiles existed (backward compatibility for
 /// trust.json).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Default, Serialize, Deserialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS), ts(rename = "TrustKind"))]
 #[serde(rename_all = "snake_case")]
 pub enum Kind {
     #[default]
@@ -86,6 +101,31 @@ pub enum Kind {
     ProfileBundle,
     Connector,
     ConnectorAccount,
+}
+
+impl Kind {
+    /// The wire and on-disk name (`playbook`, `profile_bundle`, `connector`,
+    /// `connector_account`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Kind::Playbook => "playbook",
+            Kind::ProfileBundle => "profile_bundle",
+            Kind::Connector => "connector",
+            Kind::ConnectorAccount => "connector_account",
+        }
+    }
+
+    /// Parses [`Kind::as_str`]'s names.
+    pub fn parse(s: &str) -> Option<Kind> {
+        [
+            Kind::Playbook,
+            Kind::ProfileBundle,
+            Kind::Connector,
+            Kind::ConnectorAccount,
+        ]
+        .into_iter()
+        .find(|k| k.as_str() == s)
+    }
 }
 
 /// Trust record id for a connector account approval: `"connector/account"`,
@@ -102,6 +142,58 @@ pub struct TrustRecord {
     pub approved_at_ms: u128,
     #[serde(default)]
     pub kind: Kind,
+}
+
+/// One approval as every surface lists it: `apb trust list`, MCP
+/// `trust_list` and the dashboard's Trust view.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct TrustEntry {
+    /// The approved content digest (`sha256:<hex>`).
+    pub digest: String,
+    /// What it approves: a playbook id, a profile name, a connector name, or
+    /// `connector/account`.
+    pub id: String,
+    pub kind: Kind,
+    pub origin_kind: OriginKind,
+    /// When it was approved, in Unix milliseconds.
+    pub approved_at_ms: u128,
+}
+
+/// Which approvals a revoke removes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TrustSelector {
+    /// Exactly one approved digest.
+    Digest(String),
+    /// Every approval recorded under this id (every version of a playbook,
+    /// every bundle of a profile), optionally only of one kind.
+    Id { id: String, kind: Option<Kind> },
+}
+
+impl TrustSelector {
+    /// A target starting with `sha256:` names one digest; anything else is an
+    /// id. `kind` narrows an id (it does not apply to a digest, which is
+    /// already exact).
+    pub fn parse(target: &str, kind: Option<Kind>) -> Self {
+        let target = target.trim();
+        if target.starts_with("sha256:") {
+            TrustSelector::Digest(target.to_string())
+        } else {
+            TrustSelector::Id {
+                id: target.to_string(),
+                kind,
+            }
+        }
+    }
+
+    fn matches(&self, digest: &str, record: &TrustRecord) -> bool {
+        match self {
+            TrustSelector::Digest(d) => d == digest,
+            TrustSelector::Id { id, kind } => {
+                &record.id == id && kind.is_none_or(|k| k == record.kind)
+            }
+        }
+    }
 }
 
 /// Global registry of approved digests (`<config_dir>/trust.json`).
@@ -130,7 +222,52 @@ impl Default for TrustStore {
     }
 }
 
+/// Trust status of one object's current digest: approved, changed since an
+/// earlier approval (some OTHER digest of the same id is approved - the
+/// content moved), or never approved. The one derivation every surface that
+/// shows connector or account trust uses (dashboard, MCP, CLI list and doctor).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TrustStatus {
+    Approved,
+    Changed,
+    Unapproved,
+}
+
+impl TrustStatus {
+    /// The wire string (`approved` / `changed` / `unapproved`).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            TrustStatus::Approved => "approved",
+            TrustStatus::Changed => "changed",
+            TrustStatus::Unapproved => "unapproved",
+        }
+    }
+}
+
+fn entry(digest: &str, r: &TrustRecord) -> TrustEntry {
+    TrustEntry {
+        digest: digest.to_string(),
+        id: r.id.clone(),
+        kind: r.kind,
+        origin_kind: r.origin_kind,
+        approved_at_ms: r.approved_at_ms,
+    }
+}
+
 impl TrustStore {
+    /// [`TrustStatus`] of `digest`, the current digest of the object `id` of
+    /// `kind`.
+    pub fn status(&self, digest: &str, id: &str, kind: Kind) -> TrustStatus {
+        if self.is_approved(digest) {
+            TrustStatus::Approved
+        } else if self.approved.values().any(|r| r.kind == kind && r.id == id) {
+            TrustStatus::Changed
+        } else {
+            TrustStatus::Unapproved
+        }
+    }
+
     /// Loads the store; a missing file or config directory yields an empty
     /// store. A corrupt file does not crash the caller: a warning is printed to
     /// stderr and an empty store is returned (the data can be recovered by
@@ -158,22 +295,9 @@ impl TrustStore {
         self.approved.contains_key(digest)
     }
 
-    /// The `id`s of every approved record of the given `kind`, sorted and
-    /// deduped. Lets a caller distinguish "approved" (the current digest is
-    /// in the store) from "changed since approval" (some other digest of
-    /// this same id was approved before) versus "never approved" - `apb
-    /// connector list` uses this to tell an edited-but-previously-trusted
-    /// connector apart from one that was never trusted at all.
-    pub fn approved_record_ids(&self, kind: Kind) -> Vec<String> {
-        let mut ids: Vec<String> = self
-            .approved
-            .values()
-            .filter(|r| r.kind == kind)
-            .map(|r| r.id.clone())
-            .collect();
-        ids.sort();
-        ids.dedup();
-        ids
+    /// Where the approval of `digest` came from, if it is approved at all.
+    pub fn origin(&self, digest: &str) -> Option<OriginKind> {
+        self.approved.get(digest).map(|r| r.origin_kind)
     }
 
     /// Marks the digest as approved and persists it. The read-modify-write runs
@@ -210,13 +334,37 @@ impl TrustStore {
         })
     }
 
-    /// Removes approval from a digest (e.g. for a capture draft that should not
-    /// be trusted). Idempotent, under the same lock.
-    pub fn revoke(&mut self, digest: &str) -> std::io::Result<()> {
-        let digest = digest.to_string();
-        self.locked_mutate(move |s| {
-            s.approved.remove(&digest);
-        })
+    /// Every approval, ordered by kind, then id, then approval time.
+    pub fn entries(&self) -> Vec<TrustEntry> {
+        let mut out: Vec<TrustEntry> = self
+            .approved
+            .iter()
+            .map(|(digest, r)| entry(digest, r))
+            .collect();
+        out.sort_by(|a, b| {
+            (a.kind, &a.id, a.approved_at_ms).cmp(&(b.kind, &b.id, b.approved_at_ms))
+        });
+        out
+    }
+
+    /// Removes the approvals `selector` names and returns them: the one path
+    /// behind `apb trust revoke`, MCP `trust_revoke` and the dashboard's
+    /// Revoke. Revoking only ever lowers trust (the content then needs a new
+    /// approval or an acknowledge to run). Selecting nothing is not an error;
+    /// the result is empty. Under the same lock as every other write.
+    pub fn revoke(&mut self, selector: &TrustSelector) -> std::io::Result<Vec<TrustEntry>> {
+        let mut removed: Vec<TrustEntry> = Vec::new();
+        self.locked_mutate(|s| {
+            s.approved.retain(|digest, r| {
+                let hit = selector.matches(digest, r);
+                if hit {
+                    removed.push(entry(digest, r));
+                }
+                !hit
+            });
+        })?;
+        removed.sort_by_key(|e| e.approved_at_ms);
+        Ok(removed)
     }
 
     /// Shared mutation path: under the config-directory lock, re-reads the
@@ -301,8 +449,53 @@ mod tests {
             .approve("sha256:cc", "x", OriginKind::AgentGenerated)
             .unwrap();
         assert!(TrustStore::load().is_approved("sha256:cc"));
-        store.revoke("sha256:cc").unwrap();
+        let removed = store
+            .revoke(&TrustSelector::parse("sha256:cc", None))
+            .unwrap();
+        assert_eq!(removed.len(), 1);
         assert!(!TrustStore::load().is_approved("sha256:cc"));
+    }
+
+    /// Revoking by id removes every approval under that id (of the given
+    /// kind), leaves everything else, and reports exactly what it removed.
+    #[test]
+    fn revoke_by_id_removes_every_version_of_that_id_only() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        unsafe {
+            std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        }
+        let _g = EnvGuard;
+
+        let mut store = TrustStore::load();
+        for (digest, id, kind) in [
+            ("sha256:v1", "demo", Kind::Playbook),
+            ("sha256:v2", "demo", Kind::Playbook),
+            ("sha256:p1", "demo", Kind::ProfileBundle),
+            ("sha256:o1", "other", Kind::Playbook),
+        ] {
+            store
+                .approve_kind(digest, id, kind, OriginKind::LocallyApproved)
+                .unwrap();
+        }
+
+        let removed = store
+            .revoke(&TrustSelector::parse("demo", Some(Kind::Playbook)))
+            .unwrap();
+        let digests: Vec<&str> = removed.iter().map(|e| e.digest.as_str()).collect();
+        assert_eq!(digests, ["sha256:v1", "sha256:v2"]);
+        let left: Vec<String> = TrustStore::load()
+            .entries()
+            .into_iter()
+            .map(|e| e.digest)
+            .collect();
+        assert_eq!(left, ["sha256:o1", "sha256:p1"]);
+        assert!(
+            store
+                .revoke(&TrustSelector::parse("nothing-here", None))
+                .unwrap()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -368,7 +561,7 @@ mod tests {
     }
 
     #[test]
-    fn approved_record_ids_filters_by_kind_sorted_and_deduped() {
+    fn status_tells_approved_changed_and_unapproved_apart_per_kind() {
         let _lock = crate::env_test_lock();
         let cfg = tempfile::tempdir().unwrap();
         unsafe {
@@ -377,8 +570,6 @@ mod tests {
         let _g = EnvGuard;
 
         let mut store = TrustStore::load();
-        assert!(store.approved_record_ids(Kind::Connector).is_empty());
-
         store
             .approve_kind(
                 "sha256:widget-old",
@@ -389,23 +580,18 @@ mod tests {
             .unwrap();
         store
             .approve_kind(
-                "sha256:zeta",
-                "zeta",
-                Kind::Connector,
-                OriginKind::LocallyApproved,
-            )
-            .unwrap();
-        store
-            .approve_kind(
-                "sha256:unrelated",
-                "widget",
+                "sha256:acct",
+                "gadget",
                 Kind::ConnectorAccount,
                 OriginKind::LocallyApproved,
             )
             .unwrap();
 
-        let ids = store.approved_record_ids(Kind::Connector);
-        assert_eq!(ids, vec!["widget".to_string(), "zeta".to_string()]);
+        let status = |d: &str, id: &str| store.status(d, id, Kind::Connector);
+        assert_eq!(status("sha256:widget-old", "widget"), TrustStatus::Approved);
+        assert_eq!(status("sha256:widget-new", "widget"), TrustStatus::Changed);
+        // An approval of another kind under the same id is not "changed".
+        assert_eq!(status("sha256:gadget", "gadget"), TrustStatus::Unapproved);
     }
 
     #[test]

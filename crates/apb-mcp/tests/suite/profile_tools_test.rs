@@ -1,3 +1,4 @@
+use apb_core::profile::AgentEnvironment;
 use std::fs;
 use std::path::Path;
 
@@ -82,13 +83,74 @@ fn seed_playbook(root: &Path, id: &str, profile: &str) -> String {
     yaml
 }
 
+/// The full environment is written as an explicit opt-in; the default
+/// (minimal) is the absence of the key, and the legacy `hermetic` key is no
+/// longer written at all (issue #136 item 4).
 #[test]
-fn profile_write_persists_hermetic_field() {
+fn profile_write_persists_the_environment_opt_in() {
     let _l = lock();
     let _g = EnvGuard;
     let (proj, _h, _c) = setup();
+    let write = |name: &str, environment| {
+        profile_tools::profile_write(
+            proj.path(),
+            profile_tools::ProfileWrite {
+                name: name.into(),
+                scope: "project".into(),
+                description: "desc".into(),
+                soul_md: "role".into(),
+                executor: exec(),
+                environment,
+                ..Default::default()
+            },
+        )
+        .expect("profile_write ok");
+        fs::read_to_string(
+            proj.path()
+                .join(format!(".apb/profiles/{name}/profile.yaml")),
+        )
+        .unwrap()
+    };
+    let full = write("full", Some(AgentEnvironment::Full));
+    assert!(full.contains("environment: full"), "{full}");
+    let minimal = write("minimal", Some(AgentEnvironment::Minimal));
+    let default = write("default", None);
+    for yaml in [&minimal, &default] {
+        assert!(
+            !yaml.contains("environment") && !yaml.contains("hermetic"),
+            "{yaml}"
+        );
+        let doc = apb_core::profile::ProfileDoc::from_yaml(yaml).unwrap();
+        assert_eq!(doc.environment(), AgentEnvironment::Minimal);
+    }
+}
 
-    profile_tools::profile_write(
+/// F15: an update that does not mention `environment` (MCP `profile_write`
+/// without the field, `apb profile write` without the flag, the dashboard
+/// editor) keeps the stored value instead of silently dropping an opt-in. `zcode_mode` follows the
+/// same rule, so a surface that cannot express it (the dashboard editor) never
+/// widens a profile's `edit` back to `yolo`.
+#[test]
+fn profile_update_without_environment_keeps_stored_value() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _h, _c) = setup();
+    let write = |desc: &str, expected: Option<String>| {
+        profile_tools::profile_write(
+            proj.path(),
+            profile_tools::ProfileWrite {
+                name: "herm".into(),
+                scope: "project".into(),
+                description: desc.into(),
+                soul_md: "role".into(),
+                executor: exec(),
+                expected_digest: expected,
+                ..Default::default()
+            },
+        )
+        .expect("profile_write ok")
+    };
+    let created = profile_tools::profile_write(
         proj.path(),
         profile_tools::ProfileWrite {
             name: "herm".into(),
@@ -96,39 +158,67 @@ fn profile_write_persists_hermetic_field() {
             description: "desc".into(),
             soul_md: "role".into(),
             executor: exec(),
-            hermetic: true,
+            environment: Some(AgentEnvironment::Full),
+            zcode_mode: Some(apb_core::profile::ZcodeMode::Edit),
             ..Default::default()
         },
     )
     .expect("profile_write ok");
+    let digest = created["profile_digest"].as_str().unwrap().to_string();
+    write("updated", Some(digest));
     let yaml = fs::read_to_string(proj.path().join(".apb/profiles/herm/profile.yaml")).unwrap();
-    assert!(
-        yaml.contains("hermetic: true"),
-        "expected hermetic: true in written profile.yaml, got:\n{yaml}"
-    );
     let doc = apb_core::profile::ProfileDoc::from_yaml(&yaml).unwrap();
-    assert!(doc.hermetic);
-
-    profile_tools::profile_write(
-        proj.path(),
-        profile_tools::ProfileWrite {
-            name: "plain".into(),
-            scope: "project".into(),
-            description: "desc".into(),
-            soul_md: "role".into(),
-            executor: exec(),
-            hermetic: false,
-            ..Default::default()
-        },
-    )
-    .expect("profile_write ok");
-    let yaml_plain =
-        fs::read_to_string(proj.path().join(".apb/profiles/plain/profile.yaml")).unwrap();
-    let doc_plain = apb_core::profile::ProfileDoc::from_yaml(&yaml_plain).unwrap();
-    assert!(
-        !doc_plain.hermetic,
-        "hermetic: false (or omitted) must parse back as false; yaml:\n{yaml_plain}"
+    assert_eq!(doc.description, "updated");
+    assert_eq!(
+        doc.environment(),
+        AgentEnvironment::Full,
+        "an update that omits environment must keep it; yaml:\n{yaml}"
     );
+    assert_eq!(
+        doc.zcode_mode,
+        Some(apb_core::profile::ZcodeMode::Edit),
+        "an update that omits zcode_mode must keep it; yaml:\n{yaml}"
+    );
+}
+
+/// zcode profiles are stored with the bare model id (the legacy
+/// `zai-individual/` prefix is accepted and dropped, in fallbacks too), and a
+/// model or plan outside apb's allowlist is refused with a clear message.
+#[test]
+fn profile_write_normalizes_and_gates_zcode_models() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _h, _c) = setup();
+    let write = |name: &str, model: &str| {
+        profile_tools::profile_write(
+            proj.path(),
+            profile_tools::ProfileWrite {
+                name: name.into(),
+                scope: "project".into(),
+                description: "d".into(),
+                soul_md: "role".into(),
+                executor: ExecutorInput {
+                    agent: "zcode".into(),
+                    model: model.into(),
+                    fallbacks: vec![("zcode".into(), "zai-individual/GLM-5.3".into())],
+                },
+                ..Default::default()
+            },
+        )
+    };
+    write("legacy", "zai-individual/glm-5.3-flash@HIGH").expect("legacy spelling accepted");
+    let yaml = fs::read_to_string(proj.path().join(".apb/profiles/legacy/profile.yaml")).unwrap();
+    let doc = apb_core::profile::ProfileDoc::from_yaml(&yaml).unwrap();
+    assert_eq!(doc.executor.model, "GLM-5.3-Flash@high");
+    assert_eq!(doc.executor.fallbacks[0].model, "GLM-5.3");
+    assert!(!yaml.contains("zai-individual"), "{yaml}");
+
+    for (name, bad) in [("turbo", "GLM-5-Turbo"), ("start", "zai-start/GLM-5.3")] {
+        let err = write(name, bad).unwrap_err().to_string();
+        assert!(err.contains("not allowed"), "{bad}: {err}");
+        assert!(err.contains("GLM-5.3-Flash"), "{bad}: {err}");
+        assert!(!proj.path().join(".apb/profiles").join(name).exists());
+    }
 }
 
 #[test]
@@ -299,4 +389,33 @@ fn delete_blocked_by_reference_unless_forced() {
 
     // With force - it is deleted.
     profile_tools::profile_delete(proj.path(), "arch", "project", true).expect("force delete ok");
+}
+
+/// Rewriting a profile does not approve skill content that changed since the
+/// profile was last approved: the write produced profile.yaml and SOUL.md,
+/// not the skills. The changed skills come back for the user's consent.
+#[test]
+fn a_rewrite_does_not_approve_drifted_skill_content() {
+    let _l = lock();
+    let _g = EnvGuard;
+    let (proj, _h, _c) = setup();
+    seed_skill(proj.path(), "helper", "v1");
+    let first = write_profile(proj.path(), "dev", &["helper".to_string()], None);
+
+    seed_skill(proj.path(), "helper", "v2 from upstream");
+    let rewritten = write_profile(
+        proj.path(),
+        "dev",
+        &["helper".to_string()],
+        first["profile_digest"].as_str(),
+    );
+    let bundle = rewritten["bundle_digest"].as_str().unwrap();
+    assert!(
+        !TrustStore::load().is_approved(bundle),
+        "drifted skill content must stay unapproved: {rewritten}"
+    );
+    assert_eq!(
+        rewritten["skills_unapproved"][0]["skill"], "project/helper",
+        "{rewritten}"
+    );
 }

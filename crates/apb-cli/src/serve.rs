@@ -264,18 +264,20 @@ pub(crate) fn dev_cmd(root: PathBuf, no_open: bool) -> ExitCode {
         return ExitCode::from(2);
     }
 
-    // API server in the background on 7321 (fixed to match the Vite proxy).
-    // Daemon thread: dies with the process when Vite exits.
+    // API server in the background on the default port (the Vite proxy
+    // targets the same generated constant). Daemon thread: dies with the
+    // process when Vite exits.
+    let port = apb_core::config::DEFAULT_PORT;
     std::thread::spawn(move || {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         if let Err(e) = rt.block_on(apb_server::run_server(
             IpAddr::V4(Ipv4Addr::LOCALHOST),
-            7321,
+            port,
         )) {
             if error_looks_like_addr_in_use(&e) {
-                eprintln!("{}", port_in_use_message(DEV_API, 7321));
+                eprintln!("{}", port_in_use_message(DEV_API, port));
             } else {
-                eprintln!("apb dev: API server on 7321 stopped: {e}");
+                eprintln!("apb dev: API server on {port} stopped: {e}");
             }
         }
     });

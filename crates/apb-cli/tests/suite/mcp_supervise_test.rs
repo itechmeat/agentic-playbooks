@@ -10,7 +10,7 @@
 
 use std::fs;
 use std::io::{BufRead, BufReader, Write};
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 use std::sync::mpsc;
 use std::time::Duration;
 
@@ -38,7 +38,7 @@ fn supervise_self_over_stdio_mints_token_and_inspect_resolves_it() {
     let dir = tempfile::tempdir().unwrap();
 
     // init + seed the same minimal playbook without agent_task.
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .arg("init")
         .current_dir(dir.path())
         .output()
@@ -48,7 +48,7 @@ fn supervise_self_over_stdio_mints_token_and_inspect_resolves_it() {
     fs::write(vdir.join("playbook.yaml"), NOAGENT).unwrap();
     fs::write(dir.path().join(".apb/playbooks/noagent/current"), "1.0.0").unwrap();
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let mut child = crate::common::apb_std()
         .arg("mcp")
         .current_dir(dir.path())
         .stdin(Stdio::piped())
@@ -160,10 +160,9 @@ fn supervise_self_over_stdio_mints_token_and_inspect_resolves_it() {
 /// reach `result.content[0].text` (a JSON string holding the tool's body),
 /// parse that too, and take the `supervisor_token` field. If for some reason
 /// the response shape does not match expectations (e.g. escaping), the
-/// fallback path extracts the substring `sv-<number>-<number>` directly from
-/// the raw line: the token format is defined by the server itself
-/// (`format!("sv-{millis}-{n}")` in `WfMcp::mint_token`), so the substring is
-/// enough to get a working token for the next call.
+/// fallback path extracts the substring `sv-<base64url>` directly from the raw
+/// line: the token format is defined by `apb_engine::mint_supervisor_token`,
+/// so the substring is enough to get a working token for the next call.
 fn extract_supervisor_token(line: &str) -> String {
     let parsed: Result<serde_json::Value, _> = serde_json::from_str(line);
     if let Ok(v) = parsed
@@ -174,14 +173,14 @@ fn extract_supervisor_token(line: &str) -> String {
         return token.to_string();
     }
 
-    // Fallback path: raw substring search for "sv-<millis>-<n>".
+    // Fallback path: raw substring search for "sv-<base64url>".
     let idx = line
         .find("sv-")
         .unwrap_or_else(|| panic!("no supervisor token found in: {line}"));
     let rest = &line[idx..];
     let token: String = rest
         .chars()
-        .take_while(|c| c.is_ascii_digit() || *c == '-' || c.is_ascii_alphabetic())
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
     token
 }

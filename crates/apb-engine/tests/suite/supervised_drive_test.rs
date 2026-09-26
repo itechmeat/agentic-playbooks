@@ -293,13 +293,13 @@ edges:
 "#;
 
 /// One stub for both branches: the adapter passes `-p <prompt> --model <model>`,
-/// so `$2` is the prompt and the branch is told apart by its text. The flaky
+/// so the last argument is the prompt and the branch is told apart by its text. The flaky
 /// branch fails once (marker file) and succeeds afterwards.
 fn branch_agent(dir: &Path) -> String {
     let marker = dir.join("branch_b.marker");
     let path = dir.join("branch_agent.sh");
     let body = format!(
-        "#!/bin/sh\ncase \"$2\" in\n  *flaky*)\n    if [ -f '{m}' ]; then echo ok; exit 0; fi\n    touch '{m}'\n    echo 'branch b boom' 1>&2\n    exit 1\n    ;;\nesac\necho ok\n",
+        "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n  *flaky*)\n    if [ -f '{m}' ]; then echo ok; exit 0; fi\n    touch '{m}'\n    echo 'branch b boom' 1>&2\n    exit 1\n    ;;\nesac\necho ok\n",
         m = marker.display()
     );
     fs::write(&path, body).unwrap();
@@ -441,7 +441,7 @@ edges:
 fn two_flaky_branches_agent(dir: &Path) -> String {
     let path = dir.join("two_flaky.sh");
     let body = format!(
-        "#!/bin/sh\ncase \"$2\" in\n\
+        "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in\n\
          \x20 *flaky1*) m='{m1}' ;;\n\
          \x20 *flaky2*) m='{m2}' ;;\n\
          \x20 *) echo ok; exit 0 ;;\n\
@@ -582,7 +582,7 @@ fn fail_on_demand_agent(dir: &Path) -> String {
     let path = dir.join("fail_on_demand.sh");
     fs::write(
         &path,
-        "#!/bin/sh\ncase \"$2\" in *fail-me*) echo 'boom' 1>&2; exit 1 ;; esac\necho ok\n",
+        "#!/bin/sh\nfor last; do :; done\ncase \"$last\" in *fail-me*) echo 'boom' 1>&2; exit 1 ;; esac\necho ok\n",
     )
     .unwrap();
     set_executable(&path);
@@ -817,4 +817,65 @@ fn abort_control_ends_autonomous_drive_as_aborted() {
     let events = read_all(&run_dir).unwrap();
     assert!(events.iter().any(|e| matches!(&e.payload, EventPayload::RunAborted { reason } if reason == "pre-seeded abort")),
         "expected a RunAborted event carrying the posted reason");
+}
+
+// F25: a run started with an external supervisor agent is still supervised
+// after a resume. It used to resume autonomous while its supervisor agent kept
+// being heartbeat-monitored and respawned: the one combination (autonomous,
+// supervisor expected) that no start path produces and nothing parks for.
+#[test]
+fn resumed_agent_supervised_run_still_parks_for_its_supervisor() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), "supres", WF_SUPERVISED);
+    let prog = always_fail_agent(dir.path());
+    let _env = common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &prog);
+    }
+    let opts = RunOptions {
+        mode: RunMode::AgentSupervised,
+        ..Default::default()
+    };
+    let rx = run_in_background(dir.path().to_path_buf(), "supres", opts);
+    let run_dir = find_run_dir(dir.path(), "supres-");
+    wait_for_wake(&run_dir);
+    post_control(&run_dir, Control::Pause).unwrap();
+    let first = recv_result(&rx).unwrap();
+    assert_eq!(first.outcome, RunStatus::Paused);
+
+    let (tx, resumed) = mpsc::channel();
+    {
+        let root = dir.path().to_path_buf();
+        let run_id = first.run_id.clone();
+        std::thread::spawn(move || {
+            let _ = tx.send(resume(&root, &run_id, Some("work")));
+        });
+    }
+    let wakes = poll_until("a second wake after the resume", || {
+        let events = read_all(&run_dir).ok()?;
+        let wakes = events
+            .iter()
+            .filter(|e| matches!(e.payload, EventPayload::WakeRaised { .. }))
+            .count();
+        let ended = events
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::RunFinished { .. }));
+        (wakes >= 2 || ended).then_some(wakes)
+    });
+    post_control(
+        &run_dir,
+        Control::Abort {
+            reason: "test done".into(),
+        },
+    )
+    .unwrap();
+    let _ = recv_result(&resumed);
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    drop(_env);
+    assert_eq!(
+        wakes, 2,
+        "the resumed run must park for its supervisor, not fail autonomously"
+    );
 }

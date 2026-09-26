@@ -154,8 +154,9 @@ fn profile_yaml_for(name: &str, ex: &LegacyExec) -> String {
         },
         soul: SoulRequirement::Any,
         skills: Vec::new(),
-        // Legacy schema-1 executors predate hermetic isolation.
-        hermetic: false,
+        environment: None,
+        hermetic: None,
+        zcode_mode: None,
     };
     serde_yaml_ng::to_string(&doc).unwrap_or_default()
 }
@@ -671,7 +672,7 @@ pub fn apply(root: &Path, plan: &MigrationPlan, backup_ts: u64) -> Result<(), Mi
         let id_dir = root.join(".apb/playbooks").join(&u.id);
         let src_ver = id_dir.join(&u.from_version);
         if src_ver.is_dir() {
-            copy_dir(
+            crate::fsutil::copy_tree(
                 &src_ver,
                 &backup.join("playbooks").join(&u.id).join(&u.from_version),
             )?;
@@ -730,27 +731,12 @@ pub fn apply(root: &Path, plan: &MigrationPlan, backup_ts: u64) -> Result<(), Mi
         // ALWAYS moved - otherwise a repeated apply after a failure would
         // leave current on schema 1.
         if !dst_ver.exists() {
-            copy_dir(&src_ver, &dst_ver)?;
+            crate::fsutil::copy_tree(&src_ver, &dst_ver)?;
             if let Some((_nv, yaml)) = plan.rewritten.get(&(u.id.clone(), u.from_version.clone())) {
                 crate::fsutil::atomic_write(&dst_ver.join("playbook.yaml"), yaml.as_bytes())?;
             }
         }
         crate::fsutil::atomic_write(&id_dir.join("current"), u.new_version.as_bytes())?;
-    }
-    Ok(())
-}
-
-fn copy_dir(src: &Path, dst: &Path) -> std::io::Result<()> {
-    std::fs::create_dir_all(dst)?;
-    for entry in std::fs::read_dir(src)? {
-        let entry = entry?;
-        let from = entry.path();
-        let to = dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            copy_dir(&from, &to)?;
-        } else {
-            std::fs::copy(&from, &to)?;
-        }
     }
     Ok(())
 }

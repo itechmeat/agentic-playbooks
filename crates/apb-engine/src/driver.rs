@@ -24,7 +24,28 @@ use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use apb_core::fsutil::atomic_write;
+use apb_core::fsutil::atomic_write_under;
+
+use crate::error::EngineError;
+
+/// Fails once the run directory is gone (a deleted run or workspace). Every
+/// waiting loop checks it, because a missing journal reads as empty and
+/// appends go to the unlinked file, so a parked driver would otherwise poll
+/// forever; and every post into a run (control, answers, reviews, signals)
+/// checks it instead of creating the directory, so a late command never
+/// brings a deleted run back. Writes of the run's own state files go through
+/// `apb_core::fsutil::atomic_write_under` with the run directory as anchor,
+/// for the same reason.
+pub(crate) fn ensure_run_dir(run_dir: &Path) -> Result<(), EngineError> {
+    if run_dir.is_dir() {
+        Ok(())
+    } else {
+        Err(EngineError::NotFound(format!(
+            "run directory {} was removed",
+            run_dir.display()
+        )))
+    }
+}
 
 /// File inside `runs/<id>` naming the OS process currently driving the run.
 pub const DRIVER_PID_FILE: &str = "driver.pid";
@@ -72,7 +93,7 @@ pub fn read_driven_by(run_dir: &Path) -> Option<String> {
 ///
 /// `DriverPidGuard::claim` runs inside the child, and a full exec easily takes
 /// a hundred milliseconds to get there. For that whole window `driver.pid` did
-/// not exist, so `liveness::driver_is_live` reported no driver and a `stop_run`
+/// not exist, so `liveness::driver_alive` reported no driver and a `stop_run`
 /// landing in it took the dead-run branch: it finalized a run whose driver was
 /// only just starting, and the child then executed the whole run past its own
 /// terminal `RunAborted`. A caller that gets a run_id back and stops the run
@@ -86,7 +107,7 @@ pub fn read_driven_by(run_dir: &Path) -> Option<String> {
 /// because its pid could not be published.
 pub fn publish_driver_pid(run_dir: &Path, pid: u32) {
     let path = driver_pid_path(run_dir);
-    if let Err(e) = atomic_write(&path, pid.to_string().as_bytes()) {
+    if let Err(e) = atomic_write_under(run_dir, &path, pid.to_string().as_bytes()) {
         eprintln!(
             "apb: warning: could not write {}: a stop issued before the driver starts may finalize this run as dead: {e}",
             path.display()
@@ -115,7 +136,9 @@ impl DriverPidGuard {
     /// the drive either way.
     pub(crate) fn claim(run_dir: &Path) -> Self {
         let path = driver_pid_path(run_dir);
-        if let Err(e) = atomic_write(&path, std::process::id().to_string().as_bytes()) {
+        if let Err(e) =
+            atomic_write_under(run_dir, &path, std::process::id().to_string().as_bytes())
+        {
             // A live drive with no driver.pid is the one state in which every
             // liveness consumer is wrong in the dangerous direction:
             // `stop_run` sees no driver and finalizes a run that is still
@@ -162,7 +185,7 @@ impl NestedDriveGuard {
         let driver_pid = driver_pid_path(run_dir);
         // Drop a misleading parent-process claim if one is present.
         let _ = std::fs::remove_file(&driver_pid);
-        if let Err(e) = atomic_write(&driven_by, parent_run_id.as_bytes()) {
+        if let Err(e) = atomic_write_under(run_dir, &driven_by, parent_run_id.as_bytes()) {
             eprintln!(
                 "apb: warning: could not write {}: this nested child is invisible to parent-driven liveness checks: {e}",
                 driven_by.display()
@@ -220,30 +243,7 @@ pub fn spawn_detached_driver(
     resume: bool,
     allow_environment_drift: bool,
 ) -> io::Result<u32> {
-    let exe = std::env::current_exe()?;
-    spawn_driver_at(
-        &exe,
-        root,
-        run_id,
-        from_node,
-        resume,
-        allow_environment_drift,
-    )
-}
-
-/// `spawn_detached_driver` against an explicitly named driver binary, for
-/// callers that know where `apb` lives rather than being it. Production code
-/// wants `spawn_detached_driver`; this exists because `current_exe()` inside a
-/// test binary is the test harness, so the detached path can only be exercised
-/// end-to-end by naming the real binary.
-pub fn spawn_driver_at(
-    exe: &Path,
-    root: &Path,
-    run_id: &str,
-    from_node: Option<&str>,
-    resume: bool,
-    allow_environment_drift: bool,
-) -> io::Result<u32> {
+    let exe = apb_core::fsutil::reexec_exe()?;
     // The child gets an absolute root: it starts from a different working
     // directory context and must not have to guess what a relative path meant
     // to the parent.

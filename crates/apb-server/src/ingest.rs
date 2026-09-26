@@ -536,8 +536,27 @@ fn flat(status: StatusCode) -> Response {
 /// address (the forwarded one behind a trusted proxy, so a ban lands on the
 /// sender rather than on the proxy), the connector and the account, and
 /// nothing else: no header, no body, no secret.
+///
+/// The connector and account come from the request path, percent-decoded, so
+/// each is logged only when it is a valid name (the same check
+/// [`resolve_target`] applies) and as `-` otherwise: a segment carrying a
+/// newline must not be able to end this record and write another one that
+/// names some other address.
 fn log_rejected(client: IpAddr, connector: &str, account: &str) {
-    eprintln!("apb ingest_rejected ip={client} connector={connector} account={account}");
+    fn loggable(segment: &str) -> &str {
+        if apb_core::registry::is_safe_segment(segment)
+            && apb_core::profile::validate_profile_name(segment).is_ok()
+        {
+            segment
+        } else {
+            "-"
+        }
+    }
+    eprintln!(
+        "apb ingest_rejected ip={client} connector={} account={}",
+        loggable(connector),
+        loggable(account)
+    );
 }
 
 /// `GET /hooks/{connector}/{account}`: the verification handshake. Only

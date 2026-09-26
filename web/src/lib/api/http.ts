@@ -7,9 +7,11 @@
 // can act on. Both live in `../auth.svelte`, which imports nothing from here.
 
 import { apiHeaders, markUnauthenticated } from '../auth.svelte'
+import { BUILD_HEADER, noteServerBuild } from '../buildcheck'
 
 export async function getJson<T>(url: string): Promise<T> {
   const res = await fetch(url, { headers: apiHeaders() })
+  noteServerBuild(res.headers.get(BUILD_HEADER))
   if (!res.ok) {
     if (res.status === 401) markUnauthenticated()
     throw new ApiError(`${url}: HTTP ${res.status}`, res.status)
@@ -37,6 +39,7 @@ export class ApiError extends Error {
 export async function requestJson<T>(url: string, init: RequestInit): Promise<T> {
   const headers = apiHeaders(init.headers as Record<string, string> | undefined)
   const res = await fetch(url, { ...init, headers })
+  noteServerBuild(res.headers.get(BUILD_HEADER))
   if (!res.ok) {
     if (res.status === 401) markUnauthenticated()
     const err = await errorMessage(res)
@@ -54,9 +57,25 @@ export async function errorMessage(
   try {
     const body = JSON.parse(text) as {
       error?: string
+      policy?: string
       codes?: string[]
       message?: string
       detail?: string
+      [field: string]: unknown
+    }
+    // A run gate refusal (`apb_engine::gate::check_run`) carries `policy`
+    // instead of `error`, plus the list it is about (missing requirements,
+    // unapproved connectors or accounts, untrusted profiles).
+    if (body.policy) {
+      const lists = ['missing', 'connectors', 'accounts', 'profiles']
+        .flatMap((k) => (Array.isArray(body[k]) ? (body[k] as unknown[]) : []))
+        .map(String)
+      const what = body.detail ?? (lists.length ? lists.join(', ') : undefined)
+      return {
+        message: `${url}: run refused (${body.policy})${what ? `: ${what}` : ''}`,
+        code: body.policy,
+        detail: body.detail,
+      }
     }
     const meta = { code: body.error, detail: body.detail }
     if (body.error === 'validation' && body.codes?.length) {

@@ -248,6 +248,111 @@ fn human_review_entry_event_carries_prompt() {
     assert_eq!(result.outcome, RunStatus::Succeeded);
 }
 
+/// A driver parked on an undecided gate must stop once its run directory is
+/// deleted (a removed workspace), instead of polling every 50 ms forever and
+/// appending `ReviewRequested` into an unlinked journal.
+#[test]
+fn a_gate_waiting_driver_stops_when_its_run_dir_is_deleted() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), WF_REVIEW);
+    let (tx, rx) = mpsc::channel();
+    let root = dir.path().to_path_buf();
+    std::thread::spawn(move || {
+        let _ = tx.send(run(&root, "rev", None, RunOptions::default()).map(|r| r.outcome));
+    });
+    let run_dir = latest_run_dir(dir.path());
+    poll_until("review_requested", || {
+        read_all(&run_dir)
+            .ok()?
+            .iter()
+            .any(|e| matches!(&e.payload, EventPayload::ReviewRequested { .. }))
+            .then_some(())
+    });
+    fs::remove_dir_all(dir.path()).unwrap();
+    let outcome = rx
+        .recv_timeout(POLL_DEADLINE)
+        .expect("the driver kept polling a deleted run dir");
+    assert!(
+        !matches!(outcome, Ok(RunStatus::Succeeded)),
+        "got: {outcome:?}"
+    );
+}
+
+const WF_WORK_THEN_GATE: &str = r#"
+schema: 1
+id: rev
+name: Review
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: work, type: script, script: "scripts/work.sh", runner: sh }
+  - { id: gate, type: human_review, options: [approved, rejected] }
+  - { id: ok, type: finish, outcome: success }
+  - { id: no, type: finish, outcome: failure }
+edges:
+  - { from: start, to: work }
+  - { from: work, to: gate }
+  - { from: gate, to: ok, condition: { type: review_status, equals: approved } }
+  - { from: gate, to: no, condition: { type: review_status, equals: rejected } }
+"#;
+
+/// A supervisor that sees a bad result only once the run is parked on the
+/// gate after it sends `node_retry` for the earlier node (field report,
+/// 2026-09-12). The parked driver must act on it: withdraw the open review,
+/// re-run the node, and ask for the review again when the gate is reached
+/// anew. It used to leave the directive unconsumed until a wake that a gate
+/// never raises, so the run sat on the stale review forever.
+#[test]
+fn a_retry_posted_while_parked_on_a_gate_reruns_the_node_and_asks_again() {
+    use apb_engine::control::{Control, post_control};
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path(), WF_WORK_THEN_GATE);
+    let scripts = dir.path().join(".apb/playbooks/rev/1.0.0/scripts");
+    fs::create_dir_all(&scripts).unwrap();
+    fs::write(scripts.join("work.sh"), "echo worked\n").unwrap();
+    let rx = run_in_background(dir.path());
+    let run_dir = latest_run_dir(dir.path());
+    let requests = |run_dir: &Path| {
+        read_all(run_dir)
+            .map(|evs| {
+                evs.iter()
+                    .filter(|e| matches!(&e.payload, EventPayload::ReviewRequested { .. }))
+                    .count()
+            })
+            .unwrap_or(0)
+    };
+    poll_until("first review request", || {
+        (requests(&run_dir) == 1).then_some(())
+    });
+    post_control(
+        &run_dir,
+        Control::Retry {
+            node: "work".into(),
+            prompt_override: None,
+        },
+    )
+    .unwrap();
+    poll_until("the review asked again after the retry", || {
+        (requests(&run_dir) == 2).then_some(())
+    });
+    post_review(
+        &run_dir,
+        ReviewCommand {
+            node: "gate".into(),
+            decision: "approved".into(),
+            note: String::new(),
+        },
+    )
+    .unwrap();
+    assert_eq!(wait_result(&rx).outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    let work_runs = events
+        .iter()
+        .filter(|e| matches!(&e.payload, EventPayload::NodeFinished { node, .. } if node == "work"))
+        .count();
+    assert_eq!(work_runs, 2, "the retried node ran again");
+}
+
 #[test]
 fn output_match_routes_on_substring() {
     let dir = tempfile::tempdir().unwrap();

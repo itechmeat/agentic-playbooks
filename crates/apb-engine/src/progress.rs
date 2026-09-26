@@ -15,6 +15,7 @@ use crate::state::{NodeStatus, RunState, RunStatus};
 /// The kind of node a run is waiting on. Serializes to the same strings the web
 /// badge matches on (`"human_review"` / `"wait"`); the enum gives the fold
 /// compile-time exhaustiveness instead of a free-form string.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum WaitingKind {
@@ -35,6 +36,7 @@ pub enum WaitingKind {
 /// from the `questions.jsonl` / `answers.jsonl` channel files directly
 /// (`pending_question_for_run`), not from the event log, so it is visible
 /// even before drive journals `QuestionAsked` for it.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingQuestion {
     pub node: String,
@@ -60,11 +62,13 @@ pub struct PendingQuestion {
 /// it. It exists so an intermediary that reads `run_status` is forced to see
 /// that a decision is expected, what the options are, and how to answer -
 /// rather than the run silently waiting forever.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingReview {
     pub node: String,
     /// The gate node's title from the playbook, when it has one.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub title: Option<String>,
     /// A single self-contained owner-facing line: names the gate, its options,
     /// and how to decide. This is the text a supervising agent relays verbatim.
@@ -80,6 +84,7 @@ pub struct PendingReview {
     /// shows it above the options). Already folded into `instruction` too.
     /// Template placeholders inside are NOT rendered - literal text.
     #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
     pub prompt: Option<String>,
 }
 
@@ -114,11 +119,7 @@ pub fn review_instruction(
         .map(str::trim)
         .filter(|t| !t.is_empty())
         .unwrap_or(node_id);
-    let opts = if options.is_empty() {
-        "approve or reject".to_string()
-    } else {
-        options.join(", ")
-    };
+    let opts = apb_core::schema::effective_review_options(options).join(", ");
     let guidance = prompt
         .map(str::trim)
         .filter(|p| !p.is_empty())
@@ -147,7 +148,7 @@ pub fn pending_review(
             .filter(|t| !t.is_empty())
             .map(str::to_string),
         instruction: review_instruction(node_id, title, options, prompt),
-        options: options.to_vec(),
+        options: apb_core::schema::effective_review_options(options),
         how_to_decide: review_how_to_decide(node_id),
         prompt: prompt
             .map(str::trim)
@@ -194,6 +195,7 @@ pub fn supervisor_instruction(node_id: &str, trigger: &str) -> String {
 /// `Some(WaitingKind::Supervisor)` (issue #45 finding 4). Derived from the
 /// event log alone: a `WakeRaised` for node failure/timeout with no later
 /// resolving supervisor action and a non-terminal run.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct PendingSupervisor {
     pub node: String,
@@ -211,7 +213,8 @@ pub struct PendingSupervisor {
 /// progress notes do not. Abort/pause clear the pending state via their own
 /// terminal events (`RunAborted` / `RunPaused`), not via this action list.
 fn supervisor_action_resolves_wake(action: &str) -> bool {
-    matches!(action, "node_retry" | "run_continue_from")
+    use crate::event::supervisor_action::{NODE_RETRY, RUN_CONTINUE_FROM};
+    action == NODE_RETRY || action == RUN_CONTINUE_FROM
 }
 
 /// The outstanding failure/timeout wake, if the supervised driver is parked
@@ -283,6 +286,7 @@ pub fn pending_supervisor_decision(events: &[Event]) -> Option<PendingSupervisor
 }
 
 /// The run-progress summary surfaced by the server and MCP `run_status`.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Serialize)]
 pub struct ProgressSummary {
     pub percent: u8,
@@ -307,6 +311,18 @@ pub struct ProgressSummary {
     /// Some(WaitingKind::Supervisor)` (issue #45 finding 4). Populated by the
     /// pure fold from the event log alone.
     pub pending_supervisor: Option<PendingSupervisor>,
+    /// Every human-review gate currently waiting for a decision, in playbook
+    /// order. Parallel branches can park on several at once; the singular
+    /// `pending_review` names only the one `waiting_on` points at. The
+    /// dashboard renders a decision panel per entry.
+    pub pending_reviews: Vec<PendingReview>,
+    /// Every interactive node with an unanswered question, in playbook order
+    /// (read from the channel files, so only the `from_run_dir` family fills
+    /// it). The singular `pending_question` is the first of these.
+    pub pending_questions: Vec<PendingQuestion>,
+    /// Every `wait` node currently blocking on its timer or webhook, in
+    /// playbook order.
+    pub pending_waits: Vec<String>,
     /// Deterministic identity of the work plan behind this percent (spec
     /// section 3): the playbook version bound to the run plus the latest
     /// reported `total` of each cyclic group. It changes exactly when a report
@@ -385,31 +401,35 @@ fn sccs(playbook: &Playbook) -> Vec<Vec<String>> {
 /// `legacy_snapshot::load_run_playbook` for the full doc comment.
 pub use crate::legacy_snapshot::load_run_playbook;
 
-/// The first interactive `agent_task` node with a pending question, read
+/// Every interactive `agent_task` node with a pending question, read
 /// directly from the `questions.jsonl` / `answers.jsonl` channel files
 /// (spec 2026-07-20-interactive-nodes) rather than the event log, so it is
 /// visible even before drive journals `QuestionAsked` for it (the live
 /// transport in a later task depends on this exact property). Node order
 /// follows `playbook.nodes`, giving a deterministic pick when more than one
 /// interactive node happens to be pending at once.
-fn pending_question_for_run(
+fn pending_questions_for_run(
     run_dir: &Path,
     playbook: &Playbook,
     events: &[Event],
-) -> Option<PendingQuestion> {
-    playbook.nodes.iter().find_map(|n| {
-        if matches!(
-            n.kind,
-            NodeKind::AgentTask {
-                interactive: true,
-                ..
+) -> Vec<PendingQuestion> {
+    playbook
+        .nodes
+        .iter()
+        .filter_map(|n| {
+            if matches!(
+                n.kind,
+                NodeKind::AgentTask {
+                    interactive: true,
+                    ..
+                }
+            ) {
+                pending_question_for_node(run_dir, playbook, events, &n.id)
+            } else {
+                None
             }
-        ) {
-            pending_question_for_node(run_dir, playbook, events, &n.id)
-        } else {
-            None
-        }
-    })
+        })
+        .collect()
 }
 
 /// A single node's pending question, or `None` when every asked question has
@@ -568,7 +588,8 @@ pub fn from_run_dir_with_root(
     // pending question behind a self-resolving wait would be worse than
     // always showing it, so this never narrows to "only override when
     // nothing else is waiting".
-    if let Some(pq) = pending_question_for_run(run_dir, &pb, events) {
+    summary.pending_questions = pending_questions_for_run(run_dir, &pb, events);
+    if let Some(pq) = summary.pending_questions.first().cloned() {
         summary.waiting_on = Some(pq.node.clone());
         summary.waiting_kind = Some(WaitingKind::Question);
         summary.pending_question = Some(pq);
@@ -606,7 +627,7 @@ pub fn from_run_dir_with_root(
         // progress this poll) rather than failing the parent's status read.
         // Unlike `map_child_outcome`/`run_is_terminal`, no correctness or
         // terminality choice hinges on it, so `unwrap_or_default` is deliberate.
-        let child_events = crate::event::read_all(&child_dir).unwrap_or_default();
+        let child_events = crate::event::read_all_lossy_tail(&child_dir).unwrap_or_default();
         if let Some(cp) = from_run_dir_with_root(root, &child_dir, &child_events) {
             extra += (cp.percent as u128) * (n.expected_seconds() as u128) / 100;
         }
@@ -798,19 +819,38 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     // The counters themselves live in `event` (issue #103.1), shared with the
     // decision channel's own pending check, so the two surfaces cannot drift
     // on what "pending" means.
-    let review_pending = |id: &str| {
-        crate::event::review_requested_count(events, id)
-            > crate::event::review_decided_count(events, id)
-    };
-    let waiting = playbook.nodes.iter().find_map(|n| match &n.kind {
-        NodeKind::HumanReview { .. } if review_pending(&n.id) => {
-            Some((n.id.clone(), WaitingKind::HumanReview))
-        }
-        NodeKind::Wait { .. } if status(&n.id) == NodeStatus::Running => {
-            Some((n.id.clone(), WaitingKind::Wait))
-        }
-        _ => None,
-    });
+    let review_pending = |id: &str| crate::event::review_open_count(events, id) > 0;
+    let open_gates: Vec<(&apb_core::schema::Node, WaitingKind)> = playbook
+        .nodes
+        .iter()
+        .filter_map(|n| match &n.kind {
+            NodeKind::HumanReview { .. } if review_pending(&n.id) => {
+                Some((n, WaitingKind::HumanReview))
+            }
+            NodeKind::Wait { .. } if status(&n.id) == NodeStatus::Running => {
+                Some((n, WaitingKind::Wait))
+            }
+            _ => None,
+        })
+        .collect();
+    let pending_reviews: Vec<PendingReview> = open_gates
+        .iter()
+        .filter_map(|(n, _)| match &n.kind {
+            NodeKind::HumanReview { options, prompt } => Some(pending_review(
+                &n.id,
+                n.title.as_deref(),
+                options,
+                prompt.as_deref(),
+            )),
+            _ => None,
+        })
+        .collect();
+    let pending_waits: Vec<String> = open_gates
+        .iter()
+        .filter(|(_, k)| *k == WaitingKind::Wait)
+        .map(|(n, _)| n.id.clone())
+        .collect();
+    let waiting = open_gates.first().map(|(n, k)| (n.id.clone(), *k));
     let mut waiting_on = waiting.as_ref().map(|(id, _)| id.clone());
     let mut waiting_kind = waiting.map(|(_, kind)| kind);
 
@@ -818,18 +858,8 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     // actually waiting on a human_review gate. Built from the node's title and
     // options in the snapshot, so a `run_status` reader is forced to see the
     // decision, the options, and how to answer.
-    let pending_review = match (&waiting_on, waiting_kind) {
-        (Some(id), Some(WaitingKind::HumanReview)) => {
-            playbook.node(id).and_then(|n| match &n.kind {
-                NodeKind::HumanReview { options, prompt } => Some(pending_review(
-                    id,
-                    n.title.as_deref(),
-                    options,
-                    prompt.as_deref(),
-                )),
-                _ => None,
-            })
-        }
+    let pending_review = match waiting_kind {
+        Some(WaitingKind::HumanReview) => pending_reviews.first().cloned(),
         _ => None,
     };
 
@@ -871,6 +901,9 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
         pending_question: None,
         pending_review,
         pending_supervisor,
+        pending_reviews,
+        pending_questions: Vec::new(),
+        pending_waits,
         plan_key,
     }
 }
@@ -1211,6 +1244,106 @@ edges:
             "got: {}",
             pr.instruction
         );
+    }
+
+    /// F17: a gate that declares no options (an empty list, or the key left
+    /// out) is decided with the default approve/reject. The pending block every
+    /// surface renders its buttons from must list them, or the gate cannot be
+    /// decided from the dashboard.
+    #[test]
+    fn pending_review_of_a_gate_without_options_offers_the_defaults() {
+        for gate in [
+            "{ id: r, type: human_review, options: [] }",
+            "{ id: r, type: human_review }",
+        ] {
+            let pb = Playbook::from_yaml(&format!(
+                "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: {{ profile: x }}\n\
+                 nodes:\n  - {{ id: s, type: start }}\n  - {gate}\n  - {{ id: f, type: finish, outcome: success }}\n\
+                 edges:\n  - {{ from: s, to: r }}\n  - {{ from: r, to: f }}\n"
+            ))
+            .unwrap_or_else(|e| panic!("{gate}: {e}"));
+            let events = vec![
+                ev(
+                    0,
+                    EventPayload::RunStarted {
+                        playbook: "p".into(),
+                        version: "1.0.0".into(),
+                    },
+                ),
+                ev(
+                    1,
+                    EventPayload::ReviewRequested {
+                        node: "r".into(),
+                        options: vec![],
+                        title: None,
+                        instruction: String::new(),
+                        prompt: None,
+                    },
+                ),
+            ];
+            let pr = compute(&pb, &events)
+                .pending_review
+                .expect("pending_review must be Some");
+            assert_eq!(pr.options, ["approve", "reject"], "{gate}");
+        }
+    }
+
+    /// Parallel branches can park on several gates at once. The dashboard
+    /// renders one panel per open gate from these lists (it no longer counts
+    /// events itself), so every open gate must be listed, not only the one
+    /// `waiting_on` names.
+    #[test]
+    fn every_open_gate_is_listed() {
+        let pb = Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n\
+             \x20 - { id: s, type: start }\n\
+             \x20 - { id: r1, type: human_review, options: [ok] }\n\
+             \x20 - { id: r2, type: human_review }\n\
+             \x20 - { id: w, type: wait, wait_for: { type: timer, seconds: 5 }, timeout_seconds: 60 }\n\
+             \x20 - { id: f, type: finish, outcome: success }\n\
+             edges:\n  - { from: s, to: r1 }\n  - { from: s, to: r2 }\n  - { from: s, to: w }\n\
+             \x20 - { from: r1, to: f }\n  - { from: r2, to: f }\n  - { from: w, to: f }\n",
+        )
+        .unwrap();
+        let requested = |node: &str| EventPayload::ReviewRequested {
+            node: node.into(),
+            options: vec![],
+            title: None,
+            instruction: String::new(),
+            prompt: None,
+        };
+        let events: Vec<Event> = [
+            EventPayload::RunStarted {
+                playbook: "p".into(),
+                version: "1.0.0".into(),
+            },
+            requested("r1"),
+            requested("r2"),
+            EventPayload::NodeStarted {
+                node: "w".into(),
+                attempt: 1,
+            },
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(i, p)| ev(i as u64, p))
+        .collect();
+        let p = compute(&pb, &events);
+        let reviews: Vec<(&str, Vec<String>)> = p
+            .pending_reviews
+            .iter()
+            .map(|r| (r.node.as_str(), r.options.clone()))
+            .collect();
+        assert_eq!(
+            reviews,
+            [
+                ("r1", vec!["ok".to_string()]),
+                ("r2", vec!["approve".to_string(), "reject".to_string()])
+            ]
+        );
+        assert_eq!(p.pending_waits, ["w"]);
+        assert_eq!(p.waiting_on.as_deref(), Some("r1"));
+        assert_eq!(p.pending_review.map(|r| r.node).as_deref(), Some("r1"));
     }
 
     #[test]

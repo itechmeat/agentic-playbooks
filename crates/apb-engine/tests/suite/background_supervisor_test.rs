@@ -70,7 +70,7 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
 fn agent_stub(dir: &Path, invocation_file: &Path) -> String {
     let path = dir.join("agent_stub.sh");
     let body = format!(
-        "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo '---end---'; }} >> '{}'\n",
+        "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo \"MCP_TOOL_TIMEOUT=$MCP_TOOL_TIMEOUT\"; echo \"APB_MCP_ROLE=$APB_MCP_ROLE\"; echo '---end---'; }} >> '{}'\n",
         invocation_file.display()
     );
     common::write_sync(&path, &body);
@@ -147,7 +147,7 @@ edges:
   - { from: p1, to: done }
 "#;
 
-// Scenario 1: initial spawn of the background agent when run_background(supervisor_expected:true,
+// Scenario 1: initial spawn of the background agent when run_background(mode: AgentSupervised,
 // Supervised). The brief (passed to the stub via -p) must contain the run_id, a token
 // of format `sv-...`, and the playbook id; a persisted session must exist on disk,
 // resolvable by this token via find_session_by_token.
@@ -165,8 +165,7 @@ fn initial_spawn_writes_brief_and_persists_session() {
     }
 
     let opts = RunOptions {
-        mode: RunMode::Supervised,
-        supervisor_expected: true,
+        mode: RunMode::AgentSupervised,
         ..Default::default()
     };
     let run_id = run_background(dir.path(), "bgspv1", None, opts).unwrap();
@@ -216,8 +215,18 @@ fn initial_spawn_writes_brief_and_persists_session() {
         .expect("brief must contain the sv- supervisor token");
     let token: String = content[start..]
         .chars()
-        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-')
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
         .collect();
+    // The token is the supervisor's only credential: 32 bytes from the OS
+    // CSPRNG in unpadded base64url, never a clock reading or a counter.
+    let body = token.strip_prefix("sv-").expect("sv- prefix");
+    assert!(
+        body.len() == 43
+            && body
+                .bytes()
+                .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
+        "supervisor token must be 256 random bits in base64url, got `{token}`"
+    );
     let (found_run_id, caps) = find_session_by_token(dir.path(), &token)
         .unwrap()
         .expect("find_session_by_token must resolve the freshly minted token");
@@ -243,6 +252,25 @@ fn initial_spawn_writes_brief_and_persists_session() {
     assert!(
         content.contains("-p"),
         "brief must be passed via -p:\n{content}"
+    );
+    // Token economy: the brief asks for a long server-side wait and says a
+    // timed-out wait is only a re-call, and the spawn lifts Claude Code's MCP
+    // tool timeout so that long wait is not cut short by the host.
+    assert!(
+        content.contains("timeout_ms ") && content.contains("reason `timeout`"),
+        "brief must set the long-wait discipline:\n{content}"
+    );
+    if std::env::var_os("MCP_TOOL_TIMEOUT").is_none() {
+        let want = format!(
+            "MCP_TOOL_TIMEOUT={}",
+            apb_engine::adapter::SUPERVISOR_MCP_TOOL_TIMEOUT_MS
+        );
+        assert!(content.contains(&want), "spawn must set {want}:\n{content}");
+    }
+    // Its `apb mcp` inherits this and serves only the supervisor's tools.
+    assert!(
+        content.contains("APB_MCP_ROLE=supervisor"),
+        "spawn must mark the supervisor's MCP role:\n{content}"
     );
 }
 
@@ -290,7 +318,7 @@ fn seed_sup_profile(root: &Path, name: &str, executor: &str, soul: &str) {
 // A pipeline WITHOUT a supervisor section - only defaults.profile. `--supervise`
 // must still bring up the agent from defaults.profile (completion-plan Task 9).
 // WITHOUT a supervisor section - only defaults.profile. Under --supervise
-// (supervisor_expected: true) the supervisor binding is taken from defaults.profile
+// (RunMode::AgentSupervised) the supervisor binding is taken from defaults.profile
 // precisely because the run is actually supervised (mode-gated). An autonomous
 // run of the same playbook does NOT create the binding (review P2).
 const WF_DEFAULTS_ONLY: &str = r#"
@@ -334,8 +362,7 @@ fn supervise_with_defaults_profile_only_spawns_and_delivers_soul() {
     }
 
     let opts = RunOptions {
-        mode: RunMode::Supervised,
-        supervisor_expected: true,
+        mode: RunMode::AgentSupervised,
         ..Default::default()
     };
     let run_id = run_background(dir.path(), "bgspv3", None, opts).unwrap();
@@ -407,7 +434,7 @@ edges:
     fs::write(
         &claude_stub,
         format!(
-            "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo '---end---'; }} >> '{}'\n",
+            "#!/bin/sh\n{{ for a in \"$@\"; do printf '%s\\n' \"$a\"; done; echo \"MCP_TOOL_TIMEOUT=$MCP_TOOL_TIMEOUT\"; echo \"APB_MCP_ROLE=$APB_MCP_ROLE\"; echo '---end---'; }} >> '{}'\n",
             invocation_file.display()
         ),
     )
@@ -427,8 +454,7 @@ edges:
     }
 
     let opts = RunOptions {
-        mode: RunMode::Supervised,
-        supervisor_expected: true,
+        mode: RunMode::AgentSupervised,
         ..Default::default()
     };
     let run_id = run_background(dir.path(), "bgspv4", None, opts).unwrap();
@@ -475,8 +501,7 @@ fn heartbeat_lost_triggers_single_respawn() {
     }
 
     let opts = RunOptions {
-        mode: RunMode::Supervised,
-        supervisor_expected: true,
+        mode: RunMode::AgentSupervised,
         ..Default::default()
     };
     let run_id = run_background(dir.path(), "bgspv2", None, opts).unwrap();

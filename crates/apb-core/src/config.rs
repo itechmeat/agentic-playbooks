@@ -5,6 +5,11 @@ use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
 
+/// The dashboard's port when neither `--port` nor `port:` in the global
+/// config names one. The web dev server proxies to it too (generated into
+/// `web/src/lib/api.gen.ts`).
+pub const DEFAULT_PORT: u16 = 7321;
+
 /// Global CLI config (`~/.config/playbook/config.yaml`, spec 4.2 / 7.1).
 /// Describes coding agents (id -> launch command), the runner registry (8d),
 /// and the web server port. Executors are bound through profiles (schema 2),
@@ -51,6 +56,34 @@ pub struct GlobalConfig {
     /// Absent section means disabled, which is the historical behavior: apb
     /// opens no inbound port unless an operator asks for one.
     pub ingest: IngestConfig,
+    /// The user's rules for which models profiles may use (e.g. "keep routine
+    /// work on a smaller model"), enforced by `apb validate`, `apb doctor` and the adoption
+    /// report (`crate::model_check`). Empty means no rule.
+    pub model_policy: Vec<ModelRule>,
+}
+
+/// One `model_policy` rule: for `agent` (and, with `when`, only its models
+/// matching that glob), a profile model must match one of the `allow` globs.
+/// Globs match case-insensitively; an `@effort` suffix is ignored.
+///
+/// ```yaml
+/// model_policy:
+///   - agent: claude
+///     allow: ["*sonnet*", "*haiku*"]
+///     reason: keep routine work on a smaller model
+///   - agent: opencode
+///     when: "anthropic/*"
+///     allow: ["*haiku*"]
+/// ```
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ModelRule {
+    pub agent: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub when: Option<String>,
+    pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Transport used to communicate with the agent (spec 7.2).
@@ -119,7 +152,12 @@ pub enum Interaction {
 #[serde(deny_unknown_fields)]
 pub struct InvocationDef {
     /// Argument template (without the program name). Placeholders:
-    /// `{prompt}`, `{model}`.
+    /// `{prompt}`, `{model}`. A `--` element right before `{prompt}` marks the
+    /// prompt as a trailing positional: the engine emits `-- <prompt>` last,
+    /// after every flag it appends (SOUL, autonomy, session), so a prompt that
+    /// starts with `-` is never parsed as an option. Without that marker the
+    /// prompt is taken to be an option's value, and a dash-led prompt is sent
+    /// with a leading newline instead.
     pub argv: Vec<String>,
     #[serde(default)]
     pub prompt_via: PromptVia,
@@ -199,7 +237,7 @@ impl InvocationDef {
 
 /// Description of a coding agent. Binary program, transport, and
 /// (optionally) invocation form; when `invocation` is absent for the
-/// built-in nine, a default is used (see `apb_engine::invocation::builtin`).
+/// built-in ten, a default is used (see `apb_engine::invocation::builtin`).
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct AgentDef {
@@ -213,7 +251,7 @@ pub struct AgentDef {
     #[serde(default)]
     pub invocation: Option<InvocationDef>,
     /// Enable presence detection for this custom agent (spec 7). The
-    /// built-in nine are always probed; a custom agent only with
+    /// built-in ten are always probed; a custom agent only with
     /// `probe: true`.
     #[serde(default)]
     pub probe: Option<bool>,
@@ -303,8 +341,21 @@ impl GlobalConfig {
             return Ok(Self::default());
         }
         let raw = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-        serde_yaml_ng::from_str(&raw)
-            .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))
+        let cfg: Self = serde_yaml_ng::from_str(&raw)
+            .map_err(|e| format!("invalid global config `{}`: {e}", path.display()))?;
+        // A policy glob that does not compile would match nothing and refuse
+        // every model its rule covers: report it where it is written instead.
+        for (i, rule) in cfg.model_policy.iter().enumerate() {
+            for g in rule.when.iter().chain(&rule.allow) {
+                if let Err(e) = globset::Glob::new(g) {
+                    return Err(format!(
+                        "invalid global config `{}`: model_policy[{i}]: bad glob `{g}`: {e}",
+                        path.display()
+                    ));
+                }
+            }
+        }
+        Ok(cfg)
     }
 
     /// Launch command for agent `id`, if it's described in the config.
@@ -423,6 +474,13 @@ pub struct ServerConfig {
     /// and restores the immediate refusal (HTTP 429), which is the right
     /// setting only where the caller is a human who can retry.
     pub workdir_queue_wait_seconds: Option<u64>,
+    /// Extra host names a KEYLESS dashboard answers besides its loopback
+    /// names and the host of `public_base_url`: a local proxy or tailnet name
+    /// in front of a loopback dashboard. A bare name (`apb.lan`) or
+    /// `name:port`. Any other `Host` gets 403 (DNS-rebinding protection). A
+    /// dashboard with API keys authenticates every request and does not
+    /// consult it.
+    pub allowed_hosts: Vec<String>,
 }
 
 /// How long an admitted run waits for the shared workdir by default.
@@ -455,6 +513,36 @@ impl ServerConfig {
                 .parse::<IpAddr>()
                 .map_err(|e| format!("invalid bind address `{raw}`: {e}")),
         }
+    }
+
+    /// The configured host names a keyless dashboard answers (lowercase):
+    /// the host of `public_base_url` (its authority, and the bare name) plus
+    /// every `allowed_hosts` entry.
+    pub fn allowed_host_names(&self) -> BTreeSet<String> {
+        let mut out: BTreeSet<String> = self
+            .allowed_hosts
+            .iter()
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| !h.is_empty())
+            .collect();
+        if let Some(url) = self.public_base_url.as_deref() {
+            let rest = url.trim().split_once("://").map_or(url.trim(), |(_, r)| r);
+            let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+            let authority = authority
+                .rsplit('@')
+                .next()
+                .unwrap_or("")
+                .to_ascii_lowercase();
+            if !authority.is_empty() {
+                let name = match authority.strip_prefix('[') {
+                    Some(v6) => v6.split(']').next().unwrap_or("").to_string(),
+                    None => authority.split(':').next().unwrap_or("").to_string(),
+                };
+                out.insert(authority);
+                out.insert(name);
+            }
+        }
+        out
     }
 
     /// `trusted_proxies` as parsed addresses. A CIDR range or any other

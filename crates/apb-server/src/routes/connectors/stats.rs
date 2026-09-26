@@ -46,7 +46,7 @@ impl ConnectorStatsAcc {
         let runs_dir = root.join(".apb/runs");
         for run in runs.iter().take(STATS_RUN_CAP) {
             self.runs_scanned += 1;
-            let Ok(events) = apb_engine::event::read_all(&runs_dir.join(&run.run_id)) else {
+            let Ok(events) = apb_engine::run_view::read_events(&runs_dir.join(&run.run_id)) else {
                 continue;
             };
             for event in &events {

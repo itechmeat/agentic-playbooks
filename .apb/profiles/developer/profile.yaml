@@ -1,9 +1,8 @@
 name: developer
 description: Senior Rust engineer for apb; strict TDD, gates, feature-branch only, no main commits.
-hermetic: true
 executor:
   agent: claude
-  model: claude-opus-4-8
+  model: claude-opus-5-5
   fallbacks: []
 soul: any
 skills:
@@ -13,3 +12,4 @@ skills:
   scope: auto
 - name: shadcn-svelte
   scope: auto
+hermetic: true

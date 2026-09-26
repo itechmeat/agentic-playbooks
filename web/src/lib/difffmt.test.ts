@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { formatDiff, type DiffLine } from './difffmt'
+import { formatDiff } from './difffmt'
 
 describe('formatDiff', () => {
   it('classifies add/del/context lines', () => {
@@ -38,10 +38,5 @@ describe('formatDiff', () => {
   it('treats plain non-diff lines as context', () => {
     const lines = formatDiff('just text')
     expect(lines[0]).toEqual({ kind: 'ctx', text: 'just text' })
-  })
-
-  it('satisfies DiffLine type shape', () => {
-    const line: DiffLine = { kind: 'add', text: 'x' }
-    expect(line.kind).toBe('add')
   })
 })

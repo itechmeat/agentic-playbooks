@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::registry::{Registry, RegistryError};
-use crate::versioning::{VersioningError, create_version_with_override, save_layout};
+use crate::versioning::{VersioningError, save_definition, save_layout};
 
 /// Errors for exporting/importing a playbook as a single file.
 #[derive(Debug, thiserror::Error)]
@@ -96,11 +96,10 @@ pub fn import_bundle(
     } else {
         Some(bundle.version.as_str())
     };
-    let assigned = create_version_with_override(
+    let assigned = save_definition(
         root,
         &bundle.id,
         &bundle.playbook,
-        None,
         version_override,
         make_current,
     )?;

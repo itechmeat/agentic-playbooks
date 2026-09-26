@@ -21,6 +21,9 @@ export interface ConnectorCard {
   trust: ConnectorTrust
   accountsTotal: number
   accountsReady: number
+  // The built-in version when the installed copy differs from the one embedded
+  // in the running apb (an upgrade shipped a fix, or the copy was edited).
+  updateAvailable: string | null
 }
 
 export interface ConnectorAccount {
@@ -32,6 +35,10 @@ export interface ConnectorAccount {
   // Names of env vars this account needs that do not currently resolve.
   // Never a value.
   missingEnv: string[]
+  // Secrets this account reads from a command, `field -> command line`.
+  // Approving the account lets apb run each command, so the approval row
+  // shows them. Never a secret value.
+  cmd: Record<string, string>
   trust: ConnectorTrust
 }
 
@@ -81,6 +88,8 @@ export interface ConnectorDetail {
   // connected yet. Everything else on this object is manifest-derived and is
   // populated either way.
   installed: boolean
+  // See ConnectorCard.updateAvailable.
+  updateAvailable: string | null
   trust: ConnectorTrust
   meta: ConnectorMeta
   bodyMd: string
@@ -117,10 +126,6 @@ export function accountReady(a: ConnectorAccount): boolean {
 export function deprecationReason(f: ConnectorFunction): string | null {
   const reason = f.deprecated?.trim()
   return reason ? reason : null
-}
-
-export function isDeprecated(f: ConnectorFunction): boolean {
-  return deprecationReason(f) !== null
 }
 
 // Section visibility on the connector detail page.

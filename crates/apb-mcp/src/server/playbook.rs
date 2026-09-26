@@ -202,15 +202,7 @@ impl WfMcp {
         &self,
         Parameters(PlaybookWriteArgs { id, yaml }): Parameters<PlaybookWriteArgs>,
     ) -> CallToolResult {
-        let res = tools::playbook_create(&self.root, &id, &yaml);
-        // Local creation via the tool = local approval (spec 3.1): such a
-        // playbook is trusted and passes the run gate without acknowledge.
-        if let Ok(v) = &res
-            && let Some(ver) = v["version"].as_str()
-        {
-            tools::approve_local(&self.root, &id, ver);
-        }
-        to_call_tool_result(res)
+        to_call_tool_result(tools::playbook_create(&self.root, &id, &yaml))
     }
 
     #[tool(
@@ -221,13 +213,7 @@ impl WfMcp {
         &self,
         Parameters(PlaybookWriteArgs { id, yaml }): Parameters<PlaybookWriteArgs>,
     ) -> CallToolResult {
-        let res = tools::playbook_update(&self.root, &id, &yaml);
-        if let Ok(v) = &res
-            && let Some(ver) = v["version"].as_str()
-        {
-            tools::approve_local(&self.root, &id, ver);
-        }
-        to_call_tool_result(res)
+        to_call_tool_result(tools::playbook_update(&self.root, &id, &yaml))
     }
 
     #[tool(
@@ -247,5 +233,31 @@ impl WfMcp {
             })));
         }
         to_call_tool_result(tools::playbook_delete(&self.root, &id))
+    }
+
+    #[tool(
+        description = "List the project's deleted playbooks (the trash), newest deletion first. Each entry has `name` (the handle playbook_trash_restore takes), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict`: true when a playbook with that id exists again, so a restore would be refused until it is deleted or renamed",
+        annotations(read_only_hint = true)
+    )]
+    pub(crate) async fn playbook_trash_list(
+        &self,
+        Parameters(WorkspaceArg { workspace }): Parameters<WorkspaceArg>,
+    ) -> CallToolResult {
+        let root = match self.effective_root(workspace.as_deref()) {
+            Ok(r) => r,
+            Err(e) => return to_call_tool_result(Ok(e)),
+        };
+        to_call_tool_result(tools::playbook_trash_list(&root))
+    }
+
+    #[tool(
+        description = "Restore a deleted playbook from the trash with all its versions. `name` is a trash entry name from playbook_trash_list or a playbook id (its latest deletion). The restored current version is approved like any save through apb when it has no scripts; with scripts it keeps the approval its digest already had. Refused with a conflict when a playbook with that id exists again; current workspace only",
+        annotations(destructive_hint = true)
+    )]
+    pub(crate) async fn playbook_trash_restore(
+        &self,
+        Parameters(TrashRestoreArgs { name }): Parameters<TrashRestoreArgs>,
+    ) -> CallToolResult {
+        to_call_tool_result(tools::playbook_trash_restore(&self.root, &name))
     }
 }

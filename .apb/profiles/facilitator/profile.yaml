@@ -1,9 +1,9 @@
 name: facilitator
 description: Interactive brainstorming facilitator and project-board operator for apb, no code changes.
-hermetic: true
 executor:
   agent: claude
-  model: claude-opus-4-8
+  model: claude-opus-5-5
   fallbacks: []
 soul: any
 skills: []
+hermetic: true

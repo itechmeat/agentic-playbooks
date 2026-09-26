@@ -7,6 +7,7 @@
 
 use std::path::Path;
 
+use apb_core::agent_catalog;
 use apb_core::detect::{self, AgentCategory, AuthKind, Authority};
 
 use crate::common::env_lock as lock;
@@ -113,7 +114,7 @@ fn detects_version_and_full_models_for_installed_aggregator() {
         "case \"$1\" in\n  --version) echo 9.9.9 ;;\n  models) printf 'prov/a\\nprov/b\\n' ;;\nesac",
     );
 
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let oc = agents.iter().find(|a| a.agent == "opencode").unwrap();
     assert!(oc.installed);
     assert_eq!(oc.category, AgentCategory::Aggregator);
@@ -136,7 +137,7 @@ fn claude_static_models_when_installed() {
     let _l = lock();
     let e = setup();
     write_agent(&e.bin, "claude", &e.counter, "echo 'claude 1.0.0'");
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let c = agents.iter().find(|a| a.agent == "claude").unwrap();
     assert!(c.installed);
     assert_eq!(c.category, AgentCategory::Vendor);
@@ -151,12 +152,12 @@ fn cache_hit_avoids_respawn_but_refresh_forces_it() {
     let e = setup();
     write_agent(&e.bin, "opencode", &e.counter, "echo 1.0.0");
 
-    detect::detect(true);
+    agent_catalog::agents(true);
     let after_first = count_lines(&e.counter);
     assert!(after_first >= 1, "first detect must spawn");
 
     // Second call without refresh - from cache, no new spawns.
-    detect::detect(false);
+    agent_catalog::agents(false);
     assert_eq!(
         count_lines(&e.counter),
         after_first,
@@ -164,7 +165,7 @@ fn cache_hit_avoids_respawn_but_refresh_forces_it() {
     );
 
     // refresh=true ignores the cache - spawns again.
-    detect::detect(true);
+    agent_catalog::agents(true);
     assert!(
         count_lines(&e.counter) > after_first,
         "refresh must respawn"
@@ -176,13 +177,13 @@ fn binary_mtime_change_invalidates_cache() {
     let _l = lock();
     let e = setup();
     write_agent(&e.bin, "opencode", &e.counter, "echo 1.0.0");
-    detect::detect(true);
+    agent_catalog::agents(true);
     let base = count_lines(&e.counter);
 
     // Overwrite the binary (changing content and mtime) - cache is invalidated.
     std::thread::sleep(std::time::Duration::from_millis(10));
     write_agent(&e.bin, "opencode", &e.counter, "echo 2.0.0");
-    detect::detect(false);
+    agent_catalog::agents(false);
     assert!(count_lines(&e.counter) > base, "mtime change must reprobe");
 }
 
@@ -195,7 +196,7 @@ fn hung_agent_times_out_without_hanging() {
     }
     write_agent(&e.bin, "agy", &e.counter, "sleep 30");
     let start = std::time::Instant::now();
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     unsafe {
         std::env::remove_var("APB_PROBE_TIMEOUT_MS");
     }
@@ -224,7 +225,7 @@ fn large_output_does_not_deadlock() {
         "case \"$1\" in\n  --version) echo 1.0.0 ;;\n  models) yes prov/x | head -c 1000000 ;;\nesac",
     );
     let start = std::time::Instant::now();
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     assert!(
         start.elapsed() < std::time::Duration::from_secs(10),
         "must not deadlock"
@@ -246,7 +247,7 @@ fn configured_custom_agent_gets_presence_result() {
     .unwrap();
     write_agent(&e.bin, "mycli", &e.counter, "echo 3.2.1");
 
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let m = agents
         .iter()
         .find(|a| a.agent == "mycli")
@@ -266,7 +267,7 @@ fn interpreter_beside_agent_is_reachable_via_child_path() {
     std::fs::write(&agy, "#!/usr/bin/env fake-runtime\n# ignored by runtime\n").unwrap();
     std::fs::set_permissions(&agy, std::fs::Permissions::from_mode(0o755)).unwrap();
 
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let a = agents.iter().find(|a| a.agent == "agy").unwrap();
     assert!(a.installed);
     // Version was captured - meaning env found fake-runtime on the child PATH
@@ -289,18 +290,18 @@ fn config_source_change_invalidates_cache_before_ttl() {
     std::fs::create_dir_all(&codex_dir).unwrap();
     std::fs::write(codex_dir.join("config.toml"), "model = \"a\"\n").unwrap();
 
-    detect::detect(true);
+    agent_catalog::agents(true);
     let base = count_lines(&e.counter);
     // Cache hit: no source changes - no respawn.
-    detect::detect(false);
+    agent_catalog::agents(false);
     assert_eq!(count_lines(&e.counter), base, "cache hit must not respawn");
 
-    // Change config.toml (codex's models source). Also change the content SIZE,
+    // Change config.toml (codex's providers source). Also change the content SIZE,
     // not just the mtime - that way invalidation doesn't depend on the
     // filesystem's mtime granularity (the fingerprint is size:mtime).
     std::thread::sleep(std::time::Duration::from_millis(10));
     std::fs::write(codex_dir.join("config.toml"), "model = \"bbbbbbbb\"\n").unwrap();
-    detect::detect(false);
+    agent_catalog::agents(false);
     assert!(
         count_lines(&e.counter) > base,
         "config source change must invalidate cache before TTL"
@@ -308,11 +309,13 @@ fn config_source_change_invalidates_cache_before_ttl() {
 }
 
 /// CI runners (and hermetic tests) often lack a real `codex` on PATH. The
-/// profile editor still needs to annotate models named in
-/// `~/.codex/config.toml`; file-based sources must not be gated on binary
-/// presence (regression that failed PR CI on clean Linux runners).
+/// `[model_providers.*]` annotation from `~/.codex/config.toml` stays
+/// file-based and is never gated on binary presence (regression that failed
+/// PR CI on clean Linux runners). The static model list, like claude's, is
+/// claimed only once codex is installed: exactly the table's list, default
+/// first, and never the `model` line of config.toml.
 #[test]
-fn codex_config_models_read_even_when_binary_absent() {
+fn codex_static_models_and_config_providers_without_binary() {
     let _l = lock();
     let e = setup();
     // PATH is only the empty temp bin dir from setup: no codex binary.
@@ -320,30 +323,33 @@ fn codex_config_models_read_even_when_binary_absent() {
     std::fs::create_dir_all(&codex_dir).unwrap();
     std::fs::write(
         codex_dir.join("config.toml"),
-        "model = \"gpt-5.4\"\n[model_providers.openai]\n",
+        "model = \"gpt-custom\"\n[model_providers.openai]\n",
     )
     .unwrap();
 
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let codex = agents.iter().find(|a| a.agent == "codex").unwrap();
     assert!(
         !codex.installed,
         "no binary on PATH must leave installed=false"
     );
-    let models = codex
-        .models
-        .as_ref()
-        .expect("config.toml model must be reported without the binary");
-    assert_eq!(models.authority, Authority::Partial);
-    assert!(
-        models.items.iter().any(|m| m == "gpt-5.4"),
-        "model from config.toml: {:?}",
-        models.items
-    );
+    assert!(codex.models.is_none(), "{codex:?}");
     assert_eq!(
         codex.providers,
         Some(vec!["openai".to_string()]),
-        "model_providers sections are also file-based"
+        "model_providers sections are file-based"
+    );
+
+    write_agent(&e.bin, "codex", &e.counter, "echo 1.0.0");
+    let agents = agent_catalog::agents(true);
+    let codex = agents.iter().find(|a| a.agent == "codex").unwrap();
+    assert!(codex.installed);
+    let models = codex.models.as_ref().expect("installed: the static list");
+    assert_eq!(models.authority, Authority::Static);
+    assert_eq!(
+        models.items,
+        apb_core::models_table::builtin().codex_static_models,
+        "codex's static list, in table order"
     );
 }
 
@@ -364,7 +370,7 @@ fn codex_auth_classified_by_key_names_without_leaking_values() {
         std::fs::create_dir_all(&codex_dir).unwrap();
         std::fs::write(codex_dir.join("auth.json"), body).unwrap();
 
-        let agents = detect::detect(true);
+        let agents = agent_catalog::agents(true);
         let codex = agents.iter().find(|a| a.agent == "codex").unwrap();
         let kind = codex
             .auth
@@ -413,7 +419,7 @@ fn truncated_models_output_adds_note() {
         &e.counter,
         "case \"$1\" in\n  --version) echo 1.0.0 ;;\n  models) yes prov/x | head -c 300000 ;;\nesac",
     );
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let oc = agents.iter().find(|a| a.agent == "opencode").unwrap();
     assert!(
         oc.notes.iter().any(|n| n.contains("truncated")),
@@ -439,7 +445,7 @@ fn project_local_path_entry_is_ignored() {
             format!("{}:{}", local_bin.display(), e.bin.display()),
         );
     }
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let oc = agents.iter().find(|a| a.agent == "opencode").unwrap();
     assert!(!oc.installed, "project-local agent must be ignored");
 }
@@ -455,7 +461,7 @@ fn hermes_probe_detects_stub_binary() {
         "echo 'Hermes Agent v0.18.2 (2026.7.7.2) · upstream e361c5e2'",
     );
 
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let h = agents.iter().find(|a| a.agent == "hermes").unwrap();
     assert!(h.installed);
     assert_eq!(h.category, AgentCategory::Aggregator);
@@ -487,7 +493,7 @@ fn hermes_auth_hint_from_env_file() {
     std::fs::create_dir_all(&hermes_dir).unwrap();
     std::fs::write(hermes_dir.join(".env"), "SOME_KEY=secret\n").unwrap();
 
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let h = agents.iter().find(|a| a.agent == "hermes").unwrap();
     let kind = h.auth.as_ref().map(|a| a.kind);
     assert_eq!(kind, Some(AuthKind::ApiKey));
@@ -504,9 +510,83 @@ fn hermes_auth_hint_from_env_file() {
         &e2.counter,
         "echo 'Hermes Agent v0.18.2 (2026.7.7.2) · upstream e361c5e2'",
     );
-    let agents2 = detect::detect(true);
+    let agents2 = agent_catalog::agents(true);
     let h2 = agents2.iter().find(|a| a.agent == "hermes").unwrap();
     assert!(h2.auth.is_none());
+}
+
+/// zcode is never on PATH: the desktop deploys its headless CLI under
+/// `~/.zcode/server/agents/glm/`. Detection must find it there and report
+/// apb's zcode allowlist as bare model ids (the two Individual-plan models -
+/// never a Start-plan entry, whatever the built-in provider config enables),
+/// annotated with the plan they resolve to, and flag a missing standalone
+/// login - reading only credential KEY NAMES.
+#[test]
+fn zcode_probe_finds_the_home_deployed_cli_and_its_plan_models() {
+    let _l = lock();
+    let e = setup();
+    let glm = e.home.join(".zcode/server/agents/glm");
+    std::fs::create_dir_all(&glm).unwrap();
+    write_agent(&glm, "zcode-agent", &e.counter, "echo 0.16.9");
+    let bundled = e.home.join(".zcode/v2/runtime/provider/bundled");
+    std::fs::create_dir_all(&bundled).unwrap();
+    std::fs::write(
+        bundled.join("zcode-builtin.json"),
+        r#"{"config":{"modelConfigRules":{"builtinProviderModelRules":[
+            {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:zai-start-plan"},
+            {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
+            {"modelId":"GLM-5.3-Flash","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
+            {"modelId":"GLM-5-Turbo","config":{"enabled":true},"providerId":"account:zai-individual-coding-plan"},
+            {"modelId":"GLM-5.3","config":{"enabled":true},"providerId":"account:bigmodel-start-plan"}]}}}"#,
+    )
+    .unwrap();
+
+    // Not logged in: the allowlist, with a note.
+    let agents = agent_catalog::agents(true);
+    let z = agents.iter().find(|a| a.agent == "zcode").unwrap();
+    assert!(z.installed, "{z:?}");
+    assert_eq!(z.version.as_deref(), Some("0.16.9"));
+    assert_eq!(z.category, AgentCategory::Vendor);
+    let m = z.models.as_ref().unwrap();
+    assert_eq!(m.authority, Authority::Static);
+    assert_eq!(
+        m.items,
+        vec!["GLM-5.3".to_string(), "GLM-5.3-Flash".to_string()],
+        "bare allowlist ids only - no Turbo, no plan prefix"
+    );
+    assert_eq!(
+        z.providers.as_deref(),
+        Some(&["zai-individual".to_string()][..])
+    );
+    assert_eq!(z.auth.as_ref().map(|a| a.kind), Some(AuthKind::None));
+    assert!(
+        z.notes.iter().any(|n| n.contains("zcode-agent login")),
+        "{z:?}"
+    );
+
+    // Logged in to both zai plans: the list does not grow (no Start-plan
+    // model is ever offered); no secret leaks.
+    std::fs::write(
+        e.home.join(".zcode/v2/credentials.json"),
+        r#"{"account-provider:account:zai-individual-coding-plan:identity":"ident-secret","account-provider:account:zai-start-plan:identity":"ident-secret"}"#,
+    )
+    .unwrap();
+    let agents = agent_catalog::agents(true);
+    let z = agents.iter().find(|a| a.agent == "zcode").unwrap();
+    assert_eq!(
+        z.models.as_ref().unwrap().items,
+        vec!["GLM-5.3".to_string(), "GLM-5.3-Flash".to_string()]
+    );
+    assert_eq!(z.auth.as_ref().map(|a| a.kind), Some(AuthKind::Oauth));
+    assert!(
+        z.notes.iter().all(|n| !n.contains("zcode-agent login")),
+        "logged in: no login note: {z:?}"
+    );
+    assert!(
+        !serde_json::to_string(&agents)
+            .unwrap()
+            .contains("ident-secret")
+    );
 }
 
 #[test]
@@ -514,7 +594,7 @@ fn hermes_missing_binary_reports_not_installed() {
     let _l = lock();
     let _e = setup();
 
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     let h = agents.iter().find(|a| a.agent == "hermes").unwrap();
     assert!(!h.installed);
     assert!(h.version.is_none());
@@ -551,7 +631,7 @@ fn probe_reaps_a_daemonized_descendant_of_the_agent() {
     );
 
     let start = std::time::Instant::now();
-    let agents = detect::detect(true);
+    let agents = agent_catalog::agents(true);
     assert!(
         start.elapsed() < std::time::Duration::from_secs(60),
         "the probe blocked on a descendant holding its stdout: {:?}",
@@ -620,6 +700,17 @@ fn builtin_probes_include_grok_and_cursor() {
     assert_eq!(qoder.category, AgentCategory::Aggregator);
     assert_eq!(qoder.version_args, vec!["--version".to_string()]);
 
+    // zcode: a PATH `zcode` first, then the location the ZCode desktop
+    // deploys its headless CLI to (never on PATH). Vendor-tied (GLM).
+    let zcode = by_id("zcode");
+    assert_eq!(zcode.bins, vec!["zcode".to_string()]);
+    assert_eq!(
+        zcode.home_paths,
+        vec![".zcode/server/agents/glm/zcode-agent".to_string()]
+    );
+    assert_eq!(zcode.category, AgentCategory::Vendor);
+    assert_eq!(zcode.version_args, vec!["--version".to_string()]);
+
     // The ambiguous `agent` alias must not be probed by anyone.
     for p in &probes {
         assert!(
@@ -628,4 +719,146 @@ fn builtin_probes_include_grok_and_cursor() {
             p.id
         );
     }
+}
+
+/// The detection memo holds external facts only: the lists apb owns (claude's
+/// static list here) are never written to it, and still come back from
+/// `detect` because they are added from the running binary on every call.
+#[test]
+fn memo_never_stores_apb_owned_model_lists() {
+    let _l = lock();
+    let e = setup();
+    write_agent(&e.bin, "claude", &e.counter, "echo 2.0.0");
+    let agents = agent_catalog::agents(true);
+    let claude = agents.iter().find(|a| a.agent == "claude").unwrap();
+    let want = apb_core::models_table::builtin().claude_static_models;
+    assert_eq!(claude.models.as_ref().unwrap().items, want);
+
+    let raw = std::fs::read_to_string(e.cfg.join("state/agents-detect.json")).unwrap();
+    let memo: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    let memo_claude = memo["agents"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["agent"] == "claude")
+        .unwrap();
+    assert!(
+        memo_claude.get("models").is_none(),
+        "the memo must not carry claude's list: {memo_claude}"
+    );
+    assert!(
+        want.iter().all(|m| !raw.contains(m.as_str())),
+        "no apb-owned model id may appear anywhere in the memo"
+    );
+    assert_eq!(memo["build_id"], detect::build_id());
+}
+
+/// A memo written by another apb build is never reused, even within the TTL
+/// and with every probe input unchanged.
+#[test]
+fn memo_from_another_build_is_ignored() {
+    let _l = lock();
+    let e = setup();
+    write_agent(&e.bin, "opencode", &e.counter, "echo 1.0.0");
+    agent_catalog::agents(true);
+    let base = count_lines(&e.counter);
+    agent_catalog::agents(false);
+    assert_eq!(count_lines(&e.counter), base, "same build: memo hit");
+
+    let path = e.cfg.join("state/agents-detect.json");
+    let mut memo: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+    memo["build_id"] = serde_json::json!("0.0.0|old-binary|0000");
+    std::fs::write(&path, serde_json::to_vec(&memo).unwrap()).unwrap();
+    agent_catalog::agents(false);
+    assert!(count_lines(&e.counter) > base, "another build: re-probe");
+}
+
+/// `opencode models` depends on opencode's own config and model catalog, so
+/// an edit to either invalidates the memo.
+#[test]
+fn opencode_config_change_invalidates_the_memo() {
+    let _l = lock();
+    let e = setup();
+    write_agent(&e.bin, "opencode", &e.counter, "echo a/b");
+    let cfg = e.home.join(".config/opencode");
+    std::fs::create_dir_all(&cfg).unwrap();
+    std::fs::write(cfg.join("opencode.json"), "{}").unwrap();
+    agent_catalog::agents(true);
+    let base = count_lines(&e.counter);
+    agent_catalog::agents(false);
+    assert_eq!(count_lines(&e.counter), base);
+
+    std::fs::write(cfg.join("opencode.json"), "{\"provider\":{}}").unwrap();
+    agent_catalog::agents(false);
+    assert!(
+        count_lines(&e.counter) > base,
+        "opencode.json edit: re-probe"
+    );
+}
+
+/// Current opencode keeps its credentials under XDG data; provider names are
+/// read from there (values never).
+#[test]
+fn opencode_providers_come_from_the_xdg_auth_file() {
+    let _l = lock();
+    let e = setup();
+    write_agent(&e.bin, "opencode", &e.counter, "echo 1.0.0");
+    let data = e.home.join(".local/share/opencode");
+    std::fs::create_dir_all(&data).unwrap();
+    std::fs::write(
+        data.join("auth.json"),
+        r#"{"zhipuai-coding-plan":{"type":"api","key":"SECRET"}}"#,
+    )
+    .unwrap();
+    let agents = agent_catalog::agents(true);
+    let oc = agents.iter().find(|a| a.agent == "opencode").unwrap();
+    assert_eq!(
+        oc.providers.as_deref(),
+        Some(&["zhipuai-coding-plan".to_string()][..])
+    );
+    let raw = std::fs::read_to_string(e.cfg.join("state/agents-detect.json")).unwrap();
+    assert!(!raw.contains("SECRET"));
+}
+
+/// Issue #139 F19: runs launch `agents.<id>.program` from the config, so that
+/// is the binary detection must report for a built-in agent, not whatever the
+/// agent's default name finds on PATH. Repointing it must also invalidate the
+/// detection memo.
+#[test]
+fn a_builtin_agent_is_detected_at_its_configured_program() {
+    let _l = lock();
+    let e = setup();
+    // A PATH `codex` that runs never use.
+    write_agent(&e.bin, "codex", &e.counter, "echo path-codex 1.0.0");
+    let tools = e.home.join("tools");
+    std::fs::create_dir_all(&tools).unwrap();
+    let configure = |name: &str, version: &str| {
+        write_agent(&tools, name, &e.counter, &format!("echo {name} {version}"));
+        let program = tools.join(name);
+        std::fs::write(
+            e.cfg.join("config.yaml"),
+            format!("agents:\n  codex:\n    program: {}\n", program.display()),
+        )
+        .unwrap();
+        std::fs::canonicalize(program).unwrap()
+    };
+    let codex = |refresh: bool| {
+        agent_catalog::agents(refresh)
+            .into_iter()
+            .find(|a| a.agent == "codex")
+            .unwrap()
+    };
+
+    let first = configure("my-codex", "2.0.0");
+    let found = codex(true);
+    assert_eq!(found.version.as_deref(), Some("my-codex 2.0.0"));
+    assert_eq!(found.canonical_path.as_deref(), Some(first.as_path()));
+
+    configure("other-codex", "3.0.0");
+    assert_eq!(
+        codex(false).version.as_deref(),
+        Some("other-codex 3.0.0"),
+        "a memo written for the old program was reused"
+    );
 }

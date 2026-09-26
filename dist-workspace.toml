@@ -18,11 +18,27 @@ targets = ["aarch64-apple-darwin", "x86_64-apple-darwin", "x86_64-unknown-linux-
 # Whether to install an updater program
 install-updater = true
 github-build-setup = "../build-setup.yml"
-# Plan jobs to run in CI
-plan-jobs = ["./test-gate"]
+# The release test gate. As a local-artifacts job it runs next to the
+# platform builds on every publishing run, and the generated host job refuses
+# to publish unless it finished with success (a failed gate is not "skipped").
+# As a plan job its failure only skipped the builds, which host tolerates.
+local-artifacts-jobs = ["./test-gate"]
 # Post-announce jobs to run in CI
 post-announce-jobs = ["./release-notes"]
 # Which actions to run on pull requests
 pr-run-mode = "plan"
+# Keyless build-provenance attestations (Sigstore via GitHub OIDC) for every
+# release artifact, made in the host job right before the release is created.
+# Verify with `gh attestation verify <file> --repo itechmeat/agentic-playbooks`.
+github-attestations = true
+github-attestations-phase = "host"
 # Path that installers should place binaries in
 install-path = "CARGO_HOME"
+
+# Actions the generated release.yml uses, pinned to full commit SHAs
+# (tag in the comment). Dependabot's github-actions ecosystem bumps these.
+[dist.github-action-commits]
+"actions/checkout" = "d23441a48e516b6c34aea4fa41551a30e30af803" # v6.1.0
+"actions/upload-artifact" = "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a" # v7.0.1
+"actions/download-artifact" = "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c" # v8.0.1
+"actions/attest" = "1e69f48acb82d1966a394da916b4c1698aa569d6" # v4.2.2

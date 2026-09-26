@@ -19,7 +19,7 @@ use std::path::Path;
 
 use crate::control::{read_control_after, read_control_cursor};
 use crate::error::EngineError;
-use crate::event::{Event, EventPayload, read_all};
+use crate::event::{Event, EventPayload};
 use crate::liveness;
 use crate::state::{RunState, RunStatus};
 
@@ -60,17 +60,18 @@ pub fn diagnose_run(root: &Path, run_id: &str) -> Result<Vec<RunCheck>, EngineEr
     if !run_dir.is_dir() {
         return Err(EngineError::NotFound(format!("run `{run_id}`")));
     }
-    let events = read_all(&run_dir)?;
+    let view = crate::run_view::RunView::load(&run_dir, run_id)?;
+    let events = view.events.as_slice();
 
-    let mut checks = vec![run_check(&run_dir, run_id, &events), nodes_check(&events)];
-    checks.extend(failure_reason_check(&events));
-    checks.extend(supervisor_wait_check(&events));
-    checks.extend(attempt_checks(&events));
+    let mut checks = vec![run_check(&view), nodes_check(&view)];
+    checks.extend(failure_reason_check(events));
+    checks.extend(supervisor_wait_check(events));
+    checks.extend(attempt_checks(events));
     checks.extend(autonomy_check(&run_dir));
     checks.push(driver_check(&run_dir, run_id));
     checks.push(workdir_lock_check(root));
     checks.push(control_check(&run_dir)?);
-    checks.push(supervisor_action_check(&events));
+    checks.push(supervisor_action_check(events));
     Ok(checks)
 }
 
@@ -86,11 +87,8 @@ pub fn has_failure(checks: &[RunCheck]) -> bool {
 /// outcomes warn: a run that is still going, paused, parked and waiting, or
 /// succeeded is not a problem to be reported. `interrupted` warns too - it is
 /// exactly the state a crashed driver leaves.
-fn run_check(run_dir: &Path, run_id: &str, events: &[Event]) -> RunCheck {
-    let waiting =
-        crate::progress::from_run_dir(run_dir, events).is_some_and(|p| p.waiting_on.is_some());
-    let driver = liveness::driver_alive(run_dir, run_id);
-    let status = liveness::reported_run_status(events, waiting, driver);
+fn run_check(view: &crate::run_view::RunView) -> RunCheck {
+    let status = view.run_status;
     let level = match status {
         RunStatus::Failed | RunStatus::Aborted | RunStatus::Interrupted => WARN,
         _ => OK,
@@ -143,8 +141,8 @@ fn failure_reason_check(events: &[Event]) -> Option<RunCheck> {
 /// further. Uses the same overlay as `run_status` (live open attempts report
 /// as running, dead ones as lost) so doctor and status cannot disagree on an
 /// healthy in-flight attempt (issue #45 finding 9).
-fn nodes_check(events: &[Event]) -> RunCheck {
-    let nodes = liveness::reported_node_statuses(events);
+fn nodes_check(view: &crate::run_view::RunView) -> RunCheck {
+    let nodes = view.nodes();
     if nodes.is_empty() {
         return RunCheck::new(OK, "nodes", "no nodes have started");
     }
@@ -152,10 +150,8 @@ fn nodes_check(events: &[Event]) -> RunCheck {
     let mut bad = false;
     for status in nodes.values() {
         *counts.entry(status.as_str()).or_default() += 1;
-        bad |= matches!(
-            status.as_str(),
-            "failed" | "timed_out" | "interrupted" | "lost"
-        );
+        bad |=
+            status == liveness::LOST || crate::state::NodeStatus::from_label(status).ended_badly();
     }
     let detail = counts
         .iter()
@@ -186,6 +182,15 @@ fn attempt_checks(events: &[Event]) -> Vec<RunCheck> {
                 Some(pid) if liveness::pid_is_live(pid) => {
                     RunCheck::new(OK, subject, format!("open under pid {pid}, which is running"))
                 }
+                // The drive saw the exit itself (issue #107): it is finishing
+                // the attempt, unless it died before it could.
+                Some(pid) if a.exited => RunCheck::new(
+                    WARN,
+                    subject,
+                    format!(
+                        "pid {pid} exited and its drive is finishing the attempt, or died before it could"
+                    ),
+                ),
                 Some(pid) => RunCheck::new(
                     FAIL,
                     subject,
@@ -801,6 +806,7 @@ mod tests {
                 chain,
                 ephemeral: false,
                 hermetic: false,
+                zcode_mode: None,
             }],
             node_bindings: BTreeMap::from([("a".to_string(), "project/x".to_string())]),
             connectors: Vec::new(),

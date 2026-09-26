@@ -80,11 +80,50 @@ pub struct PlaybookWriteArgs {
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrustListArgs {
+    /// Only approvals of this kind: `playbook`, `profile_bundle`,
+    /// `connector` or `connector_account`.
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrustRevokeArgs {
+    /// A digest (`sha256:...`, exactly that approval) or an id (every
+    /// approval recorded under it, e.g. every version of a playbook).
+    pub target: String,
+    /// With an id: only approvals of this kind (`playbook`, `profile_bundle`,
+    /// `connector`, `connector_account`).
+    #[serde(default)]
+    pub kind: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct TrashRestoreArgs {
+    /// A trash entry name (`<id>-<deleted_at_ms>`, from playbook_trash_list)
+    /// or a playbook id, which restores that id's latest deletion.
+    pub name: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
 pub struct RunRefArgs {
     pub run_id: String,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RunWaitArgs {
+    pub run_id: String,
+    /// workspace_id of another workspace (spec 7). None - the current one.
+    #[serde(default)]
+    pub workspace: Option<String>,
+    /// How many milliseconds to block at most (default 50000, max 1800000).
+    /// Pass the largest value your host's tool-call timeout allows: each
+    /// return costs a model turn.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -129,6 +168,11 @@ pub struct RunResumeArgs {
     /// (the accepted drift is recorded as an event in the run log).
     #[serde(default)]
     pub allow_environment_drift: bool,
+    /// Resume a run whose playbook snapshot (YAML plus scripts) is not an
+    /// approved digest. Pass true only after confirming with the user, as for
+    /// `playbook_run`.
+    #[serde(default)]
+    pub acknowledge_untrusted: Option<bool>,
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
@@ -180,10 +224,23 @@ pub struct RunAnswerArgs {
 pub struct SupervisorWaitArgs {
     /// Supervisor session token, issued on start with supervise: "self".
     pub token: String,
-    /// Return wakes starting from this seq (excluding ones already seen).
+    /// Return wakes starting from this seq (excluding ones already seen):
+    /// pass the previous answer's `next_after_seq`.
     pub after_seq: Option<u64>,
-    /// How many milliseconds to block waiting for the next wake.
+    /// How many milliseconds to block for the next wake
+    /// (default 50000, max 1800000). Longer is cheaper: each return is a
+    /// model turn.
     pub timeout_ms: Option<u64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SupervisorInspectArgs {
+    pub token: String,
+    /// Keep the long texts inside `events` verbatim. Off by default: they are
+    /// the node outputs and wake details already present in `outputs`,
+    /// `context` and `wakes`.
+    #[serde(default)]
+    pub full_events: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -423,10 +480,21 @@ pub struct ProfileWriteArgs {
     /// (optimistic concurrency). Absence means creating a new one.
     #[serde(default)]
     pub expected_digest: Option<String>,
-    /// When true, the executor launches with hermetic isolation (disables
-    /// user-scope plugins and hooks). Default false when absent.
+    /// Agent environment: "minimal" (the default: apb's own settings, no user
+    /// plugins, MCP servers, skills or CLAUDE.md; the project's own ones and
+    /// the profile's skills still load) or "full" (the operator's whole
+    /// personal setup, for a profile that depends on a user-scope plugin,
+    /// skill or MCP server). Absent: an update keeps the stored value.
+    #[serde(default)]
+    pub environment: Option<String>,
+    /// Deprecated spelling of `environment`: true = minimal, false = full.
     #[serde(default)]
     pub hermetic: Option<bool>,
+    /// ZCode permission mode for the profile's zcode steps in a run that grants
+    /// autonomy: "yolo" (default: files, shell, network) or "edit" (file edits
+    /// only, no shell commands). Absent: an update keeps the stored value.
+    #[serde(default)]
+    pub zcode_mode: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

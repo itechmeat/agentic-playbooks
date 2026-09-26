@@ -67,6 +67,7 @@ impl From<VersioningError> for ToolError {
             VersioningError::Validation(issues) => {
                 ToolError::Engine(render_validation_issues(&issues))
             }
+            VersioningError::Conflict(m) => ToolError::Conflict(m),
             other => ToolError::Engine(other.to_string()),
         }
     }

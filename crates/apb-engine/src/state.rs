@@ -4,6 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::event::{Event, EventPayload};
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum NodeStatus {
@@ -35,9 +36,12 @@ impl NodeStatus {
         }
     }
     /// Whether this status represents a node that has completed one execution
-    /// (a `node_finished` was folded). Used to bypass the result-cache lookup on
-    /// a loop re-execution: a node that already finished once in this run must
-    /// run again rather than replay its first verdict.
+    /// (a `node_finished` was folded): the one "node finished" predicate. A
+    /// join counts a finished branch with it, the cache bypass on a loop
+    /// re-execution uses it (a node that already finished once must run again
+    /// rather than replay its first verdict), and the reaper uses it to leave a
+    /// node that reported a verdict alone. `Interrupted` and `Unknown` are not
+    /// finished: a later attempt still decides them.
     pub fn is_finished(&self) -> bool {
         matches!(
             self,
@@ -48,6 +52,27 @@ impl NodeStatus {
                 | NodeStatus::Cancelled
         )
     }
+    /// Whether the node has left the not-yet-run states and is not running
+    /// now: finished, or stopped part-way (`Interrupted`, `Unknown`). A patch
+    /// treats these as already executed, since their effects may exist, and
+    /// refuses a migration that would drop or rewrite them. Deliberately wider
+    /// than [`NodeStatus::is_finished`].
+    pub fn has_executed(&self) -> bool {
+        !matches!(
+            self,
+            NodeStatus::Pending | NodeStatus::Ready | NodeStatus::Running
+        )
+    }
+
+    /// Whether this status is a node that ended badly (failed, timed out, or
+    /// cut off mid-attempt), which `doctor --run` flags.
+    pub fn ended_badly(&self) -> bool {
+        matches!(
+            self,
+            NodeStatus::Failed | NodeStatus::TimedOut | NodeStatus::Interrupted
+        )
+    }
+
     pub fn from_label(s: &str) -> NodeStatus {
         match s {
             "pending" => NodeStatus::Pending,
@@ -64,6 +89,7 @@ impl NodeStatus {
     }
 }
 
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum RunStatus {
@@ -186,6 +212,10 @@ impl RunState {
                     s.attempts.insert(node.clone(), *attempt);
                     open.insert(node.clone());
                 }
+                // The attempt stays open until its `attempt_finished`: an exit
+                // the drive never finished is a crash to an offline reader.
+                // Live reporting reads this event (see `liveness`).
+                EventPayload::AttemptExited { .. } => {}
                 EventPayload::AttemptFinished {
                     node,
                     rejected_output,
@@ -298,7 +328,7 @@ impl RunState {
                         reason: reason.clone(),
                     });
                 }
-                EventPayload::ReviewRequested { .. } => {}
+                EventPayload::ReviewRequested { .. } | EventPayload::ReviewWithdrawn { .. } => {}
                 EventPayload::ReviewDecided {
                     node,
                     decision,

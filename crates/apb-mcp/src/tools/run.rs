@@ -8,9 +8,8 @@ use std::path::Path;
 use super::{ToolError, resolve_run_dir};
 use apb_core::registry::is_safe_segment;
 use apb_engine::control::Control;
-use apb_engine::event::read_all;
 use apb_engine::run_config::ChildExpectation;
-use apb_engine::state::{FailureReason, RunState, RunStatus};
+use apb_engine::run_view::read_events;
 use apb_engine::{
     RunMode, RunOptions, list_runs, plan_resume, post_supervisor_command, run, stop_run,
 };
@@ -35,7 +34,6 @@ pub fn playbook_run(
         params,
         allow_shared_workdir: false,
         mode: RunMode::Autonomous,
-        supervisor_expected: false,
         max_patches_per_run: None,
         context_max_bytes: None,
         context_compact_model: None,
@@ -88,7 +86,6 @@ pub fn playbook_run_background(
         params,
         allow_shared_workdir: false,
         mode: RunMode::Autonomous,
-        supervisor_expected: false,
         max_patches_per_run: None,
         context_max_bytes: None,
         context_compact_model: None,
@@ -119,123 +116,146 @@ pub fn runs_list(root: &Path) -> Result<Value, ToolError> {
 
 pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
-    let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
-    let state = RunState::fold(&events);
-    // Liveness overlay (Task 9 / issue #45 findings 9 and 10; issue #102.4
-    // cause B). The pure fold is replayable from the journal alone; these
-    // read the process table (and parent-drive markers) at request time,
-    // which is precisely why they are applied here rather than folded into
-    // `RunState`.
-    //
-    // `reported_*` re-promotes a live open attempt from the pure-fold
-    // `interrupted` crash shape back to `running`, and a run parked on a
-    // wait/signal park with a live driver the same way, and maps a dead
-    // attempt pid to `lost`. `driver_alive` also understands parent-driven
-    // children - `reported_run_status` is a pure function of the journal plus
-    // these two already-computed facts, precisely so a sub-playbook child
-    // (which never writes its own `driver.pid`) is asked about through
-    // `driver_alive`, not a plain pid check.
-    let node_times = apb_engine::liveness::node_times(&events);
-    let driver_alive = apb_engine::liveness::driver_alive(&dir, run_id);
-    let nodes = apb_engine::liveness::reported_node_statuses(&events);
-    let progress = apb_engine::progress::from_run_dir(&dir, &events);
-    let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
-    let run_status = apb_engine::liveness::reported_run_status(&events, waiting, driver_alive);
-    // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
-    // nodes, Task 8): callers that only care about the pending question
-    // (`run_answer`'s caller, the web) do not have to drill into `progress`.
-    // `progress` itself still carries it too (`progress.pending_question`),
-    // unchanged.
+    // The run view every status surface reports from (`apb runs`, `apb wait`,
+    // the dashboard): the pure fold is replayable from the journal alone, and
+    // the liveness overlay on top of it reads the process table (and
+    // parent-drive markers) at request time. A live open attempt or a run
+    // parked on a wait with a live driver reads `running`, a dead attempt
+    // pid `lost`, a dead driver `interrupted`.
+    let view = apb_engine::run_view::RunView::load(&dir, run_id)
+        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    let node_times = apb_engine::liveness::node_times(&view.events);
+    let progress = view.progress.as_ref();
     let cfg = apb_engine::run_config::read_run_config(&dir).unwrap_or_default();
-    let pending_question = progress.as_ref().and_then(|p| p.pending_question.clone());
-    // Lifted to the top level like `pending_question` (issue #42 finding 4):
-    // a human_review gate must be first-class here so an intermediary that
-    // calls `run_status` is forced to see the pending decision, its options,
-    // and how to answer - the gate no longer waits silently forever.
-    let pending_review = progress.as_ref().and_then(|p| p.pending_review.clone());
-    // Supervised failure/timeout park (issue #45 finding 4): same first-class
-    // lift so the wake is never only buried under a silent "running" status.
-    let pending_supervisor = progress.as_ref().and_then(|p| p.pending_supervisor.clone());
-    let answer = apb_engine::progress::run_answer(&dir, &events);
-    let children: Vec<Value> = events
-        .iter()
-        .filter_map(|e| match &e.payload {
-            apb_engine::event::EventPayload::ChildRunStarted { node_id, run_id } => {
-                let child_dir = dir.parent().map(|p| p.join(run_id));
-                let status = child_dir
-                    .as_ref()
-                    .and_then(|d| read_all(d).ok().map(|ev| (d.clone(), ev)))
-                    .map(|(d, ev)| {
-                        // A sub-playbook child never writes its own
-                        // `driver.pid` (it writes `driven_by` and follows its
-                        // parent's drive claim), so this must go through the
-                        // parent-aware `driver_alive`, not a plain pid check -
-                        // otherwise a perfectly healthy, parent-driven child
-                        // parked on a wait reads driverless forever.
-                        let waiting = apb_engine::progress::from_run_dir(&d, &ev)
-                            .is_some_and(|p| p.waiting_on.is_some());
-                        let child_driver_alive = apb_engine::liveness::driver_alive(&d, run_id);
-                        apb_engine::liveness::reported_run_status(&ev, waiting, child_driver_alive)
-                            .as_str()
-                            .to_string()
-                    })
-                    .unwrap_or_else(|| "unknown".to_string());
-                Some(json!({ "node_id": node_id, "run_id": run_id, "status": status }))
-            }
-            _ => None,
-        })
-        .collect();
-    // The verbatim reason behind a `failed` run (issue #42 finding 3): every
-    // scheduler/prepare path that fails a run now appends a `RunError` before
-    // its terminal `run_finished(failed)`, so an operator reads why directly
-    // from run_status instead of grepping events.jsonl by hand. `None` for
-    // anything other than a failed run, and for a failed run whose log
-    // predates this fix (no `RunError` was ever appended for it).
-    let failure_reason = (run_status == RunStatus::Failed)
-        .then(|| state.failure_reason.as_ref().map(FailureReason::display))
-        .flatten();
+    // Lifted out of `progress` to the top level (spec 2026-07-20-interactive-
+    // nodes, Task 8; issue #42 finding 4; issue #45 finding 4): an
+    // intermediary that calls `run_status` must see a pending question,
+    // human_review gate or supervisor decision first-class, not buried under
+    // a silent "running". `progress` still carries them too.
+    let pending_question = progress.and_then(|p| p.pending_question.clone());
+    let pending_review = progress.and_then(|p| p.pending_review.clone());
+    let pending_supervisor = progress.and_then(|p| p.pending_supervisor.clone());
+    let answer = apb_engine::progress::run_answer(&dir, &view.events);
+    // The verbatim reason behind a `failed` run (issue #42 finding 3), read
+    // straight from the journal's last `RunError`.
+    let failure_reason = view.failure_reason();
     Ok(json!({
         "run_id": run_id,
-        "run_status": run_status.as_str(),
-        "nodes": nodes,
+        "run_status": view.run_status.as_str(),
+        "nodes": view.nodes(),
         "node_times": node_times,
-        "driver_alive": driver_alive,
-        "outputs": state.outputs,
-        "progress": progress,
+        "driver_alive": view.driver_alive,
+        "outputs": view.state.outputs,
+        "progress": view.progress,
         "pending_question": pending_question,
         "pending_review": pending_review,
         "pending_supervisor": pending_supervisor,
         "answer": answer,
-        "children": children,
+        "children": view.children(&dir),
         "continued_from": cfg.continued_from,
         "superseded_by": cfg.superseded_by,
         "failure_reason": failure_reason,
     }))
 }
 
+pub use apb_engine::run_wait::{RUN_WAIT_DEFAULT_MS, RUN_WAIT_MAX_MS};
+
+/// Clamps a caller's `timeout_ms` for `run_wait`/`supervisor_wait_event`.
+pub fn wait_timeout(timeout_ms: Option<u64>) -> std::time::Duration {
+    std::time::Duration::from_millis(
+        timeout_ms
+            .unwrap_or(RUN_WAIT_DEFAULT_MS)
+            .min(RUN_WAIT_MAX_MS),
+    )
+}
+
+/// The compact `run_wait` answer: why it returned and only what the caller
+/// needs to act on (the gate to answer, the final answer, the failure), not
+/// the full `run_status` with every node output. A caller that wants the
+/// detail calls `run_status`/`run_report` once, not on every wake.
+pub fn run_wait_result(
+    root: &Path,
+    run_id: &str,
+    res: &apb_engine::run_wait::RunWaitResult,
+) -> Result<Value, ToolError> {
+    use apb_engine::run_wait::WaitReason;
+    // Built from the observation the wait decided on, not a second read: a
+    // gate decided in between must not leave `reason: needs_input` without
+    // the `pending_*` it is about.
+    let view = &res.view;
+    let mut counts: BTreeMap<String, u64> = BTreeMap::new();
+    for s in view.nodes().into_values() {
+        *counts.entry(s).or_default() += 1;
+    }
+    let next = match res.reason {
+        WaitReason::Finished => {
+            "done: the run is over; call run_report only if you need the details"
+        }
+        WaitReason::NeedsInput => match res.needs {
+            Some(apb_engine::run_wait::NeedsInput::Question) => {
+                "answer pending_question with run_answer, then call run_wait again"
+            }
+            Some(apb_engine::run_wait::NeedsInput::Review) => {
+                "relay pending_review to the user, record it with review_decide, then call run_wait again"
+            }
+            _ => "the run is parked for a supervisor decision (pending_supervisor)",
+        },
+        WaitReason::Stopped if res.driver_alive == Some(false) => {
+            "the run's driver is dead, so the run is interrupted; run_resume continues it"
+        }
+        WaitReason::Stopped => "the run is paused or has no live driver; run_resume continues it",
+        WaitReason::Timeout => {
+            "still running: call run_wait again with the same arguments; do not poll run_status"
+        }
+    };
+    let mut out = json!({
+        "run_id": run_id,
+        "reason": res.reason,
+        // The status the wait decided on, not a second read's: a run that
+        // stopped on a dead driver must never come back as `running`.
+        "run_status": res.status.as_str(),
+        "driver_alive": res.driver_alive,
+        "waited_ms": res.waited.as_millis() as u64,
+        "nodes": counts,
+        "next": next,
+    });
+    let progress = view.progress.as_ref();
+    let dir = resolve_run_dir(root, run_id)?;
+    let fields = [
+        (
+            "pending_question",
+            json!(progress.and_then(|p| p.pending_question.clone())),
+        ),
+        (
+            "pending_review",
+            json!(progress.and_then(|p| p.pending_review.clone())),
+        ),
+        (
+            "pending_supervisor",
+            json!(progress.and_then(|p| p.pending_supervisor.clone())),
+        ),
+        ("failure_reason", json!(view.failure_reason())),
+        (
+            "answer",
+            json!(apb_engine::progress::run_answer(&dir, &view.events)),
+        ),
+    ];
+    for (key, value) in fields {
+        if !value.is_null() {
+            out[key] = value;
+        }
+    }
+    Ok(out)
+}
+
 pub fn run_events(root: &Path, run_id: &str, from_seq: Option<u64>) -> Result<Value, ToolError> {
     let dir = resolve_run_dir(root, run_id)?;
-    let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
+    let events = read_events(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
     let from = from_seq.unwrap_or(0);
     let filtered: Vec<&_> = events.iter().filter(|e| e.seq >= from).collect();
     Ok(
         json!({ "events": serde_json::to_value(filtered).map_err(|e| ToolError::Engine(e.to_string()))? }),
     )
-}
-
-fn node_kind_label(kind: &apb_core::schema::NodeKind) -> &'static str {
-    use apb_core::schema::NodeKind::*;
-    match kind {
-        Start => "start",
-        AgentTask { .. } => "agent_task",
-        Script { .. } => "script",
-        Prompt { .. } => "prompt",
-        Condition { .. } => "condition",
-        HumanReview { .. } => "human_review",
-        Wait { .. } => "wait",
-        Finish { .. } => "finish",
-        Playbook { .. } => "playbook",
-    }
 }
 
 /// Per-node expected vs measured durations for calibration (spec 5). Measured
@@ -252,7 +272,7 @@ pub(crate) fn build_duration_table_from(
         .map(|n| {
             json!({
                 "node": n.id,
-                "kind": node_kind_label(&n.kind),
+                "kind": n.kind.type_str(),
                 "expected_seconds": n.expected_seconds(),
                 "measured_seconds": measured.get(&n.id),
             })
@@ -267,25 +287,20 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // propagates as a ToolError rather than masquerading as an empty duration
     // table (B7). The base object mirrors `run_status`'s JSON shape exactly.
     let dir = resolve_run_dir(root, run_id)?;
-    let events = read_all(&dir).map_err(|e| ToolError::Engine(e.to_string()))?;
-    let state = RunState::fold(&events);
+    // The same run view `run_status` reports from, so the two tools never
+    // disagree about one run: status and nodes with the liveness overlay,
+    // progress with the pending question and child credit.
+    let view = apb_engine::run_view::RunView::load(&dir, run_id)
+        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    let events = &view.events;
     let pb = apb_engine::progress::load_run_playbook(&dir);
-    let progress = pb
-        .as_ref()
-        .map(|p| apb_engine::progress::compute(p, &events));
-    let answer = apb_engine::progress::run_answer(&dir, &events);
-
-    let nodes: BTreeMap<String, String> = state
-        .nodes
-        .iter()
-        .map(|(k, v)| (k.clone(), v.as_str().to_string()))
-        .collect();
+    let answer = apb_engine::progress::run_answer(&dir, events);
     let mut base = json!({
         "run_id": run_id,
-        "run_status": state.run_status.as_str(),
-        "nodes": nodes,
-        "outputs": state.outputs,
-        "progress": progress,
+        "run_status": view.run_status.as_str(),
+        "nodes": view.nodes(),
+        "outputs": view.state.outputs,
+        "progress": view.progress,
         "answer": answer,
     });
 
@@ -293,7 +308,7 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // before; it is now built from the single events read above.
     let table = match &pb {
         Some(playbook) => {
-            let measured = apb_engine::progress::node_durations_seconds(&events);
+            let measured = apb_engine::progress::node_durations_seconds(events);
             build_duration_table_from(playbook, &measured)
         }
         None => Vec::new(),
@@ -398,14 +413,13 @@ pub fn playbook_run_supervised(
     continued_from: Option<String>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
-    // MCP session that called playbook_run, hence supervisor_expected: false
+    // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
     // (heartbeat oversight in drive does not touch this path).
     let opts = RunOptions {
         instruction,
         params,
         allow_shared_workdir: false,
         mode: RunMode::Supervised,
-        supervisor_expected: false,
         max_patches_per_run: None,
         context_max_bytes: None,
         context_compact_model: None,
@@ -733,13 +747,23 @@ mod progress_tests {
     #[test]
     fn run_report_propagates_unreadable_events() {
         // B7: an unreadable/corrupt event log surfaces as an error, not an
-        // empty duration table masquerading as "no measurements".
+        // empty duration table masquerading as "no measurements". The broken
+        // line has a line after it: a broken LAST line is a line the driver is
+        // still appending, which every read-only surface reads through.
         let tmp = tempfile::tempdir().unwrap();
         let run_dir = tmp.path().join(".apb/runs/r1");
         std::fs::create_dir_all(&run_dir).unwrap();
         std::fs::write(run_dir.join("playbook.yaml"),
             "schema: 2\nid: p\nname: p\nversion: 1.0.0\ndefaults: { profile: x }\nnodes:\n  - { id: s, type: start }\n  - { id: a, type: agent_task, prompt: hi, expected_duration: 100 }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: a }\n  - { from: a, to: f }\n").unwrap();
-        std::fs::write(run_dir.join("events.jsonl"), "this is not json\n").unwrap();
+        std::fs::write(
+            run_dir.join("events.jsonl"),
+            concat!(
+                "this is not json\n",
+                r#"{"seq":1,"ts":2,"type":"run_finished","outcome":"succeeded"}"#,
+                "\n",
+            ),
+        )
+        .unwrap();
         let err = run_report(tmp.path(), "r1").unwrap_err();
         assert!(matches!(err, ToolError::Engine(_)), "got {err:?}");
     }

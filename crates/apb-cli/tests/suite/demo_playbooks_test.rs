@@ -10,12 +10,11 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// Runs `apb <args>` with a fresh per-test config dir and no inherited run
 /// context, mirroring `connector_cli.rs`'s `playbook`/`playbook_env` helpers.
 fn playbook(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))

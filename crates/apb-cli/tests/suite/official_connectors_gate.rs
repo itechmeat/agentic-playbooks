@@ -8,7 +8,6 @@
 
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use apb_core::connector::template::{Namespace, placeholders};
 use apb_core::connector::{ConnectorDoc, PublicMeta};
@@ -182,7 +181,7 @@ fn every_official_connector_folder_is_complete() {
         }
 
         // 7. Every declared case passes, fully offline.
-        let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+        let out = crate::common::apb_std()
             .args(["connector", "test", "--dir"])
             .arg(&dir)
             .output()

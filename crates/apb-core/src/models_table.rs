@@ -188,6 +188,10 @@ pub struct ModelsTable {
     pub purposes: Vec<Purpose>,
     #[serde(default)]
     pub claude_static_models: Vec<String>,
+    /// The model ids codex accepts, user-visible ones only (detection's
+    /// Static authority list for codex, and the profile editor's option set).
+    #[serde(default)]
+    pub codex_static_models: Vec<String>,
     /// Populated only from the overlay (declared subscriptions).
     #[serde(default)]
     pub subscriptions: Vec<Subscription>,
@@ -205,6 +209,8 @@ struct ModelsOverlay {
     purposes: Vec<Purpose>,
     #[serde(default)]
     claude_static_models: Vec<String>,
+    #[serde(default)]
+    codex_static_models: Vec<String>,
     #[serde(default)]
     subscriptions: Vec<Subscription>,
 }
@@ -267,6 +273,9 @@ pub fn load_merged() -> Result<ModelsTable, ModelsError> {
     if !overlay.claude_static_models.is_empty() {
         table.claude_static_models = overlay.claude_static_models;
     }
+    if !overlay.codex_static_models.is_empty() {
+        table.codex_static_models = overlay.codex_static_models;
+    }
     table.subscriptions = overlay.subscriptions;
     Ok(table)
 }
@@ -279,16 +288,58 @@ pub fn load_merged() -> Result<ModelsTable, ModelsError> {
 /// profiles saved before the agent id was renamed) resolves to the same
 /// vendor as `claude`.
 pub fn agent_vendor(agent: &str) -> Option<&'static str> {
-    match agent {
-        "claude" | "claude-code" => Some("anthropic"),
+    match crate::detect::canonical_agent_id(agent) {
+        "claude" => Some("anthropic"),
         "codex" => Some("openai"),
         "grok" => Some("xai"),
+        "zcode" => Some("zhipu"),
         _ => None,
     }
 }
 
+/// The closed, apb-owned model list of `agent`, or `None` when the agent
+/// has none and its options come from the curated table instead.
+///
+/// This is the ONE definition of "the models apb offers for this agent":
+/// detection reports it as the agent's `Static` inventory
+/// (`agent_catalog::assemble`) and the profile editor offers exactly
+/// it ([`model_options_for_agent`]), so the two can never disagree.
+/// - zcode: apb's allowlist ([`crate::zcode::model_list`]), a Rust constant
+///   because the spawn path enforces it;
+/// - claude (and the legacy `claude-code` id): `claude_static_models`;
+/// - codex: `codex_static_models`.
+///
+/// An empty table list (an overlay may clear one) means no closed list.
+pub fn static_models_for_agent(agent: &str, table: &ModelsTable) -> Option<Vec<String>> {
+    let list = match crate::detect::canonical_agent_id(agent) {
+        a if a == crate::zcode::AGENT_ID => crate::zcode::model_list(),
+        "claude" => table.claude_static_models.clone(),
+        "codex" => table.codex_static_models.clone(),
+        _ => return None,
+    };
+    (!list.is_empty()).then_some(list)
+}
+
+/// Whether `agent`'s option set is a closed apb-side list
+/// ([`static_models_for_agent`]) rather than the curated table filtered to a
+/// vendor. For such an agent a detected item outside the list must NOT be
+/// appended as an option: the list is exactly what apb supports.
+pub fn agent_models_are_closed_list(agent: &str, table: &ModelsTable) -> bool {
+    static_models_for_agent(agent, table).is_some()
+}
+
+/// A short, stable digest of the models data baked into this binary
+/// (`assets/models.yaml`). Part of the detection memo's build id, so a binary
+/// carrying different model data never reuses a memo written by another.
+pub fn builtin_digest() -> String {
+    use sha2::{Digest, Sha256};
+    let d = Sha256::digest(BUILTIN_YAML.as_bytes());
+    d.iter().take(8).map(|b| format!("{b:02x}")).collect()
+}
+
 /// One model choice offered for a specific agent in the profile editor
-/// (issue #42 finding 9). The curated table drives the option SET; detection
+/// (issue #42 finding 9). The curated table (or, for zcode and codex, a
+/// closed apb list) drives the option SET; detection
 /// only annotates it - `detected` marks a curated row also named by the
 /// agent's local config/detected model list, and never limits which rows are
 /// offered.
@@ -299,43 +350,65 @@ pub struct ModelOption {
     pub detected: bool,
 }
 
-/// Builds `agent`'s model option list: `table` rows tied to its vendor (or
-/// every row for an aggregator/unrecognized agent, which is not pinned to a
-/// single vendor), each annotated `detected` when `detected_items` (the
-/// agent's local config/detected model list, e.g. `~/.codex/config.toml`'s
-/// `model` line) also names it. A detected item absent from that curated set
-/// is appended as its own `detected`-only entry, so a model the agent
-/// reports but the curated table does not carry yet is never hidden - it is
-/// added, not used to replace the table.
+/// Builds `agent`'s model option list.
+///
+/// The option SET, in offer order:
+/// - an agent with a closed apb list ([`static_models_for_agent`]: zcode,
+///   claude, codex): exactly that list, in its order (the first entry is the
+///   default). The curated zhipu rows would offer models the zcode allowlist
+///   refuses.
+/// - otherwise: the curated rows tied to the agent's vendor (or every row
+///   for an aggregator/unrecognized agent, which is not pinned to a single
+///   vendor).
+///
+/// Each entry is annotated `detected` when `detected_items` (the agent's
+/// local config/detected model list, e.g. `~/.codex/config.toml`'s `model`
+/// line) also names it. On the vendor path a detected item absent from the
+/// curated set is appended as its own `detected`-only entry, so a model the
+/// agent reports but the curated table does not carry yet is never hidden; on
+/// a closed list ([`agent_models_are_closed_list`]) it is not - the list is
+/// exactly what apb supports.
 pub fn model_options_for_agent(
     agent: &str,
     detected_items: &[String],
     table: &ModelsTable,
 ) -> Vec<ModelOption> {
     let vendor = agent_vendor(agent);
-    let curated: Vec<&ModelRow> = match vendor {
-        Some(v) => table.models.iter().filter(|m| m.vendor == v).collect(),
-        None => table.models.iter().collect(),
+    let agent_vendor_str = vendor.unwrap_or_default().to_string();
+    // (id, vendor) pairs of the option set, in offer order.
+    let set: Vec<(String, String)> = match static_models_for_agent(agent, table) {
+        Some(list) => list
+            .into_iter()
+            .map(|id| (id, agent_vendor_str.clone()))
+            .collect(),
+        None => table
+            .models
+            .iter()
+            .filter(|m| vendor.is_none_or(|v| m.vendor == v))
+            .map(|m| (m.id.clone(), m.vendor.clone()))
+            .collect(),
     };
     let detected_set: std::collections::BTreeSet<&str> =
         detected_items.iter().map(String::as_str).collect();
-    let mut out: Vec<ModelOption> = curated
-        .iter()
-        .map(|m| ModelOption {
-            id: m.id.clone(),
-            vendor: m.vendor.clone(),
-            detected: detected_set.contains(m.id.as_str()),
+    let offered: std::collections::BTreeSet<String> =
+        set.iter().map(|(id, _)| id.clone()).collect();
+    let mut out: Vec<ModelOption> = set
+        .into_iter()
+        .map(|(id, vendor)| ModelOption {
+            detected: detected_set.contains(id.as_str()),
+            id,
+            vendor,
         })
         .collect();
-    let curated_ids: std::collections::BTreeSet<&str> =
-        curated.iter().map(|m| m.id.as_str()).collect();
-    for item in detected_items {
-        if !curated_ids.contains(item.as_str()) {
-            out.push(ModelOption {
-                id: item.clone(),
-                vendor: vendor.unwrap_or_default().to_string(),
-                detected: true,
-            });
+    if !agent_models_are_closed_list(agent, table) {
+        for item in detected_items {
+            if !offered.contains(item) {
+                out.push(ModelOption {
+                    id: item.clone(),
+                    vendor: agent_vendor_str.clone(),
+                    detected: true,
+                });
+            }
         }
     }
     out
@@ -528,6 +601,7 @@ mod tests {
                 .collect(),
             purposes: Vec::new(),
             claude_static_models: Vec::new(),
+            codex_static_models: Vec::new(),
             subscriptions: Vec::new(),
         }
     }
@@ -541,6 +615,7 @@ mod tests {
         assert_eq!(agent_vendor("opencode"), None);
         assert_eq!(agent_vendor("cursor"), None);
         assert_eq!(agent_vendor("qoder"), None);
+        assert_eq!(agent_vendor("zcode"), Some("zhipu"));
         assert_eq!(agent_vendor("some-custom-agent"), None);
     }
 
@@ -549,7 +624,7 @@ mod tests {
         let t = table_of(&[
             ("gpt-5.6-sol", "openai"),
             ("gpt-5.6-terra", "openai"),
-            ("claude-opus-4-8", "anthropic"),
+            ("claude-opus-5-5", "anthropic"),
         ]);
         // codex ties to openai: only the two openai rows are offered, in
         // table order, none detected (an empty local config).
@@ -611,12 +686,158 @@ mod tests {
 
     #[test]
     fn model_options_for_agent_keeps_an_aggregator_on_the_full_table() {
-        let t = table_of(&[("gpt-5.6-sol", "openai"), ("claude-opus-4-8", "anthropic")]);
+        let t = table_of(&[("gpt-5.6-sol", "openai"), ("claude-opus-5-5", "anthropic")]);
         // opencode is an aggregator (no single vendor tie): it keeps every
         // curated row, same as an unrecognized agent id.
         let opts = model_options_for_agent("opencode", &[], &t);
         assert_eq!(opts.len(), 2);
+        assert_eq!(opts[0].vendor, "openai", "each row keeps its own vendor");
+        assert_eq!(opts[1].vendor, "anthropic", "each row keeps its own vendor");
         let unknown = model_options_for_agent("some-custom-agent", &[], &t);
         assert_eq!(unknown.len(), 2);
+    }
+
+    /// zcode's option set is apb's allowlist, always: bare ids, annotated
+    /// `detected` from the detected list, never extended by a detected item
+    /// outside the allowlist (the curated zhipu row `glm-5.2` must not
+    /// appear either).
+    #[test]
+    fn model_options_for_zcode_come_from_the_allowlist() {
+        let t = table_of(&[("glm-5.2", "zhipu"), ("gpt-5.6-sol", "openai")]);
+        let detected = vec!["GLM-5.3".to_string(), "GLM-5.3-Flash".to_string()];
+        let opts = model_options_for_agent("zcode", &detected, &t);
+        assert_eq!(
+            opts,
+            vec![
+                ModelOption {
+                    id: "GLM-5.3".into(),
+                    vendor: "zhipu".into(),
+                    detected: true
+                },
+                ModelOption {
+                    id: "GLM-5.3-Flash".into(),
+                    vendor: "zhipu".into(),
+                    detected: true
+                },
+            ]
+        );
+
+        // No detection yet: the allowlist is still the whole offer.
+        let bare = model_options_for_agent("zcode", &[], &t);
+        let ids: Vec<&str> = bare.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, vec!["GLM-5.3", "GLM-5.3-Flash"]);
+
+        // A detected id outside the allowlist must not leak into the offer.
+        let leaked = model_options_for_agent("zcode", &["GLM-5-Turbo".to_string()], &t);
+        let ids: Vec<&str> = leaked.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, vec!["GLM-5.3", "GLM-5.3-Flash"]);
+    }
+
+    /// codex's option set is the static list from the table, in list order;
+    /// detection only annotates. With no static list in the table the old
+    /// vendor-rows path applies (an overlay may clear or omit it).
+    #[test]
+    fn model_options_for_codex_come_from_the_static_list() {
+        let mut t = table_of(&[("gpt-5.6-sol", "openai"), ("gpt-5.4-nano", "openai")]);
+        let seven = [
+            "gpt-6-sol",
+            "gpt-6-astra",
+            "gpt-6-luna",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+        ];
+        t.codex_static_models = seven.iter().map(|s| s.to_string()).collect();
+        let opts = model_options_for_agent(
+            "codex",
+            &["gpt-5.6-terra".to_string(), "gpt-reserve".to_string()],
+            &t,
+        );
+        let ids: Vec<&str> = opts.iter().map(|o| o.id.as_str()).collect();
+        assert_eq!(ids, seven, "exactly the static list, default first");
+        assert!(
+            !opts
+                .iter()
+                .any(|o| o.id == "gpt-reserve" || o.id == "gpt-5.4-nano"),
+            "neither a config-only model nor a curated row outside the list may join it"
+        );
+        let terra = opts.iter().find(|o| o.id == "gpt-5.6-terra").unwrap();
+        assert!(terra.detected);
+        assert!(!opts.iter().find(|o| o.id == "gpt-6-sol").unwrap().detected);
+    }
+
+    /// claude is a closed list too: exactly `claude_static_models`, even when
+    /// the curated table carries other anthropic rows; an overlay that clears
+    /// the list falls back to the vendor rows.
+    #[test]
+    fn model_options_for_claude_come_from_the_static_list() {
+        let mut t = table_of(&[
+            ("claude-opus-5-5", "anthropic"),
+            ("claude-old-1", "anthropic"),
+        ]);
+        t.claude_static_models = vec!["claude-opus-5-5".into(), "claude-sonnet-5".into()];
+        for agent in ["claude", "claude-code"] {
+            let ids: Vec<String> = model_options_for_agent(agent, &["claude-x".into()], &t)
+                .into_iter()
+                .map(|o| o.id)
+                .collect();
+            assert_eq!(ids, vec!["claude-opus-5-5", "claude-sonnet-5"], "{agent}");
+        }
+        t.claude_static_models.clear();
+        assert_eq!(static_models_for_agent("claude", &t), None);
+        assert_eq!(model_options_for_agent("claude", &[], &t).len(), 2);
+    }
+
+    #[test]
+    fn static_models_for_agent_covers_exactly_the_closed_list_agents() {
+        let t = builtin();
+        assert_eq!(
+            static_models_for_agent("zcode", &t),
+            Some(crate::zcode::model_list())
+        );
+        assert_eq!(
+            static_models_for_agent("claude", &t),
+            Some(t.claude_static_models.clone())
+        );
+        assert_eq!(
+            static_models_for_agent("codex", &t),
+            Some(t.codex_static_models.clone())
+        );
+        for open in ["opencode", "grok", "cursor", "qoder", "some-agent"] {
+            assert_eq!(static_models_for_agent(open, &t), None, "{open}");
+        }
+    }
+
+    /// Table-wide invariants a model refresh must keep, without naming any
+    /// model: ids are unique, every metered row is priced, and every model the
+    /// table's own closed lists offer has a full row (provenance is checked for
+    /// every row above). zcode's list is the Rust allowlist and is deliberately
+    /// unpriced: GLM-5.3 has no published metered price.
+    #[test]
+    fn rows_are_unique_priced_and_back_every_static_list() {
+        let t = builtin();
+        let mut seen = std::collections::BTreeSet::new();
+        for m in &t.models {
+            assert!(seen.insert(m.id.as_str()), "duplicate model id `{}`", m.id);
+            if !(m.stt || m.tts) {
+                assert!(
+                    m.cost_in_usd_mtok.is_some() && m.cost_out_usd_mtok.is_some(),
+                    "model `{}` is missing a price",
+                    m.id
+                );
+            }
+        }
+        for id in t.claude_static_models.iter().chain(&t.codex_static_models) {
+            let m = t
+                .models
+                .iter()
+                .find(|m| &m.id == id)
+                .unwrap_or_else(|| panic!("static-list model `{id}` has no row"));
+            assert!(
+                m.context_tokens.is_some() && m.reasoning.is_some(),
+                "static-list model `{id}` is missing context or reasoning"
+            );
+        }
     }
 }

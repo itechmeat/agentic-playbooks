@@ -19,6 +19,8 @@ pub mod lock;
 mod ratelimit;
 pub mod routes;
 pub mod state;
+#[cfg(test)]
+mod ts_contract;
 pub mod watch;
 pub mod ws;
 
@@ -70,6 +72,16 @@ pub fn build_router(state: AppState) -> Router {
         .route(
             "/api/playbooks/{id}/run",
             post(routes::playbooks::run_playbook_handler),
+        )
+        .route("/api/trust", get(routes::trust::list_trust_handler))
+        .route(
+            "/api/trust/revoke",
+            post(routes::trust::revoke_trust_handler),
+        )
+        .route("/api/trash", get(routes::trash::list_trash_handler))
+        .route(
+            "/api/trash/{name}/restore",
+            post(routes::trash::restore_trash_handler),
         )
         .route(
             "/api/profiles",
@@ -161,6 +173,8 @@ pub fn build_router(state: AppState) -> Router {
             state.clone(),
             auth::auth_middleware,
         ))
+        // Outermost, so auth refusals carry the build header too.
+        .layer(axum::middleware::from_fn(assets::build_middleware))
         .with_state(state)
 }
 
@@ -204,7 +218,8 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     // issuing a first key or revoking a compromised one takes effect on a
     // running dashboard without a restart.
     let mut auth_state = auth::AuthState::new(Some(auth_path), auth_file.keys, &global_cfg.server)
-        .map_err(std::io::Error::other)?;
+        .map_err(std::io::Error::other)?
+        .with_port(port);
     // check_bind_allowed only checks the bind/key precondition once, at
     // startup. On a non-loopback bind, require_keys keeps it enforced for the
     // life of the process: if the key set empties out later (the last key
@@ -220,12 +235,15 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
     let cfg = apb_core::config::config_dir()
         .ok_or_else(|| std::io::Error::other("no config dir for the global server lock"))?;
     std::fs::create_dir_all(&cfg)?;
-    // Bind the port BEFORE writing the lock file: the port bind is the real
-    // mutual exclusion (a second server on the same port fails here), so if it
-    // fails we must return without having written a lock that no cleanup path
-    // would then remove.
+    // Bind the port BEFORE taking the lock: a second server on the same port
+    // fails here without touching the lock. The lock then refuses a second
+    // dashboard on another port over the same config dir, naming the one
+    // that is running.
     let listener = tokio::net::TcpListener::bind((bind, port)).await?;
-    let _lock = lock::write_global_lock(&cfg, port)?;
+    let _lock = lock::GlobalLock::acquire(&cfg, port).map_err(std::io::Error::other)?;
+    // An upgrade restarts the dashboard: bring pristine installed copies of
+    // official connectors in line with the ones embedded in this binary.
+    report_connector_reconcile(apb_core::connector::install::reconcile_official());
     // Real-time updates across all projects: a filesystem watcher broadcasts
     // change pings on the shared channel that the dashboard's WebSocket relays.
     // Best-effort: if it cannot start, the server still serves (the UI just
@@ -266,10 +284,35 @@ pub async fn run_server(bind: IpAddr, port: u16) -> Result<(), Box<dyn std::erro
         shutdown_signal(),
     )
     .await;
-    // Remove the lock both on normal shutdown and after catching a signal.
-    lock::remove_global_lock(&cfg)?;
+    // `_lock` drops on return: the lock goes on normal shutdown and after a
+    // caught signal alike, and only while it is still this instance's.
     result?;
     Ok(())
+}
+
+fn report_connector_reconcile(outcome: Vec<apb_core::connector::install::Reconciled>) {
+    use apb_core::connector::install::Reconciled;
+    for r in outcome {
+        match r {
+            Reconciled::Updated {
+                name,
+                from_version,
+                to_version,
+            } => println!(
+                "apb dashboard: connector `{name}` updated to the built-in copy ({from_version} -> {to_version})"
+            ),
+            Reconciled::UpdateAvailable {
+                name,
+                installed_version,
+                embedded_version,
+            } => println!(
+                "apb dashboard: connector `{name}` {installed_version} has local changes; the built-in {embedded_version} is available (apb connector install {name} --force)"
+            ),
+            Reconciled::Failed { name, error } => {
+                eprintln!("apb dashboard: cannot update connector `{name}`: {error}")
+            }
+        }
+    }
 }
 
 async fn shutdown_signal() {

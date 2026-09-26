@@ -17,7 +17,7 @@ use apb_core::connector::def::ConnectorDoc;
 use apb_core::connector::secrets;
 use apb_core::connector::store::{self, LoadedConnector};
 use apb_core::doctor::{Check, CheckStatus};
-use apb_core::trust::{Kind, OriginKind, TrustStore, account_trust_id};
+use apb_core::trust::{Kind, OriginKind, TrustStatus, TrustStore, account_trust_id};
 use clap::Subcommand;
 use serde_json::{Value, json};
 
@@ -30,9 +30,9 @@ pub(crate) enum ConnectorAction {
     /// Show one connector's manifest summary and account status
     Show { name: String },
     /// Call a connector function - the agent-facing call channel (also
-    /// usable by a human for debugging). Requires a run context: this
-    /// process must be spawned by the engine with `APB_RUN_DIR` and
-    /// `APB_NODE_ID` set.
+    /// usable by a human for debugging). A real call requires a run context:
+    /// this process must be spawned by the engine with `APB_RUN_DIR` and
+    /// `APB_NODE_ID` set. `--dry-run` also works outside a run.
     Call {
         name: String,
         function: String,
@@ -146,7 +146,6 @@ fn list_cmd(root: &Path) -> ExitCode {
         );
     } else {
         let trust = TrustStore::load();
-        let approved_connector_ids = trust.approved_record_ids(Kind::Connector);
         let mut rows: Vec<Vec<String>> = vec![vec![
             "NAME".to_string(),
             "VERSION".to_string(),
@@ -155,15 +154,9 @@ fn list_cmd(root: &Path) -> ExitCode {
         ]];
         for s in &summaries {
             let trust_state = match store::load(&s.name) {
-                Ok(loaded) => {
-                    if trust.is_approved(&loaded.digest) {
-                        "approved"
-                    } else if approved_connector_ids.iter().any(|id| id == &s.name) {
-                        "changed"
-                    } else {
-                        "unapproved"
-                    }
-                }
+                Ok(loaded) => trust
+                    .status(&loaded.digest, &s.name, Kind::Connector)
+                    .as_str(),
                 Err(_) => "invalid",
             };
             let accounts_count = config::load_merged(root, &s.name)
@@ -178,15 +171,15 @@ fn list_cmd(root: &Path) -> ExitCode {
         }
         print_table(&rows);
 
-        // Version-drift notes: an installed connector whose embedded version
-        // differs (a binary upgrade shipped a newer manifest).
+        // Drift notes: an installed official connector whose files differ
+        // from the copy embedded in this binary (an upgrade shipped a fix, or
+        // the copy was edited locally). The dashboard replaces pristine copies
+        // on start; an edited one stays until the user reinstalls it.
         for s in &summaries {
-            if let Some(o) = official.iter().find(|o| o.name == s.name)
-                && o.version != s.version
-            {
+            if let Some(embedded) = apb_core::connector::install::embedded_update(&s.name) {
                 println!(
-                    "note: `{}` installed {}, embedded {} (reinstall with --force to upgrade)",
-                    s.name, s.version, o.version
+                    "note: `{}` installed {} differs from the built-in {embedded} (reinstall with --force to update)",
+                    s.name, s.version
                 );
             }
         }
@@ -277,6 +270,9 @@ fn show_cmd(root: &Path, name: &str) -> ExitCode {
                 "default": a.default,
                 "fields": Value::Object(fields),
                 "env": env,
+                // A secret read from a command: the command line, which
+                // approving the account authorizes apb to run (not a secret).
+                "cmd": config::cmd_refs(&loaded.doc, a),
             })
         })
         .collect();
@@ -298,8 +294,9 @@ fn show_cmd(root: &Path, name: &str) -> ExitCode {
 /// Approves the connector's current tree digest, or with `account` the current
 /// non-secret-field digest of that account (spec 7). Prints the concrete fields
 /// approved for an account so the user sees exactly what they trusted. Secret
-/// fields carry only their raw `{{env.VAR}}` reference in the config, never the
-/// value, so printing every field is safe.
+/// fields carry only their raw `{{env.VAR}}` or `{{cmd:...}}` reference in the
+/// config, never the value, so printing every field is safe; `cmd` names each
+/// command the approval lets apb run.
 fn approve_cmd(root: &Path, name: &str, account: Option<&str>) -> ExitCode {
     let loaded = match store::load(name) {
         Ok(l) => l,
@@ -356,6 +353,7 @@ fn approve_cmd(root: &Path, name: &str, account: Option<&str>) -> ExitCode {
                 "digest": digest,
                 "default": account.default,
                 "fields": Value::Object(fields),
+                "cmd": config::cmd_refs(&loaded.doc, account),
             }));
             ExitCode::SUCCESS
         }
@@ -373,23 +371,6 @@ fn call_cmd(
     dry_run: bool,
     full: bool,
 ) -> ExitCode {
-    let run_dir = std::env::var("APB_RUN_DIR").ok();
-    let node_id = std::env::var("APB_NODE_ID").ok();
-    let (run_dir, node_id) = match (run_dir, node_id) {
-        (Some(r), Some(n)) => (r, n),
-        _ => {
-            print_call_result(&call_error_json(
-                "config",
-                "apb connector call requires a run context: set APB_RUN_DIR (the runs/<id> \
-                 directory of the current run) and APB_NODE_ID (the id of the node making the \
-                 call). Both are set automatically by the engine when a node executes a \
-                 connector call; outside a run, use the connector's healthcheck or `--dry-run` \
-                 inside a real run instead.",
-            ));
-            return ExitCode::FAILURE;
-        }
-    };
-
     let args_str = match args.as_deref() {
         None => "{}".to_string(),
         Some("-") => {
@@ -411,6 +392,44 @@ fn call_cmd(
             print_call_result(&call_error_json(
                 "invalid_args",
                 &format!("--args is not valid JSON: {e}"),
+            ));
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let run_dir = std::env::var("APB_RUN_DIR").ok();
+    let node_id = std::env::var("APB_NODE_ID").ok();
+    let (run_dir, node_id) = match (run_dir, node_id) {
+        (Some(r), Some(n)) => (r, n),
+        // A dry run resolves no secret and executes nothing, so outside a run
+        // it renders against the live connector and account config (the
+        // dashboard playground's path) instead of refusing.
+        _ if dry_run => {
+            let (value, ok) = apb_engine::connector::call::play_call(
+                root,
+                name,
+                account.as_deref(),
+                function,
+                &parsed_args,
+                true,
+                full,
+            );
+            print_call_result(&value);
+            return if ok {
+                ExitCode::SUCCESS
+            } else {
+                ExitCode::FAILURE
+            };
+        }
+        _ => {
+            print_call_result(&call_error_json(
+                "config",
+                "apb connector call requires a run context: set APB_RUN_DIR (the runs/<id> \
+                 directory of the current run) and APB_NODE_ID (the id of the node making the \
+                 call). Both are set automatically by the engine when a node executes a \
+                 connector call; outside a run, `--dry-run` renders the call without \
+                 executing it and `apb connector doctor` or the dashboard probe checks an \
+                 account.",
             ));
             return ExitCode::FAILURE;
         }
@@ -563,6 +582,18 @@ fn doctor_cmd(root: &Path) -> ExitCode {
 
         push_connector_trust_check(&mut checks, &trust, name, &loaded.digest);
         for account in &accounts {
+            for (field, command) in config::cmd_refs(&loaded.doc, account) {
+                checks.push(Check {
+                    name: format!(
+                        "connector `{name}` account `{}`: secret command",
+                        account.name
+                    ),
+                    status: CheckStatus::Ok,
+                    detail: format!(
+                        "field `{field}` is read from the output of `{command}`; approving the account lets apb run it"
+                    ),
+                });
+            }
             let digest = config::account_digest(account);
             let approved = trust.is_approved(&digest);
             checks.push(Check {
@@ -620,18 +651,14 @@ fn push_connector_trust_check(
     name: &str,
     digest: &str,
 ) {
-    let approved = trust.is_approved(digest);
-    let detail = if approved {
-        "approved".to_string()
-    } else if trust
-        .approved_record_ids(Kind::Connector)
-        .iter()
-        .any(|id| id == name)
-    {
-        "changed since last approval".to_string()
-    } else {
-        "not approved".to_string()
-    };
+    let status = trust.status(digest, name, Kind::Connector);
+    let approved = status == TrustStatus::Approved;
+    let detail = match status {
+        TrustStatus::Approved => "approved",
+        TrustStatus::Changed => "changed since last approval",
+        TrustStatus::Unapproved => "not approved",
+    }
+    .to_string();
     checks.push(Check {
         name: format!("connector `{name}`: trust"),
         status: if approved {

@@ -3,24 +3,26 @@ import { provenanceLabel } from './versioninfo'
 import type { VersionInfo } from './types'
 
 describe('provenanceLabel', () => {
-  it('labels a user minor version with no provenance', () => {
+  it('labels a version with no sidecar as minor', () => {
     const v: VersionInfo = { version: '1.1.0', is_current: true, provenance: null }
-    expect(provenanceLabel(v)).toBe('minor, current')
+    expect(provenanceLabel(v)).toBe('minor')
   })
-  it('labels a promoted improvement patch from a run', () => {
+  // Every save through apb writes a `created_by: user` sidecar; it is an
+  // ordinary version, not a supervisor patch of unknown classification.
+  it('labels a version saved by the user as minor, not as a patch', () => {
+    const v: VersionInfo = {
+      version: '1.14.0',
+      is_current: false,
+      provenance: { created_by: 'user', run_id: null, classification: null },
+    }
+    expect(provenanceLabel(v)).toBe('minor')
+  })
+  it('labels a supervisor patch with its classification and run', () => {
     const v: VersionInfo = {
       version: '1.0.1',
       is_current: false,
-      provenance: { created_by: 'supervisor', run_id: 'run-1', classification: 'improvement', promoted: true },
+      provenance: { created_by: 'supervisor', run_id: 'run-1', classification: 'improvement' },
     }
-    expect(provenanceLabel(v)).toBe('patch: improvement, promoted, run run-1')
-  })
-  it('labels an unpromoted workaround patch', () => {
-    const v: VersionInfo = {
-      version: '1.0.2',
-      is_current: false,
-      provenance: { created_by: 'supervisor', run_id: null, classification: 'workaround', promoted: false },
-    }
-    expect(provenanceLabel(v)).toBe('patch: workaround, not promoted')
+    expect(provenanceLabel(v)).toBe('patch: improvement, run run-1')
   })
 })

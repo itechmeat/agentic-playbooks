@@ -1,0 +1,26 @@
+{
+  "sessionId": "sess_00000000-0000-4000-8000-000000000003",
+  "traceId": "00000000-0000-4000-8000-0000000000a3",
+  "turnId": "turn_00000000-0000-4000-8000-0000000000b3",
+  "response": "Created `hello.py` (defines `hello()` returning `'hi'`, prints it when run as a script) and `test_hello.py` (pytest test asserting `hello() == 'hi'`).",
+  "usage": {
+    "source": "provider",
+    "modelRequestCount": 2,
+    "inputTokens": 41775,
+    "outputTokens": 318,
+    "totalTokens": 42093,
+    "cacheReadTokens": 36224,
+    "cacheWriteTokens": 0,
+    "reasoningTokens": 0,
+    "webFetchRequests": 0,
+    "webSearchRequests": 0
+  },
+  "eventCount": 206,
+  "projection": {
+    "status": "idle",
+    "turnCount": 1,
+    "totalTokenCount": 42093,
+    "contextUsed": 21140,
+    "contextWindow": 200000
+  }
+}

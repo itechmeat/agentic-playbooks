@@ -6,8 +6,21 @@ import { Document, YAMLSeq } from 'yaml'
 // supervisor), as well as comments and key order. Each function clones the
 // document (immutable from the caller's point of view) and returns a new copy.
 
-const NODE_TYPES = ['start', 'agent_task', 'script', 'condition', 'finish', 'playbook'] as const
-export type NodeKind = (typeof NODE_TYPES)[number]
+import type { NodeType } from './consts.gen'
+
+// The node kinds the editor can add, in the order a graph is usually built,
+// with the node that ends a run last. A subset of the schema's node types
+// (NodeType is generated from apb-core, so a renamed or removed type fails
+// the check here).
+export const EDITOR_NODE_KINDS = [
+  'start',
+  'agent_task',
+  'script',
+  'condition',
+  'playbook',
+  'finish',
+] as const satisfies readonly NodeType[]
+export type NodeKind = (typeof EDITOR_NODE_KINDS)[number]
 
 /** Default value for a new node's title. */
 function defaultTitle(kind: string, id: string): string {

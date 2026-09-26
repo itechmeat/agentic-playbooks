@@ -5,7 +5,7 @@ use std::fs;
 const VALID: &str = include_str!("../../../apb-core/tests/fixtures/valid.yaml");
 
 fn playbook() -> Command {
-    Command::cargo_bin("apb").unwrap()
+    crate::common::apb()
 }
 
 fn seeded_dir() -> tempfile::TempDir {
@@ -124,4 +124,43 @@ fn dev_without_frontend_fails_clearly() {
         .assert()
         .failure()
         .stderr(predicate::str::contains("frontend not found"));
+}
+
+/// `apb import` saves through the one save path, so the imported version is
+/// trusted exactly like a save through MCP or the dashboard: its digest lands
+/// in the trust store. It used to import untrusted.
+#[test]
+fn import_approves_the_imported_digest() {
+    let src = seeded_dir();
+    let bundle_path = src.path().join("bundle.json");
+    playbook()
+        .args(["export", "implement-task", "--out"])
+        .arg(&bundle_path)
+        .current_dir(src.path())
+        .assert()
+        .success();
+    let dst = tempfile::tempdir().unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    playbook()
+        .arg("init")
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .success();
+    seed_architect(dst.path());
+    playbook()
+        .arg("import")
+        .arg(&bundle_path)
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dst.path())
+        .assert()
+        .success();
+    let pdir = dst.path().join(".apb/playbooks/implement-task");
+    let version = fs::read_to_string(pdir.join("current")).unwrap();
+    let saved = fs::read_to_string(pdir.join(version.trim()).join("playbook.yaml")).unwrap();
+    let trust = fs::read_to_string(cfg.path().join("trust.json")).unwrap_or_default();
+    assert!(
+        trust.contains(&apb_core::scope::digest_str(&saved)),
+        "the imported digest must be approved, trust store: {trust}"
+    );
 }

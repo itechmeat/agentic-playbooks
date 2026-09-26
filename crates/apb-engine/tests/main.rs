@@ -177,6 +177,8 @@ mod retry_test;
 mod review_state_test;
 #[path = "suite/review_test.rs"]
 mod review_test;
+#[path = "suite/run_wait_test.rs"]
+mod run_wait_test;
 #[path = "suite/runner_registry_test.rs"]
 mod runner_registry_test;
 #[path = "suite/scheduler_test.rs"]
@@ -202,9 +204,17 @@ mod supervised_drive_test;
 mod supervisor_channel_delivery_test;
 #[path = "suite/supervisor_commands_test.rs"]
 mod supervisor_commands_test;
+#[cfg(unix)]
+#[path = "suite/token_economy_test.rs"]
+mod token_economy_test;
+#[path = "suite/unhandled_failure_test.rs"]
+mod unhandled_failure_test;
 #[path = "suite/wait_test.rs"]
 mod wait_test;
 #[path = "suite/wake_events_test.rs"]
 mod wake_events_test;
 #[path = "suite/workdir_test.rs"]
 mod workdir_test;
+#[cfg(unix)]
+#[path = "suite/zcode_adapter_test.rs"]
+mod zcode_adapter_test;

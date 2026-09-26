@@ -16,7 +16,7 @@ use std::path::{Path, PathBuf};
 use serde::{Deserialize, Serialize};
 
 use crate::fsutil::atomic_write;
-use crate::registry::{Registry, is_frozen_dir, is_safe_segment};
+use crate::registry::{Registry, is_frozen_dir, is_safe_segment, list_versions, parse_version};
 use crate::schema::{Playbook, SchemaError};
 use crate::validate::{Issue, Severity, ValidationContext, validate};
 
@@ -38,12 +38,17 @@ pub enum VersioningError {
     Io(#[from] io::Error),
 }
 
+/// Who made a version, stored beside it in `meta/<version>.yaml`. Which
+/// version is in use is not part of it: the `current` pointer is the one
+/// authority for that (see [`VersionInfo::is_current`]). Sidecars written by
+/// older builds carry a `promoted` flag that drifted from `current` (a
+/// rollback or a save that did not move `current` left it set); it is
+/// ignored on read.
 #[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
 pub struct VersionProvenance {
     pub created_by: String,
     pub run_id: Option<String>,
     pub classification: Option<String>,
-    pub promoted: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,7 +74,7 @@ fn advance_minor_pair(major: u32, minor: u32) -> Result<(u32, u32), ()> {
 /// Invalid `base` (not three numeric segments) yields safe default `1.0.0`.
 /// If minor is exhausted, major is incremented (explicit safeguard against looping on `u32::MAX`).
 pub fn next_minor_version(base: &str, existing: &[String]) -> String {
-    let Some((mut major, minor, _)) = parse_version_triple(base) else {
+    let Some((mut major, minor, _)) = parse_version(base) else {
         return "1.0.0".to_string();
     };
     let taken: HashSet<&str> = existing.iter().map(String::as_str).collect();
@@ -94,7 +99,7 @@ pub fn next_minor_version(base: &str, existing: &[String]) -> String {
 /// Invalid `base` yields safe default `1.0.0`; create_patch_version
 /// separately rejects such base before creating the version.
 pub fn next_patch_version(base: &str, existing: &[String]) -> String {
-    let Some((major, minor, patch)) = parse_version_triple(base) else {
+    let Some((major, minor, patch)) = parse_version(base) else {
         return "1.0.0".to_string();
     };
     let taken: HashSet<&str> = existing.iter().map(String::as_str).collect();
@@ -166,14 +171,14 @@ pub fn create_version_with_override(
     let existing = if is_new {
         Vec::new()
     } else {
-        list_version_dirs(&playbook_dir)?
+        list_versions(&playbook_dir)?
     };
 
     let (mut version, bump) = if let Some(v) = version_override {
         if !is_safe_segment(v) {
             return Err(VersioningError::NotFound(format!("{id}@{v}")));
         }
-        if parse_version_triple(v).is_none() {
+        if parse_version(v).is_none() {
             return Err(VersioningError::Conflict(format!("invalid version `{v}`")));
         }
         if existing.iter().any(|e| e.as_str() == v) {
@@ -221,7 +226,6 @@ pub fn create_version_with_override(
             created_by: "user".to_string(),
             run_id: None,
             classification: None,
-            promoted: true,
         },
     )?;
 
@@ -230,6 +234,89 @@ pub fn create_version_with_override(
     }
 
     Ok(version)
+}
+
+/// The one save path for a playbook definition written through apb: MCP
+/// `playbook_create` / `playbook_update`, the dashboard editor, and
+/// `apb import`. Creates the new version exactly like
+/// [`create_version_with_override`] and then applies the one trust rule for
+/// saves: a definition saved through apb is a user-authorized local write,
+/// so the digest of the version it wrote is approved (`LocallyApproved`,
+/// spec 3.1 and the profiles spec 9.4: auto-approve is trust in the result of
+/// an authorized operation). Content that changes outside apb - a hand edit,
+/// a `git pull`, a copied directory - never passes here and stays untrusted.
+///
+/// The save writes the YAML, not the scripts: the new version carries the
+/// base version's `scripts/` along. So the result is approved only when that
+/// carried code was already approved - the new version has no scripts, or the
+/// base version's own digest is approved and the scripts are unchanged. A save
+/// on top of scripts nobody approved (a repository update, a cloned project)
+/// leaves the new version untrusted like its base.
+///
+/// Approval is best effort: the version is already committed when it runs,
+/// so a trust-store write failure is reported on stderr rather than turning
+/// a completed save into an error (the playbook then runs only with an
+/// explicit acknowledge, like any untrusted one).
+pub fn save_definition(
+    root: &Path,
+    id: &str,
+    yaml: &str,
+    version_override: Option<&str>,
+    make_current: bool,
+) -> Result<String, VersioningError> {
+    let base = if is_safe_segment(id) {
+        read_current_pointer(&playbooks_dir(root).join(id))
+    } else {
+        None
+    };
+    let version =
+        create_version_with_override(root, id, yaml, None, version_override, make_current)?;
+    approve_written(root, id, &version, base.as_deref(), "saved");
+    Ok(version)
+}
+
+/// The trust half of a write through apb: approves the digest of
+/// `<id>/<version>` (its YAML plus its scripts, see
+/// [`crate::scope::definition_digest`]) as `LocallyApproved`, because the
+/// user asked for that write. Shared by [`save_definition`] and
+/// [`restore_from_trash`]. A version with scripts is approved only when they
+/// were carried unchanged from `base`, a version whose own digest is already
+/// approved; the write never produced them, so it cannot vouch for them.
+/// A failure to record trust does not undo the write (the definition is on
+/// disk either way); it is reported and the playbook stays untrusted.
+fn approve_written(root: &Path, id: &str, version: &str, base: Option<&str>, what: &str) {
+    let playbook_dir = playbooks_dir(root).join(id);
+    let digest_of = |v: &str, yaml_of: &str| -> io::Result<(String, String)> {
+        let yaml = fs::read_to_string(playbook_dir.join(yaml_of).join("playbook.yaml"))?;
+        let d = crate::scope::definition_digest(&yaml, &playbook_dir.join(v))
+            .map_err(io::Error::other)?;
+        Ok((yaml, d))
+    };
+    let approved = digest_of(version, version).and_then(|(yaml, digest)| {
+        let trust = crate::trust::TrustStore::load();
+        let scripts_vouched = digest == crate::scope::digest_str(&yaml)
+            || base.is_some_and(|b| {
+                // The base's YAML digested over the NEW version's scripts equals
+                // the base's approved digest exactly when the scripts are the
+                // ones that approval covered.
+                matches!(
+                    (digest_of(b, b), digest_of(version, b)),
+                    (Ok((_, base_digest)), Ok((_, carried)))
+                        if carried == base_digest && trust.is_approved(&base_digest)
+                )
+            });
+        if !scripts_vouched {
+            return Ok(());
+        }
+        crate::trust::TrustStore::load().approve(
+            &digest,
+            id,
+            crate::trust::OriginKind::LocallyApproved,
+        )
+    });
+    if let Err(e) = approved {
+        eprintln!("apb: {what} `{id}` {version} but could not record its trust: {e}");
+    }
 }
 
 /// Creates immutable patch version from base version without changing current.
@@ -257,7 +344,7 @@ pub fn create_patch_version(
             node: None,
         }]));
     }
-    if parse_version_triple(base_version).is_none() {
+    if parse_version(base_version).is_none() {
         return Err(VersioningError::Conflict(format!(
             "invalid version `{base_version}`"
         )));
@@ -273,7 +360,7 @@ pub fn create_patch_version(
         return Err(VersioningError::Frozen(id.to_string()));
     }
 
-    let existing = list_version_dirs(&playbook_dir)?;
+    let existing = list_versions(&playbook_dir)?;
     let version = next_patch_version(base_version, &existing);
     let mut playbook = Playbook::from_yaml(new_yaml).map_err(schema_err)?;
     playbook.version = version.clone();
@@ -302,14 +389,13 @@ pub fn create_patch_version(
             created_by: "supervisor".to_string(),
             run_id: Some(run_id.to_string()),
             classification: Some(classification.to_string()),
-            promoted: false,
         },
     )?;
 
     Ok(version)
 }
 
-/// Writes mutable provenance of version outside the immutable version folder.
+/// Writes the provenance of a version outside the immutable version folder.
 pub fn write_provenance(
     root: &Path,
     id: &str,
@@ -342,12 +428,15 @@ pub fn read_provenance(
 #[derive(Debug, Clone, Serialize)]
 pub struct VersionInfo {
     pub version: String,
+    /// Whether `current` points at this version: the one source for "in use"
+    /// (promoted) and the only one the listings report.
     pub is_current: bool,
     pub provenance: Option<VersionProvenance>,
 }
 
 /// Lists playbook versions with provenance and current marker.
-/// Order matches `list_version_dirs` (lexicographic by folder name).
+/// Oldest first in semver order, like every version listing
+/// ([`crate::registry::list_versions`]).
 pub fn list_versions_with_provenance(
     root: &Path,
     id: &str,
@@ -363,7 +452,7 @@ pub fn list_versions_with_provenance(
         .ok()
         .map(|s| s.trim().to_string());
     let mut out = Vec::new();
-    for version in list_version_dirs(&playbook_dir)? {
+    for version in list_versions(&playbook_dir)? {
         let is_current = current.as_deref() == Some(version.as_str());
         let provenance = read_provenance(root, id, &version)?;
         out.push(VersionInfo {
@@ -375,24 +464,10 @@ pub fn list_versions_with_provenance(
     Ok(out)
 }
 
-/// Changes the promote flag in mutable sidecar of a known version.
-pub fn set_promoted(
-    root: &Path,
-    id: &str,
-    version: &str,
-    promoted: bool,
-) -> Result<(), VersioningError> {
-    let mut provenance = read_provenance(root, id, version)?
-        .ok_or_else(|| VersioningError::NotFound(format!("{id}@{version}")))?;
-    provenance.promoted = promoted;
-    write_provenance(root, id, version, &provenance)
-}
-
-/// Makes `version` the current one. Any stored version qualifies, newer or
-/// older: the provenance sidecar carries the supervisor-patch `promoted` flag
-/// and is updated when it exists, but a version created by an ordinary save
-/// has no sidecar and must still be selectable - requiring one used to make
-/// every hand-authored version unpromotable.
+/// Makes `version` the current one: a promotion (a supervisor patch that
+/// passed its run, the dashboard's "Use") and a rollback are the same move of
+/// the one `current` pointer. Any stored version qualifies, newer or older,
+/// with or without a provenance sidecar.
 ///
 /// What is required instead is a version that can actually run: the directory
 /// must hold a `playbook.yaml`, so `current` never points at a half-written
@@ -405,9 +480,6 @@ pub fn promote_version(root: &Path, id: &str, version: &str) -> Result<(), Versi
     }
     if !playbook_dir.join(version).join("playbook.yaml").is_file() {
         return Err(VersioningError::NotFound(format!("{id}@{version}")));
-    }
-    if read_provenance(root, id, version)?.is_some() {
-        set_promoted(root, id, version, true)?;
     }
     atomic_write(&playbook_dir.join("current"), version.as_bytes())?;
     Ok(())
@@ -496,8 +568,43 @@ pub fn delete_playbook(root: &Path, id: &str, ts_millis: u128) -> Result<PathBuf
     Ok(dst)
 }
 
-/// Names of folders in `.apb/trash/`. If trash directory doesn't exist - empty list.
-pub fn list_trash(root: &Path) -> Result<Vec<String>, VersioningError> {
+/// One deleted playbook in `.apb/trash/`, as every surface lists it
+/// (dashboard, `apb trash list`, MCP `playbook_trash_list`).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct TrashEntry {
+    /// The trash folder name `<id>-<deleted_at_ms>`: the exact handle a
+    /// restore takes when one id was deleted more than once.
+    pub name: String,
+    /// The playbook id it restores to.
+    pub id: String,
+    /// When it was deleted, in Unix milliseconds.
+    pub deleted_at_ms: u128,
+    /// Its versions in semver order; a restore brings all of them back.
+    pub versions: Vec<String>,
+    /// The version its `current` pointer names, if any.
+    pub current: Option<String>,
+    /// A playbook with this id exists again, so a restore would be refused
+    /// until that one is deleted.
+    pub conflict: bool,
+}
+
+/// What a restore brought back.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+pub struct RestoredPlaybook {
+    pub id: String,
+    /// The trash entry it came from.
+    pub name: String,
+    /// The restored `current` version (its digest is now approved).
+    pub current: Option<String>,
+    pub versions: Vec<String>,
+}
+
+/// The deleted playbooks of the project at `root`, newest deletion first.
+/// Folders whose name is not `<id>-<millis>` (nothing apb wrote) are skipped.
+/// No trash directory - empty list.
+pub fn list_trash(root: &Path) -> Result<Vec<TrashEntry>, VersioningError> {
     let trash = trash_dir(root);
     if !trash.is_dir() {
         return Ok(Vec::new());
@@ -506,12 +613,36 @@ pub fn list_trash(root: &Path) -> Result<Vec<String>, VersioningError> {
     let mut out = Vec::new();
     for entry in fs::read_dir(&trash)? {
         let entry = entry?;
-        if entry.file_type()?.is_dir() {
-            out.push(entry.file_name().to_string_lossy().to_string());
+        if !entry.file_type()?.is_dir() {
+            continue;
         }
+        let name = entry.file_name().to_string_lossy().to_string();
+        let Some((id, deleted_at_ms)) = parse_trash_name(&name) else {
+            continue;
+        };
+        let dir = entry.path();
+        out.push(TrashEntry {
+            conflict: playbooks_dir(root).join(&id).exists(),
+            versions: list_versions(&dir)?,
+            current: read_current_pointer(&dir),
+            name,
+            id,
+            deleted_at_ms,
+        });
     }
-    out.sort();
+    out.sort_by(|a, b| {
+        b.deleted_at_ms
+            .cmp(&a.deleted_at_ms)
+            .then_with(|| a.name.cmp(&b.name))
+    });
     Ok(out)
+}
+
+fn read_current_pointer(playbook_dir: &Path) -> Option<String> {
+    fs::read_to_string(playbook_dir.join("current"))
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 /// Saves canvas layout for version. Layout is mutable: overwriting
@@ -702,33 +833,69 @@ fn line_diff(from: &str, to: &str) -> String {
     out.join("\n")
 }
 
-/// Restores playbook from trash: `<id>-<ts>` -> `.apb/playbooks/<id>`.
-/// If `<id>` already exists - `Conflict`.
-pub fn restore_playbook(root: &Path, trash_name: &str) -> Result<String, VersioningError> {
-    if !is_safe_segment(trash_name) {
-        return Err(VersioningError::NotFound(trash_name.to_string()));
+/// Restores a deleted playbook: the one path behind the dashboard's Restore,
+/// `apb trash restore` and MCP `playbook_trash_restore`.
+///
+/// `name` is a trash entry name (`<id>-<millis>`) or a playbook id; an id
+/// picks its most recent deletion. The whole folder moves back to
+/// `.apb/playbooks/<id>`, so every version, the `current` pointer, layouts
+/// and provenance come back as they were (runs never moved). The restored
+/// current definition then gets the trust of any other write through apb
+/// (see [`save_definition`]): its digest is approved as `LocallyApproved`
+/// when it has no scripts. A definition with scripts keeps whatever approval
+/// its digest already had, since a restore cannot vouch for code it did not
+/// write.
+///
+/// Errors: `NotFound` when nothing in the trash matches, `Conflict` when a
+/// playbook with that id exists again (nothing is moved then).
+pub fn restore_from_trash(root: &Path, name: &str) -> Result<RestoredPlaybook, VersioningError> {
+    if !is_safe_segment(name) {
+        return Err(VersioningError::NotFound(format!("`{name}` in trash")));
     }
+    let entries = list_trash(root)?;
+    let entry = entries
+        .iter()
+        .find(|e| e.name == name)
+        // Newest first, so the first match by id is its latest deletion.
+        .or_else(|| entries.iter().find(|e| e.id == name))
+        .ok_or_else(|| VersioningError::NotFound(format!("`{name}` in trash")))?;
 
-    let id = id_from_trash_name(trash_name)
-        .ok_or_else(|| VersioningError::NotFound(trash_name.to_string()))?;
-
-    let src = trash_dir(root).join(trash_name);
-    if !src.is_dir() {
-        return Err(VersioningError::NotFound(trash_name.to_string()));
-    }
-
-    let dst = playbooks_dir(root).join(&id);
+    let src = trash_dir(root).join(&entry.name);
+    let dst = playbooks_dir(root).join(&entry.id);
+    fs::create_dir_all(playbooks_dir(root))?;
+    let conflict = || {
+        VersioningError::Conflict(format!(
+            "a playbook `{}` exists again; delete or rename it, then restore `{}`",
+            entry.id, entry.name
+        ))
+    };
     if dst.exists() {
-        return Err(VersioningError::Conflict(format!(
-            "playbook `{id}` already exists"
-        )));
+        return Err(conflict());
     }
-
-    if let Some(parent) = dst.parent() {
-        fs::create_dir_all(parent)?;
+    // A playbook created with the same id between the check and the move
+    // makes the rename fail (the target is not empty), which is the same
+    // conflict.
+    match fs::rename(&src, &dst) {
+        Ok(()) => {}
+        Err(e)
+            if matches!(
+                e.kind(),
+                io::ErrorKind::AlreadyExists | io::ErrorKind::DirectoryNotEmpty
+            ) =>
+        {
+            return Err(conflict());
+        }
+        Err(e) => return Err(e.into()),
     }
-    fs::rename(&src, &dst)?;
-    Ok(id)
+    if let Some(current) = &entry.current {
+        approve_written(root, &entry.id, current, None, "restored");
+    }
+    Ok(RestoredPlaybook {
+        id: entry.id.clone(),
+        name: entry.name.clone(),
+        current: entry.current.clone(),
+        versions: entry.versions.clone(),
+    })
 }
 
 fn playbooks_dir(root: &Path) -> PathBuf {
@@ -757,11 +924,7 @@ pub fn create_draft_in(
     let reg = Registry::open_dir(parent).map_err(|e| VersioningError::NotFound(e.to_string()))?;
     // Origin is passed explicitly: global draft with `scope: project` should
     // fail V14 immediately, not only at runtime.
-    let ctx = ValidationContext {
-        profiles: reg.profiles(),
-        playbook_origin: origin,
-        connectors: crate::connector::resolve::validation_facts(),
-    };
+    let ctx = ValidationContext::for_registry(&reg, origin);
     let report = validate(&playbook, &ctx);
     let errors: Vec<Issue> = report
         .issues
@@ -817,19 +980,17 @@ fn trash_dir(root: &Path) -> PathBuf {
     root.join(".apb/trash")
 }
 
-/// Extracts `id` from trash folder name `<id>-<ts_millis>` (part before last `-`).
-fn id_from_trash_name(trash_name: &str) -> Option<String> {
+/// Splits a trash folder name `<id>-<ts_millis>` (at the last `-`) into the
+/// id and the deletion time.
+fn parse_trash_name(trash_name: &str) -> Option<(String, u128)> {
     let (id, ts) = trash_name.rsplit_once('-')?;
-    if id.is_empty() || ts.is_empty() {
-        return None;
-    }
-    if !ts.chars().all(|c| c.is_ascii_digit()) {
+    if id.is_empty() || ts.is_empty() || !ts.chars().all(|c| c.is_ascii_digit()) {
         return None;
     }
     if !is_safe_segment(id) {
         return None;
     }
-    Some(id.to_string())
+    Some((id.to_string(), ts.parse().ok()?))
 }
 
 fn schema_err(e: SchemaError) -> VersioningError {
@@ -838,10 +999,7 @@ fn schema_err(e: SchemaError) -> VersioningError {
 
 fn validate_playbook(root: &Path, playbook: &Playbook) -> Result<(), VersioningError> {
     let reg = Registry::open(root).map_err(|e| VersioningError::NotFound(e.to_string()))?;
-    let ctx = ValidationContext {
-        profiles: reg.profiles(),
-        ..Default::default()
-    };
+    let ctx = ValidationContext::for_registry(&reg, crate::profile_store::PlaybookOrigin::Project);
     let report = validate(playbook, &ctx);
     if report.is_valid() {
         return Ok(());
@@ -854,19 +1012,8 @@ fn validate_playbook(root: &Path, playbook: &Playbook) -> Result<(), VersioningE
     Err(VersioningError::Validation(issues))
 }
 
-fn parse_version_triple(s: &str) -> Option<(u32, u32, u32)> {
-    let parts: Vec<&str> = s.split('.').collect();
-    if parts.len() != 3 {
-        return None;
-    }
-    let major = parts[0].parse().ok()?;
-    let minor = parts[1].parse().ok()?;
-    let patch = parts[2].parse().ok()?;
-    Some((major, minor, patch))
-}
-
 fn bump_minor(version: &str) -> Result<String, VersioningError> {
-    let (major, minor, _) = parse_version_triple(version)
+    let (major, minor, _) = parse_version(version)
         .ok_or_else(|| VersioningError::Conflict(format!("invalid version `{version}`")))?;
     let (next_major, next_minor) = advance_minor_pair(major, minor)
         .map_err(|()| VersioningError::Conflict(format!("version overflow for `{version}`")))?;
@@ -874,7 +1021,7 @@ fn bump_minor(version: &str) -> Result<String, VersioningError> {
 }
 
 fn bump_patch(version: &str) -> Result<String, VersioningError> {
-    let (major, minor, patch) = parse_version_triple(version)
+    let (major, minor, patch) = parse_version(version)
         .ok_or_else(|| VersioningError::Conflict(format!("invalid version `{version}`")))?;
     let next_patch = patch
         .checked_add(1)
@@ -904,23 +1051,6 @@ fn read_current(playbook_dir: &Path) -> Result<String, VersioningError> {
         ));
     }
     Ok(current)
-}
-
-fn list_version_dirs(playbook_dir: &Path) -> Result<Vec<String>, VersioningError> {
-    let mut out = Vec::new();
-    for entry in fs::read_dir(playbook_dir)? {
-        let entry = entry?;
-        if !entry.file_type()?.is_dir() {
-            continue;
-        }
-        let name = entry.file_name().to_string_lossy().to_string();
-        if name == "layouts" || name == "meta" || name.starts_with(".tmp-") {
-            continue;
-        }
-        out.push(name);
-    }
-    out.sort();
-    Ok(out)
 }
 
 fn temp_dir_name(version: &str) -> String {
@@ -968,7 +1098,7 @@ fn commit_version_dir(
         if let Some(base) = base_version {
             let scripts_src = playbook_dir.join(base).join("scripts");
             if scripts_src.is_dir() {
-                copy_dir_recursive(&scripts_src, &tmp.join("scripts"))?;
+                crate::fsutil::copy_tree(&scripts_src, &tmp.join("scripts"))?;
             }
         }
 
@@ -1025,21 +1155,6 @@ fn copy_parent_layout(
         .join("layouts")
         .join(format!("{new_version}.yaml"));
     atomic_write(&dst, content.as_bytes())?;
-    Ok(())
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> io::Result<()> {
-    fs::create_dir_all(dst)?;
-    for entry in fs::read_dir(src)? {
-        let entry = entry?;
-        let file_type = entry.file_type()?;
-        let target = dst.join(entry.file_name());
-        if file_type.is_dir() {
-            copy_dir_recursive(&entry.path(), &target)?;
-        } else {
-            fs::copy(entry.path(), &target)?;
-        }
-    }
     Ok(())
 }
 

@@ -107,13 +107,16 @@ Once installed, run `apb init` in a project to set it up. In an interactive term
 ```text
 apb init            create the .apb structure
 apb list            playbooks and versions
-apb validate        validate playbook schema
-apb run <id>        run a playbook (--overrides, --supervise, params)
+apb validate        validate playbooks, profile models, requires and connectors
+apb run <id>        run a playbook (--overrides, --supervise, --detach, params)
+apb wait <run>      block until a run finishes, needs input or stops (exit code = verdict)
 apb runs            list runs
 apb resume <run>    resume a paused or interrupted run
 apb stop <run>      stop a run: interrupt the running node, finalize if the driver is gone
 apb note <run> <t>  post a note (context append) to a run's control channel
 apb review          decide a pending human_review node
+apb trash list      deleted playbooks; `apb trash restore <name|id>` brings one back
+apb trust list      approvals in the trust store; `apb trust revoke <digest|id>` removes them
 apb answer <run> <t> answer an interactive node's pending question (--node)
 apb dashboard       web UI (port 7321)
 apb mcp             stdio MCP server for coding agents
@@ -158,7 +161,7 @@ Other MCP-compatible hosts (Codex, OpenCode, etc.): add a stdio MCP server
 with command `apb` and args `["mcp"]`, using the name `agentic-playbooks`.
 
 Tool families: playbook CRUD and validation, run control (`playbook_run`,
-`run_status`, `run_events`, `run_report`, `run_resume`), profile and advisory
+`run_wait`, `run_status`, `run_events`, `run_report`, `run_resume`), profile and advisory
 tools, and supervisor tools.
 
 **Supervised runs.** `playbook_run` with `supervise: "self"` starts the run in

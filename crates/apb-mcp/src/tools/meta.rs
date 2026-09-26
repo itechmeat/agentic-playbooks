@@ -21,7 +21,6 @@ pub fn projects_list() -> Result<Value, ToolError> {
 /// still do not surface here: names only).
 pub fn connectors_list(root: &Path) -> Result<Value, ToolError> {
     let trust = apb_core::trust::TrustStore::load();
-    let approved_ids = trust.approved_record_ids(apb_core::trust::Kind::Connector);
     let mut out = Vec::new();
     for summary in apb_core::connector::store::list() {
         let Ok(loaded) = apb_core::connector::store::load(&summary.name) else {
@@ -42,26 +41,73 @@ pub fn connectors_list(root: &Path) -> Result<Value, ToolError> {
                 })
             })
             .collect();
-        // Account NAMES only (never fields/env). Best-effort: a broken account
-        // config yields an empty account list, not a failed listing.
-        let accounts: Vec<String> = apb_core::connector::config::load_merged(root, &summary.name)
-            .map(|accts| accts.into_iter().map(|a| a.name).collect())
-            .unwrap_or_default();
-        let trust_state = if trust.is_approved(&loaded.digest) {
-            "approved"
-        } else if approved_ids.iter().any(|id| id == &summary.name) {
-            "changed"
-        } else {
-            "unapproved"
-        };
+        // Account NAMES (never field or env values). Best-effort: a broken
+        // account config yields an empty account list, not a failed listing.
+        // Plus, per account, each secret read from a command with its command
+        // line: that is what approving the account authorizes apb to run, so
+        // an agent asking the user to approve must be able to show it.
+        let merged =
+            apb_core::connector::config::load_merged(root, &summary.name).unwrap_or_default();
+        let accounts: Vec<String> = merged.iter().map(|a| a.name.clone()).collect();
+        let account_commands: serde_json::Map<String, Value> = merged
+            .iter()
+            .filter_map(|a| {
+                let cmd = apb_core::connector::config::cmd_refs(&loaded.doc, a);
+                (!cmd.is_empty()).then(|| (a.name.clone(), json!(cmd)))
+            })
+            .collect();
+        let trust_state = trust
+            .status(
+                &loaded.digest,
+                &summary.name,
+                apb_core::trust::Kind::Connector,
+            )
+            .as_str();
         out.push(json!({
             "name": summary.name,
             "version": summary.version,
             "summary": summary.meta.summary,
             "trust": trust_state,
+            "update_available": apb_core::connector::install::embedded_update(&summary.name),
             "functions": functions,
             "accounts": accounts,
+            "account_commands": account_commands,
         }));
     }
     Ok(json!({ "connectors": out }))
+}
+
+fn parse_kind(kind: Option<&str>) -> Result<Option<apb_core::trust::Kind>, ToolError> {
+    match kind {
+        None => Ok(None),
+        Some(k) => apb_core::trust::Kind::parse(k).map(Some).ok_or_else(|| {
+            ToolError::Engine(format!(
+                "unknown kind `{k}`; use playbook, profile_bundle, connector or connector_account"
+            ))
+        }),
+    }
+}
+
+/// Every approval in the trust store (optionally of one kind): digest, id,
+/// kind, origin and approval time. The same listing as `apb trust list` and
+/// the dashboard's Trust view.
+pub fn trust_list(kind: Option<&str>) -> Result<Value, ToolError> {
+    let kind = parse_kind(kind)?;
+    let entries: Vec<apb_core::trust::TrustEntry> = apb_core::trust::TrustStore::load()
+        .entries()
+        .into_iter()
+        .filter(|e| kind.is_none_or(|k| k == e.kind))
+        .collect();
+    Ok(json!({ "approvals": entries }))
+}
+
+/// Revokes the approvals `target` names (a digest, or every approval under an
+/// id, optionally of one kind) through the one core path, and returns what
+/// was removed. Revoking only lowers trust.
+pub fn trust_revoke(target: &str, kind: Option<&str>) -> Result<Value, ToolError> {
+    let selector = apb_core::trust::TrustSelector::parse(target, parse_kind(kind)?);
+    let removed = apb_core::trust::TrustStore::load()
+        .revoke(&selector)
+        .map_err(|e| ToolError::Engine(e.to_string()))?;
+    Ok(json!({ "revoked": removed }))
 }

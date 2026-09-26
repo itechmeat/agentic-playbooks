@@ -8,7 +8,8 @@
 
 use std::path::Path;
 
-use apb_core::detect::{self, Authority};
+use apb_core::agent_catalog;
+use apb_core::model_check;
 use apb_core::models_table::{self, OnboardingState, Subscription};
 use apb_core::profile::QualifiedProfileRef;
 use apb_core::profile_store::{self, PlaybookOrigin};
@@ -18,17 +19,20 @@ use serde_json::{Value, json};
 
 use crate::tools::ToolError;
 
-/// Detects installed agents (spec 7.6). `refresh` ignores the cache.
+/// Detects installed agents (spec 7.6) and the model options apb offers for
+/// each: the same `agent_catalog` snapshot the dashboard's `/api/models`
+/// serves. `refresh` re-probes instead of using the detection memo.
 pub fn agents_detect(refresh: bool) -> Result<Value, ToolError> {
-    let agents = detect::detect(refresh);
-    Ok(json!({ "agents": agents }))
+    let c = agent_catalog::load(refresh).map_err(|e| ToolError::Engine(e.to_string()))?;
+    Ok(json!({ "agents": c.agents, "options_by_agent": c.options_by_agent }))
 }
 
 /// The profile howto bundle: format, selection rules, models table, purposes,
 /// subscriptions, detection, and hints. When onboarding is `Uninitialized` it carries the
 /// `subscriptions_uninitialized` flag so the agent offers the survey.
 pub fn profile_howto() -> Result<Value, ToolError> {
-    let table = models_table::load_merged().map_err(|e| ToolError::Engine(e.to_string()))?;
+    let catalog = agent_catalog::load(false).map_err(|e| ToolError::Engine(e.to_string()))?;
+    let table = &catalog.table;
     let state = models_table::onboarding::read().map_err(|e| ToolError::Engine(e.to_string()))?;
     let mut out = json!({
         "format": PROFILE_FORMAT,
@@ -41,7 +45,8 @@ pub fn profile_howto() -> Result<Value, ToolError> {
             "purposes": table.purposes,
         },
         "subscriptions": table.subscriptions,
-        "agents": detect::detect(false),
+        "agents": catalog.agents,
+        "options_by_agent": catalog.options_by_agent,
     });
     if state == OnboardingState::Uninitialized {
         out["subscriptions_uninitialized"] = json!(true);
@@ -80,7 +85,7 @@ pub fn playbook_adopt_report(root: &Path, id: Option<&str>) -> Result<Value, Too
         Some(one) => vec![one.to_string()],
         None => reg.playbook_ids(),
     };
-    let agents = detect::detect(false);
+    let cx = model_check::ModelContext::load();
     let store = TrustStore::load();
     let mut reports = Vec::new();
     for wid in ids {
@@ -93,8 +98,13 @@ pub fn playbook_adopt_report(root: &Path, id: Option<&str>) -> Result<Value, Too
                 // (supervised: true) to surface its problems, even though
                 // supervision is only needed with --supervise.
                 for r in crate::policy::collect_profile_refs(&loaded.playbook, true) {
-                    adopt_check_profile(root, &r, &agents, &store, &mut findings);
+                    adopt_check_profile(root, &r, &cx, &store, &mut findings);
                 }
+                // A profile several nodes bind (or that is also the default
+                // and the supervisor) is one thing to fix: report each finding
+                // once, in first-seen order.
+                let mut seen = std::collections::HashSet::new();
+                findings.retain(|f| seen.insert(f.to_string()));
                 reports.push(json!({ "id": wid, "findings": findings }));
             }
             Err(e) => {
@@ -112,7 +122,7 @@ pub fn playbook_adopt_report(root: &Path, id: Option<&str>) -> Result<Value, Too
 fn adopt_check_profile(
     root: &Path,
     r: &QualifiedProfileRef,
-    agents: &[detect::AgentInfo],
+    cx: &model_check::ModelContext,
     store: &TrustStore,
     findings: &mut Vec<Value>,
 ) {
@@ -131,7 +141,7 @@ fn adopt_check_profile(
                     .map(|f| (f.agent.as_str(), f.model.as_str())),
             );
             for (agent, model) in chain {
-                adopt_check_model(agent, model, &key, agents, findings);
+                adopt_check_model(agent, model, &key, cx, findings);
             }
         }
         Err(e) => {
@@ -141,48 +151,32 @@ fn adopt_check_profile(
     }
 }
 
-/// The code for model availability with an agent (spec 5.2 environment part):
-/// `model_not_available` only when authority is Full; otherwise `model_unverifiable`.
+/// One `(agent, model)` of a profile's executor chain, judged by the shared
+/// [`model_check`] (spec 5.2 environment part): availability is asserted only
+/// when detection authority is Full; zcode's allowlist and the config's
+/// `model_policy` block; an id outside apb's closed list for the agent is
+/// `model_unknown`.
 fn adopt_check_model(
     agent: &str,
     model: &str,
     profile_key: &str,
-    agents: &[detect::AgentInfo],
+    cx: &model_check::ModelContext,
     findings: &mut Vec<Value>,
 ) {
-    // Normalize the id to the detection probe the same way the invocation resolver does
-    // (claude-code -> claude), otherwise a profile on claude-code would give a false
-    // model_unverifiable instead of a real check against the claude probe.
-    let probe_id = match agent {
-        "claude-code" => "claude",
-        other => other,
-    };
-    let Some(info) = agents.iter().find(|a| a.agent == probe_id) else {
-        // The agent is not among the built-in top six - nothing to check against.
-        findings.push(json!({ "code": "model_unverifiable", "ref": profile_key, "agent": agent, "model": model }));
+    let Some(issue) = model_check::check(agent, model, cx) else {
         return;
     };
-    if !info.installed {
-        findings.push(json!({ "code": "agent_not_installed", "ref": profile_key, "agent": agent }));
-        return;
-    }
-    match &info.models {
-        Some(m) if m.authority == Authority::Full => {
-            if !m.items.iter().any(|x| x == model) {
-                findings.push(json!({ "code": "model_not_available", "ref": profile_key, "agent": agent, "model": model }));
-            }
+    let mut f = json!({ "code": issue.code(), "ref": profile_key, "agent": agent });
+    match &issue {
+        model_check::ModelIssue::AgentNotInstalled => {}
+        model_check::ModelIssue::NotAllowed(detail)
+        | model_check::ModelIssue::PolicyViolation(detail) => {
+            f["model"] = json!(model);
+            f["detail"] = json!(detail);
         }
-        // Partial/Display/Static/no list - runnability is not guaranteed.
-        _ => {
-            if info
-                .models
-                .as_ref()
-                .is_none_or(|m| !m.items.iter().any(|x| x == model))
-            {
-                findings.push(json!({ "code": "model_unverifiable", "ref": profile_key, "agent": agent, "model": model }));
-            }
-        }
+        _ => f["model"] = json!(model),
     }
+    findings.push(f);
 }
 
 fn classify_profile_error(e: &profile_store::ProfileError) -> (&'static str, String) {
@@ -195,13 +189,13 @@ fn classify_profile_error(e: &profile_store::ProfileError) -> (&'static str, Str
 }
 
 const PROFILE_FORMAT: &str = "\
-A profile is the single executor binding for a node. profile.yaml carries name, description, executor (agent + model + ordered fallbacks), soul (any | native_required), and skills (names or {name, scope}). SOUL.md holds the role system prompt. A node references a profile by name (scope auto) or {name, scope}. Skill content is never embedded into prompts. For isolation none (default) skills are delivered advisory by name and the agent reads the live .agents/skills; for isolation full or best_effort the run materializes skill copies from the run snapshot into an isolated per-node workdir and the agent reads only that snapshot (attempts record skills_mode: materialized vs advisory). Skills semantics: an empty skills list means the profile grants NO skills (empty is none, not all). When the user authors a profile through the dashboard the skills default to all-off and the user picks what to grant; when YOU author a profile on the user's behalf, pre-select exactly the skills the role needs from the outset.";
+A profile is the single executor binding for a node. profile.yaml carries name, description, executor (agent + model + ordered fallbacks), soul (any | native_required), and skills (names or {name, scope}). SOUL.md holds the role system prompt. A node references a profile by name (scope auto) or {name, scope}. Skill content is never embedded into prompts. For isolation none (default) skills are delivered advisory by name and the agent reads the live .agents/skills; for isolation full or best_effort the run materializes skill copies from the run snapshot into an isolated per-node workdir and the agent reads only that snapshot (attempts record skills_mode: materialized vs advisory). Skills semantics: an empty skills list means the profile grants NO skills (empty is none, not all). When the user authors a profile through the dashboard the skills default to all-off and the user picks what to grant; when YOU author a profile on the user's behalf, pre-select exactly the skills the role needs from the outset. environment: minimal (default, omit the key) keeps the operator's own plugins, user MCP servers, user skills and user CLAUDE.md out of a claude executor (the project's own CLAUDE.md and .claude/skills and the profile's skills still load); set environment: full only when the role depends on something only the operator's personal setup provides, such as a plugin skill or a user-scope MCP server.";
 
 const SELECTION_RULES: &str = "\
 Pick agent and model from the task's purpose using the models table as a hint only. Match the purpose (coding, review, planning, writing, cheap-glue, vision-tasks, and so on) to a high-scoring model, then confirm the user has access (subscription or key). Prefer a fallback chain that degrades gracefully. The table is advisory: never hard-bind a node to a table entry, and never claim a model works without detection evidence.";
 
 const COVERAGE_SEMANTICS: &str = "\
-Model availability is only asserted when detection authority is Full: then a missing model is model_not_available. For Partial, Display, Static, or no list, treat availability as model_unverifiable and do not block on it.";
+Model availability is only asserted when detection authority is Full: then a missing model is model_not_available. For Partial, Display, Static, or no list, treat availability as model_unverifiable and do not block on it. Where apb keeps a closed model list (claude, codex, zcode), an id outside it (a typo, a retired model) is model_unknown: check it, it rarely runs. zcode is stricter: apb allows only GLM-5.3 and GLM-5.3-Flash (bare ids, optional @low|high|max effort) and reports any other zcode model as model_not_allowed, which does block. So does model_policy_violation: the user's global config has a model_policy rule the model breaks (for example an allowlist that keeps routine work on a smaller model); pick an allowed model instead.";
 
 const AUTHORIZATION_BOUNDS: &str = "\
 Create a project profile a directly requested playbook needs without extra questions. Ask the user before an unexpected global mutation or an initiative-driven change to a profile other playbooks already use. Cross-workspace profile mutations are not allowed.";

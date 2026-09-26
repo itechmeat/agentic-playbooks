@@ -5,7 +5,6 @@
 
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 /// Runs `apb <args>` with a fresh per-test config dir and no inherited run
 /// context (`APB_RUN_DIR`/`APB_NODE_ID` explicitly removed so a developer's
@@ -17,7 +16,7 @@ fn playbook(dir: &Path, args: &[&str]) -> std::process::Output {
 /// Like `playbook`, but with extra environment variables set on the child
 /// (e.g. the scaffold's secret env var).
 fn playbook_env(dir: &Path, args: &[&str], extra_env: &[(&str, &str)]) -> std::process::Output {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_apb"));
+    let mut cmd = crate::common::apb_std();
     cmd.args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))
@@ -148,6 +147,41 @@ fn call_without_run_context_prints_config_error_json_and_exits_nonzero() {
 }
 
 // --- env ------------------------------------------------------------------
+
+/// `--dry-run` renders a call without executing it or resolving secrets, so
+/// it needs no run context: outside a run it renders against the live
+/// connector and account config (the docs promise exactly this). The token's
+/// env var is deliberately unset and nothing is approved.
+#[test]
+fn call_dry_run_without_run_context_renders_the_request() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    write_widget_account(dir.path(), "WIDGET_DRY_RUN_TOKEN_UNSET");
+
+    let out = playbook(
+        dir.path(),
+        &[
+            "connector",
+            "call",
+            "widget",
+            "get_item",
+            "--args",
+            r#"{"id":"42"}"#,
+            "--dry-run",
+        ],
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(out.status.success(), "dry run outside a run: {stdout}");
+    let v: serde_json::Value =
+        serde_json::from_str(stdout.trim()).unwrap_or_else(|e| panic!("not JSON ({e}): {stdout}"));
+    assert_eq!(v["dry_run"], serde_json::json!(true), "{v}");
+    assert_eq!(
+        v["url"],
+        serde_json::json!("https://example.com/items/42"),
+        "{v}"
+    );
+}
 
 #[test]
 fn env_lists_the_scaffold_token_var_when_unset() {
@@ -314,6 +348,34 @@ fn show_reports_functions_and_account_fields() {
     );
     // Never the secret value itself.
     assert!(!stdout.contains("shh-secret-value"));
+}
+
+/// `show` and `doctor`, the CLI views an account is approved from, name a
+/// secret that is read from a command, with the command: approving the
+/// account authorizes running it.
+#[test]
+fn show_and_doctor_name_a_command_sourced_secret() {
+    let dir = tempfile::tempdir().unwrap();
+    setup(dir.path());
+    apb_ok(dir.path(), &["connector", "init", "widget"]);
+    let global = dir.path().join("cfg/connector-config/widget.yaml");
+    fs::create_dir_all(global.parent().unwrap()).unwrap();
+    fs::write(
+        &global,
+        "accounts:\n  - name: mine\n    base_url: https://example.com\n    token: \"{{cmd:pass show widget}}\"\n",
+    )
+    .unwrap();
+
+    let out = apb_ok(dir.path(), &["connector", "show", "widget"]);
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["accounts"][0]["cmd"]["token"], "pass show widget", "{v}");
+
+    let out = playbook(dir.path(), &["connector", "doctor"]);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("account `mine`: secret command") && stdout.contains("pass show widget"),
+        "{stdout}"
+    );
 }
 
 // --- approve --------------------------------------------------------------

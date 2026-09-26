@@ -15,8 +15,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::path::Path;
-use std::path::PathBuf;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, ChildStdin, Stdio};
 use std::sync::mpsc::Receiver;
 use std::time::{Duration, Instant};
 
@@ -44,91 +43,8 @@ fn poll_until<T>(what: &str, mut f: impl FnMut() -> Option<T>) -> T {
     }
 }
 
-/// Every process signal and liveness check in this module is a syscall, not a
-/// `kill`/`ps` subprocess.
-///
-/// That is not tidiness. `Command::new("kill").arg("-9").arg("-<pgid>")` is
-/// accepted by BSD kill (macOS, where this suite passed) but rejected by
-/// procps-ng kill (Linux, and so CI), which hands the leading `-` of the
-/// operand to getopt and errors out as if it were an unknown option. The
-/// signal was then never delivered, the status of the spawned `kill` was
-/// discarded, and the unbounded `child.wait()` that followed blocked forever:
-/// the CI job burned 30 minutes on a test whose own 60s poll ceiling was never
-/// reached, because control never got that far. `apb_engine::proc::run_capture`
-/// and `apb_core::detect` moved off the same subprocess form for the same
-/// reason. A syscall has no argument-parsing layer to disagree about.
-mod sig {
-    /// SIGKILLs a single process.
-    ///
-    /// Validated for the same reason `kill_group` is, and it is not academic:
-    /// `DriverReaper` calls both on a pid it parsed out of `driver.pid`. A
-    /// `driver.pid` holding `4294967295` narrows to `-1`, and
-    /// `kill(-1, SIGKILL)` is "every process I may signal" - this test suite
-    /// would end the developer's session.
-    ///
-    /// `> 0` here, where `kill_group` needs `> 1`: the single-pid form does
-    /// not negate its argument, so pid 1 is just init and merely EPERMs. Only
-    /// 0 ("my own process group") and the values that narrow negative have to
-    /// go.
-    pub fn kill_pid(pid: u32) {
-        let Some(pid) = single_target(pid) else {
-            return;
-        };
-        // SAFETY: `kill` takes no pointers; `pid` is a validated positive pid,
-        // never a wildcard, and an unknown pid is ESRCH.
-        unsafe {
-            libc::kill(pid, libc::SIGKILL);
-        }
-    }
-
-    /// The `kill(2)` argument naming a single process, or `None` when `pid`
-    /// cannot name one.
-    fn single_target(pid: u32) -> Option<i32> {
-        match i32::try_from(pid) {
-            Ok(p) if p > 0 => Some(p),
-            _ => None,
-        }
-    }
-
-    /// SIGKILLs every process in the group led by `pid`.
-    ///
-    /// Refuses anything that cannot lead an addressable group. The group form
-    /// negates its argument, so pid 1 becomes `kill(-1, SIGKILL)` - "every
-    /// process I may signal" - pid 0 targets our own group, and a pid above
-    /// `i32::MAX` narrows negative and then lands on a small unrelated pid.
-    /// `DriverReaper` feeds this a pid parsed out of `driver.pid`, and a
-    /// signal target that came from a file gets validated. Mirrors
-    /// `apb_engine::proc::group_target`.
-    pub fn kill_group(pid: u32) {
-        let Ok(pid) = i32::try_from(pid) else {
-            return;
-        };
-        if pid <= 1 {
-            return;
-        }
-        // SAFETY: as above; a validated negative pid addresses the group.
-        unsafe {
-            libc::kill(-pid, libc::SIGKILL);
-        }
-    }
-
-    /// The process-group id of `pid`, or `None` once the process is gone.
-    pub fn pgid_of(pid: u32) -> Option<u32> {
-        // SAFETY: `getpgid` takes no pointers and reports ESRCH as -1.
-        let pgid = unsafe { libc::getpgid(pid as i32) };
-        (pgid >= 0).then_some(pgid as u32)
-    }
-
-    /// Whether `pid` still exists (a zombie counts as existing, which is the
-    /// point of the reaping assertions in this module).
-    pub fn alive(pid: u32) -> bool {
-        // SAFETY: signal 0 performs the permission and existence checks
-        // without delivering anything.
-        unsafe { libc::kill(pid as i32, 0) == 0 }
-    }
-}
-
-use sig::{alive, pgid_of};
+use crate::common::RunGuard;
+use crate::common::sig::{self, alive, pgid_of};
 
 /// `child.wait()` with a deadline, and a message naming what the wait was for.
 ///
@@ -154,26 +70,16 @@ fn wait_with_deadline(child: &mut Child, budget: Duration, what: &str) {
     }
 }
 
-/// Kills the detached driver if a test bails out before the run finished.
-/// Nothing else would: the driver deliberately outlives every process these
-/// tests control, so a panicking `poll_until` would otherwise leave a live
-/// `sleep` running against a tempdir that is about to be deleted. On the happy
-/// path `driver.pid` is already gone and this is a no-op.
-struct DriverReaper {
-    run_dir: PathBuf,
-}
-
-impl Drop for DriverReaper {
-    fn drop(&mut self) {
-        if let Some(pid) = apb_engine::driver::read_driver_pid(&self.run_dir) {
-            // The driver leads its own group, so this also takes down the
-            // script it is running. Not waited on: the driver is not our
-            // child (it was re-exec'd by another process), so there is no
-            // handle to reap and nothing that could block here.
-            sig::kill_group(pid);
-            sig::kill_pid(pid);
-        }
-    }
+/// Waits until the detached driver has started the run's node: by then it has
+/// exec'd and claimed `driver.pid` itself.
+fn wait_until_driving(run_dir: &Path) {
+    poll_until("the driver to start the node", || {
+        read_all(run_dir)
+            .ok()?
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::NodeStarted { .. }))
+            .then_some(())
+    });
 }
 
 fn finishes(run_dir: &Path) -> usize {
@@ -226,7 +132,7 @@ edges:
 }
 
 fn seed(root: &Path, id: &str, playbook: &str, script: &str) {
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .arg("init")
         .current_dir(root)
         .output()
@@ -259,11 +165,12 @@ fn drive_run_subcommand_completes_a_run_prepared_by_another_process() {
     )
     .unwrap();
     let run_id = prepared.run_id().to_string();
+    let _guard = RunGuard::new(dir.path(), &run_id);
     // Release the workdir lock the way a parent that failed to spawn would;
     // the child then takes it itself.
     drop(prepared);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let out = crate::common::apb_std()
         .arg("__drive-run")
         .arg("--root")
         .arg(dir.path())
@@ -279,9 +186,6 @@ fn drive_run_subcommand_completes_a_run_prepared_by_another_process() {
     );
 
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
     let status = wait_for_outcome(&run_dir, 0, "the driven run to reach a terminal event");
     assert_eq!(status, RunStatus::Succeeded);
 }
@@ -303,19 +207,10 @@ fn mcp_background_run_survives_a_group_kill_of_the_mcp_process() {
     // `apb mcp` leads its own group, so the group kill below cannot reach the
     // test runner itself.
     let mut mcp = McpSession::start(dir.path());
-    let body = mcp.call(
-        2,
-        r#"{"name":"playbook_run","arguments":{"id":"bgsurvive","background":true,"acknowledge_untrusted":true}}"#,
-    );
-    let run_id = body["run_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no run_id in playbook_run response: {body}"))
-        .to_string();
+    let run_id = mcp.run_background("bgsurvive");
 
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
+    let _guard = RunGuard::new(dir.path(), &run_id);
 
     // The run is still in flight (the script sleeps 3s): the driver must be a
     // process of its own, not a thread of the MCP server.
@@ -346,6 +241,18 @@ fn mcp_background_run_survives_a_group_kill_of_the_mcp_process() {
         "the driver must not share its launcher's process group"
     );
 
+    // The pid the launcher published is the driver's own: once the child is
+    // driving (and has claimed `driver.pid` itself) the file still names it.
+    // A wrapper process in between would leave the child's pid here instead,
+    // and the workdir handover and every liveness check would aim at the
+    // wrong process.
+    wait_until_driving(&run_dir);
+    assert_eq!(
+        apb_engine::driver::read_driver_pid(&run_dir),
+        Some(driver_pid),
+        "the published pid must be the pid of the process that drives the run"
+    );
+
     // Kill the launcher's entire group, mid-run.
     mcp.kill_group();
     poll_until(
@@ -367,75 +274,14 @@ fn mcp_background_run_survives_a_group_kill_of_the_mcp_process() {
     );
 }
 
-// Scenario 2b: the contract of `spawn_driver_at` (and so of
-// `spawn_detached_driver`, which is the same function with `current_exe()`)
-// asserted directly, since every other scenario reaches it indirectly through
-// the MCP server. Three promises: the returned pid is the driver's own pid -
-// the SAME one that lands in `driver.pid` and that liveness checks read - the
-// driver leads its own process group, and it completes the run with the caller
-// doing nothing but wait.
-#[test]
-fn spawn_driver_at_returns_the_driver_pid_and_drives_the_run_alone() {
-    let dir = tempfile::tempdir().unwrap();
-    let (yaml, script) = slowscript_yaml("spawnme", 2);
-    seed(dir.path(), "spawnme", &yaml, &script);
-
-    let prepared = apb_engine::prepare_supervised_background(
-        dir.path(),
-        "spawnme",
-        None,
-        apb_engine::RunOptions::default(),
-    )
-    .unwrap();
-    let run_id = prepared.run_id().to_string();
-    let run_dir = dir.path().join(".apb/runs").join(&run_id);
-
-    let pid = apb_engine::driver::spawn_driver_at(
-        Path::new(env!("CARGO_BIN_EXE_apb")),
-        dir.path(),
-        &run_id,
-        None,
-        false,
-        false,
-    )
-    .unwrap();
-    // Hand the lock across exactly as `start_detached` does, so the driver
-    // adopts it rather than waiting the handover window out.
-    prepared.hand_over_workdir_lock(pid).unwrap();
-
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
-
-    // The returned pid is the driver itself: whatever it publishes as
-    // `driver.pid` must be the very pid we were handed, or the workdir
-    // handover and every downstream liveness check are aimed at the wrong
-    // process.
-    let published = poll_until("the driver to publish driver.pid", || {
-        apb_engine::driver::read_driver_pid(&run_dir)
-    });
-    assert_eq!(
-        published, pid,
-        "spawn_driver_at must return the pid that ends up in driver.pid"
-    );
-    assert_eq!(
-        pgid_of(pid),
-        Some(pid),
-        "the driver must lead its own process group"
-    );
-
-    // The caller drives nothing - it only waits.
-    let status = wait_for_outcome(&run_dir, 0, "the spawned driver to finish the run alone");
-    assert_eq!(status, RunStatus::Succeeded);
-}
-
-// Scenario 2c: a driver killed mid-run must read as DEAD. The launcher reaps
-// its driver handles, so a killed driver's pid is released instead of lingering
-// as a zombie - and `kill -0`, which is how liveness is checked here and in
-// `workdir`, succeeds for a zombie. Without reaping, a driver that was
-// SIGKILLed mid-run would read as alive for the rest of the launcher's
-// session, and the stuck run it left behind could never be recognised as
-// recoverable - which is exactly the signal Tasks 8 and 9 build on.
+// Scenario 2c: a driver killed mid-run must read as DEAD. The launcher (the
+// long-lived `apb mcp`) reaps its driver handles, so a killed driver's pid is
+// released instead of lingering as a zombie - and `kill -0`, which is how
+// liveness is checked here and in `workdir`, succeeds for a zombie. Without
+// reaping, a driver that was SIGKILLed mid-run would read as alive for the
+// rest of the launcher's session, and the stuck run it left behind could never
+// be recognised as recoverable - which is exactly the signal Tasks 8 and 9
+// build on.
 #[test]
 fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
     let dir = tempfile::tempdir().unwrap();
@@ -443,31 +289,12 @@ fn a_killed_driver_is_reaped_and_stops_reading_as_alive() {
     let (yaml, script) = slowscript_yaml("reapme", 30);
     seed(dir.path(), "reapme", &yaml, &script);
 
-    let prepared = apb_engine::prepare_supervised_background(
-        dir.path(),
-        "reapme",
-        None,
-        apb_engine::RunOptions::default(),
-    )
-    .unwrap();
-    let run_id = prepared.run_id().to_string();
+    let mut mcp = McpSession::start(dir.path());
+    let run_id = mcp.run_background("reapme");
+    let _guard = RunGuard::new(dir.path(), &run_id);
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
-
-    // This test process is the launcher, so it owns the reaper.
-    let pid = apb_engine::driver::spawn_driver_at(
-        Path::new(env!("CARGO_BIN_EXE_apb")),
-        dir.path(),
-        &run_id,
-        None,
-        false,
-        false,
-    )
-    .unwrap();
-    prepared.hand_over_workdir_lock(pid).unwrap();
-
-    poll_until("the driver to start driving", || {
-        apb_engine::driver::read_driver_pid(&run_dir)
-    });
+    let pid = apb_engine::driver::read_driver_pid(&run_dir).expect("driver.pid");
+    wait_until_driving(&run_dir);
     assert!(alive(pid), "the driver should be alive before we kill it");
 
     sig::kill_pid(pid);
@@ -516,18 +343,9 @@ fn a_stop_in_the_driver_spawn_window_is_not_lost() {
     // through `hand_to_detached_driver`, and the tool call returns the instant
     // that function does - which is precisely the window under test.
     let mut mcp = McpSession::start(dir.path());
-    let body = mcp.call(
-        2,
-        r#"{"name":"playbook_run","arguments":{"id":"stopwindow","background":true,"acknowledge_untrusted":true}}"#,
-    );
-    let run_id = body["run_id"]
-        .as_str()
-        .unwrap_or_else(|| panic!("no run_id in playbook_run response: {body}"))
-        .to_string();
+    let run_id = mcp.run_background("stopwindow");
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
+    let _guard = RunGuard::new(dir.path(), &run_id);
 
     // No polling: whoever holds the run_id holds it the moment the call
     // returned, and by then the run must already name its driver.
@@ -639,6 +457,125 @@ fn a_stop_in_the_driver_spawn_window_is_not_lost() {
     );
 }
 
+// Scenario 2e: a run started from the dashboard survives the dashboard.
+//
+// The dashboard used to drive its runs on a thread of its own process, while
+// the CLI and MCP hand theirs to a detached driver. Every dashboard restart
+// (and on a dev box the service restarts on every `apb` reinstall) took each
+// run it had started down with it, leaving a `running` journal that nothing
+// would ever finish. Kill the dashboard mid-run: the run must still finish.
+#[test]
+fn a_dashboard_run_survives_the_dashboard_being_killed() {
+    let cfg = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("dashsurvive", 3);
+    seed(dir.path(), "dashsurvive", &yaml, &script);
+    // Register the project in this test's own registry, the way any `apb`
+    // command run inside it does, so the global dashboard can address it.
+    let listed = crate::common::apb_std()
+        .arg("list")
+        .current_dir(dir.path())
+        .env("APB_CONFIG_DIR", cfg.path())
+        .env_remove("CI")
+        .env_remove("APB_NO_REGISTRY")
+        .output()
+        .unwrap();
+    assert!(listed.status.success(), "apb list failed: {listed:?}");
+    let workspace = fs::read_to_string(dir.path().join(".apb/workspace.local"))
+        .expect("the project was registered")
+        .trim()
+        .to_string();
+
+    let mut dashboard = Dashboard::start(cfg.path());
+    let run_id = dashboard.start_run("dashsurvive", &workspace);
+    let _guard = RunGuard::new(dir.path(), &run_id);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    wait_until_driving(&run_dir);
+
+    dashboard.kill();
+
+    let status = wait_for_outcome(
+        &run_dir,
+        0,
+        "the dashboard's run to finish after the dashboard was killed",
+    );
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
+/// A global `apb dashboard` on a free loopback port, killed on drop.
+struct Dashboard {
+    child: Child,
+    port: u16,
+}
+
+impl Dashboard {
+    fn start(config_dir: &Path) -> Self {
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let child = crate::common::apb_std()
+            .args(["dashboard", "--no-open", "--port", &port.to_string()])
+            .env("APB_CONFIG_DIR", config_dir)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let dashboard = Self { child, port };
+        poll_until("the dashboard to accept connections", || {
+            std::net::TcpStream::connect(("127.0.0.1", port)).ok()
+        });
+        dashboard
+    }
+
+    /// `POST /api/playbooks/{id}/run` and the run id it answers with.
+    fn start_run(&mut self, id: &str, workspace: &str) -> String {
+        let mut conn = std::net::TcpStream::connect(("127.0.0.1", self.port)).unwrap();
+        conn.set_read_timeout(Some(Duration::from_secs(20)))
+            .unwrap();
+        write!(
+            conn,
+            "POST /api/playbooks/{id}/run?workspace={workspace} HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{{}}",
+            self.port
+        )
+        .unwrap();
+        let mut response = String::new();
+        std::io::Read::read_to_string(&mut conn, &mut response).unwrap();
+        let body = response
+            .split_once("\r\n\r\n")
+            .map(|(_, body)| body)
+            .unwrap_or_default();
+        let json: serde_json::Value = serde_json::from_str(body)
+            .unwrap_or_else(|_| panic!("the run start answered: {response}"));
+        json["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no run_id in: {response}"))
+            .to_string()
+    }
+
+    fn kill(&mut self) {
+        sig::kill_pid(self.child.id());
+        wait_with_deadline(&mut self.child, REAP_DEADLINE, "the dashboard to die");
+    }
+}
+
+impl Drop for Dashboard {
+    /// Bounded, like `McpSession`'s: this also runs while unwinding.
+    fn drop(&mut self) {
+        sig::kill_pid(self.child.id());
+        let deadline = Instant::now() + REAP_DEADLINE;
+        while Instant::now() < deadline {
+            match self.child.try_wait() {
+                Ok(Some(_)) | Err(_) => return,
+                Ok(None) => std::thread::sleep(POLL_STEP),
+            }
+        }
+    }
+}
+
 // Scenario 3: `run_resume` acknowledges immediately and the resumed run then
 // completes without the caller. The resumed node sleeps 10s, so an ack that
 // arrives in well under 5s can only mean the drive was handed to another
@@ -651,7 +588,7 @@ fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
     let (yaml, script) = slowscript_yaml("resumeme", 0);
     seed(dir.path(), "resumeme", &yaml, &script);
 
-    let out = Command::new(env!("CARGO_BIN_EXE_apb"))
+    let out = crate::common::apb_std()
         .arg("run")
         .arg("resumeme")
         .current_dir(dir.path())
@@ -674,16 +611,16 @@ fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
     // own snapshot, so rewriting it here is what the resumed node will run.
     fs::write(run_dir.join("scripts/work.sh"), "#!/bin/sh\nsleep 10\n").unwrap();
     let before = finishes(&run_dir);
-    let _reaper = DriverReaper {
-        run_dir: run_dir.clone(),
-    };
+    let _guard = RunGuard::new(dir.path(), &run_id);
 
     let mut mcp = McpSession::start(dir.path());
     let started = Instant::now();
+    // The rewritten snapshot is not an approved digest, so the resume needs
+    // the acknowledge a start would.
     let body = mcp.call(
         2,
         &format!(
-            r#"{{"name":"run_resume","arguments":{{"run_id":"{run_id}","from_node":"work"}}}}"#
+            r#"{{"name":"run_resume","arguments":{{"run_id":"{run_id}","from_node":"work","acknowledge_untrusted":true}}}}"#
         ),
     );
     let elapsed = started.elapsed();
@@ -707,6 +644,102 @@ fn mcp_run_resume_acks_immediately_and_the_run_completes_detached() {
     assert_eq!(status, RunStatus::Succeeded);
 }
 
+/// Copies a run directory tree (a run shipped inside a repository is exactly
+/// such a copy under a new name).
+fn copy_dir(src: &Path, dst: &Path) {
+    fs::create_dir_all(dst).unwrap();
+    for entry in fs::read_dir(src).unwrap() {
+        let entry = entry.unwrap();
+        let to = dst.join(entry.file_name());
+        if entry.file_type().unwrap().is_dir() {
+            copy_dir(&entry.path(), &to);
+        } else {
+            fs::copy(entry.path(), &to).unwrap();
+        }
+    }
+}
+
+// MCP `run_resume` holds a resume to the same consent as a start: a run
+// directory apb did not create here (one that came with the repository) is
+// refused even with an acknowledge, and a run whose snapshot is not approved
+// needs the acknowledge.
+#[test]
+fn mcp_run_resume_refuses_a_foreign_run_and_an_unapproved_snapshot() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("resumegate", 0);
+    seed(dir.path(), "resumegate", &yaml, &script);
+    let out = crate::common::apb_std()
+        .arg("run")
+        .arg("resumegate")
+        .current_dir(dir.path())
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let run_id = stdout
+        .split_whitespace()
+        .find(|w| w.starts_with("resumegate-"))
+        .unwrap_or_else(|| panic!("no run id in `apb run` output: {stdout}"))
+        .to_string();
+    let runs = dir.path().join(".apb/runs");
+    copy_dir(&runs.join(&run_id), &runs.join("shipped-1"));
+    let _guards = (
+        RunGuard::new(dir.path(), &run_id),
+        RunGuard::new(dir.path(), "shipped-1"),
+    );
+
+    let mut mcp = McpSession::start(dir.path());
+    let foreign = mcp.call(
+        2,
+        r#"{"name":"run_resume","arguments":{"run_id":"shipped-1","from_node":"work","acknowledge_untrusted":true}}"#,
+    );
+    assert_eq!(
+        foreign["policy_refusal"]["policy"], "run_not_created_locally",
+        "got: {foreign}"
+    );
+    let unapproved = mcp.call(
+        3,
+        &format!(
+            r#"{{"name":"run_resume","arguments":{{"run_id":"{run_id}","from_node":"work"}}}}"#
+        ),
+    );
+    assert_eq!(
+        unapproved["policy_refusal"]["policy"], "untrusted_requires_acknowledge",
+        "got: {unapproved}"
+    );
+    mcp.kill();
+}
+
+// A long-running `apb mcp` (an agent session's MCP server) keeps starting
+// background runs after `apb` is reinstalled under it. Reinstalling replaces
+// the file, so the running process's own executable reads as deleted, and a
+// driver re-exec'd from that path used to fail to spawn.
+#[test]
+fn mcp_background_run_starts_after_the_binary_is_replaced() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("afterreinstall", 0);
+    seed(dir.path(), "afterreinstall", &yaml, &script);
+
+    let bin_dir = tempfile::tempdir_in(env!("CARGO_TARGET_TMPDIR")).unwrap();
+    let exe = bin_dir.path().join("apb");
+    fs::copy(crate::common::apb_bin(), &exe).unwrap();
+    let mut mcp = McpSession::start_with(dir.path(), crate::common::apb_std_from(&exe));
+
+    // The reinstall: a new file at the same path, as `cargo install` does.
+    fs::remove_file(&exe).unwrap();
+    fs::copy(crate::common::apb_bin(), &exe).unwrap();
+
+    let run_id = mcp.run_background("afterreinstall");
+    let _guard = RunGuard::new(dir.path(), &run_id);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    let status = wait_for_outcome(&run_dir, 0, "the run started after the reinstall to finish");
+    assert_eq!(status, RunStatus::Succeeded);
+}
+
 // --- minimal stdio MCP client -------------------------------------------------
 
 /// A live `apb mcp` child spoken to over stdio, with the initialize handshake
@@ -720,7 +753,11 @@ struct McpSession {
 
 impl McpSession {
     fn start(root: &Path) -> Self {
-        let mut child = Command::new(env!("CARGO_BIN_EXE_apb"))
+        Self::start_with(root, crate::common::apb_std())
+    }
+
+    fn start_with(root: &Path, mut cmd: std::process::Command) -> Self {
+        let mut child = cmd
             .arg("mcp")
             .current_dir(root)
             .stdin(Stdio::piped())
@@ -771,6 +808,20 @@ impl McpSession {
 
     fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// Starts playbook `id` as a background run and returns its run id.
+    fn run_background(&mut self, id: &str) -> String {
+        let body = self.call(
+            2,
+            &format!(
+                r#"{{"name":"playbook_run","arguments":{{"id":"{id}","background":true,"acknowledge_untrusted":true}}}}"#
+            ),
+        );
+        body["run_id"]
+            .as_str()
+            .unwrap_or_else(|| panic!("no run_id in playbook_run response: {body}"))
+            .to_string()
     }
 
     fn call(&mut self, id: u32, params: &str) -> serde_json::Value {
@@ -840,4 +891,67 @@ impl Drop for McpSession {
             self.child.id()
         );
     }
+}
+
+/// Prepares a run of `id` the way a launcher does and releases its workdir
+/// lock, leaving a run directory a `__drive-run` can pick up.
+fn prepare_released(root: &Path, id: &str) -> String {
+    let prepared = apb_engine::prepare_supervised_background(
+        root,
+        id,
+        None,
+        apb_engine::RunOptions::default(),
+    )
+    .unwrap();
+    let run_id = prepared.run_id().to_string();
+    drop(prepared);
+    run_id
+}
+
+// Issue #139 F13: a driver whose workspace is deleted mid-node stops after the
+// node without re-creating the run directory (context.md, outputs, the control
+// cursor were all written with create_dir_all).
+#[test]
+fn a_driver_does_not_recreate_a_workspace_deleted_mid_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (yaml, script) = slowscript_yaml("midrun", 2);
+    seed(dir.path(), "midrun", &yaml, &script);
+    let run_id = prepare_released(dir.path(), "midrun");
+    let _guard = RunGuard::new(dir.path(), &run_id);
+    let run_dir = dir.path().join(".apb/runs").join(&run_id);
+
+    let mut driver = crate::common::apb_std()
+        .arg("__drive-run")
+        .arg("--root")
+        .arg(dir.path())
+        .arg("--run-id")
+        .arg(&run_id)
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .unwrap();
+    wait_until_driving(&run_dir);
+    fs::remove_dir_all(dir.path()).unwrap();
+    wait_with_deadline(&mut driver, POLL_DEADLINE, "the driver to stop");
+
+    assert!(
+        !dir.path().exists(),
+        "the driver re-created the deleted workspace: {:?}",
+        walk(dir.path())
+    );
+}
+
+/// Every path under `root`, for a failure message.
+fn walk(root: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    let mut stack = vec![root.to_path_buf()];
+    while let Some(p) = stack.pop() {
+        if let Ok(rd) = fs::read_dir(&p) {
+            for e in rd.flatten() {
+                stack.push(e.path());
+            }
+        }
+        out.push(p);
+    }
+    out
 }

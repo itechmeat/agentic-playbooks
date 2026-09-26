@@ -131,8 +131,13 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         "playbook_create",
         "playbook_update",
         "playbook_delete",
+        "playbook_trash_list",
+        "playbook_trash_restore",
+        "trust_list",
+        "trust_revoke",
         "runs_list",
         "run_status",
+        "run_wait",
         "run_events",
         "run_report",
         "run_resume",
@@ -161,6 +166,73 @@ fn tool_router_registers_all_read_run_write_and_supervisor_tools() {
         names.len(),
         expected.len(),
         "unexpected extra tools registered: {names:?}"
+    );
+}
+
+/// F18: docs/MCP.md is the tool reference agents and people read; every tool
+/// the router actually registers must be in it.
+#[test]
+fn every_registered_tool_is_documented_in_mcp_md() {
+    let doc = include_str!("../../../../docs/MCP.md");
+    let missing: Vec<String> = WfMcp::new(PathBuf::from("."))
+        .tool_router
+        .list_all()
+        .into_iter()
+        .map(|t| t.name.to_string())
+        .filter(|name| !doc.contains(&format!("`{name}`")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "tools missing from docs/MCP.md: {missing:?}"
+    );
+}
+
+/// F27: the blocking waits' bounds are stated in the tool descriptions, the
+/// argument docs and docs/MCP.md; each statement must be the value the
+/// server actually applies (`RUN_WAIT_DEFAULT_MS`, `RUN_WAIT_MAX_MS`).
+#[test]
+fn wait_bounds_are_stated_as_the_server_applies_them() {
+    use apb_engine::run_wait::{RUN_WAIT_DEFAULT_MS, RUN_WAIT_MAX_MS};
+    let stated = format!("default {RUN_WAIT_DEFAULT_MS}, max {RUN_WAIT_MAX_MS}");
+    for tool in WfMcp::new(PathBuf::from("."))
+        .tool_router
+        .list_all()
+        .into_iter()
+        .filter(|t| t.name == "run_wait" || t.name == "supervisor_wait_event")
+    {
+        let description = tool.description.as_deref().unwrap_or_default();
+        let schema = serde_json::to_string(&tool.input_schema).unwrap();
+        assert!(
+            description.contains(&stated),
+            "{}: {description}",
+            tool.name
+        );
+        assert!(schema.contains(&stated), "{}: {schema}", tool.name);
+    }
+    let doc = include_str!("../../../../docs/MCP.md");
+    assert!(doc.contains(&stated), "docs/MCP.md must state `{stated}`");
+}
+
+/// F18: `playbook_howto` hands agents docs/HOWTO-authoring.md; its node type
+/// list must name every node type the schema accepts.
+#[test]
+fn playbook_howto_lists_every_node_type() {
+    let howto = crate::tools::playbook_howto().unwrap()["howto"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let section = howto
+        .split("## Node types")
+        .nth(1)
+        .and_then(|rest| rest.split("\n\n").nth(1))
+        .expect("HOWTO has a `## Node types` section with a type list");
+    let missing: Vec<&str> = apb_core::schema::NODE_TYPES
+        .into_iter()
+        .filter(|t| !section.contains(&format!("`{t}`")))
+        .collect();
+    assert!(
+        missing.is_empty(),
+        "node types missing from the HOWTO list: {missing:?}"
     );
 }
 
@@ -197,8 +269,11 @@ fn tools_carry_safety_annotations() {
         "playbook_list",
         "playbook_get",
         "playbook_validate",
+        "playbook_trash_list",
+        "trust_list",
         "runs_list",
         "run_status",
+        "run_wait",
         "run_events",
         "run_report",
         "supervisor_wait_event",
@@ -216,6 +291,8 @@ fn tools_carry_safety_annotations() {
         "playbook_create",
         "playbook_update",
         "playbook_delete",
+        "playbook_trash_restore",
+        "trust_revoke",
         "run_resume",
         "run_stop",
         "review_decide",
@@ -537,11 +614,39 @@ async fn background_run_returns_run_id_without_blocking() {
     );
 }
 
+/// A supervisor token is the only credential of the supervisor tools, and it
+/// is handed to an agent process. It must carry 256 bits from the OS CSPRNG
+/// (unpadded base64url), not a clock reading or a counter, and a near miss of a
+/// live token must not resolve.
 #[test]
-fn patch_playbook_tool_maps_to_patch_capability() {
-    assert_eq!(
-        capability_for_tool("supervisor_patch_playbook"),
-        "patch_playbook"
+fn minted_supervisor_tokens_are_random_256_bit_values() {
+    let dir = tempfile::tempdir().unwrap();
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let a = server
+        .mint_token("run-x".to_string(), vec!["observe".to_string()])
+        .unwrap();
+    let b = server
+        .mint_token("run-x".to_string(), vec!["observe".to_string()])
+        .unwrap();
+    for token in [&a, &b] {
+        let body = token.strip_prefix("sv-").expect("sv- prefix");
+        assert!(
+            body.len() == 43
+                && body
+                    .bytes()
+                    .all(|c| c.is_ascii_alphanumeric() || c == b'-' || c == b'_'),
+            "token body must be 32 random bytes in unpadded base64url, got {token}"
+        );
+    }
+    assert_ne!(a, b);
+    assert!(server.resolve_session(&a, "supervisor_run_inspect").is_ok());
+    let mut near = a.clone();
+    let last = near.pop().expect("non-empty");
+    near.push(if last == 'A' { 'B' } else { 'A' });
+    assert!(
+        server
+            .resolve_session(&near, "supervisor_run_inspect")
+            .is_err()
     );
 }
 
@@ -550,7 +655,9 @@ fn patch_playbook_rejected_without_capability() {
     let dir = tempfile::tempdir().unwrap();
     let server = WfMcp::new(dir.path().to_path_buf());
     // A session with only observe - patch_playbook is not granted.
-    let token = server.mint_token("run-x".to_string(), vec!["observe".to_string()]);
+    let token = server
+        .mint_token("run-x".to_string(), vec!["observe".to_string()])
+        .unwrap();
     let err = server
         .resolve_session(&token, "supervisor_patch_playbook")
         .unwrap_err();
@@ -561,7 +668,9 @@ fn patch_playbook_rejected_without_capability() {
 fn patch_playbook_allowed_with_capability() {
     let dir = tempfile::tempdir().unwrap();
     let server = WfMcp::new(dir.path().to_path_buf());
-    let token = server.mint_token("run-x".to_string(), vec!["patch_playbook".to_string()]);
+    let token = server
+        .mint_token("run-x".to_string(), vec!["patch_playbook".to_string()])
+        .unwrap();
     assert_eq!(
         server
             .resolve_session(&token, "supervisor_patch_playbook")
@@ -574,16 +683,13 @@ fn patch_playbook_allowed_with_capability() {
 /// gated exactly like its sibling `supervisor_node_retry`: it is a control-flow
 /// intervention, so it needs the `retry` capability, not `observe`.
 #[test]
-fn interrupt_attempt_tool_maps_to_retry_capability() {
-    assert_eq!(capability_for_tool("supervisor_interrupt_attempt"), "retry");
-}
-
-#[test]
 fn interrupt_attempt_rejected_without_capability() {
     let dir = tempfile::tempdir().unwrap();
     let server = WfMcp::new(dir.path().to_path_buf());
     // A session with only observe - retry (and so interrupt) is not granted.
-    let token = server.mint_token("run-x".to_string(), vec!["observe".to_string()]);
+    let token = server
+        .mint_token("run-x".to_string(), vec!["observe".to_string()])
+        .unwrap();
     let err = server
         .resolve_session(&token, "supervisor_interrupt_attempt")
         .unwrap_err();
@@ -595,19 +701,16 @@ fn interrupt_attempt_rejected_without_capability() {
 /// bundle and changes the run's effective binding), so a policy can grant retry
 /// without granting rebind.
 #[test]
-fn rebind_profile_tool_maps_to_rebind_capability() {
-    assert_eq!(capability_for_tool("supervisor_rebind_profile"), "rebind");
-}
-
-#[test]
 fn rebind_profile_rejected_without_the_rebind_capability() {
     let dir = tempfile::tempdir().unwrap();
     let server = WfMcp::new(dir.path().to_path_buf());
     // retry alone does NOT grant rebind.
-    let token = server.mint_token(
-        "run-x".to_string(),
-        vec!["observe".to_string(), "retry".to_string()],
-    );
+    let token = server
+        .mint_token(
+            "run-x".to_string(),
+            vec!["observe".to_string(), "retry".to_string()],
+        )
+        .unwrap();
     let err = server
         .resolve_session(&token, "supervisor_rebind_profile")
         .unwrap_err();
@@ -618,7 +721,9 @@ fn rebind_profile_rejected_without_the_rebind_capability() {
 fn rebind_profile_allowed_with_the_rebind_capability() {
     let dir = tempfile::tempdir().unwrap();
     let server = WfMcp::new(dir.path().to_path_buf());
-    let token = server.mint_token("run-x".to_string(), vec!["rebind".to_string()]);
+    let token = server
+        .mint_token("run-x".to_string(), vec!["rebind".to_string()])
+        .unwrap();
     assert_eq!(
         server
             .resolve_session(&token, "supervisor_rebind_profile")
@@ -704,10 +809,12 @@ fn check_rebind_refuses_unresolved_profile() {
 fn interrupt_attempt_allowed_with_retry_capability() {
     let dir = tempfile::tempdir().unwrap();
     let server = WfMcp::new(dir.path().to_path_buf());
-    let token = server.mint_token(
-        "run-x".to_string(),
-        vec!["observe".to_string(), "retry".to_string()],
-    );
+    let token = server
+        .mint_token(
+            "run-x".to_string(),
+            vec!["observe".to_string(), "retry".to_string()],
+        )
+        .unwrap();
     assert_eq!(
         server
             .resolve_session(&token, "supervisor_interrupt_attempt")
@@ -722,8 +829,9 @@ async fn supervisor_tool_rejects_unknown_token() {
     let server = WfMcp::new(dir.path().to_path_buf());
 
     let result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs {
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
             token: "bogus".to_string(),
+            full_events: None,
         }))
         .await;
 
@@ -755,7 +863,9 @@ async fn capability_gate_blocks_retry_when_observe_only() {
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
 
-    let token = server.mint_token(run_id, vec!["observe".to_string()]);
+    let token = server
+        .mint_token(run_id, vec!["observe".to_string()])
+        .unwrap();
 
     let retry_result = server
         .supervisor_node_retry(Parameters(SupervisorRetryArgs {
@@ -776,7 +886,10 @@ async fn capability_gate_blocks_retry_when_observe_only() {
     );
 
     let inspect_result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs { token }))
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
+            token,
+            full_events: None,
+        }))
         .await;
     assert_eq!(
         inspect_result.is_error,
@@ -824,8 +937,9 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
     let server = WfMcp::new(dir.path().to_path_buf());
 
     let inspect_result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs {
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
             token: "sv-disk-1".to_string(),
+            full_events: None,
         }))
         .await;
     assert_eq!(
@@ -838,8 +952,9 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
     // Capabilities from disk must also be enforced: an unknown token
     // without a disk persist remains refused.
     let unknown_result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs {
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
             token: "sv-nowhere".to_string(),
+            full_events: None,
         }))
         .await;
     assert_eq!(unknown_result.is_error, Some(true));
@@ -899,8 +1014,9 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
     );
 
     let inspect_result = server
-        .supervisor_run_inspect(Parameters(SupervisorRunRefArgs {
+        .supervisor_run_inspect(Parameters(SupervisorInspectArgs {
             token: "sv-disk-observe-only".to_string(),
+            full_events: None,
         }))
         .await;
     assert_eq!(
@@ -938,7 +1054,9 @@ async fn run_answer_token_path_posts_supervisor_answer_on_supervisor_node() {
     let dir = tempfile::tempdir().unwrap();
     let run_dir = interactive_run_dir(dir.path(), "r-sv", SUPERVISOR_ASK_PB);
     let server = WfMcp::new(dir.path().to_path_buf());
-    let token = server.mint_token("r-sv".to_string(), vec!["observe".to_string()]);
+    let token = server
+        .mint_token("r-sv".to_string(), vec!["observe".to_string()])
+        .unwrap();
 
     let result = server
         .run_answer(Parameters(RunAnswerArgs {
@@ -967,7 +1085,9 @@ async fn run_answer_token_path_relays_on_human_only_node() {
     let dir = tempfile::tempdir().unwrap();
     interactive_run_dir(dir.path(), "r-human", HUMAN_ASK_PB);
     let server = WfMcp::new(dir.path().to_path_buf());
-    let token = server.mint_token("r-human".to_string(), vec!["observe".to_string()]);
+    let token = server
+        .mint_token("r-human".to_string(), vec!["observe".to_string()])
+        .unwrap();
 
     let result = server
         .run_answer(Parameters(RunAnswerArgs {
@@ -1169,6 +1289,25 @@ async fn prepared_token(server: &WfMcp, b_id: &str) -> serde_json::Value {
     serde_json::from_str(&result_text(&res)).unwrap()
 }
 
+/// Approves the digest of a version already on disk (the trust state a save
+/// through apb leaves behind), for tests that seed definitions by hand.
+fn approve_version(root: &Path, id: &str, version: &str) {
+    let yaml = std::fs::read_to_string(
+        root.join(".apb/playbooks")
+            .join(id)
+            .join(version)
+            .join("playbook.yaml"),
+    )
+    .unwrap();
+    apb_core::trust::TrustStore::load()
+        .approve(
+            &apb_core::scope::digest_str(&yaml),
+            id,
+            apb_core::trust::OriginKind::LocallyApproved,
+        )
+        .unwrap();
+}
+
 fn setup_two(cfg: &Path) -> (tempfile::TempDir, tempfile::TempDir, String) {
     let a = tempfile::tempdir().unwrap();
     let b = tempfile::tempdir().unwrap();
@@ -1180,7 +1319,7 @@ fn setup_two(cfg: &Path) -> (tempfile::TempDir, tempfile::TempDir, String) {
     seed_noagent_run(a.path());
     seed_noagent_run(b.path());
     // Pipeline B must be trusted+active, so that preflight lets it through.
-    tools::approve_local(b.path(), "noagent", "1.0.0");
+    approve_version(b.path(), "noagent", "1.0.0");
     apb_core::projects::touch(b.path());
     let b_id = apb_core::workspace::ensure_id(b.path()).unwrap();
     (a, b, b_id)
@@ -1227,9 +1366,20 @@ async fn prepare_then_execute_runs_in_target_workspace() {
         .expect("run_id present")
         .to_string();
     assert_eq!(out["run_ref"]["workspace_id"], b_id);
+    // The run is prepared in B and handed to a detached `apb __drive-run`
+    // process (driving it to completion is proven against the real binary in
+    // the apb-cli detached-driver suite; this test binary is not `apb`).
+    let events = apb_engine::event::read_all(&b.path().join(".apb/runs").join(&run_id)).unwrap();
     assert!(
-        run_finished(b.path(), &run_id),
-        "run should finish in target workspace B"
+        events.iter().any(|e| matches!(
+            e.payload,
+            apb_engine::event::EventPayload::RunStarted { .. }
+        )),
+        "the run must be prepared in target workspace B"
+    );
+    assert!(
+        !a.path().join(".apb/runs").join(&run_id).exists(),
+        "the run must not land in the calling workspace A"
     );
 
     unsafe {
@@ -1285,7 +1435,7 @@ async fn digest_drift_invalidates_plan() {
     std::fs::write(&vpath, format!("{cur}# drift\n")).unwrap();
     // Re-approve the new digest, so preflight does not fail on trust and
     // we verify plan_stale specifically.
-    tools::approve_local(b.path(), "noagent", "1.0.0");
+    approve_version(b.path(), "noagent", "1.0.0");
 
     let res = server
         .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
@@ -1411,6 +1561,66 @@ async fn untrusted_foreign_plan_requires_acknowledge() {
         "got: {}",
         result_text(&ok)
     );
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+}
+
+/// A cross-workspace plan runs its whole sub-playbook tree through the same
+/// gate as `playbook_run`: an approved parent does not carry an unapproved
+/// child past it without an acknowledge.
+#[tokio::test]
+async fn execute_plan_refuses_an_unapproved_child_without_acknowledge() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let (a, b, b_id) = setup_two(cfg.path());
+    let seed = |id: &str, yaml: &str| {
+        let vdir = b.path().join(".apb/playbooks").join(id).join("1.0.0");
+        fs::create_dir_all(&vdir).unwrap();
+        fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+        fs::write(
+            b.path().join(".apb/playbooks").join(id).join("current"),
+            "1.0.0",
+        )
+        .unwrap();
+    };
+    seed(
+        "pp",
+        "schema: 2\nid: pp\nname: pp\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: sub, type: playbook, playbook: child }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: sub }\n  - { from: sub, to: f }\n",
+    );
+    seed(
+        "child",
+        "schema: 2\nid: child\nname: child\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: f }\n",
+    );
+    approve_version(b.path(), "pp", "1.0.0");
+
+    let server = WfMcp::new(a.path().to_path_buf());
+    let res = server
+        .playbook_prepare_run(Parameters(PlaybookPrepareRunArgs {
+            id: "pp".into(),
+            version: None,
+            workspace: b_id.clone(),
+            params: BTreeMap::new(),
+        }))
+        .await;
+    let plan: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
+    assert_eq!(plan["plan"]["children"][0]["id"], "child", "got: {plan}");
+    assert_eq!(plan["plan"]["children"][0]["trusted"], false, "got: {plan}");
+    let token = plan["plan_token"].as_str().unwrap().to_string();
+
+    let refused = server
+        .playbook_execute_plan(Parameters(PlaybookExecutePlanArgs {
+            plan_token: token,
+            acknowledge_untrusted: None,
+        }))
+        .await;
+    let out: serde_json::Value = serde_json::from_str(&result_text(&refused)).unwrap();
+    assert_eq!(
+        out["policy_refusal"]["policy"], "untrusted_requires_acknowledge",
+        "got: {out}"
+    );
+    assert_eq!(out["policy_refusal"]["id"], "child", "got: {out}");
 
     unsafe {
         std::env::remove_var("APB_CONFIG_DIR");

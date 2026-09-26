@@ -156,13 +156,120 @@ pub struct ProfileDoc {
     pub soul: SoulRequirement,
     #[serde(default)]
     pub skills: Vec<SkillRef>,
-    /// When `true`, the executor is launched with an apb-owned minimal settings
-    /// profile that disables user-scope plugins and hooks (hermetic isolation).
-    /// Default `false`; a profile.yaml written before this field simply omits
-    /// the key. Only agents with an isolation mechanism (claude/claude-code)
-    /// honor it; any other adapter ignores it with a warning (see the engine).
-    #[serde(default)]
-    pub hermetic: bool,
+    /// What the executor loads of the operator's own agent setup (see
+    /// [`AgentEnvironment`]). Absent means [`AgentEnvironment::Minimal`];
+    /// `full` is the explicit opt-in to the whole personal environment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub environment: Option<AgentEnvironment>,
+    /// Deprecated, read only so older profile.yaml files still parse. It no
+    /// longer selects anything: every write path used to emit `hermetic:
+    /// false` whether or not anyone chose it, so it cannot stand for the
+    /// full-environment opt-in (that is `environment: full`), and `true` is
+    /// what the default does anyway. New writes omit it.
+    #[serde(default, skip_serializing)]
+    pub hermetic: Option<bool>,
+    /// The ZCode permission mode the profile's zcode steps get in a run that
+    /// grants autonomy (see [`ZcodeMode`]). Absent means `yolo`, the
+    /// historical grant; only zcode reads it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub zcode_mode: Option<ZcodeMode>,
+}
+
+impl ProfileDoc {
+    /// The environment the executor runs with: the declared one, else
+    /// [`AgentEnvironment::Minimal`].
+    pub fn environment(&self) -> AgentEnvironment {
+        self.environment.unwrap_or_default()
+    }
+}
+
+/// What an executor loads of the operator's own agent setup (issue #136
+/// item 4). A node agent is a batch worker: loading every plugin, MCP server,
+/// user skill and personal instruction file the operator installed costs
+/// thousands of tokens per spawn and changes what the node does.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AgentEnvironment {
+    /// The default. claude gets apb's own settings (no hooks, no plugins),
+    /// only the project and local setting sources (no user CLAUDE.md, user
+    /// skills or user settings), and only the MCP servers apb passes itself.
+    /// The project's own CLAUDE.md and `.claude/skills` still load, and the
+    /// profile's declared skills are delivered.
+    #[default]
+    Minimal,
+    /// The operator's whole personal environment, as an interactive session
+    /// would have it. For a profile that depends on a user-scope plugin,
+    /// skill or MCP server.
+    Full,
+}
+
+impl AgentEnvironment {
+    /// The spelling in profile.yaml and on every surface.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AgentEnvironment::Minimal => "minimal",
+            AgentEnvironment::Full => "full",
+        }
+    }
+
+    /// Parses `minimal` / `full`.
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "minimal" => Ok(AgentEnvironment::Minimal),
+            "full" => Ok(AgentEnvironment::Full),
+            other => Err(format!(
+                "environment `{other}`: expected `minimal` or `full`"
+            )),
+        }
+    }
+
+    /// The environment a write surface asked for: `environment` wins; the
+    /// deprecated `hermetic` flag maps `true` to minimal and `false` to full
+    /// (on a write surface `false` is a caller's explicit choice). `None`
+    /// when neither was given, which keeps the stored value on an update.
+    pub fn from_surface(
+        environment: Option<&str>,
+        hermetic: Option<bool>,
+    ) -> Result<Option<Self>, String> {
+        match (environment, hermetic) {
+            (Some(e), _) => Self::parse(e).map(Some),
+            (None, Some(true)) => Ok(Some(AgentEnvironment::Minimal)),
+            (None, Some(false)) => Ok(Some(AgentEnvironment::Full)),
+            (None, None) => Ok(None),
+        }
+    }
+}
+
+/// ZCode's `--mode` for a run that grants autonomy. In a headless run every
+/// approval request is denied, so the mode is the whole permission set:
+/// `yolo` allows everything (files, shell, network), `edit` allows file edits
+/// and nothing that needs an approval (no shell commands). A run that grants
+/// no autonomy always runs zcode in `build`, which refuses writes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ZcodeMode {
+    #[default]
+    Yolo,
+    Edit,
+}
+
+impl ZcodeMode {
+    /// The value ZCode's `--mode` flag takes.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ZcodeMode::Yolo => "yolo",
+            ZcodeMode::Edit => "edit",
+        }
+    }
+
+    /// Parses `yolo` / `edit` (the surfaces' spelling).
+    pub fn parse(s: &str) -> Result<Self, String> {
+        match s {
+            "yolo" => Ok(ZcodeMode::Yolo),
+            "edit" => Ok(ZcodeMode::Edit),
+            other => Err(format!("zcode_mode `{other}`: expected `edit` or `yolo`")),
+        }
+    }
 }
 
 impl ProfileDoc {
@@ -221,7 +328,7 @@ pub fn profile_digest(profile_yaml: &str, soul_md: &str) -> String {
 mod tests {
     use super::*;
 
-    const P: &str = "name: architect\ndescription: d\nexecutor:\n  agent: claude\n  model: claude-opus-4-8\n  fallbacks:\n    - { agent: opencode, model: opencode/claude-opus-4-8 }\nskills:\n  - coding-standards\n  - { name: writing-plans, scope: global }\n";
+    const P: &str = "name: architect\ndescription: d\nexecutor:\n  agent: claude\n  model: claude-opus-5-5\n  fallbacks:\n    - { agent: opencode, model: opencode/claude-opus-5-5 }\nskills:\n  - coding-standards\n  - { name: writing-plans, scope: global }\n";
 
     #[test]
     fn parses_profile_and_skill_ref_forms() {
@@ -267,21 +374,25 @@ mod tests {
         assert_ne!(d1, profile_digest(P, ""));
     }
 
+    /// Issue #136 item 4: the cheap environment is the default, the full one
+    /// an explicit opt-in, and the deprecated `hermetic` key (which every old
+    /// write path emitted as `false`) opts into nothing.
     #[test]
-    fn hermetic_defaults_false_and_parses_true() {
+    fn environment_defaults_to_minimal_and_full_is_explicit() {
         let p = ProfileDoc::from_yaml(P).unwrap();
-        assert!(!p.hermetic, "hermetic must default to false when absent");
-        let with = format!("{P}hermetic: true\n");
-        let ph = ProfileDoc::from_yaml(&with).unwrap();
-        assert!(ph.hermetic, "hermetic: true must parse as true");
-    }
-
-    #[test]
-    fn hermetic_changes_profile_digest() {
-        // The digest hashes the raw profile.yaml text, so a profile that sets
-        // hermetic must not collide with one that omits it.
-        let with = format!("{P}hermetic: true\n");
-        assert_ne!(profile_digest(P, "role"), profile_digest(&with, "role"));
+        assert_eq!(p.environment(), AgentEnvironment::Minimal);
+        for legacy in ["hermetic: false", "hermetic: true"] {
+            let doc = ProfileDoc::from_yaml(&format!("{P}{legacy}\n")).unwrap();
+            assert_eq!(doc.environment(), AgentEnvironment::Minimal, "{legacy}");
+            let written = serde_yaml_ng::to_string(&doc).unwrap();
+            assert!(
+                !written.contains("hermetic"),
+                "a rewrite drops the key: {written}"
+            );
+        }
+        let full = ProfileDoc::from_yaml(&format!("{P}environment: full\n")).unwrap();
+        assert_eq!(full.environment(), AgentEnvironment::Full);
+        assert!(ProfileDoc::from_yaml(&format!("{P}environment: all\n")).is_err());
     }
 
     #[test]

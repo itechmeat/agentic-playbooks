@@ -1,11 +1,10 @@
 use std::fs;
 use std::path::Path;
-use std::process::Command;
 
 const NAMED: &str = "schema: 1\nid: a\nname: W\nversion: 1.0.0\nexecutors:\n  main:\n    agent: claude\n    model: haiku\ndefaults:\n  executor: main\nnodes:\n  - { id: start, type: start }\n  - { id: t, type: agent_task, prompt: \"do\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: t }\n  - { from: t, to: done }\n";
 
 fn playbook(dir: &Path, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    crate::common::apb_std()
         .args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))
@@ -44,7 +43,13 @@ fn apb_with_editor(dir: &Path, editor: &Path, args: &[&str]) -> std::process::Ou
 /// Like `apb_with_editor`, but $EDITOR is an arbitrary string (may carry
 /// arguments, e.g. "ed.sh --wait").
 fn apb_with_editor_str(dir: &Path, editor: &str, args: &[&str]) -> std::process::Output {
-    Command::new(env!("CARGO_BIN_EXE_apb"))
+    // `apb profile edit` stages the edit under the temp dir and keeps it on a
+    // failed save for recovery (the conflict case below): give the child a
+    // temp dir inside this test's own, so nothing outlives the test.
+    let tmp = dir.join("tmp");
+    fs::create_dir_all(&tmp).unwrap();
+    crate::common::apb_std()
+        .env("TMPDIR", &tmp)
         .args(args)
         .current_dir(dir)
         .env("APB_CONFIG_DIR", dir.join("cfg"))
@@ -190,7 +195,7 @@ fn profile_edit_handles_editor_with_arguments() {
 }
 
 #[test]
-fn profile_edit_preserves_hermetic_flag() {
+fn profile_edit_preserves_the_environment_opt_in() {
     let dir = tempfile::tempdir().unwrap();
     fs::create_dir_all(dir.path().join("cfg")).unwrap();
     fs::create_dir_all(dir.path().join("home")).unwrap();
@@ -202,21 +207,16 @@ fn profile_edit_preserves_hermetic_flag() {
         ],
     );
 
-    // The owner enables hermetic isolation directly in profile.yaml (there is
-    // no `--hermetic` CLI write flag). Editing an unrelated field (SOUL only)
-    // must NOT silently strip that flag - otherwise a later run loses the
-    // hermetic session and re-exposes the user-scope Stop hook (#70 item 2).
+    // The owner opts the profile into the full environment directly in
+    // profile.yaml. Editing an unrelated field (SOUL only) must NOT silently
+    // strip that opt-in.
     let yaml_path = dir.path().join(".apb/profiles/p1/profile.yaml");
     let base = fs::read_to_string(&yaml_path).unwrap();
     assert!(
-        base.contains("hermetic: false"),
-        "precondition: fresh profile serializes hermetic: false, got: {base}"
+        !base.contains("environment") && !base.contains("hermetic"),
+        "precondition: a fresh profile has the default environment, got: {base}"
     );
-    fs::write(
-        &yaml_path,
-        base.replace("hermetic: false", "hermetic: true"),
-    )
-    .unwrap();
+    fs::write(&yaml_path, format!("{base}environment: full\n")).unwrap();
 
     // $EDITOR touches only SOUL.md (second arg); profile.yaml is left as-is.
     let ok_editor = dir.path().join("editor_soul.sh");
@@ -224,14 +224,14 @@ fn profile_edit_preserves_hermetic_flag() {
     let out = apb_with_editor(dir.path(), &ok_editor, &["profile", "edit", "p1"]);
     assert!(
         out.status.success(),
-        "edit of a hermetic profile failed: {}",
+        "edit of a full-environment profile failed: {}",
         String::from_utf8_lossy(&out.stderr)
     );
 
     let written = fs::read_to_string(&yaml_path).unwrap();
     assert!(
-        written.contains("hermetic: true"),
-        "edit must preserve hermetic: true, got: {written}"
+        written.contains("environment: full"),
+        "edit must preserve environment: full, got: {written}"
     );
 }
 

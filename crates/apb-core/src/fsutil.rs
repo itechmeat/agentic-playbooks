@@ -2,6 +2,28 @@ use std::fs::{self, File};
 use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
+/// The path to re-exec this binary from (`__drive-run`, `__drive-supervised`,
+/// the `__ask-server` sidecar). Normally `current_exe`. A long-running
+/// process (`apb mcp` in an agent session, the dashboard) outlives a
+/// reinstall of `apb`, which replaces the file: Linux then reports the old
+/// executable as `<path> (deleted)`, which cannot be spawned. The binary now
+/// at the original path is the one to run, exactly what a fresh `apb` would
+/// be; it re-opens the run from disk like any driver.
+pub fn reexec_exe() -> io::Result<PathBuf> {
+    Ok(live_exe_path(std::env::current_exe()?))
+}
+
+fn live_exe_path(exe: PathBuf) -> PathBuf {
+    if exe.exists() {
+        return exe;
+    }
+    exe.to_str()
+        .and_then(|s| s.strip_suffix(" (deleted)"))
+        .map(PathBuf::from)
+        .filter(|p| p.exists())
+        .unwrap_or(exe)
+}
+
 /// Creates a symbolic link at `link` pointing at `target`.
 ///
 /// Symlinks are a unix-only capability in apb (skill bridges, materialized
@@ -23,12 +45,100 @@ pub fn symlink(target: &Path, link: &Path) -> io::Result<()> {
     }
 }
 
+/// Recursively copies the directory `src` into `dst` (created if missing). The
+/// one tree copy for definition content: a new playbook version's `scripts/`,
+/// the scripts a run starts with, a profile moved between scopes, a migrated
+/// playbook, a skill snapshot.
+///
+/// A symlink is recreated as the same symlink, never followed: following it
+/// would copy the content of whatever it points at, possibly a file outside
+/// the repository, into a directory that is committed or executed. A
+/// directory is copied recursively, a regular file byte for byte, and any
+/// other entry (a FIFO, a socket, a device) is refused with
+/// [`io::ErrorKind::InvalidInput`] rather than opened. Off unix a symlink
+/// fails with [`io::ErrorKind::Unsupported`] (see [`symlink`]).
+pub fn copy_tree(src: &Path, dst: &Path) -> io::Result<()> {
+    fs::create_dir_all(dst)?;
+    for entry in fs::read_dir(src)? {
+        let entry = entry?;
+        let from = entry.path();
+        let to = dst.join(entry.file_name());
+        // `DirEntry::file_type` does not follow symlinks.
+        let ft = entry.file_type()?;
+        if ft.is_symlink() {
+            symlink(&fs::read_link(&from)?, &to)?;
+        } else if ft.is_dir() {
+            copy_tree(&from, &to)?;
+        } else if ft.is_file() {
+            fs::copy(&from, &to)?;
+        } else {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "not a regular file, directory or symlink: {}",
+                    from.display()
+                ),
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Control files are always written this way: temp + fsync + atomic rename (spec 4.3).
 pub fn atomic_write(path: &Path, bytes: &[u8]) -> io::Result<()> {
     let dir = path
         .parent()
         .ok_or_else(|| io::Error::other("path has no parent"))?;
     fs::create_dir_all(dir)?;
+    write_into_existing_dir(dir, path, bytes)
+}
+
+/// [`atomic_write`] for state inside a directory that someone else owns and
+/// may delete at any time (a run directory, a workspace's `.apb`). The file is
+/// written only while `anchor` exists, and only the directories between
+/// `anchor` and the file are created; once `anchor` is gone this fails with
+/// `NotFound`. A late writer (a detached driver finishing a node after its
+/// workspace was removed) therefore never brings the deleted tree back, which
+/// the `create_dir_all` in [`atomic_write`] did.
+pub fn atomic_write_under(anchor: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
+    let dir = path
+        .parent()
+        .ok_or_else(|| io::Error::other("path has no parent"))?;
+    create_dir_under(anchor, dir)?;
+    write_into_existing_dir(dir, path, bytes)
+}
+
+/// Creates `dir` and the directories between `anchor` and it, never `anchor`
+/// itself or anything above it: `NotFound` when `anchor` is missing, an error
+/// when `dir` is not inside `anchor`. See [`atomic_write_under`].
+pub fn create_dir_under(anchor: &Path, dir: &Path) -> io::Result<()> {
+    if !anchor.is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::NotFound,
+            format!("`{}` no longer exists", anchor.display()),
+        ));
+    }
+    let rel = dir.strip_prefix(anchor).map_err(|_| {
+        io::Error::other(format!(
+            "`{}` is not inside `{}`",
+            dir.display(),
+            anchor.display()
+        ))
+    })?;
+    let mut cur = anchor.to_path_buf();
+    for part in rel.components() {
+        cur.push(part);
+        match fs::create_dir(&cur) {
+            Ok(()) => {}
+            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {}
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(())
+}
+
+/// Temp + fsync + rename inside `dir`, which must exist.
+fn write_into_existing_dir(dir: &Path, path: &Path, bytes: &[u8]) -> io::Result<()> {
     let tmp = dir.join(format!(
         ".tmp-{}-{}",
         std::process::id(),
@@ -84,8 +194,8 @@ pub fn atomic_write_private(path: &Path, bytes: &[u8]) -> io::Result<()> {
 /// owner token. The guard removes the file only if the token is still ours
 /// (after a force-steal of a stale lock, this protects against cascading
 /// removal of someone else's lock). A shared primitive for serializing
-/// read-modify-write over global state files (trust.json, suggestions.json).
-/// `projects.json` historically carries an equivalent implementation of its own.
+/// read-modify-write over global state files (trust.json, suggestions.json,
+/// projects.json).
 pub struct DirLock {
     path: PathBuf,
     token: String,

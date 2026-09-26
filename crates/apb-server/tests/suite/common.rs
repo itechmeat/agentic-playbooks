@@ -27,6 +27,42 @@ pub async fn env_lock() -> MutexGuard<'static, ()> {
     ENV_LOCK.lock().await
 }
 
+/// A private global config dir (`APB_CONFIG_DIR`) for one test, holding
+/// [`ENV_LOCK`] for its lifetime and restoring the previous value on drop.
+/// Any test whose request writes global state - a playbook save approves the
+/// saved digest in `trust.json` - must hold one, or the write lands in the
+/// developer's real `~/.config/apb`.
+pub struct ConfigSandbox {
+    _dir: tempfile::TempDir,
+    prev: Option<std::ffi::OsString>,
+    _lock: MutexGuard<'static, ()>,
+}
+
+pub async fn config_sandbox() -> ConfigSandbox {
+    let lock = env_lock().await;
+    let dir = tempfile::tempdir().unwrap();
+    let prev = std::env::var_os("APB_CONFIG_DIR");
+    // SAFETY: env mutation is serialized by ENV_LOCK, held until drop.
+    unsafe { std::env::set_var("APB_CONFIG_DIR", dir.path()) };
+    ConfigSandbox {
+        _dir: dir,
+        prev,
+        _lock: lock,
+    }
+}
+
+impl Drop for ConfigSandbox {
+    fn drop(&mut self) {
+        // SAFETY: still under ENV_LOCK (the guard drops after this body).
+        unsafe {
+            match &self.prev {
+                Some(v) => std::env::set_var("APB_CONFIG_DIR", v),
+                None => std::env::remove_var("APB_CONFIG_DIR"),
+            }
+        }
+    }
+}
+
 // --- Ephemeral one-shot HTTP server (mirrors apb-engine's tests/suite/common/mod.rs) ---
 
 use std::io::{BufRead, BufReader, Read as _, Write as _};

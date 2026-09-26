@@ -326,7 +326,7 @@ pub(crate) fn check_cycles(playbook: &Playbook, r: &mut ValidationReport) {
 
 /// V36 (error): an `Edge.join` value other than `all` or `any`. The engine
 /// parses the field leniently (anything that is not `any` means `all`, see
-/// `apb_engine::parallel::JoinMode::parse`), so without this rule a typo like
+/// `apb_core::schema::JoinMode::parse`), so without this rule a typo like
 /// `join: al` silently becomes a wait-for-all barrier. Parsing stays lenient on
 /// purpose: a stored run snapshot with a legacy value must keep loading, so the
 /// value space is guarded at validation time rather than at deserialization.
@@ -338,7 +338,7 @@ pub(crate) fn check_cycles(playbook: &Playbook, r: &mut ValidationReport) {
 pub(crate) fn check_joins(playbook: &Playbook, r: &mut ValidationReport) {
     for e in &playbook.edges {
         if let Some(join) = &e.join
-            && !matches!(join.as_str(), "all" | "any")
+            && crate::schema::JoinMode::parse(join).is_none()
         {
             r.error(
                 "V36",
@@ -355,7 +355,7 @@ pub(crate) fn check_joins(playbook: &Playbook, r: &mut ValidationReport) {
     let mut by_target: HashMap<&str, Vec<&str>> = HashMap::new();
     for e in &playbook.edges {
         if let Some(join) = e.join.as_deref()
-            && matches!(join, "all" | "any")
+            && crate::schema::JoinMode::parse(join).is_some()
         {
             by_target.entry(e.to.as_str()).or_default().push(join);
         }

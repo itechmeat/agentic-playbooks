@@ -185,12 +185,13 @@ fn seed_yaml(root: &Path, id: &str, yaml: &str) {
     common::seed_main(root);
 }
 
-/// The branch token this invocation's prompt carries (`$2` is the prompt: the
-/// adapter's argv is `-p <prompt> --model <model>`), as a shell prelude every
-/// fork stub below shares.
-const BRANCH_OF_PROMPT: &str = "case \"$2\" in\n\
-     *BRANCH_ALPHA*) n=alpha ;;\n\
-     *BRANCH_BETA*) n=beta ;;\n\
+/// The branch this invocation runs for, from the node id the engine hands
+/// every agent (`APB_NODE_ID`), as a shell prelude every fork stub below
+/// shares. Not from the prompt: a retry continues the killed attempt's
+/// session with a short continuation prompt that names no branch.
+const BRANCH_OF_PROMPT: &str = "case \"$APB_NODE_ID\" in\n\
+     alpha) n=alpha ;;\n\
+     beta) n=beta ;;\n\
      *) n=other ;;\n\
      esac\n";
 
