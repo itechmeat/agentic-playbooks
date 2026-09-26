@@ -465,6 +465,11 @@ pub(crate) fn prepare_run_target(
         crate::run_lineage::validate_continued_from(root, pred, id)?;
     }
     let mut log = EventLog::create(&run_dir)?;
+    // Every run path (CLI, MCP, dashboard, detached driver, child runs) comes
+    // through here, and nothing but the event log is in the run yet: make sure
+    // `.apb/.gitignore` covers the run directory before any node output or
+    // agent transcript lands in it. Best-effort.
+    apb_core::workspace::ensure_local_ignored(root);
     // The run snapshot = the effective playbook. Without overrides we write the raw yaml
     // (preserving formatting/comments); with overrides we serialize the
     // effective playbook, so the snapshot honestly reflects what actually ran.
