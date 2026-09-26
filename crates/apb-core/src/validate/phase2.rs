@@ -67,6 +67,17 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
         if source.kind.workdir_template() != node.kind.workdir_template() {
             cold.push("the two nodes run in different workdirs");
         }
+        // Two continuations of one session that may run at the same time
+        // would both write into it.
+        let racing = playbook.nodes.iter().any(|other| {
+            other.id != node.id
+                && matches!(&other.kind, NodeKind::AgentTask { continue_session: Some(s), .. } if s == source_id)
+                && !must.get(node.id.as_str()).is_some_and(|s| s.contains(other.id.as_str()))
+                && !must.get(other.id.as_str()).is_some_and(|s| s.contains(node.id.as_str()))
+        });
+        if racing {
+            cold.push("another node continues the same session and may run at the same time");
+        }
         if !cold.is_empty() {
             r.warn(
                 "V45",

@@ -192,3 +192,22 @@ fn preflight_warns_when_the_bound_agent_cannot_continue_a_session() {
         );
     }
 }
+
+/// Two nodes continuing one session on parallel branches would write into
+/// it at the same time.
+#[test]
+fn parallel_continuations_of_one_session_are_a_warning() {
+    let edges = "  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: a, to: c }\n  - { from: b, to: done }\n  - { from: c, to: done }\n";
+    let got = issues(
+        "  - { id: a, type: agent_task, prompt: x }\n  - { id: b, type: agent_task, prompt: y, continue_session: a }\n  - { id: c, type: agent_task, prompt: z, continue_session: a }\n",
+        edges,
+    );
+    assert!(has(&got, "V45", Severity::Warning), "{got:?}");
+    // In a chain the second continuation follows the first: no warning.
+    let chain = "  - { from: start, to: a }\n  - { from: a, to: b }\n  - { from: b, to: c }\n  - { from: c, to: done }\n";
+    let got = issues(
+        "  - { id: a, type: agent_task, prompt: x }\n  - { id: b, type: agent_task, prompt: y, continue_session: a }\n  - { id: c, type: agent_task, prompt: z, continue_session: a }\n",
+        chain,
+    );
+    assert!(!has(&got, "V45", Severity::Warning), "{got:?}");
+}
