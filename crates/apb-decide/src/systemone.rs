@@ -17,20 +17,15 @@
 //! Reply: `{"model", "answers": {id: {...}}, "usage": {"input_tokens",
 //! "output_tokens", "cost"?}}`.
 
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 
+use crate::http::Route;
 use crate::validate::{check_limits, validate_answers};
 use crate::{
     ApiKey, DecideError, DecisionProvider, DecisionRequest, DecisionResponse, Limits, Usage,
 };
-
-/// Most retries after the first attempt.
-const MAX_RETRIES: u32 = 2;
-
-/// How much of a 422 detail an error keeps.
-const DETAIL_CHARS: usize = 200;
 
 /// A `/v1/systemone` provider.
 #[derive(Debug, Clone)]
@@ -68,112 +63,85 @@ impl SystemOne {
         self
     }
 
-    /// The request body, serialized straight from the types (not through a
-    /// `serde_json::Value`, whose map would sort a choice's options).
-    fn body(&self, req: &DecisionRequest) -> Result<Vec<u8>, DecideError> {
-        #[derive(serde::Serialize)]
-        struct Body<'a> {
-            model: &'a str,
-            state: OrderedState<'a>,
-            questions: &'a std::collections::BTreeMap<String, crate::Question>,
+    fn route(&self) -> Route {
+        Route {
+            url: format!("{}/v1/systemone", self.base_url),
+            key: self.key.clone(),
+            invalid_statuses: &[422],
         }
-        serde_json::to_vec(&Body {
-            model: &self.model,
+    }
+}
+
+/// Parses a `/v1/systemone`-shaped reply (also OpenRouter's Decisions route
+/// and Cloudflare's `result`): every item validated against its question,
+/// `usage.cost` kept when the route reports one.
+pub(crate) fn parse_systemone_reply(
+    provider: &str,
+    configured_model: &str,
+    calibrated: bool,
+    req: &DecisionRequest,
+    reply: &Value,
+) -> Result<DecisionResponse, DecideError> {
+    let answers = reply
+        .get("answers")
+        .and_then(Value::as_object)
+        .ok_or_else(|| DecideError::Unavailable("reply has no answers".into()))?;
+    let (answers, ignored_items) = validate_answers(&req.questions, answers);
+    let usage = reply.get("usage");
+    let count = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64);
+    Ok(DecisionResponse {
+        provider: provider.to_string(),
+        model: reply
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or(configured_model)
+            .to_string(),
+        calibrated,
+        answers,
+        usage: Usage {
+            input_tokens: count("input_tokens"),
+            output_tokens: count("output_tokens"),
+            cost_usd: usage.and_then(|u| u.get("cost")).and_then(Value::as_f64),
+        },
+        latency_ms: 0,
+        cached: false,
+        ignored_items,
+    })
+}
+
+/// A reply body as JSON, or `Unavailable`.
+pub(crate) fn reply_json(text: &str) -> Result<Value, DecideError> {
+    serde_json::from_str(text).map_err(|_| DecideError::Unavailable("reply is not JSON".into()))
+}
+
+/// The `{"model", "state", "questions"}` body, serialized straight from the
+/// types (not through a `serde_json::Value`, whose map would sort a
+/// choice's options).
+pub(crate) fn systemone_body(model: &str, req: &DecisionRequest) -> Result<Vec<u8>, DecideError> {
+    serde_json::to_vec(&WireRequest::new(model, req))
+        .map_err(|_| DecideError::Invalid("request does not serialize".into()))
+}
+
+/// The canonical request object, for adapters that wrap it.
+#[derive(serde::Serialize)]
+pub(crate) struct WireRequest<'a> {
+    model: &'a str,
+    state: OrderedState<'a>,
+    questions: &'a std::collections::BTreeMap<String, crate::Question>,
+}
+
+impl<'a> WireRequest<'a> {
+    pub(crate) fn new(model: &'a str, req: &'a DecisionRequest) -> Self {
+        WireRequest {
+            model,
             state: OrderedState(&req.state, &req.state_order),
             questions: &req.questions,
-        })
-        .map_err(|_| DecideError::Invalid("request does not serialize".into()))
-    }
-
-    /// One HTTP exchange. `Ok` carries the status, the `retry-after` header
-    /// and the body text; `Err` is a transport failure.
-    fn send(
-        &self,
-        body: &[u8],
-        budget: Duration,
-    ) -> Result<(u16, Option<u64>, String), DecideError> {
-        let config = ureq::Agent::config_builder()
-            .max_redirects(0)
-            .timeout_global(Some(budget))
-            .http_status_as_error(false)
-            .build();
-        let agent = ureq::Agent::new_with_config(config);
-        let mut builder = ureq::http::Request::builder()
-            .method("POST")
-            .uri(format!("{}/v1/systemone", self.base_url))
-            .header("content-type", "application/json");
-        if let Some(key) = &self.key {
-            builder = builder.header("authorization", format!("Bearer {}", key.expose()));
         }
-        let request = builder
-            .body(body.to_vec())
-            .map_err(|_| DecideError::Unavailable("request could not be built".into()))?;
-        let response = agent.run(request).map_err(|e| match e {
-            ureq::Error::Timeout(_) => DecideError::Timeout,
-            // A transport failure never carries ureq's own text: it can name
-            // the URL, and nothing about the request belongs in an error.
-            ureq::Error::HostNotFound => DecideError::Unavailable("host not found".into()),
-            ureq::Error::ConnectionFailed => DecideError::Unavailable("connection failed".into()),
-            _ => DecideError::Unavailable("transport error".into()),
-        })?;
-        let status = response.status().as_u16();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok());
-        let text = response
-            .into_body()
-            .read_to_string()
-            .map_err(|_| DecideError::Unavailable("reply could not be read".into()))?;
-        Ok((status, retry_after, text))
-    }
-
-    fn scrub(&self, text: &str) -> String {
-        let cut: String = text.chars().take(DETAIL_CHARS).collect();
-        match &self.key {
-            Some(k) => k.scrub(&cut),
-            None => cut,
-        }
-    }
-
-    fn parse_reply(
-        &self,
-        req: &DecisionRequest,
-        text: &str,
-    ) -> Result<DecisionResponse, DecideError> {
-        let reply: Value = serde_json::from_str(text)
-            .map_err(|_| DecideError::Unavailable("reply is not JSON".into()))?;
-        let answers = reply
-            .get("answers")
-            .and_then(Value::as_object)
-            .ok_or_else(|| DecideError::Unavailable("reply has no answers".into()))?;
-        let (answers, ignored_items) = validate_answers(&req.questions, answers);
-        let usage = reply.get("usage");
-        let count = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64);
-        Ok(DecisionResponse {
-            provider: self.id.clone(),
-            model: reply
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or(&self.model)
-                .to_string(),
-            calibrated: true,
-            answers,
-            usage: Usage {
-                input_tokens: count("input_tokens"),
-                output_tokens: count("output_tokens"),
-                cost_usd: usage.and_then(|u| u.get("cost")).and_then(Value::as_f64),
-            },
-            latency_ms: 0,
-            cached: false,
-            ignored_items,
-        })
     }
 }
 
 /// A state serialized with the caller's key order at the top level.
-struct OrderedState<'a>(&'a Value, &'a [String]);
+pub(crate) struct OrderedState<'a>(pub(crate) &'a Value, pub(crate) &'a [String]);
 
 impl serde::Serialize for OrderedState<'_> {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
@@ -192,12 +160,6 @@ impl serde::Serialize for OrderedState<'_> {
     }
 }
 
-/// Whether a status is worth another try: request timeout, conflict, rate
-/// limit, server errors and the overload code.
-fn retryable(status: u16) -> bool {
-    matches!(status, 408 | 409 | 429 | 529) || (500..600).contains(&status)
-}
-
 impl DecisionProvider for SystemOne {
     fn id(&self) -> &str {
         &self.id
@@ -211,46 +173,17 @@ impl DecisionProvider for SystemOne {
         self.limits
     }
 
+    fn threshold_profile(&self) -> String {
+        format!("systemone:{}", self.model)
+    }
+
     fn decide(&self, req: &DecisionRequest) -> Result<DecisionResponse, DecideError> {
         check_limits(req, &self.limits)?;
-        let body = self.body(req)?;
-        let started = Instant::now();
-        let deadline = started + self.timeout;
-        let mut retries = 0;
-        loop {
-            let left = deadline.saturating_duration_since(Instant::now());
-            if left.is_zero() {
-                return Err(DecideError::Timeout);
-            }
-            // A transport failure is never retried: once the body may have
-            // reached the server, a second request could be billed twice.
-            let (status, retry_after, text) = self.send(&body, left)?;
-            match status {
-                200..=299 => {
-                    let mut response = self.parse_reply(req, &text)?;
-                    response.latency_ms = started.elapsed().as_millis() as u64;
-                    return Ok(response);
-                }
-                401 | 403 => return Err(DecideError::Auth),
-                402 => return Err(DecideError::Budget),
-                422 => return Err(DecideError::Invalid(self.scrub(&text))),
-                s if retryable(s) => {
-                    let wait = Duration::from_secs(retry_after.unwrap_or(0));
-                    let fits = Instant::now() + wait < deadline;
-                    if retries >= MAX_RETRIES || !fits {
-                        return Err(if s == 429 {
-                            DecideError::RateLimited {
-                                retry_after: retry_after.map(Duration::from_secs),
-                            }
-                        } else {
-                            DecideError::Unavailable(format!("http {s}"))
-                        });
-                    }
-                    retries += 1;
-                    std::thread::sleep(wait);
-                }
-                s => return Err(DecideError::Unavailable(format!("http {s}"))),
-            }
-        }
+        let body = systemone_body(&self.model, req)?;
+        let (text, took) = self.route().exchange(&body, self.timeout)?;
+        let mut response =
+            parse_systemone_reply(&self.id, &self.model, true, req, &reply_json(&text)?)?;
+        response.latency_ms = took.as_millis() as u64;
+        Ok(response)
     }
 }

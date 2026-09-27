@@ -9,7 +9,10 @@
 //!
 //! - [`DecisionProvider`] is the one trait; [`SystemOne`] speaks the
 //!   `/v1/systemone` wire format (route table in its module docs) and
-//!   [`FakeProvider`] answers from a script.
+//!   [`FakeProvider`] answers from a script. [`VercelEvaluate`] (Vercel AI
+//!   Gateway `/v1/evaluate`), [`OpenRouterDecisions`] (OpenRouter's alpha
+//!   Decisions API) and [`Cloudflare`] (Workers AI REST) map their route's
+//!   variant of the format onto the same types (issue #165 Part 15).
 //! - [`validate`] holds the client-side limit checks, the strict reply
 //!   validation and the confidence recompute every provider shares.
 //! - [`ProviderChain`] tries providers in order; [`DecisionCache`] is the
@@ -22,26 +25,33 @@
 
 mod cache;
 mod chain;
+mod cloudflare;
 pub mod digest;
 mod error;
 mod fake;
+mod http;
 mod key;
+mod openrouter_decisions;
 mod systemone;
 #[cfg(feature = "testing")]
 pub mod testing;
 mod types;
 pub mod validate;
+mod vercel_evaluate;
 
 pub use cache::DecisionCache;
 pub use chain::ProviderChain;
+pub use cloudflare::{CLOUDFLARE_BASE_URL, Cloudflare};
 pub use error::DecideError;
 pub use fake::FakeProvider;
 pub use key::ApiKey;
+pub use openrouter_decisions::{OpenRouterDecisions, is_model_alias};
 pub use systemone::SystemOne;
 pub use types::{
     Answer, ChoiceCriteria, DecisionRequest, DecisionResponse, Limits, NoulCriteria, Question,
     Usage, UseSite,
 };
+pub use vercel_evaluate::VercelEvaluate;
 
 /// A decision model behind one configured route. Implementations are
 /// blocking and shareable across threads (a run's parallel branches ask
@@ -52,5 +62,13 @@ pub trait DecisionProvider: Send + Sync + std::fmt::Debug {
     /// The configured model id (part of the cache key).
     fn model(&self) -> &str;
     fn limits(&self) -> Limits;
+    /// The threshold profile this provider's answers belong to: the wire
+    /// route and the model, `<kind>:<model>`. Thresholds tuned on one
+    /// profile do not transfer to another (another route can post-process,
+    /// fall back or answer with another model), so a threshold store keys on
+    /// it alongside the provider id. The default is `<id>:<model>`.
+    fn threshold_profile(&self) -> String {
+        format!("{}:{}", self.id(), self.model())
+    }
     fn decide(&self, req: &DecisionRequest) -> Result<DecisionResponse, DecideError>;
 }
