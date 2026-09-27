@@ -143,8 +143,8 @@ cost_usd?: number,
  */
 cost_attempts: number, 
 /**
- * At least one attempt's numbers are the CLI's own count rather than
- * the provider's (`source: estimated`).
+ * At least one attempt's numbers are apb's own estimate rather than a
+ * count the agent CLI printed (`source: estimated`).
  */
 estimated?: boolean, };
 

@@ -851,7 +851,7 @@ fn usage_line(u: &apb_engine::run_view::RunUsage) -> String {
         u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens, u.attempts
     );
     if u.estimated {
-        line.push_str(" (partly the agent's own count)");
+        line.push_str(" (partly estimated by apb)");
     }
     if let Some(cost) = u.cost_usd {
         line.push_str(&format!(", ${cost:.4} reported"));

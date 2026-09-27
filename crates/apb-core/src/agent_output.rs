@@ -29,11 +29,18 @@
 //!   the cache, `output` excludes reasoning.
 //! - zcode 0.16 `--json`: one object with `response` and `usage`
 //!   `{source, inputTokens, outputTokens, cacheReadTokens, cacheWriteTokens}`;
-//!   `inputTokens` include the cache reads. `source: provider` means the
-//!   provider reported the numbers; any other source is zcode's own count.
+//!   `inputTokens` include the cache reads. zcode also labels the numbers
+//!   with a `source` of its own (`provider` or its own count); apb does not
+//!   copy that label, since the count is still one the CLI printed.
 //!
-//! [`AgentUsage`] normalizes them: `input_tokens` never include cache reads
-//! or writes, `output_tokens` include reasoning.
+//! [`AgentUsage`] takes the numbers as the CLI reports them. The one
+//! adjustment is the cache reads a CLI is documented to count inside its
+//! input (codex, zcode), which are moved out of `input_tokens`; opencode's
+//! separate reasoning count is added to `output_tokens`. Nothing else is
+//! added or subtracted: whether codex's `cache_write_input_tokens` sit
+//! inside its `input_tokens`, or zcode's `reasoningTokens` inside its
+//! `outputTokens`, is not something apb can verify, so both are kept as
+//! printed. The numbers may therefore not be comparable across agents.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -43,9 +50,10 @@ use serde_json::Value;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UsageSource {
-    /// The agent CLI reported them from the provider's response.
+    /// The agent CLI printed them, whatever it says about their origin.
     Reported,
-    /// The agent CLI printed them as its own count, not the provider's.
+    /// apb estimated them itself. Reserved: nothing records it yet, and a
+    /// count the agent CLI printed is always [`UsageSource::Reported`].
     Estimated,
 }
 
@@ -286,11 +294,8 @@ fn zcode_usage(stdout: &str) -> Option<AgentUsage> {
         cache_read_tokens: cached,
         cache_write_tokens: u64_at(u, "cacheWriteTokens"),
         cost_usd: None,
-        // `provider`: the provider's numbers. zcode names any other origin;
-        // no source at all is zcode's report without a qualifier.
-        source: match str_at(u, "source") {
-            Some("provider") | None => UsageSource::Reported,
-            Some(_) => UsageSource::Estimated,
-        },
+        // Printed by the CLI, so reported, whatever zcode's own `source`
+        // label says (see the module docs).
+        source: UsageSource::Reported,
     })
 }

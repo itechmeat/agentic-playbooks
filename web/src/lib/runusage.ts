@@ -38,7 +38,7 @@ export function runUsageSummary(u: RunUsage): string {
         : `${formatCost(u.cost_usd)} reported`,
     )
   }
-  if (u.estimated) parts.push("partly the agent's own count")
+  if (u.estimated) parts.push('partly estimated by apb')
   return parts.join(' · ')
 }
 

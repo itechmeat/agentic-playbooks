@@ -62,8 +62,8 @@ pub struct RunUsage {
     pub cost_usd: Option<f64>,
     /// How many of `attempts` reported a cost, so a partial sum reads as one.
     pub cost_attempts: u32,
-    /// At least one attempt's numbers are the CLI's own count rather than
-    /// the provider's (`source: estimated`).
+    /// At least one attempt's numbers are apb's own estimate rather than a
+    /// count the agent CLI printed (`source: estimated`).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub estimated: bool,

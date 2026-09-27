@@ -39,7 +39,7 @@ describe('runUsageSummary', () => {
 
   it('says when only some attempts reported a cost or when counts are estimates', () => {
     expect(runUsageSummary({ ...total, cost_attempts: 1, estimated: true })).toBe(
-      "1.3k in · 820 out · 1.5M cache read · 3 attempts · $0.4312 reported by 1 of 3 · partly the agent's own count",
+      "1.3k in · 820 out · 1.5M cache read · 3 attempts · $0.4312 reported by 1 of 3 · partly estimated by apb",
     )
   })
 

@@ -104,11 +104,26 @@ fn zcode_json_usage_excludes_cache_reads_from_input() {
     assert_eq!(u.cache_read_tokens, 36224);
     assert_eq!(u.output_tokens, 318);
     assert_eq!(u.source, UsageSource::Reported);
-    let own_count = ZCODE.replace(r#""source": "provider""#, r#""source": "local""#);
-    assert_eq!(
-        usage("zcode", &own_count).unwrap().source,
-        UsageSource::Estimated
-    );
+}
+
+/// zcode's own `source` label does not make a count apb's estimate: every
+/// number the CLI printed is `reported`, so `estimated` stays free for counts
+/// apb itself works out.
+#[test]
+fn zcode_usage_is_reported_whatever_its_own_source_says() {
+    assert!(ZCODE.contains(r#""source": "provider""#));
+    for label in [r#""source": "local""#, r#""source": "estimate""#, ""] {
+        let out = ZCODE.replace(
+            r#""source": "provider","#,
+            &format!("{label}{}", if label.is_empty() { "" } else { "," }),
+        );
+        assert_ne!(out, ZCODE, "fixture edit for {label:?}");
+        assert_eq!(
+            usage("zcode", &out).unwrap().source,
+            UsageSource::Reported,
+            "{label:?}"
+        );
+    }
 }
 
 #[test]
@@ -146,4 +161,22 @@ fn a_finished_turn_without_a_message_is_an_empty_reply() {
         .collect::<Vec<_>>()
         .join("\n");
     assert_eq!(reply("opencode", &opencode).unwrap().text, "");
+}
+
+/// Counts whose overlap apb cannot verify are kept as the CLI printed them:
+/// codex's cache writes are not taken out of its input (only the cache reads
+/// it documents as inclusive are), and zcode's reasoning tokens are not added
+/// to its output.
+#[test]
+fn unverifiable_overlaps_are_kept_as_the_cli_reports_them() {
+    let codex = r#"{"type":"turn.completed","usage":{"input_tokens":1000,"cached_input_tokens":600,"cache_write_input_tokens":250,"output_tokens":80,"reasoning_output_tokens":30}}"#;
+    let u = usage("codex", codex).unwrap();
+    assert_eq!(u.input_tokens, 1000 - 600);
+    assert_eq!(u.cache_read_tokens, 600);
+    assert_eq!(u.cache_write_tokens, 250);
+    assert_eq!(u.output_tokens, 80);
+
+    let zcode = ZCODE.replace(r#""reasoningTokens": 0"#, r#""reasoningTokens": 40"#);
+    assert_ne!(zcode, ZCODE);
+    assert_eq!(usage("zcode", &zcode).unwrap().output_tokens, 318);
 }
