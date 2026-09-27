@@ -58,6 +58,11 @@ pub struct RunDetail {
     /// the run page renders its panels from this, never from `events`.
     pub progress: Option<apb_engine::progress::ProgressSummary>,
     pub answer: Option<String>,
+    /// Token usage the run's attempts reported; null when none did.
+    pub usage: Option<apb_engine::run_view::RunUsage>,
+    /// Events of a type this binary does not know (a newer apb wrote them),
+    /// left out of `events`; 0 for a journal read in full.
+    pub unknown_events: usize,
     #[cfg_attr(test, ts(type = "WfEvent[]"))]
     pub events: Vec<apb_engine::event::Event>,
 }
@@ -152,6 +157,7 @@ pub(crate) async fn get_run_handler(
 
     let children = view.children(&run_dir);
     let failure_reason = view.failure_reason();
+    let usage = view.usage();
     let nodes = view.nodes();
     Json(RunDetail {
         run_id: id,
@@ -169,6 +175,8 @@ pub(crate) async fn get_run_handler(
         layout,
         hooks,
         children,
+        usage,
+        unknown_events: view.unknown.len(),
         progress: view.progress,
         answer,
         events: view.events,

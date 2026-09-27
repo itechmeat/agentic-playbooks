@@ -173,8 +173,12 @@ enum Command {
         #[arg(long, value_name = "DIR")]
         worktree: Option<String>,
     },
-    /// List runs
-    Runs,
+    /// List runs, or show one run (its nodes and the token usage its agents
+    /// reported)
+    Runs {
+        /// Show only this run
+        run_id: Option<String>,
+    },
     /// Resume a paused/interrupted run
     Resume {
         run_id: String,
@@ -419,7 +423,7 @@ fn main() -> ExitCode {
             continued_from,
             worktree,
         ),
-        Some(Command::Runs) => runs_cmd(&root),
+        Some(Command::Runs { run_id }) => runs_cmd(&root, run_id.as_deref()),
         Some(Command::Resume {
             run_id,
             from_node,

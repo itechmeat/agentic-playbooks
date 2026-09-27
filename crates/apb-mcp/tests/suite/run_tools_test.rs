@@ -1127,3 +1127,73 @@ fn a_run_over_its_own_worktree_is_not_blocked_by_the_root_and_reports_it() {
         "the script ran in the tree"
     );
 }
+
+/// A journal with token usage and an event a newer apb wrote (issue #167):
+/// `run_status` and `run_report` read it, report the usage totals and name
+/// the skipped event; a run without either carries neither field.
+#[test]
+fn run_status_and_report_carry_usage_and_unknown_events_only_when_present() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let run = dir.path().join(".apb/runs/r-usage");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        [
+            r#"{"seq":0,"ts":1,"type":"run_started","playbook":"noagent","version":"1.0.0"}"#,
+            r#"{"seq":1,"ts":2,"type":"attempt_finished","node":"w","attempt":1,"status":"succeeded","duration_ms":5,"session":null,"summary":null,"usage":{"input_tokens":10,"output_tokens":4,"cache_read_tokens":0,"cache_write_tokens":0,"source":"estimated"}}"#,
+            r#"{"seq":2,"ts":3,"type":"decision_made","use":"completion_check"}"#,
+            r#"{"seq":3,"ts":4,"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"ok","artifacts":[]}"#,
+            r#"{"seq":4,"ts":5,"type":"run_finished","outcome":"succeeded"}"#,
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+
+    for out in [
+        run_status(dir.path(), "r-usage").unwrap(),
+        apb_mcp::tools::run_report(dir.path(), "r-usage").unwrap(),
+    ] {
+        assert_eq!(out["run_status"], "succeeded");
+        assert_eq!(
+            out["usage"],
+            serde_json::json!({
+                "attempts": 1,
+                "input_tokens": 10,
+                "output_tokens": 4,
+                "cache_read_tokens": 0,
+                "cache_write_tokens": 0,
+                "cost_attempts": 0,
+                "estimated": true,
+            })
+        );
+        assert_eq!(out["unknown_events"], 1);
+        assert_eq!(
+            out["unknown_events_note"],
+            "1 unknown event (newer apb?): skipped by this binary"
+        );
+    }
+
+    let mut params = BTreeMap::new();
+    params.insert("who".to_string(), "world".to_string());
+    let res = playbook_run(
+        dir.path(),
+        "noagent",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+        None,
+        None,
+    )
+    .unwrap();
+    let run_id = res["run_id"].as_str().unwrap().to_string();
+    let plain = run_status(dir.path(), &run_id).unwrap();
+    assert!(plain.get("usage").is_none());
+    assert!(plain.get("unknown_events").is_none());
+}

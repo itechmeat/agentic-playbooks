@@ -30,6 +30,12 @@ pub struct ResolvedInvocation {
 /// Built-in invocation form for the known ten. `None` for unknown agents and
 /// for pi (details will follow once the binary exists).
 ///
+/// claude, codex, opencode and zcode are asked for their machine output
+/// (`--output-format json`, `exec --json`, `run --format json`, `--json`):
+/// it carries the token usage and the session id of the attempt, and the
+/// adapter unwraps the reply from it (`apb_core::agent_output`), falling back
+/// to the raw stdout when the shape is absent.
+///
 /// The prompt is never parsed as an option. Where an agent takes it as a
 /// positional argument (claude, codex, opencode, cursor, qoder) the form ends
 /// with `--`, `{prompt}` and the adapter keeps that pair last. Verified
@@ -64,7 +70,15 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         // blocking `ask_user` MCP tool, Task 11); the aggregators that expose a
         // resumable session get `resume`; agy, which does not, gets `reprompt`.
         "claude" => Some(mk(
-            &["-p", "--model", "{model}", "--", "{prompt}"],
+            &[
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                "{model}",
+                "--",
+                "{prompt}",
+            ],
             SoulDelivery::Native,
             Some("--append-system-prompt"),
             &["--permission-mode", "bypassPermissions"],
@@ -85,7 +99,7 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         // prompts and runs without sandboxing, the one-shot equivalent of
         // claude's bypassPermissions.
         "codex" => Some(mk(
-            &["exec", "-m", "{model}", "--", "{prompt}"],
+            &["exec", "--json", "-m", "{model}", "--", "{prompt}"],
             SoulDelivery::Prefix,
             None,
             &["--dangerously-bypass-approvals-and-sandbox"],
@@ -94,7 +108,7 @@ pub fn builtin(agent_id: &str) -> Option<InvocationDef> {
         // Verified against the local `opencode run --help`: `--auto`
         // auto-approves permissions that are not explicitly denied.
         "opencode" => Some(mk(
-            &["run", "-m", "{model}", "--", "{prompt}"],
+            &["run", "--format", "json", "-m", "{model}", "--", "{prompt}"],
             SoulDelivery::Prefix,
             None,
             &["--auto"],
@@ -211,6 +225,8 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
             "--resume",
             "{session}",
             "-p",
+            "--output-format",
+            "json",
             "--model",
             "{model}",
             "--",
@@ -221,6 +237,7 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
             "exec",
             "resume",
             "{session}",
+            "--json",
             "-m",
             "{model}",
             "--",
@@ -231,6 +248,8 @@ pub fn resume_argv(agent_id: &str) -> Option<Vec<String>> {
             "run",
             "--session",
             "{session}",
+            "--format",
+            "json",
             "-m",
             "{model}",
             "--",
@@ -776,6 +795,76 @@ mod tests {
         assert_eq!(spec.soul_flag, None);
         assert_eq!(spec.transport, Transport::Headless);
         assert!(spec.autonomous_args.is_empty());
+    }
+
+    /// claude, codex and opencode are asked for their machine output, in the
+    /// launch form and the resume form alike: it carries the attempt's token
+    /// usage and session id (issue #167). Verified against claude 2.1.283,
+    /// `codex exec` / `codex exec resume` 0.157.0 and `opencode run` 1.18.32.
+    #[test]
+    fn builtin_forms_ask_for_machine_output() {
+        let argv = |a: &str| builtin(a).expect("builtin").argv;
+        assert_eq!(
+            argv("claude"),
+            vec![
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                "{model}",
+                "--",
+                "{prompt}"
+            ]
+        );
+        assert_eq!(
+            argv("codex"),
+            vec!["exec", "--json", "-m", "{model}", "--", "{prompt}"]
+        );
+        assert_eq!(
+            argv("opencode"),
+            vec!["run", "--format", "json", "-m", "{model}", "--", "{prompt}"]
+        );
+        assert_eq!(
+            resume_argv("claude").unwrap(),
+            vec![
+                "--resume",
+                "{session}",
+                "-p",
+                "--output-format",
+                "json",
+                "--model",
+                "{model}",
+                "--",
+                "{prompt}"
+            ]
+        );
+        assert_eq!(
+            resume_argv("codex").unwrap(),
+            vec![
+                "exec",
+                "resume",
+                "{session}",
+                "--json",
+                "-m",
+                "{model}",
+                "--",
+                "{prompt}"
+            ]
+        );
+        assert_eq!(
+            resume_argv("opencode").unwrap(),
+            vec![
+                "run",
+                "--session",
+                "{session}",
+                "--format",
+                "json",
+                "-m",
+                "{model}",
+                "--",
+                "{prompt}"
+            ]
+        );
     }
 
     /// Verified against the local `opencode run --help`: `--auto` auto-approves

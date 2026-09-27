@@ -110,7 +110,7 @@ apb list            playbooks and versions
 apb validate        validate playbooks, profile models, requires and connectors
 apb run <id>        run a playbook (--overrides, --supervise, --detach, params)
 apb wait <run>      block until a run finishes, needs input or stops (exit code = verdict)
-apb runs            list runs
+apb runs [run]      list runs, or one run with the tokens its agents reported
 apb resume <run>    resume a paused or interrupted run
 apb stop <run>      stop a run: interrupt the running node, finalize if the driver is gone
 apb note <run> <t>  post a note (context append) to a run's control channel

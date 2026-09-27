@@ -60,6 +60,8 @@ mod run_cli_test;
 mod run_doctor_cli_test;
 #[path = "suite/run_wait_cli_test.rs"]
 mod run_wait_cli_test;
+#[path = "suite/runs_detail_cli_test.rs"]
+mod runs_detail_cli_test;
 #[path = "suite/server_key_cli_test.rs"]
 mod server_key_cli_test;
 #[cfg(unix)]

@@ -1,0 +1,6 @@
+{"type":"thread.started","thread_id":"01a0e454-ef08-7a33-99f4-48719b962fe3"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"reasoning","text":"Reading the file."}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"cat f.txt","aggregated_output":"hello\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"hello\n\n```yaml\nstatus: success\nsummary: read the file\n```"}}
+{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"output_tokens":122,"reasoning_output_tokens":64}}

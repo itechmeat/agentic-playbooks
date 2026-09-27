@@ -32,7 +32,9 @@ code-ranker, see below).
   (`models_table.rs` + `assets/models.yaml`), graph SCC and reachability helpers
   shared by the validator and the engine (`graphutil.rs`), content/bundle digests
   (`content.rs`), trust store (`trust.rs`), atomic state IO, symlinks and dir
-  locks (`fsutil.rs`), the single wall-clock source (`clock.rs`).
+  locks (`fsutil.rs`), the single wall-clock source (`clock.rs`), the readers of
+  each agent CLI's machine output: reply and reported token usage
+  (`agent_output.rs`).
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan, `supervisor` heartbeat and wake park, `node` execution,
@@ -164,6 +166,11 @@ published release body via a post-announce job.
   No CJK anywhere in code or prose. Machine-facing fields are English;
   user-facing chat messages are written in the user's chat language.
 - New `EventPayload` fields are added only with `#[serde(default)]`.
+- A new `EventPayload` variant must be safe to skip up to the next checkpoint
+  (`EventPayload::is_checkpoint`): an older binary skips an event type it does
+  not know and counts it, and the engine continues a run only when a
+  checkpoint follows every such event (`event::read_all`). Never replace a
+  known event with a new type; add alongside it.
 - State files are written atomically (temp + rename, 0600 on unix) via
   `apb_core::fsutil`.
 - Secret values (auth files) are never returned, logged, or cached; skill

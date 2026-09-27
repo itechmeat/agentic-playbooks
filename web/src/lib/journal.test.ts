@@ -69,6 +69,8 @@ describe('runEventJournal notes', () => {
       { seq: 5, ts: 5, type: 'node_started', node: 'a' },
       { seq: 6, ts: 6, type: 'worktree_resolved', path: '/src/wt', source: 'node', node: 'a' },
       { seq: 7, ts: 7, type: 'worktree_resolved', path: '/src/wt', source: 'caller' },
+      { seq: 8, ts: 8, type: 'attempt_finished', node: 'a', usage: { input_tokens: 10, output_tokens: 2, source: 'reported' } },
+      { seq: 9, ts: 9, type: 'attempt_finished', node: 'a' },
     ] as never)
     expect(entries.map((e) => e.note)).toEqual([
       'warm: continues the session of a',
@@ -78,6 +80,8 @@ describe('runEventJournal notes', () => {
       undefined,
       'working tree: /src/wt (published by a)',
       'working tree: /src/wt (from caller)',
+      'tokens: 10 in, 2 out',
+      undefined,
     ])
   })
 })

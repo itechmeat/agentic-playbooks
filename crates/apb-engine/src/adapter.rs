@@ -361,16 +361,17 @@ fn apply_zcode_env(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorClas
     Ok(())
 }
 
-/// The reply text of an attempt's stdout. zcode's `--json` wraps the reply in
-/// a JSON object (`response`); every other agent prints the reply itself.
-/// Falls back to the raw stdout when the expected shape is absent.
-fn reply_text(agent: &str, stdout: &str) -> String {
-    if agent == apb_core::zcode::AGENT_ID
-        && let Some(r) = apb_core::zcode::response_text(stdout)
-    {
-        return r.trim().to_string();
+/// The reply of an attempt's stdout and whether the CLI itself marked the
+/// attempt failed. The built-in forms ask claude, codex, opencode and zcode
+/// for their machine output, which wraps the reply (see
+/// `apb_core::agent_output`); every other agent, and any output without the
+/// expected shape (a custom invocation form, an older CLI), is the reply
+/// itself.
+fn reply_text(agent: &str, stdout: &str) -> (String, bool) {
+    match apb_core::agent_output::reply(agent, stdout) {
+        Some(r) => (r.text.trim().to_string(), r.is_error),
+        None => (stdout.to_string(), false),
     }
-    stdout.to_string()
 }
 
 pub struct AgentTask<'a> {
@@ -768,6 +769,10 @@ pub struct AgentReport {
     /// into `AttemptFinished.session` and reads it back to re-enter the agent's
     /// session on the answer round.
     pub session: Option<String>,
+    /// Token usage this attempt's output reports (see
+    /// `apb_core::agent_output::usage`); `None` when the output reports none.
+    /// The drive loop writes it into `AttemptFinished.usage`.
+    pub usage: Option<apb_core::agent_output::AgentUsage>,
 }
 
 /// Captures an agent session id from a finished attempt's raw output, for the
@@ -775,20 +780,38 @@ pub struct AgentReport {
 /// returns `None` when the output carries no session id, which forces the
 /// runtime downgrade from `resume` to `reprompt`.
 ///
-/// Reality per agent under the CURRENT one-shot invocation forms: only claude's
-/// stream-json output (`--output-format stream-json`, the `acp` transport)
-/// emits a `session_id` field, so claude is the one agent that yields a session
-/// id today; codex/opencode/hermes/grok/cursor one-shot output is plain
-/// final-answer text
-/// with no session id, so they yield `None` here and rely on the downgrade
-/// path. The per-agent field lists below are wired so that when those agents'
-/// resumable one-shot output lands, only the field name changes here (spec
-/// Transport: resume). No parser is invented for an output shape we do not
-/// produce today: a plain-text line simply never matches.
+/// Reality per agent under the built-in invocation forms: claude's JSON
+/// result (`--output-format json` headless, `stream-json` on the `acp`
+/// transport) carries `session_id`, codex's `exec --json` opens with a
+/// `thread.started` event carrying `thread_id`, and every opencode
+/// `--format json` event carries `sessionID`; hermes/grok/cursor one-shot
+/// output is plain final-answer text with no session id, so they yield
+/// `None` here and rely on the downgrade path. The per-agent field lists
+/// below are wired so that when those agents' resumable one-shot output
+/// lands, only the field name changes here (spec Transport: resume). No
+/// parser is invented for an output shape we do not produce today: a
+/// plain-text line simply never matches.
 pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
+    capture_session_any(agent_id, raw).filter(|id| is_plausible_session_id(id))
+}
+
+/// A session id goes back to the agent as one argv element of its resume
+/// form (`{session}`), in front of the `--` that ends its options. It comes
+/// from the agent's output, so only an id that cannot read as an option or
+/// carry anything but an identifier is taken: ASCII letters, digits, `-`,
+/// `_`, `.` and `:`, not starting with `-`, at most 128 characters.
+fn is_plausible_session_id(id: &str) -> bool {
+    id.len() <= 128
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+}
+
+fn capture_session_any(agent_id: &str, raw: &str) -> Option<String> {
     match canonical_agent_id(agent_id) {
         "claude" => capture_json_string_field(raw, &["session_id"]),
-        "codex" => capture_json_string_field(raw, &["session_id", "conversation_id"]),
+        "codex" => capture_json_string_field(raw, &["thread_id", "session_id", "conversation_id"]),
         "opencode" => capture_json_string_field(raw, &["session_id", "sessionID"]),
         "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
         "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
@@ -1012,6 +1035,19 @@ fn build_command(
         PromptVia::Argv => None,
     };
     AgentCommand { argv, tail, stdin }
+}
+
+/// Removes every `flag <value>` pair from `argv`.
+fn drop_option(argv: &mut Vec<String>, flag: &str) {
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == flag {
+            let end = (i + 2).min(argv.len());
+            argv.drain(i..end);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Appends the live `--mcp-config` sidecar injection to `argv` when this is a
@@ -1474,7 +1510,7 @@ impl ClaudeAdapter {
         // output is the reply body with that block stripped, and raw is the full
         // stdout for debugging/streaming. The reply is stdout itself except for
         // an agent that wraps it in JSON (zcode's `--json`).
-        let reply = reply_text(task.agent, &stdout);
+        let (reply, cli_failed) = reply_text(task.agent, &stdout);
         let report = interpret_report(&reply);
         // Node-output contract (Finding 2 of issue #56): when the node set
         // `outputs.extract`, the output is the LAST `<tag>...</tag>` block in
@@ -1495,13 +1531,22 @@ impl ClaudeAdapter {
         // `None`; the stream path below is where claude surfaces one.
         let session = capture_session(task.agent, &stdout)
             .or_else(|| capture_session_header(task.agent, &stderr));
+        let usage = apb_core::agent_output::usage(task.agent, &stdout);
+        // The CLI's own failure flag wins over the report block, as on the
+        // stream transport.
+        let status = if cli_failed {
+            NodeStatus::Failed
+        } else {
+            report.status
+        };
         Ok(AgentReport {
-            status: report.status,
+            status,
             output,
             summary: report.summary,
             raw: stdout,
             question,
             session,
+            usage,
         })
     }
 
@@ -1542,6 +1587,10 @@ impl ClaudeAdapter {
         );
         inject_ask_server(&mut built.argv, task, live);
         inject_hermetic_settings(&mut built.argv, task);
+        // The headless form already names an output format (`json`); the
+        // stream replaces it rather than relying on the CLI to keep the last
+        // of two.
+        drop_option(&mut built.argv, "--output-format");
         built.argv.push("--output-format".to_string());
         built.argv.push("stream-json".to_string());
         built.argv.push("--verbose".to_string());
@@ -1883,6 +1932,7 @@ fn parse_stream_result(
         // 7): claude's stream-json events carry a `session_id`, so the parser
         // scans `raw` (every event line), not just the terminal result text.
         let session = capture_session(task.agent, &raw);
+        let usage = apb_core::agent_output::usage(task.agent, &raw);
         return Ok(AgentReport {
             status,
             output,
@@ -1890,6 +1940,7 @@ fn parse_stream_result(
             raw,
             question,
             session,
+            usage,
         });
     }
     Err((

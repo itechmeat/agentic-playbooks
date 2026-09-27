@@ -745,7 +745,10 @@ pub(crate) fn drive_run_child(
     }
 }
 
-pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
+pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>) -> ExitCode {
+    if let Some(run_id) = run_id {
+        return run_detail_cmd(root, run_id);
+    }
     match list_runs(root) {
         Ok(runs) if runs.is_empty() => {
             println!("no runs yet");
@@ -754,14 +757,18 @@ pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
         Ok(runs) => {
             for r in runs {
                 // The status column stays exactly as it always has (a script
-                // parsing it must keep working); a dead driver is called out
-                // as an appended marker rather than a rewrite of that text
-                // (#85 finding 4).
+                // parsing it must keep working); a dead driver and events a
+                // newer apb wrote are called out as appended markers rather
+                // than a rewrite of that text (#85 finding 4).
+                let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
                 if r.driver_dead {
-                    println!("{}\t{}\t{}\tdriver dead", r.run_id, r.playbook, r.status);
-                } else {
-                    println!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+                    line.push_str("\tdriver dead");
                 }
+                if r.unknown_events > 0 {
+                    line.push('\t');
+                    line.push_str(&unknown_events_note(r.unknown_events));
+                }
+                println!("{line}");
                 print_waiting_on_question(r.progress.as_ref());
             }
             ExitCode::SUCCESS
@@ -771,6 +778,88 @@ pub(crate) fn runs_cmd(root: &Path) -> ExitCode {
             ExitCode::from(2)
         }
     }
+}
+
+/// The note for events a newer apb wrote that this binary skipped.
+fn unknown_events_note(n: usize) -> String {
+    let events = if n == 1 { "event" } else { "events" };
+    format!("{n} unknown {events} (newer apb?)")
+}
+
+/// `apb runs <run_id>`: one run through the same run view as `run_status`,
+/// with the token usage its attempts reported when there is any.
+fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
+    if !is_safe_segment(run_id) {
+        eprintln!("runs: invalid run id `{run_id}`");
+        return ExitCode::from(2);
+    }
+    let run_dir = root.join(".apb/runs").join(run_id);
+    if !run_dir.is_dir() {
+        eprintln!("runs: run `{run_id}` not found");
+        return ExitCode::from(2);
+    }
+    let view = match apb_engine::run_view::RunView::load(&run_dir, run_id) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("runs failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let playbook = view
+        .events
+        .iter()
+        .find_map(|e| match &e.payload {
+            apb_engine::event::EventPayload::RunStarted {
+                playbook, version, ..
+            } => Some(format!("{playbook} {version}")),
+            _ => None,
+        })
+        .unwrap_or_default();
+    println!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
+    if view.driver_alive == Some(false) {
+        println!("  driver dead");
+    }
+    for (node, status) in view.nodes() {
+        println!("  {node}\t{status}");
+    }
+    if let Some(reason) = view.failure_reason() {
+        println!(
+            "  failure: {}",
+            sanitize_for_terminal(&reason, QUESTION_TEXT_MAX)
+        );
+    }
+    if let Some(u) = view.usage() {
+        println!("  usage: {}", usage_line(&u));
+    }
+    if !view.unknown.is_empty() {
+        println!("  {}", unknown_events_note(view.unknown.len()));
+    }
+    print_waiting_on_question(view.progress.as_ref());
+    ExitCode::SUCCESS
+}
+
+/// One line of token totals: `1200 input, 300 output, 5000 cache read, 0
+/// cache write tokens over 2 attempts, $0.0123 reported`.
+fn usage_line(u: &apb_engine::run_view::RunUsage) -> String {
+    let attempts = if u.attempts == 1 {
+        "attempt"
+    } else {
+        "attempts"
+    };
+    let mut line = format!(
+        "{} input, {} output, {} cache read, {} cache write tokens over {} {attempts}",
+        u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens, u.attempts
+    );
+    if u.estimated {
+        line.push_str(" (partly the agent's own count)");
+    }
+    if let Some(cost) = u.cost_usd {
+        line.push_str(&format!(", ${cost:.4} reported"));
+        if u.cost_attempts < u.attempts {
+            line.push_str(&format!(" by {} of them", u.cost_attempts));
+        }
+    }
+    line
 }
 
 /// Prints a waiting-on-question marker line (node id and question text,

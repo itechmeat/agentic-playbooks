@@ -128,6 +128,43 @@ export type ChildRun = { node_id: string, run_id: string,
  */
 status: string, };
 
+export type RunUsage = { 
+/**
+ * Attempts whose output reported usage. Attempts that reported none
+ * (plain-text agents, attempts that died) are not in the totals.
+ */
+attempts: number, input_tokens: number, output_tokens: number, cache_read_tokens: number, cache_write_tokens: number, 
+/**
+ * The sum of the costs the agent CLIs reported, absent when none did.
+ */
+cost_usd?: number, 
+/**
+ * How many of `attempts` reported a cost, so a partial sum reads as one.
+ */
+cost_attempts: number, 
+/**
+ * At least one attempt's numbers are the CLI's own count rather than
+ * the provider's (`source: estimated`).
+ */
+estimated?: boolean, };
+
+export type UsageSource = "reported" | "estimated";
+
+export type AgentUsage = { 
+/**
+ * Input tokens neither read from nor written to the prompt cache.
+ */
+input_tokens: number, 
+/**
+ * Output tokens, reasoning included.
+ */
+output_tokens: number, cache_read_tokens: number, cache_write_tokens: number, 
+/**
+ * The attempt's cost in US dollars, only when the CLI printed a
+ * non-zero one (a subscription plan prints `0`, which is not a price).
+ */
+cost_usd?: number, source: UsageSource, };
+
 export type RunSummary = { run_id: string, playbook: string, status: string, started_ts: number, progress?: ProgressSummary, parent_run?: string | null, continued_from?: string | null, superseded_by?: string | null, 
 /**
  * The run has a drive claim and that claim's process is provably gone: the
@@ -137,7 +174,13 @@ export type RunSummary = { run_id: string, playbook: string, status: string, sta
  * while; a listing could not, so a killed driver looked healthy in a table.
  * `false` also covers "no drive claim at all", which is not a problem.
  */
-driver_dead?: boolean, };
+driver_dead?: boolean, 
+/**
+ * Events of a type this binary does not know, skipped when the journal
+ * was read: a newer apb wrote them. Zero (and absent) for a journal this
+ * binary reads in full.
+ */
+unknown_events?: number, };
 
 export type RunListEntry = { 
 /**
@@ -152,7 +195,13 @@ workspace_id: string, project: string, run_id: string, playbook: string, status:
  * while; a listing could not, so a killed driver looked healthy in a table.
  * `false` also covers "no drive claim at all", which is not a problem.
  */
-driver_dead?: boolean, };
+driver_dead?: boolean, 
+/**
+ * Events of a type this binary does not know, skipped when the journal
+ * was read: a newer apb wrote them. Zero (and absent) for a journal this
+ * binary reads in full.
+ */
+unknown_events?: number, };
 
 export type RunDetail = { run_id: string, playbook: string, version: string, run_status: RunStatus, 
 /**
@@ -184,7 +233,16 @@ children: Array<ChildRun>,
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.
  */
-progress: ProgressSummary | null, answer: string | null, events: WfEvent[], };
+progress: ProgressSummary | null, answer: string | null, 
+/**
+ * Token usage the run's attempts reported; null when none did.
+ */
+usage: RunUsage | null, 
+/**
+ * Events of a type this binary does not know (a newer apb wrote them),
+ * left out of `events`; 0 for a journal read in full.
+ */
+unknown_events: number, events: WfEvent[], };
 
 export type TrashEntry = { 
 /**

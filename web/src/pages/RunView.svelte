@@ -6,6 +6,7 @@
   import { interventionJournal, runEventJournal } from '../lib/journal'
   import { cachedNodeIds } from '../lib/runcache'
   import { runGates } from '../lib/rungates'
+  import { runUsageSummary, unknownEventsNote } from '../lib/runusage'
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
@@ -42,6 +43,8 @@
   const supervisor = $derived(gates?.supervisor ?? null)
   const hookEntries = $derived(Object.entries(detail?.hooks ?? {}))
   const children = $derived(detail?.children ?? [])
+  const usageLine = $derived(detail?.usage ? runUsageSummary(detail.usage) : null)
+  const unknownNote = $derived(unknownEventsNote(detail?.unknown_events))
 
   async function decide(node: string, decision: string) {
     deciding = `${node}:${decision}`
@@ -126,6 +129,24 @@
   <div class="flex items-center gap-2 border-b border-border px-4 py-1.5 text-xs">
     <span class="font-semibold text-muted-foreground">Working tree</span>
     <span class="truncate font-mono" title={detail.worktree}>{detail.worktree}</span>
+  </div>
+{/if}
+
+<!-- Token usage the run's agent attempts reported (issue #167); absent when
+     no attempt's CLI reported any. -->
+{#if usageLine}
+  <div class="flex items-center gap-2 border-b border-border px-4 py-1.5 text-xs" data-testid="run-usage">
+    <span class="font-semibold text-muted-foreground">Tokens</span>
+    <span class="truncate font-mono" title={usageLine}>{usageLine}</span>
+  </div>
+{/if}
+
+<!-- Events a newer apb wrote that this binary skipped: the run still reads,
+     but the journal views below leave those events out. -->
+{#if unknownNote}
+  <div class="flex items-center gap-1.5 border-b border-border px-4 py-1.5 text-xs text-muted-foreground" data-testid="run-unknown-events">
+    <TriangleAlert class="size-3.5" />
+    <span title="This journal has events of a type this apb does not know; upgrade apb to see them.">{unknownNote}</span>
   </div>
 {/if}
 

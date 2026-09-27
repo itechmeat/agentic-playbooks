@@ -344,3 +344,59 @@ fn acp_cancel_stops_streaming_agent() {
         "cancel did not stop the agent promptly"
     );
 }
+
+/// The stream transport replaces the headless form's `--output-format json`
+/// instead of passing two formats, and reads the usage of the final `result`
+/// line (issue #167).
+#[test]
+fn acp_passes_one_output_format_and_reads_the_result_usage() {
+    let dir = tempfile::tempdir().unwrap();
+    let argv_file = dir.path().join("argv.txt");
+    let body = format!(
+        "printf '%s\\n' \"$@\" > '{}'\n\
+         echo '{{\"type\":\"result\",\"subtype\":\"success\",\"is_error\":false,\"result\":\"done ok\",\"usage\":{{\"input_tokens\":7,\"output_tokens\":3,\"cache_read_input_tokens\":11,\"cache_creation_input_tokens\":0}}}}'",
+        argv_file.display()
+    );
+    let ad = acp(stub(dir.path(), &body));
+    let report = ad
+        .run(&AgentTask {
+            prompt: "go",
+            model: "haiku",
+            workdir: dir.path(),
+            timeout: None,
+            stream_log: None,
+            soul: None,
+            grant_autonomy: false,
+            connector_policy: &Default::default(),
+            interactive: false,
+            report_contract: true,
+            node: "test",
+            agent: "claude",
+            extract: None,
+            status_file: None,
+            hermetic_settings: None,
+            transcript_dir: None,
+        })
+        .unwrap();
+
+    let argv: Vec<String> = fs::read_to_string(&argv_file)
+        .unwrap()
+        .lines()
+        .map(String::from)
+        .collect();
+    let formats: Vec<&str> = argv
+        .windows(2)
+        .filter(|w| w[0] == "--output-format")
+        .map(|w| w[1].as_str())
+        .collect();
+    assert_eq!(formats, vec!["stream-json"], "{argv:?}");
+    let usage = report.usage.expect("the result line reports usage");
+    assert_eq!(
+        (
+            usage.input_tokens,
+            usage.output_tokens,
+            usage.cache_read_tokens
+        ),
+        (7, 3, 11)
+    );
+}

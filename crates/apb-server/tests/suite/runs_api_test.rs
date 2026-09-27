@@ -1177,3 +1177,44 @@ async fn post_playbook_run_refuses_a_draft_playbook() {
         "a refused start writes no run"
     );
 }
+
+/// A journal with an event a newer apb wrote and an attempt that reported
+/// its tokens (issue #167): the detail answers 200, counts the skipped event
+/// and totals the usage; the listing flags the run.
+#[tokio::test]
+async fn run_detail_reads_a_journal_with_a_future_event_and_totals_usage() {
+    let dir = seed_with_run();
+    let run = dir.path().join(".apb/runs/future-1");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        [
+            r#"{"seq":0,"ts":1,"type":"run_started","playbook":"noagent","version":"1.0.0"}"#,
+            r#"{"seq":1,"ts":2,"type":"attempt_finished","node":"note","attempt":1,"status":"succeeded","duration_ms":5,"session":null,"summary":null,"usage":{"input_tokens":10,"output_tokens":4,"cache_read_tokens":90,"cache_write_tokens":0,"cost_usd":0.002,"source":"reported"}}"#,
+            r#"{"seq":2,"ts":3,"type":"decision_made","use":"completion_check"}"#,
+            r#"{"seq":3,"ts":4,"type":"node_finished","node":"note","status":"succeeded","attempt":1,"output":"ok","artifacts":[]}"#,
+            r#"{"seq":4,"ts":5,"type":"run_finished","outcome":"succeeded"}"#,
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+    let (status, json) = get_json(app.clone(), "/api/runs/future-1").await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    assert_eq!(json["run_status"], "succeeded");
+    assert_eq!(json["unknown_events"], 1);
+    assert_eq!(json["events"].as_array().unwrap().len(), 4);
+    assert_eq!(json["usage"]["attempts"], 1);
+    assert_eq!(json["usage"]["cache_read_tokens"], 90);
+    assert_eq!(json["usage"]["cost_usd"], 0.002);
+
+    let (_, list) = get_json(app, "/api/runs").await;
+    let row = list
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|r| r["run_id"] == "future-1")
+        .expect("the run is listed");
+    assert_eq!(row["unknown_events"], 1);
+}

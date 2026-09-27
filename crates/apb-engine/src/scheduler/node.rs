@@ -362,6 +362,7 @@ pub(super) fn journal_interrupted_attempt(
         rejected_output: None,
         partial_output: (!partial.trim().is_empty()).then(|| partial.to_string()),
         failure_kind: failure_kind.map(|k| k.as_str().to_string()),
+        usage: None,
     })
 }
 
@@ -1418,6 +1419,7 @@ pub(crate) fn execute_node(
                             rejected_output: None,
                             partial_output: None,
                             failure_kind: None,
+                            usage: None,
                         })?;
                         return Ok(AttemptOutcome::Finished {
                             status: NodeStatus::Failed,
@@ -1553,6 +1555,7 @@ pub(crate) fn execute_node(
                                     rejected_output: None,
                                     partial_output: None,
                                     failure_kind: None,
+                                    usage: report.usage.clone(),
                                 })?;
                                 return Ok(AttemptOutcome::Suspended {
                                     question: q.question,
@@ -1650,6 +1653,7 @@ pub(crate) fn execute_node(
                                             rejected_output: Some(report.output.clone()),
                                             partial_output: None,
                                             failure_kind: None,
+                                            usage: report.usage.clone(),
                                         })?;
                                         // Keep the human-readable reason on the
                                         // terminal failure message while the raw
@@ -1674,6 +1678,7 @@ pub(crate) fn execute_node(
                                             rejected_output: None,
                                             partial_output: None,
                                             failure_kind: None,
+                                            usage: report.usage.clone(),
                                         })?;
                                         return Ok(AttemptOutcome::Finished {
                                             status: NodeStatus::Succeeded,
@@ -1698,6 +1703,7 @@ pub(crate) fn execute_node(
                                     rejected_output: None,
                                     partial_output: None,
                                     failure_kind: None,
+                                    usage: report.usage.clone(),
                                 })?;
                                 last_msg = report.output;
                                 last_timed_out = false;
@@ -1776,6 +1782,7 @@ pub(crate) fn execute_node(
                                         // decision, not an infrastructure
                                         // failure: nothing is classified.
                                         failure_kind: None,
+                                        usage: None,
                                     })?;
                                     last_msg = msg;
                                 }
@@ -1820,6 +1827,7 @@ pub(crate) fn execute_node(
                                                 rejected_output: None,
                                                 partial_output: None,
                                                 failure_kind: None,
+                                                usage: None,
                                             })?;
                                             return Ok(AttemptOutcome::Finished {
                                                 status: NodeStatus::Succeeded,
@@ -1838,6 +1846,7 @@ pub(crate) fn execute_node(
                                                 rejected_output: Some(output.clone()),
                                                 partial_output: None,
                                                 failure_kind: None,
+                                                usage: None,
                                             })?;
                                             last_msg = format!("{reason}: {output}");
                                             last_timed_out = false;
@@ -1859,6 +1868,7 @@ pub(crate) fn execute_node(
                                         rejected_output: None,
                                         partial_output: None,
                                         failure_kind: None,
+                                        usage: None,
                                     })?;
                                     last_msg = sfr.outputs.clone().unwrap_or_else(|| msg.clone());
                                 }
@@ -1903,6 +1913,7 @@ pub(crate) fn execute_node(
                                             partial_output: None,
                                             failure_kind: failure_kind
                                                 .map(|k| k.as_str().to_string()),
+                                            usage: None,
                                         })?;
                                     }
                                     last_msg = msg;
@@ -2344,6 +2355,7 @@ pub(crate) fn execute_finish_answer(
                         rejected_output: None,
                         partial_output: None,
                         failure_kind: None,
+                        usage: report.usage.clone(),
                     })?;
                     if report.status == NodeStatus::Succeeded {
                         // The composed finish answer is the agent's reply body,
@@ -2370,6 +2382,7 @@ pub(crate) fn execute_finish_answer(
                         rejected_output: None,
                         partial_output: None,
                         failure_kind: None,
+                        usage: None,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {

@@ -35,6 +35,8 @@ const detail = (events: Partial<WfEvent>[], p: ProgressSummary, status: RunDetai
   children: [],
   progress: p,
   answer: null,
+  usage: null,
+  unknown_events: 0,
   events: events.map((e, i) => ({ seq: i, ts: i, type: '', ...e })),
 })
 
