@@ -85,29 +85,49 @@ pub fn reply(agent: &str, stdout: &str) -> Option<Reply> {
             text: str_at(&r, "result").unwrap_or_default().to_string(),
             is_error: r.get("is_error").and_then(Value::as_bool).unwrap_or(false),
         }),
-        "codex" => json_lines(stdout)
-            .filter(|v| str_at(v, "type") == Some("item.completed"))
-            .filter_map(|v| {
-                let item = v.get("item")?;
-                (str_at(item, "type") == Some("agent_message"))
-                    .then(|| str_at(item, "text").map(str::to_string))
-                    .flatten()
-            })
-            .last()
-            .map(|text| Reply {
-                text,
-                is_error: false,
-            }),
-        "opencode" => {
-            let parts: Vec<String> = json_lines(stdout)
-                .filter(|v| str_at(v, "type") == Some("text"))
-                .filter_map(|v| {
-                    v.get("part")
-                        .and_then(|p| str_at(p, "text"))
-                        .map(String::from)
+        // The last agent message. A completed turn that sent none (it only
+        // ran tools) is an empty reply, as the plain form printed nothing for
+        // it, not a stream to hand on as the reply.
+        "codex" => {
+            let mut completed = false;
+            let mut text = None;
+            for v in json_lines(stdout) {
+                match str_at(&v, "type") {
+                    Some("turn.completed") => completed = true,
+                    Some("item.completed") => {
+                        if let Some(item) = v.get("item")
+                            && str_at(item, "type") == Some("agent_message")
+                            && let Some(t) = str_at(item, "text")
+                        {
+                            text = Some(t.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            text.or_else(|| completed.then(String::new))
+                .map(|text| Reply {
+                    text,
+                    is_error: false,
                 })
-                .collect();
-            (!parts.is_empty()).then(|| Reply {
+        }
+        // Every text part. A run that finished steps without one (tool calls
+        // only) is an empty reply, as for codex above.
+        "opencode" => {
+            let mut stepped = false;
+            let mut parts: Vec<String> = Vec::new();
+            for v in json_lines(stdout) {
+                match str_at(&v, "type") {
+                    Some("step_finish") => stepped = true,
+                    Some("text") => {
+                        if let Some(t) = v.get("part").and_then(|p| str_at(p, "text")) {
+                            parts.push(t.to_string());
+                        }
+                    }
+                    _ => {}
+                }
+            }
+            (stepped || !parts.is_empty()).then(|| Reply {
                 text: parts.join("\n"),
                 is_error: false,
             })

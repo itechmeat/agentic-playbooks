@@ -170,7 +170,9 @@ published release body via a post-announce job.
   (`EventPayload::is_checkpoint`): an older binary skips an event type it does
   not know and counts it, and the engine continues a run only when a
   checkpoint follows every such event (`event::read_all`). Never replace a
-  known event with a new type; add alongside it.
+  known event with a new type; add alongside it. A structured optional field
+  of a known event (such as `AttemptFinished.usage`) decodes leniently, so a
+  shape a newer apb wrote reads as absent instead of failing the journal.
 - State files are written atomically (temp + rename, 0600 on unix) via
   `apb_core::fsutil`.
 - Secret values (auth files) are never returned, logged, or cached; skill

@@ -131,3 +131,19 @@ fn absurd_token_counts_saturate_instead_of_overflowing() {
     let u = usage("opencode", &format!("{step}\n{step}\n")).unwrap();
     assert_eq!((u.input_tokens, u.output_tokens), (max, max));
 }
+
+#[test]
+fn a_finished_turn_without_a_message_is_an_empty_reply() {
+    let codex = CODEX
+        .lines()
+        .filter(|l| !l.contains("agent_message"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(reply("codex", &codex).unwrap().text, "");
+    let opencode = OPENCODE
+        .lines()
+        .filter(|l| !l.contains(r#""type": "text""#))
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert_eq!(reply("opencode", &opencode).unwrap().text, "");
+}

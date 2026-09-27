@@ -1484,6 +1484,18 @@ impl ClaudeAdapter {
         let output = pipes.finish(child, drain_budget(), &self.program)?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // A failure quotes what the agent said: the reply inside its machine
+        // output when there is one (claude prints its errored JSON result and
+        // exits non-zero), else stdout as printed, so an empty reply never
+        // hides what else the output said.
+        let said = || {
+            let (reply, _) = reply_text(task.agent, &stdout);
+            if reply.is_empty() {
+                stdout.clone()
+            } else {
+                reply
+            }
+        };
         // Signal termination is a failure before anything else is read (issue
         // #42, finding 6): a wrapper that turned a SIGTERM into a `0` exit, or a
         // kill that truncated/emptied stdout, must not be journaled as success.
@@ -1492,7 +1504,7 @@ impl ClaudeAdapter {
                 ErrorClass::ProcessExit,
                 format!(
                     "agent terminated by signal {sig}: {}",
-                    exit_detail(&stderr, &stdout)
+                    exit_detail(&stderr, &said())
                 ),
             ));
         }
@@ -1502,14 +1514,14 @@ impl ClaudeAdapter {
                 format!(
                     "agent exited with {:?}: {}",
                     output.status.code(),
-                    exit_detail(&stderr, &stdout)
+                    exit_detail(&stderr, &said())
                 ),
             ));
         }
         // Status comes from the structured report block (spec 6.2); the node
         // output is the reply body with that block stripped, and raw is the full
         // stdout for debugging/streaming. The reply is stdout itself except for
-        // an agent that wraps it in JSON (zcode's `--json`).
+        // an agent whose machine output wraps it (see `reply_text`).
         let (reply, cli_failed) = reply_text(task.agent, &stdout);
         let report = interpret_report(&reply);
         // Node-output contract (Finding 2 of issue #56): when the node set
@@ -1527,8 +1539,8 @@ impl ClaudeAdapter {
         let question = scan_question(&reply, task)?;
         // Session capture (spec 2026-07-20, Task 7): pull the agent's session id
         // from its output so the answer round can resume the same session. The
-        // plain headless `-p` form carries no session id, so this is normally
-        // `None`; the stream path below is where claude surfaces one.
+        // built-in machine-output forms carry one (see `capture_session`); a
+        // plain-text custom form carries none, so this is `None` there.
         let session = capture_session(task.agent, &stdout)
             .or_else(|| capture_session_header(task.agent, &stderr));
         let usage = apb_core::agent_output::usage(task.agent, &stdout);

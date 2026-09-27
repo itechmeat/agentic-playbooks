@@ -206,3 +206,35 @@ fn resume_refuses_an_unknown_event_newer_than_the_last_checkpoint() {
     // Refused before anything was written.
     assert_eq!(fs::read(dir.join("events.jsonl")).unwrap(), before);
 }
+
+/// A newer apb may report usage in a shape this binary cannot decode (a new
+/// `source`, a new required field). The usage block is optional data on a
+/// known event, so the attempt still reads, without its usage, instead of
+/// failing the whole journal.
+#[test]
+fn an_attempt_usage_block_of_a_newer_shape_does_not_break_the_journal() {
+    let dir = tempfile::tempdir().unwrap();
+    let line = |seq: u64, body: &str| format!(r#"{{"seq":{seq},"ts":1,{body}}}"#);
+    let journal = [
+        line(0, r#""type":"run_started","playbook":"p","version":"1.0.0""#),
+        line(
+            1,
+            r#""type":"attempt_finished","node":"w","attempt":1,"status":"succeeded","usage":{"input_tokens":1,"output_tokens":2,"source":"measured"}"#,
+        ),
+        line(
+            2,
+            r#""type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"ok""#,
+        ),
+    ]
+    .join("\n");
+    std::fs::write(dir.path().join("events.jsonl"), journal + "\n").unwrap();
+
+    let read = apb_engine::event::read_journal(dir.path()).expect("journal reads");
+    assert!(read.unknown.is_empty());
+    let usage = read.events.iter().find_map(|e| match &e.payload {
+        apb_engine::event::EventPayload::AttemptFinished { usage, .. } => Some(usage.clone()),
+        _ => None,
+    });
+    assert_eq!(usage, Some(None));
+    apb_engine::event::read_all(dir.path()).expect("the engine reads it too");
+}

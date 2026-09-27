@@ -190,3 +190,81 @@ fn plain_text_output_journals_no_usage() {
     let journal = fs::read_to_string(run_dir.join("events.jsonl")).unwrap();
     assert!(!journal.contains("\"usage\""), "{journal}");
 }
+
+/// codex's `exec --json` stream of a turn that ended without an agent
+/// message (it only ran a tool). The plain form printed nothing for such a
+/// turn, so the node output stays empty rather than becoming the JSON event
+/// stream itself.
+#[test]
+fn a_codex_stream_without_an_agent_message_is_an_empty_reply_not_the_stream() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    common::seed_profile(dir.path(), "main", "codex", "gpt-5", &[]);
+    let events = [
+        r#"{"type":"thread.started","thread_id":"01a0e454-ef08-7a33-99f4-48719b962fe3"}"#,
+        r#"{"type":"turn.started"}"#,
+        r#"{"type":"item.completed","item":{"id":"item_0","type":"command_execution","command":"cat secret.txt","aggregated_output":"file contents\n","exit_code":0,"status":"completed"}}"#,
+        r#"{"type":"turn.completed","usage":{"input_tokens":100,"cached_input_tokens":40,"output_tokens":7}}"#,
+    ]
+    .join("\n");
+    let _cmd = AgentCmd::set(&stub(dir.path(), &events));
+
+    let res = run(dir.path(), "u", None, RunOptions::default()).unwrap();
+    let run_dir = dir.path().join(".apb/runs").join(&res.run_id);
+    let view = RunView::load(&run_dir, &res.run_id).unwrap();
+    assert_eq!(
+        view.state.outputs["w"], "",
+        "the node output must not be the event stream"
+    );
+    assert_eq!(
+        attempt_usages(dir.path(), &res.run_id)[0]
+            .as_ref()
+            .map(|u| u.input_tokens),
+        Some(60)
+    );
+}
+
+/// claude exits non-zero on an errored result, with the JSON result on
+/// stdout. The attempt's failure message quotes the reply inside it, as the
+/// plain form printed it, not the whole JSON envelope.
+#[test]
+fn a_failed_claude_exit_quotes_the_reply_not_the_json_envelope() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let result = serde_json::json!({
+        "type": "result",
+        "subtype": "success",
+        "is_error": true,
+        "result": "There is an issue with the selected model.",
+        "session_id": "49af5891-8ceb-450b-b315-40cbf9f62a7a",
+        "total_cost_usd": 0,
+        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "modelUsage": {}
+    })
+    .to_string();
+    let prog = stub(dir.path(), &result);
+    // The same stub, exiting 1 after printing.
+    let failing = dir.path().join("failing.sh");
+    common::write_sync(&failing, &format!("#!/bin/sh\n'{prog}' \"$@\"\nexit 1\n"));
+    let mut p = fs::metadata(&failing).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&failing, p).unwrap();
+    let _cmd = AgentCmd::set(&failing.to_string_lossy());
+
+    let res = run(dir.path(), "u", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let journal = fs::read_to_string(
+        dir.path()
+            .join(".apb/runs")
+            .join(&res.run_id)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        journal.contains("There is an issue with the selected model."),
+        "{journal}"
+    );
+    assert!(!journal.contains("modelUsage"), "{journal}");
+}

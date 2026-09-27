@@ -186,8 +186,14 @@ pub enum EventPayload {
         /// output (issue #167, see `apb_core::agent_output`). `None` when the
         /// output reported none (plain-text agents, custom invocation forms,
         /// an attempt that ended without a parsable result), and for old
-        /// logs: never an estimate made by apb. Additive.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
+        /// logs: never an estimate made by apb. Additive. Read leniently: a
+        /// usage block this binary cannot decode (a newer apb's shape) reads
+        /// as `None` rather than failing the whole journal.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_usage"
+        )]
         usage: Option<apb_core::agent_output::AgentUsage>,
     },
     NodeFinished {
@@ -850,6 +856,18 @@ pub(crate) fn review_requested_count(events: &[Event], node: &str) -> usize {
             |e| matches!(&e.payload, EventPayload::ReviewRequested { node: n, .. } if n == node),
         )
         .count()
+}
+
+/// `AttemptFinished.usage` as optional data: a block that does not decode as
+/// this binary's [`apb_core::agent_output::AgentUsage`] (a `source` or a
+/// required field a newer apb added) is dropped instead of making the known
+/// event, and with it the whole journal, unreadable.
+fn lenient_usage<'de, D>(d: D) -> Result<Option<apb_core::agent_output::AgentUsage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
 }
 
 /// An event whose `type` this binary does not know: a newer apb wrote it.
