@@ -270,6 +270,42 @@ pub enum ErrorClass {
     Timeout,
 }
 
+/// Why an agent attempt failed, and the token usage its output reported
+/// anyway.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentFailure {
+    pub class: ErrorClass,
+    pub message: String,
+    /// The usage the agent's machine output carried although the attempt
+    /// failed: claude prints its errored result, usage included, and exits
+    /// non-zero. `None` when the failed output reported none. The drive loop
+    /// writes it into the failed `AttemptFinished.usage`.
+    pub usage: Option<apb_core::agent_output::AgentUsage>,
+}
+
+impl AgentFailure {
+    pub fn new(class: ErrorClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+            usage: None,
+        }
+    }
+
+    /// The same failure, with the usage the output reported.
+    #[must_use]
+    pub fn with_usage(mut self, usage: Option<apb_core::agent_output::AgentUsage>) -> Self {
+        self.usage = usage;
+        self
+    }
+}
+
+impl From<(ErrorClass, String)> for AgentFailure {
+    fn from((class, message): (ErrorClass, String)) -> Self {
+        Self::new(class, message)
+    }
+}
+
 /// Connector isolation applied to every spawned agent process (spec 4.3).
 /// `scrub` is the union of env var names referenced by ANY installed connector
 /// config (both scopes), removed from the child so a connector token can never
@@ -868,7 +904,7 @@ fn capture_json_string_field(raw: &str, fields: &[&str]) -> Option<String> {
 }
 
 pub trait AgentAdapter {
-    fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)>;
+    fn run(&self, task: &AgentTask) -> Result<AgentReport, AgentFailure>;
 
     /// Like `run`, but with cooperative cancellation: while the agent is
     /// running, the implementation periodically checks `cancel` and, if set,
@@ -909,7 +945,7 @@ pub trait AgentAdapter {
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
-    ) -> Result<AgentReport, (ErrorClass, String)> {
+    ) -> Result<AgentReport, AgentFailure> {
         let _ = (cancel, on_spawn, live, stall, control);
         self.run(task)
     }
@@ -1355,7 +1391,7 @@ impl ClaudeAdapter {
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
-    ) -> Result<AgentReport, (ErrorClass, String)> {
+    ) -> Result<AgentReport, AgentFailure> {
         let prompt = transport_prompt(task);
         let mut built = build_command(
             &self.spec,
@@ -1430,7 +1466,7 @@ impl ClaudeAdapter {
                 // attempt with the node-named timeout message.
                 if lh.abort.load(Ordering::Relaxed) {
                     kill_process_tree(&mut child);
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         "live interactive question timed out with no default answer".to_string(),
                     ));
@@ -1451,7 +1487,7 @@ impl ClaudeAdapter {
                 (ch.on_poll)();
                 if ch.interrupt.load(Ordering::Relaxed) {
                     kill_process_tree(&mut child);
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         "attempt interrupted by supervisor".to_string(),
                     ));
@@ -1460,13 +1496,13 @@ impl ClaudeAdapter {
             if let Some(err) =
                 Self::check_cancel_timeout(&mut child, cancel, started, task.timeout, pending_ms)
             {
-                return Err(err);
+                return Err(err.into());
             }
             match child.try_wait() {
                 Ok(Some(_)) => break,
                 Ok(None) => std::thread::sleep(Duration::from_millis(50)),
                 Err(e) => {
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         format!("wait `{}` failed: {e}", self.program),
                     ));
@@ -1500,7 +1536,7 @@ impl ClaudeAdapter {
         // #42, finding 6): a wrapper that turned a SIGTERM into a `0` exit, or a
         // kill that truncated/emptied stdout, must not be journaled as success.
         if let Some(sig) = terminating_signal(&output.status) {
-            return Err((
+            return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!(
                     "agent terminated by signal {sig}: {}",
@@ -1509,14 +1545,18 @@ impl ClaudeAdapter {
             ));
         }
         if !output.status.success() {
-            return Err((
+            // The tokens were spent either way: claude prints its errored
+            // result, usage included, and exits non-zero, so the failed
+            // attempt records what the output reported.
+            return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!(
                     "agent exited with {:?}: {}",
                     output.status.code(),
                     exit_detail(&stderr, &said())
                 ),
-            ));
+            )
+            .with_usage(apb_core::agent_output::usage(task.agent, &stdout)));
         }
         // Status comes from the structured report block (spec 6.2); the node
         // output is the reply body with that block stripped, and raw is the full
@@ -1585,7 +1625,7 @@ impl ClaudeAdapter {
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
-    ) -> Result<AgentReport, (ErrorClass, String)> {
+    ) -> Result<AgentReport, AgentFailure> {
         let prompt = transport_prompt(task);
         // Base argv comes from the invocation form; claude-specific streaming
         // flags (stream-json) are layered on top. In the first iteration,
@@ -1735,7 +1775,7 @@ impl ClaudeAdapter {
                 // attempt with the node-named timeout message.
                 if lh.abort.load(Ordering::Relaxed) {
                     kill_process_tree(&mut child);
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         "live interactive question timed out with no default answer".to_string(),
                     ));
@@ -1759,7 +1799,7 @@ impl ClaudeAdapter {
                 (ch.on_poll)();
                 if ch.interrupt.load(Ordering::Relaxed) {
                     kill_process_tree(&mut child);
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         "attempt interrupted by supervisor".to_string(),
                     ));
@@ -1774,7 +1814,7 @@ impl ClaudeAdapter {
                     pending_ms,
                 )
             {
-                return Err(err);
+                return Err(err.into());
             }
             // This loop used to end ONLY on stdout EOF - but EOF is not the
             // agent's to give. A grandchild that inherited the pipe (a real
@@ -1826,7 +1866,7 @@ impl ClaudeAdapter {
         let status = match wait_bounded(&mut child, grace) {
             Some(Ok(status)) => status,
             Some(Err(e)) => {
-                return Err((
+                return Err(AgentFailure::new(
                     ErrorClass::ProcessExit,
                     format!("wait `{}` failed: {e}", self.program),
                 ));
@@ -1852,8 +1892,10 @@ impl ClaudeAdapter {
                     // was invalid JSON - rewriting that into a generic "no result
                     // event" Timeout would hide the real, node-named cause. Only a
                     // genuinely-missing result becomes the grace Timeout.
-                    Err((ErrorClass::Transport, msg)) => Err((ErrorClass::Transport, msg)),
-                    Err(_) => Err((
+                    Err((ErrorClass::Transport, msg)) => {
+                        Err(AgentFailure::new(ErrorClass::Transport, msg))
+                    }
+                    Err(_) => Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         format!(
                             "`{}` closed its stdout without a terminal result event and was still \
@@ -1872,19 +1914,25 @@ impl ClaudeAdapter {
         // streamed (issue #42, finding 6): a killed agent that a wrapper exited
         // `0` (or that lost stdout) must not be journaled as success.
         if let Some(sig) = terminating_signal(&status) {
-            return Err((
+            return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!("agent terminated by signal {sig}: {}", stderr.trim()),
             ));
         }
         if !status.success() {
-            return Err((
+            // As on the headless transport: the errored result still reports
+            // the usage it spent.
+            return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!("agent exited with {:?}: {}", status.code(), stderr.trim()),
-            ));
+            )
+            .with_usage(apb_core::agent_output::usage(
+                task.agent,
+                &raw_lines.join("\n"),
+            )));
         }
 
-        parse_stream_result(&raw_lines, task)
+        parse_stream_result(&raw_lines, task).map_err(AgentFailure::from)
     }
 }
 
@@ -1962,7 +2010,7 @@ fn parse_stream_result(
 }
 
 impl AgentAdapter for ClaudeAdapter {
-    fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)> {
+    fn run(&self, task: &AgentTask) -> Result<AgentReport, AgentFailure> {
         // A non-cancellable run is a cancellable run with an always-false flag,
         // no spawn hook, no live sidecar, no stall watch, and no control
         // observation.
@@ -1977,7 +2025,7 @@ impl AgentAdapter for ClaudeAdapter {
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
-    ) -> Result<AgentReport, (ErrorClass, String)> {
+    ) -> Result<AgentReport, AgentFailure> {
         match self.spec.transport {
             Transport::Headless => self.run_headless(task, cancel, on_spawn, live, stall, control),
             Transport::Acp => self.run_acp(task, cancel, on_spawn, live, stall, control),

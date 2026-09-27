@@ -76,7 +76,7 @@ fn claude_adapter_nonzero_exit_is_process_exit() {
             transcript_dir: None,
         })
         .unwrap_err();
-    assert!(matches!(err.0, ErrorClass::ProcessExit));
+    assert!(matches!(err.class, ErrorClass::ProcessExit));
 }
 
 // `adapter_for` consults the process-global `APB_AGENT_CMD` (an override makes

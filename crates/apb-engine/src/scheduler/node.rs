@@ -3,6 +3,7 @@
 
 use super::*;
 
+use crate::adapter::AgentFailure;
 use crate::failure_class::{FailureKind, INFRA_RETRY_ACTION};
 
 /// Renders a node's prompt template with the full standard context (compaction
@@ -1709,7 +1710,11 @@ pub(crate) fn execute_node(
                                 last_timed_out = false;
                             }
                         }
-                        Err((class, msg)) => {
+                        Err(AgentFailure {
+                            class,
+                            message: msg,
+                            usage: failed_usage,
+                        }) => {
                             // Cancellation mid-adapter-work: kill returned Transport,
                             // but this is not a failure - mark the node Cancelled.
                             if cancel.load(Ordering::Relaxed) {
@@ -1782,7 +1787,7 @@ pub(crate) fn execute_node(
                                         // decision, not an infrastructure
                                         // failure: nothing is classified.
                                         failure_kind: None,
-                                        usage: None,
+                                        usage: failed_usage.clone(),
                                     })?;
                                     last_msg = msg;
                                 }
@@ -1827,7 +1832,7 @@ pub(crate) fn execute_node(
                                                 rejected_output: None,
                                                 partial_output: None,
                                                 failure_kind: None,
-                                                usage: None,
+                                                usage: failed_usage.clone(),
                                             })?;
                                             return Ok(AttemptOutcome::Finished {
                                                 status: NodeStatus::Succeeded,
@@ -1846,7 +1851,7 @@ pub(crate) fn execute_node(
                                                 rejected_output: Some(output.clone()),
                                                 partial_output: None,
                                                 failure_kind: None,
-                                                usage: None,
+                                                usage: failed_usage.clone(),
                                             })?;
                                             last_msg = format!("{reason}: {output}");
                                             last_timed_out = false;
@@ -1868,7 +1873,7 @@ pub(crate) fn execute_node(
                                         rejected_output: None,
                                         partial_output: None,
                                         failure_kind: None,
-                                        usage: None,
+                                        usage: failed_usage.clone(),
                                     })?;
                                     last_msg = sfr.outputs.clone().unwrap_or_else(|| msg.clone());
                                 }
@@ -1913,7 +1918,7 @@ pub(crate) fn execute_node(
                                             partial_output: None,
                                             failure_kind: failure_kind
                                                 .map(|k| k.as_str().to_string()),
-                                            usage: None,
+                                            usage: failed_usage.clone(),
                                         })?;
                                     }
                                     last_msg = msg;
@@ -2365,7 +2370,11 @@ pub(crate) fn execute_finish_answer(
                     last_msg = report.output;
                     last_timed_out = false;
                 }
-                Err((class, msg)) => {
+                Err(AgentFailure {
+                    class,
+                    message: msg,
+                    usage: failed_usage,
+                }) => {
                     last_timed_out = class == ErrorClass::Timeout;
                     journal.append(EventPayload::AttemptFinished {
                         node: node_id.into(),
@@ -2382,7 +2391,7 @@ pub(crate) fn execute_finish_answer(
                         rejected_output: None,
                         partial_output: None,
                         failure_kind: None,
-                        usage: None,
+                        usage: failed_usage,
                     })?;
                     last_msg = msg;
                     if class == ErrorClass::Transport || class == ErrorClass::Timeout {

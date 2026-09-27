@@ -427,13 +427,13 @@ fn a_wedged_agent_with_no_result_fails_as_a_bounded_timeout() {
     let _reaper = Reaper(pid);
 
     assert!(
-        matches!(err.0, ErrorClass::Timeout),
+        matches!(err.class, ErrorClass::Timeout),
         "a wedged agent that never reported must fail as a timeout, got {err:?}"
     );
     assert!(
-        err.1.contains("stdout"),
+        err.message.contains("stdout"),
         "the error must say what the adapter was waiting for, got: {}",
-        err.1
+        err.message
     );
     assert!(
         elapsed < Duration::from_secs(60),

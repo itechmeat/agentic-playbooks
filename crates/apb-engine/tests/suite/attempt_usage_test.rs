@@ -81,6 +81,17 @@ fn stub(root: &Path, stdout: &str) -> String {
     path.to_string_lossy().to_string()
 }
 
+/// [`stub`], exiting 1 after printing, as claude does on an errored result.
+fn failing_stub(root: &Path, stdout: &str) -> String {
+    let prog = stub(root, stdout);
+    let failing = root.join("failing.sh");
+    common::write_sync(&failing, &format!("#!/bin/sh\n'{prog}' \"$@\"\nexit 1\n"));
+    let mut p = fs::metadata(&failing).unwrap().permissions();
+    p.set_mode(0o755);
+    fs::set_permissions(&failing, p).unwrap();
+    failing.to_string_lossy().to_string()
+}
+
 fn claude_result(is_error: bool) -> String {
     serde_json::json!({
         "type": "result",
@@ -244,14 +255,7 @@ fn a_failed_claude_exit_quotes_the_reply_not_the_json_envelope() {
         "modelUsage": {}
     })
     .to_string();
-    let prog = stub(dir.path(), &result);
-    // The same stub, exiting 1 after printing.
-    let failing = dir.path().join("failing.sh");
-    common::write_sync(&failing, &format!("#!/bin/sh\n'{prog}' \"$@\"\nexit 1\n"));
-    let mut p = fs::metadata(&failing).unwrap().permissions();
-    p.set_mode(0o755);
-    fs::set_permissions(&failing, p).unwrap();
-    let _cmd = AgentCmd::set(&failing.to_string_lossy());
+    let _cmd = AgentCmd::set(&failing_stub(dir.path(), &result));
 
     let res = run(dir.path(), "u", None, RunOptions::default()).unwrap();
     assert_eq!(res.outcome, RunStatus::Failed);
@@ -266,5 +270,44 @@ fn a_failed_claude_exit_quotes_the_reply_not_the_json_envelope() {
         journal.contains("There is an issue with the selected model."),
         "{journal}"
     );
+    assert!(!journal.contains("modelUsage"), "{journal}");
+}
+
+/// The tokens of an errored claude result were spent all the same: when
+/// claude exits non-zero with its JSON result on stdout, the failed attempt
+/// journals the usage that result reports, and its failure message still
+/// quotes the reply rather than the envelope.
+#[test]
+fn a_failed_claude_exit_still_journals_the_usage_it_reported() {
+    let _env = common::env_lock();
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let _cmd = AgentCmd::set(&failing_stub(dir.path(), &claude_result(true)));
+
+    let res = run(dir.path(), "u", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Failed);
+    let expected = AgentUsage {
+        input_tokens: 150,
+        output_tokens: 50,
+        cache_read_tokens: 3000,
+        cache_write_tokens: 200,
+        cost_usd: Some(0.0125),
+        source: UsageSource::Reported,
+    };
+    let usages = attempt_usages(dir.path(), &res.run_id);
+    assert!(!usages.is_empty());
+    assert!(
+        usages.iter().all(|u| u.as_ref() == Some(&expected)),
+        "{usages:?}"
+    );
+    let journal = fs::read_to_string(
+        dir.path()
+            .join(".apb/runs")
+            .join(&res.run_id)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(journal.contains("agent exited with"), "{journal}");
+    assert!(journal.contains("the work"), "{journal}");
     assert!(!journal.contains("modelUsage"), "{journal}");
 }

@@ -100,7 +100,7 @@ fn timeout_kills_whole_process_tree() {
             &policy,
         ))
         .unwrap_err();
-    assert!(matches!(err.0, ErrorClass::Timeout), "got: {err:?}");
+    assert!(matches!(err.class, ErrorClass::Timeout), "got: {err:?}");
     assert_grandchild_dead(work.path());
 }
 
@@ -150,7 +150,7 @@ fn cancel_kills_whole_process_tree() {
         )
         .unwrap_err();
     assert!(
-        matches!(err.0, ErrorClass::Transport) && err.1.contains("cancelled"),
+        matches!(err.class, ErrorClass::Transport) && err.message.contains("cancelled"),
         "got: {err:?}"
     );
     assert_grandchild_dead(work.path());
