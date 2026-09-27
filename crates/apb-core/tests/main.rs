@@ -21,6 +21,8 @@
 //! before this change (safe only because it had its own test binary); it now
 //! takes the shared lock too.
 
+#[path = "suite/agent_output_test.rs"]
+mod agent_output_test;
 #[path = "suite/common.rs"]
 mod common;
 

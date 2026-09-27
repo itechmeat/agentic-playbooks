@@ -5,7 +5,7 @@
 //! to the `AgentTask.interactive` gate and to malformed JSON. No waits (the
 //! stub exits immediately), so nothing here needs a bounded poll.
 
-use apb_engine::adapter::{AgentAdapter, AgentTask, ClaudeAdapter, ErrorClass};
+use apb_engine::adapter::{AgentAdapter, AgentFailure, AgentTask, ClaudeAdapter, ErrorClass};
 use apb_engine::invocation::builtin;
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
@@ -84,7 +84,11 @@ fn interactive_malformed_marker_json_fails_naming_node() {
         spec: builtin("claude").unwrap(),
     };
     let policy = Default::default();
-    let (class, msg) = ad
+    let AgentFailure {
+        class,
+        message: msg,
+        ..
+    } = ad
         .run(&task("go", dir.path(), true, "ask", &policy))
         .expect_err("malformed marker JSON must fail the attempt");
     assert!(

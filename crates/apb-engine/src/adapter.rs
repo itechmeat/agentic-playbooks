@@ -270,6 +270,42 @@ pub enum ErrorClass {
     Timeout,
 }
 
+/// Why an agent attempt failed, and the token usage its output reported
+/// anyway.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AgentFailure {
+    pub class: ErrorClass,
+    pub message: String,
+    /// The usage the agent's machine output carried although the attempt
+    /// failed: claude prints its errored result, usage included, and exits
+    /// non-zero. `None` when the failed output reported none. The drive loop
+    /// writes it into the failed `AttemptFinished.usage`.
+    pub usage: Option<apb_core::agent_output::AgentUsage>,
+}
+
+impl AgentFailure {
+    pub fn new(class: ErrorClass, message: impl Into<String>) -> Self {
+        Self {
+            class,
+            message: message.into(),
+            usage: None,
+        }
+    }
+
+    /// The same failure, with the usage the output reported.
+    #[must_use]
+    pub fn with_usage(mut self, usage: Option<apb_core::agent_output::AgentUsage>) -> Self {
+        self.usage = usage;
+        self
+    }
+}
+
+impl From<(ErrorClass, String)> for AgentFailure {
+    fn from((class, message): (ErrorClass, String)) -> Self {
+        Self::new(class, message)
+    }
+}
+
 /// Connector isolation applied to every spawned agent process (spec 4.3).
 /// `scrub` is the union of env var names referenced by ANY installed connector
 /// config (both scopes), removed from the child so a connector token can never
@@ -361,16 +397,17 @@ fn apply_zcode_env(cmd: &mut Command, task: &AgentTask) -> Result<(), (ErrorClas
     Ok(())
 }
 
-/// The reply text of an attempt's stdout. zcode's `--json` wraps the reply in
-/// a JSON object (`response`); every other agent prints the reply itself.
-/// Falls back to the raw stdout when the expected shape is absent.
-fn reply_text(agent: &str, stdout: &str) -> String {
-    if agent == apb_core::zcode::AGENT_ID
-        && let Some(r) = apb_core::zcode::response_text(stdout)
-    {
-        return r.trim().to_string();
+/// The reply of an attempt's stdout and whether the CLI itself marked the
+/// attempt failed. The built-in forms ask claude, codex, opencode and zcode
+/// for their machine output, which wraps the reply (see
+/// `apb_core::agent_output`); every other agent, and any output without the
+/// expected shape (a custom invocation form, an older CLI), is the reply
+/// itself.
+fn reply_text(agent: &str, stdout: &str) -> (String, bool) {
+    match apb_core::agent_output::reply(agent, stdout) {
+        Some(r) => (r.text.trim().to_string(), r.is_error),
+        None => (stdout.to_string(), false),
     }
-    stdout.to_string()
 }
 
 pub struct AgentTask<'a> {
@@ -768,6 +805,10 @@ pub struct AgentReport {
     /// into `AttemptFinished.session` and reads it back to re-enter the agent's
     /// session on the answer round.
     pub session: Option<String>,
+    /// Token usage this attempt's output reports (see
+    /// `apb_core::agent_output::usage`); `None` when the output reports none.
+    /// The drive loop writes it into `AttemptFinished.usage`.
+    pub usage: Option<apb_core::agent_output::AgentUsage>,
 }
 
 /// Captures an agent session id from a finished attempt's raw output, for the
@@ -775,20 +816,38 @@ pub struct AgentReport {
 /// returns `None` when the output carries no session id, which forces the
 /// runtime downgrade from `resume` to `reprompt`.
 ///
-/// Reality per agent under the CURRENT one-shot invocation forms: only claude's
-/// stream-json output (`--output-format stream-json`, the `acp` transport)
-/// emits a `session_id` field, so claude is the one agent that yields a session
-/// id today; codex/opencode/hermes/grok/cursor one-shot output is plain
-/// final-answer text
-/// with no session id, so they yield `None` here and rely on the downgrade
-/// path. The per-agent field lists below are wired so that when those agents'
-/// resumable one-shot output lands, only the field name changes here (spec
-/// Transport: resume). No parser is invented for an output shape we do not
-/// produce today: a plain-text line simply never matches.
+/// Reality per agent under the built-in invocation forms: claude's JSON
+/// result (`--output-format json` headless, `stream-json` on the `acp`
+/// transport) carries `session_id`, codex's `exec --json` opens with a
+/// `thread.started` event carrying `thread_id`, and every opencode
+/// `--format json` event carries `sessionID`; hermes/grok/cursor one-shot
+/// output is plain final-answer text with no session id, so they yield
+/// `None` here and rely on the downgrade path. The per-agent field lists
+/// below are wired so that when those agents' resumable one-shot output
+/// lands, only the field name changes here (spec Transport: resume). No
+/// parser is invented for an output shape we do not produce today: a
+/// plain-text line simply never matches.
 pub fn capture_session(agent_id: &str, raw: &str) -> Option<String> {
+    capture_session_any(agent_id, raw).filter(|id| is_plausible_session_id(id))
+}
+
+/// A session id goes back to the agent as one argv element of its resume
+/// form (`{session}`), in front of the `--` that ends its options. It comes
+/// from the agent's output, so only an id that cannot read as an option or
+/// carry anything but an identifier is taken: ASCII letters, digits, `-`,
+/// `_`, `.` and `:`, not starting with `-`, at most 128 characters.
+fn is_plausible_session_id(id: &str) -> bool {
+    id.len() <= 128
+        && !id.starts_with('-')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | ':'))
+}
+
+fn capture_session_any(agent_id: &str, raw: &str) -> Option<String> {
     match canonical_agent_id(agent_id) {
         "claude" => capture_json_string_field(raw, &["session_id"]),
-        "codex" => capture_json_string_field(raw, &["session_id", "conversation_id"]),
+        "codex" => capture_json_string_field(raw, &["thread_id", "session_id", "conversation_id"]),
         "opencode" => capture_json_string_field(raw, &["session_id", "sessionID"]),
         "hermes" => capture_json_string_field(raw, &["session", "session_id"]),
         "grok" => capture_json_string_field(raw, &["session_id", "sessionId"]),
@@ -845,7 +904,7 @@ fn capture_json_string_field(raw: &str, fields: &[&str]) -> Option<String> {
 }
 
 pub trait AgentAdapter {
-    fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)>;
+    fn run(&self, task: &AgentTask) -> Result<AgentReport, AgentFailure>;
 
     /// Like `run`, but with cooperative cancellation: while the agent is
     /// running, the implementation periodically checks `cancel` and, if set,
@@ -886,7 +945,7 @@ pub trait AgentAdapter {
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
-    ) -> Result<AgentReport, (ErrorClass, String)> {
+    ) -> Result<AgentReport, AgentFailure> {
         let _ = (cancel, on_spawn, live, stall, control);
         self.run(task)
     }
@@ -1012,6 +1071,19 @@ fn build_command(
         PromptVia::Argv => None,
     };
     AgentCommand { argv, tail, stdin }
+}
+
+/// Removes every `flag <value>` pair from `argv`.
+fn drop_option(argv: &mut Vec<String>, flag: &str) {
+    let mut i = 0;
+    while i < argv.len() {
+        if argv[i] == flag {
+            let end = (i + 2).min(argv.len());
+            argv.drain(i..end);
+        } else {
+            i += 1;
+        }
+    }
 }
 
 /// Appends the live `--mcp-config` sidecar injection to `argv` when this is a
@@ -1319,7 +1391,7 @@ impl ClaudeAdapter {
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
-    ) -> Result<AgentReport, (ErrorClass, String)> {
+    ) -> Result<AgentReport, AgentFailure> {
         let prompt = transport_prompt(task);
         let mut built = build_command(
             &self.spec,
@@ -1394,7 +1466,7 @@ impl ClaudeAdapter {
                 // attempt with the node-named timeout message.
                 if lh.abort.load(Ordering::Relaxed) {
                     kill_process_tree(&mut child);
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         "live interactive question timed out with no default answer".to_string(),
                     ));
@@ -1415,7 +1487,7 @@ impl ClaudeAdapter {
                 (ch.on_poll)();
                 if ch.interrupt.load(Ordering::Relaxed) {
                     kill_process_tree(&mut child);
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         "attempt interrupted by supervisor".to_string(),
                     ));
@@ -1424,13 +1496,13 @@ impl ClaudeAdapter {
             if let Some(err) =
                 Self::check_cancel_timeout(&mut child, cancel, started, task.timeout, pending_ms)
             {
-                return Err(err);
+                return Err(err.into());
             }
             match child.try_wait() {
                 Ok(Some(_)) => break,
                 Ok(None) => std::thread::sleep(Duration::from_millis(50)),
                 Err(e) => {
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         format!("wait `{}` failed: {e}", self.program),
                     ));
@@ -1448,33 +1520,49 @@ impl ClaudeAdapter {
         let output = pipes.finish(child, drain_budget(), &self.program)?;
         let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
         let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        // A failure quotes what the agent said: the reply inside its machine
+        // output when there is one (claude prints its errored JSON result and
+        // exits non-zero), else stdout as printed, so an empty reply never
+        // hides what else the output said.
+        let said = || {
+            let (reply, _) = reply_text(task.agent, &stdout);
+            if reply.is_empty() {
+                stdout.clone()
+            } else {
+                reply
+            }
+        };
         // Signal termination is a failure before anything else is read (issue
         // #42, finding 6): a wrapper that turned a SIGTERM into a `0` exit, or a
         // kill that truncated/emptied stdout, must not be journaled as success.
         if let Some(sig) = terminating_signal(&output.status) {
-            return Err((
+            return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!(
                     "agent terminated by signal {sig}: {}",
-                    exit_detail(&stderr, &stdout)
+                    exit_detail(&stderr, &said())
                 ),
             ));
         }
         if !output.status.success() {
-            return Err((
+            // The tokens were spent either way: claude prints its errored
+            // result, usage included, and exits non-zero, so the failed
+            // attempt records what the output reported.
+            return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!(
                     "agent exited with {:?}: {}",
                     output.status.code(),
-                    exit_detail(&stderr, &stdout)
+                    exit_detail(&stderr, &said())
                 ),
-            ));
+            )
+            .with_usage(apb_core::agent_output::usage(task.agent, &stdout)));
         }
         // Status comes from the structured report block (spec 6.2); the node
         // output is the reply body with that block stripped, and raw is the full
         // stdout for debugging/streaming. The reply is stdout itself except for
-        // an agent that wraps it in JSON (zcode's `--json`).
-        let reply = reply_text(task.agent, &stdout);
+        // an agent whose machine output wraps it (see `reply_text`).
+        let (reply, cli_failed) = reply_text(task.agent, &stdout);
         let report = interpret_report(&reply);
         // Node-output contract (Finding 2 of issue #56): when the node set
         // `outputs.extract`, the output is the LAST `<tag>...</tag>` block in
@@ -1491,17 +1579,26 @@ impl ClaudeAdapter {
         let question = scan_question(&reply, task)?;
         // Session capture (spec 2026-07-20, Task 7): pull the agent's session id
         // from its output so the answer round can resume the same session. The
-        // plain headless `-p` form carries no session id, so this is normally
-        // `None`; the stream path below is where claude surfaces one.
+        // built-in machine-output forms carry one (see `capture_session`); a
+        // plain-text custom form carries none, so this is `None` there.
         let session = capture_session(task.agent, &stdout)
             .or_else(|| capture_session_header(task.agent, &stderr));
+        let usage = apb_core::agent_output::usage(task.agent, &stdout);
+        // The CLI's own failure flag wins over the report block, as on the
+        // stream transport.
+        let status = if cli_failed {
+            NodeStatus::Failed
+        } else {
+            report.status
+        };
         Ok(AgentReport {
-            status: report.status,
+            status,
             output,
             summary: report.summary,
             raw: stdout,
             question,
             session,
+            usage,
         })
     }
 
@@ -1528,7 +1625,7 @@ impl ClaudeAdapter {
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
-    ) -> Result<AgentReport, (ErrorClass, String)> {
+    ) -> Result<AgentReport, AgentFailure> {
         let prompt = transport_prompt(task);
         // Base argv comes from the invocation form; claude-specific streaming
         // flags (stream-json) are layered on top. In the first iteration,
@@ -1542,6 +1639,10 @@ impl ClaudeAdapter {
         );
         inject_ask_server(&mut built.argv, task, live);
         inject_hermetic_settings(&mut built.argv, task);
+        // The headless form already names an output format (`json`); the
+        // stream replaces it rather than relying on the CLI to keep the last
+        // of two.
+        drop_option(&mut built.argv, "--output-format");
         built.argv.push("--output-format".to_string());
         built.argv.push("stream-json".to_string());
         built.argv.push("--verbose".to_string());
@@ -1674,7 +1775,7 @@ impl ClaudeAdapter {
                 // attempt with the node-named timeout message.
                 if lh.abort.load(Ordering::Relaxed) {
                     kill_process_tree(&mut child);
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         "live interactive question timed out with no default answer".to_string(),
                     ));
@@ -1698,7 +1799,7 @@ impl ClaudeAdapter {
                 (ch.on_poll)();
                 if ch.interrupt.load(Ordering::Relaxed) {
                     kill_process_tree(&mut child);
-                    return Err((
+                    return Err(AgentFailure::new(
                         ErrorClass::ProcessExit,
                         "attempt interrupted by supervisor".to_string(),
                     ));
@@ -1713,7 +1814,7 @@ impl ClaudeAdapter {
                     pending_ms,
                 )
             {
-                return Err(err);
+                return Err(err.into());
             }
             // This loop used to end ONLY on stdout EOF - but EOF is not the
             // agent's to give. A grandchild that inherited the pipe (a real
@@ -1765,7 +1866,7 @@ impl ClaudeAdapter {
         let status = match wait_bounded(&mut child, grace) {
             Some(Ok(status)) => status,
             Some(Err(e)) => {
-                return Err((
+                return Err(AgentFailure::new(
                     ErrorClass::ProcessExit,
                     format!("wait `{}` failed: {e}", self.program),
                 ));
@@ -1791,8 +1892,10 @@ impl ClaudeAdapter {
                     // was invalid JSON - rewriting that into a generic "no result
                     // event" Timeout would hide the real, node-named cause. Only a
                     // genuinely-missing result becomes the grace Timeout.
-                    Err((ErrorClass::Transport, msg)) => Err((ErrorClass::Transport, msg)),
-                    Err(_) => Err((
+                    Err((ErrorClass::Transport, msg)) => {
+                        Err(AgentFailure::new(ErrorClass::Transport, msg))
+                    }
+                    Err(_) => Err(AgentFailure::new(
                         ErrorClass::Timeout,
                         format!(
                             "`{}` closed its stdout without a terminal result event and was still \
@@ -1811,19 +1914,25 @@ impl ClaudeAdapter {
         // streamed (issue #42, finding 6): a killed agent that a wrapper exited
         // `0` (or that lost stdout) must not be journaled as success.
         if let Some(sig) = terminating_signal(&status) {
-            return Err((
+            return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!("agent terminated by signal {sig}: {}", stderr.trim()),
             ));
         }
         if !status.success() {
-            return Err((
+            // As on the headless transport: the errored result still reports
+            // the usage it spent.
+            return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!("agent exited with {:?}: {}", status.code(), stderr.trim()),
-            ));
+            )
+            .with_usage(apb_core::agent_output::usage(
+                task.agent,
+                &raw_lines.join("\n"),
+            )));
         }
 
-        parse_stream_result(&raw_lines, task)
+        parse_stream_result(&raw_lines, task).map_err(AgentFailure::from)
     }
 }
 
@@ -1883,6 +1992,7 @@ fn parse_stream_result(
         // 7): claude's stream-json events carry a `session_id`, so the parser
         // scans `raw` (every event line), not just the terminal result text.
         let session = capture_session(task.agent, &raw);
+        let usage = apb_core::agent_output::usage(task.agent, &raw);
         return Ok(AgentReport {
             status,
             output,
@@ -1890,6 +2000,7 @@ fn parse_stream_result(
             raw,
             question,
             session,
+            usage,
         });
     }
     Err((
@@ -1899,7 +2010,7 @@ fn parse_stream_result(
 }
 
 impl AgentAdapter for ClaudeAdapter {
-    fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)> {
+    fn run(&self, task: &AgentTask) -> Result<AgentReport, AgentFailure> {
         // A non-cancellable run is a cancellable run with an always-false flag,
         // no spawn hook, no live sidecar, no stall watch, and no control
         // observation.
@@ -1914,7 +2025,7 @@ impl AgentAdapter for ClaudeAdapter {
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
-    ) -> Result<AgentReport, (ErrorClass, String)> {
+    ) -> Result<AgentReport, AgentFailure> {
         match self.spec.transport {
             Transport::Headless => self.run_headless(task, cancel, on_spawn, live, stall, control),
             Transport::Acp => self.run_acp(task, cancel, on_spawn, live, stall, control),

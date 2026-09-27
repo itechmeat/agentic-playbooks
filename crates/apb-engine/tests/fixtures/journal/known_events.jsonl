@@ -1,0 +1,21 @@
+{"seq":0,"ts":1790000000000,"type":"run_started","playbook":"demo","version":"1.2.0"}
+{"seq":1,"ts":1790000000001,"type":"run_provenance","origin":"project","digest":"sha256:abc","profiles":[{"scope":"project","name":"writer","bundle_digest":"sha256:def"}]}
+{"seq":2,"ts":1790000000002,"type":"node_started","node":"draft","attempt":1}
+{"seq":3,"ts":1790000000003,"type":"attempt_started","node":"draft","attempt":1,"agent":"claude","soul_delivery":"native","skills_mode":"advisory","pid":4242,"spawn_ms":3,"model":"sonnet","workdir":"src","transcript":"attempts/draft-1"}
+{"seq":4,"ts":1790000000004,"type":"attempt_exited","node":"draft","attempt":1}
+{"seq":5,"ts":1790000000005,"type":"attempt_finished","node":"draft","attempt":1,"status":"failed","duration_ms":1200,"session":null,"summary":null,"partial_output":"half done","failure_kind":"transient"}
+{"seq":6,"ts":1790000000006,"type":"retry_started","node":"draft","attempt":2}
+{"seq":7,"ts":1790000000007,"type":"attempt_started","node":"draft","attempt":2,"agent":"claude","pid":4243,"spawn_ms":null}
+{"seq":8,"ts":1790000000008,"type":"attempt_finished","node":"draft","attempt":2,"status":"succeeded","duration_ms":5300,"session":"s-1","summary":"drafted"}
+{"seq":9,"ts":1790000000009,"type":"node_finished","node":"draft","status":"succeeded","attempt":2,"output":"the draft","artifacts":[]}
+{"seq":10,"ts":1790000000010,"type":"edge_traversed","from":"draft","to":"review"}
+{"seq":11,"ts":1790000000011,"type":"review_requested","node":"review","options":["approve","needs_changes"],"title":"Check the draft","instruction":"read it"}
+{"seq":12,"ts":1790000000012,"type":"run_paused","reason":"review"}
+{"seq":13,"ts":1790000000013,"type":"review_decided","node":"review","decision":"approve","note":""}
+{"seq":14,"ts":1790000000014,"type":"run_resumed","from_node":"review"}
+{"seq":15,"ts":1790000000015,"type":"wake_raised","trigger":"anomaly","node":"review","detail":"slow"}
+{"seq":16,"ts":1790000000016,"type":"supervisor_action","action":"context_append","node":null,"detail":"note"}
+{"seq":17,"ts":1790000000017,"type":"run_progress","node_id":"review","done":1,"total":2,"label":null}
+{"seq":18,"ts":1790000000018,"type":"node_finished","node":"review","status":"succeeded","attempt":1,"output":"approve","artifacts":[]}
+{"seq":19,"ts":1790000000019,"type":"run_error","reason":"none"}
+{"seq":20,"ts":1790000000020,"type":"run_finished","outcome":"succeeded"}

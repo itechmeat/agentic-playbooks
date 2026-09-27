@@ -27,6 +27,16 @@ pub struct RunSummary {
     /// `false` also covers "no drive claim at all", which is not a problem.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub driver_dead: bool,
+    /// Events of a type this binary does not know, skipped when the journal
+    /// was read: a newer apb wrote them. Zero (and absent) for a journal this
+    /// binary reads in full.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<usize>", optional))]
+    pub unknown_events: usize,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
@@ -65,6 +75,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
         let continued_from = cfg.as_ref().and_then(|c| c.continued_from.clone());
         let superseded_by = cfg.as_ref().and_then(|c| c.superseded_by.clone());
         let driver_dead = matches!(view.driver_alive, Some(false));
+        let unknown_events = view.unknown.len();
         let status = view.run_status.as_str().into();
         let progress = view.progress;
         out.push(RunSummary {
@@ -77,6 +88,7 @@ pub fn list_runs(root: &Path) -> Result<Vec<RunSummary>, EngineError> {
             continued_from,
             superseded_by,
             driver_dead,
+            unknown_events,
         });
     }
     out.sort_by_key(|s| std::cmp::Reverse(s.started_ts));

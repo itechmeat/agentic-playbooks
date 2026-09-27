@@ -143,7 +143,7 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // The verbatim reason behind a `failed` run (issue #42 finding 3), read
     // straight from the journal's last `RunError`.
     let failure_reason = view.failure_reason();
-    Ok(json!({
+    let mut out = json!({
         "run_id": run_id,
         "run_status": view.run_status.as_str(),
         "nodes": view.nodes(),
@@ -163,7 +163,26 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "continued_from": cfg.continued_from,
         "superseded_by": cfg.superseded_by,
         "failure_reason": failure_reason,
-    }))
+    });
+    add_journal_extras(&mut out, &view);
+    Ok(out)
+}
+
+/// The fields a run view carries only when they apply: the token usage its
+/// attempts reported, and the note about events a newer apb wrote that this
+/// binary skipped. Shared by `run_status` and `run_report`.
+fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
+    if let Some(usage) = view.usage() {
+        out["usage"] = json!(usage);
+    }
+    if !view.unknown.is_empty() {
+        out["unknown_events"] = json!(view.unknown.len());
+        let n = view.unknown.len();
+        let events = if n == 1 { "event" } else { "events" };
+        out["unknown_events_note"] = json!(format!(
+            "{n} unknown {events} (newer apb?): skipped by this binary"
+        ));
+    }
 }
 
 pub use apb_engine::run_wait::{RUN_WAIT_DEFAULT_MS, RUN_WAIT_MAX_MS};
@@ -311,6 +330,7 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "progress": view.progress,
         "answer": answer,
     });
+    add_journal_extras(&mut base, &view);
 
     // duration_table is always present (empty when there is no snapshot), as
     // before; it is now built from the single events read above.

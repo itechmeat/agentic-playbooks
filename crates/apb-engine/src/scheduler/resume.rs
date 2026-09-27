@@ -295,6 +295,10 @@ pub fn resume_detached_with(
     // allowed); this parent-side pass exists only so the error reaches the
     // caller instead of vanishing with the child process.
     check_environment_drift(&run_dir, allow_environment_drift)?;
+    // The same for a journal holding events of a type this binary does not
+    // know and cannot skip safely (see `event::read_all`): refuse here, where
+    // the caller sees the version mismatch.
+    read_all(&run_dir)?;
     let pid = crate::driver::spawn_detached_driver(
         root,
         run_id,
@@ -346,6 +350,27 @@ pub(crate) fn check_environment_drift(
         }
     }
     Ok(drift_events)
+}
+
+/// Tells the operator, once per resume, that the journal holds events a newer
+/// apb wrote which this binary skips. Only called once the engine accepted
+/// them as settled (see `event::read_all`).
+fn warn_skipped_unknown_events(run_dir: &Path, run_id: &str) {
+    let Ok(journal) = crate::event::read_journal(run_dir) else {
+        return;
+    };
+    if journal.unknown.is_empty() {
+        return;
+    }
+    let mut kinds: Vec<&str> = journal.unknown.iter().map(|u| u.kind.as_str()).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    eprintln!(
+        "warning: run `{run_id}`: skipping {} event(s) of a type this apb {} does not know ({}); a newer apb wrote them before the run's last checkpoint, so the run continues without them",
+        journal.unknown.len(),
+        env!("CARGO_PKG_VERSION"),
+        kinds.join(", ")
+    );
 }
 
 pub fn resume(
@@ -407,7 +432,11 @@ pub(crate) fn resume_inner(
     }
     let playbook = crate::legacy_snapshot::parse_snapshot_playbook(&yaml)?;
     let cfg = crate::run_config::read_run_config(&run_dir)?;
+    // Opening the log refuses a journal with an unknown event (one a newer
+    // apb wrote) that no checkpoint settles; one that is settled is skipped,
+    // and said so once.
     let mut log = EventLog::open(&run_dir)?;
+    warn_skipped_unknown_events(&run_dir, run_id);
     for ev in drift_events {
         log.append(ev)?;
     }

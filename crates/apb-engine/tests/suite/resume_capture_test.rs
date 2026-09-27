@@ -113,6 +113,43 @@ fn capture_session_none_when_no_session_id() {
     );
 }
 
+/// The machine output of codex and opencode carries their session ids
+/// (issue #167): codex `exec --json` in `thread.started`, opencode `--format
+/// json` on every event.
+#[test]
+fn capture_session_reads_codex_and_opencode_json_output() {
+    let codex = concat!(
+        r#"{"type":"thread.started","thread_id":"01a0e454-ef08-7a33-99f4-48719b962fe3"}"#,
+        "\n",
+        r#"{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}"#,
+    );
+    assert_eq!(
+        capture_session("codex", codex).as_deref(),
+        Some("01a0e454-ef08-7a33-99f4-48719b962fe3")
+    );
+    let opencode = r#"{"type":"text","sessionID":"ses_f1b945143ffe","part":{"text":"hi"}}"#;
+    assert_eq!(
+        capture_session("opencode", opencode).as_deref(),
+        Some("ses_f1b945143ffe")
+    );
+}
+
+/// A captured id goes back into the agent's resume argv in front of `--`, so
+/// one that could read as an option, or carries anything but an identifier,
+/// is not taken.
+#[test]
+fn capture_session_refuses_an_id_that_is_not_an_identifier() {
+    for bad in [
+        "--dangerously-bypass-approvals-and-sandbox",
+        "a b",
+        "id\\u001b[2J",
+        "",
+    ] {
+        let raw = format!(r#"{{"type":"thread.started","thread_id":"{bad}"}}"#);
+        assert_eq!(capture_session("codex", &raw), None, "{bad:?}");
+    }
+}
+
 // --- shared drive scaffolding ---
 
 fn make_stub(dir: &Path, body: &str) -> String {

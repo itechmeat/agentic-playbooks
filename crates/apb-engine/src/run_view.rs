@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::path::Path;
 
 use crate::error::EngineError;
-use crate::event::{Event, EventPayload};
+use crate::event::{Event, EventPayload, UnknownEvent};
 use crate::progress::ProgressSummary;
 use crate::state::{RunState, RunStatus};
 
@@ -29,6 +29,10 @@ pub fn read_events(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
 #[derive(Debug)]
 pub struct RunView {
     pub events: Vec<Event>,
+    /// Events of a type this binary does not know (a newer apb wrote them),
+    /// skipped from `events` and everything folded from it. Read-only
+    /// surfaces show their count; they never fail on them.
+    pub unknown: Vec<UnknownEvent>,
     /// The pure fold of `events`: outputs, failure reason, reviews.
     pub state: RunState,
     pub progress: Option<ProgressSummary>,
@@ -38,6 +42,58 @@ pub struct RunView {
     /// The status to report: the fold, corrected by liveness (see
     /// [`crate::liveness::reported_run_status`]).
     pub run_status: RunStatus,
+}
+
+/// Token usage summed over a run's own agent attempts that reported it (see
+/// `AttemptFinished.usage`); a sub-playbook run reports its own.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct RunUsage {
+    /// Attempts whose output reported usage. Attempts that reported none
+    /// (plain-text agents, attempts that died) are not in the totals.
+    pub attempts: u32,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub cache_read_tokens: u64,
+    pub cache_write_tokens: u64,
+    /// The sum of the costs the agent CLIs reported, absent when none did.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub cost_usd: Option<f64>,
+    /// How many of `attempts` reported a cost, so a partial sum reads as one.
+    pub cost_attempts: u32,
+    /// At least one attempt's numbers are apb's own estimate rather than a
+    /// count the agent CLI printed (`source: estimated`).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub estimated: bool,
+}
+
+impl RunUsage {
+    /// The totals over `events`, `None` when no attempt reported usage.
+    pub fn from_events(events: &[Event]) -> Option<Self> {
+        let mut total = RunUsage::default();
+        for e in events {
+            let EventPayload::AttemptFinished { usage: Some(u), .. } = &e.payload else {
+                continue;
+            };
+            // Saturating: the numbers come from agent output, and a bogus
+            // one must not panic a read-only surface.
+            total.attempts = total.attempts.saturating_add(1);
+            total.input_tokens = total.input_tokens.saturating_add(u.input_tokens);
+            total.output_tokens = total.output_tokens.saturating_add(u.output_tokens);
+            total.cache_read_tokens = total.cache_read_tokens.saturating_add(u.cache_read_tokens);
+            total.cache_write_tokens = total
+                .cache_write_tokens
+                .saturating_add(u.cache_write_tokens);
+            if let Some(c) = u.cost_usd {
+                total.cost_usd = Some(total.cost_usd.unwrap_or(0.0) + c);
+                total.cost_attempts = total.cost_attempts.saturating_add(1);
+            }
+            total.estimated |= u.source == apb_core::agent_output::UsageSource::Estimated;
+        }
+        (total.attempts > 0).then_some(total)
+    }
 }
 
 /// A sub-playbook run started by a run, as its parent reports it.
@@ -54,7 +110,7 @@ pub struct ChildRun {
 impl RunView {
     /// Reads run `run_id` at `run_dir` once.
     pub fn load(run_dir: &Path, run_id: &str) -> Result<Self, EngineError> {
-        let events = read_events(run_dir)?;
+        let crate::event::JournalRead { events, unknown } = crate::event::read_journal(run_dir)?;
         let progress = crate::progress::from_run_dir(run_dir, &events);
         let driver_alive = crate::liveness::driver_alive(run_dir, run_id);
         let waiting = progress.as_ref().is_some_and(|p| p.waiting_on.is_some());
@@ -62,6 +118,7 @@ impl RunView {
         Ok(Self {
             state: RunState::fold(&events),
             events,
+            unknown,
             progress,
             driver_alive,
             run_status,
@@ -73,6 +130,11 @@ impl RunView {
     /// in-flight work under a provably dead driver).
     pub fn nodes(&self) -> BTreeMap<String, String> {
         crate::liveness::reported_node_statuses(&self.events, self.driver_alive)
+    }
+
+    /// Token usage over the run's attempts, `None` when none reported any.
+    pub fn usage(&self) -> Option<RunUsage> {
+        RunUsage::from_events(&self.events)
     }
 
     /// The failure reason, only for a run that actually ended `failed`.

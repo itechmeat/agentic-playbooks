@@ -315,6 +315,7 @@ mod tests {
                 rejected_output: None,
                 partial_output: None,
                 failure_kind: None,
+                usage: None,
             },
         }
     }

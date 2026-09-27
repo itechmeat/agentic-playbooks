@@ -14,8 +14,8 @@ use apb_core::config::{GlobalConfig, InvocationDef};
 use apb_core::zcode_tasks_index::{self as index, Host, HostFacts, Retry, TaskRecord};
 
 use crate::adapter::{
-    AgentAdapter, AgentReport, AgentTask, ConnectorEnvPolicy, ControlHooks, ErrorClass, LiveHooks,
-    StallHooks,
+    AgentAdapter, AgentFailure, AgentReport, AgentTask, ConnectorEnvPolicy, ControlHooks,
+    ErrorClass, LiveHooks, StallHooks,
 };
 
 /// [`wrap`] for one step of a run: a no-op for every agent but zcode, else
@@ -175,7 +175,7 @@ fn last_mode(args: &[String]) -> Option<String> {
 }
 
 impl AgentAdapter for ZcodeUiSync {
-    fn run(&self, task: &AgentTask) -> Result<AgentReport, (ErrorClass, String)> {
+    fn run(&self, task: &AgentTask) -> Result<AgentReport, AgentFailure> {
         self.run_cancellable(task, &AtomicBool::new(false), None, None, None, None)
     }
 
@@ -187,7 +187,7 @@ impl AgentAdapter for ZcodeUiSync {
         live: Option<&LiveHooks>,
         stall: Option<&StallHooks>,
         control: Option<&ControlHooks>,
-    ) -> Result<AgentReport, (ErrorClass, String)> {
+    ) -> Result<AgentReport, AgentFailure> {
         let result = self
             .inner
             .run_cancellable(task, cancel, on_spawn, live, stall, control);

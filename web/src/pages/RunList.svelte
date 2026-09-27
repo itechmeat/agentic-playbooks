@@ -2,6 +2,7 @@
   import { fetchRuns } from '../lib/api'
   import { filterByProject, projectFilter } from '../lib/projectfilter'
   import { groupRunsByParent } from '../lib/runlist'
+  import { unknownEventsNote } from '../lib/runusage'
   import { subscribeChanges } from '../lib/ws'
   import type { RunSummary } from '../lib/types'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -101,6 +102,11 @@
                   </Badge>
                   {#if showsDriverDead(r.status, r.driver_dead)}
                     <Badge variant="outline" class="ml-1">needs resume</Badge>
+                  {/if}
+                  {#if unknownEventsNote(r.unknown_events)}
+                    <Badge variant="outline" class="ml-1" title="This journal has events of a type this apb does not know">
+                      {unknownEventsNote(r.unknown_events)}
+                    </Badge>
                   {/if}
                 </Table.Cell>
                 <Table.Cell class="w-56">

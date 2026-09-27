@@ -52,7 +52,7 @@ use std::time::Duration;
 
 use crate::control::{Control, post_control, read_control_after, write_control_cursor};
 use crate::error::EngineError;
-use crate::event::{EventLog, EventPayload, read_all};
+use crate::event::{EventLog, EventPayload, read_all_for_stop};
 use crate::state::{RunState, RunStatus};
 
 /// The reason recorded for an abort that came through `stop_run`, so an
@@ -128,7 +128,10 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
     // could not take must not stop an operator from stopping a run.
     let _lock = apb_core::fsutil::lock_dir(&run_dir, EVENT_LOCK).ok();
 
-    if is_terminal(RunState::fold(&read_all(&run_dir)?).run_status) {
+    // An event a newer apb wrote does not block a stop (see
+    // `read_all_for_stop`): this first read warns about it, the later ones
+    // stay quiet.
+    if is_terminal(RunState::fold(&read_all_for_stop(&run_dir, true)?).run_status) {
         return Ok(StopOutcome::AlreadyTerminal);
     }
 
@@ -155,7 +158,7 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
     // ahead of that append and the pid file after the removal would otherwise
     // stamp a redundant `RunAborted` onto a run that had in fact just
     // finished cleanly.
-    if is_terminal(RunState::fold(&read_all(&run_dir)?).run_status) {
+    if is_terminal(RunState::fold(&read_all_for_stop(&run_dir, false)?).run_status) {
         // The abort we just posted has nothing left to do, and the driver that
         // just finalized this run owns the cursor for everything it applied.
         // Mark our own entry consumed so a later resume of a run that finished
@@ -173,7 +176,7 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
     // `apb stop` plus `apb resume` silently lost the note. The replay is
     // self-limiting: the next drive re-reads the abort through the drive
     // loop's own Abort arm, which advances the cursor, so it happens once.
-    let mut log = EventLog::open(&run_dir)?;
+    let mut log = EventLog::open_for_stop(&run_dir)?;
     log.append(EventPayload::RunAborted {
         reason: STOP_REASON.into(),
     })?;
@@ -188,11 +191,12 @@ pub fn stop_run(root: &Path, run_id: &str) -> Result<StopOutcome, EngineError> {
 /// the parent maps to a failed node.
 pub(crate) fn abort_children(root: &Path, run_id: &str) -> Result<(), EngineError> {
     let run_dir = root.join(".apb/runs").join(run_id);
-    let events = read_all(&run_dir)?;
+    let events = read_all_for_stop(&run_dir, false)?;
     for e in &events {
         if let EventPayload::ChildRunStarted { run_id: child, .. } = &e.payload {
             let child_dir = root.join(".apb/runs").join(child);
-            if child_dir.is_dir() && !is_terminal(RunState::fold(&read_all(&child_dir)?).run_status)
+            if child_dir.is_dir()
+                && !is_terminal(RunState::fold(&read_all_for_stop(&child_dir, false)?).run_status)
             {
                 // Best-effort per child (a child that raced to terminal or lost
                 // its dir must not block the parent abort), but no longer

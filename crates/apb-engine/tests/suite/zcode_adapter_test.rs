@@ -18,7 +18,8 @@ use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 use apb_engine::adapter::{
-    AgentAdapter, AgentTask, ClaudeAdapter, ConnectorEnvPolicy, ErrorClass, capture_session,
+    AgentAdapter, AgentFailure, AgentTask, ClaudeAdapter, ConnectorEnvPolicy, ErrorClass,
+    capture_session,
 };
 use apb_engine::event::{EventPayload, read_all};
 use apb_engine::failure_class::{FailureKind, classify};
@@ -156,7 +157,11 @@ fn zcode_error_exit_is_process_exit_with_the_cli_message() {
         ),
         spec: builtin("zcode").unwrap(),
     };
-    let (class, msg) = ad
+    let AgentFailure {
+        class,
+        message: msg,
+        ..
+    } = ad
         .run(&task(dir.path(), &ConnectorEnvPolicy::default(), false))
         .unwrap_err();
     assert_eq!(class, ErrorClass::ProcessExit);
@@ -176,9 +181,10 @@ fn zcode_quota_stop_classifies_as_budget() {
         ),
         spec: builtin("zcode").unwrap(),
     };
-    let (_, msg) = ad
+    let msg = ad
         .run(&task(dir.path(), &ConnectorEnvPolicy::default(), false))
-        .unwrap_err();
+        .unwrap_err()
+        .message;
     assert_eq!(classify(&msg), FailureKind::Budget, "{msg}");
 }
 

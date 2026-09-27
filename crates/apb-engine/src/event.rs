@@ -182,6 +182,19 @@ pub enum EventPayload {
         /// attempt a supervisor interrupted, and for old logs. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         failure_kind: Option<String>,
+        /// Token usage the agent CLI reported for this attempt in its machine
+        /// output (issue #167, see `apb_core::agent_output`). `None` when the
+        /// output reported none (plain-text agents, custom invocation forms,
+        /// an attempt that ended without a parsable result), and for old
+        /// logs: never an estimate made by apb. Additive. Read leniently: a
+        /// usage block this binary cannot decode (a newer apb's shape) reads
+        /// as `None` rather than failing the whole journal.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_usage"
+        )]
+        usage: Option<apb_core::agent_output::AgentUsage>,
     },
     NodeFinished {
         node: String,
@@ -649,12 +662,31 @@ impl EventLog {
     }
 
     pub fn open(run_dir: &Path) -> Result<Self, EngineError> {
+        Self::open_with(run_dir, UnknownPolicy::Refuse)
+    }
+
+    /// [`Self::open`] for the stop path, which only ever appends the
+    /// `run_aborted` checkpoint: an unknown event newer than the last
+    /// checkpoint does not refuse (see [`read_all_for_stop`], which already
+    /// warned about it).
+    pub(crate) fn open_for_stop(run_dir: &Path) -> Result<Self, EngineError> {
+        Self::open_with(run_dir, UnknownPolicy::Allow)
+    }
+
+    fn open_with(run_dir: &Path, policy: UnknownPolicy) -> Result<Self, EngineError> {
         let path = run_dir.join("events.jsonl");
-        let next_seq = if path.is_file() {
-            read_all(run_dir)?.last().map(|e| e.seq + 1).unwrap_or(0)
-        } else {
-            0
-        };
+        // Appending is deciding on the journal, so the engine's rule for
+        // unknown events applies (see [`read_all`]); the next seq also clears
+        // the skipped ones, so an appended event never reuses their seq.
+        let journal = read_journal_with(run_dir, false)?;
+        settle_unknown(&journal, policy)?;
+        let next_seq = journal
+            .events
+            .iter()
+            .map(|e| e.seq)
+            .chain(journal.unknown.iter().map(|u| u.seq))
+            .max()
+            .map_or(0, |s| s + 1);
         let file = OpenOptions::new().create(true).append(true).open(&path)?;
         Ok(Self {
             path,
@@ -702,7 +734,9 @@ fn last_seq_on_disk(path: &Path) -> Result<Option<u64>, EngineError> {
         if line.trim().is_empty() {
             continue;
         }
-        let ev: Event =
+        // Only the seq is needed, so an event of a type this binary does not
+        // know still counts: its seq is taken all the same.
+        let ev: EventHeader =
             serde_json::from_str(&line).map_err(|e| EngineError::Yaml(e.to_string()))?;
         last = Some(ev.seq);
     }
@@ -836,18 +870,216 @@ pub(crate) fn review_requested_count(events: &[Event], node: &str) -> usize {
         .count()
 }
 
-/// The whole journal, strictly: any unparsable line at all is an error.
+/// `AttemptFinished.usage` as optional data: a block that does not decode as
+/// this binary's [`apb_core::agent_output::AgentUsage`] (a `source` or a
+/// required field a newer apb added) is dropped instead of making the known
+/// event, and with it the whole journal, unreadable.
+fn lenient_usage<'de, D>(d: D) -> Result<Option<apb_core::agent_output::AgentUsage>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// An event whose `type` this binary does not know: a newer apb wrote it.
+/// Only its position is kept; the line itself stays on disk untouched.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct UnknownEvent {
+    pub seq: u64,
+    pub ts: u128,
+    /// The event's `type` tag, as written.
+    pub kind: String,
+}
+
+/// A journal as read: the events this binary knows, in order, and the ones
+/// it skipped because their type is newer than this binary.
+#[derive(Debug, Default)]
+pub struct JournalRead {
+    pub events: Vec<Event>,
+    pub unknown: Vec<UnknownEvent>,
+}
+
+/// The envelope every event line carries, whatever its type: what is left
+/// to go on for a line whose payload this binary cannot decode.
+#[derive(Deserialize)]
+struct EventHeader {
+    seq: u64,
+    #[serde(default)]
+    ts: u128,
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+/// Whether `kind` names an [`EventPayload`] variant this binary knows. Asked
+/// of serde itself, so a variant added later is known without a list to keep
+/// in sync: a bare `{"type": kind}` fails with "unknown variant" only when no
+/// variant carries that tag (a known one fails on its missing fields, or
+/// decodes when all of them are optional).
+fn is_known_kind(kind: &str) -> bool {
+    match serde_json::from_value::<EventPayload>(serde_json::json!({ "type": kind })) {
+        Ok(_) => true,
+        Err(e) => !e.to_string().starts_with("unknown variant"),
+    }
+}
+
+/// Whether `kind` has the shape of an event `type` tag (snake_case, at most
+/// 64 characters). Only such a tag is skipped as a newer event type; any
+/// other value is corruption, and it is kept out of the messages that name
+/// skipped types.
+fn is_event_tag(kind: &str) -> bool {
+    (1..=64).contains(&kind.len())
+        && kind.starts_with(|c: char| c.is_ascii_lowercase())
+        && kind
+            .chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_')
+}
+
+/// Reads one journal line into `out`. An event of an unknown type is not an
+/// error: it goes to `out.unknown` so the caller can skip and count it. A
+/// known type whose fields do not decode, and anything that is not an event
+/// at all, stays an error.
+fn push_line(line: &str, out: &mut JournalRead) -> Result<(), EngineError> {
+    let err = match serde_json::from_str::<Event>(line) {
+        Ok(ev) => {
+            out.events.push(ev);
+            return Ok(());
+        }
+        Err(e) => EngineError::Yaml(e.to_string()),
+    };
+    match serde_json::from_str::<EventHeader>(line) {
+        Ok(h) if is_event_tag(&h.kind) && !is_known_kind(&h.kind) => {
+            out.unknown.push(UnknownEvent {
+                seq: h.seq,
+                ts: h.ts,
+                kind: h.kind,
+            });
+            Ok(())
+        }
+        _ => Err(err),
+    }
+}
+
+impl EventPayload {
+    /// A checkpoint: an event after which everything earlier in the journal
+    /// is settled (a node's result is recorded, the drive stopped at a
+    /// boundary, the run ended). The engine skips an unknown event only when
+    /// a checkpoint follows it (see [`read_all`]).
+    pub fn is_checkpoint(&self) -> bool {
+        matches!(
+            self,
+            EventPayload::NodeFinished { .. }
+                | EventPayload::RunPaused { .. }
+                | EventPayload::RunFinished { .. }
+                | EventPayload::RunAborted { .. }
+        )
+    }
+}
+
+/// The whole journal, for the engine: any unparsable line at all is an error,
+/// and so is an event of an unknown type that no checkpoint follows.
 ///
-/// This is the engine's own contract and it does not change. Everything that
-/// decides on the journal (the drive loop, the folds, resume) must fail loudly
-/// rather than act on a log it could only read in part.
+/// Everything that decides on the journal (the drive loop, the folds, resume,
+/// every writer that reads before appending) must fail loudly rather than act
+/// on a log it could only read in part. An event type a newer apb wrote is
+/// the one exception, and only while a checkpoint follows it
+/// ([`EventPayload::is_checkpoint`]): whatever it meant was settled by the
+/// time the run reached that checkpoint, so the fold of the known events is
+/// still correct. The contract for every new event type is exactly that: it
+/// must be safe to skip up to the next checkpoint. An unknown event newer
+/// than the last checkpoint may be state the engine needs to continue, so
+/// this refuses with a message naming the version mismatch instead.
 pub fn read_all(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
-    read_events(run_dir, false)
+    let journal = read_journal_with(run_dir, false)?;
+    settle_unknown(&journal, UnknownPolicy::Refuse)?;
+    Ok(journal.events)
+}
+
+/// [`read_all`] for stopping a run (`apb run stop`, `run_cancel`, the abort
+/// propagated to children): an unknown event newer than the last checkpoint
+/// does not refuse. `warn` prints one warning about it; the stop path passes
+/// it on its first read only, so one stop warns once.
+///
+/// Stopping is the one decision that is safe on a journal this binary reads
+/// only in part. It never re-drives the run: all it can write is
+/// `run_aborted`, itself a checkpoint, so whatever the unknown event meant is
+/// settled by the abort rather than acted on. Refusing here would leave an
+/// older binary unable to stop a run a newer one started. The line format
+/// stays strict, as in [`read_all`].
+pub(crate) fn read_all_for_stop(run_dir: &Path, warn: bool) -> Result<Vec<Event>, EngineError> {
+    let journal = read_journal_with(run_dir, false)?;
+    let policy = if warn {
+        UnknownPolicy::Warn
+    } else {
+        UnknownPolicy::Allow
+    };
+    settle_unknown(&journal, policy)?;
+    Ok(journal.events)
+}
+
+/// What a writer does with an unknown event newer than the last checkpoint.
+#[derive(Clone, Copy)]
+enum UnknownPolicy {
+    /// Refuse (drive, resume, every other writer).
+    Refuse,
+    /// Warn and go on (the stop path, see [`read_all_for_stop`]).
+    Warn,
+    /// Go on silently (the stop path after its first read has warned).
+    Allow,
+}
+
+fn settle_unknown(journal: &JournalRead, policy: UnknownPolicy) -> Result<(), EngineError> {
+    match (check_unknown_settled(journal), policy) {
+        (Err(EngineError::Conflict(msg)), UnknownPolicy::Warn) => {
+            eprintln!(
+                "apb: warning: {msg}; stopping the run anyway, which only appends `run_aborted`"
+            );
+            Ok(())
+        }
+        (Err(EngineError::Conflict(_)), UnknownPolicy::Allow) => Ok(()),
+        (res, _) => res,
+    }
+}
+
+/// Refuses a journal holding an unknown event that no checkpoint follows
+/// (see [`read_all`]).
+fn check_unknown_settled(journal: &JournalRead) -> Result<(), EngineError> {
+    let checkpoint = journal
+        .events
+        .iter()
+        .rev()
+        .find(|e| e.payload.is_checkpoint())
+        .map(|e| e.seq);
+    let unsettled: Vec<&UnknownEvent> = journal
+        .unknown
+        .iter()
+        .filter(|u| checkpoint.is_none_or(|c| u.seq > c))
+        .collect();
+    if unsettled.is_empty() {
+        return Ok(());
+    }
+    let mut kinds: Vec<&str> = unsettled.iter().map(|u| u.kind.as_str()).collect();
+    kinds.sort_unstable();
+    kinds.dedup();
+    let after = match checkpoint {
+        Some(seq) => format!("after its last checkpoint (seq {seq})"),
+        None => "before any checkpoint".to_string(),
+    };
+    Err(EngineError::Conflict(format!(
+        "the run journal has {} event(s) of a type this apb {} does not know ({}) {after}; \
+         they were written by a newer apb, and continuing without them could act on \
+         state this binary cannot see: upgrade apb and retry",
+        unsettled.len(),
+        env!("CARGO_PKG_VERSION"),
+        kinds.join(", "),
+    )))
 }
 
 /// The journal for a reader that may be racing the writer: identical to
 /// [`read_all`] except that a single unparsable LAST line is dropped instead
-/// of failing the read (issue #103.3).
+/// of failing the read (issue #103.3), and that unknown event types are
+/// skipped wherever they are.
 ///
 /// `EventLog::append` writes one line at a time and a reader can open the file
 /// between the bytes of a line and its newline, so a torn tail is a normal
@@ -860,17 +1092,24 @@ pub fn read_all(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
 /// it - a blank line included, since a torn append leaves no line behind it at
 /// all - is real corruption, and skipping it would hand the caller a journal
 /// with a silent hole. Reserved for read-only reporting surfaces; engine
-/// consumers stay on [`read_all`].
+/// consumers stay on [`read_all`]. A surface that shows how many events it
+/// skipped reads [`read_journal`] instead.
 pub fn read_all_lossy_tail(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
-    read_events(run_dir, true)
+    Ok(read_journal(run_dir)?.events)
 }
 
-fn read_events(run_dir: &Path, tolerate_torn_tail: bool) -> Result<Vec<Event>, EngineError> {
+/// The journal as a read-only surface sees it (see [`read_all_lossy_tail`]),
+/// with the events of unknown types it skipped.
+pub fn read_journal(run_dir: &Path) -> Result<JournalRead, EngineError> {
+    read_journal_with(run_dir, true)
+}
+
+fn read_journal_with(run_dir: &Path, tolerate_torn_tail: bool) -> Result<JournalRead, EngineError> {
     let path = run_dir.join("events.jsonl");
+    let mut out = JournalRead::default();
     if !path.is_file() {
-        return Ok(Vec::new());
+        return Ok(out);
     }
-    let mut out = Vec::new();
     // An unparsable line is only forgiven once nothing follows it, so the
     // verdict is deferred: the next line proves it was not the tail.
     let mut torn: Option<EngineError> = None;
@@ -885,15 +1124,11 @@ fn read_events(run_dir: &Path, tolerate_torn_tail: bool) -> Result<Vec<Event>, E
         if line.trim().is_empty() {
             continue;
         }
-        match serde_json::from_str::<Event>(&line) {
-            Ok(ev) => out.push(ev),
-            Err(e) => {
-                let err = EngineError::Yaml(e.to_string());
-                if !tolerate_torn_tail {
-                    return Err(err);
-                }
-                torn = Some(err);
+        if let Err(err) = push_line(&line, &mut out) {
+            if !tolerate_torn_tail {
+                return Err(err);
             }
+            torn = Some(err);
         }
     }
     Ok(out)
@@ -1060,6 +1295,7 @@ mod tests {
             rejected_output: Some("interim progress only".into()),
             partial_output: None,
             failure_kind: None,
+            usage: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
@@ -1095,6 +1331,7 @@ mod tests {
             rejected_output: None,
             partial_output: None,
             failure_kind: Some("transient".into()),
+            usage: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
@@ -1162,6 +1399,7 @@ mod tests {
             rejected_output: None,
             partial_output: None,
             failure_kind: None,
+            usage: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
