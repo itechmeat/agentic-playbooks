@@ -559,6 +559,11 @@ pub(crate) fn describe_route_key(key: &RouteKey<'_>) -> String {
         }) => {
             format!("output_field node=`{node}` field=`{field}` equals=`{equals}`")
         }
+        RouteKey::Conditional(EdgeCondition::Judge {
+            question, min_p, ..
+        }) => {
+            format!("judge question=`{question}` min_p={}", min_p.0)
+        }
     }
 }
 

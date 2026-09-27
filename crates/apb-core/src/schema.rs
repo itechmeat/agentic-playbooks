@@ -67,7 +67,7 @@ impl JoinMode {
 /// Every node `type` tag, in declaration order. [`NodeKind::type_str`] reads
 /// from it, so this is the one list of node types (the dashboard's generated
 /// types, the authoring guide's doc test).
-pub const NODE_TYPES: [&str; 9] = [
+pub const NODE_TYPES: [&str; 10] = [
     "start",
     "agent_task",
     "script",
@@ -77,6 +77,7 @@ pub const NODE_TYPES: [&str; 9] = [
     "wait",
     "finish",
     "playbook",
+    "judge",
 ];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -438,6 +439,10 @@ impl NodeKind {
             | NodeKind::Finish {
                 prompt: Some(_), ..
             } => true,
+            // A judge whose fallback is `emulate` may run its profile's agent.
+            NodeKind::Judge { on_unavailable, .. } => {
+                matches!(on_unavailable, Some(crate::judge::JudgeFallback::Emulate))
+            }
             NodeKind::Start
             | NodeKind::Script { .. }
             | NodeKind::Prompt { .. }
@@ -502,6 +507,15 @@ impl NodeKind {
                 profile,
                 ..
             } => profile.clone().or_else(|| defaults.profile.clone()),
+            NodeKind::Judge {
+                on_unavailable,
+                profile,
+                ..
+            } => crate::judge::emulation_profile(
+                on_unavailable.as_ref(),
+                profile.as_ref(),
+                defaults,
+            ),
             _ => None,
         }
     }
@@ -532,6 +546,7 @@ impl NodeKind {
             NodeKind::Wait { .. } => 6,
             NodeKind::Finish { .. } => 7,
             NodeKind::Playbook { .. } => 8,
+            NodeKind::Judge { .. } => 9,
         }]
     }
 }
@@ -1138,6 +1153,33 @@ pub enum NodeKind {
         #[serde(default)]
         instruction: Option<String>,
     },
+    // --- issue #165 Part 5: the judge node --------------------------------
+    /// Asks a decision model typed questions over a small named state and
+    /// publishes the answers as a compact JSON object (see
+    /// [`crate::judge`]). Routes on the answer only when the machine's
+    /// `judge_node` use is at `enforce`; otherwise, and whenever no usable
+    /// answer comes back, it applies `on_unavailable`. Additive to schema 2;
+    /// older binaries reject the node type.
+    Judge {
+        /// Named state fields, each a template rendered like a prompt.
+        #[serde(default)]
+        state: crate::judge::OrderedMap<String>,
+        /// The questions, a map from id to question.
+        #[serde(default)]
+        questions: crate::judge::JudgeQuestions,
+        /// How an answer becomes an output value, by question id.
+        #[serde(default, skip_serializing_if = "crate::judge::OrderedMap::is_empty")]
+        thresholds: crate::judge::OrderedMap<crate::judge::JudgeThreshold>,
+        /// What the node does without a usable answer; absent means `fail`
+        /// (and a validator warning).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_unavailable: Option<crate::judge::JudgeFallback>,
+        /// The profile an `emulate` fallback runs (falls back to
+        /// `defaults.profile`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<QualifiedProfileRef>,
+    },
+    // --- end judge node ----------------------------------------------------
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1250,6 +1292,23 @@ pub enum EdgeCondition {
         field: String,
         equals: String,
     },
+    // --- issue #165 Part 7: the judge edge condition -------------------------
+    /// A yes/no question to a decision model about the SOURCE node's output
+    /// (its only state, with the source's title as `step`), asked once when
+    /// the source finishes, together with every other judge edge of that
+    /// node, and journaled before routing. The edge matches when the answer's
+    /// probability is at least `min_p`; without a usable answer (no provider,
+    /// the `judge_edge` use below enforce, an error) it matches exactly when
+    /// `on_unavailable` is true. `on_unavailable` is mandatory (validator
+    /// V59); it is optional here only so a missing value is a validation
+    /// error rather than a parse error.
+    Judge {
+        question: String,
+        min_p: crate::judge::Probability,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_unavailable: Option<bool>,
+    },
+    // --- end judge edge condition ----------------------------------------------
 }
 
 /// One top-level field of a node output that parses as a JSON object, as the
@@ -1307,6 +1366,7 @@ mod tests {
             "{ id: n6, type: wait, wait_for: { type: timer, seconds: 1 }, timeout_seconds: 5 }",
             "{ id: n7, type: finish, outcome: success }",
             "{ id: n8, type: playbook, playbook: other }",
+            "{ id: n9, type: judge, state: { s: x }, questions: { q: { type: noul, instructions: i } } }",
         ]
         .map(|n| format!("  - {n}\n"))
         .concat();

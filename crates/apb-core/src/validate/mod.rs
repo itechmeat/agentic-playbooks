@@ -9,6 +9,7 @@
 
 mod connectors;
 mod graph;
+mod judge;
 mod node_io;
 mod nodes;
 mod templates;
@@ -34,6 +35,7 @@ use nodes::{
     check_cache, check_expected_duration, check_finish, check_goal, check_interactive,
     check_isolation, check_playbook_ref, check_scripts, check_success_check, check_trigger,
 };
+use judge::{check_judge_edges, check_judge_nodes};
 use templates::{check_cross_branch_reads, check_refs, check_templates};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -154,6 +156,8 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     check_failure_policy(playbook, &mut r); // V35
+    check_judge_nodes(playbook, &mut r); // V50-V58, V61 (issue #165 Part 5)
+    check_judge_edges(playbook, &mut r); // V59, V60 (issue #165 Part 7)
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10
