@@ -168,7 +168,9 @@ published release body via a post-announce job.
 - A new `EventPayload` variant must be safe to skip up to the next checkpoint
   (`EventPayload::is_checkpoint`): an older binary skips an event type it does
   not know and counts it, and the engine continues a run only when a
-  checkpoint follows every such event (`event::read_all`). Never replace a
+  checkpoint follows every such event (`event::read_all`). Stopping a run is
+  the one exception: it only appends `run_aborted`, itself a checkpoint, so it
+  goes through with a warning (`event::read_all_for_stop`). Never replace a
   known event with a new type; add alongside it. A structured optional field
   of a known event (such as `AttemptFinished.usage`) decodes leniently, so a
   shape a newer apb wrote reads as absent instead of failing the journal.

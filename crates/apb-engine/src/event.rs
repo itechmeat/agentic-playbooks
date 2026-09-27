@@ -662,12 +662,24 @@ impl EventLog {
     }
 
     pub fn open(run_dir: &Path) -> Result<Self, EngineError> {
+        Self::open_with(run_dir, UnknownPolicy::Refuse)
+    }
+
+    /// [`Self::open`] for the stop path, which only ever appends the
+    /// `run_aborted` checkpoint: an unknown event newer than the last
+    /// checkpoint does not refuse (see [`read_all_for_stop`], which already
+    /// warned about it).
+    pub(crate) fn open_for_stop(run_dir: &Path) -> Result<Self, EngineError> {
+        Self::open_with(run_dir, UnknownPolicy::Allow)
+    }
+
+    fn open_with(run_dir: &Path, policy: UnknownPolicy) -> Result<Self, EngineError> {
         let path = run_dir.join("events.jsonl");
         // Appending is deciding on the journal, so the engine's rule for
         // unknown events applies (see [`read_all`]); the next seq also clears
         // the skipped ones, so an appended event never reuses their seq.
         let journal = read_journal_with(run_dir, false)?;
-        check_unknown_settled(&journal)?;
+        settle_unknown(&journal, policy)?;
         let next_seq = journal
             .events
             .iter()
@@ -980,8 +992,54 @@ impl EventPayload {
 /// this refuses with a message naming the version mismatch instead.
 pub fn read_all(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
     let journal = read_journal_with(run_dir, false)?;
-    check_unknown_settled(&journal)?;
+    settle_unknown(&journal, UnknownPolicy::Refuse)?;
     Ok(journal.events)
+}
+
+/// [`read_all`] for stopping a run (`apb run stop`, `run_cancel`, the abort
+/// propagated to children): an unknown event newer than the last checkpoint
+/// does not refuse. `warn` prints one warning about it; the stop path passes
+/// it on its first read only, so one stop warns once.
+///
+/// Stopping is the one decision that is safe on a journal this binary reads
+/// only in part. It never re-drives the run: all it can write is
+/// `run_aborted`, itself a checkpoint, so whatever the unknown event meant is
+/// settled by the abort rather than acted on. Refusing here would leave an
+/// older binary unable to stop a run a newer one started. The line format
+/// stays strict, as in [`read_all`].
+pub(crate) fn read_all_for_stop(run_dir: &Path, warn: bool) -> Result<Vec<Event>, EngineError> {
+    let journal = read_journal_with(run_dir, false)?;
+    let policy = if warn {
+        UnknownPolicy::Warn
+    } else {
+        UnknownPolicy::Allow
+    };
+    settle_unknown(&journal, policy)?;
+    Ok(journal.events)
+}
+
+/// What a writer does with an unknown event newer than the last checkpoint.
+#[derive(Clone, Copy)]
+enum UnknownPolicy {
+    /// Refuse (drive, resume, every other writer).
+    Refuse,
+    /// Warn and go on (the stop path, see [`read_all_for_stop`]).
+    Warn,
+    /// Go on silently (the stop path after its first read has warned).
+    Allow,
+}
+
+fn settle_unknown(journal: &JournalRead, policy: UnknownPolicy) -> Result<(), EngineError> {
+    match (check_unknown_settled(journal), policy) {
+        (Err(EngineError::Conflict(msg)), UnknownPolicy::Warn) => {
+            eprintln!(
+                "apb: warning: {msg}; stopping the run anyway, which only appends `run_aborted`"
+            );
+            Ok(())
+        }
+        (Err(EngineError::Conflict(_)), UnknownPolicy::Allow) => Ok(()),
+        (res, _) => res,
+    }
 }
 
 /// Refuses a journal holding an unknown event that no checkpoint follows

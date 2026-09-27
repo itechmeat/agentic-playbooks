@@ -238,3 +238,35 @@ fn an_attempt_usage_block_of_a_newer_shape_does_not_break_the_journal() {
     assert_eq!(usage, Some(None));
     apb_engine::event::read_all(dir.path()).expect("the engine reads it too");
 }
+
+/// Stopping never re-drives a run and only appends `run_aborted`, itself a
+/// checkpoint, so an older apb can stop a run whose journal holds an unknown
+/// event after the last checkpoint. Resuming the same journal still refuses.
+#[test]
+fn stop_goes_through_an_unknown_event_newer_than_the_last_checkpoint() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed(tmp.path());
+    let res = run(tmp.path(), "lin", None, RunOptions::default()).unwrap();
+    crash_after_a_with_future_event(tmp.path(), &res.run_id, true);
+    let dir = tmp.path().join(".apb/runs").join(&res.run_id);
+
+    let err = resume(tmp.path(), &res.run_id, None)
+        .unwrap_err()
+        .to_string();
+    assert!(err.contains("newer apb"), "{err}");
+
+    let outcome = apb_engine::stop_run(tmp.path(), &res.run_id).unwrap();
+    assert_eq!(outcome, apb_engine::StopOutcome::FinalizedDeadRun);
+    let journal = read_journal(&dir).unwrap();
+    assert_eq!(journal.unknown.len(), 1, "the unknown event stays on disk");
+    let last = journal.events.last().unwrap();
+    assert!(
+        matches!(last.payload, EventPayload::RunAborted { .. }),
+        "{last:?}"
+    );
+    assert!(last.seq > journal.unknown[0].seq, "the abort follows it");
+    assert_eq!(
+        RunView::load(&dir, &res.run_id).unwrap().state.run_status,
+        RunStatus::Aborted
+    );
+}
