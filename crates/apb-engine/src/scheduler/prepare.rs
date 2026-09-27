@@ -616,7 +616,7 @@ pub(crate) fn prepare_run_target(
     // gated sub-playbook child with a missing/drifted connector permit, or a
     // profile bundle mismatch, is refused (issue #42 finding 3b) - the run
     // directory and its journal already exist at this point, hence `prep_try`.
-    let manifest = prep_try(
+    let mut manifest = prep_try(
         &mut log,
         build_run_manifest(
             &playbook,
@@ -640,6 +640,13 @@ pub(crate) fn prepare_run_target(
             bundle_digest: p.bundle_digest.clone(),
         })
         .collect();
+    // Decision models (issue #165): snapshot the effective settings for a
+    // run that has agent nodes, the only place a use asks today. Nothing at
+    // all without `decisions.yaml`, so such a manifest is unchanged. A file
+    // that does not load leaves the layer off; it never fails the run.
+    if !manifest.profiles.is_empty() {
+        manifest.decisions = crate::decision::snapshot(root);
+    }
     if !manifest.is_empty() {
         prep_try(&mut log, crate::manifest::write(&run_dir, &manifest))?;
     }

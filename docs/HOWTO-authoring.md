@@ -140,6 +140,23 @@ attempt and exposed to downstream templates as
 `{{nodes.<id>.rejected_output}}`, so a fix or review node can read exactly what
 the rejected attempt claimed.
 
+### Completion check (decision models)
+
+When the machine's `decisions.yaml` turns the `completion_check` use on, each
+successful `agent_task` attempt is also rated by a decision model (is the
+reply a finished result, or a progress note, a plan or a question back?). The
+check is shadow-only: it is recorded in the run journal and changes nothing
+else. It never runs on a node whose `success_check` is a script. A node whose
+output is not a report (a collector returning a list, a node printing only
+data) can switch it off:
+
+```yaml
+  - { id: collect, type: agent_task, prompt: "list the open issues", profile: dev, completion_check: off }
+```
+
+`completion_check` takes `auto` (the default) or `off`; it can only switch the
+check off. See DECISIONS.md.
+
 ### Status file (APB_STATUS_FILE)
 
 Each agent_task attempt is handed an `APB_STATUS_FILE` environment variable

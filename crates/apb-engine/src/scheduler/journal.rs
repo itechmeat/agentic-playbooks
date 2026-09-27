@@ -42,6 +42,17 @@ impl<'a> Journal<'a> {
         Ok(())
     }
 
+    /// Appends one event and returns its seq (the decision runner names its
+    /// debug-state file after it).
+    pub(crate) fn append_seq(&self, payload: EventPayload) -> Result<u64, EngineError> {
+        Ok(self
+            .log
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .append(payload)?
+            .seq)
+    }
+
     /// Journals a wake and mirrors it to a parent run when nested (issue #45
     /// finding 8). Same contract as [`crate::event::raise_wake`].
     pub(crate) fn raise_wake(
@@ -59,6 +70,14 @@ impl<'a> Journal<'a> {
         })?;
         let _ = crate::event::propagate_wake_to_parent(run_dir, trigger, node, &detail);
         Ok(())
+    }
+}
+
+/// Decisions are journaled mid-node through the attempt journal, the same
+/// handle as `attempt_finished` (issue #165 Part 3), never the post-node batch.
+impl crate::decision::DecisionJournal for Journal<'_> {
+    fn append_decision(&self, payload: EventPayload) -> Result<u64, EngineError> {
+        self.append_seq(payload)
     }
 }
 

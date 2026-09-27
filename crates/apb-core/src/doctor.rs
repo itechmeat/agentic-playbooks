@@ -104,6 +104,19 @@ pub fn diagnose(root: &Path) -> DoctorReport {
         }
     }
 
+    // Decision models (issue #165 Part 2): one line, never a key. Reported
+    // before the registry check for the same reason as the suggestions line.
+    let (decisions_ok, decisions_detail) = crate::decisions::doctor_line(root);
+    r.push(
+        if decisions_ok {
+            CheckStatus::Ok
+        } else {
+            CheckStatus::Warn
+        },
+        "decisions",
+        decisions_detail,
+    );
+
     let reg = match Registry::open(root) {
         Ok(reg) => reg,
         Err(e) => {

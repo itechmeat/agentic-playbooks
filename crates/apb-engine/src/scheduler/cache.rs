@@ -566,6 +566,30 @@ pub(crate) fn probe(
     }
 }
 
+/// The declared `outputs.fields` a successful output leaves out (absent,
+/// `null`, or an output that is not a JSON object at all). Empty for a node
+/// that declares none. The one definition behind `OutputFieldsMissing` and
+/// the completion check's `missing_fields`.
+pub(crate) fn missing_output_fields(node: &apb_core::schema::Node, output: &str) -> Vec<String> {
+    let Some(fields) = node.outputs.as_ref().map(|o| &o.fields) else {
+        return Vec::new();
+    };
+    if fields.is_empty() {
+        return Vec::new();
+    }
+    let parsed: Option<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(output).ok();
+    fields
+        .iter()
+        .filter(|f| {
+            parsed
+                .as_ref()
+                .is_none_or(|o| o.get(f.as_str()).is_none_or(|v| v.is_null()))
+        })
+        .cloned()
+        .collect()
+}
+
 /// The post-execution half of the per-node unit: captures the node's declared
 /// output artifacts, checks the declaration, and decides cache admission.
 ///
@@ -613,26 +637,12 @@ pub(crate) fn settle(
     let mut events = Vec::new();
     // Declared named outputs (issue #67 item 4): a warning per execution that
     // left any of them out, never a failure.
-    if let Some(fields) = node.outputs.as_ref().map(|o| &o.fields)
-        && !fields.is_empty()
-    {
-        let parsed: Option<serde_json::Map<String, serde_json::Value>> =
-            serde_json::from_str(output).ok();
-        let missing: Vec<String> = fields
-            .iter()
-            .filter(|f| {
-                parsed
-                    .as_ref()
-                    .is_none_or(|o| o.get(f.as_str()).is_none_or(|v| v.is_null()))
-            })
-            .cloned()
-            .collect();
-        if !missing.is_empty() {
-            events.push(EventPayload::OutputFieldsMissing {
-                node: node_id.to_string(),
-                fields: missing,
-            });
-        }
+    let missing = missing_output_fields(node, output);
+    if !missing.is_empty() {
+        events.push(EventPayload::OutputFieldsMissing {
+            node: node_id.to_string(),
+            fields: missing,
+        });
     }
     if declared.is_empty() && ctx.is_none() {
         return (Vec::new(), events);

@@ -326,6 +326,46 @@ fn success_check_rejection(
     }
 }
 
+/// The completion check (issue #165 Part 8) on an attempt that reported
+/// success and passed its `success_check`, in milliseconds (counted into the
+/// attempt's duration). Shadow only: it journals a `decision_made` and
+/// changes nothing else. Skipped without a decision runner, on a node with a
+/// script `success_check` (a checked fact outranks a judgment), on a node
+/// with `completion_check: off`, and for an empty output (the empty-output
+/// anomaly covers it).
+fn completion_check_ms(
+    decisions: Option<&crate::decision::DecisionRunner>,
+    journal: &Journal,
+    node: &apb_core::schema::Node,
+    attempt: u32,
+    prompt: &str,
+    output: &str,
+) -> u64 {
+    let Some(runner) = decisions else {
+        return 0;
+    };
+    if node.completion_check == Some(apb_core::schema::CompletionCheckSetting::Off)
+        || matches!(
+            node.success_check,
+            Some(apb_core::schema::SuccessCheck::Script(_))
+        )
+    {
+        return 0;
+    }
+    crate::decision::completion::check(
+        runner,
+        journal,
+        crate::decision::completion::Attempt {
+            node: &node.id,
+            attempt,
+            prompt,
+            output,
+            missing_fields: super::cache::missing_output_fields(node, output),
+        },
+    )
+    .as_millis() as u64
+}
+
 /// Journals an attempt that ended without recording a REQUIRED verdict as
 /// `interrupted`, preserving whatever it produced (spec 2026-08-05 section 2.2,
 /// issue #71 item 1).
@@ -479,6 +519,7 @@ pub(crate) fn execute_node(
     cancel: &AtomicBool,
     env_scrub: &[String],
     journal: &Journal,
+    decisions: Option<&crate::decision::DecisionRunner>,
     resume: Option<ResumeContext>,
     live: Option<LiveContext>,
 ) -> Result<AttemptOutcome, EngineError> {
@@ -607,6 +648,9 @@ pub(crate) fn execute_node(
                     events,
                 );
             }
+            // The completion check's `task`: the prompt as rendered for this
+            // execution, before any retry continuation replaces it.
+            let task_prompt = text.clone();
             let retries = max_retries.or(playbook.defaults.max_retries).unwrap_or(0);
             // Required verdict (spec 2026-08-05 section 2.2). The node field is a
             // plain bool, so it can only turn the requirement ON; a playbook-wide
@@ -1663,6 +1707,15 @@ pub(crate) fn execute_node(
                                         last_timed_out = false;
                                     }
                                     None => {
+                                        let check_ms = completion_check_ms(
+                                            decisions,
+                                            journal,
+                                            node,
+                                            attempt,
+                                            &task_prompt,
+                                            &report.output,
+                                        );
+                                        let duration_ms = duration_ms.map(|d| d + check_ms);
                                         journal.append(EventPayload::AttemptFinished {
                                             node: node_id.into(),
                                             attempt,
@@ -1822,6 +1875,15 @@ pub(crate) fn execute_node(
                                         &output,
                                     )? {
                                         None => {
+                                            let check_ms = completion_check_ms(
+                                                decisions,
+                                                journal,
+                                                node,
+                                                attempt,
+                                                &task_prompt,
+                                                &output,
+                                            );
+                                            let duration_ms = duration_ms.map(|d| d + check_ms);
                                             journal.append(EventPayload::AttemptFinished {
                                                 node: node_id.into(),
                                                 attempt,

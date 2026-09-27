@@ -120,11 +120,20 @@ pub struct RunExecutionManifest {
     /// Binding from `node_id` -> the grants that node holds.
     #[serde(default)]
     pub connector_grants: BTreeMap<String, Vec<ManifestConnectorGrant>>,
+    /// The decision-model settings of the run (issue #165 Part 3), present
+    /// only when at least one use is above off at start: providers (ids,
+    /// kinds, URLs, pinned models, data class, the key REFERENCE, never a
+    /// key), per-use modes and thresholds, budget and privacy. Retry and
+    /// resume read it from here, so a later edit of `decisions.yaml` does not
+    /// reach a started run. Absent in older manifests and in every run on a
+    /// machine without `decisions.yaml`, which therefore serializes as before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub decisions: Option<apb_core::decisions::EffectiveDecisions>,
 }
 
 impl RunExecutionManifest {
     pub fn is_empty(&self) -> bool {
-        self.profiles.is_empty() && self.connectors.is_empty()
+        self.profiles.is_empty() && self.connectors.is_empty() && self.decisions.is_none()
     }
 
     pub fn for_node(&self, node_id: &str) -> Option<&ManifestProfile> {

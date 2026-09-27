@@ -1142,7 +1142,7 @@ fn run_status_and_report_carry_usage_and_unknown_events_only_when_present() {
         [
             r#"{"seq":0,"ts":1,"type":"run_started","playbook":"noagent","version":"1.0.0"}"#,
             r#"{"seq":1,"ts":2,"type":"attempt_finished","node":"w","attempt":1,"status":"succeeded","duration_ms":5,"session":null,"summary":null,"usage":{"input_tokens":10,"output_tokens":4,"cache_read_tokens":0,"cache_write_tokens":0,"source":"estimated"}}"#,
-            r#"{"seq":2,"ts":3,"type":"decision_made","use":"completion_check"}"#,
+            r#"{"seq":2,"ts":3,"type":"future_event","use":"completion_check"}"#,
             r#"{"seq":3,"ts":4,"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"ok","artifacts":[]}"#,
             r#"{"seq":4,"ts":5,"type":"run_finished","outcome":"succeeded"}"#,
             "",

@@ -929,8 +929,25 @@ pub struct Node {
     /// `defaults.context` field by field. See [`ContextLimits`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextLimits>,
+    /// The decision-model completion check on this node's successful
+    /// attempts (issue #165 Part 8). `auto` (the default) runs it when the
+    /// machine's `decisions.yaml` turns the use on; `off` switches it off for
+    /// this node, for instance on a collector whose output is a list rather
+    /// than a report. The field can only switch the check off, never on.
+    /// Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_check: Option<CompletionCheckSetting>,
     #[serde(flatten)]
     pub kind: NodeKind,
+}
+
+/// A node's `completion_check` setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionCheckSetting {
+    #[default]
+    Auto,
+    Off,
 }
 
 /// Post-agent success gate on an `agent_task` node (spec 6.2, plus issue 45

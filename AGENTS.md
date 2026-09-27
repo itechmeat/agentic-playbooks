@@ -17,9 +17,9 @@ spec `docs/superpowers/specs/2026-07-12-agent-profiles-design.md`.
 
 ## Crates (big picture)
 
-Five crates under `crates/`; the dependency direction is core <- engine <- mcp,
-with cli and server on top. Do not introduce import cycles (enforced by
-code-ranker, see below).
+Six crates under `crates/`; the dependency direction is core <- engine <- mcp,
+with cli and server on top, and `apb-decide` (no workspace dependency) <-
+engine. Do not introduce import cycles (enforced by code-ranker, see below).
 
 - `apb-core` - domain layer, no async. Playbook schema (`schema.rs`,
   `Playbook::from_yaml`), validator (`validate/`, codes V01+, one module per
@@ -34,7 +34,13 @@ code-ranker, see below).
   (`content.rs`), trust store (`trust.rs`), atomic state IO, symlinks and dir
   locks (`fsutil.rs`), the single wall-clock source (`clock.rs`), the readers of
   each agent CLI's machine output: reply and reported token usage
-  (`agent_output.rs`).
+  (`agent_output.rs`), the decision-model config (`decisions.rs`: the
+  machine's `decisions.yaml`, project narrowing, the doctor line).
+- `apb-decide` - a blocking, provider-agnostic decision-model client: the
+  `DecisionProvider` trait, question and answer types, the `systemone` and
+  `fake` providers, limit checks and strict reply validation, retries, the
+  provider chain, the per-run cache and the `ApiKey` wrapper; the `testing`
+  feature adds a multi-response HTTP stub. Knows nothing about runs.
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan, `supervisor` heartbeat and wake park, `node` execution,
@@ -49,8 +55,11 @@ code-ranker, see below).
   (`invocation.rs`), agent adapters (`adapter.rs`), the append-only event log
   (`event.rs`), connector execution (`connector/`, with `call/` split into
   account selection, auth, encoding and response mapping), background
-  supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), and the run
-  policy gate every launch surface calls (`gate.rs`).
+  supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
+  policy gate every launch surface calls (`gate.rs`), and the decision runner
+  (`decision/`: the one entry point for decision-model uses, redaction,
+  budget, replay, the `decision_made` event, and the shadow completion check;
+  see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
   `meta`).

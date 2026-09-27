@@ -89,6 +89,8 @@ mod context_test;
 mod control_liveness_test;
 #[path = "suite/control_test.rs"]
 mod control_test;
+#[path = "suite/decision_test.rs"]
+mod decision_test;
 #[path = "suite/detached_driver_test.rs"]
 mod detached_driver_test;
 #[path = "suite/digest_binding_test.rs"]

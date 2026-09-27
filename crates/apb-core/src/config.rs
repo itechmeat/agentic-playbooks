@@ -315,7 +315,7 @@ fn is_executable(p: &std::path::Path) -> bool {
 }
 
 /// Global config directory: `APB_CONFIG_DIR` (override for tests/local),
-/// then `XDG_CONFIG_HOME/playbook`, then `~/.config/playbook`. None - if
+/// then `XDG_CONFIG_HOME/apb`, then `~/.config/apb`. None - if
 /// no environment variable is set (config-less path).
 pub fn config_dir() -> Option<PathBuf> {
     if let Ok(d) = std::env::var("APB_CONFIG_DIR")

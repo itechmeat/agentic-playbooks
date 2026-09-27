@@ -152,10 +152,23 @@ dependencies = [
 ]
 
 [[package]]
+name = "apb-decide"
+version = "0.21.0"
+dependencies = [
+ "apb-decide",
+ "serde",
+ "serde_json",
+ "sha2",
+ "thiserror",
+ "ureq",
+]
+
+[[package]]
 name = "apb-engine"
 version = "0.21.0"
 dependencies = [
  "apb-core",
+ "apb-decide",
  "base64 0.23.1",
  "imap",
  "imap-proto 0.16.7",
@@ -164,6 +177,7 @@ dependencies = [
  "libc",
  "mail-parser",
  "percent-encoding",
+ "regex",
  "rusqlite",
  "rustls",
  "rustls-platform-verifier",

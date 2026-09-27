@@ -420,6 +420,11 @@ fn drive_inner(
     if !reap_dead_attempts(&entry_events, log)?.is_empty() {
         entry_events = read_all(run_dir)?;
     }
+    // The run's decision runner (issue #165), only when its manifest carries
+    // a decisions block. Seeded from the journal: the budget spent so far and
+    // the answers a resumed attempt replays instead of asking again.
+    let decisions =
+        crate::decision::DecisionRunner::for_run(root, run_dir, &entry_events, &env_scrub);
     // The journal as this drive starts. A fresh run has barely one event; a drive
     // over an existing run dir (a resume) needs it twice: the `After` seed
     // evaluates the finished node's edges against it, and both modes rebuild from
@@ -994,6 +999,7 @@ fn drive_inner(
                             let cancel_c = Arc::clone(&cancel);
                             let scrub_c = env_scrub.clone();
                             let journal_ref = &journal;
+                            let decisions_ref = decisions.as_ref();
                             scope.spawn(move || {
                                 let res = execute_node(
                                     &playbook_c,
@@ -1007,6 +1013,7 @@ fn drive_inner(
                                     &cancel_c,
                                     &scrub_c,
                                     journal_ref,
+                                    decisions_ref,
                                     // Interactive nodes are excluded from the
                                     // concurrent batch, so neither a resume nor
                                     // the live sidecar ever originates here.
@@ -1761,6 +1768,7 @@ fn drive_inner(
                         &run_cancel,
                         &env_scrub,
                         &journal,
+                        decisions.as_ref(),
                         // Resume context set by the answer-consumed arm above;
                         // `None` on the first attempt of a visit and on the
                         // reprompt path.
@@ -1961,6 +1969,7 @@ fn drive_inner(
                         &run_cancel,
                         &env_scrub,
                         &journal,
+                        decisions.as_ref(),
                         // Non-interactive nodes never resume.
                         None,
                         // ...and never run the live sidecar.

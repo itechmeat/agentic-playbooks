@@ -281,6 +281,9 @@ impl RunState {
                 // Context compaction is a materialized rendering artifact,
                 // it does not affect run state.
                 EventPayload::ContextCompacted { .. } => {}
+                // A decision record changes no run state: a shadow answer is
+                // journal only.
+                EventPayload::DecisionMade { .. } => {}
                 // An accepted environment drift is an audit record, it does not change state.
                 EventPayload::EnvironmentDriftAccepted { .. } => {}
                 // Progress is an audit-only cycle report, it does not change state.

@@ -3,6 +3,7 @@ mod agent_home;
 pub mod connector;
 pub mod context;
 pub mod control;
+pub mod decision;
 pub mod driver;
 pub mod error;
 pub mod event;

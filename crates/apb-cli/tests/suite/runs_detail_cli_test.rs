@@ -14,7 +14,7 @@ const JOURNAL: &str = concat!(
     "\n",
     r#"{"seq":2,"ts":1790000000002,"type":"attempt_finished","node":"w","attempt":1,"status":"succeeded","duration_ms":10,"session":null,"summary":"done","usage":{"input_tokens":1200,"output_tokens":300,"cache_read_tokens":5000,"cache_write_tokens":0,"cost_usd":0.0123,"source":"reported"}}"#,
     "\n",
-    r#"{"seq":3,"ts":1790000000003,"type":"decision_made","use":"completion_check","node":"w"}"#,
+    r#"{"seq":3,"ts":1790000000003,"type":"future_event","use":"completion_check","node":"w"}"#,
     "\n",
     r#"{"seq":4,"ts":1790000000004,"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"ok","artifacts":[]}"#,
     "\n",

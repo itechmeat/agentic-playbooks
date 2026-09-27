@@ -1,0 +1,24 @@
+[package]
+name = "apb-decide"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Provider-agnostic client for decision models (typed choice, score and noul questions over a text state)"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+sha2.workspace = true
+# Blocking HTTP client for the `systemone` adapter; the engine's drive loop is
+# synchronous, so no async runtime is involved.
+ureq.workspace = true
+
+[features]
+# `apb_decide::testing`: a multi-response HTTP stub server for the tests of
+# this crate and of the engine. Never enabled in a release build.
+testing = []
+
+[dev-dependencies]
+apb-decide = { path = ".", features = ["testing"] }

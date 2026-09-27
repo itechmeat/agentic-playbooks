@@ -7,7 +7,7 @@
 {"seq":6,"ts":1790000000006,"type":"retry_started","node":"draft","attempt":2}
 {"seq":7,"ts":1790000000007,"type":"attempt_started","node":"draft","attempt":2,"agent":"claude","pid":4243,"spawn_ms":null}
 {"seq":8,"ts":1790000000008,"type":"attempt_finished","node":"draft","attempt":2,"status":"succeeded","duration_ms":5300,"session":"s-1","summary":"drafted"}
-{"seq":9,"ts":1790000000100,"type":"decision_made","use":"completion_check","node":"draft","answer":{"complete":0.97},"provider":"fake"}
+{"seq":9,"ts":1790000000100,"type":"future_event","use":"completion_check","node":"draft","answer":{"complete":0.97},"provider":"fake"}
 {"seq":10,"ts":1790000000009,"type":"node_finished","node":"draft","status":"succeeded","attempt":2,"output":"the draft","artifacts":[]}
 {"seq":11,"ts":1790000000010,"type":"edge_traversed","from":"draft","to":"review"}
 {"seq":12,"ts":1790000000011,"type":"review_requested","node":"review","options":["approve","needs_changes"],"title":"Check the draft","instruction":"read it"}
@@ -17,7 +17,7 @@
 {"seq":16,"ts":1790000000015,"type":"wake_raised","trigger":"anomaly","node":"review","detail":"slow"}
 {"seq":17,"ts":1790000000016,"type":"supervisor_action","action":"context_append","node":null,"detail":"note"}
 {"seq":18,"ts":1790000000017,"type":"run_progress","node_id":"review","done":1,"total":2,"label":null}
-{"seq":19,"ts":1790000000100,"type":"decision_made","use":"completion_check","node":"review","answer":{"complete":0.97},"provider":"fake"}
+{"seq":19,"ts":1790000000100,"type":"future_event","use":"completion_check","node":"review","answer":{"complete":0.97},"provider":"fake"}
 {"seq":20,"ts":1790000000018,"type":"node_finished","node":"review","status":"succeeded","attempt":1,"output":"approve","artifacts":[]}
 {"seq":21,"ts":1790000000019,"type":"run_error","reason":"none"}
 {"seq":22,"ts":1790000000020,"type":"run_finished","outcome":"succeeded"}

@@ -6,6 +6,7 @@ pub mod clock;
 pub mod config;
 pub mod connector;
 pub mod content;
+pub mod decisions;
 pub mod detect;
 pub mod dismiss;
 pub mod doctor;

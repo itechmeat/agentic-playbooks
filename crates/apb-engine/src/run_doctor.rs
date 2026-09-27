@@ -816,6 +816,7 @@ mod tests {
             node_bindings: BTreeMap::from([("a".to_string(), "project/x".to_string())]),
             connectors: Vec::new(),
             connector_grants: BTreeMap::new(),
+            decisions: None,
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }
