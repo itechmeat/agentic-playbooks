@@ -14,8 +14,7 @@
 //!
 //! Pin a versioned model id (`typesafe/jev-1.13`): aliases move with each
 //! release and one community report had the `~typesafe/jev-latest` alias
-//! fail on this route. [`is_model_alias`] tells the config layer when to
-//! warn.
+//! fail on this route; `apb doctor` flags an alias model id.
 //!
 //! Base URL `https://openrouter.ai`; key `{{env.OPENROUTER_API_KEY}}`.
 //! Calibrated: the model is TypeSafe's Jev, which its vendor documents as
@@ -31,14 +30,6 @@ use crate::http::Route;
 use crate::systemone::{parse_systemone_reply, reply_json, systemone_body};
 use crate::validate::check_limits;
 use crate::{ApiKey, DecideError, DecisionProvider, DecisionRequest, DecisionResponse, Limits};
-
-/// Whether a model id is an alias that moves with releases rather than a
-/// pinned version: a leading `~` (OpenRouter's alias marker) or a
-/// `-latest` / `-preview` suffix.
-pub fn is_model_alias(model: &str) -> bool {
-    let m = model.trim();
-    m.starts_with('~') || m.ends_with("-latest") || m.ends_with("-preview")
-}
 
 /// An OpenRouter Decisions provider (alpha route).
 #[derive(Debug, Clone)]

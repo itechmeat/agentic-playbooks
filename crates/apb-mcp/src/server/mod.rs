@@ -53,6 +53,8 @@ pub struct WfMcp {
     /// This server serves a background supervisor agent (see
     /// [`WfMcp::for_supervisor`]).
     supervisor_role: bool,
+    /// Catalog ranking answers for the server's lifetime (issue #165 Part 16).
+    rank_cache: Arc<crate::catalog_rank::RankCache>,
 }
 
 /// Longest single blocking slice of a server-side wait (`run_wait`,
@@ -192,6 +194,7 @@ impl WfMcp {
             sessions: Arc::new(Mutex::new(HashMap::new())),
             used_nonces: Arc::new(Mutex::new(HashSet::new())),
             supervisor_role: false,
+            rank_cache: Arc::default(),
         }
     }
 

@@ -340,6 +340,11 @@ pub struct PlaybookCatalogArgs {
     /// workspace_id of another workspace (spec 7). None - the current one.
     #[serde(default)]
     pub workspace: Option<String>,
+    /// The task in one sentence (optional). Only when the machine enabled
+    /// decision-model catalog ranking: adds an advisory `ranked` list,
+    /// `needs_playbook_p` and `covered_by`; otherwise ignored.
+    #[serde(default)]
+    pub query: Option<String>,
 }
 
 #[derive(Debug, Deserialize, JsonSchema)]

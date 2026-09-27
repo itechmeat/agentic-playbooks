@@ -45,7 +45,7 @@ pub use cloudflare::{CLOUDFLARE_BASE_URL, Cloudflare};
 pub use error::DecideError;
 pub use fake::FakeProvider;
 pub use key::ApiKey;
-pub use openrouter_decisions::{OpenRouterDecisions, is_model_alias};
+pub use openrouter_decisions::OpenRouterDecisions;
 pub use systemone::SystemOne;
 pub use types::{
     Answer, ChoiceCriteria, DecisionRequest, DecisionResponse, Limits, NoulCriteria, Question,

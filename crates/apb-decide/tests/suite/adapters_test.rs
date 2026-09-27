@@ -9,7 +9,7 @@ use std::time::Duration;
 use apb_decide::testing::{StubResponse, StubServer};
 use apb_decide::{
     Answer, ApiKey, ChoiceCriteria, Cloudflare, DecideError, DecisionProvider, DecisionRequest,
-    OpenRouterDecisions, Question, UseSite, VercelEvaluate, is_model_alias,
+    OpenRouterDecisions, Question, UseSite, VercelEvaluate,
 };
 use serde_json::{Value, json};
 
@@ -470,19 +470,4 @@ fn cloudflare_refuses_an_unsafe_account_id_and_a_failed_envelope() {
         cloudflare(&server, None).decide(&request()),
         Err(DecideError::Unavailable(_))
     ));
-}
-
-#[test]
-fn aliases_are_told_apart_from_pinned_ids() {
-    for alias in ["~typesafe/jev-latest", "jev-latest", "jev-preview"] {
-        assert!(is_model_alias(alias), "{alias}");
-    }
-    for pinned in [
-        "typesafe/jev-1.13",
-        "jev-1.13.0",
-        "typesafe-ai/jev",
-        "typesafe/jev",
-    ] {
-        assert!(!is_model_alias(pinned), "{pinned}");
-    }
 }
