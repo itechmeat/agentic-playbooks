@@ -650,3 +650,92 @@ fn a_project_can_switch_the_check_off() {
     let manifest = fs::read_to_string(p.run_dir(&run_id).join("manifest.yaml")).unwrap();
     assert!(!manifest.contains("decisions"));
 }
+
+// --- the report and replay over a real run (issue #165 Part 13) ---------------
+
+/// Every file under a directory with its bytes, for an unchanged check.
+fn tree(dir: &std::path::Path) -> Vec<(std::path::PathBuf, Vec<u8>)> {
+    let mut out = Vec::new();
+    for entry in fs::read_dir(dir).unwrap().flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(tree(&path));
+        } else {
+            out.push((path.clone(), fs::read(&path).unwrap()));
+        }
+    }
+    out.sort();
+    out
+}
+
+#[test]
+fn the_report_labels_a_real_run_and_replay_leaves_its_journal_untouched() {
+    use apb_engine::decision::report::{self, ReportFilter, ReportSettings, replay};
+
+    let p = Project::new(&two_nodes(), DONE);
+    let server = StubServer::start(vec![
+        StubResponse::json(200, reply(0.93, "complete")),
+        StubResponse::json(200, reply(0.91, "complete")),
+    ]);
+    let other = StubServer::start(vec![
+        StubResponse::json(200, reply(0.05, "partial")),
+        StubResponse::json(200, reply(0.95, "complete")),
+    ]);
+    // `other` comes second: the run never asks it, only replay does.
+    p.decisions(&format!(
+        "version: 1\nmode: shadow\nproviders:\n  - {{ id: stub, kind: systemone, base_url: \"{}\", model: jev-1.13.0 }}\n  - {{ id: other, kind: systemone, base_url: \"{}\", model: jev-1.14.0 }}\nuses:\n  completion_check: {{ mode: shadow }}\nprivacy: {{ debug_state: true }}\n",
+        server.base_url, other.base_url
+    ));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (status, run_id, _) = p.run();
+    assert_eq!(status, RunStatus::Succeeded);
+    assert_eq!((server.count(), other.count()), (2, 0));
+
+    let roots = [p.root.path().to_path_buf()];
+    let r = report::report(&roots, &ReportFilter::default(), &ReportSettings::default());
+    assert_eq!(r.decisions, 2);
+    let g = &r.groups[0];
+    assert_eq!(
+        (g.provider.as_str(), g.provider_kind.as_deref()),
+        ("stub", Some("systemone"))
+    );
+    // `w` is followed by a successful `w2`, and `w2` ends a successful run.
+    assert_eq!(
+        (g.labelled, g.keep_labels, g.all.accuracy),
+        (2, 2, Some(1.0))
+    );
+
+    let run_dir = p.run_dir(&run_id);
+    let before = tree(&run_dir);
+    assert!(
+        run_dir.join("decisions").is_dir(),
+        "the run kept its debug state"
+    );
+    assert_eq!(
+        replay::replay(&roots, p.cfg.path(), None, &ReportFilter::default(), 10).unwrap_err(),
+        replay::ReplayError::NoProvider
+    );
+    let s = replay::replay(
+        &roots,
+        p.cfg.path(),
+        Some("other"),
+        &ReportFilter::default(),
+        10,
+    )
+    .unwrap();
+    assert_eq!((s.matched, s.with_state, s.asked, s.errors), (2, 2, 2, 0));
+    // `other` flags `w` (0.05 < 0.15): one of two agree, and labelled
+    // accuracy drops from 2/2 to 1/2.
+    assert_eq!(s.agreement, Some(0.5));
+    assert_eq!(
+        (s.original_accuracy, s.replay_accuracy),
+        (Some(1.0), Some(0.5))
+    );
+    assert_eq!(other.count(), 2);
+    // The replayed state is the one that was sent, in the same order.
+    assert!(other.requests()[0].contains(r#""state":{"task":"#));
+    let results = s.results.expect("results written");
+    assert!(results.starts_with(p.cfg.path().join("decisions-replay")));
+    assert_eq!(tree(&run_dir), before, "replay never touches the run");
+}

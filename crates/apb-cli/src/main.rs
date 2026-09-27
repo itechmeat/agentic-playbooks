@@ -1,5 +1,6 @@
 mod cache;
 mod connector;
+mod decisions;
 mod manage;
 mod onboarding;
 mod profile;
@@ -19,6 +20,7 @@ use clap::{Parser, Subcommand};
 
 use crate::cache::{CacheCmd, cache_cmd};
 use crate::connector::{ConnectorAction, connector_cmd};
+use crate::decisions::{DecisionsAction, decisions_cmd};
 use crate::manage::{
     ProjectsAction, adopt_cmd, detect_cmd, export_cmd, import_cmd, migrate_cmd, projects_cmd,
     run_init, subscriptions_cmd,
@@ -225,6 +227,12 @@ enum Command {
         #[arg(long)]
         node: Option<String>,
         text: String,
+    },
+    /// Measure decision-model uses (issue #165): the report, the stored
+    /// thresholds, replay against another provider
+    Decisions {
+        #[command(subcommand)]
+        action: DecisionsAction,
     },
     /// Inspect and manage the project-local node result cache
     Cache {
@@ -466,6 +474,7 @@ fn main() -> ExitCode {
         Some(Command::Profile { action }) => profile_cmd(&root, action),
         Some(Command::Connector { action }) => connector_cmd(&root, action),
         Some(Command::Cache { cmd }) => cache_cmd(&root, cmd),
+        Some(Command::Decisions { action }) => decisions_cmd(&root, action),
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
         Some(Command::Detect { refresh }) => detect_cmd(refresh),
         Some(Command::Adopt { name }) => adopt_cmd(&root, name.as_deref()),
