@@ -12,7 +12,7 @@ use apb_core::schema::{NodeKind, Playbook, WaitFor};
 
 use crate::error::EngineError;
 
-const HOOKS_FILE: &str = "hooks.json";
+pub(crate) const HOOKS_FILE: &str = "hooks.json";
 
 /// Generates secrets for all of the playbook's webhook keys and saves
 /// `hooks.json`. Idempotent: if the file already exists, nothing is

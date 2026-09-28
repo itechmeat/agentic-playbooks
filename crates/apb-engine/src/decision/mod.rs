@@ -363,6 +363,13 @@ impl DecisionRunner {
                 .filter_map(|n| apb_core::connector::secrets::resolve_var(&self.root, n))
                 .collect();
             secrets.extend(self.chains().keys.iter().cloned());
+            // A webhook's secret is a capability: `{{run.hooks.<key>}}` in a
+            // rendered state must not leave the machine.
+            secrets.extend(
+                crate::hooks::read_hooks(&self.run_dir)
+                    .unwrap_or_default()
+                    .into_values(),
+            );
             redact::Redactor::new(secrets, &self.root)
         })
     }
@@ -1207,6 +1214,24 @@ mod tests {
             })
             .unwrap();
         runner
+    }
+
+    #[test]
+    fn a_webhook_secret_never_leaves_in_a_state_and_debug_hides_keys() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let secret = "0f8e2c1a-7b3d-4e5f-9a6b-1c2d3e4f5a6b";
+        std::fs::write(
+            root.path().join(crate::hooks::HOOKS_FILE),
+            format!("{{\"deploy\": \"{secret}\"}}"),
+        )
+        .unwrap();
+        let runner = enforce_runner(cfg.path(), root.path());
+        let out = runner
+            .redactor()
+            .redact(&format!("call /api/hooks/r-1/{secret} when done"));
+        assert!(!out.contains(secret), "{out}");
+        assert!(!format!("{runner:?}").contains(secret));
     }
 
     #[test]

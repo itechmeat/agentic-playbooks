@@ -12,8 +12,7 @@ use apb_decide::{
     ProviderChain, StructuredOutput, SystemOne, VercelEvaluate,
 };
 
-/// The run's provider chains, built once.
-#[derive(Debug)]
+/// The run's provider chains, built once. `Debug` never prints the keys.
 pub(crate) struct Chains {
     /// Every configured provider, in order.
     pub(crate) all: ProviderChain,
@@ -23,6 +22,17 @@ pub(crate) struct Chains {
     pub(crate) emulation: ProviderChain,
     /// The resolved keys (secrets for the redactor).
     pub(crate) keys: Vec<String>,
+}
+
+impl std::fmt::Debug for Chains {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Chains")
+            .field("all", &self.all)
+            .field("native", &self.native)
+            .field("emulation", &self.emulation)
+            .field("keys", &self.keys.len())
+            .finish()
+    }
 }
 
 /// The chain and the resolved keys (which the redactor treats as secrets).

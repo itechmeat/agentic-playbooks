@@ -26,8 +26,14 @@ static PREFIXED: LazyLock<Regex> = LazyLock::new(|| {
     )
     .expect("valid")
 });
+/// A value after `bearer`, `token` (also `access_token`, `refresh_token`)
+/// or `api_key`, written as `Bearer v`, `token=v`, `token: v` or the JSON
+/// `"token": "v"`. Group 1 is everything before the value.
 static BEARER: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r"(?i)\b(bearer|token)(\s+|=|:\s*)[A-Za-z0-9._~+/=\-]{12,}").expect("valid")
+    Regex::new(
+        r#"(?i)(\b(?:bearer|[a-z0-9_]*token|api[_-]?key)["']?(?:\s+|\s*[=:]\s*)["']?)[A-Za-z0-9._~+/=\-]{12,}"#,
+    )
+    .expect("valid")
 });
 static LONG_RUN: LazyLock<Regex> =
     LazyLock::new(|| Regex::new(r"[A-Za-z0-9_+/=\-]{32,}").expect("valid"));
@@ -35,9 +41,15 @@ static EMAIL: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"[A-Za-z0-9._%+\-]+@[A-Za-z0-9\-]+(?:\.[A-Za-z0-9\-]+)*\.[A-Za-z]{2,}")
         .expect("valid")
 });
+/// A home directory with its user name: `/home/u`, `/Users/u`,
+/// `/mnt/c/Users/u` and `C:\Users\u` (the Windows forms in any case, a
+/// URL's `/users/` path is left alone), with forward slashes
+/// (`file:///C:/Users/u`) or JSON-escaped backslashes (`C:\\Users\\u`).
 static HOME_PATH: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#"(?:/home/|/Users/|/mnt/[a-z]/Users/|[A-Za-z]:\\Users\\)[^/\\\s:"'`]+"#)
-        .expect("valid")
+    Regex::new(
+        r#"(?:/home/|/Users/|/mnt/[a-z]/(?i:users)/|(?i:[a-z]:(?:\\{1,2}|/)users(?:\\{1,2}|/)))[^/\\\s:"'`]+"#,
+    )
+    .expect("valid")
 });
 static UUID: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(r"^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
@@ -59,8 +71,8 @@ fn looks_like_token(run: &str) -> bool {
         && slashes <= 1
 }
 
-/// Redacts text for one run.
-#[derive(Debug, Default)]
+/// Redacts text for one run. `Debug` never prints the secret values.
+#[derive(Default)]
 pub(crate) struct Redactor {
     /// Secret values, longest first so a value containing another is
     /// replaced whole.
@@ -68,6 +80,15 @@ pub(crate) struct Redactor {
     /// The project root, as written in paths (no trailing slash).
     root: Option<String>,
     home: Option<String>,
+}
+
+impl std::fmt::Debug for Redactor {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Redactor")
+            .field("secrets", &self.secrets.len())
+            .field("root", &self.root)
+            .finish_non_exhaustive()
+    }
 }
 
 impl Redactor {
@@ -110,9 +131,7 @@ impl Redactor {
         out = JWT.replace_all(&out, "[redacted-token]").into_owned();
         out = PREFIXED.replace_all(&out, "[redacted-token]").into_owned();
         out = BEARER
-            .replace_all(&out, |c: &regex::Captures| {
-                format!("{} [redacted-token]", &c[1])
-            })
+            .replace_all(&out, "${1}[redacted-token]")
             .into_owned();
         out = LONG_RUN
             .replace_all(&out, |c: &regex::Captures| {
@@ -208,6 +227,30 @@ mod tests {
         ] {
             assert!(out.contains(kept), "{kept} missing: {out}");
         }
+    }
+
+    #[test]
+    fn home_paths_and_token_fields_are_redacted_in_every_spelling() {
+        let root = tempfile::tempdir().unwrap();
+        let r = Redactor::new(vec!["hunter2-secret-value".into()], root.path());
+        let text = r#"u https://api.example.com/users/octo a c:\users\alice\x b C:/Users/bob/x c file:///C:/Users/carol/x d /mnt/c/users/dave/x e C:\\Users\\erin\\x f {"token": "a1b2c3d4e5f6g7h8i9j0"} g access_token=Zz9Yy8Xx7Ww6Vv5 h "api_key":"k1k2k3k4k5k6k7k8""#;
+        let out = r.redact(text);
+        for gone in [
+            "alice",
+            "bob",
+            "carol",
+            "dave",
+            "erin",
+            "a1b2c3d4e5f6g7h8i9j0",
+            "Zz9Yy8Xx7Ww6Vv5",
+            "k1k2k3k4k5k6k7k8",
+        ] {
+            assert!(!out.contains(gone), "{gone} survived: {out}");
+        }
+        assert!(out.contains(r#""token": "[redacted-token]""#), "{out}");
+        assert!(out.contains("access_token=[redacted-token]"), "{out}");
+        assert!(out.contains("https://api.example.com/users/octo"), "{out}");
+        assert!(!format!("{r:?}").contains("hunter2"), "{r:?}");
     }
 
     #[test]
