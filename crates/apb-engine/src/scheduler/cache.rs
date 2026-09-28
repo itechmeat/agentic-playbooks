@@ -90,6 +90,9 @@ fn cache_eligible<'a>(playbook: &'a Playbook, node_id: &str, cfg: &RunConfig) ->
 /// depends on its state and questions, never on the working tree.
 const JUDGE_FINGERPRINT: &str = "judge";
 
+/// The rendered-state digest and the `(provider, model)` of a judge key.
+type JudgeKey = (String, (String, String));
+
 /// A judge node's key parts: the rendered state (canonical JSON) and the
 /// `(provider, pinned model)` that would answer. `None` (no cache) unless
 /// the run's `judge_node` use is at enforce, because below it the output is
@@ -101,12 +104,15 @@ fn judge_key_parts(
     run_id: &str,
     state: &RunState,
     cfg: &RunConfig,
-) -> Result<Option<(String, (String, String))>, EngineError> {
+) -> Result<Option<JudgeKey>, EngineError> {
     let Some(NodeKind::Judge { state: fields, .. }) = playbook.node(node_id).map(|n| &n.kind)
     else {
         return Ok(None);
     };
-    let Some(decisions) = crate::manifest::read(run_dir).ok().flatten().and_then(|m| m.decisions)
+    let Some(decisions) = crate::manifest::read(run_dir)
+        .ok()
+        .flatten()
+        .and_then(|m| m.decisions)
     else {
         return Ok(None);
     };
@@ -115,9 +121,11 @@ fn judge_key_parts(
     {
         return Ok(None);
     }
-    let Some(primary) = decisions.providers.iter().find(|p| {
-        !matches!(p.kind, apb_core::decisions::ProviderKind::LlmEmulation)
-    }) else {
+    let Some(primary) = decisions
+        .providers
+        .iter()
+        .find(|p| !matches!(p.kind, apb_core::decisions::ProviderKind::LlmEmulation))
+    else {
         return Ok(None);
     };
     let mut rendered = serde_json::Map::new();
@@ -134,7 +142,10 @@ fn judge_key_parts(
     }
     Ok(Some((
         apb_decide::digest::digest(&serde_json::Value::Object(rendered)),
-        (primary.id.clone(), primary.model.clone().unwrap_or_default()),
+        (
+            primary.id.clone(),
+            primary.model.clone().unwrap_or_default(),
+        ),
     )))
 }
 
@@ -559,7 +570,10 @@ pub(crate) fn probe(
         agent_model = Some((agent, model));
         connector_digests = digests;
     }
-    if matches!(playbook.node(node_id).map(|n| &n.kind), Some(NodeKind::Judge { .. })) {
+    if matches!(
+        playbook.node(node_id).map(|n| &n.kind),
+        Some(NodeKind::Judge { .. })
+    ) {
         match judge_key_parts(playbook, node_id, run_dir, run_id, state, cfg)? {
             Some((state_digest, provider_model)) => {
                 rendered_prompt = Some(state_digest);

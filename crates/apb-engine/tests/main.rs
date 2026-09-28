@@ -131,6 +131,8 @@ mod interactive_reprompt_test;
 mod interactive_timeout_test;
 #[path = "suite/journal_compat_test.rs"]
 mod journal_compat_test;
+#[path = "suite/judge_test.rs"]
+mod judge_test;
 #[path = "suite/lineage_test.rs"]
 mod lineage_test;
 #[path = "suite/list_runs_resilient_test.rs"]

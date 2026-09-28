@@ -433,7 +433,14 @@ impl DecisionRunner {
         let questions_digest = apb_decide::digest::questions_digest(&call.questions);
         let route_ids: Option<Vec<String>> = match &route {
             Route::All => None,
-            Route::Native => Some(self.chains().native.ids().iter().map(|s| s.to_string()).collect()),
+            Route::Native => Some(
+                self.chains()
+                    .native
+                    .ids()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
             Route::Emulation => Some(
                 self.chains()
                     .emulation

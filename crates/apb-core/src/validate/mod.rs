@@ -28,6 +28,7 @@ use graph::{
     check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,
     check_joins, check_reachability, check_start_finish, check_unique_ids,
 };
+use judge::{check_judge_edges, check_judge_nodes};
 use node_io::{
     check_cache_key, check_declared_fields, check_session_handoff, check_workdir, check_worktree,
 };
@@ -35,7 +36,6 @@ use nodes::{
     check_cache, check_expected_duration, check_finish, check_goal, check_interactive,
     check_isolation, check_playbook_ref, check_scripts, check_success_check, check_trigger,
 };
-use judge::{check_judge_edges, check_judge_nodes};
 use templates::{check_cross_branch_reads, check_refs, check_templates};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -511,11 +511,9 @@ impl NodeKind {
                 on_unavailable,
                 profile,
                 ..
-            } => crate::judge::emulation_profile(
-                on_unavailable.as_ref(),
-                profile.as_ref(),
-                defaults,
-            ),
+            } => {
+                crate::judge::emulation_profile(on_unavailable.as_ref(), profile.as_ref(), defaults)
+            }
             _ => None,
         }
     }

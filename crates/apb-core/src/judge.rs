@@ -391,12 +391,19 @@ impl std::hash::Hash for Probability {
 /// The output fields a judge node publishes for its questions, in question
 /// order, plus `decided_by` and `reason`: what an `output_field` edge or a
 /// `{{nodes.<id>.output.<field>}}` template may read.
-pub fn output_fields(questions: &JudgeQuestions, thresholds: &OrderedMap<JudgeThreshold>) -> Vec<String> {
+pub fn output_fields(
+    questions: &JudgeQuestions,
+    thresholds: &OrderedMap<JudgeThreshold>,
+) -> Vec<String> {
     let mut out = Vec::new();
     for (id, q) in questions.iter() {
         match q {
             JudgeQuestion::Choice { .. } => {
-                out.extend([id.to_string(), format!("{id}_p"), format!("{id}_confidence")]);
+                out.extend([
+                    id.to_string(),
+                    format!("{id}_p"),
+                    format!("{id}_confidence"),
+                ]);
             }
             JudgeQuestion::Noul { .. } => out.extend([id.to_string(), format!("{id}_p")]),
             JudgeQuestion::Score { .. } => {
@@ -446,7 +453,10 @@ mod tests {
         let JudgeQuestion::Noul { criteria, .. } = h.questions.get("zeta").unwrap() else {
             panic!()
         };
-        assert_eq!(criteria.as_ref().unwrap().keys().collect::<Vec<_>>(), ["true", "false"]);
+        assert_eq!(
+            criteria.as_ref().unwrap().keys().collect::<Vec<_>>(),
+            ["true", "false"]
+        );
         let JudgeQuestion::Choice { criteria, .. } = h.questions.get("alpha").unwrap() else {
             panic!()
         };
@@ -484,13 +494,14 @@ mod tests {
                 serde_yaml_ng::from_str(&format!("questions: {{}}\non_unavailable: {yaml}\n"))
                     .unwrap();
             assert_eq!(h.on_unavailable.as_ref(), Some(&want), "{yaml}");
-            let back: Holder =
-                serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
+            let back: Holder = serde_json::from_str(&serde_json::to_string(&h).unwrap()).unwrap();
             assert_eq!(back.on_unavailable, Some(want));
         }
         assert!(
-            serde_yaml_ng::from_str::<Holder>("questions: {}\non_unavailable: { route: a, x: 1 }\n")
-                .is_err()
+            serde_yaml_ng::from_str::<Holder>(
+                "questions: {}\non_unavailable: { route: a, x: 1 }\n"
+            )
+            .is_err()
         );
     }
 
@@ -503,7 +514,16 @@ mod tests {
         let mut th = OrderedMap::default();
         assert_eq!(
             output_fields(&h.questions, &th),
-            ["v", "v_p", "v_confidence", "r", "r_p", "e_score", "decided_by", "reason"]
+            [
+                "v",
+                "v_p",
+                "v_confidence",
+                "r",
+                "r_p",
+                "e_score",
+                "decided_by",
+                "reason"
+            ]
         );
         th.0.push((
             "e".into(),

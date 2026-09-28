@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use apb_decide::testing::{StubResponse, StubServer};
 use apb_decide::{
-    Answer, ApiKey, ChoiceCriteria, DecisionProvider, DecisionRequest, LlmEmulation,
-    Question, StructuredOutput, UseSite,
+    Answer, ApiKey, ChoiceCriteria, DecisionProvider, DecisionRequest, LlmEmulation, Question,
+    StructuredOutput, UseSite,
 };
 use serde_json::json;
 

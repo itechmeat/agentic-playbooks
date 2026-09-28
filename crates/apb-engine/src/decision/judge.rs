@@ -58,7 +58,10 @@ pub(crate) fn node_questions(questions: &JudgeQuestions) -> BTreeMap<String, Que
 /// The band `value` falls into: `[lo, hi)`, the last band (highest `hi`)
 /// closed at its top.
 fn band(bands: &OrderedMap<[f64; 2]>, value: f64) -> Option<&str> {
-    let top = bands.iter().map(|(_, [_, hi])| *hi).fold(f64::MIN, f64::max);
+    let top = bands
+        .iter()
+        .map(|(_, [_, hi])| *hi)
+        .fold(f64::MIN, f64::max);
     bands
         .iter()
         .find(|(_, [lo, hi])| value >= *lo && (value < *hi || (*hi == top && value <= *hi)))
@@ -110,7 +113,11 @@ pub(crate) fn output_from_answers(
                 out.insert(format!("{id}_p"), json!(p));
             }
             JudgeQuestion::Score { .. } => {
-                let value = a.value.as_ref().and_then(Value::as_f64).ok_or_else(missing)?;
+                let value = a
+                    .value
+                    .as_ref()
+                    .and_then(Value::as_f64)
+                    .ok_or_else(missing)?;
                 if let Some(bands) = t.and_then(|t| t.bands.as_ref())
                     && let Some(name) = band(bands, value)
                 {
@@ -126,7 +133,10 @@ pub(crate) fn output_from_answers(
 
 /// The output of a `route` or `default` fallback, `None` for the forms
 /// that do not succeed with an output of their own (`fail`, `emulate`).
-pub(crate) fn fallback_output(fallback: Option<&JudgeFallback>, reason: &str) -> Option<Map<String, Value>> {
+pub(crate) fn fallback_output(
+    fallback: Option<&JudgeFallback>,
+    reason: &str,
+) -> Option<Map<String, Value>> {
     let mut out = Map::new();
     match fallback {
         Some(JudgeFallback::Route(_)) => {
@@ -194,7 +204,11 @@ thresholds:
         (s.questions, s.thresholds)
     }
 
-    fn answers(verdict: (&str, f64, f64), risky: f64, effort: f64) -> BTreeMap<String, DecisionAnswer> {
+    fn answers(
+        verdict: (&str, f64, f64),
+        risky: f64,
+        effort: f64,
+    ) -> BTreeMap<String, DecisionAnswer> {
         BTreeMap::from([
             (
                 "verdict".to_string(),
@@ -227,27 +241,39 @@ thresholds:
     #[test]
     fn thresholds_map_answers_to_the_documented_output() {
         let (q, t) = spec();
-        let out = output_from_answers(&q, &t, &answers(("needs_fix", 0.83, 0.71), 0.12, 1.9), "typesafe/jev-1.13.0")
-            .unwrap();
+        let out = output_from_answers(
+            &q,
+            &t,
+            &answers(("needs_fix", 0.83, 0.71), 0.12, 1.9),
+            "typesafe/jev-1.13.0",
+        )
+        .unwrap();
         assert_eq!(
             render(&out),
             r#"{"decided_by":"typesafe/jev-1.13.0","effort":"medium","effort_score":1.9,"risky":false,"risky_p":0.12,"verdict":"needs_fix","verdict_confidence":0.71,"verdict_p":0.83}"#
         );
         // Below min_confidence the safe option wins; yes_at is inclusive;
         // the last band is closed at its top.
-        let out = output_from_answers(&q, &t, &answers(("clean", 0.5, 0.59), 0.7, 4.0), "x").unwrap();
+        let out =
+            output_from_answers(&q, &t, &answers(("clean", 0.5, 0.59), 0.7, 4.0), "x").unwrap();
         assert_eq!(out["verdict"], json!("unclear"));
         assert_eq!(out["risky"], json!(true));
         assert_eq!(out["effort"], json!("large"));
-        let out = output_from_answers(&q, &t, &answers(("clean", 0.5, 0.9), 0.1, 1.5), "x").unwrap();
+        let out =
+            output_from_answers(&q, &t, &answers(("clean", 0.5, 0.9), 0.1, 1.5), "x").unwrap();
         assert_eq!(out["effort"], json!("medium"));
     }
 
     #[test]
     fn without_a_threshold_the_raw_answer_stands() {
         let (q, _) = spec();
-        let out = output_from_answers(&q, &OrderedMap::default(), &answers(("clean", 0.4, 0.1), 0.5, 2.2), "x")
-            .unwrap();
+        let out = output_from_answers(
+            &q,
+            &OrderedMap::default(),
+            &answers(("clean", 0.4, 0.1), 0.5, 2.2),
+            "x",
+        )
+        .unwrap();
         assert_eq!(out["verdict"], json!("clean"));
         assert_eq!(out["risky"], json!(true));
         assert!(out.get("effort").is_none());
@@ -271,7 +297,8 @@ thresholds:
             render(&fallback_output(Some(&route), "mode").unwrap()),
             r#"{"decided_by":"unavailable","reason":"mode"}"#
         );
-        let default = JudgeFallback::Default(BTreeMap::from([("verdict".into(), json!("unclear"))]));
+        let default =
+            JudgeFallback::Default(BTreeMap::from([("verdict".into(), json!("unclear"))]));
         assert_eq!(
             render(&fallback_output(Some(&default), "timeout").unwrap()),
             r#"{"decided_by":"default","reason":"timeout","verdict":"unclear"}"#

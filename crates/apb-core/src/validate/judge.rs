@@ -5,8 +5,8 @@
 //! are the authoring advice a decision model needs to answer well (an
 //! `unclear` option, levels in words, a small state, a declared fallback).
 
-use super::*;
 use super::templates::template_refs;
+use super::*;
 use crate::judge::{
     DECIDED_BY, ESCAPE_OPTIONS, JudgeFallback, JudgeQuestion, JudgeQuestions, JudgeThreshold,
     MAX_LEVELS, MAX_OPTIONS, MAX_QUESTIONS, MIN_LEVELS, OrderedMap, REASON, UNAVAILABLE,
@@ -235,7 +235,9 @@ fn check_thresholds(
             }
             JudgeQuestion::Noul { .. } => {
                 if choice_keys || t.bands.is_some() {
-                    err(format!("threshold of noul question `{qid}` takes only yes_at"));
+                    err(format!(
+                        "threshold of noul question `{qid}` takes only yes_at"
+                    ));
                 }
                 match t.yes_at {
                     Some(p) if p > 0.0 && p < 1.0 => {}
@@ -247,7 +249,9 @@ fn check_thresholds(
             }
             JudgeQuestion::Score { levels, .. } => {
                 if choice_keys || t.yes_at.is_some() {
-                    err(format!("threshold of score question `{qid}` takes only bands"));
+                    err(format!(
+                        "threshold of score question `{qid}` takes only bands"
+                    ));
                 }
                 let Some(bands) = &t.bands else {
                     err(format!("threshold of `{qid}` sets nothing"));
@@ -259,7 +263,10 @@ fn check_thresholds(
                     if name.trim().is_empty() {
                         err(format!("a band of `{qid}` has an empty name"));
                     }
-                    if !(lo < hi) || *lo < 0.0 || *hi > top {
+                    if lo.partial_cmp(hi) != Some(std::cmp::Ordering::Less)
+                        || *lo < 0.0
+                        || *hi > top
+                    {
                         err(format!(
                             "band `{name}` of `{qid}` must be [lo, hi] with 0 <= lo < hi <= {top} (level indexes, lowest 0)"
                         ));
@@ -555,16 +562,16 @@ mod tests {
     }
 
     fn has(p: &Playbook, code: &str, severity: Severity) -> bool {
-        issues(p).iter().any(|(c, s, _)| *c == code && *s == severity)
+        issues(p)
+            .iter()
+            .any(|(c, s, _)| *c == code && *s == severity)
     }
 
     fn judge_codes(p: &Playbook) -> Vec<&'static str> {
         issues(p)
             .into_iter()
             .map(|(c, _, _)| c)
-            .filter(|c| {
-                c[1..].parse::<u32>().is_ok_and(|n| (50..=61).contains(&n))
-            })
+            .filter(|c| c[1..].parse::<u32>().is_ok_and(|n| (50..=61).contains(&n)))
             .collect()
     }
 
@@ -582,8 +589,14 @@ mod tests {
             "    questions:\n      - id: verdict\n        type: choice",
         );
         let body = body
-            .replace("      risky: { type: noul", "      - { id: risky, type: noul")
-            .replace("      effort:\n        type: score", "      - id: effort\n        type: score");
+            .replace(
+                "      risky: { type: noul",
+                "      - { id: risky, type: noul",
+            )
+            .replace(
+                "      effort:\n        type: score",
+                "      - id: effort\n        type: score",
+            );
         let p = pb(&body, "", EDGES);
         let found = issues(&p);
         assert!(
@@ -623,9 +636,15 @@ mod tests {
     fn thresholds_must_name_real_questions_and_options() {
         for (from, to) in [
             ("below: unclear }", "below: maybe }"),
-            ("      risky: { yes_at: 0.7 }", "      riskyy: { yes_at: 0.7 }"),
+            (
+                "      risky: { yes_at: 0.7 }",
+                "      riskyy: { yes_at: 0.7 }",
+            ),
             ("{ yes_at: 0.7 }", "{ yes_at: 1.0 }"),
-            ("{ min_confidence: 0.6, below: unclear }", "{ min_confidence: 0.6 }"),
+            (
+                "{ min_confidence: 0.6, below: unclear }",
+                "{ min_confidence: 0.6 }",
+            ),
             ("large: [1.5, 3]", "large: [1.0, 3]"),
             ("large: [1.5, 3]", "large: [1.5, 7]"),
         ] {
@@ -665,7 +684,11 @@ mod tests {
             "{ route: human }",
         );
         let human = "  - { id: human, type: human_review }\n";
-        let p = pb(&route, human, &format!("{EDGES}  - {{ from: human, to: done }}\n"));
+        let p = pb(
+            &route,
+            human,
+            &format!("{EDGES}  - {{ from: human, to: done }}\n"),
+        );
         assert!(has(&p, "V53", Severity::Error), "{:?}", issues(&p));
         let edge = "  - { from: triage, to: human, condition: { type: output_field, node: triage, field: decided_by, equals: unavailable } }\n";
         let p = pb(
@@ -703,7 +726,10 @@ mod tests {
         assert!(has(&p, "V56", Severity::Warning), "{:?}", issues(&p));
         assert!(has(&p, "V57", Severity::Warning), "{:?}", issues(&p));
         let p = pb(
-            &GOOD.replace("\"{{run.instruction}}\"", "\"{{run.context}} {{run.context}}\""),
+            &GOOD.replace(
+                "\"{{run.instruction}}\"",
+                "\"{{run.context}} {{run.context}}\"",
+            ),
             "",
             EDGES,
         );
@@ -717,7 +743,9 @@ mod tests {
                 "  - {{ from: triage, to: fix, condition: {cond} }}\n  - {{ from: triage, to: done, fallback: true }}\n"
             )
         };
-        let ok = edges("{ type: judge, question: \"Is it broken?\", min_p: 0.7, on_unavailable: false }");
+        let ok = edges(
+            "{ type: judge, question: \"Is it broken?\", min_p: 0.7, on_unavailable: false }",
+        );
         assert!(judge_codes(&pb(GOOD, "", &ok)).is_empty());
         for bad in [
             "{ type: judge, question: \"Is it broken?\", min_p: 0.7 }",
@@ -731,11 +759,7 @@ mod tests {
 
     #[test]
     fn an_edge_reading_a_field_the_judge_never_writes_is_a_v46_warning() {
-        let p = pb(
-            GOOD,
-            "",
-            &EDGES.replace("field: verdict", "field: verdikt"),
-        );
+        let p = pb(GOOD, "", &EDGES.replace("field: verdict", "field: verdikt"));
         assert!(has(&p, "V46", Severity::Warning), "{:?}", issues(&p));
         assert!(!has(&pb(GOOD, "", EDGES), "V46", Severity::Warning));
     }

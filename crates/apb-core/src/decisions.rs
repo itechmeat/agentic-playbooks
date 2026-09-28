@@ -459,7 +459,8 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
             Some(v) => Some(key_ref(&format!("{at}.api_key"), v)?),
             None => None,
         };
-        if p.kind != ProviderKind::LlmEmulation && (p.via.is_some() || p.structured_output.is_some())
+        if p.kind != ProviderKind::LlmEmulation
+            && (p.via.is_some() || p.structured_output.is_some())
         {
             return Err(format!(
                 "{at}: via and structured_output are only for kind llm_emulation"

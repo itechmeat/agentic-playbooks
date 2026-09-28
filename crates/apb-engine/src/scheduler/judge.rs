@@ -22,7 +22,8 @@ use apb_core::judge::JudgeFallback;
 use apb_decide::{DecideError, DecisionRequest, DecisionResponse, Question, UseSite};
 
 use crate::decision::judge::{
-    differs_from_fallback, fallback_output, node_questions, output_from_answers, render as render_output,
+    differs_from_fallback, fallback_output, node_questions, output_from_answers,
+    render as render_output,
 };
 use crate::decision::{
     AnswerSource, DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, FieldClass,
@@ -70,12 +71,15 @@ pub(crate) fn execute(
         ..
     } = &node.kind
     else {
-        return Err(EngineError::Invalid(format!("node `{node_id}` is not a judge")));
+        return Err(EngineError::Invalid(format!(
+            "node `{node_id}` is not a judge"
+        )));
     };
     let fallback = on_unavailable.as_ref();
     let parts = render_state(playbook, run_dir, run_id, state, cfg, node_id, fields)?;
     let wire = node_questions(questions);
-    let enforce = decisions.is_some_and(|r| r.mode_for(UseSite::JudgeNode) == DecisionMode::Enforce);
+    let enforce =
+        decisions.is_some_and(|r| r.mode_for(UseSite::JudgeNode) == DecisionMode::Enforce);
 
     // 1. The node's own question, to the decision models proper.
     let reason: String = match decisions {
@@ -120,12 +124,18 @@ pub(crate) fn execute(
 
     // 2. The declared fallback.
     if let Some(out) = fallback_output(fallback, &reason) {
-        return Ok(finished(NodeStatus::Succeeded, render_output(&out), Vec::new()));
+        return Ok(finished(
+            NodeStatus::Succeeded,
+            render_output(&out),
+            Vec::new(),
+        ));
     }
     if !matches!(fallback, Some(JudgeFallback::Emulate)) {
         return Ok(finished(
             NodeStatus::Failed,
-            format!("judge node `{node_id}` has no usable answer ({reason}) and on_unavailable is fail"),
+            format!(
+                "judge node `{node_id}` has no usable answer ({reason}) and on_unavailable is fail"
+            ),
             Vec::new(),
         ));
     }
@@ -154,7 +164,11 @@ pub(crate) fn execute(
             Route::Emulation,
         );
         if let Some(out) = use_answers(outcome, source) {
-            return Ok(finished(NodeStatus::Succeeded, render_output(&out), Vec::new()));
+            return Ok(finished(
+                NodeStatus::Succeeded,
+                render_output(&out),
+                Vec::new(),
+            ));
         }
     }
     // 2b. The node's profile.
@@ -179,10 +193,7 @@ pub(crate) fn execute(
         cancel,
         env_scrub,
         journal,
-        attempt: std::cell::Cell::new(attempt_started_count(
-            &read_all(run_dir)?,
-            node_id,
-        ) as u32),
+        attempt: std::cell::Cell::new(attempt_started_count(&read_all(run_dir)?, node_id) as u32),
     };
     let Some((id, model)) = agent.binding()? else {
         return Ok(finished(
@@ -202,10 +213,16 @@ pub(crate) fn execute(
         },
     );
     match use_answers(outcome, source) {
-        Some(out) => Ok(finished(NodeStatus::Succeeded, render_output(&out), Vec::new())),
+        Some(out) => Ok(finished(
+            NodeStatus::Succeeded,
+            render_output(&out),
+            Vec::new(),
+        )),
         None => Ok(finished(
             NodeStatus::Failed,
-            format!("judge node `{node_id}` has no usable answer ({reason}) and its emulation gave none either"),
+            format!(
+                "judge node `{node_id}` has no usable answer ({reason}) and its emulation gave none either"
+            ),
             Vec::new(),
         )),
     }
@@ -304,15 +321,18 @@ impl ProfileEmulation<'_, '_> {
         let Some(entry) = effective_for_node(self.run_dir, &manifest, self.node_id)? else {
             return Ok(None);
         };
-        Ok(entry.chain.first().map(|ri| {
-            (
-                format!("profile:{}", entry.name),
-                ri.model.clone(),
-            )
-        }))
+        Ok(entry
+            .chain
+            .first()
+            .map(|ri| (format!("profile:{}", entry.name), ri.model.clone())))
     }
 
-    fn ask(&self, req: &DecisionRequest, id: &str, model: &str) -> Result<DecisionResponse, DecideError> {
+    fn ask(
+        &self,
+        req: &DecisionRequest,
+        id: &str,
+        model: &str,
+    ) -> Result<DecisionResponse, DecideError> {
         let started = std::time::Instant::now();
         let prompt = apb_decide::llm_emulation::EmulationPrompt::new(req, true).single_message();
         let mut last = DecideError::Unavailable("emulation agent gave no answer".into());
@@ -334,7 +354,11 @@ impl ProfileEmulation<'_, '_> {
                     Err(e) => last = e,
                 },
                 Ok(None) => {}
-                Err(_) => return Err(DecideError::Unavailable("emulation agent could not run".into())),
+                Err(_) => {
+                    return Err(DecideError::Unavailable(
+                        "emulation agent could not run".into(),
+                    ));
+                }
             }
         }
         Err(last)
@@ -369,7 +393,11 @@ impl ProfileEmulation<'_, '_> {
             prompt,
             model: &ri.model,
             workdir: self.workdir,
-            timeout: self.playbook.defaults.timeout_seconds.map(Duration::from_secs),
+            timeout: self
+                .playbook
+                .defaults
+                .timeout_seconds
+                .map(Duration::from_secs),
             stream_log: Some(&stream_log),
             soul: Some(entry.soul.as_str()),
             // An emulated decision reads and answers; it is granted nothing.
@@ -405,7 +433,8 @@ impl ProfileEmulation<'_, '_> {
                 *spawn_err.borrow_mut() = Some(e);
             }
         };
-        let outcome = adapter.run_cancellable(&task, self.cancel, Some(&on_spawn), None, None, None);
+        let outcome =
+            adapter.run_cancellable(&task, self.cancel, Some(&on_spawn), None, None, None);
         if let Some(e) = spawn_err.borrow_mut().take() {
             return Err(e);
         }
@@ -414,7 +443,12 @@ impl ProfileEmulation<'_, '_> {
         }
         let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
         let (status, output, session, usage) = match outcome {
-            Ok(report) => (report.status, Some(report.output), report.session, report.usage),
+            Ok(report) => (
+                report.status,
+                Some(report.output),
+                report.session,
+                report.usage,
+            ),
             Err(crate::adapter::AgentFailure { class, usage, .. }) => (
                 if class == ErrorClass::Timeout {
                     NodeStatus::TimedOut
@@ -469,7 +503,12 @@ pub(crate) fn decide_edges(
                 question,
                 min_p,
                 on_unavailable,
-            }) => Some((i, question.as_str(), min_p.0, on_unavailable.unwrap_or(false))),
+            }) => Some((
+                i,
+                question.as_str(),
+                min_p.0,
+                on_unavailable.unwrap_or(false),
+            )),
             _ => None,
         })
         .collect();
@@ -553,5 +592,8 @@ pub(crate) fn decide_edges(
         },
         Route::Native,
     );
-    Ok(!matches!(outcome.0, DecisionOutcome::Skipped { reason: "off" }))
+    Ok(!matches!(
+        outcome.0,
+        DecisionOutcome::Skipped { reason: "off" }
+    ))
 }
