@@ -554,3 +554,53 @@ mod tests {
         assert!(s.is_err(), "misspelled `scpoe` must be rejected for skills");
     }
 }
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    const WITH_TIERS: &str = "name: p\nexecutor: { agent: claude, model: sonnet }\ntiers:\n  light: { agent: opencode, model: small, for: \"Mechanical edits.\" }\n  standard: { use: executor, for: \"Ordinary tasks.\" }\n";
+
+    #[test]
+    fn tiers_parse_in_order_round_trip_and_change_the_digest() {
+        let doc = ProfileDoc::from_yaml(WITH_TIERS).unwrap();
+        let names: Vec<&str> = doc.tiers.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["light", "standard"]);
+        assert!(doc.tiers.problems().is_empty());
+        assert_eq!(
+            doc.executor_pairs(),
+            [("claude", "sonnet"), ("opencode", "small")]
+        );
+        let back = ProfileDoc::from_yaml(&serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(back, doc);
+        let plain = "name: p\nexecutor: { agent: claude, model: sonnet }\n";
+        assert_ne!(profile_digest(plain, ""), profile_digest(WITH_TIERS, ""));
+        // Without tiers the document serializes as before.
+        let doc = ProfileDoc::from_yaml(plain).unwrap();
+        assert!(!serde_yaml_ng::to_string(&doc).unwrap().contains("tiers"));
+    }
+
+    #[test]
+    fn malformed_tiers_are_reported() {
+        for (yaml, what) in [
+            ("  x: { agent: a, for: \"w\" }\n", "needs"),
+            (
+                "  x: { use: executor, agent: a, model: m, for: \"w\" }\n",
+                "takes no",
+            ),
+            ("  x: { agent: a, model: m, for: \" \" }\n", "for"),
+            ("  Bad: { agent: a, model: m, for: \"w\" }\n", "name"),
+        ] {
+            let doc = ProfileDoc::from_yaml(&format!(
+                "name: p\nexecutor: {{ agent: claude, model: sonnet }}\ntiers:\n{yaml}"
+            ))
+            .unwrap();
+            let problems = doc.tiers.problems();
+            assert!(
+                problems.iter().any(|p| p.contains(what)),
+                "{yaml}: {problems:?}"
+            );
+        }
+        assert!(ProfileDoc::from_yaml("name: p\nexecutor: { agent: a, model: m }\ntiers:\n  x: { agent: a, model: m, for: w, price: 1 }\n").is_err());
+    }
+}

@@ -154,8 +154,31 @@ data) can switch it off:
   - { id: collect, type: agent_task, prompt: "list the open issues", profile: dev, completion_check: off }
 ```
 
-`completion_check` takes `auto` (the default) or `off`; it can only switch the
-check off. See DECISIONS.md.
+`completion_check` takes `auto` (the default), `off`, or `enforce`: the
+opt-in that lets a confident "not a finished result" fail the attempt and
+consume a retry, where the machine enables the use in enforce and has a
+stored threshold (elsewhere `enforce` behaves as `auto`). See DECISIONS.md.
+
+### Other decision-model opt-ins
+
+All optional and additive to schema 2; none does anything on a machine
+without a `decisions.yaml` that enables the use (validator V74 notes them).
+
+- `route: auto` on an `agent_task` (V70): pick one of the profile's `tiers`
+  for the first attempt. Needs a profile with `tiers` (a run start refuses
+  otherwise); never applies to a node with `continue_session`.
+- `option_descriptions: { <option>: "<meaning>" }` on a `human_review` (V71):
+  what each option means, shown to the decision model as the recommendation's
+  criteria. Keys must be the gate's options.
+- `auto_decide: { allow: [needs_changes], min_confidence: 0.9 }` on a
+  `human_review` (V72, V73): let a confident recommendation of
+  `needs_changes` decide the gate. Never `approve`. Refused on a playbook that
+  declares `irreversible` or `secrets` effects or runs a merge, push, deploy
+  or publish step after the gate, unless the gate sets `auto_decide_ok: true`.
+- `defaults.retry_advice: enforce`: let retry advice skip doomed
+  same-executor retries.
+- `supervisor: { pre_triage: enforce }`: let wake pre-triage post a retry
+  itself (at most three per run by default).
 
 ### Status file (APB_STATUS_FILE)
 

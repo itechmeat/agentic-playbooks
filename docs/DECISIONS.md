@@ -16,16 +16,20 @@ The full design, including the uses that are not shipped yet, is issue #165.
 
 ## Status
 
-One use exists, in shadow mode only:
-
 | Use | What it asks | Modes available |
 |---|---|---|
-| `completion_check` | whether a successful agent reply is a finished result rather than a progress note, a plan or a question back | `off`, `shadow` |
+| `completion_check` | whether a successful agent reply is a finished result rather than a progress note, a plan or a question back | `off`, `shadow`, `advise`, `enforce` |
+| `retry_advice` | whether a same-executor retry after an agent failure is likely to help | `off`, `shadow`, `advise`, `enforce` |
+| `supervisor_triage` | what a supervisor should do about a park wake | `off`, `shadow`, `advise`, `enforce` |
+| `review_triage` | which option a reviewer would most likely pick at a `human_review` gate | `off`, `shadow`, `advise`, `enforce` |
+| `routing` | which of a profile's executor tiers a step needs | `off`, `shadow`, `advise`, `enforce` |
 
 Shadow means journal only: the answer is recorded in the run's journal and
-nothing acts on it. Advise mode (showing a flag where a person or supervisor
-decides), the `judge` node and edge, and the other uses come later, once shadow
-data exists to set their thresholds.
+nothing acts on it. Advise shows the answer where a person or supervisor
+decides (an anomaly wake, a wake's `triage`, a gate's `recommendation`) and
+never applies it. Enforce changes engine behaviour, but only under the common
+rules below; without a stored threshold every enforce path behaves as advise.
+Every threshold named here is a placeholder until measured on shadow data.
 
 ## Configuration: `<config_dir>/decisions.yaml`
 
@@ -207,3 +211,131 @@ full answer distributions of each decision are kept in
 `budget.max_requests_per_run` and `budget.max_usd_per_run` count every
 request of the run, resumes included. Past either, a decision is journaled
 with `error: budget` and nothing is sent.
+
+## Engine uses (issue #165 Parts 8 to 12)
+
+Each use lives in its own module under `crates/apb-engine/src/decision/` and
+asks through the one runner. Every decision records join keys under
+`decision_made.join` for the report's labellers.
+
+### Completion check (Part 8)
+
+Asked after an agent attempt reported success and passed its
+`success_check`; never for a script `success_check`, an empty output or
+`completion_check: off`. State: `task` (prompt head 4 kB), `result` (reply
+head 1 kB and tail 8 kB), `meta.missing_fields`. A generic regex verdict is
+recorded alongside. A decision is flagged when `final_result` is below
+`uses.completion_check.thresholds.final_result` (default 0.15); the
+`completion` choice never flags on its own.
+
+- shadow: `would_change` only.
+- advise: one `WakeRaised` `anomaly` per flagged attempt, detail
+  ``agent_task node `fix` attempt 2 reported success, but the completion
+  check rates it partial (p=0.81) and final_result p=0.12``. The attempt's
+  status never changes.
+
+### Retry advice (Part 9)
+
+Asked only for an attempt that failed with the `agent` failure kind while a
+same-executor retry is still pending; never for transient, auth or budget
+failures, deadline continuations, interrupts or cancellations. State: `step`
+(title and prompt head 2 kB), `failure` (last 6 kB), `previous_failure` (the
+execution's previous agent failure, when there is one) and `meta.attempt`,
+`retries_left`, `fallbacks_left`. Questions: `next`
+(`retry_same_likely_helps`, `switch_executor`, `stop_and_route_failure`,
+`unclear`) and, with a previous failure, `repeat`. `would_change` when `next`
+is not `retry_same_likely_helps` at `thresholds.min_confidence` (0.6) or
+more; the retry runs as today below enforce. Join keys: `retries_left`,
+`fallbacks_left`.
+
+### Supervisor wake pre-triage (Part 10)
+
+Asked once per park wake (a supervised run parked on a failed or timed-out
+node), before the wake is raised; anomaly and question wakes are never
+triaged. State: `step` (id, title, prompt 2 kB), `output_tail` (6 kB), and
+`meta.trigger`, `failure_kind`, `attempt`, `retries_left`,
+`alternative_executor`, `recent_actions` (the last five supervisor actions).
+The `action` choice holds only what is legal now: `retry_same`,
+`retry_with_note`, `switch_executor` (only with another executor or
+profile), `continue_from_next` (only with a successor), `pause_for_human`,
+`needs_supervisor`; plus the `looping` noul. Join key: `wake_seq`.
+
+- advise: the wake gets `triage: {action, p, confidence, looping_p,
+  provider, model}` (mirrored to a parent run with the wake), its detail ends
+  with `Triage (advisory): retry_with_note p=0.78.`, and the supervisor's
+  brief gets one sentence: follow the triage unless the detail contradicts
+  it, and use `supervisor_run_inspect` only when neither is enough. With the
+  use off or the provider down, the wake and the brief are byte-identical to
+  before.
+
+### Review gate recommendation (Part 11)
+
+Asked once per gate visit, before `review_requested`. State: `gate` (title
+and the literal `prompt`), `inputs` (the outputs of the gate's direct
+predecessors that ran, 6 kB tail each, by node id). One `decision` choice
+over the gate's effective options (the defaults included), with the gate's
+`option_descriptions` as criteria. Join key: `gate_visit`.
+
+- advise: `review_requested.recommendation: {option, p, confidence,
+  provider, model, calibrated}`, and the instruction ends with `Advisory
+  recommendation: approve (p=0.86).` `run_status`, `run_wait` and
+  `supervisor_wait_event` carry it in `pending_review`. Nothing is
+  preselected and the gate still waits for a person.
+
+### Executor tier routing (Part 12)
+
+For an `agent_task` with `route: auto` whose profile declares `tiers` (see
+PROFILES.md), before the first attempt of each execution. State: `step`
+(title and prompt head 3 kB) and `meta.declared_outputs`. Questions: `tier`
+(a choice over the declared tiers with their `for` texts, plus `unclear`)
+and `difficulty` (a five-level score, in words). Hysteresis: after a node of
+the same profile ran on a tier, a different tier needs
+`thresholds.hysteresis` (0.75) confidence. Join keys: `profile`,
+`executor_tier`, `recommended`, `tier` (the tier after hysteresis).
+
+- shadow and advise: the would-be tier is journaled, the profile's own
+  executor runs, `would_change` when the tiers differ.
+- Never routed, with `join.excluded` naming why and no request: a node with
+  `continue_session`, a handoff source (a later node continues its session),
+  a node a supervisor rebound. Retries and fallback steps are never routed:
+  routing happens once per execution.
+
+## Enforce (Part 14)
+
+Common rules, applied by the runner for every use:
+
+1. The use is in `enforce` for the run (the snapshot, capped by the machine
+   and the project at the moment of the decision: `APB_DECISIONS=off`, a
+   lowered ceiling or use mode, a removed file or a project opt-out stop
+   every path mid-run), and the playbook opts in (below).
+2. The answer is calibrated, or `uses.<name>.allow_uncalibrated: true`.
+3. A threshold is stored for the use and the answering provider and model in
+   `<config_dir>/decisions-thresholds.yaml` (`thresholds: [{use, provider,
+   model, threshold}]`, written by the report tooling). The model must match
+   exactly: a new model id never inherits.
+4. At most `uses.<name>.max_actions` (default 3) automatic actions per use
+   and run.
+
+When a rule fails, the decision is journaled with `enforce_refused`
+(`not_opted_in`, `uncalibrated`, `no_threshold`, `cap`, or `effects` at a
+gate) and the use behaves as advise. An acting decision is journaled with
+`applied: true` before anything acts on it, and a resumed run replays it
+without a request, so the same path repeats. Every path is fail-open except
+the review auto-decision, which is fail-closed.
+
+| Path | Opt-in | Acts when | Action |
+|---|---|---|---|
+| Completion | node `completion_check: enforce` | `final_result` below the stored threshold and `completion` is not `blocked_on_input` | the attempt fails with reason `completion check: partial (p=0.84)`, the reply kept as `rejected_output`, consuming a normal retry; a `blocked_on_input` answer only raises the advise anomaly |
+| Retry advice | `defaults.retry_advice: enforce` | `next` is `switch_executor` (with a fallback left) or `stop_and_route_failure` at the stored threshold's confidence | `switch_executor` skips the remaining same-executor retries to the next fallback; `stop_and_route_failure` fails the node now; each is journaled as a `supervisor_action` `retry_advice` marker |
+| Supervisor auto-retry | `supervisor: { pre_triage: enforce }` | `action` is `retry_same` or `retry_with_note` at the stored threshold and `looping` below `thresholds.looping_max` (0.3) | the engine posts the same `node_retry` command a supervisor sends, after a `supervisor_action` `triage_retry` marker; `retry_with_note` first appends the code-template note `Previous attempt failed with: <failure_kind>; <first error line of the output tail>` to the run context; the wake is still raised, with `triage.applied: true` |
+| Review auto-decision | gate `auto_decide: { allow: [needs_changes], min_confidence: 0.9 }` | the recommendation is an allowed option at the higher of the stored threshold and `min_confidence` | the option is posted through the review channel with note `auto: <provider>/<model> p=<p>` and journaled as an ordinary `review_decided`; revertible with `continue_from`; a decision a person posted first wins |
+| Routing | node `route: auto` | the tier after hysteresis differs from the profile's executor tier at the stored threshold's confidence | the first attempt runs on that tier through the rebind overlay (`profile_rebound` with reason `routing: tier ...`); an agent failure on a tier below the executor goes up a tier at once (`fallback_triggered.reason: routing`) before the normal chain; a later execution routed back to the executor clears the overlay the same way |
+
+The review auto-decision is refused by the validator (V73) on a playbook that
+declares `irreversible` or `secrets` effects, or whose nodes after the gate
+include a merge, push, deploy or publish step (by id, title or script path),
+unless the gate sets `auto_decide_ok: true`. The inferred `external` effect
+does not count (every playbook with an agent has it). The run re-checks the
+same rule with the declared effects of the sub-playbooks it runs and refuses
+with `enforce_refused: effects`. `allow` may contain only `needs_changes`,
+never `approve` (V72).

@@ -175,7 +175,13 @@ model turn for the supervisor, so pass the largest value the host's tool-call
 limit allows: the server refreshes the supervisor heartbeat while it blocks
 (so a long wait never reads as a lost supervisor) and sends progress
 notifications every 15 s when the call carries a progress token. On `timeout`,
-just call again. A wake's `detail` is capped at its last 16 KiB
+just call again. A park wake may carry `triage: {action, p, confidence,
+looping_p, provider, model, applied?}`, a decision model's recommendation
+(only when the machine's `decisions.yaml` puts `supervisor_triage` in advise
+or enforce; `applied: true` means the engine already posted the retry). A
+`pending_review` may carry `recommendation: {option, p, confidence,
+provider, model, calibrated, applied?}`, advisory and never preselected (see
+DECISIONS.md). A wake's `detail` is capped at its last 16 KiB
 (`detail_truncated: true`); `supervisor_run_inspect` has the full output.
 `supervisor_run_inspect` itself elides texts over 512 bytes inside `events`
 (they repeat `outputs`, `context` and `wakes`); pass `full_events: true` for

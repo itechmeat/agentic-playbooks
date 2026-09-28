@@ -1022,4 +1022,43 @@ privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug
             assert!(parse_origin(bad).is_none(), "{bad}");
         }
     }
+
+    #[test]
+    fn stored_thresholds_match_exactly_and_never_inherit() {
+        let cfg = tempfile::tempdir().unwrap();
+        assert_eq!(stored_threshold_in(cfg.path(), "routing", "p", "m-1"), None);
+        std::fs::write(
+            cfg.path().join(THRESHOLDS_FILE),
+            "version: 1\nthresholds:\n  - { use: routing, provider: p, model: m-1, threshold: 0.7 }\n",
+        )
+        .unwrap();
+        assert_eq!(
+            stored_threshold_in(cfg.path(), "routing", "p", "m-1"),
+            Some(0.7)
+        );
+        assert_eq!(stored_threshold_in(cfg.path(), "routing", "p", "m-2"), None);
+        assert_eq!(stored_threshold_in(cfg.path(), "routing", "q", "m-1"), None);
+        assert_eq!(
+            stored_threshold_in(cfg.path(), "completion_check", "p", "m-1"),
+            None
+        );
+    }
+
+    #[test]
+    fn engine_uses_get_default_thresholds_and_enforce_settings() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write(
+            cfg.path(),
+            "mode: enforce\nproviders: [{ id: a, kind: systemone, base_url: 'http://127.0.0.1:1', model: m }]\nuses:\n  retry_advice: { mode: enforce, max_actions: 1, allow_uncalibrated: true }\n  routing: { mode: shadow, thresholds: { hysteresis: 0.9 } }\n  supervisor_triage: { mode: advise }\n",
+        );
+        let eff = resolve_in(cfg.path(), root.path()).active().unwrap();
+        assert_eq!(eff.threshold("retry_advice", "min_confidence"), Some(0.6));
+        assert_eq!(eff.threshold("routing", "hysteresis"), Some(0.9));
+        assert_eq!(eff.threshold("supervisor_triage", "looping_max"), Some(0.3));
+        assert_eq!(eff.max_actions("retry_advice"), 1);
+        assert_eq!(eff.max_actions("routing"), DEFAULT_MAX_ACTIONS);
+        assert!(eff.allows_uncalibrated("retry_advice"));
+        assert!(!eff.allows_uncalibrated("routing"));
+    }
 }
