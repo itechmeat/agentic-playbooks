@@ -12,10 +12,10 @@
 
 use std::collections::{BTreeSet, VecDeque};
 
-use super::ValidationReport;
+use super::*;
 use crate::schema::{
-    AUTO_DECIDE_ALLOWED, CompletionCheckSetting, DecisionOptIn, Effect, NodeKind, Playbook,
-    RouteSetting, effective_review_options,
+    AUTO_DECIDE_ALLOWED, CompletionCheckSetting, DecisionOptIn, Effect, RouteSetting,
+    effective_review_options,
 };
 
 /// Words that mark a step as one that ships something out of reach of a
