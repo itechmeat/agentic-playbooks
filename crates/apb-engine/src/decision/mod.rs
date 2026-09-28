@@ -22,6 +22,7 @@
 //!    to `runs/<id>/decisions/<seq>.json`.
 
 pub(crate) mod completion;
+pub(crate) mod judge;
 mod redact;
 
 use std::collections::BTreeMap;
@@ -145,6 +146,9 @@ struct Replay {
     state_digest: String,
     questions_digest: String,
     answers: BTreeMap<String, DecisionAnswer>,
+    /// Who answered (issue #165 Part 5: a judge replays only an answer from
+    /// the route it asks, and names it in its output).
+    source: Option<AnswerSource>,
 }
 
 #[derive(Debug, Default)]
@@ -172,7 +176,7 @@ pub(crate) struct DecisionRunner {
     run_dir: PathBuf,
     /// Variables whose values never leave the machine (connector secrets).
     scrub_names: Vec<String>,
-    chain: OnceLock<(ProviderChain, Vec<String>)>,
+    chain: OnceLock<Chains>,
     redactor: OnceLock<redact::Redactor>,
     cache: DecisionCache,
     ledger: Mutex<Ledger>,
@@ -188,6 +192,24 @@ impl DecisionRunner {
         scrub_names: &[String],
     ) -> Option<Self> {
         let settings = crate::manifest::read(run_dir).ok()??.decisions?;
+        Some(Self::with_settings(
+            settings,
+            root,
+            run_dir,
+            events,
+            scrub_names,
+        ))
+    }
+
+    /// A runner over `settings`, its budget and replay list seeded from the
+    /// journal.
+    fn with_settings(
+        settings: EffectiveDecisions,
+        root: &Path,
+        run_dir: &Path,
+        events: &[Event],
+        scrub_names: &[String],
+    ) -> Self {
         let mut ledger = Ledger::default();
         for e in events {
             if let EventPayload::DecisionMade {
@@ -195,6 +217,8 @@ impl DecisionRunner {
                 node,
                 attempt,
                 provider,
+                model,
+                calibrated,
                 questions_digest,
                 state_digest,
                 answers,
@@ -216,11 +240,16 @@ impl DecisionRunner {
                         state_digest: state_digest.clone(),
                         questions_digest: questions_digest.clone(),
                         answers: answers.clone(),
+                        source: provider.as_ref().map(|p| AnswerSource {
+                            provider: p.clone(),
+                            model: model.clone().unwrap_or_default(),
+                            calibrated: *calibrated,
+                        }),
                     });
                 }
             }
         }
-        Some(DecisionRunner {
+        DecisionRunner {
             settings,
             root: root.to_path_buf(),
             run_dir: run_dir.to_path_buf(),
@@ -229,7 +258,7 @@ impl DecisionRunner {
             redactor: OnceLock::new(),
             cache: DecisionCache::new(),
             ledger: Mutex::new(ledger),
-        })
+        }
     }
 
     pub(crate) fn settings(&self) -> &EffectiveDecisions {
@@ -245,14 +274,14 @@ impl DecisionRunner {
         }
     }
 
-    /// Builds the provider chain on first use: keys resolve now, and a
+    /// Builds the provider chains on first use: keys resolve now, and a
     /// provider whose key does not resolve is left out (said once on
     /// stderr, never with a value). Also returns the resolved keys, which
     /// the redactor treats as secrets.
-    fn chain(&self) -> &(ProviderChain, Vec<String>) {
+    fn chains(&self) -> &Chains {
         self.chain.get_or_init(|| {
             let timeout = Duration::from_millis(self.settings.timeout_ms);
-            let mut providers: Vec<Box<dyn DecisionProvider>> = Vec::new();
+            let (mut all, mut native, mut emulation) = (Vec::new(), Vec::new(), Vec::new());
             let mut keys = Vec::new();
             for spec in &self.settings.providers {
                 let key = match resolve_key(spec) {
@@ -265,25 +294,26 @@ impl DecisionRunner {
                 if let Some(k) = &key {
                     keys.push(k.clone());
                 }
+                let build = || provider_for(spec, key.clone(), timeout);
+                all.push(build());
                 match spec.kind {
-                    ProviderKind::Systemone => providers.push(Box::new(SystemOne::new(
-                        spec.id.clone(),
-                        spec.base_url.clone().unwrap_or_default(),
-                        spec.model.clone().unwrap_or_default(),
-                        key.map(ApiKey::new),
-                        timeout,
-                    ))),
-                    ProviderKind::Fake => {
-                        let mut fake = FakeProvider::new(spec.id.clone());
-                        for (qid, item) in &spec.answers {
-                            fake = fake.answer(qid.clone(), item.clone());
-                        }
-                        providers.push(Box::new(fake));
-                    }
+                    ProviderKind::LlmEmulation => emulation.push(build()),
+                    ProviderKind::Systemone | ProviderKind::Fake => native.push(build()),
                 }
             }
-            (ProviderChain::new(providers), keys)
+            Chains {
+                all: ProviderChain::new(all),
+                native: ProviderChain::new(native),
+                emulation: ProviderChain::new(emulation),
+                keys,
+            }
         })
+    }
+
+    /// The chain every configured provider is in, and the resolved keys.
+    fn chain(&self) -> (&ProviderChain, &[String]) {
+        let c = self.chains();
+        (&c.all, &c.keys)
     }
 
     fn redactor(&self) -> &redact::Redactor {
@@ -345,7 +375,8 @@ impl DecisionRunner {
         attempt: Option<u32>,
         state_digest: &str,
         questions_digest: &str,
-    ) -> Option<BTreeMap<String, DecisionAnswer>> {
+        answered_by: Option<&[String]>,
+    ) -> Option<(BTreeMap<String, DecisionAnswer>, Option<AnswerSource>)> {
         let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
         ledger
             .replay
@@ -356,8 +387,11 @@ impl DecisionRunner {
                     && r.attempt == attempt
                     && r.state_digest == state_digest
                     && r.questions_digest == questions_digest
+                    && answered_by.is_none_or(|ids| {
+                        r.source.as_ref().is_some_and(|s| ids.contains(&s.provider))
+                    })
             })
-            .map(|r| r.answers.clone())
+            .map(|r| (r.answers.clone(), r.source.clone()))
     }
 
     fn budget_spent(&self) -> bool {
@@ -372,26 +406,60 @@ impl DecisionRunner {
         journal: &dyn DecisionJournal,
         call: DecisionCall,
     ) -> DecisionOutcome {
+        self.decide_routed(journal, call, Route::All).0
+    }
+
+    /// [`Self::decide`] through a chosen route, also naming who answered.
+    /// A custom route (a backend outside `decisions.yaml`, the judge's
+    /// profile emulation) is asked whatever the use's mode, and what it
+    /// concludes is applied whatever the mode: the node declared it.
+    pub(crate) fn decide_routed(
+        &self,
+        journal: &dyn DecisionJournal,
+        call: DecisionCall,
+        route: Route,
+    ) -> (DecisionOutcome, Option<AnswerSource>) {
         let mode = self.mode_for(call.site);
-        if mode == DecisionMode::Off {
-            return DecisionOutcome::Skipped { reason: "off" };
+        let custom = matches!(route, Route::Custom { .. });
+        // The emulation routes are a judge node's declared fallback: what
+        // they conclude is applied whatever the mode.
+        let declared = custom || matches!(route, Route::Emulation);
+        if mode == DecisionMode::Off && !custom {
+            return (DecisionOutcome::Skipped { reason: "off" }, None);
         }
         let state = self.build_state(&call.state);
         let state_bytes = serde_json::to_string(&state).map_or(0, |s| s.len()) as u64;
         let state_digest = apb_decide::digest::digest(&state);
         let questions_digest = apb_decide::digest::questions_digest(&call.questions);
-        if let Some(answers) = self.replayed(
+        let route_ids: Option<Vec<String>> = match &route {
+            Route::All => None,
+            Route::Native => Some(self.chains().native.ids().iter().map(|s| s.to_string()).collect()),
+            Route::Emulation => Some(
+                self.chains()
+                    .emulation
+                    .ids()
+                    .iter()
+                    .map(|s| s.to_string())
+                    .collect(),
+            ),
+            Route::Custom { id, .. } => Some(vec![id.to_string()]),
+        };
+        if let Some((answers, source)) = self.replayed(
             call.site,
             call.node,
             call.attempt,
             &state_digest,
             &questions_digest,
+            route_ids.as_deref(),
         ) {
-            return DecisionOutcome::Answered {
-                answers,
-                mode,
-                replayed: true,
-            };
+            return (
+                DecisionOutcome::Answered {
+                    answers,
+                    mode,
+                    replayed: true,
+                },
+                source,
+            );
         }
         let base = EventPayload::DecisionMade {
             use_site: call.site.as_str().to_string(),
@@ -421,7 +489,7 @@ impl DecisionRunner {
                 *error = Some("budget".into());
             }
             let _ = journal.append_decision(event);
-            return DecisionOutcome::Skipped { reason: "budget" };
+            return (DecisionOutcome::Skipped { reason: "budget" }, None);
         }
         let request = DecisionRequest {
             use_site: call.site,
@@ -436,7 +504,15 @@ impl DecisionRunner {
             questions: call.questions.clone(),
         };
         let started = std::time::Instant::now();
-        let result = self.chain().0.decide(&request, Some(&self.cache));
+        let result = match &route {
+            Route::All => self.chain().0.decide(&request, Some(&self.cache)),
+            Route::Native => self.chains().native.decide(&request, Some(&self.cache)),
+            Route::Emulation => self.chains().emulation.decide(&request, Some(&self.cache)),
+            Route::Custom { id, model, ask } => match self.cache.get(id, model, &request) {
+                Some(hit) => Ok(hit),
+                None => ask(&request).inspect(|r| self.cache.put(id, model, &request, r)),
+            },
+        };
         let elapsed = started.elapsed().as_millis() as u64;
         let mut event = base;
         let mut full: Option<BTreeMap<String, Answer>> = None;
@@ -469,8 +545,9 @@ impl DecisionRunner {
                     *model = Some(resp.model.clone());
                     *calibrated = resp.calibrated;
                     *answers = compact.clone();
-                    // Never applied in shadow, whatever the use concluded.
-                    *applied = verdict.applied && mode > DecisionMode::Shadow;
+                    // Never applied in shadow, whatever the use concluded
+                    // (a custom route is the node's own declared fallback).
+                    *applied = verdict.applied && (declared || mode > DecisionMode::Shadow);
                     *would_change = verdict.would_change;
                     *latency_ms = if resp.cached {
                         0
@@ -493,7 +570,14 @@ impl DecisionRunner {
                     outcome_answers = Some(compact);
                 }
                 Err(e) => {
-                    *provider = self.chain().0.ids().last().map(|s| s.to_string());
+                    *provider = match &route {
+                        Route::All => self.chain().0.ids().last().map(|s| s.to_string()),
+                        Route::Native => self.chains().native.ids().last().map(|s| s.to_string()),
+                        Route::Emulation => {
+                            self.chains().emulation.ids().last().map(|s| s.to_string())
+                        }
+                        Route::Custom { id, .. } => Some(id.to_string()),
+                    };
                     *latency_ms = elapsed;
                     *error = Some(e.kind().to_string());
                     outcome_answers = None;
@@ -511,12 +595,20 @@ impl DecisionRunner {
             } => (cost_usd.unwrap_or(0.0), provider.is_some() && !cached),
             _ => (0.0, false),
         };
+        let source = result.as_ref().ok().map(|r| AnswerSource {
+            provider: r.provider.clone(),
+            model: r.model.clone(),
+            calibrated: r.calibrated,
+        });
         let seq = match journal.append_decision(event) {
             Ok(seq) => seq,
             Err(_) => {
-                return DecisionOutcome::Failed {
-                    error_kind: "journal".into(),
-                };
+                return (
+                    DecisionOutcome::Failed {
+                        error_kind: "journal".into(),
+                    },
+                    None,
+                );
             }
         };
         {
@@ -533,13 +625,14 @@ impl DecisionRunner {
                     state_digest,
                     questions_digest,
                     answers: answers.clone(),
+                    source: source.clone(),
                 });
             }
         }
         if self.settings.privacy.debug_state {
             self.write_debug_state(seq, &state, &call.questions, full.as_ref());
         }
-        match (outcome_answers, result) {
+        let outcome = match (outcome_answers, result) {
             (Some(answers), _) => DecisionOutcome::Answered {
                 answers,
                 mode,
@@ -551,7 +644,8 @@ impl DecisionRunner {
             (None, Ok(_)) => DecisionOutcome::Failed {
                 error_kind: "unavailable".into(),
             },
-        }
+        };
+        (outcome, source)
     }
 
     /// Step 9: the redacted state, the questions and the full answers, for
@@ -573,6 +667,136 @@ impl DecisionRunner {
         }
     }
 }
+
+/// The run's provider chains, built once.
+#[derive(Debug)]
+struct Chains {
+    /// Every configured provider, in order.
+    all: ProviderChain,
+    /// The decision models proper (`systemone`, `fake`).
+    native: ProviderChain,
+    /// The `llm_emulation` providers.
+    emulation: ProviderChain,
+    /// The resolved keys (secrets for the redactor).
+    keys: Vec<String>,
+}
+
+fn provider_for(
+    spec: &ProviderSpec,
+    key: Option<String>,
+    timeout: Duration,
+) -> Box<dyn DecisionProvider> {
+    match spec.kind {
+        ProviderKind::Systemone => Box::new(SystemOne::new(
+            spec.id.clone(),
+            spec.base_url.clone().unwrap_or_default(),
+            spec.model.clone().unwrap_or_default(),
+            key.map(ApiKey::new),
+            timeout,
+        )),
+        ProviderKind::Fake => {
+            let mut fake = FakeProvider::new(spec.id.clone());
+            for (qid, item) in &spec.answers {
+                fake = fake.answer(qid.clone(), item.clone());
+            }
+            Box::new(fake)
+        }
+        ProviderKind::LlmEmulation => Box::new(apb_decide::LlmEmulation::new(
+            spec.id.clone(),
+            spec.base_url.clone().unwrap_or_default(),
+            spec.model.clone().unwrap_or_default(),
+            key.map(ApiKey::new),
+            timeout,
+            match spec.structured_output.unwrap_or_default() {
+                apb_core::decisions::EmulationOutput::JsonSchema => {
+                    apb_decide::StructuredOutput::JsonSchema
+                }
+                apb_core::decisions::EmulationOutput::PromptOnly => {
+                    apb_decide::StructuredOutput::PromptOnly
+                }
+            },
+        )),
+    }
+}
+
+// --- issue #165 Parts 5-7: routes for the judge uses ------------------------
+
+/// A backend asked outside `decisions.yaml`.
+pub(crate) type AskFn<'a> =
+    &'a dyn Fn(&DecisionRequest) -> Result<apb_decide::DecisionResponse, apb_decide::DecideError>;
+
+/// Which providers a call goes to.
+pub(crate) enum Route<'a> {
+    /// Every configured provider, in order (what [`DecisionRunner::decide`] uses).
+    All,
+    /// The decision models proper, without the `llm_emulation` providers: a
+    /// judge's own question.
+    Native,
+    /// Only the configured `llm_emulation` providers.
+    Emulation,
+    /// A backend outside the chain (the judge node's profile emulation),
+    /// journaled under `id` and `model`.
+    Custom {
+        id: &'a str,
+        model: &'a str,
+        ask: AskFn<'a>,
+    },
+}
+
+/// Who answered a decision.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) struct AnswerSource {
+    pub(crate) provider: String,
+    pub(crate) model: String,
+    pub(crate) calibrated: bool,
+}
+
+impl DecisionRunner {
+    /// A runner for a run whose manifest has no decisions block, used only
+    /// to journal and replay what a judge node's profile emulation answers:
+    /// every use is off, no provider is configured, the default privacy and
+    /// budget apply.
+    pub(crate) fn for_emulation(
+        root: &Path,
+        run_dir: &Path,
+        events: &[Event],
+        scrub_names: &[String],
+    ) -> Self {
+        let settings = EffectiveDecisions {
+            mode: DecisionMode::Off,
+            timeout_ms: 3000,
+            providers: Vec::new(),
+            budget: Default::default(),
+            privacy: Default::default(),
+            uses: BTreeMap::new(),
+        };
+        Self::with_settings(settings, root, run_dir, events, scrub_names)
+    }
+
+    /// Whether any `llm_emulation` provider is configured for the run.
+    pub(crate) fn has_emulation(&self) -> bool {
+        !self.chains().emulation.is_empty()
+    }
+}
+
+/// A state field name with a `'static` lifetime, for the judge node's
+/// author-named fields. Each distinct name is kept once for the life of the
+/// process (bounded by the names the playbooks run here declare).
+pub(crate) fn intern(name: &str) -> &'static str {
+    static NAMES: OnceLock<Mutex<std::collections::BTreeSet<&'static str>>> = OnceLock::new();
+    let mut names = NAMES
+        .get_or_init(Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if let Some(n) = names.get(name) {
+        return n;
+    }
+    let leaked: &'static str = Box::leak(name.to_string().into_boxed_str());
+    names.insert(leaked);
+    leaked
+}
+
+// --- end judge routes ---------------------------------------------------------
 
 fn resolve_key(spec: &ProviderSpec) -> Result<Option<String>, String> {
     match &spec.key {

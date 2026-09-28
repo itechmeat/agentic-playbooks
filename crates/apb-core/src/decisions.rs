@@ -88,7 +88,31 @@ pub enum ProviderKind {
     /// Scripted answers, no network (tests and dry runs; needs
     /// `APB_DECISIONS_ALLOW_FAKE=1`).
     Fake,
+    /// A chat model imitating the interface through structured output
+    /// (issue #165 Part 6): `via: openai_compatible`, `POST
+    /// {base_url}/chat/completions`. Uncalibrated.
+    LlmEmulation,
 }
+
+// --- issue #165 Part 6: LLM emulation settings ------------------------------
+
+/// How an `llm_emulation` provider asks for structured output.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum EmulationOutput {
+    /// `response_format: {type: json_schema, strict: true}`.
+    #[default]
+    JsonSchema,
+    /// The schema in the prompt, the first JSON object of the reply parsed.
+    PromptOnly,
+}
+
+/// The only `via` a `decisions.yaml` provider takes. The other emulation
+/// backend, an APB agent profile, is declared on the judge node itself
+/// (`on_unavailable: emulate` with `profile`), never in this file.
+const VIA_OPENAI_COMPATIBLE: &str = "openai_compatible";
+
+// --- end LLM emulation settings ---------------------------------------------
 
 /// A material class a use may send (`privacy.send`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
@@ -129,6 +153,9 @@ pub struct ProviderSpec {
     /// `kind: fake` only: reply items by question id, in the wire shape.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub answers: BTreeMap<String, serde_json::Value>,
+    /// `kind: llm_emulation` only: how structured output is asked for.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub structured_output: Option<EmulationOutput>,
 }
 
 impl ProviderSpec {
@@ -307,6 +334,11 @@ struct ProviderDoc {
     data_class: DataClass,
     #[serde(default)]
     answers: BTreeMap<String, serde_json::Value>,
+    /// `kind: llm_emulation` only.
+    #[serde(default)]
+    via: Option<String>,
+    #[serde(default)]
+    structured_output: Option<EmulationOutput>,
 }
 
 /// A URL's parts that matter here.
@@ -427,7 +459,43 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
             Some(v) => Some(key_ref(&format!("{at}.api_key"), v)?),
             None => None,
         };
+        if p.kind != ProviderKind::LlmEmulation && (p.via.is_some() || p.structured_output.is_some())
+        {
+            return Err(format!(
+                "{at}: via and structured_output are only for kind llm_emulation"
+            ));
+        }
         match p.kind {
+            ProviderKind::LlmEmulation => {
+                match p.via.as_deref() {
+                    Some(VIA_OPENAI_COMPATIBLE) => {}
+                    Some("profile") => {
+                        return Err(format!(
+                            "{at}: via profile is declared on the judge node (on_unavailable: emulate with a profile), not in {DECISIONS_FILE}"
+                        ));
+                    }
+                    _ => {
+                        return Err(format!(
+                            "{at}.via must be {VIA_OPENAI_COMPATIBLE} for kind llm_emulation"
+                        ));
+                    }
+                }
+                let url = p
+                    .base_url
+                    .as_deref()
+                    .ok_or_else(|| format!("{at}.base_url is required for kind llm_emulation"))?;
+                if parse_origin(url).is_none() {
+                    return Err(format!(
+                        "{at}.base_url must be an http(s) URL without credentials, query or fragment"
+                    ));
+                }
+                if p.model.as_deref().is_none_or(str::is_empty) {
+                    return Err(format!("{at}.model is required for kind llm_emulation"));
+                }
+                if !p.answers.is_empty() {
+                    return Err(format!("{at}.answers is only for kind fake"));
+                }
+            }
             ProviderKind::Systemone => {
                 let url = p
                     .base_url
@@ -459,6 +527,10 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
             data_class: p.data_class,
             key,
             answers: p.answers,
+            structured_output: match p.kind {
+                ProviderKind::LlmEmulation => Some(p.structured_output.unwrap_or_default()),
+                _ => None,
+            },
         });
     }
     if providers.is_empty() {
@@ -665,6 +737,7 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
                     let kind = match p.kind {
                         ProviderKind::Systemone => "systemone",
                         ProviderKind::Fake => "fake",
+                        ProviderKind::LlmEmulation => "llm_emulation (uncalibrated)",
                     };
                     let mut parts = vec![kind.to_string()];
                     if let Some(h) = p.host() {
@@ -750,6 +823,42 @@ privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug
         );
         assert_eq!(eff.budget.max_requests_per_run, 5);
         assert!(eff.privacy.debug_state);
+    }
+
+    #[test]
+    fn an_llm_emulation_provider_loads_and_its_profile_form_is_refused_here() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write(
+            cfg.path(),
+            "providers:\n  - { id: emu, kind: llm_emulation, via: openai_compatible, base_url: \"https://llm.example.test/v1\", model: small-1, api_key: \"{{env.EMU_KEY}}\", structured_output: prompt_only }\nuses:\n  judge_node: { mode: shadow }\n",
+        );
+        let eff = resolve_in(cfg.path(), root.path()).active().unwrap();
+        assert_eq!(eff.providers[0].kind, ProviderKind::LlmEmulation);
+        assert_eq!(
+            eff.providers[0].structured_output,
+            Some(EmulationOutput::PromptOnly)
+        );
+        for (body, needle) in [
+            (
+                "providers:\n  - { id: emu, kind: llm_emulation, via: profile, base_url: \"https://x.test\", model: m }\n",
+                "declared on the judge node",
+            ),
+            (
+                "providers:\n  - { id: emu, kind: llm_emulation, base_url: \"https://x.test\", model: m }\n",
+                "via must be openai_compatible",
+            ),
+            (
+                "providers:\n  - { id: s, kind: systemone, base_url: \"https://x.test\", model: m, via: openai_compatible }\n",
+                "only for kind llm_emulation",
+            ),
+        ] {
+            write(cfg.path(), body);
+            match resolve_in(cfg.path(), root.path()) {
+                Resolution::Invalid(e) => assert!(e.contains(needle), "{e}"),
+                other => panic!("{other:?}"),
+            }
+        }
     }
 
     #[test]

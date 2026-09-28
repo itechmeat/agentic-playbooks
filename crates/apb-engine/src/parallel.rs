@@ -35,8 +35,26 @@ fn status_matches(node_status: NodeStatus, equals: StatusEq) -> bool {
 }
 
 /// Whether the edge's condition matches the current run state.
-/// `from` is the edge's source node (for review_status).
+/// `from` is the edge's source node (for review_status). A judge edge needs
+/// its position among `from`'s outgoing edges, see [`edge_matches_at`];
+/// here it takes its `on_unavailable`.
 pub fn edge_matches(edge: &Edge, from: &str, state: &RunState) -> bool {
+    edge_matches_at(edge, None, from, state)
+}
+
+/// The "yes" probability the judge edge at `index` of `from` was given for
+/// `from`'s latest execution, when that answer was applied (issue #165 Part
+/// 7). `None`: no usable answer, so the edge's `on_unavailable` decides.
+fn judge_edge_p(state: &RunState, from: &str, index: usize) -> Option<f64> {
+    let answers = state.judge_edges.get(from)?;
+    if !answers.applied || state.finished_counts.get(from) != Some(&answers.execution) {
+        return None;
+    }
+    answers.p.get(&format!("edge_{index}")).copied()
+}
+
+/// [`edge_matches`] for the edge at `index` among `from`'s outgoing edges.
+pub fn edge_matches_at(edge: &Edge, index: Option<usize>, from: &str, state: &RunState) -> bool {
     match &edge.condition {
         None => true,
         Some(EdgeCondition::NodeStatus { node, equals }) => state
@@ -63,6 +81,14 @@ pub fn edge_matches(edge: &Edge, from: &str, state: &RunState) -> bool {
             .get(node)
             .and_then(|o| output_field_value(o, field))
             .is_some_and(|value| value == *equals),
+        Some(EdgeCondition::Judge {
+            min_p,
+            on_unavailable,
+            ..
+        }) => match index.and_then(|i| judge_edge_p(state, from, i)) {
+            Some(p) => p >= min_p.0,
+            None => on_unavailable.unwrap_or(false),
+        },
     }
 }
 
@@ -91,7 +117,9 @@ fn condition_reads(cond: &EdgeCondition, node: &str) -> bool {
         EdgeCondition::NodeStatus { node: n, .. }
         | EdgeCondition::OutputMatch { node: n, .. }
         | EdgeCondition::OutputField { node: n, .. } => n == node,
-        EdgeCondition::ReviewStatus { .. } => false,
+        // A judge edge reads its own source, which the caller already
+        // treats as a conditional edge out of that node.
+        EdgeCondition::ReviewStatus { .. } | EdgeCondition::Judge { .. } => false,
     }
 }
 
@@ -194,11 +222,9 @@ pub fn selected_edges<'a>(playbook: &'a Playbook, from: &str, state: &RunState) 
     if !unconditional.is_empty() {
         return unconditional;
     }
-    if let Some(e) = out
-        .iter()
-        .copied()
-        .find(|e| !e.fallback && edge_available(e, state) && edge_matches(e, from, state))
-    {
+    if let Some((_, e)) = out.iter().copied().enumerate().find(|(i, e)| {
+        !e.fallback && edge_available(e, state) && edge_matches_at(e, Some(*i), from, state)
+    }) {
         return vec![e];
     }
     if let Some(e) = out

@@ -9,7 +9,8 @@
 //!
 //! - [`DecisionProvider`] is the one trait; [`SystemOne`] speaks the
 //!   `/v1/systemone` wire format (route table in its module docs) and
-//!   [`FakeProvider`] answers from a script.
+//!   [`FakeProvider`] answers from a script; [`LlmEmulation`] imitates the
+//!   interface with a chat model (uncalibrated, see [`llm_emulation`]).
 //! - [`validate`] holds the client-side limit checks, the strict reply
 //!   validation and the confidence recompute every provider shares.
 //! - [`ProviderChain`] tries providers in order; [`DecisionCache`] is the
@@ -26,6 +27,7 @@ pub mod digest;
 mod error;
 mod fake;
 mod key;
+pub mod llm_emulation;
 mod systemone;
 #[cfg(feature = "testing")]
 pub mod testing;
@@ -37,6 +39,7 @@ pub use chain::ProviderChain;
 pub use error::DecideError;
 pub use fake::FakeProvider;
 pub use key::ApiKey;
+pub use llm_emulation::{LlmEmulation, StructuredOutput};
 pub use systemone::SystemOne;
 pub use types::{
     Answer, ChoiceCriteria, DecisionRequest, DecisionResponse, Limits, NoulCriteria, Question,

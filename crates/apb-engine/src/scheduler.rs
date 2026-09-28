@@ -45,6 +45,7 @@ mod control_apply;
 mod entry;
 mod handoff;
 mod journal;
+mod judge;
 mod listing;
 mod live;
 mod node;
@@ -443,10 +444,28 @@ fn drive_inner(
             // sibling branch that never started blocks a join here instead of
             // being written off as dead.
             let outstanding = parallel::pending_heads(&playbook, &entry_state);
+            // A drive that died between the node's finish and its judge-edge
+            // decision (issue #165 Part 7) asks now; an execution already
+            // decided is not asked again.
+            let edge_state = match entry_state.nodes.get(&start_node).copied() {
+                Some(st)
+                    if judge::decide_edges(
+                        &playbook,
+                        run_dir,
+                        &start_node,
+                        st,
+                        decisions.as_ref(),
+                        &Journal::new(&mut *log),
+                    )? =>
+                {
+                    RunState::fold(&read_all(run_dir)?)
+                }
+                _ => entry_state.clone(),
+            };
             advance_frontier(
                 &playbook,
                 &start_node,
-                &entry_state,
+                &edge_state,
                 &mut frontier,
                 &outstanding,
                 log,
@@ -1071,6 +1090,15 @@ fn drive_inner(
                                 output,
                                 artifacts,
                             })?;
+                            // Judge edges (issue #165 Part 7), before routing.
+                            judge::decide_edges(
+                                &playbook,
+                                run_dir,
+                                &node,
+                                status,
+                                decisions.as_ref(),
+                                &journal,
+                            )?;
                             // If this branch successfully fed a join:any - cancel the others.
                             if status == NodeStatus::Succeeded {
                                 let state_peek = RunState::fold(&read_all(run_dir)?);
@@ -2019,6 +2047,15 @@ fn drive_inner(
             output: output.clone(),
             artifacts: node_artifacts,
         })?;
+        // Judge edges of this node (issue #165 Part 7), journaled before routing.
+        judge::decide_edges(
+            &playbook,
+            run_dir,
+            &current,
+            status,
+            decisions.as_ref(),
+            &Journal::new(&mut *log),
+        )?;
 
         rebuild_context_md(run_dir)?;
 
