@@ -957,14 +957,19 @@ impl DecisionRunner {
         }
     }
 
-    /// Sends a request that was already redacted and clipped (a debug
-    /// state) to the chain: no journal, no budget, no cache. Evaluation
-    /// only; a run never calls this.
+    /// Sends a debug state to the chain, redacted again first (the file
+    /// may have been written with redaction off, or edited since): no
+    /// journal, no budget, no cache. Evaluation only; a run never calls
+    /// this.
     pub(crate) fn ask_unjournaled(
         &self,
         request: &DecisionRequest,
     ) -> Result<apb_decide::DecisionResponse, apb_decide::DecideError> {
-        self.chains().all.decide(request, None)
+        let mut request = request.clone();
+        if self.settings.privacy.redact {
+            request.state = redact_value(self.redactor(), request.state);
+        }
+        self.chains().all.decide(&request, None)
     }
 }
 

@@ -395,7 +395,13 @@ Re-asks decisions whose run kept its debug state (`privacy.debug_state`)
 against another provider from `decisions.yaml` (another hosted model, a
 self-hosted server, an emulation) and prints agreement with the original
 answers and labelled accuracy side by side. The state sent is the one in the
-debug file, already redacted and clipped. It refuses without `--provider`,
+debug file, redacted again before it is sent. Each run is replayed under its
+project's settings as a run would see them now: `APB_DECISIONS=off` refuses
+the replay, and a run whose project turned the layer or the use off, left
+the provider out (`data_class: local`) or narrowed `send` is skipped and
+counted. For a use without a labeller, agreement compares the answers
+themselves (the same option or level, a noul on the same side of 0.5). It
+refuses without `--provider`,
 never writes a journal or anything under a run, and saves its results under
 `<config_dir>/decisions-replay/`.
 

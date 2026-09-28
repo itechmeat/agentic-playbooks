@@ -247,6 +247,12 @@ fn print_replay(s: &replay::ReplaySummary) {
         s.matched - s.with_state,
         s.errors
     );
+    if s.refused > 0 {
+        println!(
+            "{} skipped: their project's decision settings do not allow sending them to `{}` now",
+            s.refused, s.provider
+        );
+    }
     println!("agreement with the original answers: {}", pct(s.agreement));
     println!(
         "labelled accuracy over {}: original {}, replay {}",

@@ -180,3 +180,62 @@ fn replay_refuses_without_a_provider() {
         .code(2)
         .stderr(predicate::str::contains("replay needs --provider <id>"));
 }
+
+/// A run of `project(true)` with the debug state of its first decision, and
+/// a machine `decisions.yaml` whose only provider is a hosted fake.
+fn replayable(project_config: &str) -> (tempfile::TempDir, tempfile::TempDir) {
+    let dir = project(true);
+    let debug = dir.path().join(".apb/runs/demo-1/decisions");
+    fs::create_dir_all(&debug).unwrap();
+    fs::write(
+        debug.join("2.json"),
+        r#"{"seq":2,"state":{"result":"done","meta":{}},"state_order":["result","meta"],"questions":{"final_result":{"type":"noul","instructions":"done?"}},"answers":null}"#,
+    )
+    .unwrap();
+    fs::write(dir.path().join(".apb/config.yaml"), project_config).unwrap();
+    let cfg = tempfile::tempdir().unwrap();
+    fs::write(
+        cfg.path().join("decisions.yaml"),
+        "mode: shadow\nproviders:\n  - id: hosted\n    kind: fake\n    answers:\n      final_result: { type: noul, noul: 0.9 }\nuses:\n  completion_check: { mode: shadow }\n",
+    )
+    .unwrap();
+    (dir, cfg)
+}
+
+#[test]
+fn replay_honours_the_projects_narrowing_and_the_kill_switch() {
+    let run = |project_config: &str, kill: bool| {
+        let (dir, cfg) = replayable(project_config);
+        let mut cmd = apb();
+        cmd.args(["decisions", "replay", "--provider", "hosted"])
+            .env("APB_CONFIG_DIR", cfg.path())
+            .env("APB_DECISIONS_ALLOW_FAKE", "1")
+            .current_dir(dir.path());
+        if kill {
+            cmd.env("APB_DECISIONS", "off");
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.code(),
+            String::from_utf8_lossy(&out.stdout).to_string(),
+            String::from_utf8_lossy(&out.stderr).to_string(),
+        )
+    };
+    let (code, stdout, _) = run("", false);
+    assert_eq!(code, Some(0));
+    assert!(stdout.contains("replayed 1 of"), "{stdout}");
+    for project in [
+        "decisions:\n  data_class: local\n",
+        "decisions:\n  enabled: false\n",
+        "decisions:\n  send: [prompts]\n",
+        "decisions:\n  uses: { completion_check: { mode: off } }\n",
+    ] {
+        let (code, stdout, stderr) = run(project, false);
+        assert_eq!(code, Some(0), "{project}: {stderr}");
+        assert!(stdout.contains("replayed 0 of"), "{project}: {stdout}");
+        assert!(stdout.contains("skipped"), "{project}: {stdout}");
+    }
+    let (code, _, stderr) = run("", true);
+    assert_eq!(code, Some(2));
+    assert!(stderr.contains("APB_DECISIONS=off"), "{stderr}");
+}

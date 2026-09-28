@@ -3,8 +3,13 @@
 //!
 //! Only decisions whose run kept its debug state (`privacy.debug_state`,
 //! `runs/<id>/decisions/<seq>.json`) can be replayed: the journal itself
-//! holds no state text. The state in that file is the one that was sent,
-//! already redacted and clipped, so it is sent as is.
+//! holds no state text. The state in that file is the one that was sent;
+//! it is redacted again before it is re-sent (the file sits in the project
+//! tree, and redaction may have been off when it was written). Each run is
+//! replayed under its project's settings as a run would see them now: the
+//! kill switch refuses the whole replay, and a project that switched the
+//! layer off, narrowed `send` or left the provider out (`data_class`) is
+//! skipped.
 //!
 //! Replay never writes a journal, a debug file or anything under a run: the
 //! results go to `<config_dir>/decisions-replay/`. It is evaluation (how the
@@ -63,6 +68,9 @@ pub struct ReplaySummary {
     /// Of those, the ones with a debug state to replay.
     pub with_state: usize,
     pub asked: usize,
+    /// Of those, the ones skipped because their project's settings do not
+    /// allow sending its state to this provider now.
+    pub refused: usize,
     pub errors: usize,
     pub agreement: Option<f64>,
     pub labelled: usize,
@@ -79,6 +87,8 @@ pub enum ReplayError {
     NoProvider,
     UnknownProvider(String),
     Config(String),
+    /// `APB_DECISIONS=off`.
+    Off,
 }
 
 impl std::fmt::Display for ReplayError {
@@ -91,6 +101,9 @@ impl std::fmt::Display for ReplayError {
                 write!(f, "no provider `{id}` in decisions.yaml")
             }
             ReplayError::Config(e) => write!(f, "decisions.yaml does not load: {e}"),
+            ReplayError::Off => {
+                f.write_str("decision models are switched off on this machine (APB_DECISIONS=off)")
+            }
         }
     }
 }
@@ -128,27 +141,24 @@ pub fn replay(
     let provider = provider
         .filter(|p| !p.trim().is_empty())
         .ok_or(ReplayError::NoProvider)?;
+    if apb_core::decisions::killed_by_switch() {
+        return Err(ReplayError::Off);
+    }
     let settings = apb_core::decisions::load_file(config_dir)
         .map_err(ReplayError::Config)?
         .ok_or_else(|| ReplayError::Config("no decisions.yaml".into()))?;
-    let spec = settings
-        .providers
-        .iter()
-        .find(|p| p.id == provider)
-        .cloned()
-        .ok_or_else(|| ReplayError::UnknownProvider(provider.to_string()))?;
-    let runner = DecisionRunner::for_replay(
-        EffectiveDecisions {
-            providers: vec![spec],
-            ..settings
-        },
-        config_dir,
-    );
+    if !settings.providers.iter().any(|p| p.id == provider) {
+        return Err(ReplayError::UnknownProvider(provider.to_string()));
+    }
+    // One runner per project, over the settings as that project narrows
+    // them now; `None` when they do not allow this replay.
+    let mut runners: BTreeMap<PathBuf, Option<DecisionRunner>> = BTreeMap::new();
     let mut summary = ReplaySummary {
         provider: provider.to_string(),
         matched: 0,
         with_state: 0,
         asked: 0,
+        refused: 0,
         errors: 0,
         agreement: None,
         labelled: 0,
@@ -172,6 +182,19 @@ pub fn replay(
                 continue;
             };
             summary.with_state += 1;
+            let root = project_root(&run_dir);
+            let Some(runner) = runners
+                .entry(root.clone())
+                .or_insert_with(|| runner_for(config_dir, &root, provider))
+            else {
+                summary.refused += 1;
+                continue;
+            };
+            // A use the project turned off is not replayed either.
+            if runner.settings().mode_for(&r.use_site) == apb_core::decisions::DecisionMode::Off {
+                summary.refused += 1;
+                continue;
+            }
             if summary.asked >= max {
                 continue;
             }
@@ -182,7 +205,7 @@ pub fn replay(
                 state_order,
                 questions,
             };
-            summary.items.push(ask(&runner, &r, &request, &journal));
+            summary.items.push(ask(runner, &r, &request, &journal));
         }
     }
     summarize(&mut summary);
@@ -195,6 +218,37 @@ pub fn replay(
         summary.results = Some(path);
     }
     Ok(summary)
+}
+
+/// The project a run directory belongs to (`<root>/.apb/runs/<id>`).
+fn project_root(run_dir: &Path) -> PathBuf {
+    run_dir
+        .ancestors()
+        .nth(3)
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| run_dir.to_path_buf())
+}
+
+/// A replay runner for `provider` under the settings `root` resolves to now,
+/// or `None` when they refuse it: the layer off for the project, the
+/// provider left out by its narrowing, or a `send` without prompts and
+/// outputs (a debug state does not say which field was which).
+fn runner_for(config_dir: &Path, root: &Path, provider: &str) -> Option<DecisionRunner> {
+    use apb_core::decisions::{Resolution, SendClass};
+    let Resolution::Active(eff) = apb_core::decisions::resolve_in(config_dir, root) else {
+        return None;
+    };
+    let spec = eff.providers.iter().find(|p| p.id == provider)?.clone();
+    if !(eff.sends(SendClass::Prompts) && eff.sends(SendClass::Outputs)) {
+        return None;
+    }
+    Some(DecisionRunner::for_replay(
+        EffectiveDecisions {
+            providers: vec![spec],
+            ..eff
+        },
+        root,
+    ))
 }
 
 fn ask(
@@ -220,8 +274,20 @@ fn ask(
         ..r.clone()
     };
     let original_acts = labeller.acts_at(r, t);
-    let replay_acts = labeller.acts_at(&replayed, t).filter(|_| error.is_none());
-    let agrees = original_acts.zip(replay_acts).map(|(a, b)| a == b);
+    // A use without a labeller has no action rule to apply to new answers:
+    // agreement compares the answers themselves.
+    let (replay_acts, agrees) = if labeller.pending() {
+        (
+            None,
+            error.is_none().then(|| answers_agree(&r.answers, &answers)),
+        )
+    } else {
+        let replay_acts = labeller.acts_at(&replayed, t).filter(|_| error.is_none());
+        (
+            replay_acts,
+            original_acts.zip(replay_acts).map(|(a, b)| a == b),
+        )
+    };
     ReplayItem {
         run_id: r.run_id.clone(),
         seq: r.seq,
@@ -245,6 +311,28 @@ fn ask(
     }
 }
 
+/// Whether two sets of compact answers say the same: every original
+/// question has a replayed answer with the same value (a choice, a score
+/// level) or, for a noul, a probability on the same side of 0.5.
+fn answers_agree(
+    original: &BTreeMap<String, DecisionAnswer>,
+    replayed: &BTreeMap<String, DecisionAnswer>,
+) -> bool {
+    original.iter().all(|(id, a)| {
+        let Some(b) = replayed.get(id) else {
+            return false;
+        };
+        match (&a.value, &b.value) {
+            (Some(x), Some(y)) => x == y,
+            (None, None) => match (a.p, b.p) {
+                (Some(x), Some(y)) => (x >= 0.5) == (y >= 0.5),
+                _ => a.invalid.is_some() && b.invalid.is_some(),
+            },
+            _ => false,
+        }
+    })
+}
+
 fn summarize(s: &mut ReplaySummary) {
     s.errors = s.items.iter().filter(|i| i.error.is_some()).count();
     let agree: Vec<bool> = s.items.iter().filter_map(|i| i.agrees).collect();
@@ -262,4 +350,49 @@ fn summarize(s: &mut ReplaySummary) {
     s.labelled = original.1;
     s.original_accuracy = rate(original.0, original.1);
     s.replay_accuracy = rate(replayed.0, replayed.1);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn noul(p: f64) -> DecisionAnswer {
+        DecisionAnswer {
+            p: Some(p),
+            ..Default::default()
+        }
+    }
+
+    fn choice(v: &str) -> DecisionAnswer {
+        DecisionAnswer {
+            value: Some(json!(v)),
+            p: Some(0.9),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn answers_agree_on_the_option_or_the_side_of_a_noul() {
+        let a = BTreeMap::from([
+            ("x".to_string(), choice("retry_same")),
+            ("l".to_string(), noul(0.2)),
+        ]);
+        let same = BTreeMap::from([
+            ("x".to_string(), choice("retry_same")),
+            ("l".to_string(), noul(0.4)),
+        ]);
+        let other = BTreeMap::from([
+            ("x".to_string(), choice("switch_executor")),
+            ("l".to_string(), noul(0.2)),
+        ]);
+        let flipped = BTreeMap::from([
+            ("x".to_string(), choice("retry_same")),
+            ("l".to_string(), noul(0.7)),
+        ]);
+        assert!(answers_agree(&a, &same));
+        assert!(!answers_agree(&a, &other));
+        assert!(!answers_agree(&a, &flipped));
+        assert!(!answers_agree(&a, &BTreeMap::new()));
+    }
 }
