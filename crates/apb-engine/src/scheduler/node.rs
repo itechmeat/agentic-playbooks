@@ -364,6 +364,7 @@ fn completion_check(
             attempt,
             prompt,
             output,
+            prompt_class: crate::decision::FieldClass::of_node_prompt(node),
             missing_fields: super::cache::missing_output_fields(node, output),
             enforce: node.completion_check
                 == Some(apb_core::schema::CompletionCheckSetting::Enforce),
@@ -443,6 +444,7 @@ fn route_execution(
             node: &node.id,
             title: node.title.as_deref(),
             prompt,
+            prompt_class: crate::decision::FieldClass::of_node_prompt(node),
             outputs: &outputs,
             entry: base,
             previous_tier: routing::previous_tier(events, &base.key(), &node.id),
@@ -2279,6 +2281,8 @@ pub(crate) fn execute_node(
                                             attempt,
                                             title: node.title.as_deref(),
                                             prompt: &task_prompt,
+                                            prompt_class:
+                                                crate::decision::FieldClass::of_node_prompt(node),
                                             failure: &last_msg,
                                             previous_failure: previous.as_deref(),
                                             retries_left: retries - try_i,

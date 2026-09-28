@@ -85,6 +85,8 @@ pub(crate) struct Failure<'a> {
     pub(crate) attempt: u32,
     pub(crate) title: Option<&'a str>,
     pub(crate) prompt: &'a str,
+    /// The class of `prompt` ([`FieldClass::of_node_prompt`]).
+    pub(crate) prompt_class: FieldClass,
     pub(crate) failure: &'a str,
     pub(crate) previous_failure: Option<&'a str>,
     pub(crate) retries_left: u32,
@@ -124,7 +126,7 @@ pub(crate) fn advise(runner: &DecisionRunner, journal: &dyn DecisionJournal, f: 
     let mut fields = vec![
         StateField {
             name: "step",
-            class: FieldClass::Prompt,
+            class: f.prompt_class,
             text: step,
             head: STEP_HEAD,
             tail: 0,

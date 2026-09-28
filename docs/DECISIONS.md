@@ -224,7 +224,11 @@ otherwise ignored: the check fails open.
 
 Before anything leaves the machine, every text field is:
 
-1. emptied unless its class (`prompts`, `outputs`) is in `privacy.send`;
+1. emptied unless its class (`prompts`, `outputs`) is in `privacy.send`. A
+   node's rendered prompt (`task`, `step`) is `outputs` material when its
+   template reads `{{nodes.*}}` or `{{run.context}}`, since it then carries
+   agent output; the `detail` of earlier supervisor actions in
+   `supervisor_triage`'s `meta` is sent only with `outputs`;
 2. redacted (unless `privacy.redact: false`): the values of every variable an
    installed connector references and of the provider keys become
    `[redacted]`; token-shaped strings (JWTs, well-known key prefixes, bearer

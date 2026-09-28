@@ -81,6 +81,21 @@ pub(crate) enum FieldClass {
 }
 
 impl FieldClass {
+    /// The class of a node's rendered prompt: `Output` when its template
+    /// pulls in recorded material (`{{nodes.*}}`, `{{run.context}}`), which
+    /// is agent output that `privacy.send` without `outputs` must keep
+    /// local; `Prompt` otherwise.
+    pub(crate) fn of_node_prompt(node: &apb_core::schema::Node) -> FieldClass {
+        match &node.kind {
+            apb_core::schema::NodeKind::AgentTask { prompt, .. }
+                if crate::context::reads_recorded_context(prompt) =>
+            {
+                FieldClass::Output
+            }
+            _ => FieldClass::Prompt,
+        }
+    }
+
     fn send_class(self) -> SendClass {
         match self {
             FieldClass::Prompt => SendClass::Prompts,

@@ -169,10 +169,23 @@ pub(crate) fn triage(runner: &DecisionRunner, journal: &dyn DecisionJournal, p: 
     meta.insert("attempt".into(), json!(p.attempt));
     meta.insert("retries_left".into(), json!(p.retries_left));
     meta.insert("alternative_executor".into(), json!(p.has_alternative));
-    meta.insert(
-        "recent_actions".into(),
-        Value::Array(p.recent_actions.clone()),
-    );
+    // An action's `detail` is agent-authored text (a supervisor's note): it
+    // goes out only when outputs may be sent; the action names always do.
+    let sends_outputs = runner
+        .settings()
+        .sends(apb_core::decisions::SendClass::Outputs);
+    let recent: Vec<Value> = p
+        .recent_actions
+        .iter()
+        .cloned()
+        .map(|mut a| {
+            if !sends_outputs && let Some(o) = a.as_object_mut() {
+                o.remove("detail");
+            }
+            a
+        })
+        .collect();
+    meta.insert("recent_actions".into(), Value::Array(recent));
     let judge = |answers: &BTreeMap<String, DecisionAnswer>| Judgement {
         applied: false,
         would_change: action(answers).map(|(a, _, _)| a != "needs_supervisor"),

@@ -167,6 +167,8 @@ pub(crate) struct Attempt<'a> {
     pub(crate) prompt: &'a str,
     /// The attempt's raw output (the node output).
     pub(crate) output: &'a str,
+    /// The class of `prompt` ([`FieldClass::of_node_prompt`]).
+    pub(crate) prompt_class: FieldClass,
     pub(crate) missing_fields: Vec<String>,
     /// The node opted in to the enforce path (`completion_check: enforce`).
     pub(crate) enforce: bool,
@@ -255,7 +257,7 @@ pub(crate) fn check(
                 fields: vec![
                     StateField {
                         name: "task",
-                        class: FieldClass::Prompt,
+                        class: attempt.prompt_class,
                         text: attempt.prompt.to_string(),
                         head: TASK_HEAD,
                         tail: 0,

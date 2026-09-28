@@ -1127,7 +1127,7 @@ fn supervisor_auto_retry_stops_at_its_cap_and_wakes_the_supervisor() {
     p.decisions(&config(
         &server.base_url,
         "enforce",
-        "  supervisor_triage: { mode: enforce, max_actions: 1 }\n",
+        "  supervisor_triage: { mode: enforce, max_actions: 1 }\nprivacy: { send: [prompts] }\n",
     ));
     p.threshold(&[("supervisor_triage", 0.5)]);
     let _lock = common::env_lock();
@@ -1156,6 +1156,14 @@ fn supervisor_auto_retry_stops_at_its_cap_and_wakes_the_supervisor() {
     let d = decisions(&read_all(&run_dir).unwrap(), "supervisor_triage");
     assert!(d[0].applied);
     assert_eq!(d[1].enforce_refused.as_deref(), Some("cap"));
+    // Without `outputs` in `send`, earlier actions go out by name only:
+    // their detail is agent-authored text.
+    let second_request = &server.requests()[1];
+    assert!(second_request.contains("triage_retry"), "{second_request}");
+    assert!(
+        !second_request.contains("pre-triage posted"),
+        "{second_request}"
+    );
     apb_engine::control::post_control(
         &run_dir,
         apb_engine::control::Control::Abort {

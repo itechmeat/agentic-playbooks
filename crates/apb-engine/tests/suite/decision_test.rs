@@ -518,6 +518,27 @@ fn a_provider_planted_in_the_manifest_is_never_asked_on_resume() {
 }
 
 #[test]
+fn a_prompt_that_embeds_an_output_is_sent_only_with_outputs() {
+    // `send: [prompts]` keeps agent output local, also when a later prompt
+    // pulls that output in through a template.
+    let yaml = playbook(
+        "  - { id: w, type: agent_task, prompt: \"First step\" }\n  - { id: w2, type: agent_task, prompt: \"Continue from {{nodes.w.output}}\" }\n",
+        "  - { from: w, to: w2 }\n  - { from: w2, to: ok }\n",
+    );
+    let p = Project::new(&yaml, "Done. SENTINEL-OUT-7f3a");
+    let server =
+        StubServer::start_with_fallback(vec![], StubResponse::json(200, reply(0.9, "complete")));
+    p.decisions(&config(&server.base_url, "privacy: { send: [prompts] }\n"));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (status, _, _) = p.run();
+    assert_eq!(status, RunStatus::Succeeded);
+    for r in server.requests() {
+        assert!(!r.contains("SENTINEL-OUT-7f3a"), "{r}");
+    }
+}
+
+#[test]
 fn the_budget_stops_at_its_request_count() {
     let p = Project::new(&two_nodes(), DONE);
     let server =

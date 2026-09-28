@@ -126,6 +126,8 @@ pub(crate) struct Step<'a> {
     pub(crate) node: &'a str,
     pub(crate) title: Option<&'a str>,
     pub(crate) prompt: &'a str,
+    /// The class of `prompt` ([`FieldClass::of_node_prompt`]).
+    pub(crate) prompt_class: FieldClass,
     pub(crate) outputs: &'a [String],
     /// The node's binding from the manifest (not an overlay).
     pub(crate) entry: &'a ManifestProfile,
@@ -225,7 +227,7 @@ pub(crate) fn route(runner: &DecisionRunner, journal: &dyn DecisionJournal, s: S
             state: StateParts {
                 fields: vec![StateField {
                     name: "step",
-                    class: FieldClass::Prompt,
+                    class: s.prompt_class,
                     text: step,
                     head: PROMPT_HEAD,
                     tail: 0,
