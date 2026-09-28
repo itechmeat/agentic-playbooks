@@ -12,34 +12,30 @@ generative step stays with agents.
 no request, no event, and manifests, journals, CLI output and MCP responses
 are unchanged.
 
-The full design, including the uses that are not shipped yet, is issue #165.
+The full design is issue #165; every use below ships in the same release.
 
 ## Status
 
-| Use | What it asks | Modes available |
-|---|---|---|
-| `completion_check` | whether a successful agent reply is a finished result rather than a progress note, a plan or a question back | `off`, `shadow` |
-| `catalog_rank` | which catalog playbook fits the task an agent names, whether the task needs a playbook at all, and whether a silenced suggestion covers it (MCP, outside runs) | `off`, `shadow`, `advise` (`enforce` acts as `advise`) |
-| `judge_node` | the questions a playbook's `judge` node declares | `off`, `shadow`, `advise` (journal only), `enforce` (routes) |
-| `judge_edge` | the yes/no question of a `judge` edge condition | `off`, `shadow`, `advise` (journal only), `enforce` (routes) |
-
-Shadow means journal only: the answer is recorded in the run's journal and
-nothing acts on it. The `judge` node and edge are declared by a playbook and
-route only at `enforce`; below it they take their declared fallback (see their
-sections below). Advise mode for the engine's own uses and the other uses come
-later, once shadow data exists to set their thresholds.
-| `completion_check` | whether a successful agent reply is a finished result rather than a progress note, a plan or a question back | `off`, `shadow`, `advise`, `enforce` |
-| `retry_advice` | whether a same-executor retry after an agent failure is likely to help | `off`, `shadow`, `advise`, `enforce` |
-| `supervisor_triage` | what a supervisor should do about a park wake | `off`, `shadow`, `advise`, `enforce` |
-| `review_triage` | which option a reviewer would most likely pick at a `human_review` gate | `off`, `shadow`, `advise`, `enforce` |
-| `routing` | which of a profile's executor tiers a step needs | `off`, `shadow`, `advise`, `enforce` |
+| Use | What it asks | Modes | Since | Threshold source |
+|---|---|---|---|---|
+| `completion_check` | whether a successful agent reply is a finished result rather than a progress note, a plan or a question back | `off`, `shadow`, `advise`, `enforce` | #165 Part 8 (shadow first, advise and enforce with Part 14) | `uses.completion_check.thresholds.final_result` (default 0.15) for shadow and advise; enforce needs a stored threshold |
+| `judge_node` | the questions a playbook's `judge` node declares | `off`, `shadow`, `advise` (journal only), `enforce` (routes) | #165 Part 5 | the node's own `thresholds` in the playbook; no stored threshold |
+| `judge_edge` | the yes/no question of a `judge` edge condition | `off`, `shadow`, `advise` (journal only), `enforce` (routes) | #165 Part 7 | the edge's own `min_p`; no stored threshold |
+| `retry_advice` | whether a same-executor retry after an agent failure is likely to help | `off`, `shadow`, `advise`, `enforce` | #165 Part 9 | `uses.retry_advice.thresholds.min_confidence` (default 0.6); enforce needs a stored threshold |
+| `supervisor_triage` | what a supervisor should do about a park wake | `off`, `shadow`, `advise`, `enforce` | #165 Part 10 | `uses.supervisor_triage.thresholds.looping_max` (default 0.3); enforce needs a stored threshold |
+| `review_triage` | which option a reviewer would most likely pick at a `human_review` gate | `off`, `shadow`, `advise`, `enforce` | #165 Part 11 | enforce: the higher of the stored threshold and the gate's `auto_decide.min_confidence` |
+| `routing` | which of a profile's executor tiers a step needs | `off`, `shadow`, `advise`, `enforce` | #165 Part 12 | `uses.routing.thresholds.hysteresis` (default 0.75); enforce needs a stored threshold |
+| `catalog_rank` | which catalog playbook fits the task an agent names, whether the task needs a playbook at all, and whether a silenced suggestion covers it (MCP, outside runs) | `off`, `shadow`, `advise` (`enforce` acts as `advise`) | #165 Part 16 | `uses.catalog_rank.thresholds.covered` (default 0.8); advisory by design |
 
 Shadow means journal only: the answer is recorded in the run's journal and
 nothing acts on it. Advise shows the answer where a person or supervisor
 decides (an anomaly wake, a wake's `triage`, a gate's `recommendation`) and
 never applies it. Enforce changes engine behaviour, but only under the common
-rules below; without a stored threshold every enforce path behaves as advise.
-Every threshold named here is a placeholder until measured on shadow data.
+rules in "Enforce" below; without a stored threshold every engine enforce
+path behaves as advise. The `judge` node and edge are declared by a playbook
+and route only at `enforce`; below it they take their declared fallback (see
+their sections). Every default threshold named here is a placeholder until
+measured on shadow data (`apb decisions report`).
 
 ## Configuration: `<config_dir>/decisions.yaml`
 
@@ -88,6 +84,21 @@ privacy:
 - The effective mode of a use is the lower of the ceiling and its own mode.
 - `APB_DECISIONS=off` switches every use off for the process, checked again
   before every decision.
+
+### Kill switch
+
+`APB_DECISIONS=off`, `mode: off` (the ceiling or a use), a lowered ceiling
+or use mode, a removed or broken file, and a project opt-out stop every call
+to a decision provider, re-checked before each decision so they apply
+mid-run: the native providers, the `llm_emulation` endpoints and the MCP
+catalog ranking alike. A run's snapshot can only be lowered this way, never
+raised.
+
+One thing is not a decision provider and keeps running: a judge node's
+profile emulation (`on_unavailable: emulate` through the node's `profile` or
+`defaults.profile`). It is the playbook's own declared agent executor, so it
+runs whatever the use's mode, the kill switch included, and its answer is
+journaled with `calibrated: false` like any emulated decision.
 
 Provider routes for `kind: systemone` (all `POST {base_url}/v1/systemone`):
 
@@ -339,7 +350,7 @@ pooled with a decision model. With no matching decision the report prints
 | Use | Label |
 |---|---|
 | `completion_check` | acting was right when, before the node starts again, a supervisor retried it, the run was moved back to it or to a node that ran before it (`run_continue_from`, a patch or migration `continue_from`), or the next node to start after it failed; wrong when the next node succeeded, or the node was the last and the run succeeded. Otherwise unlabelled |
-| other uses | not labelled yet: each gets its labeller once its events journal the join key (attempt, gate visit or wake) |
+| other uses | not labelled yet: their decisions journal the join keys (`decision_made.join`: attempt, `gate_visit`, `wake_seq`, tier), and each use gets its labeller in a later release |
 
 Unlabelled decisions stay out of every accuracy figure and are listed with the
 reason.
@@ -427,6 +438,7 @@ Each decision is logged as one line of `<root>/.apb/decisions.jsonl`
 (git-ignored): the `decision_made` fields without node and attempt, plus
 `ts_ms`. Past `max_requests_per_day` a line with `error: budget` is logged and
 nothing is sent.
+
 ## Judge node (`judge_node`)
 
 A playbook's `judge` node (authoring: HOWTO-authoring.md, "Judge nodes and
@@ -443,7 +455,7 @@ decides what happens with the answer:
   `not_configured` or `off`).
 
 A judge node's own question goes to the decision models of the chain only
-(`systemone`, `fake`), never to an `llm_emulation` provider; those are used
+(every kind but `llm_emulation`), never to an `llm_emulation` provider; those are used
 by `on_unavailable: emulate`. The judge node needs no stored threshold: its
 thresholds are declared by the author in the playbook, for the provider and
 model the machine pins. Answers from an uncalibrated provider are used, since
@@ -626,9 +638,9 @@ Common rules, applied by the runner for every use:
    every path mid-run), and the playbook opts in (below).
 2. The answer is calibrated, or `uses.<name>.allow_uncalibrated: true`.
 3. A threshold is stored for the use and the answering provider and model in
-   `<config_dir>/decisions-thresholds.yaml` (`thresholds: [{use, provider,
-   model, threshold}]`, written by the report tooling). The model must match
-   exactly: a new model id never inherits.
+   `<config_dir>/decisions-thresholds.yaml` (see "Stored thresholds" above;
+   written by `apb decisions thresholds set`). The model must match exactly:
+   a new model id never inherits.
 4. At most `uses.<name>.max_actions` (default 3) automatic actions per use
    and run.
 
