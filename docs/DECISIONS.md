@@ -156,7 +156,8 @@ Hosted providers keep what they receive under their own terms (TypeSafe
 offers zero retention only to enterprise customers). Use `data_class: local`
 providers and `send` to keep material on the machine.
 
-Decision outputs are used for evaluation and threshold tuning only. apb has no
+Decision outputs are used for evaluation and threshold tuning only
+(`apb decisions report` and `apb decisions replay`, below). apb has no
 feature that exports decisions for training a model; the provider terms
 (TypeSafe: https://typesafe.ai/legal/mca) forbid training an imitating model
 on outputs.
@@ -192,6 +193,9 @@ attempt, state and questions) with no request.
   (USD 0.042 per million input tokens for the Jev 1.13 ids).
 - `error`: `unavailable`, `timeout`, `rate_limited`, `auth`, `budget`,
   `invalid`, or null. Never a key or a body.
+- `output_chars`: characters of the output the use judged (the completion
+  check: the raw reply), before redaction and clipping. The report uses it to
+  set long outputs apart; absent in journals written before it existed.
 - Nothing in the event holds state text; `state_digest` identifies it.
 
 An older apb that does not know `decision_made` skips it: the attempt it
@@ -207,3 +211,111 @@ full answer distributions of each decision are kept in
 `budget.max_requests_per_run` and `budget.max_usd_per_run` count every
 request of the run, resumes included. Past either, a decision is journaled
 with `error: budget` and nothing is sent.
+
+## Cost and latency on run surfaces
+
+Every read-only run surface reports the run's decisions as one compact object
+when, and only when, the run journaled at least one `decision_made`:
+
+- `apb runs <id>` and `apb wait` print one line, for example
+  `decisions: 14 (2 replayed, 1 error), $0.0004, p50 190 ms; shadow would change: 3`
+  (the parenthesis lists only what is not zero; `estimated` follows the cost
+  when a price-table estimate is in it);
+- MCP `run_status` and `run_report` carry `decisions`: `decisions`,
+  `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`,
+  `p50_latency_ms`, `p95_latency_ms` and `by_use` (`requests`, `errors`,
+  `applied`, `shadow_would_change` per use). Each decision's detail stays in
+  `run_events`;
+- the dashboard's run page shows a "Decisions" card (totals, a line per use,
+  and per decision: use site, node, answers with their p, provider and model,
+  latency, applied or shadow) and a note on each `decision_made` in the event
+  list.
+
+`requests` counts requests actually sent; `replayed` counts decisions answered
+without a request (the run's cache). A resume that replays a journaled
+decision journals nothing new, so it is in neither count. Latency percentiles
+cover the requests actually sent. `apb runs` has no list column for it.
+
+## Measuring a use: `apb decisions report`
+
+```text
+apb decisions report [--use USE] [--since 7d|2026-09-20] [--playbook ID]
+                     [--provider ID] [--all-projects] [--json]
+```
+
+Reads run journals only (this project's, or every registered one with
+`--all-projects`); it asks no model and writes nothing. Per use and
+`(provider, model)`:
+
+- counts, errors, and label coverage (labelled of answered);
+- accuracy at the use's threshold, next to the majority class, today's
+  behaviour ("always complete" for the completion check) and the journaled
+  regex baseline on the same items;
+- Brier score and a 10-bin expected calibration error of the probability that
+  acting is right;
+- a threshold table in 0.05 steps: coverage (share acted on), accuracy,
+  recall and false-action rate with a Wilson 95% interval;
+- the same core figures for long outputs (1,000 characters or more,
+  `output_chars`);
+- `would_change` accuracy;
+- a labelled savings estimate at the threshold: correct actions times the
+  median agent attempt wall time, against wrong actions at the same cost and
+  the decisions' own cost and latency. It is an estimate from labels, not a
+  measurement;
+- "eligible for enforce: yes/no" with every reason.
+
+An emulation provider (uncalibrated) is reported as its own group and is never
+pooled with a decision model. With no matching decision the report prints
+`no decisions recorded`.
+
+**Labels** come from what the run did later, never from a model:
+
+| Use | Label |
+|---|---|
+| `completion_check` | acting was right when, before the node starts again, a supervisor retried it, the run was moved back to it or to a node that ran before it (`run_continue_from`, a patch or migration `continue_from`), or the next node to start after it failed; wrong when the next node succeeded, or the node was the last and the run succeeded. Otherwise unlabelled |
+| other uses | not labelled yet: each gets its labeller once its events journal the join key (attempt, gate visit or wake) |
+
+Unlabelled decisions stay out of every accuracy figure and are listed with the
+reason.
+
+**Eligibility** (the rule the enforce modes apply): a threshold stored for
+exactly this provider and model, at least 50 labelled decisions (20 per
+option for a `choice` use), accuracy above both the majority class and
+today's behaviour, and a false-action rate under the use's target (default
+5%, `uses.<name>.thresholds.false_action_target`).
+
+## Stored thresholds: `apb decisions thresholds`
+
+```text
+apb decisions thresholds set --use completion_check --provider main --model jev-1.13.0 --threshold 0.12
+apb decisions thresholds list [--json]
+```
+
+`set` writes `<config_dir>/decisions-thresholds.yaml` (its own file with its
+own `version`; numbers and names only). A threshold applies to exactly one
+`(use, provider, model)`: a new model id, another provider or another use
+never inherits it, and the report says a new shadow period is needed. Code
+reads it through one lookup,
+`apb_core::decision_thresholds::stored_threshold(use, provider, model) -> Option<f64>`;
+`None` means an enforce path refuses and journals `enforce_refused:
+no_threshold`. The value is on the use's own scale (for the completion check,
+the `final_result` cut: flag below it). Without a stored threshold, use sites
+keep their `uses.<name>.thresholds` defaults.
+
+## Replay against another provider: `apb decisions replay`
+
+```text
+apb decisions replay --provider ID [--use USE] [--since 7d] [--max 200] [--json]
+```
+
+Re-asks decisions whose run kept its debug state (`privacy.debug_state`)
+against another provider from `decisions.yaml` (another hosted model, a
+self-hosted server, an emulation) and prints agreement with the original
+answers and labelled accuracy side by side. The state sent is the one in the
+debug file, already redacted and clipped. It refuses without `--provider`,
+never writes a journal or anything under a run, and saves its results under
+`<config_dir>/decisions-replay/`.
+
+Replay is evaluation only, like threshold tuning: it compares answers against
+APB's own labels. It is not an export of outputs for training, and apb has no
+such feature (see the provider terms note under "What is sent").

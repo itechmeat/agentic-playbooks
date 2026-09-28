@@ -35,7 +35,8 @@ engine. Do not introduce import cycles (enforced by code-ranker, see below).
   locks (`fsutil.rs`), the single wall-clock source (`clock.rs`), the readers of
   each agent CLI's machine output: reply and reported token usage
   (`agent_output.rs`), the decision-model config (`decisions.rs`: the
-  machine's `decisions.yaml`, project narrowing, the doctor line).
+  machine's `decisions.yaml`, project narrowing, the doctor line) and the
+  measured-threshold store (`decision_thresholds.rs`).
 - `apb-decide` - a blocking, provider-agnostic decision-model client: the
   `DecisionProvider` trait, question and answer types, the `systemone` and
   `fake` providers, limit checks and strict reply validation, retries, the
@@ -58,8 +59,9 @@ engine. Do not introduce import cycles (enforced by code-ranker, see below).
   supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
   policy gate every launch surface calls (`gate.rs`), and the decision runner
   (`decision/`: the one entry point for decision-model uses, redaction,
-  budget, replay, the `decision_made` event, and the shadow completion check;
-  see `docs/DECISIONS.md`).
+  budget, replay, the `decision_made` event, the shadow completion check,
+  and `report/`: the labellers, statistics and replay behind
+  `apb decisions`; see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
   `meta`).
