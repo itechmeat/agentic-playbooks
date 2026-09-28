@@ -12,26 +12,39 @@ use serde_json::{Value, json};
 
 use crate::common::env_lock as lock;
 
-/// Sets `APB_CONFIG_DIR` and the fake-provider opt-in for one test, and
-/// clears them on drop.
-struct Env;
+/// The variables a test sets, restored to their previous values on drop
+/// (also when the test panics).
+const VARS: [&str; 3] = [
+    "APB_CONFIG_DIR",
+    "APB_DECISIONS_ALLOW_FAKE",
+    "APB_DECISIONS",
+];
+
+/// Sets `APB_CONFIG_DIR` and the fake-provider opt-in for one test, clears
+/// `APB_DECISIONS`, and restores all three on drop.
+struct Env(Vec<(&'static str, Option<std::ffi::OsString>)>);
 
 impl Env {
     fn new(cfg: &Path) -> Self {
+        let saved = VARS.iter().map(|k| (*k, std::env::var_os(k))).collect();
         unsafe {
             std::env::set_var("APB_CONFIG_DIR", cfg);
             std::env::set_var("APB_DECISIONS_ALLOW_FAKE", "1");
             std::env::remove_var("APB_DECISIONS");
         }
-        Env
+        Env(saved)
     }
 }
 
 impl Drop for Env {
     fn drop(&mut self) {
-        unsafe {
-            std::env::remove_var("APB_CONFIG_DIR");
-            std::env::remove_var("APB_DECISIONS_ALLOW_FAKE");
+        for (k, v) in &self.0 {
+            unsafe {
+                match v {
+                    Some(v) => std::env::set_var(k, v),
+                    None => std::env::remove_var(k),
+                }
+            }
         }
     }
 }
@@ -376,10 +389,8 @@ fn the_kill_switch_turns_ranking_off() {
     unsafe {
         std::env::set_var("APB_DECISIONS", "off");
     }
+    // `Env` restores APB_DECISIONS on drop, a panic included.
     let out = ranked(root.path(), "deploy the site", &RankCache::default());
-    unsafe {
-        std::env::remove_var("APB_DECISIONS");
-    }
     assert_eq!(bytes(&out), bytes(&plain));
     assert!(log_lines(root.path()).is_empty());
 }

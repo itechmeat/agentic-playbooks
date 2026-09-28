@@ -58,11 +58,6 @@ impl SystemOne {
         }
     }
 
-    pub fn with_limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
-        self
-    }
-
     fn route(&self) -> Route {
         Route {
             url: format!("{}/v1/systemone", self.base_url),

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { fromYamlField, judgeSkeleton, questionSummary, toYamlField } from './judgefields'
+import { fromYamlField, questionSummary, toYamlField } from './judgefields'
 
 describe('judge node fields', () => {
   it('round-trips a questions map through its YAML snippet, order kept', () => {
@@ -27,11 +27,5 @@ describe('judge node fields', () => {
     )
     expect(questionSummary([{ id: 'v', type: 'score' }, { type: 'noul' }])).toBe('v (score), q2 (noul)')
     expect(questionSummary(undefined)).toBe('')
-  })
-
-  it('starts a new judge node with an unclear option and a declared fallback', () => {
-    const s = judgeSkeleton() as { questions: { verdict: { criteria: Record<string, string> } }; on_unavailable: string }
-    expect(Object.keys(s.questions.verdict.criteria)).toContain('unclear')
-    expect(s.on_unavailable).toBe('fail')
   })
 })

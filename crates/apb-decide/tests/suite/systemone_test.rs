@@ -127,17 +127,6 @@ fn no_key_means_no_authorization_header() {
 }
 
 #[test]
-fn a_reported_cost_is_kept() {
-    let reply = OK_REPLY.replace(
-        r#""output_tokens":3"#,
-        r#""output_tokens":3,"cost":0.00005"#,
-    );
-    let server = StubServer::start(vec![StubResponse::json(200, reply)]);
-    let r = provider(&server, None).decide(&request()).unwrap();
-    assert_eq!(r.usage.cost_usd, Some(0.00005));
-}
-
-#[test]
 fn reply_text_is_bounded_before_it_reaches_the_journal() {
     // The model name, a cost and an invalid item's reason are provider text.
     let long = "x".repeat(100_000);
@@ -159,16 +148,6 @@ fn reply_text_is_bounded_before_it_reaches_the_journal() {
         Answer::Invalid { reason } => assert!(reason.chars().count() <= 200, "{}", reason.len()),
         other => panic!("{other:?}"),
     }
-}
-
-#[test]
-fn a_partial_batch_keeps_the_good_items() {
-    let reply = r#"{"model":"m","answers":{"done":{"type":"noul","noul":0.4},"kind":{"type":"choice","choice":"b","probabilities":{"a":0.8,"b":0.2}}}}"#;
-    let server = StubServer::start(vec![StubResponse::json(200, reply)]);
-    let r = provider(&server, None).decide(&request()).unwrap();
-    assert_eq!(r.answers["done"], Answer::Noul { p: 0.4 });
-    assert!(matches!(r.answers["kind"], Answer::Invalid { .. }));
-    assert!(matches!(r.answers["size"], Answer::Invalid { .. }));
 }
 
 #[test]

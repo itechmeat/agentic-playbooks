@@ -407,8 +407,8 @@ impl LlmEmulation {
         }
     }
 
-    /// The request body (a snapshot test reads it).
-    pub fn body(&self, req: &DecisionRequest) -> Value {
+    /// The request body.
+    fn body(&self, req: &DecisionRequest) -> Value {
         let prompt = EmulationPrompt::new(req, self.structured == StructuredOutput::PromptOnly);
         let mut body = json!({
             "model": self.model,
@@ -741,42 +741,5 @@ mod tests {
         // A tie goes to the first option written.
         assert!(matches!(&answers["verdict"], Answer::Choice { value, .. } if value == "clean"));
         assert!(parse_reply(&req, "no json here").is_err());
-    }
-
-    #[test]
-    fn the_json_schema_mode_asks_for_strict_structured_output() {
-        let p = LlmEmulation::new(
-            "emu",
-            "http://127.0.0.1:1/v1/",
-            "small-model",
-            None,
-            Duration::from_secs(1),
-            StructuredOutput::JsonSchema,
-        );
-        let body = p.body(&request(json!({"review": "x"})));
-        assert_eq!(body["response_format"]["type"], "json_schema");
-        assert_eq!(body["response_format"]["json_schema"]["strict"], true);
-        assert!(
-            !body["messages"][1]["content"]
-                .as_str()
-                .unwrap()
-                .contains("JSON schema")
-        );
-        let p = LlmEmulation::new(
-            "emu",
-            "http://127.0.0.1:1/v1",
-            "small-model",
-            None,
-            Duration::from_secs(1),
-            StructuredOutput::PromptOnly,
-        );
-        let body = p.body(&request(json!({"review": "x"})));
-        assert!(body.get("response_format").is_none());
-        assert!(
-            body["messages"][1]["content"]
-                .as_str()
-                .unwrap()
-                .contains("JSON schema")
-        );
     }
 }

@@ -89,6 +89,10 @@ fn an_answer_comes_back_uncalibrated_and_normalised() {
     assert!(raw.starts_with("POST /v1/chat/completions"));
     assert!(raw.contains(&format!("authorization: Bearer {SENTINEL_KEY}")));
     assert!(raw.contains(r#""response_format":{"json_schema""#));
+    assert!(
+        raw.contains(r#""strict":true"#),
+        "structured output is strict"
+    );
     assert!(raw.contains("<document>"));
 }
 

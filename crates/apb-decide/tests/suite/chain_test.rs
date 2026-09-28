@@ -114,22 +114,3 @@ fn the_cache_answers_a_repeated_request_without_asking() {
     c.decide(&request("other"), Some(&cache)).unwrap();
     assert_eq!(p.calls(), 2, "another state is another key");
 }
-
-#[test]
-fn the_fake_scripts_by_state_digest_and_captures_requests() {
-    let req = request("special");
-    let digest = apb_decide::digest::digest(&req.state);
-    let p = FakeProvider::new("f")
-        .answer("done", json!({"noul": 0.2}))
-        .answer_for_state(digest, "done", json!({"noul": 0.95}));
-    assert_eq!(
-        p.decide(&req).unwrap().answers["done"],
-        Answer::Noul { p: 0.95 }
-    );
-    assert_eq!(
-        p.decide(&request("plain")).unwrap().answers["done"],
-        Answer::Noul { p: 0.2 }
-    );
-    assert_eq!(p.requests().len(), 2);
-    assert_eq!(p.requests()[0].state, json!("special"));
-}

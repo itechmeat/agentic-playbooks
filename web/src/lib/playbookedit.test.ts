@@ -340,6 +340,8 @@ describe('adding a judge node', () => {
     const node = (next.toJS() as { nodes: Record<string, unknown>[] }).nodes[0]
     expect(node.type).toBe('judge')
     expect(Object.keys(node.questions as object)).toEqual(['verdict'])
+    const verdict = (node.questions as { verdict: { criteria: Record<string, string> } }).verdict
+    expect(Object.keys(verdict.criteria)).toContain('unclear')
     expect(node.on_unavailable).toBe('fail')
     expect(node.state).toEqual({ input: '{{run.instruction}}' })
     // Other kinds are unchanged: id, type and title only.

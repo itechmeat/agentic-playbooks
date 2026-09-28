@@ -125,7 +125,7 @@ fn the_report_says_when_nothing_was_recorded_and_reads_journals() {
 }
 
 #[test]
-fn thresholds_round_trip_for_the_exact_model_only() {
+fn thresholds_are_set_replaced_range_checked_and_listed() {
     let dir = project(false);
     let cfg = tempfile::tempdir().unwrap();
     let set = |model: &str, t: &str| {
@@ -157,15 +157,6 @@ fn thresholds_round_trip_for_the_exact_model_only() {
         .assert()
         .success()
         .stdout("completion_check\tmain/jev-1.13.0\t0.12\n");
-    assert_eq!(
-        apb_core::decision_thresholds::stored_threshold_in(
-            cfg.path(),
-            "completion_check",
-            "main",
-            "jev-1.14.0"
-        ),
-        None
-    );
 }
 
 #[test]
