@@ -159,8 +159,28 @@ pub struct RunExecutionManifest {
     /// resume read it from here, so a later edit of `decisions.yaml` does not
     /// reach a started run. Absent in older manifests and in every run on a
     /// machine without `decisions.yaml`, which therefore serializes as before.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    ///
+    /// Read leniently: the settings types refuse unknown fields, so a block a
+    /// newer apb wrote (a new privacy knob, a new provider kind) reads as
+    /// `None` here (the layer off for the run) instead of making the whole
+    /// manifest unreadable.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_decisions"
+    )]
     pub decisions: Option<apb_core::decisions::EffectiveDecisions>,
+}
+
+fn lenient_decisions<'de, D>(
+    d: D,
+) -> Result<Option<apb_core::decisions::EffectiveDecisions>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Option::<serde_yaml_ng::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_yaml_ng::from_value(v).ok()))
 }
 
 impl RunExecutionManifest {
@@ -255,6 +275,18 @@ pub fn read(run_dir: &Path) -> Result<Option<RunExecutionManifest>, EngineError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_decisions_block_from_a_newer_apb_leaves_the_manifest_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            manifest_path(dir.path()),
+            "profiles: []\nnode_bindings: {}\ndecisions:\n  mode: shadow\n  timeout_ms: 3000\n  providers: []\n  budget: { max_requests_per_run: 5, max_usd_per_run: 1.0 }\n  privacy: { send: [prompts], redact: true, max_state_bytes: 24000, debug_state: false, future_knob: 1 }\n  uses: {}\n",
+        )
+        .unwrap();
+        let m = read(dir.path()).unwrap().unwrap();
+        assert!(m.decisions.is_none());
+    }
 
     #[test]
     fn manifest_account_cmd_defaults_to_empty_and_roundtrips() {
