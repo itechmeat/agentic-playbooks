@@ -35,7 +35,10 @@ pub fn ece(items: &[(f64, bool)], bins: usize) -> Option<f64> {
     }
     let mut sums = vec![(0.0_f64, 0.0_f64, 0_usize); bins];
     for (p, y) in items {
-        let b = ((p * bins as f64).floor() as usize).min(bins - 1);
+        // Rounded before the floor: 1 - 0.9 is 0.0999..., which belongs
+        // to [0.1, 0.2) like the 0.1 it stands for.
+        let b = (((p * bins as f64) * 1e9).round() / 1e9).floor().max(0.0) as usize;
+        let b = b.min(bins - 1);
         sums[b].0 += p;
         sums[b].1 += f64::from(u8::from(*y));
         sums[b].2 += 1;
@@ -82,6 +85,15 @@ pub fn median(values: &mut [u64]) -> Option<u64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_probability_on_a_bin_edge_lands_in_the_bin_it_opens() {
+        // 1 - 0.9 is 0.0999...: bin [0.1, 0.2), whose observed rate is 1
+        // here, so the error is |0.1 - 1| = 0.9 either way; with a second
+        // item at 0.15 (rate 0) sharing the bin the mean differs by bin.
+        let items = [(1.0 - 0.9, true), (0.15, false)];
+        assert_eq!(ece(&items, 10), Some(0.375));
+    }
 
     #[test]
     fn brier_and_ece_match_hand_computed_values() {

@@ -355,7 +355,7 @@ pooled with a decision model. With no matching decision the report prints
 
 | Use | Label |
 |---|---|
-| `completion_check` | acting was right when, before the node starts again, a supervisor retried it, the run was moved back to it or to a node that ran before it (`run_continue_from`, a patch or migration `continue_from`), or the next node to start after it failed; wrong when the next node succeeded, or the node was the last and the run succeeded. Otherwise unlabelled |
+| `completion_check` | acting was right when, before the node starts again, a supervisor retried it, the run was moved back to it or to a node that ran before it (`run_continue_from`, a patch or migration `continue_from`), or the next node to start after it failed; wrong when the next node succeeded, or the node was the last and the run succeeded. Unlabelled when another attempt of the same visit followed (its outcome is not this attempt's), when above shadow the check's own anomaly wake came first (the outcome may be the decision's doing), and otherwise until the run shows an outcome |
 | other uses | not labelled yet: their decisions journal the join keys (`decision_made.join`: attempt, `gate_visit`, `wake_seq`, tier), and each use gets its labeller in a later release |
 
 Unlabelled decisions stay out of every accuracy figure and are listed with the

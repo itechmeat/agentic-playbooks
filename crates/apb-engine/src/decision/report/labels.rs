@@ -188,7 +188,10 @@ pub fn labeller_for(use_site: &str) -> Box<dyn Labeller> {
 ///   `continue_from`), or the next node to start after it finished `failed`;
 /// - `Keep` when the next node finished `succeeded` with none of those, or
 ///   the node was the last one and the run finished `succeeded`;
-/// - unlabelled while the run has not shown either.
+/// - unlabelled while the run has not shown either, when another attempt of
+///   the same visit followed (its outcome is not this attempt's), and above
+///   shadow when the check's own anomaly wake came first (the outcome may be
+///   the decision's doing).
 pub struct CompletionLabeller;
 
 /// The node a supervisor or patch moved the run back to, if this event does.
@@ -259,6 +262,24 @@ impl Labeller for CompletionLabeller {
             )
             .collect();
         let restarted = window.len() < events.len() - at - 1;
+        // Another attempt of the same visit (the checked one was rejected
+        // or failed after it): what follows is that attempt's outcome, not
+        // this one's, and an enforce rejection would label itself.
+        if window.iter().any(|e| {
+            matches!(&e.payload, EventPayload::AttemptStarted { node: n, attempt, .. }
+                if n == node && r.attempt.is_some_and(|a| *attempt > a))
+        }) {
+            return Label::Unlabelled("a later attempt of the node followed");
+        }
+        // Above shadow the check raised its own anomaly wake: a supervisor
+        // retry that answers it would confirm the decision by its own doing.
+        if r.mode != "shadow"
+            && window.iter().any(|e| {
+                matches!(&e.payload, EventPayload::WakeRaised { trigger: crate::event::WakeTrigger::Anomaly, node: n, .. } if n == node)
+            })
+        {
+            return Label::Unlabelled("the decision's own anomaly wake preceded the outcome");
+        }
         if window.iter().any(|e| {
             moved_back_to(e).is_some_and(|target| target == node || before.contains(&target))
         }) {
@@ -427,6 +448,56 @@ mod tests {
             error: None,
             output_chars: None,
         }
+    }
+
+    #[test]
+    fn a_later_attempt_or_the_decisions_own_wake_leaves_it_unlabelled() {
+        let attempt = |seq: u64, n: u32| {
+            ev(
+                seq,
+                serde_json::from_value(serde_json::json!({
+                    "type": "attempt_started", "node": "a", "attempt": n, "agent": "x"
+                }))
+                .unwrap(),
+            )
+        };
+        let events = vec![
+            started(1, "a"),
+            decision_event(2),
+            attempt(3, 2),
+            finished(4, "a", "succeeded"),
+            started(5, "b"),
+            finished(6, "b", "succeeded"),
+        ];
+        assert!(matches!(
+            CompletionLabeller.label(&decision(2, "a"), &events),
+            Label::Unlabelled(_)
+        ));
+        let wake = ev(
+            3,
+            EventPayload::WakeRaised {
+                trigger: crate::event::WakeTrigger::Anomaly,
+                node: "a".into(),
+                detail: String::new(),
+                triage: None,
+            },
+        );
+        let retry = ev(
+            4,
+            EventPayload::SupervisorAction {
+                action: supervisor_action::NODE_RETRY.into(),
+                node: Some("a".into()),
+                detail: String::new(),
+            },
+        );
+        let events = vec![started(1, "a"), decision_event(2), wake, retry];
+        let mut advised = decision(2, "a");
+        assert_eq!(CompletionLabeller.label(&advised, &events), Label::Act);
+        advised.mode = "advise".into();
+        assert!(matches!(
+            CompletionLabeller.label(&advised, &events),
+            Label::Unlabelled(_)
+        ));
     }
 
     fn decision_event(seq: u64) -> Event {
