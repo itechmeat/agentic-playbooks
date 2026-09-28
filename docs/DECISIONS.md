@@ -227,7 +227,9 @@ Before anything leaves the machine, every text field is:
    absolute paths under the project become repo-relative and other home
    paths `~/...`; e-mail addresses become `[email]`;
 3. clipped to its own budget and then to its share of
-   `privacy.max_state_bytes`, keeping head and tail with the cut marked.
+   `privacy.max_state_bytes`, keeping head and tail with the cut marked; the
+   shares shrink until the state as serialized (JSON escapes included) fits
+   `max_state_bytes`.
 
 Hosted providers keep what they receive under their own terms (TypeSafe
 offers zero retention only to enterprise customers). Use `data_class: local`

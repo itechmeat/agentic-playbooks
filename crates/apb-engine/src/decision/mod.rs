@@ -386,39 +386,68 @@ impl DecisionRunner {
     fn build_state(&self, parts: &StateParts) -> Value {
         let privacy = &self.settings.privacy;
         let meta = Value::Object(parts.meta.clone());
-        let meta_len = serde_json::to_string(&meta).map_or(0, |s| s.len());
-        let share = privacy
-            .max_state_bytes
-            .saturating_sub(meta_len + 64)
-            .checked_div(parts.fields.len().max(1))
-            .unwrap_or(0);
-        let mut obj = serde_json::Map::new();
-        for f in &parts.fields {
-            let text = if !self.settings.sends(f.class.send_class()) {
-                String::new()
-            } else {
-                let text = if privacy.redact {
-                    self.redactor().redact(&f.text)
-                } else {
-                    f.text.clone()
-                };
-                let own = redact::clip(&text, f.head, f.tail);
-                if own.len() <= share {
-                    own
-                } else {
-                    let keep = f.head + f.tail;
-                    let head = share * f.head / keep.max(1);
-                    redact::clip(&text, head, share - head)
-                }
-            };
-            obj.insert(f.name.to_string(), Value::String(text));
-        }
         let meta = if privacy.redact {
             redact_value(self.redactor(), meta)
         } else {
             meta
         };
-        obj.insert("meta".to_string(), meta);
+        let meta_len = serde_json::to_string(&meta).map_or(0, |s| s.len());
+        // Each field redacted once, before any clip.
+        let texts: Vec<Option<String>> = parts
+            .fields
+            .iter()
+            .map(|f| {
+                self.settings.sends(f.class.send_class()).then(|| {
+                    if privacy.redact {
+                        self.redactor().redact(&f.text)
+                    } else {
+                        f.text.clone()
+                    }
+                })
+            })
+            .collect();
+        let fields = parts.fields.len().max(1);
+        let mut share = privacy
+            .max_state_bytes
+            .saturating_sub(meta_len + 64)
+            .checked_div(fields)
+            .unwrap_or(0);
+        // The share counts raw bytes; JSON escapes (quotes, newlines,
+        // control characters) and the cut markers add to them. The state as
+        // serialized must fit `max_state_bytes`, so the share shrinks until
+        // it does.
+        loop {
+            let state = Self::assemble(parts, &texts, share, &meta);
+            let len = serde_json::to_string(&state).map_or(0, |s| s.len());
+            if len <= privacy.max_state_bytes || share == 0 {
+                return state;
+            }
+            // Scaled by how far over it is (an escaped byte can take six).
+            share = (share * privacy.max_state_bytes / len).min(share - 1);
+        }
+    }
+
+    /// The state object with every sent field clipped to its own budget and
+    /// then to `share` bytes, head and tail kept.
+    fn assemble(parts: &StateParts, texts: &[Option<String>], share: usize, meta: &Value) -> Value {
+        let mut obj = serde_json::Map::new();
+        for (f, text) in parts.fields.iter().zip(texts) {
+            let text = match text {
+                None => String::new(),
+                Some(text) => {
+                    let own = redact::clip(text, f.head, f.tail);
+                    if own.len() <= share {
+                        own
+                    } else {
+                        let keep = f.head + f.tail;
+                        let head = share * f.head / keep.max(1);
+                        redact::clip(text, head, share - head)
+                    }
+                }
+            };
+            obj.insert(f.name.to_string(), Value::String(text));
+        }
+        obj.insert("meta".to_string(), meta.clone());
         Value::Object(obj)
     }
 
@@ -1423,6 +1452,45 @@ mod tests {
                 .any(|o| *o == DecisionOutcome::Skipped { reason: "budget" }),
             "{outcomes:?}"
         );
+    }
+
+    #[test]
+    fn the_state_as_sent_fits_max_state_bytes_whatever_it_escapes_to() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write_config(
+            cfg.path(),
+            &format!("{ENFORCE}privacy: {{ max_state_bytes: 1024 }}\n"),
+        );
+        let runner = runner_over(cfg.path(), root.path(), &[], &fake());
+        for text in [
+            "\"".repeat(50_000),
+            "\u{1}".repeat(50_000),
+            "a\n".repeat(30_000),
+        ] {
+            let state = runner.build_state(&StateParts {
+                fields: vec![
+                    StateField {
+                        name: "task",
+                        class: FieldClass::Prompt,
+                        text: text.clone(),
+                        head: 8 * 1024,
+                        tail: 0,
+                    },
+                    StateField {
+                        name: "result",
+                        class: FieldClass::Output,
+                        text,
+                        head: 4 * 1024,
+                        tail: 8 * 1024,
+                    },
+                ],
+                meta: serde_json::Map::from_iter([("attempt".to_string(), json!(2))]),
+            });
+            let len = serde_json::to_string(&state).unwrap().len();
+            assert!(len <= 1024, "{len} bytes");
+            assert!(state["result"].as_str().unwrap().len() > 100, "{state}");
+        }
     }
 
     #[test]
