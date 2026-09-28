@@ -145,8 +145,9 @@ the rejected attempt claimed.
 When the machine's `decisions.yaml` turns the `completion_check` use on, each
 successful `agent_task` attempt is also rated by a decision model (is the
 reply a finished result, or a progress note, a plan or a question back?). The
-check is shadow-only: it is recorded in the run journal and changes nothing
-else. It never runs on a node whose `success_check` is a script. A node whose
+check is recorded in the run journal; in advise a flagged attempt also raises
+an anomaly wake, and only the `enforce` opt-in below can change the attempt's
+status. It never runs on a node whose `success_check` is a script. A node whose
 output is not a report (a collector returning a list, a node printing only
 data) can switch it off:
 
