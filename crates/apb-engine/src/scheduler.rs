@@ -1342,7 +1342,14 @@ fn drive_inner(
                         Some(runner) => {
                             let journal = Journal::new(&mut *log);
                             review_gate::recommend(
-                                root, run_dir, runner, &journal, &playbook, &current, &events,
+                                root,
+                                run_dir,
+                                runner,
+                                &journal,
+                                &playbook,
+                                &current,
+                                &events,
+                                cfg.parent_run.is_some(),
                             )
                         }
                         None => Default::default(),

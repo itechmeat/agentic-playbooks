@@ -707,5 +707,6 @@ does not count (every playbook with an agent has it). The run re-checks the
 same rule with the declared effects of every sub-playbook it runs, at any
 depth and in any scope (resolved as the run gate resolves them), and refuses
 with `enforce_refused: effects`; a sub-playbook tree that does not resolve is
-refused the same way. `allow` may contain only `needs_changes`,
+refused the same way, and so is a gate inside a sub-playbook run, which cannot
+see what its parent does after it returns. `allow` may contain only `needs_changes`,
 never `approve` (V72).
