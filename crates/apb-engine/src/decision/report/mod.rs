@@ -701,10 +701,13 @@ pub fn build(
     filter: &ReportFilter,
     settings: &ReportSettings,
 ) -> DecisionsReport {
-    let mut durations: Vec<u64> = journals
+    // Only the runs the filter keeps a decision of: the header's run count
+    // and the savings unit describe the same runs as the figures.
+    let kept: Vec<&RunJournal> = journals
         .iter()
-        .flat_map(RunJournal::attempt_durations)
+        .filter(|j| j.records().iter().any(|r| filter.keeps(r)))
         .collect();
+    let mut durations: Vec<u64> = kept.iter().flat_map(|j| j.attempt_durations()).collect();
     let median_attempt_ms = median(&mut durations);
     let mut labellers: BTreeMap<String, Box<dyn Labeller>> = BTreeMap::new();
     let mut labelled: Vec<(DecisionRecord, Label)> = Vec::new();
@@ -765,7 +768,7 @@ pub fn build(
         })
         .collect();
     DecisionsReport {
-        runs: journals.len(),
+        runs: kept.len(),
         decisions,
         median_attempt_ms,
         note: (decisions == 0).then(|| NO_DECISIONS.to_string()),

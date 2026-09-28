@@ -547,3 +547,22 @@ fn a_judge_use_is_never_asked_for_a_stored_threshold() {
         .is_err()
     );
 }
+
+#[test]
+fn the_run_count_covers_only_the_runs_the_filter_keeps() {
+    let all = build(
+        &eligible_fixture(),
+        &ReportFilter::default(),
+        &ReportSettings::default(),
+    );
+    assert_eq!(all.runs, 60);
+    let none = build(
+        &eligible_fixture(),
+        &ReportFilter {
+            use_site: Some("retry_advice".into()),
+            ..Default::default()
+        },
+        &ReportSettings::default(),
+    );
+    assert_eq!(none.runs, 0);
+}
