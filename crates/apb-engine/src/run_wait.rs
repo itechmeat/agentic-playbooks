@@ -251,7 +251,7 @@ fn result(
 }
 
 /// What a supervisor wait returned.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum SupervisorWait {
     /// The first `WakeRaised` after the cursor.
     Wake(WakeEvent),
@@ -320,12 +320,14 @@ pub fn wait_supervisor_event_with(
                     trigger,
                     node,
                     detail,
+                    triage,
                 } => {
                     return Ok(SupervisorWait::Wake(WakeEvent {
                         seq: event.seq,
                         trigger,
                         node,
                         detail,
+                        triage,
                     }));
                 }
                 EventPayload::ReviewRequested { node, .. } => {

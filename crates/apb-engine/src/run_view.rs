@@ -308,6 +308,8 @@ mod decision_tests {
             seq,
             ts: seq as u128,
             payload: EventPayload::DecisionMade {
+                enforce_refused: None,
+                join: BTreeMap::new(),
                 use_site: "completion_check".into(),
                 node: Some("w".into()),
                 attempt: Some(1),

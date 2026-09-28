@@ -26,6 +26,17 @@ answer_by: string,
  */
 asked_at: number, };
 
+export type ReviewRecommendation = { 
+/**
+ * One of the gate's options.
+ */
+option: string, p: number, confidence: number, provider: string, model: string, calibrated: boolean, 
+/**
+ * The engine posted this option as the decision itself (enforce,
+ * `auto_decide`, Part 14.4).
+ */
+applied?: boolean, };
+
 export type PendingReview = { node: string, 
 /**
  * The gate node's title from the playbook, when it has one.
@@ -52,7 +63,13 @@ how_to_decide: string,
  * shows it above the options). Already folded into `instruction` too.
  * Template placeholders inside are NOT rendered - literal text.
  */
-prompt?: string, };
+prompt?: string, 
+/**
+ * The decision model's advisory recommendation for this visit (issue
+ * #165 Part 11), from the open `review_requested`; already appended to
+ * `instruction` as one sentence. Never preselected.
+ */
+recommendation?: ReviewRecommendation, };
 
 export type PendingSupervisor = { node: string, 
 /**

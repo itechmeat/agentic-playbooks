@@ -20,6 +20,36 @@
 #[path = "suite/common/mod.rs"]
 mod common;
 
+// Config isolation (issue #165 P1 open item 5): every engine test runs with
+// an isolated global config dir, so a developer's real
+// `~/.config/apb/decisions.yaml` (or any other global file) can never make a
+// test call a provider or read personal settings. Many tests set
+// `APB_CONFIG_DIR` themselves and remove it afterwards, which would fall back
+// to `XDG_CONFIG_HOME` or `HOME`; pointing `XDG_CONFIG_HOME` at a sandbox for
+// the whole process, before any test thread starts, closes that fallback.
+// Tests that need their own config dir still set `APB_CONFIG_DIR`, which wins.
+#[used]
+#[cfg_attr(
+    any(target_os = "linux", target_os = "android", target_os = "freebsd"),
+    unsafe(link_section = ".init_array")
+)]
+#[cfg_attr(
+    target_vendor = "apple",
+    unsafe(link_section = "__DATA,__mod_init_func")
+)]
+static ISOLATE_CONFIG: extern "C" fn() = isolate_config;
+
+extern "C" fn isolate_config() {
+    let dir = std::path::Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(format!("apb-engine-test-xdg-{}", std::process::id()));
+    let _ = std::fs::create_dir_all(&dir);
+    // SAFETY: runs before `main`, so no other thread exists yet.
+    unsafe {
+        std::env::set_var("XDG_CONFIG_HOME", &dir);
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+}
+
 #[path = "suite/acp_adapter_test.rs"]
 mod acp_adapter_test;
 #[path = "suite/acp_config_test.rs"]
@@ -91,6 +121,9 @@ mod control_liveness_test;
 mod control_test;
 #[path = "suite/decision_test.rs"]
 mod decision_test;
+#[cfg(unix)]
+#[path = "suite/decision_uses_test.rs"]
+mod decision_uses_test;
 #[path = "suite/detached_driver_test.rs"]
 mod detached_driver_test;
 #[path = "suite/digest_binding_test.rs"]

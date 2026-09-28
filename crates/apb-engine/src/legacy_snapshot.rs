@@ -239,6 +239,9 @@ fn manifest_profile_for(
         // isolation: the flag is off on the legacy/ephemeral path.
         hermetic: false,
         zcode_mode: None,
+        tiers: Vec::new(),
+        routed_tier: None,
+        cascade: 0,
     })
 }
 

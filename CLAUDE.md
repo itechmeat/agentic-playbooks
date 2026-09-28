@@ -38,10 +38,10 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   measured-threshold store (`decision_thresholds.rs`).
 - `apb-decide` - a blocking, provider-agnostic decision-model client: the
   `DecisionProvider` trait, question and answer types, the `systemone`,
-  `fake` and `llm_emulation` (uncalibrated) providers and the route adapters (`vercel_evaluate`,
-  `openrouter_decisions`, `cloudflare`) over one shared HTTP exchange, limit
-  checks and strict reply validation, retries, the provider chain, the
-  per-run cache and the `ApiKey` wrapper; the `testing` feature adds a
+  `fake` and `llm_emulation` (uncalibrated) providers and the route
+  adapters (`vercel_evaluate`, `openrouter_decisions`, `cloudflare`) over
+  one shared HTTP exchange, limit checks and strict reply validation,
+  retries, the provider chain, the per-run cache and the `ApiKey` wrapper; the `testing` feature adds a
   multi-response HTTP stub. Knows nothing about runs.
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
@@ -60,10 +60,11 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
   policy gate every launch surface calls (`gate.rs`), and the decision runner
   (`decision/`: the one entry point for decision-model uses, redaction,
-  budget, replay, the `decision_made` event, the shadow completion check,
-  the judge node and edge answers (`scheduler/judge` runs them), and
-  `report/`: the labellers, statistics and replay behind `apb decisions`;
-  see `docs/DECISIONS.md`).
+  budget, replay, the `decision_made` event, the enforce gate, and one
+  module per use: completion check, retry advice, supervisor wake triage,
+  review recommendation, tier routing, the judge node and edge answers
+  (`scheduler/judge` runs them), and `report/`: the labellers, statistics
+  and replay behind `apb decisions`; see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
   `meta`); `catalog_rank` is the opt-in decision-model ranking behind

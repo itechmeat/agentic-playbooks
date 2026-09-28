@@ -326,23 +326,25 @@ fn success_check_rejection(
     }
 }
 
-/// The completion check (issue #165 Part 8) on an attempt that reported
-/// success and passed its `success_check`, in milliseconds (counted into the
-/// attempt's duration). Shadow only: it journals a `decision_made` and
-/// changes nothing else. Skipped without a decision runner, on a node with a
-/// script `success_check` (a checked fact outranks a judgment), on a node
-/// with `completion_check: off`, and for an empty output (the empty-output
+/// The completion check (issue #165 Part 8, Part 14.1) on an attempt that
+/// reported success and passed its `success_check`. Its time is counted into
+/// the attempt's duration. In advise a flagged attempt gets one `Anomaly`
+/// wake (raised here); in enforce a rejection fails the attempt (the caller
+/// journals it). Skipped without a decision runner, on a node with a script
+/// `success_check` (a checked fact outranks a judgment), on a node with
+/// `completion_check: off`, and for an empty output (the empty-output
 /// anomaly covers it).
-fn completion_check_ms(
+fn completion_check(
     decisions: Option<&crate::decision::DecisionRunner>,
     journal: &Journal,
+    run_dir: &Path,
     node: &apb_core::schema::Node,
     attempt: u32,
     prompt: &str,
     output: &str,
-) -> u64 {
+) -> Result<crate::decision::completion::Verdict, EngineError> {
     let Some(runner) = decisions else {
-        return 0;
+        return Ok(Default::default());
     };
     if node.completion_check == Some(apb_core::schema::CompletionCheckSetting::Off)
         || matches!(
@@ -350,9 +352,9 @@ fn completion_check_ms(
             Some(apb_core::schema::SuccessCheck::Script(_))
         )
     {
-        return 0;
+        return Ok(Default::default());
     }
-    crate::decision::completion::check(
+    let verdict = crate::decision::completion::check(
         runner,
         journal,
         crate::decision::completion::Attempt {
@@ -361,9 +363,105 @@ fn completion_check_ms(
             prompt,
             output,
             missing_fields: super::cache::missing_output_fields(node, output),
+            enforce: node.completion_check
+                == Some(apb_core::schema::CompletionCheckSetting::Enforce),
         },
-    )
-    .as_millis() as u64
+    );
+    if let Some(detail) = &verdict.anomaly {
+        journal.raise_wake(
+            run_dir,
+            crate::event::WakeTrigger::Anomaly,
+            &node.id,
+            detail.clone(),
+        )?;
+    }
+    Ok(verdict)
+}
+
+/// Tier routing before an execution's first attempt (issue #165 Part 12,
+/// Part 14.5). Excluded nodes (a handoff, a supervisor rebind) are journaled
+/// as excluded without a request. An enforced route writes the rebind
+/// overlay and journals `profile_rebound` with a `routing:` reason; a later
+/// execution routed back to the executor clears it the same way.
+#[allow(clippy::too_many_arguments)]
+fn route_execution(
+    runner: &crate::decision::DecisionRunner,
+    journal: &Journal,
+    run_dir: &Path,
+    playbook: &Playbook,
+    node: &apb_core::schema::Node,
+    manifest: &RunExecutionManifest,
+    prompt: &str,
+    events: &[Event],
+) -> Result<(), EngineError> {
+    use crate::decision::routing;
+    let Some(base) = manifest.for_node(&node.id) else {
+        return Ok(());
+    };
+    if base.tiers.is_empty() || base.ephemeral {
+        return Ok(());
+    }
+    let overlay = super::rebind::read_overlay(run_dir)?;
+    let current = overlay.nodes.get(&node.id);
+    let excluded = if matches!(
+        &node.kind,
+        NodeKind::AgentTask {
+            continue_session: Some(_),
+            ..
+        }
+    ) {
+        Some("continue_session")
+    } else if super::handoff::is_source(playbook, &node.id) {
+        Some("handoff_source")
+    } else if current.is_some_and(|p| p.routed_tier.is_none()) {
+        Some("rebound")
+    } else {
+        None
+    };
+    if let Some(reason) = excluded {
+        runner.record_excluded(
+            journal,
+            apb_decide::UseSite::Routing,
+            Some(&node.id),
+            Some(1),
+            reason,
+        );
+        return Ok(());
+    }
+    let outputs: Vec<String> = node
+        .outputs
+        .as_ref()
+        .map(|o| o.fields.clone())
+        .unwrap_or_default();
+    let plan = routing::route(
+        runner,
+        journal,
+        routing::Step {
+            node: &node.id,
+            title: node.title.as_deref(),
+            prompt,
+            outputs: &outputs,
+            entry: base,
+            previous_tier: routing::previous_tier(events, &base.key(), &node.id),
+        },
+    );
+    let (entry, reason) = match plan {
+        routing::Plan::Routed { entry, reason } => (Some(*entry), reason),
+        routing::Plan::Executor => (
+            None,
+            "routing: back to the profile's own executor".to_string(),
+        ),
+    };
+    let key = entry.as_ref().map_or_else(|| base.key(), |e| e.key());
+    if super::rebind::set_routed(run_dir, &node.id, entry)? {
+        journal.append(EventPayload::ProfileRebound {
+            node: node.id.clone(),
+            profile: key,
+            bundle: base.bundle_digest.clone(),
+            reason,
+        })?;
+    }
+    Ok(())
 }
 
 /// Journals an attempt that ended without recording a REQUIRED verdict as
@@ -708,6 +806,23 @@ pub(crate) fn execute_node(
                     "node `{node_id}` has no execution manifest: this run predates agent profiles and cannot be resumed after the schema 2 upgrade - start a fresh run"
                 ))
             })?;
+            // Tier routing (issue #165 Part 12): before the first attempt of
+            // an execution, possibly through the rebind overlay read below.
+            if let Some(runner) = decisions
+                && resume.is_none()
+                && node.route == Some(apb_core::schema::RouteSetting::Auto)
+            {
+                route_execution(
+                    runner,
+                    journal,
+                    run_dir,
+                    playbook,
+                    node,
+                    &manifest,
+                    &text,
+                    journaled.as_deref().unwrap_or(&[]),
+                )?;
+            }
             // The EFFECTIVE binding: a mid-run rebind (issue #45 finding 5)
             // overlays the manifest for future attempts of this node.
             let entry = effective_for_node(run_dir, &manifest, node_id)?.ok_or_else(|| {
@@ -729,6 +844,13 @@ pub(crate) fn execute_node(
             let soul_text = Some(entry.soul.clone());
             let skill_names: Vec<String> = entry.skills.iter().map(|s| s.name.clone()).collect();
             let profile_key = Some(entry.key());
+            // Leading chain steps that are routed tiers below the profile's
+            // executor (issue #165 Part 14.5): an agent failure there goes
+            // up a tier at once.
+            let cascade = entry.cascade as usize;
+            // The last agent failure of this execution, for retry advice's
+            // `previous_failure` (issue #165 Part 9).
+            let mut last_agent_failure: Option<String> = None;
 
             if steps.is_empty() {
                 return Err(EngineError::Invalid(format!(
@@ -972,6 +1094,7 @@ pub(crate) fn execute_node(
                                 .unwrap_or_else(|| steps[idx - 1].model.clone()),
                         ),
                         to_model: Some(step.model.clone()),
+                        reason: (idx - 1 < cascade).then(|| "routing".to_string()),
                     });
                 }
                 last_tried = Some((step.agent.clone(), step.model.clone()));
@@ -1712,15 +1835,40 @@ pub(crate) fn execute_node(
                                         last_timed_out = false;
                                     }
                                     None => {
-                                        let check_ms = completion_check_ms(
+                                        let check = completion_check(
                                             decisions,
                                             journal,
+                                            run_dir,
                                             node,
                                             attempt,
                                             &task_prompt,
                                             &report.output,
-                                        );
-                                        let duration_ms = duration_ms.map(|d| d + check_ms);
+                                        )?;
+                                        let duration_ms = duration_ms
+                                            .map(|d| d + check.elapsed.as_millis() as u64);
+                                        // Completion enforce (issue #165 Part
+                                        // 14.1): a rejection is an attempt
+                                        // failure, like a success_check one.
+                                        if let Some(reason) = check.reject {
+                                            journal.append(EventPayload::AttemptFinished {
+                                                node: node_id.into(),
+                                                attempt,
+                                                status: "failed".into(),
+                                                duration_ms,
+                                                session: report.session.clone(),
+                                                summary: Some(report.summary.clone()),
+                                                rejected_output: Some(report.output.clone()),
+                                                partial_output: None,
+                                                failure_kind: None,
+                                                usage: report.usage.clone(),
+                                            })?;
+                                            last_msg = format!("{reason}: {}", report.output);
+                                            last_timed_out = false;
+                                            if !infra_retry {
+                                                try_i += 1;
+                                            }
+                                            continue;
+                                        }
                                         journal.append(EventPayload::AttemptFinished {
                                             node: node_id.into(),
                                             attempt,
@@ -1880,32 +2028,53 @@ pub(crate) fn execute_node(
                                         &output,
                                     )? {
                                         None => {
-                                            let check_ms = completion_check_ms(
+                                            let check = completion_check(
                                                 decisions,
                                                 journal,
+                                                run_dir,
                                                 node,
                                                 attempt,
                                                 &task_prompt,
                                                 &output,
-                                            );
-                                            let duration_ms = duration_ms.map(|d| d + check_ms);
-                                            journal.append(EventPayload::AttemptFinished {
-                                                node: node_id.into(),
-                                                attempt,
-                                                status: NodeStatus::Succeeded.as_str().into(),
-                                                duration_ms,
-                                                session: None,
-                                                summary: None,
-                                                rejected_output: None,
-                                                partial_output: None,
-                                                failure_kind: None,
-                                                usage: failed_usage.clone(),
-                                            })?;
-                                            return Ok(AttemptOutcome::Finished {
-                                                status: NodeStatus::Succeeded,
-                                                output,
-                                                events,
-                                            });
+                                            )?;
+                                            let duration_ms = duration_ms
+                                                .map(|d| d + check.elapsed.as_millis() as u64);
+                                            if let Some(reason) = check.reject {
+                                                // Completion enforce (issue #165
+                                                // Part 14.1), as on the Ok branch.
+                                                journal.append(EventPayload::AttemptFinished {
+                                                    node: node_id.into(),
+                                                    attempt,
+                                                    status: "failed".into(),
+                                                    duration_ms,
+                                                    session: None,
+                                                    summary: None,
+                                                    rejected_output: Some(output.clone()),
+                                                    partial_output: None,
+                                                    failure_kind: None,
+                                                    usage: failed_usage.clone(),
+                                                })?;
+                                                last_msg = format!("{reason}: {output}");
+                                                last_timed_out = false;
+                                            } else {
+                                                journal.append(EventPayload::AttemptFinished {
+                                                    node: node_id.into(),
+                                                    attempt,
+                                                    status: NodeStatus::Succeeded.as_str().into(),
+                                                    duration_ms,
+                                                    session: None,
+                                                    summary: None,
+                                                    rejected_output: None,
+                                                    partial_output: None,
+                                                    failure_kind: None,
+                                                    usage: failed_usage.clone(),
+                                                })?;
+                                                return Ok(AttemptOutcome::Finished {
+                                                    status: NodeStatus::Succeeded,
+                                                    output,
+                                                    events,
+                                                });
+                                            }
                                         }
                                         Some(reason) => {
                                             journal.append(EventPayload::AttemptFinished {
@@ -2083,6 +2252,61 @@ pub(crate) fn execute_node(
                                 // handling above: a step that cannot be re-run usefully is
                                 // still abandoned in favor of the next executor.
                                 break;
+                            }
+                            // Retry advice and the routing cascade (issue #165
+                            // Parts 9, 14.2 and 14.5): only for an agent failure
+                            // that is about to spend a same-executor retry.
+                            if !infra_retry && failure_kind == Some(FailureKind::Agent) {
+                                let previous = last_agent_failure.replace(last_msg.clone());
+                                if idx < cascade {
+                                    // A routed lower tier failed: go up a tier.
+                                    break;
+                                }
+                                if try_i < retries
+                                    && let Some(runner) = decisions
+                                {
+                                    use crate::decision::retry_advice::{self, Advice};
+                                    let advice = retry_advice::advise(
+                                        runner,
+                                        journal,
+                                        retry_advice::Failure {
+                                            node: node_id,
+                                            attempt,
+                                            title: node.title.as_deref(),
+                                            prompt: &task_prompt,
+                                            failure: &last_msg,
+                                            previous_failure: previous.as_deref(),
+                                            retries_left: retries - try_i,
+                                            fallbacks_left: step_count.saturating_sub(idx + 1)
+                                                as u32,
+                                            opted_in: playbook.defaults.retry_advice
+                                                == Some(apb_core::schema::DecisionOptIn::Enforce),
+                                        },
+                                    );
+                                    match advice {
+                                        Advice::Retry => {}
+                                        Advice::SwitchExecutor(detail) => {
+                                            journal.append(EventPayload::SupervisorAction {
+                                                action: retry_advice::RETRY_ADVICE_ACTION.into(),
+                                                node: Some(node_id.to_string()),
+                                                detail,
+                                            })?;
+                                            break;
+                                        }
+                                        Advice::Stop(detail) => {
+                                            journal.append(EventPayload::SupervisorAction {
+                                                action: retry_advice::RETRY_ADVICE_ACTION.into(),
+                                                node: Some(node_id.to_string()),
+                                                detail,
+                                            })?;
+                                            return Ok(AttemptOutcome::Finished {
+                                                status: NodeStatus::Failed,
+                                                output: last_msg,
+                                                events,
+                                            });
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
@@ -2318,6 +2542,7 @@ pub(crate) fn execute_finish_answer(
                         .unwrap_or_else(|| entry.chain[idx - 1].model.clone()),
                 ),
                 to_model: Some(ri.model.clone()),
+                reason: None,
             });
         }
         last_tried = Some((ri.agent_id.clone(), ri.model.clone()));

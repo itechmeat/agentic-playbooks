@@ -156,6 +156,7 @@ fn wake_from_asked_question_still_reaches_supervisor_wait_event_after_answer() {
         trigger: WakeTrigger::Anomaly,
         node: "ask".into(),
         detail: "interactive question".into(),
+        triage: None,
     })
     .unwrap();
     drop(log);

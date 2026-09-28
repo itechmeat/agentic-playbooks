@@ -54,6 +54,7 @@ mod patch;
 mod prepare;
 mod rebind;
 mod resume;
+mod review_gate;
 mod skills_copy;
 mod status_file;
 mod supervisor;
@@ -1209,6 +1210,7 @@ fn drive_inner(
                         &mut frontier,
                         &mut last_applied_patch,
                         &failed,
+                        decisions.as_ref(),
                     )? {
                         BatchWake::NoFailures => {}
                         BatchWake::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
@@ -1328,19 +1330,49 @@ fn drive_inner(
                 // options are, and how to answer.
                 if review_open_count(&events, &current) == 0 {
                     let title = playbook.node(&current).and_then(|n| n.title.clone());
-                    let instruction = crate::progress::review_instruction(
+                    let mut instruction = crate::progress::review_instruction(
                         &current,
                         title.as_deref(),
                         options,
                         prompt.as_deref(),
                     );
+                    // The review recommendation (issue #165 Part 11, 14.4),
+                    // once per visit, before the request is declared.
+                    let rec = match decisions.as_ref() {
+                        Some(runner) => {
+                            let journal = Journal::new(&mut *log);
+                            review_gate::recommend(
+                                root, runner, &journal, &playbook, &current, &events,
+                            )
+                        }
+                        None => Default::default(),
+                    };
+                    if let Some(r) = &rec.recommendation {
+                        instruction.push_str(&crate::decision::review_triage::instruction_line(r));
+                    }
                     log.append(EventPayload::ReviewRequested {
                         node: current.clone(),
                         options: apb_core::schema::effective_review_options(options),
                         title,
                         instruction,
                         prompt: prompt.clone(),
+                        recommendation: rec.recommendation.clone(),
                     })?;
+                    // Enforced: post through the review channel, so it is
+                    // consumed and journaled like a person's decision; a
+                    // decision a person already queued wins (the channel
+                    // refuses a second one), and any failure waits for the
+                    // person (fail-closed).
+                    if let Some((decision, note)) = rec.auto {
+                        let _ = crate::review::post_review(
+                            run_dir,
+                            crate::review::ReviewCommand {
+                                node: current.clone(),
+                                decision,
+                                note,
+                            },
+                        );
+                    }
                 }
                 // A directive that moves the run elsewhere (`node_retry`,
                 // `run_continue_from`) is what a supervisor sends when it sees,
@@ -2104,6 +2136,7 @@ fn drive_inner(
                 &mut last_applied_patch,
                 status,
                 &output,
+                decisions.as_ref(),
             )? {
                 WakeOutcome::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
                 WakeOutcome::Resumed => continue,

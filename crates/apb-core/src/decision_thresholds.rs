@@ -95,6 +95,7 @@ pub fn stored_threshold_in(
         .into_iter()
         .find(|t| t.use_name == use_name && t.provider == provider && t.model == model)
         .map(|t| t.threshold)
+        .filter(|t| t.is_finite())
 }
 
 /// Stores (or replaces) the threshold for `(use, provider, model)`.

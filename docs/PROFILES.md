@@ -100,6 +100,29 @@ the default does anyway. Rewrites drop it. On the write surfaces (`--hermetic`,
 the MCP and HTTP `hermetic` field) it is a deprecated alias: `true` means
 `minimal`, `false` means `full`.
 
+## Executor tiers (optional)
+
+A profile may declare `tiers`, lightest first, for decision-model tier
+routing (see DECISIONS.md). A node opts in with `route: auto`.
+
+```yaml
+executor: { agent: claude, model: <mid-size model id> }
+tiers:
+  light:    { agent: opencode, model: <small model id>, for: "Mechanical edits, renames, formatting, small read-only lookups." }
+  standard: { use: executor, for: "Ordinary implementation and review tasks." }
+  heavy:    { agent: claude, model: <largest model id>, for: "Cross-cutting design changes, subtle concurrency or security work." }
+```
+
+Each tier is an `agent` plus `model`, or `use: executor` (the profile's own
+executor chain; without one the executor counts as the heaviest tier). `for`
+describes the work, never the price. Tiers are part of the profile digest,
+so adding or editing them means granting trust again, and they are
+snapshotted into the run manifest. `apb validate` and `apb doctor` check
+every tier's model against the model lists and `model_policy`, and a run
+start fails on a tier with an unknown agent. An apb older than this field
+rejects a profile that has it (`profile.yaml` is strict). No write surface
+edits tiers yet: `profile_write` keeps a profile's stored tiers on an update.
+
 ## Scopes and resolution
 
 A node references a profile by name (`profile: architect`, scope `auto`) or by

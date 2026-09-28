@@ -86,6 +86,27 @@ pub struct PendingReview {
     #[serde(skip_serializing_if = "Option::is_none")]
     #[cfg_attr(feature = "ts", ts(optional))]
     pub prompt: Option<String>,
+    /// The decision model's advisory recommendation for this visit (issue
+    /// #165 Part 11), from the open `review_requested`; already appended to
+    /// `instruction` as one sentence. Never preselected.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub recommendation: Option<crate::event::ReviewRecommendation>,
+}
+
+/// The recommendation carried by a gate's latest `review_requested`.
+fn open_recommendation(
+    events: &[crate::event::Event],
+    node: &str,
+) -> Option<crate::event::ReviewRecommendation> {
+    events.iter().rev().find_map(|e| match &e.payload {
+        crate::event::EventPayload::ReviewRequested {
+            node: n,
+            recommendation,
+            ..
+        } if n == node => Some(recommendation.clone()),
+        _ => None,
+    })?
 }
 
 /// The decision mechanics for a human-review gate: how an owner (or an agent
@@ -154,6 +175,7 @@ pub fn pending_review(
             .map(str::trim)
             .filter(|p| !p.is_empty())
             .map(str::to_string),
+        recommendation: None,
     }
 }
 
@@ -836,12 +858,15 @@ fn compute_with(playbook: &Playbook, events: &[Event], gc: &GroupContext) -> Pro
     let pending_reviews: Vec<PendingReview> = open_gates
         .iter()
         .filter_map(|(n, _)| match &n.kind {
-            NodeKind::HumanReview { options, prompt } => Some(pending_review(
-                &n.id,
-                n.title.as_deref(),
-                options,
-                prompt.as_deref(),
-            )),
+            NodeKind::HumanReview { options, prompt } => {
+                let mut pr = pending_review(&n.id, n.title.as_deref(), options, prompt.as_deref());
+                if let Some(r) = open_recommendation(events, &n.id) {
+                    pr.instruction
+                        .push_str(&crate::decision::review_triage::instruction_line(&r));
+                    pr.recommendation = Some(r);
+                }
+                Some(pr)
+            }
             _ => None,
         })
         .collect();
@@ -1233,6 +1258,7 @@ edges:
                     title: None,
                     instruction: String::new(),
                     prompt: Some("Check the changelog first.".into()),
+                    recommendation: None,
                 },
             ),
         ];
@@ -1278,6 +1304,7 @@ edges:
                         title: None,
                         instruction: String::new(),
                         prompt: None,
+                        recommendation: None,
                     },
                 ),
             ];
@@ -1311,6 +1338,7 @@ edges:
             title: None,
             instruction: String::new(),
             prompt: None,
+            recommendation: None,
         };
         let events: Vec<Event> = [
             EventPayload::RunStarted {
@@ -1368,6 +1396,7 @@ edges:
                     title: None,
                     instruction: String::new(),
                     prompt: None,
+                    recommendation: None,
                 },
             ),
         ];
@@ -1395,6 +1424,7 @@ edges:
                     title: None,
                     instruction: String::new(),
                     prompt: None,
+                    recommendation: None,
                 },
             ),
             ev(
@@ -1531,6 +1561,7 @@ edges:
                     title: None,
                     instruction: String::new(),
                     prompt: None,
+                    recommendation: None,
                 },
             ),
         ];
@@ -2095,6 +2126,7 @@ edges:
                     trigger: crate::event::WakeTrigger::NodeFailed,
                     node: "work".into(),
                     detail: "boom".into(),
+                    triage: None,
                 },
             ),
         ];
@@ -2128,6 +2160,7 @@ edges:
                     trigger: crate::event::WakeTrigger::NodeTimeout,
                     node: "work".into(),
                     detail: String::new(),
+                    triage: None,
                 },
             ),
             ev(

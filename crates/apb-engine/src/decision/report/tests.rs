@@ -20,6 +20,8 @@ fn decision_event(seq: u64, p: Option<f64>, regex_flag: bool, output_chars: u64)
         seq,
         ts: 1_000 + u128::from(seq),
         payload: EventPayload::DecisionMade {
+            enforce_refused: None,
+            join: BTreeMap::new(),
             use_site: "completion_check".into(),
             node: Some("a".into()),
             attempt: Some(1),

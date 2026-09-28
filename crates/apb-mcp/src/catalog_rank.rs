@@ -413,6 +413,8 @@ mod tests {
             uses: BTreeMap::from([(
                 "catalog_rank".to_string(),
                 UseSettings {
+                    allow_uncalibrated: false,
+                    max_actions: None,
                     mode: DecisionMode::Advise,
                     thresholds: BTreeMap::new(),
                     max_requests_per_day: None,

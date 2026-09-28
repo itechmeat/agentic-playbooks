@@ -76,6 +76,7 @@ fn review_decide_validates_the_node_against_the_run_snapshot() {
         title: None,
         instruction: String::new(),
         prompt: None,
+        recommendation: None,
     })
     .unwrap();
     let res = review_decide(dir.path(), "r1", "gate", "approved", "").unwrap();

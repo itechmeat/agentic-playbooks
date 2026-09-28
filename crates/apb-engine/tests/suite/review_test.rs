@@ -184,6 +184,7 @@ fn human_review_entry_event_carries_instruction_and_options() {
                         title,
                         instruction,
                         prompt,
+                        ..
                     } if node == "gate" => Some((options, title, instruction, prompt)),
                     _ => None,
                 })
@@ -394,6 +395,7 @@ fn review_requested(node: &str) -> EventPayload {
         title: None,
         instruction: String::new(),
         prompt: None,
+        recommendation: None,
     }
 }
 

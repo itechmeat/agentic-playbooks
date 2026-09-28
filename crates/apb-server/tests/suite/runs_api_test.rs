@@ -138,6 +138,7 @@ fn review_requested(node: &str) -> apb_engine::event::EventPayload {
         title: None,
         instruction: String::new(),
         prompt: None,
+        recommendation: None,
     }
 }
 
@@ -201,6 +202,7 @@ async fn get_run_detail_exposes_pending_review_prompt() {
         title: None,
         instruction: String::new(),
         prompt: Some("Check the changelog first.".into()),
+        recommendation: None,
     };
     seed_gate_run_yaml(dir.path(), "gate-2", GATE_PROMPT, &[prompt]);
     let app = build_router(AppState::new(dir.path().to_path_buf()));

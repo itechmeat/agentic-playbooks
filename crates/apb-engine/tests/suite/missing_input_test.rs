@@ -91,6 +91,7 @@ fn anomalies(events: &[Event], node: &str) -> Vec<String> {
                 trigger: WakeTrigger::Anomaly,
                 node: n,
                 detail,
+                ..
             } if n == node => Some(detail.clone()),
             _ => None,
         })

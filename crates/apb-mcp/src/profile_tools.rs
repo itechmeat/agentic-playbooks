@@ -213,6 +213,7 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
         environment: environment.filter(|e| *e != apb_core::profile::AgentEnvironment::Minimal),
         hermetic: None,
         zcode_mode,
+        tiers: Default::default(),
     };
 
     // Validation: the agent is known (builtin or config) - both the primary and EVERY
@@ -277,8 +278,11 @@ pub fn profile_write(root: &Path, req: ProfileWrite) -> Result<Value, ToolError>
             }
             // Likewise `zcode_mode`.
             if zcode_mode.is_none() {
-                doc.zcode_mode = stored.and_then(|d| d.zcode_mode);
+                doc.zcode_mode = stored.as_ref().and_then(|d| d.zcode_mode);
             }
+            // No write surface edits tiers yet (issue #165 Part 12): an
+            // update keeps the stored ones.
+            doc.tiers = stored.map(|d| d.tiers).unwrap_or_default();
         }
     }
     let yaml = serde_yaml_ng::to_string(&doc).map_err(|e| ToolError::Engine(e.to_string()))?;

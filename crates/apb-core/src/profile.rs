@@ -173,7 +173,149 @@ pub struct ProfileDoc {
     /// historical grant; only zcode reads it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zcode_mode: Option<ZcodeMode>,
+    /// Executor tiers for tier routing (issue #165 Part 12), lightest first.
+    /// Absent: the profile is never routed. Covered by the profile digest
+    /// like every other field, so adding tiers means granting trust again;
+    /// an apb older than this field rejects a profile that has it
+    /// (`deny_unknown_fields`).
+    #[serde(default, skip_serializing_if = "ProfileTiers::is_empty")]
+    pub tiers: ProfileTiers,
 }
+
+// --- executor tiers (issue #165 Part 12) ---
+
+/// One executor tier: another executor (`agent` and `model`) or the
+/// profile's own (`use: executor`), and `for`, the kind of work it is meant
+/// for (the routing question's criterion: describe work, never price).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProfileTier {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// `executor`: this tier is the profile's own executor chain.
+    #[serde(rename = "use", default, skip_serializing_if = "Option::is_none")]
+    pub use_executor: Option<TierUse>,
+    #[serde(rename = "for")]
+    pub for_work: String,
+}
+
+/// The only `use:` value a tier takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TierUse {
+    Executor,
+}
+
+impl ProfileTier {
+    /// The tier's own executor, or `None` for `use: executor`.
+    pub fn executor(&self) -> Option<(&str, &str)> {
+        match (&self.agent, &self.model) {
+            (Some(a), Some(m)) if self.use_executor.is_none() => Some((a, m)),
+            _ => None,
+        }
+    }
+}
+
+/// A profile's tiers in declaration order (lightest first), written as a
+/// YAML map.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ProfileTiers(pub Vec<(String, ProfileTier)>);
+
+impl ProfileTiers {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &(String, ProfileTier)> {
+        self.0.iter()
+    }
+
+    /// Structural problems: a bad tier name, a tier that is neither
+    /// `use: executor` nor an `agent` plus `model`, an empty `for`.
+    pub fn problems(&self) -> Vec<String> {
+        let mut out = Vec::new();
+        for (name, t) in &self.0 {
+            if validate_slug("tier name", name).is_err() {
+                out.push(format!(
+                    "tier `{name}`: the name must match [a-z0-9][a-z0-9-]*"
+                ));
+            }
+            let own = t.agent.is_some() || t.model.is_some();
+            match (t.use_executor.is_some(), own) {
+                (true, true) => out.push(format!(
+                    "tier `{name}`: `use: executor` takes no agent or model"
+                )),
+                (false, _) if t.executor().is_none() => out.push(format!(
+                    "tier `{name}`: needs `agent` and `model`, or `use: executor`"
+                )),
+                _ => {}
+            }
+            if t.for_work.trim().is_empty() {
+                out.push(format!(
+                    "tier `{name}`: `for` must describe the work it is for"
+                ));
+            }
+        }
+        out
+    }
+}
+
+impl Serialize for ProfileTiers {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap;
+        let mut map = s.serialize_map(Some(self.0.len()))?;
+        for (k, v) in &self.0 {
+            map.serialize_entry(k, v)?;
+        }
+        map.end()
+    }
+}
+
+impl<'de> Deserialize<'de> for ProfileTiers {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        struct V;
+        impl<'de> serde::de::Visitor<'de> for V {
+            type Value = ProfileTiers;
+            fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                f.write_str("a map of tier name to tier")
+            }
+            fn visit_map<A: serde::de::MapAccess<'de>>(
+                self,
+                mut map: A,
+            ) -> Result<Self::Value, A::Error> {
+                let mut out: Vec<(String, ProfileTier)> = Vec::new();
+                while let Some((k, v)) = map.next_entry::<String, ProfileTier>()? {
+                    if out.iter().any(|(n, _)| *n == k) {
+                        return Err(serde::de::Error::custom(format!("tier `{k}` twice")));
+                    }
+                    out.push((k, v));
+                }
+                Ok(ProfileTiers(out))
+            }
+        }
+        d.deserialize_map(V)
+    }
+}
+
+impl ProfileDoc {
+    /// Every `(agent, model)` the profile can run: the executor, its
+    /// fallbacks and every tier's own executor (for model checks).
+    pub fn executor_pairs(&self) -> Vec<(&str, &str)> {
+        let mut out = vec![(self.executor.agent.as_str(), self.executor.model.as_str())];
+        out.extend(
+            self.executor
+                .fallbacks
+                .iter()
+                .map(|f| (f.agent.as_str(), f.model.as_str())),
+        );
+        out.extend(self.tiers.iter().filter_map(|(_, t)| t.executor()));
+        out
+    }
+}
+
+// --- end executor tiers ---
 
 impl ProfileDoc {
     /// The environment the executor runs with: the declared one, else
@@ -410,5 +552,55 @@ mod tests {
         assert!(r.is_err(), "misspelled `scpoe` must be rejected");
         let s: Result<SkillRef, _> = serde_yaml_ng::from_str("{ name: x, scpoe: global }");
         assert!(s.is_err(), "misspelled `scpoe` must be rejected for skills");
+    }
+}
+
+#[cfg(test)]
+mod tier_tests {
+    use super::*;
+
+    const WITH_TIERS: &str = "name: p\nexecutor: { agent: claude, model: sonnet }\ntiers:\n  light: { agent: opencode, model: small, for: \"Mechanical edits.\" }\n  standard: { use: executor, for: \"Ordinary tasks.\" }\n";
+
+    #[test]
+    fn tiers_parse_in_order_round_trip_and_change_the_digest() {
+        let doc = ProfileDoc::from_yaml(WITH_TIERS).unwrap();
+        let names: Vec<&str> = doc.tiers.iter().map(|(n, _)| n.as_str()).collect();
+        assert_eq!(names, ["light", "standard"]);
+        assert!(doc.tiers.problems().is_empty());
+        assert_eq!(
+            doc.executor_pairs(),
+            [("claude", "sonnet"), ("opencode", "small")]
+        );
+        let back = ProfileDoc::from_yaml(&serde_yaml_ng::to_string(&doc).unwrap()).unwrap();
+        assert_eq!(back, doc);
+        let plain = "name: p\nexecutor: { agent: claude, model: sonnet }\n";
+        assert_ne!(profile_digest(plain, ""), profile_digest(WITH_TIERS, ""));
+        // Without tiers the document serializes as before.
+        let doc = ProfileDoc::from_yaml(plain).unwrap();
+        assert!(!serde_yaml_ng::to_string(&doc).unwrap().contains("tiers"));
+    }
+
+    #[test]
+    fn malformed_tiers_are_reported() {
+        for (yaml, what) in [
+            ("  x: { agent: a, for: \"w\" }\n", "needs"),
+            (
+                "  x: { use: executor, agent: a, model: m, for: \"w\" }\n",
+                "takes no",
+            ),
+            ("  x: { agent: a, model: m, for: \" \" }\n", "for"),
+            ("  Bad: { agent: a, model: m, for: \"w\" }\n", "name"),
+        ] {
+            let doc = ProfileDoc::from_yaml(&format!(
+                "name: p\nexecutor: {{ agent: claude, model: sonnet }}\ntiers:\n{yaml}"
+            ))
+            .unwrap();
+            let problems = doc.tiers.problems();
+            assert!(
+                problems.iter().any(|p| p.contains(what)),
+                "{yaml}: {problems:?}"
+            );
+        }
+        assert!(ProfileDoc::from_yaml("name: p\nexecutor: { agent: a, model: m }\ntiers:\n  x: { agent: a, model: m, for: w, price: 1 }\n").is_err());
     }
 }

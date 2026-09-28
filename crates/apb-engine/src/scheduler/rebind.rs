@@ -40,7 +40,7 @@ pub(crate) fn read_overlay(run_dir: &Path) -> Result<RebindOverlay, EngineError>
     serde_yaml_ng::from_str(&raw).map_err(|e| EngineError::Yaml(e.to_string()))
 }
 
-fn write_overlay(run_dir: &Path, overlay: &RebindOverlay) -> Result<(), EngineError> {
+pub(crate) fn write_overlay(run_dir: &Path, overlay: &RebindOverlay) -> Result<(), EngineError> {
     let yaml = serde_yaml_ng::to_string(overlay).map_err(|e| EngineError::Yaml(e.to_string()))?;
     apb_core::fsutil::atomic_write_under(run_dir, &overlay_path(run_dir), yaml.as_bytes())?;
     Ok(())
@@ -218,4 +218,37 @@ fn resolve_rebind(
         Err(EngineError::Invalid(reason)) => Ok(RebindOutcome::Rejected(reason)),
         Err(other) => Err(other),
     }
+}
+
+/// Sets or clears a node's tier-routing entry in the rebind overlay (issue
+/// #165 Part 14.5): routing swaps the executor through the same overlay a
+/// supervisor rebind writes, never through a third path. Returns whether the
+/// overlay changed (a resumed execution that replays the same route writes
+/// nothing).
+pub(crate) fn set_routed(
+    run_dir: &Path,
+    node: &str,
+    entry: Option<ManifestProfile>,
+) -> Result<bool, EngineError> {
+    let mut overlay = read_overlay(run_dir)?;
+    let current = overlay.nodes.get(node);
+    let changed = match (&entry, current) {
+        (Some(e), Some(c)) => e != c,
+        (Some(_), None) => true,
+        (None, Some(c)) => c.routed_tier.is_some(),
+        (None, None) => false,
+    };
+    if !changed {
+        return Ok(false);
+    }
+    match entry {
+        Some(e) => {
+            overlay.nodes.insert(node.to_string(), e);
+        }
+        None => {
+            overlay.nodes.remove(node);
+        }
+    }
+    write_overlay(run_dir, &overlay)?;
+    Ok(true)
 }

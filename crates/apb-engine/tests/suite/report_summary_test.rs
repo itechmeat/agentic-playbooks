@@ -48,6 +48,7 @@ fn summary_is_built_from_wakes_and_interventions_when_no_report_submitted() {
         trigger: WakeTrigger::NodeFailed,
         node: "impl".into(),
         detail: "boom".into(),
+        triage: None,
     })
     .unwrap();
     log.append(EventPayload::SupervisorAction {

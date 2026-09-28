@@ -282,6 +282,20 @@ pub struct UseSettings {
     /// project and UTC day (default [`CATALOG_RANK_MAX_REQUESTS_PER_DAY`]).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_requests_per_day: Option<u32>,
+    // --- enforce settings (issue #165 Part 14) ---
+    /// Enforce only: act on answers from a provider that reports itself
+    /// uncalibrated (the LLM emulation). Refused by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_uncalibrated: bool,
+    /// Enforce only: how many automatic actions this use may take per run
+    /// before it falls back to advise. Absent: [`DEFAULT_MAX_ACTIONS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_actions: Option<u32>,
+    // --- end enforce settings ---
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// The settings a run works with: the machine's file, capped by its
@@ -653,6 +667,12 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
             .entry("covered".into())
             .or_insert(CATALOG_COVERED_CUT);
     }
+    // Defaults of the other engine uses (issue #165 Parts 9-12).
+    for (name, u) in uses.iter_mut() {
+        for (key, value) in default_thresholds(name) {
+            u.thresholds.entry((*key).to_string()).or_insert(*value);
+        }
+    }
     Ok(Some(EffectiveDecisions {
         mode: doc.mode,
         timeout_ms: doc.timeout_ms,
@@ -662,6 +682,65 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
         uses,
     }))
 }
+
+// --- engine-use defaults and the enforce threshold store (issue #165 Parts
+// 9-12 and 14) ----------------------------------------------------------------
+
+/// Automatic actions per use and run before an enforce use falls back to
+/// advise (`uses.<name>.max_actions`).
+pub const DEFAULT_MAX_ACTIONS: u32 = 3;
+
+/// The advisory thresholds each engine use starts from, filled in under
+/// `uses.<name>.thresholds` when the file does not set them. Every value is a
+/// placeholder until measured on shadow data (issue #165, 2026-09-27
+/// correction 10); none of them lets a use act on its own: acting needs a
+/// stored threshold (see [`crate::decision_thresholds::stored_threshold`]).
+///
+/// - `retry_advice.min_confidence`: `next` would change the retry when it is
+///   not `retry_same_likely_helps` at this confidence or more.
+/// - `supervisor_triage.looping_max`: an automatic retry only below this
+///   `looping` probability.
+/// - `routing.hysteresis`: after a node of the same profile ran on a tier, a
+///   different tier needs this confidence.
+pub fn default_thresholds(use_name: &str) -> &'static [(&'static str, f64)] {
+    match use_name {
+        "retry_advice" => &[("min_confidence", 0.6)],
+        "supervisor_triage" => &[("looping_max", 0.3)],
+        "routing" => &[("hysteresis", 0.75)],
+        _ => &[],
+    }
+}
+
+impl EffectiveDecisions {
+    /// The automatic-action cap of an enforce use.
+    pub fn max_actions(&self, use_name: &str) -> u32 {
+        self.uses
+            .get(use_name)
+            .and_then(|u| u.max_actions)
+            .unwrap_or(DEFAULT_MAX_ACTIONS)
+    }
+
+    /// Whether an enforce use may act on uncalibrated answers.
+    pub fn allows_uncalibrated(&self, use_name: &str) -> bool {
+        self.uses
+            .get(use_name)
+            .is_some_and(|u| u.allow_uncalibrated)
+    }
+}
+
+/// A use's mode as the machine and the project say NOW, for re-checking a
+/// run's snapshot per decision: the kill switch, a lowered ceiling or use
+/// mode, a removed or broken file, or a project opt-out stop every use
+/// mid-run. Raising a mode mid-run has no effect (the caller takes the
+/// minimum with its snapshot).
+pub fn live_mode(root: &Path, use_name: &str) -> DecisionMode {
+    match resolve(root) {
+        Resolution::Active(eff) => eff.mode_for(use_name),
+        _ => DecisionMode::Off,
+    }
+}
+
+// --- end engine-use defaults ---
 
 // --- project narrowing -----------------------------------------------------
 
@@ -1211,5 +1290,23 @@ uses: { catalog_rank: { mode: advise, max_requests_per_day: 10 } }
             !yaml.contains("account_id") && !yaml.contains("zero_data_retention"),
             "{yaml}"
         );
+    }
+
+    #[test]
+    fn engine_uses_get_default_thresholds_and_enforce_settings() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write(
+            cfg.path(),
+            "mode: enforce\nproviders: [{ id: a, kind: systemone, base_url: 'http://127.0.0.1:1', model: m }]\nuses:\n  retry_advice: { mode: enforce, max_actions: 1, allow_uncalibrated: true }\n  routing: { mode: shadow, thresholds: { hysteresis: 0.9 } }\n  supervisor_triage: { mode: advise }\n",
+        );
+        let eff = resolve_in(cfg.path(), root.path()).active().unwrap();
+        assert_eq!(eff.threshold("retry_advice", "min_confidence"), Some(0.6));
+        assert_eq!(eff.threshold("routing", "hysteresis"), Some(0.9));
+        assert_eq!(eff.threshold("supervisor_triage", "looping_max"), Some(0.3));
+        assert_eq!(eff.max_actions("retry_advice"), 1);
+        assert_eq!(eff.max_actions("routing"), DEFAULT_MAX_ACTIONS);
+        assert!(eff.allows_uncalibrated("retry_advice"));
+        assert!(!eff.allows_uncalibrated("routing"));
     }
 }

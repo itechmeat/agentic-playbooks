@@ -248,6 +248,9 @@ fn call<'a>(
     judge: &'a dyn Fn(&BTreeMap<String, crate::event::DecisionAnswer>) -> Judgement,
 ) -> DecisionCall<'a> {
     DecisionCall {
+        enforce: None,
+        join: BTreeMap::new(),
+        join_from: None,
         site: UseSite::JudgeNode,
         node: Some(node_id),
         attempt: None,
@@ -564,6 +567,9 @@ pub(crate) fn decide_edges(
     let outcome = runner.decide_routed(
         journal,
         DecisionCall {
+            enforce: None,
+            join: BTreeMap::new(),
+            join_from: None,
             site: UseSite::JudgeEdge,
             node: Some(node_id),
             attempt: Some(execution),

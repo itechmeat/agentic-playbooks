@@ -1,4 +1,4 @@
-//! The completion check (issue #165 Part 8, shadow only): after an agent
+//! The completion check (issue #165 Part 8, Part 14.1): after an agent
 //! attempt reported success and passed its `success_check`, ask whether its
 //! reply is a finished result rather than a progress note, a plan or a
 //! question back.
@@ -7,12 +7,24 @@
 //! a flag would have been raised (`would_change`) and a code-only regex
 //! verdict on the same reply for comparison. The attempt's status, output
 //! and events are otherwise exactly what they would be without the check.
+//!
+//! Advise: a flagged attempt (`final_result` below the configured cut) also
+//! raises one `Anomaly` wake naming the node, the attempt, both answers and
+//! the `completion` choice; the attempt's status never changes.
+//!
+//! Enforce (the node opted in with `completion_check: enforce`, and the
+//! runner found a stored threshold): `final_result` below that threshold
+//! fails the attempt with the reply kept as `rejected_output`, consuming a
+//! normal retry. A `blocked_on_input` answer never fails the attempt; it only
+//! raises the advise anomaly.
 
 use std::collections::BTreeMap;
 use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 use apb_core::decisions::{COMPLETION_FINAL_RESULT_CUT, DecisionMode};
+
+use super::{DecisionOutcome, Enforce};
 use apb_decide::{Question, UseSite};
 use regex::Regex;
 use serde_json::{Value, json};
@@ -156,20 +168,52 @@ pub(crate) struct Attempt<'a> {
     /// The attempt's raw output (the node output).
     pub(crate) output: &'a str,
     pub(crate) missing_fields: Vec<String>,
+    /// The node opted in to the enforce path (`completion_check: enforce`).
+    pub(crate) enforce: bool,
 }
 
-/// Runs the check for one successful attempt and returns how long it took
-/// (counted into the attempt's duration). Fail-open: every failure is
+/// What the attempt site does with the check's answer.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub(crate) struct Verdict {
+    /// How long the check took (counted into the attempt's duration).
+    pub(crate) elapsed: Duration,
+    /// Advise: the detail of the one `Anomaly` wake to raise.
+    pub(crate) anomaly: Option<String>,
+    /// Enforce: the attempt fails with this reason, its reply kept as
+    /// `rejected_output`.
+    pub(crate) reject: Option<String>,
+}
+
+/// `partial (p=0.81)` for the `completion` answer, `unknown` without one.
+fn choice_text(answers: &BTreeMap<String, DecisionAnswer>) -> String {
+    match answers.get("completion") {
+        Some(a) => format!(
+            "{} (p={:.2})",
+            a.value
+                .as_ref()
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
+            a.p.unwrap_or(0.0)
+        ),
+        None => "unknown".to_string(),
+    }
+}
+
+fn completion_value(answers: &BTreeMap<String, DecisionAnswer>) -> Option<&str> {
+    answers.get("completion")?.value.as_ref()?.as_str()
+}
+
+/// Runs the check for one successful attempt. Fail-open: every failure is
 /// journaled by the runner and changes nothing else.
 pub(crate) fn check(
     runner: &DecisionRunner,
     journal: &dyn DecisionJournal,
     attempt: Attempt,
-) -> Duration {
+) -> Verdict {
     if runner.mode_for(UseSite::CompletionCheck) == DecisionMode::Off
         || attempt.output.trim().is_empty()
     {
-        return Duration::ZERO;
+        return Verdict::default();
     }
     let started = Instant::now();
     let cut = runner
@@ -190,7 +234,14 @@ pub(crate) fn check(
         ),
     );
     let judge = judge(cut);
-    let _ = runner.decide(
+    let acts = |answers: &BTreeMap<String, DecisionAnswer>, threshold: f64| {
+        completion_value(answers) != Some("blocked_on_input")
+            && answers
+                .get("final_result")
+                .and_then(|a| a.p)
+                .is_some_and(|p| p < threshold)
+    };
+    let outcome = runner.decide(
         journal,
         DecisionCall {
             site: UseSite::CompletionCheck,
@@ -218,9 +269,40 @@ pub(crate) fn check(
             questions: questions(),
             baseline: Some(baseline),
             judge: &judge,
+            join_from: None,
+            join: BTreeMap::new(),
+            enforce: Some(Enforce {
+                opted_in: attempt.enforce,
+                refused: None,
+                acts: &acts,
+            }),
         },
     );
-    started.elapsed()
+    let mut verdict = Verdict::default();
+    if let DecisionOutcome::Answered {
+        answers,
+        mode,
+        meta,
+        ..
+    } = &outcome
+    {
+        let final_p = answers.get("final_result").and_then(|a| a.p);
+        if meta.applied {
+            verdict.reject = Some(format!("completion check: {}", choice_text(answers)));
+        } else if *mode >= DecisionMode::Advise
+            && let Some(p) = final_p
+            && p < cut
+        {
+            verdict.anomaly = Some(format!(
+                "agent_task node `{}` attempt {} reported success, but the completion check rates it {} and final_result p={p:.2}",
+                attempt.node,
+                attempt.attempt,
+                choice_text(answers),
+            ));
+        }
+    }
+    verdict.elapsed = started.elapsed();
+    verdict
 }
 
 #[cfg(test)]

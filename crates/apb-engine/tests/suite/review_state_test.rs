@@ -27,6 +27,7 @@ fn fold_records_review_decision() {
                 title: None,
                 instruction: String::new(),
                 prompt: None,
+                recommendation: None,
             },
         ),
         ev(
