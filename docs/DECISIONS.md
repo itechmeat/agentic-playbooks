@@ -192,8 +192,13 @@ connection to its host opens. No key and no request are ever sent by doctor.
 
 A run snapshots the effective settings into its manifest at start (a
 `decisions` block with provider ids, kinds, URLs, models, data class and the
-key *reference*, never a key), so editing `decisions.yaml` does not change a
-started run.
+key *reference*, never a key). The manifest lives in the project tree, so a
+running or resumed run treats the snapshot only as an upper bound: it keeps the
+providers the machine's `decisions.yaml` still lists unchanged (kind, URL,
+model, key reference), and takes the stricter of the snapshot and the live
+file for the modes, the budget, the timeout, privacy and the enforce settings.
+Loosening `decisions.yaml` does not widen a started run; tightening it, or
+removing a provider, applies at once.
 
 For the completion check, after an `agent_task` attempt reported success and
 passed its `success_check`, and before the node finishes, one request carries:

@@ -489,6 +489,35 @@ fn a_resumed_run_replays_the_decision_without_a_request() {
 }
 
 #[test]
+fn a_provider_planted_in_the_manifest_is_never_asked_on_resume() {
+    // The manifest lives in the project tree: its decisions block can only
+    // narrow what the machine's decisions.yaml allows now.
+    let p = Project::new(&one_node(""), DONE);
+    let owner =
+        StubServer::start_with_fallback(vec![], StubResponse::json(200, reply(0.9, "complete")));
+    let planted =
+        StubServer::start_with_fallback(vec![], StubResponse::json(200, reply(0.9, "complete")));
+    p.decisions(&config(&owner.base_url, ""));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (_, run_id, _) = p.run();
+    assert_eq!(owner.count(), 1);
+
+    let manifest = p.run_dir(&run_id).join("manifest.yaml");
+    let text = std::fs::read_to_string(&manifest).unwrap();
+    assert!(text.contains(&owner.base_url));
+    std::fs::write(&manifest, text.replace(&owner.base_url, &planted.base_url)).unwrap();
+    p.set_output(RUNNING);
+    resume(p.root.path(), &run_id, Some("w")).unwrap();
+    assert_eq!(planted.count(), 0, "a planted provider URL gets no request");
+    assert_eq!(
+        owner.count(),
+        1,
+        "the owner's provider is not in the tampered block either"
+    );
+}
+
+#[test]
 fn the_budget_stops_at_its_request_count() {
     let p = Project::new(&two_nodes(), DONE);
     let server =

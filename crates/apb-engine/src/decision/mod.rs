@@ -244,7 +244,13 @@ impl DecisionRunner {
         events: &[Event],
         scrub_names: &[String],
     ) -> Option<Self> {
-        let settings = crate::manifest::read(run_dir).ok()??.decisions?;
+        // The manifest lives in the project tree, so its block is only a
+        // snapshot to narrow: providers, keys and limits come from what the
+        // machine's file allows now.
+        let snapshot = crate::manifest::read(run_dir).ok()??.decisions?;
+        let live = apb_core::config::config_dir()
+            .and_then(|dir| apb_core::decisions::resolve_in(&dir, root).active());
+        let settings = snapshot.capped_by(live.as_ref());
         Some(Self::with_settings(
             settings,
             root,

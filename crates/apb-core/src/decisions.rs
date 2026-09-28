@@ -712,6 +712,56 @@ pub fn default_thresholds(use_name: &str) -> &'static [(&'static str, f64)] {
 }
 
 impl EffectiveDecisions {
+    /// A run's snapshot (read back from its manifest, which lives in the
+    /// project tree) capped by what the machine's configuration allows now:
+    /// only providers the live file lists unchanged (kind, URL, key
+    /// reference and all), the stricter privacy, budget and timeout, and
+    /// per use the lower mode and cap and `allow_uncalibrated` only when
+    /// both allow it. `None` (the layer is not active now) keeps no
+    /// provider and no use. The snapshot can never add a provider, a URL,
+    /// a key or a looser setting.
+    pub fn capped_by(mut self, live: Option<&EffectiveDecisions>) -> EffectiveDecisions {
+        let Some(live) = live else {
+            self.providers.clear();
+            self.uses.clear();
+            return self;
+        };
+        self.mode = self.mode.min(live.mode);
+        self.timeout_ms = self.timeout_ms.min(live.timeout_ms);
+        self.providers.retain(|p| live.providers.contains(p));
+        self.budget.max_requests_per_run = self
+            .budget
+            .max_requests_per_run
+            .min(live.budget.max_requests_per_run);
+        self.budget.max_usd_per_run = self.budget.max_usd_per_run.min(live.budget.max_usd_per_run);
+        self.privacy.send.retain(|c| live.privacy.send.contains(c));
+        self.privacy.redact |= live.privacy.redact;
+        self.privacy.max_state_bytes = self
+            .privacy
+            .max_state_bytes
+            .min(live.privacy.max_state_bytes);
+        self.privacy.debug_state &= live.privacy.debug_state;
+        let snapshot_caps: BTreeMap<String, u32> = self
+            .uses
+            .keys()
+            .map(|k| (k.clone(), self.max_actions(k)))
+            .collect();
+        self.uses.retain(|name, u| {
+            let Some(l) = live.uses.get(name) else {
+                return false;
+            };
+            u.mode = u.mode.min(l.mode);
+            u.allow_uncalibrated &= l.allow_uncalibrated;
+            u.max_actions = Some(snapshot_caps[name].min(live.max_actions(name)));
+            u.max_requests_per_day = match (u.max_requests_per_day, l.max_requests_per_day) {
+                (Some(a), Some(b)) => Some(a.min(b)),
+                (a, b) => a.or(b),
+            };
+            true
+        });
+        self
+    }
+
     /// The automatic-action cap of an enforce use.
     pub fn max_actions(&self, use_name: &str) -> u32 {
         self.uses
@@ -992,6 +1042,46 @@ uses:
   judge_node: { mode: off }
 privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug_state: true }
 "#;
+
+    #[test]
+    fn a_tampered_snapshot_is_capped_by_the_live_file() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write(cfg.path(), FULL);
+        let live = resolve_in(cfg.path(), root.path()).active().unwrap();
+        let mut snap = live.clone();
+        snap.mode = DecisionMode::Enforce;
+        snap.providers[0].base_url = Some("https://planted.example.test".into());
+        snap.budget.max_requests_per_run = 10_000;
+        snap.privacy.redact = false;
+        snap.privacy.send.push(SendClass::Diffs);
+        snap.privacy.max_state_bytes = 1 << 30;
+        let cc = snap.uses.get_mut("completion_check").unwrap();
+        cc.allow_uncalibrated = true;
+        cc.max_actions = Some(1000);
+        let capped = snap.capped_by(Some(&live));
+        assert_eq!(capped.mode, live.mode);
+        assert_eq!(
+            capped
+                .providers
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            live.providers[1..]
+                .iter()
+                .map(|p| p.id.as_str())
+                .collect::<Vec<_>>(),
+            "the provider with a changed URL is dropped"
+        );
+        assert_eq!(capped.budget, live.budget);
+        assert_eq!(capped.privacy, live.privacy);
+        let cc = &capped.uses["completion_check"];
+        assert!(!cc.allow_uncalibrated);
+        assert_eq!(cc.max_actions, Some(DEFAULT_MAX_ACTIONS));
+        // Not active now: nothing to ask.
+        let off = live.clone().capped_by(None);
+        assert!(off.providers.is_empty() && off.uses.is_empty());
+    }
 
     #[test]
     fn a_full_file_loads_with_references_and_capped_modes() {
