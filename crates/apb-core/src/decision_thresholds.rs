@@ -98,6 +98,14 @@ pub fn stored_threshold_in(
         .filter(|t| t.is_finite())
 }
 
+/// Whether an enforce path of `use_name` reads a stored threshold (issue
+/// #165 Part 14): every engine use but the judge node and edge (declared
+/// thresholds in the playbook) and the catalog ranking (advisory, its cut
+/// in `decisions.yaml`).
+pub fn reads_stored_threshold(use_name: &str) -> bool {
+    !matches!(use_name, "judge_node" | "judge_edge" | "catalog_rank")
+}
+
 /// Stores (or replaces) the threshold for `(use, provider, model)`.
 pub fn set_threshold_in(
     config_dir: &Path,
@@ -110,6 +118,15 @@ pub fn set_threshold_in(
         return Err(format!(
             "unknown use `{use_name}` (one of {})",
             USE_NAMES.join(", ")
+        ));
+    }
+    if !reads_stored_threshold(use_name) {
+        return Err(format!(
+            "`{use_name}` reads no stored threshold: {}",
+            match use_name {
+                "catalog_rank" => "its cut is `uses.catalog_rank.thresholds` in decisions.yaml",
+                _ => "a judge node uses its declared `thresholds` and a judge edge its `min_p`",
+            }
         ));
     }
     if provider.trim().is_empty() || model.trim().is_empty() {

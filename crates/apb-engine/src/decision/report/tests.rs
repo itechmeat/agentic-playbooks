@@ -514,3 +514,36 @@ fn the_json_report_matches_its_snapshot() {
         "{path} is stale; regenerate with APB_WRITE_SNAPSHOTS=1\n{rendered}"
     );
 }
+
+#[test]
+fn a_judge_use_is_never_asked_for_a_stored_threshold() {
+    let mut journals = eligible_fixture();
+    for j in &mut journals {
+        for e in &mut j.events {
+            if let EventPayload::DecisionMade { use_site, .. } = &mut e.payload {
+                *use_site = "judge_node".into();
+            }
+        }
+    }
+    let r = build(
+        &journals,
+        &ReportFilter::default(),
+        &ReportSettings::default(),
+    );
+    let g = one_group(&r);
+    assert!(
+        !g.eligibility.iter().any(|e| e.contains("stored threshold")),
+        "{:?}",
+        g.eligibility
+    );
+    assert!(
+        apb_core::decision_thresholds::set_threshold_in(
+            tempfile::tempdir().unwrap().path(),
+            "judge_node",
+            "p",
+            "m",
+            0.5
+        )
+        .is_err()
+    );
+}

@@ -362,7 +362,11 @@ Unlabelled decisions stay out of every accuracy figure and are listed with the
 reason.
 
 **Eligibility** (the rule the enforce modes apply): a threshold stored for
-exactly this provider and model, at least 50 labelled decisions (20 per
+exactly this provider and model (for the Part 14 paths: completion, retry
+advice, supervisor triage, review triage and routing; a judge node or edge
+enforces with the thresholds its playbook declares and reads none, and
+`apb decisions thresholds set` refuses `judge_node`, `judge_edge` and
+`catalog_rank`), at least 50 labelled decisions (20 per
 option for a `choice` use), accuracy above both the majority class and
 today's behaviour, and a false-action rate under the use's target (default
 5%, `uses.<name>.thresholds.false_action_target`).

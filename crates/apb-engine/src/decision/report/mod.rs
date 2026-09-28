@@ -608,7 +608,8 @@ struct EligibilityInput<'a> {
     labeller_pending: bool,
 }
 
-/// The promotion rule (Part 14 enforces it): a stored threshold, at least
+/// The promotion rule (Part 14 enforces it): a stored threshold (for the
+/// uses whose enforce path reads one), at least
 /// [`MIN_LABELLED`] labelled decisions ([`MIN_PER_OPTION`] per option for a
 /// choice use), accuracy above both the majority class and today's
 /// behaviour, and a false-action rate under the use's target. Returns
@@ -619,7 +620,10 @@ fn eligibility(i: &EligibilityInput) -> (bool, Vec<String>) {
     if i.labeller_pending {
         why.push("no labeller for this use yet".to_string());
     }
-    if i.stored.is_none() {
+    // A judge node or edge enforces with its declared thresholds: no
+    // stored threshold is read, so none is asked for.
+    if apb_core::decision_thresholds::reads_stored_threshold(&i.key.use_site) && i.stored.is_none()
+    {
         why.push(format!(
             "no stored threshold for {}/{} (apb decisions thresholds set)",
             i.key.provider, i.key.model
