@@ -334,6 +334,7 @@ fn success_check_rejection(
 /// `success_check` (a checked fact outranks a judgment), on a node with
 /// `completion_check: off`, and for an empty output (the empty-output
 /// anomaly covers it).
+#[allow(clippy::too_many_arguments)]
 fn completion_check(
     decisions: Option<&crate::decision::DecisionRunner>,
     journal: &Journal,

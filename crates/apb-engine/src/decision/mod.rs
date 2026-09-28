@@ -1453,9 +1453,7 @@ mod tests {
         });
         assert_eq!(provider.calls(), 1, "{outcomes:?}");
         assert!(
-            outcomes
-                .iter()
-                .any(|o| *o == DecisionOutcome::Skipped { reason: "budget" }),
+            outcomes.contains(&DecisionOutcome::Skipped { reason: "budget" }),
             "{outcomes:?}"
         );
     }
