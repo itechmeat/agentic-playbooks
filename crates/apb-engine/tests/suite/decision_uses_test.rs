@@ -326,6 +326,54 @@ fn completion_enforce_with_a_stored_threshold_fails_the_attempt_and_consumes_one
     assert!(anomalies(&events).is_empty());
 }
 
+/// The enforce gate reads the store `apb decisions thresholds set` writes
+/// (`apb_core::decision_thresholds`, with its `version`): a threshold set
+/// through that module lets the path act, and a store of an unknown version
+/// reads as no threshold.
+#[test]
+fn the_enforce_gate_reads_the_threshold_store_the_cli_writes() {
+    for (stored, acts) in [(true, true), (false, false)] {
+        let p = Project::new(
+            &one_node(", completion_check: enforce, max_retries: 1"),
+            &format!(
+                "if [ -f \"$0.marker\" ]; then echo 'Implemented the parser; the suite passed.'; else touch \"$0.marker\"; echo '{RUNNING}'; fi"
+            ),
+        );
+        let server = StubServer::start(vec![
+            completion(0.02, "partial"),
+            completion(0.95, "complete"),
+        ]);
+        p.decisions(&config(
+            &server.base_url,
+            "enforce",
+            "  completion_check: { mode: enforce }\n",
+        ));
+        if stored {
+            apb_core::decision_thresholds::set_threshold_in(
+                p.cfg.path(),
+                "completion_check",
+                "stub",
+                "jev-1.13.0",
+                0.05,
+            )
+            .unwrap();
+        } else {
+            fs::write(
+                p.cfg.path().join("decisions-thresholds.yaml"),
+                "version: 2\nthresholds:\n  - { use: completion_check, provider: stub, model: jev-1.13.0, threshold: 0.05 }\n",
+            )
+            .unwrap();
+        }
+        let _lock = common::env_lock();
+        let _env = p.env();
+        let (_, _, events) = p.run();
+        let d = decisions(&events, "completion_check");
+        assert_eq!(d[0].applied, acts, "stored={stored}");
+        let refused = d[0].enforce_refused.as_deref();
+        assert_eq!(refused, if acts { None } else { Some("no_threshold") });
+    }
+}
+
 #[test]
 fn completion_enforce_refusals_act_as_advise() {
     // No stored threshold, a blocked_on_input answer, and the action cap.

@@ -331,3 +331,32 @@ fn the_kill_switch_turns_ranking_off() {
     assert_eq!(bytes(&out), bytes(&plain));
     assert!(log_lines(root.path()).is_empty());
 }
+
+#[test]
+fn an_off_ceiling_or_a_project_opt_out_turns_ranking_off() {
+    let _l = lock();
+    for case in ["ceiling", "project"] {
+        let cfg = tempfile::tempdir().unwrap();
+        let _e = Env::new(cfg.path());
+        let root = project();
+        fake_config(cfg.path(), "advise", "");
+        let plain = playbook_catalog(root.path(), None, None, None).unwrap();
+        if case == "ceiling" {
+            let path = cfg.path().join("decisions.yaml");
+            let body = std::fs::read_to_string(&path).unwrap();
+            std::fs::write(
+                &path,
+                body.replace("mode: advise\nproviders", "mode: off\nproviders"),
+            )
+            .unwrap();
+        } else {
+            let path = root.path().join(".apb/config.yaml");
+            let mut body = std::fs::read_to_string(&path).unwrap_or_default();
+            body.push_str("decisions: { enabled: false }\n");
+            std::fs::write(&path, body).unwrap();
+        }
+        let out = ranked(root.path(), "deploy the site", &RankCache::default());
+        assert_eq!(bytes(&out), bytes(&plain), "{case}");
+        assert!(log_lines(root.path()).is_empty(), "{case}");
+    }
+}

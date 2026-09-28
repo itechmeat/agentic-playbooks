@@ -388,6 +388,54 @@ fn emulate_goes_to_a_configured_endpoint_when_the_native_provider_is_down() {
     assert!(endpoint.requests()[0].contains("<document>"));
 }
 
+/// The kill switch (docs/DECISIONS.md "Kill switch"): `APB_DECISIONS=off`,
+/// an `off` ceiling and a project opt-out stop every decision-provider call,
+/// the native model and the `llm_emulation` endpoint alike, while a judge
+/// node's profile emulation, the playbook's own declared executor, still
+/// runs and is journaled uncalibrated.
+#[test]
+fn the_kill_switch_stops_every_provider_but_not_the_profile_emulation() {
+    for case in ["env", "ceiling", "project"] {
+        let native = StubServer::start(vec![]);
+        let endpoint = StubServer::start(vec![]);
+        let p = Project::new(&small("    on_unavailable: emulate\n", ""));
+        p.set_emulation(
+            "{\"q1\": 0.9, \"q2\": {\"clean\": 0.1, \"needs_fix\": 0.8, \"unclear\": 0.1}}",
+        );
+        let ceiling = if case == "ceiling" { "off" } else { "enforce" };
+        p.decisions(&format!(
+            "version: 1\nmode: {ceiling}\ntimeout_ms: 2000\nproviders:\n  - {{ id: native, kind: systemone, base_url: \"{}\", model: jev-1.13.0 }}\n  - {{ id: emu, kind: llm_emulation, via: openai_compatible, base_url: \"{}/v1\", model: small-model }}\nuses:\n  judge_node: {{ mode: enforce }}\n",
+            native.base_url, endpoint.base_url
+        ));
+        if case == "project" {
+            let cfg = p.root.path().join(".apb/config.yaml");
+            let mut body = fs::read_to_string(&cfg).unwrap_or_default();
+            body.push_str("decisions: { enabled: false }\n");
+            fs::write(&cfg, body).unwrap();
+        }
+        let _lock = common::env_lock();
+        let _env = p.env();
+        let _off = (case == "env").then(|| Env::set(&[("APB_DECISIONS", "off")]));
+        let (status, _, events) = p.run("small");
+        assert_eq!(status, RunStatus::Succeeded, "{case}");
+        assert_eq!(
+            native.count() + endpoint.count(),
+            0,
+            "{case}: no provider call"
+        );
+        assert_eq!(p.emulations(), 1, "{case}: the profile emulation runs");
+        let out = output(&events, "triage").unwrap().1;
+        assert_eq!(out["decided_by"], json!("emulated:profile:main"), "{case}");
+        let d = decisions(&events);
+        assert_eq!(d.len(), 1, "{case}");
+        assert_eq!(
+            (d[0].2, d[0].3.as_deref()),
+            (false, Some("profile:main")),
+            "{case}: journaled uncalibrated"
+        );
+    }
+}
+
 #[test]
 fn a_resumed_judge_replays_its_answer_without_a_request() {
     let server = StubServer::start_with_fallback(
