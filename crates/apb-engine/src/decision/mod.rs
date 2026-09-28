@@ -504,10 +504,19 @@ impl DecisionRunner {
         }
     }
 
-    fn budget_spent(&self) -> bool {
-        let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
-        ledger.requests >= self.settings.budget.max_requests_per_run
+    /// Takes a request slot from the run's budget, or `false` when it is
+    /// spent. Checked and taken under one lock: parallel branches share the
+    /// runner, and a slot raised only after the reply would let each of
+    /// them past the last one.
+    fn reserve_request(&self) -> bool {
+        let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        if ledger.requests >= self.settings.budget.max_requests_per_run
             || ledger.cost_usd >= self.settings.budget.max_usd_per_run
+        {
+            return false;
+        }
+        ledger.requests += 1;
+        true
     }
 
     /// Asks one decision. See the module docs for the steps.
@@ -620,7 +629,7 @@ impl DecisionRunner {
             enforce_refused: None,
             join: call.join.clone(),
         };
-        if self.budget_spent() {
+        if !self.reserve_request() {
             let mut event = base;
             if let EventPayload::DecisionMade { error, .. } = &mut event {
                 *error = Some("budget".into());
@@ -779,8 +788,10 @@ impl DecisionRunner {
         };
         {
             let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
-            if counted {
-                ledger.requests += 1;
+            // The slot taken before asking is given back when no request
+            // went out (a cache hit, an empty chain).
+            if !counted {
+                ledger.requests = ledger.requests.saturating_sub(1);
             }
             ledger.cost_usd += cost;
             if applied_now && !reserved {
@@ -1383,6 +1394,34 @@ mod tests {
                 .count(),
             1,
             "{metas:?}"
+        );
+    }
+
+    #[test]
+    fn parallel_branches_never_send_past_the_request_budget() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write_config(
+            cfg.path(),
+            &format!("{ENFORCE}budget: {{ max_requests_per_run: 1 }}\n"),
+        );
+        let provider = fake();
+        let runner = runner_over(cfg.path(), root.path(), &[], &provider);
+        let journal = BarrierJournal {
+            barrier: Barrier::new(2),
+            seq: AtomicU64::new(1),
+        };
+        let outcomes: Vec<DecisionOutcome> = std::thread::scope(|s| {
+            let a = s.spawn(|| ask(&runner, &journal, "a"));
+            let b = s.spawn(|| ask(&runner, &journal, "b"));
+            vec![a.join().unwrap(), b.join().unwrap()]
+        });
+        assert_eq!(provider.calls(), 1, "{outcomes:?}");
+        assert!(
+            outcomes
+                .iter()
+                .any(|o| *o == DecisionOutcome::Skipped { reason: "budget" }),
+            "{outcomes:?}"
         );
     }
 
