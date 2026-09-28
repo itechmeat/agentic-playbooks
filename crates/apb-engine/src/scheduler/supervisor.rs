@@ -958,3 +958,37 @@ fn triage_advised(manifest: &crate::manifest::RunExecutionManifest) -> bool {
             d.mode_for("supervisor_triage") >= apb_core::decisions::DecisionMode::Advise
         })
 }
+
+#[cfg(test)]
+mod triage_brief_tests {
+    use super::*;
+
+    #[test]
+    fn the_brief_line_needs_triage_in_advise_for_the_run() {
+        let mut m = crate::manifest::RunExecutionManifest::default();
+        assert!(!triage_advised(&m), "no decisions block: brief unchanged");
+        let mut uses = std::collections::BTreeMap::new();
+        uses.insert(
+            "supervisor_triage".to_string(),
+            apb_core::decisions::UseSettings {
+                mode: apb_core::decisions::DecisionMode::Shadow,
+                thresholds: Default::default(),
+                allow_uncalibrated: false,
+                max_actions: None,
+            },
+        );
+        let eff = |uses| apb_core::decisions::EffectiveDecisions {
+            mode: apb_core::decisions::DecisionMode::Enforce,
+            timeout_ms: 1000,
+            providers: Vec::new(),
+            budget: Default::default(),
+            privacy: Default::default(),
+            uses,
+        };
+        m.decisions = Some(eff(uses.clone()));
+        assert!(!triage_advised(&m), "shadow: brief unchanged");
+        uses.get_mut("supervisor_triage").unwrap().mode = apb_core::decisions::DecisionMode::Advise;
+        m.decisions = Some(eff(uses));
+        assert!(triage_advised(&m));
+    }
+}

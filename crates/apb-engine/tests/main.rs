@@ -121,6 +121,9 @@ mod control_liveness_test;
 mod control_test;
 #[path = "suite/decision_test.rs"]
 mod decision_test;
+#[cfg(unix)]
+#[path = "suite/decision_uses_test.rs"]
+mod decision_uses_test;
 #[path = "suite/detached_driver_test.rs"]
 mod detached_driver_test;
 #[path = "suite/digest_binding_test.rs"]

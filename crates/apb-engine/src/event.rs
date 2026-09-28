@@ -1837,4 +1837,26 @@ mod tests {
         };
         assert!(answers.is_empty() && baseline.is_none());
     }
+
+    #[test]
+    fn the_new_optional_fields_leave_old_lines_byte_identical() {
+        // Lines as an apb before issue #165 Parts 10-12 wrote them: they
+        // parse, and written back they are the same bytes (the new fields
+        // are absent when unset).
+        for line in [
+            r#"{"seq":1,"ts":1,"type":"wake_raised","trigger":"node_failed","node":"w","detail":"boom"}"#,
+            r#"{"seq":2,"ts":1,"type":"review_requested","node":"g","options":["approve","reject"],"instruction":"x"}"#,
+            r#"{"seq":3,"ts":1,"type":"fallback_triggered","node":"w","from":"a","to":"b","from_model":"m","to_model":"n"}"#,
+        ] {
+            let ev: Event = serde_json::from_str(line).unwrap();
+            assert_eq!(serde_json::to_string(&ev).unwrap(), line);
+        }
+        // A triage of a shape this binary cannot read is dropped, not fatal.
+        let newer = r#"{"seq":1,"ts":1,"type":"wake_raised","trigger":"node_failed","node":"w","detail":"d","triage":"newer"}"#;
+        let ev: Event = serde_json::from_str(newer).unwrap();
+        assert!(matches!(
+            ev.payload,
+            EventPayload::WakeRaised { triage: None, .. }
+        ));
+    }
 }
