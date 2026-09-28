@@ -546,6 +546,38 @@ impl DecisionRunner {
         (true, None)
     }
 
+    /// Whether a journaled action may be repeated on replay: the static
+    /// parts of [`Self::enforce_gate`] (opt-in, refusal, calibration, a
+    /// stored threshold for the journaled provider and model) still hold.
+    /// The answer is the journaled one and its action slot is already
+    /// counted, so neither is checked again.
+    fn still_enforceable(
+        &self,
+        site: UseSite,
+        enforce: Option<&Enforce>,
+        meta: &AnswerMeta,
+    ) -> bool {
+        let Some(en) = enforce else {
+            return false;
+        };
+        let (Some(provider), Some(model)) = (meta.provider.as_deref(), meta.model.as_deref())
+        else {
+            return false;
+        };
+        en.opted_in
+            && en.refused.is_none()
+            && (meta.calibrated || self.settings.allows_uncalibrated(site.as_str()))
+            && self.config_dir.as_deref().is_some_and(|dir| {
+                apb_core::decision_thresholds::stored_threshold_in(
+                    dir,
+                    site.as_str(),
+                    provider,
+                    model,
+                )
+                .is_some()
+            })
+    }
+
     /// Gives back an action slot taken by [`Self::enforce_gate`] when its
     /// decision could not be journaled (the caller does not act).
     fn release_action(&self, site: UseSite) {
@@ -642,6 +674,15 @@ impl DecisionRunner {
             // enforce: the kill switch or a lowered ceiling stops it on a
             // resume too. A judge's declared route applies whatever the mode.
             if !declared && mode != DecisionMode::Enforce {
+                meta.applied = false;
+            }
+            // Nor once the rest of the gate no longer holds: the node opted
+            // out or is refused now (a patched playbook), the provider is no
+            // longer allowed uncalibrated, or its stored threshold is gone.
+            if !declared
+                && meta.applied
+                && !self.still_enforceable(call.site, call.enforce.as_ref(), &meta)
+            {
                 meta.applied = false;
             }
             let source = meta.source();
@@ -1558,6 +1599,16 @@ mod tests {
             &ENFORCE.replace("mode: enforce, max", "mode: shadow, max"),
         );
         let resumed = runner_over(cfg.path(), root.path(), &events, &provider);
+        let outcome = ask(&resumed, &Recorder::default(), "a");
+        let (meta, replayed) = meta_of(&outcome);
+        assert!(replayed && !meta.applied, "{meta:?}");
+        assert_eq!(provider.calls(), 1);
+
+        // Still enforce, but the stored threshold was removed before the
+        // resume: the rest of the gate is checked again, so no action.
+        write_config(cfg.path(), ENFORCE);
+        let resumed = runner_over(cfg.path(), root.path(), &events, &provider);
+        std::fs::remove_file(cfg.path().join("decisions-thresholds.yaml")).unwrap();
         let outcome = ask(&resumed, &Recorder::default(), "a");
         let (meta, replayed) = meta_of(&outcome);
         assert!(replayed && !meta.applied, "{meta:?}");

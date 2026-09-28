@@ -256,6 +256,9 @@ Written to the run journal through the attempt journal *before* anything reads
 the answer, so a resumed run replays a journaled decision (same use, node,
 attempt, state and questions) with no request. Each journaled decision is
 replayed once, the latest first; a failed one replays as the same failure.
+A replayed action is repeated only while the use is still in enforce and the
+rest of the enforce gate still holds (opt-in, no refusal, calibration, a
+stored threshold for the journaled provider and model).
 Within one drive nothing is replayed: a node executed again (a loop, a
 `node_retry`) is asked anew, journaled and counted, and an identical state
 is then answered from the run's cache.
