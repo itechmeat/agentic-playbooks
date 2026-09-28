@@ -62,6 +62,7 @@ pub(crate) fn check_judge_nodes(playbook: &Playbook, r: &mut ValidationReport) {
         };
         let id = node.id.as_str();
         check_questions(id, questions, r);
+        check_field_collisions(id, questions, thresholds, r);
         check_thresholds(id, questions, thresholds, r);
         check_fallback(playbook, id, questions, thresholds, fallback, r);
         check_state(playbook, id, state, questions, r);
@@ -76,6 +77,37 @@ pub(crate) fn check_judge_nodes(playbook: &Playbook, r: &mut ValidationReport) {
                 "judge `profile` is only used by `on_unavailable: emulate`; it has no effect here"
                     .into(),
             );
+        }
+    }
+}
+
+/// V50: no two questions write the same output field (`risk` and `risk_p`
+/// would both set `risk_p`, one answer silently replacing the other).
+fn check_field_collisions(
+    id: &str,
+    questions: &JudgeQuestions,
+    thresholds: &crate::judge::OrderedMap<crate::judge::JudgeThreshold>,
+    r: &mut ValidationReport,
+) {
+    let mut owner: std::collections::BTreeMap<String, &str> = Default::default();
+    for (qid, q) in questions.iter() {
+        let one = crate::judge::JudgeQuestions {
+            entries: vec![(qid.to_string(), q.clone())],
+            ..Default::default()
+        };
+        for field in crate::judge::output_fields(&one, thresholds) {
+            if field == DECIDED_BY || field == REASON {
+                continue;
+            }
+            if let Some(other) = owner.insert(field.clone(), qid) {
+                r.error(
+                    "V50",
+                    Some(id),
+                    format!(
+                        "questions `{other}` and `{qid}` both write the output field `{field}`; rename one"
+                    ),
+                );
+            }
         }
     }
 }
@@ -109,7 +141,7 @@ fn check_questions(id: &str, questions: &JudgeQuestions, r: &mut ValidationRepor
                 "V50",
                 Some(id),
                 format!(
-                    "question id `{qid}` must match [a-z][a-z0-9_]* and must not be `{DECIDED_BY}` or `{REASON}`"
+                    "question id `{qid}` must match [a-z][a-z0-9_]* (at most 64 characters) and must not be `{DECIDED_BY}` or `{REASON}`"
                 ),
             );
         }
@@ -409,7 +441,7 @@ fn check_state(
             r.error(
                 "V54",
                 Some(id),
-                format!("state field `{name}` must match [a-z][a-z0-9_]* and must not be `meta`"),
+                format!("state field `{name}` must match [a-z][a-z0-9_]* (at most 64 characters) and must not be `meta`"),
             );
         }
     }
@@ -778,5 +810,59 @@ mod tests {
             };
             assert!(validate(&p, &ctx).is_valid(), "{:?}", issues(&p));
         }
+    }
+
+    #[test]
+    fn two_questions_writing_the_same_field_are_refused() {
+        let body = GOOD.replace(
+            "      risky: { type: noul,",
+            "      risky_p: { type: noul, instructions: \"Is it?\" }\n      risky: { type: noul,",
+        );
+        let p = pb(&body, "", EDGES);
+        assert!(
+            issues(&p)
+                .iter()
+                .any(|(c, s, m)| *c == "V50" && *s == Severity::Error && m.contains("`risky_p`")),
+            "{:?}",
+            issues(&p)
+        );
+    }
+
+    #[test]
+    fn an_empty_state_or_a_bad_state_name_is_v54() {
+        let empty = GOOD.replace(
+            "    state:\n      request: \"{{run.instruction}}\"\n      review_output: \"{{nodes.review.output}}\"\n",
+            "    state: {}\n",
+        );
+        assert!(has(&pb(&empty, "", EDGES), "V54", Severity::Error));
+        let meta = GOOD.replace("      request:", "      meta:");
+        assert!(has(&pb(&meta, "", EDGES), "V54", Severity::Error));
+        let huge = GOOD.replace(
+            "Does `review_output` mention deleted tests?",
+            &"x".repeat(PROVIDER_CAP_BYTES / 2 + 10),
+        );
+        assert!(has(&pb(&huge, "", EDGES), "V54", Severity::Error));
+    }
+
+    #[test]
+    fn a_profile_without_emulate_is_v61() {
+        let body = GOOD.replace("    questions:\n", "    profile: x\n    questions:\n");
+        assert!(has(&pb(&body, "", EDGES), "V61", Severity::Warning));
+        let emulate = body.replace(
+            "    on_unavailable: { default: { verdict: unclear, risky: true } }\n",
+            "    on_unavailable: emulate\n",
+        );
+        assert!(!has(&pb(&emulate, "", EDGES), "V61", Severity::Warning));
+    }
+
+    #[test]
+    fn more_than_eight_judge_edges_on_one_node_is_v60() {
+        let mut edges = String::from(EDGES);
+        for i in 0..=MAX_JUDGE_EDGES {
+            edges.push_str(&format!(
+                "  - {{ from: review, to: done, condition: {{ type: judge, question: \"Is it {i}?\", min_p: 0.5 }} }}\n"
+            ));
+        }
+        assert!(has(&pb(GOOD, "", &edges), "V60", Severity::Warning));
     }
 }

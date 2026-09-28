@@ -92,7 +92,9 @@ pub(crate) fn execute(
                     applied: enforce && derived.is_some(),
                     would_change: match (&derived, enforce) {
                         (_, true) => None,
-                        (Some(d), false) => differs_from_fallback(d, fallback, questions),
+                        (Some(d), false) => {
+                            differs_from_fallback(d, fallback, questions, thresholds)
+                        }
                         (None, false) => None,
                     },
                 }
@@ -123,7 +125,7 @@ pub(crate) fn execute(
     };
 
     // 2. The declared fallback.
-    if let Some(out) = fallback_output(fallback, &reason) {
+    if let Some(out) = fallback_output(fallback, questions, thresholds, &reason) {
         return Ok(finished(
             NodeStatus::Succeeded,
             render_output(&out),

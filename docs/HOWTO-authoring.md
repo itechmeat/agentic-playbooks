@@ -679,7 +679,9 @@ times out, is out of budget or returns an invalid item, the node applies
   The route is an explicit edge, required by the validator:
   `{ from: triage, to: <node>, condition: { type: output_field, node: triage, field: decided_by, equals: unavailable } }`.
 - `{ default: { <question>: <value> } }` succeeds with those values,
-  `decided_by: default` and the reason.
+  `decided_by: default` and the reason. Each value lands in the field an
+  answer writes: `<id>`, except for a `score` without bands, whose number
+  lands in `<id>_score`.
 - `fail` fails the node like any node (failure edges, `defaults.on_failure`,
   a supervisor park). Absent `on_unavailable` means `fail`, with a V55 warning.
 - `emulate` asks an emulation backend: the `llm_emulation` providers of
@@ -736,7 +738,7 @@ A failed source asks nothing. Prefer a judge node when you need more than a
 yes/no, more than a few edges (V60 warns above eight), or the answer in a
 template.
 
-Validator codes: V50 questions shape, V51 question content, V52 thresholds,
+Validator codes: V50 questions shape (including two questions writing one output field), V51 question content, V52 thresholds,
 V53 `on_unavailable`, V54 state, V59 judge edges (errors); V55, V56, V57, V58,
 V60, V61 (warnings).
 

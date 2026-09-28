@@ -133,8 +133,28 @@ pub(crate) fn output_from_answers(
 
 /// The output of a `route` or `default` fallback, `None` for the forms
 /// that do not succeed with an output of their own (`fail`, `emulate`).
+/// The output field a `default` value for question `id` lands in: the
+/// question's own field, except for a `score` without bands, whose answers
+/// write only `<id>_score` (so an edge on it matches the default too).
+fn default_field(
+    questions: &JudgeQuestions,
+    thresholds: &OrderedMap<JudgeThreshold>,
+    id: &str,
+) -> String {
+    match questions.get(id) {
+        Some(JudgeQuestion::Score { .. })
+            if !thresholds.get(id).is_some_and(|t| t.bands.is_some()) =>
+        {
+            format!("{id}_score")
+        }
+        _ => id.to_string(),
+    }
+}
+
 pub(crate) fn fallback_output(
     fallback: Option<&JudgeFallback>,
+    questions: &JudgeQuestions,
+    thresholds: &OrderedMap<JudgeThreshold>,
     reason: &str,
 ) -> Option<Map<String, Value>> {
     let mut out = Map::new();
@@ -144,7 +164,7 @@ pub(crate) fn fallback_output(
         }
         Some(JudgeFallback::Default(values)) => {
             for (k, v) in values {
-                out.insert(k.clone(), v.clone());
+                out.insert(default_field(questions, thresholds, k), v.clone());
             }
             out.insert(DECIDED_BY.into(), json!(apb_core::judge::DEFAULT));
         }
@@ -161,13 +181,12 @@ pub(crate) fn differs_from_fallback(
     derived: &Map<String, Value>,
     fallback: Option<&JudgeFallback>,
     questions: &JudgeQuestions,
+    thresholds: &OrderedMap<JudgeThreshold>,
 ) -> Option<bool> {
     match fallback {
-        Some(JudgeFallback::Default(values)) => Some(
-            questions
-                .iter()
-                .any(|(id, _)| values.get(id) != derived.get(id)),
-        ),
+        Some(JudgeFallback::Default(values)) => Some(questions.iter().any(|(id, _)| {
+            values.get(id) != derived.get(&default_field(questions, thresholds, id))
+        })),
         Some(JudgeFallback::Emulate) => None,
         _ => Some(true),
     }
@@ -292,18 +311,30 @@ thresholds:
 
     #[test]
     fn fallback_outputs_name_the_reason() {
+        let (q, t) = spec();
+        let none = OrderedMap::default();
         let route = JudgeFallback::Route("human".into());
         assert_eq!(
-            render(&fallback_output(Some(&route), "mode").unwrap()),
+            render(&fallback_output(Some(&route), &q, &t, "mode").unwrap()),
             r#"{"decided_by":"unavailable","reason":"mode"}"#
         );
         let default =
             JudgeFallback::Default(BTreeMap::from([("verdict".into(), json!("unclear"))]));
         assert_eq!(
-            render(&fallback_output(Some(&default), "timeout").unwrap()),
+            render(&fallback_output(Some(&default), &q, &t, "timeout").unwrap()),
             r#"{"decided_by":"default","reason":"timeout","verdict":"unclear"}"#
         );
-        assert!(fallback_output(Some(&JudgeFallback::Fail), "x").is_none());
-        assert!(fallback_output(None, "x").is_none());
+        // A score without bands: the default lands where answers write it.
+        let score = JudgeFallback::Default(BTreeMap::from([("effort".into(), json!(1))]));
+        assert_eq!(
+            render(&fallback_output(Some(&score), &q, &none, "timeout").unwrap()),
+            r#"{"decided_by":"default","effort_score":1,"reason":"timeout"}"#
+        );
+        assert_eq!(
+            render(&fallback_output(Some(&score), &q, &t, "timeout").unwrap()),
+            r#"{"decided_by":"default","effort":1,"reason":"timeout"}"#
+        );
+        assert!(fallback_output(Some(&JudgeFallback::Fail), &q, &t, "x").is_none());
+        assert!(fallback_output(None, &q, &t, "x").is_none());
     }
 }
