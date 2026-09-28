@@ -487,7 +487,15 @@ fn group_report(
         .filter_map(|i| i.r.would_change.map(|w| w == i.act))
         .collect();
     let rows = table(l, &items);
-    let cost_usd = round_usd(input.records.iter().filter_map(|(r, _)| r.cost_usd).sum());
+    // `+ 0.0`: an empty float sum is -0.0, which would print as `$-0.0000`.
+    let cost_usd = round_usd(
+        input
+            .records
+            .iter()
+            .filter_map(|(r, _)| r.cost_usd)
+            .sum::<f64>()
+            + 0.0,
+    );
     let latency_ms_total: u64 = input.records.iter().map(|(r, _)| r.latency_ms).sum();
     let savings = median_attempt_ms.filter(|_| !items.is_empty()).map(|m| {
         let tp = items
