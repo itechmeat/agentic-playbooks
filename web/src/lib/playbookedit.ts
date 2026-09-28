@@ -7,6 +7,7 @@ import { Document, YAMLSeq } from 'yaml'
 // document (immutable from the caller's point of view) and returns a new copy.
 
 import type { NodeType } from './consts.gen'
+import { judgeSkeleton } from './judgefields'
 
 // The node kinds the editor can add, in the order a graph is usually built,
 // with the node that ends a run last. A subset of the schema's node types
@@ -17,6 +18,7 @@ export const EDITOR_NODE_KINDS = [
   'agent_task',
   'script',
   'condition',
+  'judge',
   'playbook',
   'finish',
 ] as const satisfies readonly NodeType[]
@@ -54,7 +56,10 @@ function nodeById(nodes: YAMLSeq, id: string): ReturnType<YAMLSeq['get']> | unde
 export function addNode(doc: Document, kind: string, id: string): Document {
   const next = doc.clone()
   const nodes = ensureNodes(next)
-  const node = next.createNode({ id, type: kind, title: defaultTitle(kind, id) })
+  // A judge node starts with a question skeleton: a bare `type: judge` asks
+  // nothing and does not validate.
+  const extra = kind === 'judge' ? judgeSkeleton() : {}
+  const node = next.createNode({ id, type: kind, title: defaultTitle(kind, id), ...extra })
   nodes.add(node)
   return next
 }

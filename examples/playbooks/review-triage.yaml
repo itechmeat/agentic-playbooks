@@ -15,6 +15,7 @@ nodes:
   - id: review
     type: agent_task
     title: Review the change
+    expected_duration: 5m
     prompt: >-
       Review the change described in {{run.instruction}}. List every
       blocking defect with file and line, or say there is none.
@@ -42,6 +43,7 @@ nodes:
   - id: fix
     type: agent_task
     title: Fix the findings
+    expected_duration: 10m
     prompt: "Fix the blocking defects listed in {{nodes.review.output}}."
   - id: human_review
     type: human_review

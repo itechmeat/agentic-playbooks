@@ -23,6 +23,7 @@
   import Combobox from '$lib/components/Combobox.svelte'
   import Trash2 from '@lucide/svelte/icons/trash-2'
   import { fieldsToField, fieldToOutputs, sessionSources } from './nodeio'
+  import { fromYamlField, questionSummary, toYamlField } from './judgefields'
 
   let {
     id,
@@ -170,9 +171,30 @@
         workdir: str(n.workdir),
         continue_session: str(n.continue_session),
         output_fields: fieldsToField(n.outputs),
+        judge_state: toYamlField(n.state),
+        judge_questions: toYamlField(n.questions),
+        judge_thresholds: toYamlField(n.thresholds),
+        on_unavailable: toYamlField(n.on_unavailable),
       }
+      yamlErrors = {}
     })
   })
+
+  // Judge node snippets (state, questions, thresholds, on_unavailable): a
+  // snippet that does not parse is shown as an error and writes nothing.
+  let yamlErrors = $state<Record<string, string>>({})
+  function setYaml(formKey: string, yamlKey: string, raw: string) {
+    f[formKey] = raw
+    const r = fromYamlField(raw)
+    if (!r.ok) {
+      yamlErrors = { ...yamlErrors, [formKey]: r.error }
+      return
+    }
+    const { [formKey]: _dropped, ...rest } = yamlErrors
+    yamlErrors = rest
+    onChange?.({ [yamlKey]: r.value })
+  }
+  const judgeSummary = $derived(kind === 'judge' ? questionSummary(node.questions) : '')
 
   // Connector bindings (design doc section 5/9): a structural field, so it
   // gets its own state array rather than living in the plain-string `f`
@@ -765,6 +787,43 @@
           {readonly}
           value={f.prompt}
           oninput={(e) => setStr('prompt', e.currentTarget.value)}
+        />
+      </Field.Field>
+    {:else if kind === 'judge'}
+      {#snippet yamlField(formKey: 'judge_state' | 'judge_questions' | 'judge_thresholds' | 'on_unavailable', yamlKey: string, rows: number)}
+        <Field.Field class="md:col-span-2">
+          {@render fieldHead(formKey, `np-${formKey}`)}
+          <Textarea
+            id={`np-${formKey}`}
+            {rows}
+            class="max-h-[300px] overflow-auto font-mono text-xs"
+            {readonly}
+            value={f[formKey]}
+            oninput={(e) => setYaml(formKey, yamlKey, e.currentTarget.value)}
+          />
+          {#if yamlErrors[formKey]}
+            <p class="text-xs text-destructive">not saved: {yamlErrors[formKey]}</p>
+          {/if}
+        </Field.Field>
+      {/snippet}
+      {#if judgeSummary}
+        <p class="text-xs text-muted-foreground md:col-span-2" data-testid="judge-summary">
+          asks: {judgeSummary}
+        </p>
+      {/if}
+      {@render yamlField('judge_state', 'state', 3)}
+      {@render yamlField('judge_questions', 'questions', 10)}
+      {@render yamlField('judge_thresholds', 'thresholds', 3)}
+      {@render yamlField('on_unavailable', 'on_unavailable', 1)}
+      <Field.Field>
+        {@render fieldHead('judge_profile', 'np-judge-profile')}
+        <Input
+          id="np-judge-profile"
+          list="apb-profile-options"
+          placeholder="name (scope auto) or scope/name"
+          {readonly}
+          value={f.profile}
+          oninput={(e) => setProfile(e.currentTarget.value)}
         />
       </Field.Field>
     {:else if kind === 'playbook'}
