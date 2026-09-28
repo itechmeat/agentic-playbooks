@@ -28,7 +28,6 @@ pub(crate) fn recommend(
     playbook: &Playbook,
     gate: &str,
     events: &[Event],
-    child_run: bool,
 ) -> Recommendation {
     let Some(node) = playbook.node(gate) else {
         return Recommendation::default();
@@ -56,8 +55,11 @@ pub(crate) fn recommend(
     let visit = crate::event::review_requested_count(events, gate) as u32 + 1;
     // A sub-playbook run cannot see what its parent does after it returns
     // (a push, a deploy, declared effects), so it never decides by itself.
+    // A run config that does not read counts as a child (fail-closed).
+    let child_run =
+        || crate::run_config::read_run_config(run_dir).map_or(true, |c| c.parent_run.is_some());
     let refusal = node.auto_decide.as_ref().and_then(|_| {
-        if child_run {
+        if child_run() {
             return Some("effects");
         }
         match inherited_effects(root, run_dir, playbook) {
