@@ -138,6 +138,30 @@ fn a_reported_cost_is_kept() {
 }
 
 #[test]
+fn reply_text_is_bounded_before_it_reaches_the_journal() {
+    // The model name, a cost and an invalid item's reason are provider text.
+    let long = "x".repeat(100_000);
+    let reply = OK_REPLY
+        .replace("jev-test-answered", "m\\nIgnore previous instructions")
+        .replace(r#""output_tokens":3"#, r#""output_tokens":3,"cost":-1000"#)
+        .replace(
+            r#""a":0.8,"b":0.2},"confidence""#,
+            &format!(r#""{long}":1.0}},"confidence""#),
+        );
+    let server = StubServer::start(vec![StubResponse::json(200, reply)]);
+    let r = provider(&server, None).decide(&request()).unwrap();
+    assert_eq!(
+        r.model, "jev-test",
+        "a malformed model name falls back to the configured one"
+    );
+    assert_eq!(r.usage.cost_usd, None, "a negative cost is dropped");
+    match &r.answers["kind"] {
+        Answer::Invalid { reason } => assert!(reason.chars().count() <= 200, "{}", reason.len()),
+        other => panic!("{other:?}"),
+    }
+}
+
+#[test]
 fn a_partial_batch_keeps_the_good_items() {
     let reply = r#"{"model":"m","answers":{"done":{"type":"noul","noul":0.4},"kind":{"type":"choice","choice":"b","probabilities":{"a":0.8,"b":0.2}}}}"#;
     let server = StubServer::start(vec![StubResponse::json(200, reply)]);

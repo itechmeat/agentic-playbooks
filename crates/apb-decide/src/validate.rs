@@ -119,11 +119,45 @@ fn confidence(raw: Option<&Value>, probabilities: &BTreeMap<String, f64>) -> Res
     }
 }
 
+/// The longest `Answer::Invalid` reason kept: a reason can quote the reply,
+/// which is provider text.
+const MAX_REASON_CHARS: usize = 200;
+
+/// The longest model name a reply may report.
+const MAX_MODEL_CHARS: usize = 128;
+
+/// The model a reply names, when it looks like a model id (at most 128
+/// characters of letters, digits and `._:/@-`); otherwise `configured`. The
+/// name is provider text that reaches the journal, the dashboard, a
+/// supervising agent and the threshold lookup.
+pub fn reply_model(reported: Option<&str>, configured: &str) -> String {
+    match reported {
+        Some(m)
+            if !m.is_empty()
+                && m.chars().count() <= MAX_MODEL_CHARS
+                && m.chars()
+                    .all(|c| c.is_ascii_alphanumeric() || "._:/@-".contains(c)) =>
+        {
+            m.to_string()
+        }
+        _ => configured.to_string(),
+    }
+}
+
+/// A reported cost, when it is a finite, non-negative number: a negative
+/// one would lower the run's spend.
+pub fn reply_cost(v: Option<&Value>) -> Option<f64> {
+    v.and_then(Value::as_f64)
+        .filter(|c| c.is_finite() && *c >= 0.0)
+}
+
 /// Validates one reply item against its question.
 pub fn validate_item(question: &Question, item: &Value) -> Answer {
     match validate_item_inner(question, item) {
         Ok(a) => a,
-        Err(reason) => Answer::Invalid { reason },
+        Err(reason) => Answer::Invalid {
+            reason: reason.chars().take(MAX_REASON_CHARS).collect(),
+        },
     }
 }
 

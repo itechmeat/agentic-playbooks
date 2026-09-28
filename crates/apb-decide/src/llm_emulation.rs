@@ -494,11 +494,10 @@ impl LlmEmulation {
         };
         Ok(DecisionResponse {
             provider: self.id.clone(),
-            model: reply
-                .get("model")
-                .and_then(Value::as_str)
-                .unwrap_or(&self.model)
-                .to_string(),
+            model: crate::validate::reply_model(
+                reply.get("model").and_then(Value::as_str),
+                &self.model,
+            ),
             calibrated: false,
             answers,
             usage: Usage {
@@ -556,7 +555,9 @@ impl DecisionProvider for LlmEmulation {
                 422 => return Err(DecideError::Invalid(self.scrub(&text))),
                 s if retryable(s) => {
                     let wait = Duration::from_secs(retry_after.unwrap_or(0));
-                    if retries >= MAX_RETRIES || wait >= deadline.saturating_duration_since(Instant::now()) {
+                    if retries >= MAX_RETRIES
+                        || wait >= deadline.saturating_duration_since(Instant::now())
+                    {
                         return Err(if s == 429 {
                             DecideError::RateLimited {
                                 retry_after: retry_after.map(Duration::from_secs),

@@ -91,17 +91,16 @@ pub(crate) fn parse_systemone_reply(
     let count = |k: &str| usage.and_then(|u| u.get(k)).and_then(Value::as_u64);
     Ok(DecisionResponse {
         provider: provider.to_string(),
-        model: reply
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or(configured_model)
-            .to_string(),
+        model: crate::validate::reply_model(
+            reply.get("model").and_then(Value::as_str),
+            configured_model,
+        ),
         calibrated,
         answers,
         usage: Usage {
             input_tokens: count("input_tokens"),
             output_tokens: count("output_tokens"),
-            cost_usd: usage.and_then(|u| u.get("cost")).and_then(Value::as_f64),
+            cost_usd: crate::validate::reply_cost(usage.and_then(|u| u.get("cost"))),
         },
         latency_ms: 0,
         cached: false,
