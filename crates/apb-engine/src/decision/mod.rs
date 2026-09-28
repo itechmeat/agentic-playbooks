@@ -22,21 +22,17 @@
 //!    to `runs/<id>/decisions/<seq>.json`.
 
 pub(crate) mod completion;
+mod providers;
 mod redact;
 pub mod report;
+pub mod standalone;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
 
-use apb_core::decisions::{
-    DecisionMode, EffectiveDecisions, KeyRef, ProviderKind, ProviderSpec, SendClass,
-};
-use apb_decide::{
-    Answer, ApiKey, DecisionCache, DecisionProvider, DecisionRequest, FakeProvider, ProviderChain,
-    Question, SystemOne, UseSite,
-};
+use apb_core::decisions::{DecisionMode, EffectiveDecisions, SendClass};
+use apb_decide::{Answer, DecisionCache, DecisionRequest, ProviderChain, Question, UseSite};
 use serde_json::{Value, json};
 
 use crate::error::EngineError;
@@ -251,40 +247,8 @@ impl DecisionRunner {
     /// stderr, never with a value). Also returns the resolved keys, which
     /// the redactor treats as secrets.
     fn chain(&self) -> &(ProviderChain, Vec<String>) {
-        self.chain.get_or_init(|| {
-            let timeout = Duration::from_millis(self.settings.timeout_ms);
-            let mut providers: Vec<Box<dyn DecisionProvider>> = Vec::new();
-            let mut keys = Vec::new();
-            for spec in &self.settings.providers {
-                let key = match resolve_key(spec) {
-                    Ok(k) => k,
-                    Err(why) => {
-                        eprintln!("apb: decision provider `{}` left out: {why}", spec.id);
-                        continue;
-                    }
-                };
-                if let Some(k) = &key {
-                    keys.push(k.clone());
-                }
-                match spec.kind {
-                    ProviderKind::Systemone => providers.push(Box::new(SystemOne::new(
-                        spec.id.clone(),
-                        spec.base_url.clone().unwrap_or_default(),
-                        spec.model.clone().unwrap_or_default(),
-                        key.map(ApiKey::new),
-                        timeout,
-                    ))),
-                    ProviderKind::Fake => {
-                        let mut fake = FakeProvider::new(spec.id.clone());
-                        for (qid, item) in &spec.answers {
-                            fake = fake.answer(qid.clone(), item.clone());
-                        }
-                        providers.push(Box::new(fake));
-                    }
-                }
-            }
-            (ProviderChain::new(providers), keys)
-        })
+        self.chain
+            .get_or_init(|| providers::build_chain(&self.settings))
     }
 
     fn redactor(&self) -> &redact::Redactor {
@@ -639,21 +603,6 @@ pub(crate) fn compact_answers(
 }
 
 // --- end of replay -----------------------------------------------------------
-
-fn resolve_key(spec: &ProviderSpec) -> Result<Option<String>, String> {
-    match &spec.key {
-        None => Ok(None),
-        Some(KeyRef::Env(var)) => apb_core::decisions::resolve_key_var(var)
-            .map(Some)
-            .ok_or_else(|| format!("variable `{var}` is not set")),
-        Some(KeyRef::Cmd(cmd)) => apb_core::connector::secrets::resolve_cmd(
-            cmd,
-            apb_core::connector::secrets::CMD_SECRET_TIMEOUT,
-        )
-        .map(|k| Some(k.trim().to_string()))
-        .map_err(|_| "its key command failed".to_string()),
-    }
-}
 
 fn redact_value(r: &redact::Redactor, v: Value) -> Value {
     match v {

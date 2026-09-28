@@ -4,8 +4,13 @@
 //! One record per suggestion pattern, in two scopes: the project store
 //! `<root>/.apb/suggestions.json` and the global store
 //! `<config-dir>/suggestions.json`. A record carries the agent's one-sentence
-//! `synopsis`, so future matching is done by MEANING on the agent side; the
-//! server never does language processing. A soft decline escalates the snooze
+//! `synopsis`, so future matching is done by MEANING on the agent side. The
+//! server does no language processing of its own; the one exception is
+//! opt-in: when the user enabled decision-model catalog ranking
+//! (`uses.catalog_rank` in `decisions.yaml`, issue #165 Part 16), a
+//! `playbook_catalog` call with a `query` asks the configured provider
+//! whether an active record's synopsis covers the task, and the answer is
+//! advisory only. A soft decline escalates the snooze
 //! along `SOFT_BACKOFF_DAYS`, a hard decline silences the suggestion for
 //! `HARD_TTL_DAYS` (a long silence with an expiry, not a permanent ban).
 //!

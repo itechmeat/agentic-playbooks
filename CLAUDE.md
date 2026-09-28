@@ -18,7 +18,7 @@ spec `docs/superpowers/specs/2026-07-12-agent-profiles-design.md`.
 
 Six crates under `crates/`; the dependency direction is core <- engine <- mcp,
 with cli and server on top, and `apb-decide` (no workspace dependency) <-
-engine. Do not introduce import cycles (enforced by code-ranker, see below).
+engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below).
 
 - `apb-core` - domain layer, no async. Playbook schema (`schema.rs`,
   `Playbook::from_yaml`), validator (`validate/`, codes V01+, one module per
@@ -38,9 +38,11 @@ engine. Do not introduce import cycles (enforced by code-ranker, see below).
   measured-threshold store (`decision_thresholds.rs`).
 - `apb-decide` - a blocking, provider-agnostic decision-model client: the
   `DecisionProvider` trait, question and answer types, the `systemone` and
-  `fake` providers, limit checks and strict reply validation, retries, the
-  provider chain, the per-run cache and the `ApiKey` wrapper; the `testing`
-  feature adds a multi-response HTTP stub. Knows nothing about runs.
+  `fake` providers and the route adapters (`vercel_evaluate`,
+  `openrouter_decisions`, `cloudflare`) over one shared HTTP exchange, limit
+  checks and strict reply validation, retries, the provider chain, the
+  per-run cache and the `ApiKey` wrapper; the `testing` feature adds a
+  multi-response HTTP stub. Knows nothing about runs.
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
   `scheduler/` (`entry` start, handoff and dead-attempt reaping, `control_apply`
   the control scan, `supervisor` heartbeat and wake park, `node` execution,
@@ -63,7 +65,9 @@ engine. Do not introduce import cycles (enforced by code-ranker, see below).
   `apb decisions`; see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
-  `meta`).
+  `meta`); `catalog_rank` is the opt-in decision-model ranking behind
+  `playbook_catalog(query)`, asked through the engine's standalone decider
+  (`decision/standalone.rs`).
 - `apb-cli` - package name `apb` (bin `apb`, `main.rs`); thin dispatch over
   core/engine/mcp. `apb init` runs a short interactive questionnaire in a
   terminal (feedback-loop consent into CLAUDE.md/AGENTS.md, agent

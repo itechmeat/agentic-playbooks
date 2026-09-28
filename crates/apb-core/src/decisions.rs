@@ -33,6 +33,12 @@ pub const ALLOW_FAKE_ENV: &str = "APB_DECISIONS_ALLOW_FAKE";
 /// would be flagged (issue #165 Part 8, the 2026-09-27 Phase 0 addendum). A
 /// measured starting point, to be re-fitted on shadow data.
 pub const COMPLETION_FINAL_RESULT_CUT: f64 = 0.15;
+/// `uses.catalog_rank.max_requests_per_day` when the file sets none.
+pub const CATALOG_RANK_MAX_REQUESTS_PER_DAY: u32 = 200;
+/// The catalog coverage check's default cut: a suppression record covers
+/// the task at `p` at or above it (`uses.catalog_rank.thresholds.covered`).
+/// A starting point to be measured, like every default threshold.
+pub const CATALOG_COVERED_CUT: f64 = 0.8;
 /// The known use names (`uses.<name>`).
 pub const USE_NAMES: [&str; 8] = [
     "judge_node",
@@ -88,6 +94,49 @@ pub enum ProviderKind {
     /// Scripted answers, no network (tests and dry runs; needs
     /// `APB_DECISIONS_ALLOW_FAKE=1`).
     Fake,
+    // --- issue #165 Part 15: route-specific adapters -----------------------
+    /// Vercel AI Gateway `POST {base_url}/v1/evaluate` (base URL defaults to
+    /// `https://ai-gateway.vercel.sh`).
+    VercelEvaluate,
+    /// OpenRouter's alpha Decisions API, `POST {base_url}/api/alpha/decisions`
+    /// (base URL defaults to `https://openrouter.ai`).
+    OpenrouterDecisions,
+    /// Cloudflare Workers AI REST, `POST
+    /// {base_url}/accounts/{account_id}/ai/run` (base URL defaults to
+    /// `https://api.cloudflare.com/client/v4`; `account_id` required).
+    Cloudflare,
+    // --- end Part 15 ----------------------------------------------------------
+}
+
+impl ProviderKind {
+    /// The name as written in `decisions.yaml`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            ProviderKind::Systemone => "systemone",
+            ProviderKind::Fake => "fake",
+            ProviderKind::VercelEvaluate => "vercel_evaluate",
+            ProviderKind::OpenrouterDecisions => "openrouter_decisions",
+            ProviderKind::Cloudflare => "cloudflare",
+        }
+    }
+
+    /// The base URL a kind uses when the file names none.
+    fn default_base_url(self) -> Option<&'static str> {
+        match self {
+            ProviderKind::VercelEvaluate => Some("https://ai-gateway.vercel.sh"),
+            ProviderKind::OpenrouterDecisions => Some("https://openrouter.ai"),
+            ProviderKind::Cloudflare => Some("https://api.cloudflare.com/client/v4"),
+            ProviderKind::Systemone | ProviderKind::Fake => None,
+        }
+    }
+}
+
+/// Whether a model id is an alias that moves with releases (a leading `~`,
+/// a `-latest` or `-preview` suffix) rather than a pinned version.
+/// Thresholds tuned on one version do not transfer, so doctor warns.
+pub fn is_model_alias(model: &str) -> bool {
+    let m = model.trim();
+    m.starts_with('~') || m.ends_with("-latest") || m.ends_with("-preview")
 }
 
 /// A material class a use may send (`privacy.send`).
@@ -129,6 +178,14 @@ pub struct ProviderSpec {
     /// `kind: fake` only: reply items by question id, in the wire shape.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub answers: BTreeMap<String, serde_json::Value>,
+    /// `kind: cloudflare` only: the account id, letters and digits, or a
+    /// `{{env.VAR}}` reference to one (resolved at call time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_id: Option<String>,
+    /// `kind: vercel_evaluate` only: ask the gateway for zero data
+    /// retention on every request.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub zero_data_retention: bool,
 }
 
 impl ProviderSpec {
@@ -193,6 +250,10 @@ pub struct UseSettings {
     pub mode: DecisionMode,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub thresholds: BTreeMap<String, f64>,
+    /// `catalog_rank` only (issue #165 Part 16): the most requests per
+    /// project and UTC day (default [`CATALOG_RANK_MAX_REQUESTS_PER_DAY`]).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_requests_per_day: Option<u32>,
 }
 
 /// The settings a run works with: the machine's file, capped by its
@@ -307,6 +368,10 @@ struct ProviderDoc {
     data_class: DataClass,
     #[serde(default)]
     answers: BTreeMap<String, serde_json::Value>,
+    #[serde(default)]
+    account_id: Option<String>,
+    #[serde(default)]
+    zero_data_retention: bool,
 }
 
 /// A URL's parts that matter here.
@@ -414,6 +479,15 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
     if let Some(name) = doc.uses.keys().find(|k| !USE_NAMES.contains(&k.as_str())) {
         return Err(format!("unknown use `{name}` under uses"));
     }
+    if let Some((name, _)) = doc
+        .uses
+        .iter()
+        .find(|(k, u)| u.max_requests_per_day.is_some() && k.as_str() != "catalog_rank")
+    {
+        return Err(format!(
+            "uses.{name}.max_requests_per_day is only for catalog_rank"
+        ));
+    }
     let mut providers = Vec::new();
     for (i, p) in doc.providers.into_iter().enumerate() {
         let at = format!("providers[{i}]");
@@ -427,7 +501,47 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
             Some(v) => Some(key_ref(&format!("{at}.api_key"), v)?),
             None => None,
         };
+        if p.account_id.is_some() && p.kind != ProviderKind::Cloudflare {
+            return Err(format!("{at}.account_id is only for kind cloudflare"));
+        }
+        if p.zero_data_retention && p.kind != ProviderKind::VercelEvaluate {
+            return Err(format!(
+                "{at}.zero_data_retention is only for kind vercel_evaluate"
+            ));
+        }
+        let base_url = p
+            .base_url
+            .clone()
+            .or_else(|| p.kind.default_base_url().map(str::to_string));
         match p.kind {
+            ProviderKind::VercelEvaluate
+            | ProviderKind::OpenrouterDecisions
+            | ProviderKind::Cloudflare => {
+                let kind = p.kind.as_str();
+                let url = base_url.as_deref().unwrap_or_default();
+                if parse_origin(url).is_none() {
+                    return Err(format!(
+                        "{at}.base_url must be an http(s) URL without credentials, query or fragment"
+                    ));
+                }
+                if p.model.as_deref().is_none_or(str::is_empty) {
+                    return Err(format!("{at}.model is required for kind {kind}"));
+                }
+                if !p.answers.is_empty() {
+                    return Err(format!("{at}.answers is only for kind fake"));
+                }
+                if p.kind == ProviderKind::Cloudflare {
+                    let id = p.account_id.as_deref().unwrap_or_default();
+                    let literal = !id.is_empty()
+                        && id.len() <= 64
+                        && id.chars().all(|c| c.is_ascii_alphanumeric());
+                    if !literal && parse_env_ref(id).is_none() {
+                        return Err(format!(
+                            "{at}.account_id is required for kind cloudflare: letters and digits, or {{{{env.VAR}}}}"
+                        ));
+                    }
+                }
+            }
             ProviderKind::Systemone => {
                 let url = p
                     .base_url
@@ -454,11 +568,13 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
         providers.push(ProviderSpec {
             id: p.id,
             kind: p.kind,
-            base_url: p.base_url.map(|u| u.trim_end_matches('/').to_string()),
+            base_url: base_url.map(|u| u.trim_end_matches('/').to_string()),
             model: p.model,
             data_class: p.data_class,
             key,
             answers: p.answers,
+            account_id: p.account_id,
+            zero_data_retention: p.zero_data_retention,
         });
     }
     if providers.is_empty() {
@@ -469,6 +585,11 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
         cc.thresholds
             .entry("final_result".into())
             .or_insert(COMPLETION_FINAL_RESULT_CUT);
+    }
+    if let Some(cr) = uses.get_mut("catalog_rank") {
+        cr.thresholds
+            .entry("covered".into())
+            .or_insert(CATALOG_COVERED_CUT);
     }
     Ok(Some(EffectiveDecisions {
         mode: doc.mode,
@@ -662,11 +783,7 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
                 .providers
                 .iter()
                 .map(|p| {
-                    let kind = match p.kind {
-                        ProviderKind::Systemone => "systemone",
-                        ProviderKind::Fake => "fake",
-                    };
-                    let mut parts = vec![kind.to_string()];
+                    let mut parts = vec![p.kind.as_str().to_string()];
                     if let Some(h) = p.host() {
                         parts.push(h);
                     }
@@ -678,6 +795,9 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
                     });
                     if let Some(r) = reachable(p) {
                         parts.push(if r { "reachable" } else { "unreachable" }.into());
+                    }
+                    if p.model.as_deref().is_some_and(is_model_alias) {
+                        parts.push("model is an alias, pin a version".into());
                     }
                     format!("{} ({})", p.id, parts.join(", "))
                 })
@@ -895,5 +1015,98 @@ privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug
         ] {
             assert!(parse_origin(bad).is_none(), "{bad}");
         }
+    }
+
+    // --- issue #165 Parts 15 and 16 ------------------------------------------
+
+    #[test]
+    fn the_route_kinds_load_with_their_defaults_and_own_fields() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        write(
+            cfg.path(),
+            r#"
+providers:
+  - { id: vercel, kind: vercel_evaluate, model: typesafe-ai/jev, api_key: "{{env.AI_GATEWAY_API_KEY}}", zero_data_retention: true }
+  - { id: or, kind: openrouter_decisions, model: typesafe/jev-1.13, api_key: "{{env.OPENROUTER_API_KEY}}" }
+  - { id: cf, kind: cloudflare, model: typesafe/jev, account_id: "{{env.CF_ACCOUNT}}", api_key: "{{env.CF_TOKEN}}" }
+  - { id: cf2, kind: cloudflare, base_url: "https://cf.example.test/v4/", model: typesafe/jev, account_id: abc123 }
+uses: { catalog_rank: { mode: advise, max_requests_per_day: 10 } }
+"#,
+        );
+        let eff = resolve_in(cfg.path(), root.path()).active().unwrap();
+        let urls: Vec<_> = eff
+            .providers
+            .iter()
+            .map(|p| p.base_url.as_deref())
+            .collect();
+        assert_eq!(
+            urls,
+            [
+                Some("https://ai-gateway.vercel.sh"),
+                Some("https://openrouter.ai"),
+                Some("https://api.cloudflare.com/client/v4"),
+                Some("https://cf.example.test/v4"),
+            ]
+        );
+        assert!(eff.providers[0].zero_data_retention);
+        assert_eq!(
+            eff.providers[2].account_id.as_deref(),
+            Some("{{env.CF_ACCOUNT}}")
+        );
+        let rank = &eff.uses["catalog_rank"];
+        assert_eq!(rank.max_requests_per_day, Some(10));
+        assert_eq!(rank.thresholds.get("covered"), Some(&CATALOG_COVERED_CUT));
+    }
+
+    #[test]
+    fn route_fields_are_refused_on_the_wrong_kind() {
+        let cfg = tempfile::tempdir().unwrap();
+        for body in [
+            "providers: [{ id: a, kind: systemone, base_url: 'https://h.test', model: m, account_id: abc }]\n",
+            "providers: [{ id: a, kind: openrouter_decisions, model: m, zero_data_retention: true }]\n",
+            "providers: [{ id: a, kind: cloudflare, model: m }]\n",
+            "providers: [{ id: a, kind: cloudflare, model: m, account_id: '../x' }]\n",
+            "providers: [{ id: a, kind: vercel_evaluate }]\n",
+            "providers: [{ id: a, kind: vercel_evaluate, model: m }]\nuses: { completion_check: { mode: shadow, max_requests_per_day: 3 } }\n",
+        ] {
+            write(cfg.path(), body);
+            assert!(load_file(cfg.path()).is_err(), "must refuse: {body}");
+        }
+    }
+
+    #[test]
+    fn model_aliases_are_told_apart_from_pinned_ids() {
+        for alias in ["~typesafe/jev-latest", "jev-latest", "jev-preview"] {
+            assert!(is_model_alias(alias), "{alias}");
+        }
+        for pinned in [
+            "typesafe/jev-1.13",
+            "jev-1.13.0",
+            "typesafe-ai/jev",
+            "typesafe/jev",
+        ] {
+            assert!(!is_model_alias(pinned), "{pinned}");
+        }
+    }
+
+    #[test]
+    fn a_route_spec_without_route_fields_serializes_as_before() {
+        let spec = ProviderSpec {
+            id: "a".into(),
+            kind: ProviderKind::Systemone,
+            base_url: Some("https://h.test".into()),
+            model: Some("m".into()),
+            data_class: DataClass::Hosted,
+            key: None,
+            answers: BTreeMap::new(),
+            account_id: None,
+            zero_data_retention: false,
+        };
+        let yaml = serde_yaml_ng::to_string(&spec).unwrap();
+        assert!(
+            !yaml.contains("account_id") && !yaml.contains("zero_data_retention"),
+            "{yaml}"
+        );
     }
 }

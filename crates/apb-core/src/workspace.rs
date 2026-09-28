@@ -19,7 +19,8 @@ const WORKSPACE_FILE: &str = "workspace.local";
 /// `<root>/.apb/.gitignore`: the workspace id, run directories (event logs,
 /// node outputs and per-attempt agent transcripts, which can hold whatever
 /// the agent saw), the node result cache, soft-deleted playbooks, schema
-/// migration backups and the workdir lock. The one list `ensure_local_ignored`
+/// migration backups, the workdir lock and the log of decisions asked outside
+/// a run (`decisions.jsonl`). The one list `ensure_local_ignored`
 /// writes; a new runtime path under `.apb/` belongs here.
 pub const LOCAL_ENTRIES: &[&str] = &[
     WORKSPACE_FILE,
@@ -29,6 +30,8 @@ pub const LOCAL_ENTRIES: &[&str] = &[
     "backup-*/",
     "workdir.lock",
     "locks/",
+    // The log of decisions asked outside a run (issue #165 Part 16).
+    "decisions.jsonl",
 ];
 
 /// The workspace id recorded in `<root>/.apb/workspace.local`, read only when

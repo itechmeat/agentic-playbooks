@@ -1,6 +1,7 @@
 pub mod advisory_tools;
 pub mod ask_server;
 pub mod catalog;
+pub mod catalog_rank;
 pub mod instructions;
 pub mod plan;
 /// The run policy gate lives in the engine (`apb_engine::gate`) so every launch

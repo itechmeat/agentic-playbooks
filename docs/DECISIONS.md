@@ -21,6 +21,7 @@ One use exists, in shadow mode only:
 | Use | What it asks | Modes available |
 |---|---|---|
 | `completion_check` | whether a successful agent reply is a finished result rather than a progress note, a plan or a question back | `off`, `shadow` |
+| `catalog_rank` | which catalog playbook fits the task an agent names, whether the task needs a playbook at all, and whether a silenced suggestion covers it (MCP, outside runs) | `off`, `shadow`, `advise` (`enforce` acts as `advise`) |
 
 Shadow means journal only: the answer is recorded in the run's journal and
 nothing acts on it. Advise mode (showing a flag where a person or supervisor
@@ -84,6 +85,58 @@ Provider routes for `kind: systemone` (all `POST {base_url}/v1/systemone`):
 | Vercel AI Gateway | `https://ai-gateway.vercel.sh/typesafe` | `typesafe-ai/jev` |
 | OpenCode Zen | `https://opencode.ai/zen` | `jev-1.13` |
 | Self-hosted | `http://127.0.0.1:<port>` | the server's own id |
+
+### Other provider kinds
+
+Three routes speak a variant of the same format and have a kind of their
+own. Each keeps the shared contract: client-side limits (32,000 tokens for
+the state plus the longest question, 255 options, 10 levels), strict reply
+validation with a locally recomputed confidence where the route sends none,
+retries only on 408, 409, 429, 5xx and 529 within the timeout, keys by
+reference only. Each answers under its own threshold profile
+(`<kind>:<model>`): a threshold measured on one route does not carry over to
+another, even for the same model.
+
+```yaml
+providers:
+  - id: vercel
+    kind: vercel_evaluate          # POST {base_url}/v1/evaluate
+    model: typesafe-ai/jev         # base_url defaults to https://ai-gateway.vercel.sh
+    api_key: "{{env.AI_GATEWAY_API_KEY}}"
+    zero_data_retention: true      # providerOptions.gateway.zeroDataRetention
+  - id: openrouter-decisions
+    kind: openrouter_decisions     # POST {base_url}/api/alpha/decisions (alpha)
+    model: typesafe/jev-1.13       # base_url defaults to https://openrouter.ai
+    api_key: "{{env.OPENROUTER_API_KEY}}"
+  - id: cloudflare
+    kind: cloudflare               # POST {base_url}/accounts/{account_id}/ai/run
+    model: typesafe/jev            # base_url defaults to https://api.cloudflare.com/client/v4
+    account_id: "{{env.CLOUDFLARE_ACCOUNT_ID}}"   # or the id itself (letters and digits)
+    api_key: "{{env.CLOUDFLARE_API_TOKEN}}"       # a token with the Workers AI permission
+```
+
+| Kind | Differences from `systemone` | Calibrated | Cost reported | Retention (as documented) |
+|---|---|---|---|---|
+| `vercel_evaluate` | `noul` is sent as `boolean` and answered as `probability`; usage in camelCase; cost from `providerMetadata.gateway.cost`; choice and score may come without confidence (recomputed) | only when the answering model is `typesafe-ai/jev...`; a language-model fallback is not | yes | the gateway's terms; `zero_data_retention: true` restricts routing to zero-retention providers, and a request none can serve fails |
+| `openrouter_decisions` | the same shape on OpenRouter's alpha Decisions route; 400 is a validation refusal | yes | yes (`usage.cost`) | OpenRouter's terms plus TypeSafe's |
+| `cloudflare` | the body is `{"model", "input": {"state", "questions"}}`; the reply is accepted bare or in Cloudflare's `result` envelope | yes | no (list price applies) | the model page lists zero data retention |
+
+- `openrouter_decisions` is an alpha API that may change without notice; the
+  `systemone` kind against `https://openrouter.ai/api` reaches the same model
+  on a stable path. Pin a versioned model id: one community report had the
+  `~typesafe/jev-latest` alias fail on this route. `apb doctor` flags any
+  alias model id (a leading `~`, `-latest`, `-preview`).
+- `cloudflare` follows the REST form on Cloudflare's model page; it is covered
+  by fixture tests but was not exercised against the live service.
+- `account_id` belongs to `cloudflare` only and `zero_data_retention` to
+  `vercel_evaluate` only; anywhere else they make the file invalid.
+
+Sources (read 2026-09-27):
+https://vercel.com/docs/ai-gateway/modalities/evaluation,
+https://vercel.com/docs/ai-gateway/sdks-and-apis/typesafe,
+https://openrouter.ai/docs/guides/community/jev.md,
+https://openrouter.ai/docs/api/api-reference/alphadecisions/submit-a-decisions-questions-and-answers-request.md,
+https://developers.cloudflare.com/ai/models/typesafe/jev/.
 
 ### Project narrowing
 
@@ -319,3 +372,46 @@ never writes a journal or anything under a run, and saves its results under
 Replay is evaluation only, like threshold tuning: it compares answers against
 APB's own labels. It is not an export of outputs for training, and apb has no
 such feature (see the provider terms note under "What is sent").
+
+## Catalog ranking (MCP, opt-in)
+
+Off unless the machine's `decisions.yaml` enables it:
+
+```yaml
+uses:
+  catalog_rank:
+    mode: advise                   # shadow: ask and log, answer unchanged
+    thresholds: { covered: 0.8 }   # the default; a starting point to be measured
+    max_requests_per_day: 200      # per project and UTC day; the default
+```
+
+`playbook_catalog` then accepts an optional `query`, the task in one
+sentence. One request asks a `choice` over the catalog's playbooks (their
+`when`, `avoid_when` and `examples` in the state, clipped to
+`privacy.max_state_bytes`, plus `none_of_these`), a `needs_playbook` noul
+("is the task a doable action a saved procedure could perform?") and one
+`covered` noul per active silenced suggestion ("does its synopsis describe
+the same procedure?"). The state is sent as `prompts` class and redacted like
+a run's. Above 254 playbooks the catalog is ranked in chunks and the chunk
+leaders again.
+
+In advise the response is the full catalog plus `ranked` (the top five
+`{ref, p}`), `confidence`, `needs_playbook_p`, `covered_by` (`{pattern,
+scope, p}` when a record reaches the `covered` cut) and `ranking: {provider,
+model, calibrated}`. Entries are never filtered or reordered, and nothing is
+applied: the host still decides what to run and whether to offer a capture.
+`enforce` acts as `advise`, since catalog ranking is advisory by design.
+`revision` is bypassed when a query is ranked, and answers are cached for
+the server's lifetime per project, catalog revision and query. A failure
+keeps the full catalog with `ranking: {error}`.
+
+The response is byte-identical to today without `decisions.yaml`, with the
+use off, with `APB_DECISIONS=off`, when no provider key resolves, in shadow,
+and whenever `query` is absent or blank. The server's instructions (TIER0)
+never change.
+
+Each decision is logged as one line of `<root>/.apb/decisions.jsonl`
+(git-ignored): the `decision_made` fields without node and attempt, plus
+`ts_ms`. Past `max_requests_per_day` a line with `error: budget` is logged and
+nothing is sent.
+
