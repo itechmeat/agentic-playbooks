@@ -116,8 +116,13 @@ fn judge_key_parts(
     else {
         return Ok(None);
     };
+    // The snapshot and what the machine says now (the kill switch, a
+    // lowered ceiling or use mode, a removed file): a cached answer routes
+    // the run only while the use is still at enforce.
     if apb_core::decisions::killed_by_switch()
         || decisions.mode_for("judge_node") != apb_core::decisions::DecisionMode::Enforce
+        || apb_core::decisions::live_mode(&super::judge::cfg_root(run_dir), "judge_node")
+            != apb_core::decisions::DecisionMode::Enforce
     {
         return Ok(None);
     }

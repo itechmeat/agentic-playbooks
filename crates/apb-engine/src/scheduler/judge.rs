@@ -229,7 +229,7 @@ pub(crate) fn execute(
 }
 
 /// The execution root a run belongs to: `<root>/.apb/runs/<id>`.
-fn cfg_root(run_dir: &Path) -> PathBuf {
+pub(super) fn cfg_root(run_dir: &Path) -> PathBuf {
     run_dir
         .ancestors()
         .nth(3)

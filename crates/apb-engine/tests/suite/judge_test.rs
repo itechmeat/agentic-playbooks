@@ -503,6 +503,55 @@ fn a_cached_judge_answer_is_reused_across_runs_without_a_request() {
     );
 }
 
+#[test]
+fn a_lowered_judge_mode_mid_run_skips_the_cached_answer() {
+    let server = StubServer::start_with_fallback(
+        vec![],
+        StubResponse::json(
+            200,
+            json!({"model": "jev-1.13.0", "answers": {"verdict": choice("clean", 0.9), "risky": {"type": "noul", "noul": 0.2}}}).to_string(),
+        ),
+    );
+    let yaml = small("    on_unavailable: fail\n    cache: auto\n", "");
+    let p = Project::new(&yaml);
+    p.decisions(&format!(
+        "version: 1\nmode: enforce\nproviders:\n  - {{ id: stub, kind: systemone, base_url: \"{}\", model: jev-1.13.0 }}\nuses:\n  judge_node: {{ mode: enforce }}\n",
+        server.base_url
+    ));
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (_, _, first) = p.run("small");
+    assert!(
+        first
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::NodeCacheStored { .. }))
+    );
+    // The second run starts at enforce; its review step lowers the judge to
+    // shadow before the judge node is reached.
+    let agent = p.root.path().join("agent.sh");
+    let script = fs::read_to_string(&agent).unwrap().replacen(
+        "#!/bin/sh\n",
+        &format!(
+            "#!/bin/sh\nsed -i 's/judge_node: {{ mode: enforce }}/judge_node: {{ mode: shadow }}/' '{}'\n",
+            p.cfg.path().join("decisions.yaml").display()
+        ),
+        1,
+    );
+    common::write_sync(&agent, &script);
+    let (_, _, second) = p.run("small");
+    assert!(
+        fs::read_to_string(p.cfg.path().join("decisions.yaml"))
+            .unwrap()
+            .contains("mode: shadow")
+    );
+    assert!(
+        !second
+            .iter()
+            .any(|e| matches!(e.payload, EventPayload::NodeCacheHit { .. })),
+        "a cached answer routed a run whose judge was lowered to shadow"
+    );
+}
+
 fn edges_playbook(loops: bool) -> String {
     // With `loops`, the fallback goes round through a condition node that
     // allows two more passes, then leaves for `done`.
