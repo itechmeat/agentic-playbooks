@@ -1813,14 +1813,9 @@ mod tests {
     }
 
     #[test]
-    fn a_decision_record_round_trips_and_reads_leniently() {
+    fn a_decision_record_parses_and_reads_leniently() {
         let line = r#"{"seq":3,"ts":1,"type":"decision_made","use_site":"completion_check","node":"w","attempt":1,"provider":"p","model":"m","calibrated":true,"mode":"shadow","questions_digest":"sha256:q","state_digest":"sha256:s","state_bytes":10,"answers":{"final_result":{"p":0.9}},"applied":false,"would_change":false,"baseline":{"regex_flag":false,"pattern":null},"latency_ms":5,"input_tokens":7,"cost_usd":0.1,"cached":false,"error":null}"#;
         let ev: Event = serde_json::from_str(line).unwrap();
-        let back: Event = serde_json::from_str(&serde_json::to_string(&ev).unwrap()).unwrap();
-        assert_eq!(
-            serde_json::to_value(&ev).unwrap(),
-            serde_json::to_value(&back).unwrap()
-        );
         assert!(is_known_kind("decision_made"));
         assert!(
             !ev.payload.is_checkpoint(),

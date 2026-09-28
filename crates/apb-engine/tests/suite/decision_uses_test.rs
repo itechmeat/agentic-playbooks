@@ -80,15 +80,20 @@ impl Project {
         fs::write(self.cfg.path().join("decisions.yaml"), body).unwrap();
     }
 
-    /// Stores a threshold for `(use, stub, jev-1.13.0)`.
+    /// Stores a threshold for `(use, stub, jev-1.13.0)` through the store's
+    /// writer, the one `apb decisions thresholds set` uses, so every enforce
+    /// test also proves that the engine reads what the CLI writes.
     fn threshold(&self, uses: &[(&str, f64)]) {
-        let mut body = String::from("version: 1\nthresholds:\n");
         for (u, t) in uses {
-            body.push_str(&format!(
-                "  - {{ use: {u}, provider: stub, model: jev-1.13.0, threshold: {t} }}\n"
-            ));
+            apb_core::decision_thresholds::set_threshold_in(
+                self.cfg.path(),
+                u,
+                "stub",
+                "jev-1.13.0",
+                *t,
+            )
+            .unwrap();
         }
-        fs::write(self.cfg.path().join("decisions-thresholds.yaml"), body).unwrap();
     }
 
     fn env(&self) -> Env {
@@ -358,54 +363,12 @@ fn completion_enforce_without_a_retry_left_never_fails_the_node() {
 /// through that module lets the path act, and a store of an unknown version
 /// reads as no threshold.
 #[test]
-fn the_enforce_gate_reads_the_threshold_store_the_cli_writes() {
-    for (stored, acts) in [(true, true), (false, false)] {
-        let p = Project::new(
-            &one_node(", completion_check: enforce, max_retries: 1"),
-            &format!(
-                "if [ -f \"$0.marker\" ]; then echo 'Implemented the parser; the suite passed.'; else touch \"$0.marker\"; echo '{RUNNING}'; fi"
-            ),
-        );
-        let server = StubServer::start(vec![
-            completion(0.02, "partial"),
-            completion(0.95, "complete"),
-        ]);
-        p.decisions(&config(
-            &server.base_url,
-            "enforce",
-            "  completion_check: { mode: enforce }\n",
-        ));
-        if stored {
-            apb_core::decision_thresholds::set_threshold_in(
-                p.cfg.path(),
-                "completion_check",
-                "stub",
-                "jev-1.13.0",
-                0.05,
-            )
-            .unwrap();
-        } else {
-            fs::write(
-                p.cfg.path().join("decisions-thresholds.yaml"),
-                "version: 2\nthresholds:\n  - { use: completion_check, provider: stub, model: jev-1.13.0, threshold: 0.05 }\n",
-            )
-            .unwrap();
-        }
-        let _lock = common::env_lock();
-        let _env = p.env();
-        let (_, _, events) = p.run();
-        let d = decisions(&events, "completion_check");
-        assert_eq!(d[0].applied, acts, "stored={stored}");
-        let refused = d[0].enforce_refused.as_deref();
-        assert_eq!(refused, if acts { None } else { Some("no_threshold") });
-    }
-}
-
-#[test]
 fn completion_enforce_refusals_act_as_advise() {
-    // No stored threshold, a blocked_on_input answer, and the action cap.
+    // No stored threshold (none at all, or a store of an unknown version),
+    // a blocked_on_input answer, and the action cap.
     for (case, threshold, reply_of, max_actions) in [
         ("no_threshold", false, completion(0.02, "partial"), None),
+        ("unknown_store", false, completion(0.02, "partial"), None),
         ("blocked", true, completion(0.02, "blocked_on_input"), None),
         ("cap", true, completion(0.02, "partial"), Some(1)),
     ] {
@@ -422,13 +385,20 @@ fn completion_enforce_refusals_act_as_advise() {
         if threshold {
             p.threshold(&[("completion_check", 0.05)]);
         }
+        if case == "unknown_store" {
+            fs::write(
+                p.cfg.path().join("decisions-thresholds.yaml"),
+                "version: 2\nthresholds:\n  - { use: completion_check, provider: stub, model: jev-1.13.0, threshold: 0.05 }\n",
+            )
+            .unwrap();
+        }
         let _lock = common::env_lock();
         let _env = p.env();
         let (status, _, events) = p.run();
         assert_eq!(status, RunStatus::Succeeded, "{case}");
         let d = decisions(&events, "completion_check");
         match case {
-            "no_threshold" => {
+            "no_threshold" | "unknown_store" => {
                 assert_eq!(d.len(), 1);
                 assert_eq!(d[0].enforce_refused.as_deref(), Some("no_threshold"));
                 assert!(!d[0].applied);
@@ -516,7 +486,13 @@ fn a_lowered_ceiling_mid_run_stops_the_enforce_path() {
     assert_eq!(w2[0].mode, "shadow");
     assert!(!w2[0].applied);
     assert_eq!(attempts(&events, "w2").len(), 1);
-    // And the kill switch: nothing is asked at all.
+    // And the kill switch over an enforce ceiling (restored here; the
+    // marker keeps the agent from lowering it again): nothing is asked.
+    p.decisions(&config(
+        &server.base_url,
+        "enforce",
+        "  completion_check: { mode: enforce }\n",
+    ));
     let _off = Env::set(&[("APB_DECISIONS", "off")]);
     let before = server.count();
     let (_, _, events) = p.run();
@@ -829,6 +805,13 @@ fn review_auto_decide_posts_needs_changes_with_an_auto_note() {
         )
     );
     assert!(decisions(&events, "review_triage")[0].applied);
+    // One decision for the visit (the channel's one-decision rule is owned
+    // by review_test::concurrent_decisions_for_one_pending_gate_queue_only_one).
+    let decided = events
+        .iter()
+        .filter(|e| matches!(e.payload, EventPayload::ReviewDecided { .. }))
+        .count();
+    assert_eq!(decided, 1);
     let _ = run_id;
 }
 
@@ -971,54 +954,6 @@ fn review_auto_decide_is_refused_inside_a_sub_playbook_run() {
     )
     .ok();
     let _ = rx.recv_timeout(Duration::from_secs(20));
-}
-
-#[test]
-fn an_earlier_human_decision_wins_over_auto_decide() {
-    let p = Project::new(
-        &gate_playbook("", ", auto_decide: { allow: [needs_changes] }", "fix"),
-        "echo 'Review: one blocking defect.'",
-    );
-    let server = StubServer::start_with_fallback(vec![], decision_reply("needs_changes", 0.99));
-    p.decisions(&config(
-        &server.base_url,
-        "enforce",
-        "  review_triage: { mode: enforce }\n",
-    ));
-    p.threshold(&[("review_triage", 0.5)]);
-    let _lock = common::env_lock();
-    let _env = p.env();
-    // A provider slow enough that the person's decision lands first.
-    let rx = run_in_background(p.root.path().to_path_buf(), RunOptions::default());
-    let run_dir = find_run_dir(p.root.path());
-    poll("review_requested", || review_requested(&run_dir));
-    // The queued auto decision (if any) blocks a second one: the channel
-    // accepts exactly one decision per open request.
-    let second = apb_engine::review::post_review(
-        &run_dir,
-        apb_engine::review::ReviewCommand {
-            node: "g".into(),
-            decision: "approve".into(),
-            note: "person".into(),
-        },
-    );
-    let res = rx.recv_timeout(Duration::from_secs(20)).unwrap();
-    assert_eq!(res.outcome, RunStatus::Succeeded);
-    let decided: Vec<(String, String)> = read_all(&run_dir)
-        .unwrap()
-        .iter()
-        .filter_map(|e| match &e.payload {
-            EventPayload::ReviewDecided { decision, note, .. } => {
-                Some((decision.clone(), note.clone()))
-            }
-            _ => None,
-        })
-        .collect();
-    assert_eq!(decided.len(), 1, "one decision per visit: {decided:?}");
-    match second {
-        Ok(_) => assert_eq!(decided[0].1, "person"),
-        Err(_) => assert!(decided[0].1.starts_with("auto: ")),
-    }
 }
 
 // --- Part 10 supervisor pre-triage and Part 14.3 auto-retry -----------------
@@ -1327,9 +1262,9 @@ fn routing_never_reroutes_a_handoff_node_and_refuses_without_a_threshold() {
 // --- replays ---------------------------------------------------------------
 
 #[test]
-fn resumed_runs_replay_every_use_without_a_request() {
-    // Completion (enforce, applied), routing (enforce, applied) and the
-    // review recommendation: resuming the node asks nothing again.
+fn resumed_runs_replay_routing_and_completion_without_a_request() {
+    // Completion (enforce, applied) and routing (enforce, applied):
+    // resuming the node asks nothing again.
     let p = Project::new(
         &one_node(", route: auto, completion_check: enforce, max_retries: 1"),
         "",
