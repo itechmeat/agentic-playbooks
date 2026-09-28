@@ -449,7 +449,12 @@ never change.
 Each decision is logged as one line of `<root>/.apb/decisions.jsonl`
 (git-ignored): the `decision_made` fields without node and attempt, plus
 `ts_ms`. Past `max_requests_per_day` a line with `error: budget` is logged and
-nothing is sent.
+nothing is sent. The count, the request and its line are taken under a lock
+on the log, so concurrent MCP servers never pass the cap; a call that finds
+the lock still held after about two seconds is not ranked (`ranking.error:
+busy`, the plain catalog). The task, the triggers and a suggestion's synopsis
+are redacted like a run's state (including the variables installed
+connectors reference) before anything is clipped or sent.
 
 ## Judge node (`judge_node`)
 

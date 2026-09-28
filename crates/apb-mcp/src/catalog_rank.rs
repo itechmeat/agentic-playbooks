@@ -163,14 +163,14 @@ fn clip(text: &str, max: usize) -> String {
 /// One playbook's state object within `share` bytes: examples go first,
 /// then `avoid_when` items, then `when` items beyond the first, then every
 /// string is shortened.
-fn playbook_state(c: &Candidate, share: usize) -> Value {
+fn playbook_state(decider: &StandaloneDecider, c: &Candidate, share: usize) -> Value {
     let list = |k: &str| -> Vec<String> {
         c.trigger[k]
             .as_array()
             .map(|a| {
                 a.iter()
                     .filter_map(Value::as_str)
-                    .map(str::to_string)
+                    .map(|t| decider.redact(t))
                     .collect()
             })
             .unwrap_or_default()
@@ -189,7 +189,7 @@ fn playbook_state(c: &Candidate, share: usize) -> Value {
         Value::Object(o)
     };
     let size = |v: &Value| serde_json::to_string(v).map_or(0, |s| s.len());
-    let mut title = c.title.clone();
+    let mut title = decider.redact(&c.title);
     loop {
         let v = build(&when, &avoid, &examples, &title);
         if size(&v) <= share {
@@ -220,7 +220,8 @@ fn ask(
     with_extras: bool,
 ) -> StandaloneOutcome {
     let budget = (decider.max_state_bytes() as f64 * STATE_SHARE) as usize;
-    let task = clip(query, TASK_BYTES);
+    // Redacted before any clip (a cut can split a secret).
+    let task = clip(&decider.redact(query), TASK_BYTES);
     let share = budget
         .saturating_sub(task.len() + 64)
         .checked_div(group.len().max(1))
@@ -229,7 +230,7 @@ fn ask(
     let mut criteria = ChoiceCriteria::new();
     for (i, c) in group.iter().enumerate() {
         let id = format!("p{}", i + 1);
-        playbooks.insert(id.clone(), playbook_state(c, share));
+        playbooks.insert(id.clone(), playbook_state(decider, c, share));
         criteria = criteria.with(
             id.clone(),
             Some(json!(format!(
@@ -266,7 +267,7 @@ fn ask(
                 Question::Noul {
                     instructions: json!({
                         "question": "Does the suggestion `synopsis` describe the same procedure as `task`?",
-                        "synopsis": clip(synopsis, 600),
+                        "synopsis": clip(&decider.redact(synopsis), 600),
                     }),
                     criteria: None,
                 },
