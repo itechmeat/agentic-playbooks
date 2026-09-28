@@ -1093,6 +1093,11 @@ edges:
     equals: success
   fallback: false
   join: null
+- from: pick_task
+  to: aborted
+  condition: null
+  fallback: true
+  join: null
 - from: brainstorm_gate
   to: brainstorm_child
   condition:

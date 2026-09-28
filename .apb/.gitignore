@@ -5,3 +5,4 @@ trash/
 backup-*/
 workdir.lock
 locks/
+decisions.jsonl
