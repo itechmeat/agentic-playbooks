@@ -463,7 +463,10 @@ Each decision is logged as one line of `<root>/.apb/decisions.jsonl`
 nothing is sent. The count, the request and its line are taken under a lock
 on the log, so concurrent MCP servers never pass the cap; a call that finds
 the lock still held after about two seconds is not ranked (`ranking.error:
-busy`, the plain catalog). The task, the triggers and a suggestion's synopsis
+busy`, the plain catalog). The log is opened only as a regular file, never
+through a link: a log that is a link, a directory or anything else counts as
+a spent cap (nothing is sent and nothing written), and only its last 8 MiB
+are read to count the day's requests. The task, the triggers and a suggestion's synopsis
 are redacted like a run's state (including the variables installed
 connectors reference) before anything is clipped or sent.
 

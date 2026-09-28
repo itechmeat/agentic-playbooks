@@ -25,6 +25,9 @@ use super::{compact_answer, list_price_per_million, providers, redact, redact_va
 /// The log file under `<root>/.apb/`.
 pub const DECISIONS_LOG: &str = "decisions.jsonl";
 
+/// The tail of the log read to count today's requests.
+const MAX_LOG_SCAN_BYTES: u64 = 8 * 1024 * 1024;
+
 const DAY_MS: u64 = 86_400_000;
 
 /// An answered standalone decision.
@@ -161,14 +164,62 @@ impl StandaloneDecider {
             .unwrap_or(CATALOG_RANK_MAX_REQUESTS_PER_DAY)
     }
 
-    /// Requests sent today (UTC) for `site`, per the log.
+    /// Opens the log without following a link, and only as a regular file:
+    /// the log sits in the project tree, which a repository can fill with a
+    /// symlink, a FIFO or a directory. `Ok(None)`: no log yet. `Err`: a log
+    /// that is not a plain file.
+    fn open_log(&self, append: bool) -> Result<Option<std::fs::File>, ()> {
+        let path = self.log_path();
+        match std::fs::symlink_metadata(&path) {
+            Ok(m) if !m.file_type().is_file() => return Err(()),
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound && append => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+            Err(_) => return Err(()),
+        }
+        let mut options = std::fs::OpenOptions::new();
+        if append {
+            options.create(true).append(true);
+        } else {
+            options.read(true);
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options
+                .mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let file = options.open(&path).map_err(|_| ())?;
+        match file.metadata() {
+            Ok(m) if m.is_file() => Ok(Some(file)),
+            _ => Err(()),
+        }
+    }
+
+    /// Requests sent today (UTC) for `site`, per the log. A log that is not
+    /// a plain file counts as a spent cap (fail closed for spend); only the
+    /// last [`MAX_LOG_SCAN_BYTES`] are read.
     fn requests_today(&self, site: UseSite, now_ms: u64) -> u32 {
-        let Ok(file) = std::fs::File::open(self.log_path()) else {
-            return 0;
+        use std::io::{Read, Seek, SeekFrom};
+        let mut file = match self.open_log(false) {
+            Ok(Some(f)) => f,
+            Ok(None) => return 0,
+            Err(()) => return u32::MAX,
         };
+        let len = file.metadata().map_or(0, |m| m.len());
+        let skip_partial = len > MAX_LOG_SCAN_BYTES;
+        if skip_partial
+            && file
+                .seek(SeekFrom::Start(len - MAX_LOG_SCAN_BYTES))
+                .is_err()
+        {
+            return u32::MAX;
+        }
         let today = now_ms / DAY_MS;
-        std::io::BufReader::new(file)
+        std::io::BufReader::new(file.take(MAX_LOG_SCAN_BYTES))
             .lines()
+            .skip(usize::from(skip_partial))
             .map_while(Result::ok)
             .filter_map(|l| serde_json::from_str::<Value>(&l).ok())
             .filter(|v| {
@@ -182,18 +233,11 @@ impl StandaloneDecider {
 
     /// Best effort: a log that cannot be written never changes the answer.
     fn log(&self, line: &Value) {
-        let path = self.log_path();
-        if !path.parent().is_some_and(Path::is_dir) {
+        if !self.log_path().parent().is_some_and(Path::is_dir) {
             return;
         }
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).append(true);
-        #[cfg(unix)]
+        if let (Ok(Some(mut f)), Ok(mut text)) = (self.open_log(true), serde_json::to_string(line))
         {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600);
-        }
-        if let (Ok(mut f), Ok(mut text)) = (options.open(&path), serde_json::to_string(line)) {
             text.push('\n');
             let _ = f.write_all(text.as_bytes());
         }
@@ -418,6 +462,41 @@ mod tests {
             "{sent}"
         );
         assert!(!format!("{d:?}").contains("sk-live"), "{d:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_planted_log_link_is_never_followed_and_spends_nothing() {
+        // The log sits in the project tree: a repository can commit it as a
+        // link (to /dev/null to reset the cap, to a file to corrupt it) or
+        // as a directory.
+        let root = project();
+        let outside = tempfile::tempdir().unwrap();
+        let target = outside.path().join("victim");
+        std::fs::write(&target, "keep\n").unwrap();
+        let log = root.path().join(".apb").join(DECISIONS_LOG);
+        for plant in ["link", "dir"] {
+            let _ = std::fs::remove_file(&log);
+            let _ = std::fs::remove_dir(&log);
+            match plant {
+                "link" => std::os::unix::fs::symlink(&target, &log).unwrap(),
+                _ => std::fs::create_dir(&log).unwrap(),
+            }
+            let slow = Arc::new(Slow::default());
+            let d = decider(root.path(), 5, &slow);
+            let out = d.decide(
+                UseSite::CatalogRank,
+                json!({"task": "x"}),
+                vec!["task".into()],
+                questions("s"),
+            );
+            assert!(
+                matches!(out, StandaloneOutcome::Skipped { reason: "budget" }),
+                "{plant}: {out:?}"
+            );
+            assert!(slow.seen.lock().unwrap().is_empty(), "{plant}");
+        }
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "keep\n");
     }
 
     #[test]
