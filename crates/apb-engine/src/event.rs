@@ -497,7 +497,8 @@ pub enum EventPayload {
         #[serde(default)]
         cached: bool,
         /// `unavailable`, `timeout`, `rate_limited`, `auth`, `budget`,
-        /// `invalid`, or `None` when answered. Never a key or a body.
+        /// `invalid`, `cancelled` (the run stopped the ask; a resume asks
+        /// again), or `None` when answered. Never a key or a body.
         #[serde(default)]
         error: Option<String>,
         // --- labels and enforce (issue #165 Parts 9-14) ---

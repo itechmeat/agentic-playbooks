@@ -275,7 +275,9 @@ is then answered from the run's cache.
 - `cost_usd` is the provider's figure, or with `cost_estimated` the list price
   (USD 0.042 per million input tokens for the Jev 1.13 ids).
 - `error`: `unavailable`, `timeout`, `rate_limited`, `auth`, `budget`,
-  `invalid`, or null. Never a key or a body.
+  `invalid`, `cancelled` (the run stopped the ask, for example a judge
+  node's profile emulation on a stopped run; a resume asks again), or null.
+  Never a key or a body.
 - `output_chars`: characters of the output the use judged (the completion
   check: the raw reply), before redaction and clipping. The report uses it to
   set long outputs apart; absent in journals written before it existed.

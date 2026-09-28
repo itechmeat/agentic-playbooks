@@ -290,8 +290,9 @@ impl DecisionRunner {
                 if *applied {
                     *ledger.actions.entry(use_site.clone()).or_default() += 1;
                 }
-                // A routing exclusion asked nothing: nothing to replay.
-                if !state_digest.is_empty() {
+                // A routing exclusion asked nothing, and a cancelled ask was
+                // stopped rather than answered: nothing to replay.
+                if !state_digest.is_empty() && error.as_deref() != Some("cancelled") {
                     ledger.replay.push(Replay {
                         use_site: use_site.clone(),
                         node: node.clone(),
@@ -1564,5 +1565,28 @@ mod tests {
         let resumed = runner_over(cfg.path(), root.path(), &journal.events(), &provider);
         assert_eq!(ask(&resumed, &Recorder::default(), "a"), failed);
         assert_eq!(provider.calls(), 1, "no request on the resume");
+    }
+
+    #[test]
+    fn a_cancelled_ask_is_asked_again_on_a_resume() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let journal = Recorder::default();
+        let provider = Arc::new(
+            FakeProvider::new("fake")
+                .answer("q", json!({"type": "noul", "noul": 0.9}))
+                .fail_next(apb_decide::DecideError::Cancelled),
+        );
+        let first = runner_over(cfg.path(), root.path(), &[], &provider);
+        assert_eq!(
+            ask(&first, &journal, "a"),
+            DecisionOutcome::Failed {
+                error_kind: "cancelled".into()
+            }
+        );
+        let resumed = runner_over(cfg.path(), root.path(), &journal.events(), &provider);
+        let outcome = ask(&resumed, &Recorder::default(), "a");
+        assert!(!meta_of(&outcome).1, "asked, not replayed");
+        assert_eq!(provider.calls(), 2);
     }
 }

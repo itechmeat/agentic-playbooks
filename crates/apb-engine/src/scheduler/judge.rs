@@ -214,6 +214,13 @@ pub(crate) fn execute(
             ask: &ask,
         },
     );
+    if matches!(&outcome, DecisionOutcome::Failed { error_kind } if error_kind == "cancelled") {
+        return Ok(finished(
+            NodeStatus::Cancelled,
+            "cancelled".to_string(),
+            Vec::new(),
+        ));
+    }
     match use_answers(outcome, source) {
         Some(out) => Ok(finished(
             NodeStatus::Succeeded,
@@ -342,6 +349,9 @@ impl ProfileEmulation<'_, '_> {
         let prompt = apb_decide::llm_emulation::EmulationPrompt::new(req, true).single_message();
         let mut last = DecideError::Unavailable("emulation agent gave no answer".into());
         for _ in 0..=EMULATION_RETRIES {
+            if self.cancel.load(std::sync::atomic::Ordering::Relaxed) {
+                return Err(DecideError::Cancelled);
+            }
             match self.run_once(&prompt) {
                 Ok(Some(text)) => match apb_decide::llm_emulation::parse_reply(req, &text) {
                     Ok((answers, ignored_items)) => {

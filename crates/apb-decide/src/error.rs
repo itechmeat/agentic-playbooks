@@ -26,6 +26,10 @@ pub enum DecideError {
     /// The request did not complete within the timeout.
     #[error("timed out")]
     Timeout,
+    /// The caller stopped the request (a stopped run, a branch that lost a
+    /// `join: any`). Not an answer to replay: a resumed run asks again.
+    #[error("cancelled")]
+    Cancelled,
 }
 
 impl DecideError {
@@ -38,12 +42,14 @@ impl DecideError {
             DecideError::Auth => "auth",
             DecideError::Budget => "budget",
             DecideError::Timeout => "timeout",
+            DecideError::Cancelled => "cancelled",
         }
     }
 
     /// Whether a provider chain moves on to its next provider after this
-    /// error. An invalid request stays invalid for every provider.
+    /// error. An invalid request stays invalid for every provider, and a
+    /// cancelled one is not asked again.
     pub fn moves_on(&self) -> bool {
-        !matches!(self, DecideError::Invalid(_))
+        !matches!(self, DecideError::Invalid(_) | DecideError::Cancelled)
     }
 }
