@@ -326,6 +326,33 @@ fn completion_enforce_with_a_stored_threshold_fails_the_attempt_and_consumes_one
     assert!(anomalies(&events).is_empty());
 }
 
+#[test]
+fn completion_enforce_without_a_retry_left_never_fails_the_node() {
+    let p = Project::new(
+        &one_node(", completion_check: enforce, max_retries: 0"),
+        &format!("echo '{RUNNING}'"),
+    );
+    let server = StubServer::start(vec![completion(0.02, "partial")]);
+    p.decisions(&config(
+        &server.base_url,
+        "enforce",
+        "  completion_check: { mode: enforce }\n",
+    ));
+    p.threshold(&[("completion_check", 0.05)]);
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (status, _, events) = p.run();
+    assert_eq!(status, RunStatus::Succeeded, "fail-open: nothing to retry");
+    let a = attempts(&events, "w");
+    assert_eq!(a.len(), 1);
+    assert_eq!(a[0].0, "succeeded");
+    let d = decisions(&events, "completion_check");
+    assert!(!d[0].applied);
+    assert_eq!(d[0].enforce_refused.as_deref(), Some("no_retry"));
+    // It still acts as advise: one anomaly.
+    assert_eq!(anomalies(&events).len(), 1);
+}
+
 /// The enforce gate reads the store `apb decisions thresholds set` writes
 /// (`apb_core::decision_thresholds`, with its `version`): a threshold set
 /// through that module lets the path act, and a store of an unknown version

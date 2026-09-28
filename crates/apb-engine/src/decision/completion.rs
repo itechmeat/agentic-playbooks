@@ -170,6 +170,10 @@ pub(crate) struct Attempt<'a> {
     pub(crate) missing_fields: Vec<String>,
     /// The node opted in to the enforce path (`completion_check: enforce`).
     pub(crate) enforce: bool,
+    /// A same-executor retry is left for a rejection to consume. Without
+    /// one the enforce path does not act (`enforce_refused: no_retry`): a
+    /// rejection would fail the node, not retry it.
+    pub(crate) retry_left: bool,
 }
 
 /// What the attempt site does with the check's answer.
@@ -273,7 +277,7 @@ pub(crate) fn check(
             join: BTreeMap::new(),
             enforce: Some(Enforce {
                 opted_in: attempt.enforce,
-                refused: None,
+                refused: (!attempt.retry_left).then_some("no_retry"),
                 acts: &acts,
             }),
         },

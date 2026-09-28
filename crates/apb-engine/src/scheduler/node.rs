@@ -342,6 +342,7 @@ fn completion_check(
     attempt: u32,
     prompt: &str,
     output: &str,
+    retry_left: bool,
 ) -> Result<crate::decision::completion::Verdict, EngineError> {
     let Some(runner) = decisions else {
         return Ok(Default::default());
@@ -365,6 +366,7 @@ fn completion_check(
             missing_fields: super::cache::missing_output_fields(node, output),
             enforce: node.completion_check
                 == Some(apb_core::schema::CompletionCheckSetting::Enforce),
+            retry_left,
         },
     );
     if let Some(detail) = &verdict.anomaly {
@@ -1843,6 +1845,7 @@ pub(crate) fn execute_node(
                                             attempt,
                                             &task_prompt,
                                             &report.output,
+                                            try_i < retries,
                                         )?;
                                         let duration_ms = duration_ms
                                             .map(|d| d + check.elapsed.as_millis() as u64);
@@ -2036,6 +2039,7 @@ pub(crate) fn execute_node(
                                                 attempt,
                                                 &task_prompt,
                                                 &output,
+                                                try_i < retries,
                                             )?;
                                             let duration_ms = duration_ms
                                                 .map(|d| d + check.elapsed.as_millis() as u64);

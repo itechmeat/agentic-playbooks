@@ -666,8 +666,9 @@ Common rules, applied by the runner for every use:
    and run.
 
 When a rule fails, the decision is journaled with `enforce_refused`
-(`not_opted_in`, `uncalibrated`, `no_threshold`, `cap`, or `effects` at a
-gate) and the use behaves as advise. An acting decision is journaled with
+(`not_opted_in`, `uncalibrated`, `no_threshold`, `cap`, `effects` at a
+gate, or `no_retry` for a completion check whose attempt has no
+same-executor retry left to consume) and the use behaves as advise. An acting decision is journaled with
 `applied: true` before anything acts on it, and a resumed run replays it
 without a request, so the same path repeats, as long as the use is still in
 enforce (after the kill switch or a lowered ceiling the replayed answer is

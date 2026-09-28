@@ -504,8 +504,10 @@ pub enum EventPayload {
         /// Why an enforce-mode decision acted as advise instead:
         /// `no_threshold` (none stored for this use, provider and model),
         /// `uncalibrated`, `cap` (the use spent its automatic actions for
-        /// the run), `not_opted_in` (the playbook did not opt in) or
-        /// `effects` (the gate's effects forbid an automatic decision).
+        /// the run), `not_opted_in` (the playbook did not opt in),
+        /// `effects` (the gate's effects forbid an automatic decision) or
+        /// `no_retry` (a completion rejection would have no retry to
+        /// consume).
         #[serde(default, skip_serializing_if = "Option::is_none")]
         enforce_refused: Option<String>,
         /// Join keys a report labels the decision by: `wake_seq`,
