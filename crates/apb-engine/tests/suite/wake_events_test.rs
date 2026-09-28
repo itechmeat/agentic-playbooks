@@ -14,6 +14,7 @@ fn wake_and_abort_round_trip_and_fold() {
         trigger: WakeTrigger::NodeFailed,
         node: "impl".into(),
         detail: "exit 1".into(),
+        triage: None,
     })
     .unwrap();
     log.append(EventPayload::SupervisorAction {

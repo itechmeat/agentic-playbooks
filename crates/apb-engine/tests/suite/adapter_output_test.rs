@@ -211,7 +211,7 @@ fn empty_output_success_raises_an_anomaly() {
     let anomaly = events.iter().any(|e| {
         matches!(
             &e.payload,
-            EventPayload::WakeRaised { trigger: WakeTrigger::Anomaly, node, detail }
+            EventPayload::WakeRaised { trigger: WakeTrigger::Anomaly, node, detail, .. }
                 if node == "w" && detail.contains("empty output")
         )
     });

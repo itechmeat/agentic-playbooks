@@ -27,8 +27,8 @@ use apb_decide::{Question, UseSite};
 use serde_json::{Value, json};
 
 use super::{
-    DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, Enforce, FieldClass,
-    Judgement, StateField, StateParts,
+    DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, Enforce, FieldClass, Judgement,
+    StateField, StateParts,
 };
 use crate::event::{DecisionAnswer, Event, EventPayload};
 use crate::manifest::ManifestProfile;

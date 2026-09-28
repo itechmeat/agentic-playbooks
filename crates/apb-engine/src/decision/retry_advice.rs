@@ -24,8 +24,8 @@ use apb_decide::{Question, UseSite};
 use serde_json::{Value, json};
 
 use super::{
-    DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, Enforce, FieldClass,
-    Judgement, StateField, StateParts,
+    DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, Enforce, FieldClass, Judgement,
+    StateField, StateParts,
 };
 use crate::event::DecisionAnswer;
 
@@ -112,11 +112,7 @@ fn next_answer(answers: &BTreeMap<String, DecisionAnswer>) -> Option<(&str, f64)
 
 /// Asks once for this failure. Fail-open: anything but an enforced answer is
 /// [`Advice::Retry`].
-pub(crate) fn advise(
-    runner: &DecisionRunner,
-    journal: &dyn DecisionJournal,
-    f: Failure,
-) -> Advice {
+pub(crate) fn advise(runner: &DecisionRunner, journal: &dyn DecisionJournal, f: Failure) -> Advice {
     if runner.mode_for(UseSite::RetryAdvice) == DecisionMode::Off {
         return Advice::Retry;
     }

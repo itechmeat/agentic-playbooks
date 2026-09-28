@@ -1182,6 +1182,7 @@ fn drive_inner(
                         &mut frontier,
                         &mut last_applied_patch,
                         &failed,
+                        decisions.as_ref(),
                     )? {
                         BatchWake::NoFailures => {}
                         BatchWake::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
@@ -2098,6 +2099,7 @@ fn drive_inner(
                 &mut last_applied_patch,
                 status,
                 &output,
+                decisions.as_ref(),
             )? {
                 WakeOutcome::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
                 WakeOutcome::Resumed => continue,

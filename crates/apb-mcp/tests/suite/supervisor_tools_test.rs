@@ -666,6 +666,7 @@ fn supervisor_wait_event_returns_a_cursor_and_clips_huge_details() {
             trigger: WakeTrigger::NodeFailed,
             node: "impl".into(),
             detail,
+            triage: None,
         })
         .unwrap();
     log.append(EventPayload::RunFinished {
@@ -705,6 +706,7 @@ fn run_inspect_elides_long_event_texts_unless_asked() {
         trigger: WakeTrigger::NodeFailed,
         node: "impl".into(),
         detail: big.clone(),
+        triage: None,
     })
     .unwrap();
 

@@ -238,7 +238,9 @@ impl ProfileTiers {
         let mut out = Vec::new();
         for (name, t) in &self.0 {
             if validate_slug("tier name", name).is_err() {
-                out.push(format!("tier `{name}`: the name must match [a-z0-9][a-z0-9-]*"));
+                out.push(format!(
+                    "tier `{name}`: the name must match [a-z0-9][a-z0-9-]*"
+                ));
             }
             let own = t.agent.is_some() || t.model.is_some();
             match (t.use_executor.is_some(), own) {
@@ -251,7 +253,9 @@ impl ProfileTiers {
                 _ => {}
             }
             if t.for_work.trim().is_empty() {
-                out.push(format!("tier `{name}`: `for` must describe the work it is for"));
+                out.push(format!(
+                    "tier `{name}`: `for` must describe the work it is for"
+                ));
             }
         }
         out

@@ -395,7 +395,7 @@ fn has_anomaly(events: &[apb_engine::event::Event], node: &str, needle: &str) ->
     events.iter().any(|e| {
         matches!(
             &e.payload,
-            EventPayload::WakeRaised { trigger: WakeTrigger::Anomaly, node: n, detail }
+            EventPayload::WakeRaised { trigger: WakeTrigger::Anomaly, node: n, detail, .. }
                 if n == node && detail.contains(needle)
         )
     })

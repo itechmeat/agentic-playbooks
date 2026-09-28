@@ -34,7 +34,6 @@ pub mod stop;
 pub mod workdir;
 pub mod zcode_ui_sync;
 
-
 // Unit tests run with an isolated global config dir (issue #165 P1 open item
 // 5), set before any test thread starts; see `tests/main.rs` for the same
 // guard on the integration suite.
@@ -44,13 +43,15 @@ pub mod zcode_ui_sync;
     any(target_os = "linux", target_os = "android", target_os = "freebsd"),
     unsafe(link_section = ".init_array")
 )]
-#[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,__mod_init_func"))]
+#[cfg_attr(
+    target_vendor = "apple",
+    unsafe(link_section = "__DATA,__mod_init_func")
+)]
 static ISOLATE_TEST_CONFIG: extern "C" fn() = isolate_test_config;
 
 #[cfg(test)]
 extern "C" fn isolate_test_config() {
-    let dir =
-        std::env::temp_dir().join(format!("apb-engine-unit-xdg-{}", std::process::id()));
+    let dir = std::env::temp_dir().join(format!("apb-engine-unit-xdg-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&dir);
     // SAFETY: runs before `main`, so no other thread exists yet.
     unsafe {

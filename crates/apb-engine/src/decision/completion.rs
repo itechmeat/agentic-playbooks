@@ -189,7 +189,10 @@ fn choice_text(answers: &BTreeMap<String, DecisionAnswer>) -> String {
     match answers.get("completion") {
         Some(a) => format!(
             "{} (p={:.2})",
-            a.value.as_ref().and_then(Value::as_str).unwrap_or("unknown"),
+            a.value
+                .as_ref()
+                .and_then(Value::as_str)
+                .unwrap_or("unknown"),
             a.p.unwrap_or(0.0)
         ),
         None => "unknown".to_string(),

@@ -813,6 +813,11 @@ impl EventLog {
         })
     }
 
+    /// The seq the next appended event gets.
+    pub(crate) fn peek_next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
     /// Re-reads the last on-disk seq and advances `next_seq` past it when a
     /// concurrent append (child-to-parent wake mirror) raced ahead of this
     /// handle. Call after nested child work returns and before any further
@@ -1057,6 +1062,7 @@ pub struct WakeTriage {
 
 /// A decision model's recommendation at a review gate
 /// ([`EventPayload::ReviewRequested`] `recommendation`, issue #165 Part 11).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
 pub struct ReviewRecommendation {
     /// One of the gate's options.
@@ -1074,6 +1080,7 @@ pub struct ReviewRecommendation {
     /// The engine posted this option as the decision itself (enforce,
     /// `auto_decide`, Part 14.4).
     #[serde(default, skip_serializing_if = "is_false")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub applied: bool,
 }
 
@@ -1597,6 +1604,7 @@ mod tests {
             profile: Some("project/main".into()),
             from_model: Some("haiku".into()),
             to_model: Some("opus".into()),
+            reason: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();

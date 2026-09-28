@@ -78,13 +78,18 @@ pub fn spawn_supervisor_agent(
             program: inv.canonical_executable.to_string_lossy().into_owned(),
             spec: inv.spec.clone(),
         };
-        let brief = supervisor_brief(
+        let mut brief = supervisor_brief(
             run_id,
             playbook,
             &token,
             supervisor_wait_ms(&inv.agent_id),
             &skills_line,
         );
+        // Only when the run's wakes can carry an advisory triage (issue #165
+        // Part 10): the brief is otherwise byte-identical.
+        if triage_advised(&manifest) {
+            brief.push_str(crate::decision::supervisor_triage::BRIEF_LINE);
+        }
         match adapter.spawn_supervisor(&brief, &inv.model, root, soul, &connector_policy) {
             Ok(()) => {
                 apb_core::fsutil::atomic_write_under(
@@ -415,6 +420,7 @@ pub(crate) fn park_for_batch_failures(
     frontier: &mut Vec<String>,
     last_applied_patch: &mut Option<AppliedPatch>,
     failed: &[(String, NodeStatus, String)],
+    decisions: Option<&crate::decision::DecisionRunner>,
 ) -> Result<BatchWake, EngineError> {
     let mut targets: Vec<String> = Vec::new();
     for (node, status, output) in failed {
@@ -442,6 +448,7 @@ pub(crate) fn park_for_batch_failures(
             last_applied_patch,
             *status,
             output,
+            decisions,
         )? {
             WakeOutcome::Terminal(outcome) => return Ok(BatchWake::Terminal(outcome)),
             WakeOutcome::Resumed => {
@@ -482,13 +489,55 @@ pub(crate) fn park_for_supervisor(
     last_applied_patch: &mut Option<AppliedPatch>,
     status: NodeStatus,
     output: &str,
+    decisions: Option<&crate::decision::DecisionRunner>,
 ) -> Result<WakeOutcome, EngineError> {
     let trigger = if status == NodeStatus::TimedOut {
         WakeTrigger::NodeTimeout
     } else {
         WakeTrigger::NodeFailed
     };
-    crate::event::raise_wake(run_dir, log, trigger, current, output.to_string())?;
+    // Wake pre-triage (issue #165 Part 10, Part 14.3), only here: anomaly
+    // and question wakes are never triaged.
+    let triage = match decisions {
+        Some(runner) => park_triage(run_dir, log, playbook, current, trigger, output, runner)?,
+        None => Default::default(),
+    };
+    let mut detail = output.to_string();
+    if let Some(t) = &triage.triage {
+        detail.push_str(&crate::decision::supervisor_triage::detail_line(t));
+    }
+    crate::event::raise_wake_with_triage(
+        run_dir,
+        log,
+        trigger,
+        current,
+        detail,
+        triage.triage.clone(),
+    )?;
+    // Enforced: post the retry itself, as the same `node_retry` command a
+    // supervisor sends, marked as coming from triage. A note goes in first
+    // as a context note, so the retried prompt carries it.
+    if let Some(note) = triage.retry {
+        log.append(EventPayload::SupervisorAction {
+            action: crate::decision::supervisor_triage::TRIAGE_RETRY_ACTION.into(),
+            node: Some(current.clone()),
+            detail: triage
+                .triage
+                .as_ref()
+                .map(|t| format!("pre-triage posted node_retry: {} p={:.2}", t.action, t.p))
+                .unwrap_or_default(),
+        })?;
+        if let Some(note) = note {
+            crate::control::post_control(run_dir, Control::ContextAppend { note })?;
+        }
+        crate::control::post_control(
+            run_dir,
+            Control::Retry {
+                node: current.clone(),
+                prompt_override: None,
+            },
+        )?;
+    }
 
     loop {
         let (cmd, seq) = await_control(run_dir, log, *control_cursor, current)?;
@@ -783,4 +832,129 @@ mod token_economy_tests {
             assert!(supervisor_wait_ms(agent) < 60_000, "{agent}");
         }
     }
+}
+
+/// The facts a park wake's pre-triage needs, from the journal and the
+/// manifest, and the decision (issue #165 Part 10).
+fn park_triage(
+    run_dir: &Path,
+    log: &mut EventLog,
+    playbook: &Playbook,
+    node_id: &str,
+    trigger: WakeTrigger,
+    output: &str,
+    runner: &crate::decision::DecisionRunner,
+) -> Result<crate::decision::supervisor_triage::Triage, EngineError> {
+    use crate::decision::supervisor_triage::{self as st, Park};
+    let events = read_all(run_dir)?;
+    let Some(node) = playbook.node(node_id) else {
+        return Ok(Default::default());
+    };
+    // The last execution's attempts and failure kind.
+    let start = events
+        .iter()
+        .rposition(
+            |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == node_id),
+        )
+        .unwrap_or(0);
+    let mut attempt = 0u32;
+    let mut retries_used = 0u32;
+    let mut failure_kind: Option<String> = None;
+    for e in &events[start..] {
+        match &e.payload {
+            EventPayload::AttemptFinished {
+                node,
+                attempt: a,
+                failure_kind: k,
+                ..
+            } if node == node_id => {
+                attempt = *a;
+                failure_kind = k.clone();
+            }
+            EventPayload::RetryStarted { node, .. } if node == node_id => retries_used += 1,
+            _ => {}
+        }
+    }
+    let (prompt, max_retries) = match &node.kind {
+        NodeKind::AgentTask {
+            prompt,
+            max_retries,
+            ..
+        } => (
+            prompt.clone(),
+            max_retries.or(playbook.defaults.max_retries).unwrap_or(0),
+        ),
+        NodeKind::Script { script, .. } => (script.clone(), 0),
+        _ => (String::new(), 0),
+    };
+    let manifest = crate::manifest::read(run_dir).ok().flatten();
+    let has_alternative = manifest.as_ref().is_some_and(|m| {
+        let own = m.for_node(node_id);
+        own.is_some_and(|p| p.chain.len() > 1 || !p.tiers.is_empty())
+            || m.profiles
+                .iter()
+                .any(|p| Some(p.key()) != own.map(|o| o.key()) && !p.ephemeral)
+    });
+    let recent_actions: Vec<serde_json::Value> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::SupervisorAction {
+                action,
+                node,
+                detail,
+            } => Some(serde_json::json!({
+                "action": action,
+                "node": node,
+                "detail": detail.chars().take(200).collect::<String>(),
+            })),
+            _ => None,
+        })
+        .rev()
+        .take(st::RECENT_ACTIONS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect();
+    let trigger_name = match trigger {
+        WakeTrigger::NodeTimeout => "node_timeout",
+        WakeTrigger::NodeFailed => "node_failed",
+        WakeTrigger::Anomaly => "anomaly",
+    };
+    let opted_in = playbook
+        .supervisor
+        .as_ref()
+        .and_then(|s| s.pre_triage)
+        .is_some_and(|m| m == apb_core::schema::DecisionOptIn::Enforce);
+    // The decision is journaled first, then the wake: its seq is the next
+    // one after the decision.
+    let wake_seq = log.peek_next_seq() + 1;
+    let journal = Journal::new(&mut *log);
+    Ok(st::triage(
+        runner,
+        &journal,
+        Park {
+            node: node_id,
+            title: node.title.as_deref(),
+            prompt: &prompt,
+            trigger: trigger_name,
+            failure_kind: failure_kind.as_deref(),
+            attempt,
+            retries_left: max_retries.saturating_sub(retries_used),
+            output,
+            has_alternative,
+            has_successor: playbook.edges.iter().any(|e| e.from == node_id),
+            recent_actions,
+            wake_seq,
+            opted_in,
+        },
+    ))
+}
+
+/// Whether `supervisor_triage` is in advise or enforce for this run (its
+/// manifest snapshot, and not switched off since).
+fn triage_advised(manifest: &crate::manifest::RunExecutionManifest) -> bool {
+    !apb_core::decisions::killed_by_switch()
+        && manifest.decisions.as_ref().is_some_and(|d| {
+            d.mode_for("supervisor_triage") >= apb_core::decisions::DecisionMode::Advise
+        })
 }

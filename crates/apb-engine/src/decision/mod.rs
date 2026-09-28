@@ -143,7 +143,8 @@ pub(crate) struct DecisionCall<'a> {
     /// Join keys journaled with the decision for the report's labellers.
     pub(crate) join: BTreeMap<String, Value>,
     /// Join keys that depend on the answers (added when it arrives).
-    pub(crate) join_from: Option<&'a dyn Fn(&BTreeMap<String, DecisionAnswer>) -> BTreeMap<String, Value>>,
+    pub(crate) join_from:
+        Option<&'a dyn Fn(&BTreeMap<String, DecisionAnswer>) -> BTreeMap<String, Value>>,
     /// The use's enforce path, if it has one.
     pub(crate) enforce: Option<Enforce<'a>>,
 }
@@ -459,8 +460,7 @@ impl DecisionRunner {
         if !calibrated && !self.settings.allows_uncalibrated(site.as_str()) {
             return (false, Some("uncalibrated"));
         }
-        let Some(threshold) =
-            apb_core::decisions::stored_threshold(site.as_str(), provider, model)
+        let Some(threshold) = apb_core::decisions::stored_threshold(site.as_str(), provider, model)
         else {
             return (false, Some("no_threshold"));
         };

@@ -23,8 +23,8 @@ use apb_decide::{Question, UseSite};
 use serde_json::{Value, json};
 
 use super::{
-    DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, Enforce, FieldClass,
-    Judgement, StateField, StateParts,
+    DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, Enforce, FieldClass, Judgement,
+    StateField, StateParts,
 };
 use crate::event::{DecisionAnswer, WakeTriage};
 
@@ -145,13 +145,24 @@ fn action(answers: &BTreeMap<String, DecisionAnswer>) -> Option<(&str, f64, f64)
 pub(crate) fn retry_note(failure_kind: Option<&str>, output: &str) -> String {
     let tail: String = {
         let chars = output.chars().count();
-        output.chars().skip(chars.saturating_sub(OUTPUT_TAIL)).collect()
+        output
+            .chars()
+            .skip(chars.saturating_sub(OUTPUT_TAIL))
+            .collect()
     };
     let is_error = |l: &str| {
         let l = l.to_ascii_lowercase();
-        ["error", "failed", "failure", "panic", "exception", "cannot", "not found"]
-            .iter()
-            .any(|w| l.contains(w))
+        [
+            "error",
+            "failed",
+            "failure",
+            "panic",
+            "exception",
+            "cannot",
+            "not found",
+        ]
+        .iter()
+        .any(|w| l.contains(w))
     };
     let line = tail
         .lines()
@@ -184,7 +195,10 @@ pub(crate) fn triage(runner: &DecisionRunner, journal: &dyn DecisionJournal, p: 
     meta.insert("attempt".into(), json!(p.attempt));
     meta.insert("retries_left".into(), json!(p.retries_left));
     meta.insert("alternative_executor".into(), json!(p.has_alternative));
-    meta.insert("recent_actions".into(), Value::Array(p.recent_actions.clone()));
+    meta.insert(
+        "recent_actions".into(),
+        Value::Array(p.recent_actions.clone()),
+    );
     let judge = |answers: &BTreeMap<String, DecisionAnswer>| Judgement {
         applied: false,
         would_change: action(answers).map(|(a, _, _)| a != "needs_supervisor"),

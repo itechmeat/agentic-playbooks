@@ -58,7 +58,11 @@ pub fn downstream_nodes(playbook: &Playbook, from: &str) -> BTreeSet<String> {
 /// plus `inherited`, the pinned sub-playbooks' declared effects the run
 /// knows), or a merge, push, deploy or publish step downstream of the gate.
 /// `auto_decide_ok: true` on the gate overrides both.
-pub fn auto_decide_refusal(playbook: &Playbook, node: &str, inherited: &[Effect]) -> Option<String> {
+pub fn auto_decide_refusal(
+    playbook: &Playbook,
+    node: &str,
+    inherited: &[Effect],
+) -> Option<String> {
     let gate = playbook.node(node)?;
     if gate.auto_decide_ok {
         return None;
@@ -118,11 +122,7 @@ pub(super) fn check_decision_opt_ins(playbook: &Playbook, r: &mut ValidationRepo
                     }
                     enforce_uses.push("routing");
                 }
-                _ => r.error(
-                    "V70",
-                    id,
-                    "`route` applies to agent_task nodes only".into(),
-                ),
+                _ => r.error("V70", id, "`route` applies to agent_task nodes only".into()),
             }
         }
         let review_options = match &n.kind {
@@ -149,11 +149,7 @@ pub(super) fn check_decision_opt_ins(playbook: &Playbook, r: &mut ValidationRepo
                                 ),
                             );
                         } else if v.trim().is_empty() {
-                            r.error(
-                                "V71",
-                                id,
-                                format!("`option_descriptions.{k}` is empty"),
-                            );
+                            r.error("V71", id, format!("`option_descriptions.{k}` is empty"));
                         }
                     }
                 }
@@ -320,7 +316,10 @@ mod tests {
         ));
         assert!(got.contains(&("V72".to_string(), Severity::Error)));
         // `needs_changes` must be a declared option.
-        let yaml = gate(AUTO, "", "fix").replace("options: [approve, needs_changes]", "options: [approve, reject]");
+        let yaml = gate(AUTO, "", "fix").replace(
+            "options: [approve, needs_changes]",
+            "options: [approve, reject]",
+        );
         assert!(issues(&yaml).contains(&("V72".to_string(), Severity::Error)));
     }
 
@@ -346,9 +345,15 @@ mod tests {
 
     #[test]
     fn route_is_an_agent_task_setting_and_never_applies_to_a_handoff() {
-        let yaml = gate("", "", "fix").replace("prompt: y, profile: m", "prompt: y, profile: m, route: auto, continue_session: w");
+        let yaml = gate("", "", "fix").replace(
+            "prompt: y, profile: m",
+            "prompt: y, profile: m, route: auto, continue_session: w",
+        );
         let got = issues(&yaml);
-        assert!(got.contains(&("V70".to_string(), Severity::Warning)), "{got:?}");
+        assert!(
+            got.contains(&("V70".to_string(), Severity::Warning)),
+            "{got:?}"
+        );
         let yaml = gate(", route: auto", "", "fix");
         assert!(issues(&yaml).contains(&("V70".to_string(), Severity::Error)));
     }

@@ -33,7 +33,10 @@ mod common;
     any(target_os = "linux", target_os = "android", target_os = "freebsd"),
     unsafe(link_section = ".init_array")
 )]
-#[cfg_attr(target_vendor = "apple", unsafe(link_section = "__DATA,__mod_init_func"))]
+#[cfg_attr(
+    target_vendor = "apple",
+    unsafe(link_section = "__DATA,__mod_init_func")
+)]
 static ISOLATE_CONFIG: extern "C" fn() = isolate_config;
 
 extern "C" fn isolate_config() {

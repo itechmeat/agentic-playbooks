@@ -45,6 +45,7 @@ fn render_types() -> String {
         apb_engine::state::NodeStatus::decl(&cfg),
         apb_engine::progress::WaitingKind::decl(&cfg),
         apb_engine::progress::PendingQuestion::decl(&cfg),
+        apb_engine::event::ReviewRecommendation::decl(&cfg),
         apb_engine::progress::PendingReview::decl(&cfg),
         apb_engine::progress::PendingSupervisor::decl(&cfg),
         apb_engine::progress::ProgressSummary::decl(&cfg),

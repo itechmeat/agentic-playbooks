@@ -539,7 +539,9 @@ impl EffectiveDecisions {
 
     /// Whether an enforce use may act on uncalibrated answers.
     pub fn allows_uncalibrated(&self, use_name: &str) -> bool {
-        self.uses.get(use_name).is_some_and(|u| u.allow_uncalibrated)
+        self.uses
+            .get(use_name)
+            .is_some_and(|u| u.allow_uncalibrated)
     }
 }
 

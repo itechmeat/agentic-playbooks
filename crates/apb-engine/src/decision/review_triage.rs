@@ -25,8 +25,8 @@ use apb_decide::{Question, UseSite};
 use serde_json::{Value, json};
 
 use super::{
-    DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, Enforce, FieldClass,
-    Judgement, StateField, StateParts,
+    DecisionCall, DecisionJournal, DecisionOutcome, DecisionRunner, Enforce, FieldClass, Judgement,
+    StateField, StateParts,
 };
 use crate::event::{DecisionAnswer, ReviewRecommendation};
 
@@ -192,9 +192,12 @@ pub(crate) fn recommend(
     }
     let provider = meta.provider.clone().unwrap_or_default();
     let model = meta.model.clone().unwrap_or_default();
-    let auto = meta
-        .applied
-        .then(|| (option.to_string(), format!("auto: {provider}/{model} p={p:.2}")));
+    let auto = meta.applied.then(|| {
+        (
+            option.to_string(),
+            format!("auto: {provider}/{model} p={p:.2}"),
+        )
+    });
     Recommendation {
         recommendation: Some(ReviewRecommendation {
             option: option.to_string(),

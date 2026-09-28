@@ -185,6 +185,7 @@ fn supervisor_wait_returns_wakes_reviews_and_the_end_in_seq_order() {
             trigger: WakeTrigger::NodeFailed,
             node: "impl".into(),
             detail: "exit 1".into(),
+            triage: None,
         })
         .unwrap();
     let review = log
@@ -194,6 +195,7 @@ fn supervisor_wait_returns_wakes_reviews_and_the_end_in_seq_order() {
             title: None,
             instruction: "decide".into(),
             prompt: None,
+            recommendation: None,
         })
         .unwrap();
     log.append(EventPayload::RunFinished {
