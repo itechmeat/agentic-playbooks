@@ -41,6 +41,12 @@ use serde_json::{Value, json};
 use crate::tools::ToolError;
 
 /// Most options a `choice` may carry, `none_of_these` included.
+/// The most silenced suggestions asked about in one request.
+const MAX_COVERAGE: usize = 16;
+
+/// A suggestion synopsis, at most, in the state.
+const SYNOPSIS_BYTES: usize = 600;
+
 const MAX_OPTIONS: usize = 255;
 /// How many ranked refs the response carries.
 const TOP: usize = 5;
@@ -129,6 +135,9 @@ struct Candidate {
     reference: Value,
     title: String,
     trigger: Value,
+    /// The entry's `trusted`, `lifecycle` and `ambiguous`, repeated on a
+    /// ranked item so a caller reads the facts next to the advice.
+    facts: serde_json::Map<String, Value>,
 }
 
 fn candidates(catalog: &Value) -> Vec<Candidate> {
@@ -142,6 +151,10 @@ fn candidates(catalog: &Value) -> Vec<Candidate> {
                     reference: e["ref"].clone(),
                     title: e["name"].as_str().unwrap_or("").to_string(),
                     trigger: e.get("trigger").cloned().unwrap_or(Value::Null),
+                    facts: ["trusted", "lifecycle", "ambiguous"]
+                        .into_iter()
+                        .filter_map(|k| e.get(k).map(|v| (k.to_string(), v.clone())))
+                        .collect(),
                 })
                 .collect()
         })
@@ -222,8 +235,26 @@ fn ask(
     let budget = (decider.max_state_bytes() as f64 * STATE_SHARE) as usize;
     // Redacted before any clip (a cut can split a secret).
     let task = clip(&decider.redact(query), TASK_BYTES);
+    // A suggestion's synopsis is repository text (the project store is
+    // committed): it travels in the state, like every other untrusted text,
+    // never in a question, and at most MAX_COVERAGE of them.
+    let mut suggestions = serde_json::Map::new();
+    if with_extras {
+        for (i, s) in suppressed.iter().take(MAX_COVERAGE).enumerate() {
+            let synopsis = s["synopsis"]
+                .as_str()
+                .filter(|t| !t.is_empty())
+                .or_else(|| s["pattern"].as_str())
+                .unwrap_or("");
+            suggestions.insert(
+                format!("s{i}"),
+                json!(clip(&decider.redact(synopsis), SYNOPSIS_BYTES)),
+            );
+        }
+    }
+    let suggestions_bytes = serde_json::to_string(&suggestions).map_or(0, |t| t.len());
     let share = budget
-        .saturating_sub(task.len() + 64)
+        .saturating_sub(task.len() + suggestions_bytes + 64)
         .checked_div(group.len().max(1))
         .unwrap_or(0);
     let mut playbooks = serde_json::Map::new();
@@ -256,31 +287,30 @@ fn ask(
                 criteria: None,
             },
         );
-        for (i, s) in suppressed.iter().enumerate() {
-            let synopsis = s["synopsis"]
-                .as_str()
-                .filter(|t| !t.is_empty())
-                .or_else(|| s["pattern"].as_str())
-                .unwrap_or("");
+        for i in 0..suggestions.len() {
             questions.insert(
                 format!("covered_{i}"),
                 Question::Noul {
-                    instructions: json!({
-                        "question": "Does the suggestion `synopsis` describe the same procedure as `task`?",
-                        "synopsis": clip(&decider.redact(synopsis), 600),
-                    }),
+                    instructions: json!(format!(
+                        "Does the suggestion `suggestions.s{i}` describe the same procedure as `task`?"
+                    )),
                     criteria: None,
                 },
             );
         }
     }
-    let state = json!({"task": task, "playbooks": playbooks});
-    decider.decide(
-        UseSite::CatalogRank,
-        state,
-        vec!["task".into(), "playbooks".into()],
-        questions,
-    )
+    let (state, order) = if suggestions.is_empty() {
+        (
+            json!({"task": task, "playbooks": playbooks}),
+            vec!["task".into(), "playbooks".into()],
+        )
+    } else {
+        (
+            json!({"task": task, "playbooks": playbooks, "suggestions": suggestions}),
+            vec!["task".into(), "playbooks".into(), "suggestions".into()],
+        )
+    };
+    decider.decide(UseSite::CatalogRank, state, order, questions)
 }
 
 fn error_fields(kind: &str) -> Value {
@@ -357,7 +387,12 @@ fn rank(decider: &StandaloneDecider, catalog: &Value, query: &str) -> Value {
         "ranked": ranked
             .iter()
             .take(TOP)
-            .map(|(c, p)| json!({"ref": c.reference, "p": round(*p)}))
+            .map(|(c, p)| {
+                let mut item = c.facts.clone();
+                item.insert("ref".into(), c.reference.clone());
+                item.insert("p".into(), json!(round(*p)));
+                Value::Object(item)
+            })
             .collect::<Vec<_>>(),
         "confidence": round(confidence),
         "ranking": {

@@ -441,13 +441,15 @@ sentence. One request asks a `choice` over the catalog's playbooks (their
 `when`, `avoid_when` and `examples` in the state, clipped to
 `privacy.max_state_bytes`, plus `none_of_these`), a `needs_playbook` noul
 ("is the task a doable action a saved procedure could perform?") and one
-`covered` noul per active silenced suggestion ("does its synopsis describe
-the same procedure?"). The state is sent as `prompts` class and redacted like
+`covered` noul for each of the first 16 active silenced suggestions ("does
+the suggestion `suggestions.s<i>` describe the same procedure?"; the synopses
+travel in the state, never in the question text). The state is sent as `prompts` class and redacted like
 a run's. Above 254 playbooks the catalog is ranked in chunks and the chunk
 leaders again.
 
 In advise the response is the full catalog plus `ranked` (the top five
-`{ref, p}`), `confidence`, `needs_playbook_p`, `covered_by` (`{pattern,
+`{ref, p, trusted, lifecycle, ambiguous}`, the last three copied from the
+entry so the facts stand next to the advice), `confidence`, `needs_playbook_p`, `covered_by` (`{pattern,
 scope, p}` when a record reaches the `covered` cut) and `ranking: {provider,
 model, calibrated}`. Entries are never filtered or reordered, and nothing is
 applied: the host still decides what to run and whether to offer a capture.
