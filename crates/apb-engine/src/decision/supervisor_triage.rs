@@ -141,38 +141,12 @@ fn action(answers: &BTreeMap<String, DecisionAnswer>) -> Option<(&str, f64, f64)
 }
 
 /// The code-template note of an automatic `retry_with_note`: the failure
-/// kind and the first line of the output tail that reads like an error.
-pub(crate) fn retry_note(failure_kind: Option<&str>, output: &str) -> String {
-    let tail: String = {
-        let chars = output.chars().count();
-        output
-            .chars()
-            .skip(chars.saturating_sub(OUTPUT_TAIL))
-            .collect()
-    };
-    let is_error = |l: &str| {
-        let l = l.to_ascii_lowercase();
-        [
-            "error",
-            "failed",
-            "failure",
-            "panic",
-            "exception",
-            "cannot",
-            "not found",
-        ]
-        .iter()
-        .any(|w| l.contains(w))
-    };
-    let line = tail
-        .lines()
-        .map(str::trim)
-        .find(|l| !l.is_empty() && is_error(l))
-        .or_else(|| tail.lines().map(str::trim).find(|l| !l.is_empty()))
-        .unwrap_or("");
-    let line: String = line.chars().take(300).collect();
+/// kind only. The note becomes a supervisor note, which outranks the node
+/// template and the run instruction for every later prompt of the run, so it
+/// never quotes the failed attempt's output (untrusted agent text).
+pub(crate) fn retry_note(failure_kind: Option<&str>) -> String {
     format!(
-        "Previous attempt failed with: {}; {line}",
+        "Previous attempt failed with: {}. Find the cause in what that attempt reported before repeating the same step.",
         failure_kind.unwrap_or("unknown")
     )
 }
@@ -271,7 +245,7 @@ pub(crate) fn triage(runner: &DecisionRunner, journal: &dyn DecisionJournal, p: 
     };
     let retry = meta
         .applied
-        .then(|| (act == "retry_with_note").then(|| retry_note(p.failure_kind, p.output)));
+        .then(|| (act == "retry_with_note").then(|| retry_note(p.failure_kind)));
     Triage {
         triage: Some(wake),
         retry,

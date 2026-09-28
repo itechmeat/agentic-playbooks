@@ -1106,10 +1106,12 @@ fn supervisor_auto_retry_is_a_capped_node_retry_attributed_to_triage() {
         }
         _ => None,
     });
+    // It never quotes the attempt's output: a supervisor note outranks the
+    // template for every later prompt, and the output is agent text.
     assert_eq!(
         note.as_deref(),
         Some(
-            "Previous attempt failed with: agent; agent exited with Some(1): error: flaky network fetch"
+            "Previous attempt failed with: agent. Find the cause in what that attempt reported before repeating the same step."
         )
     );
 }
