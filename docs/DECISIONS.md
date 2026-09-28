@@ -664,6 +664,8 @@ declares `irreversible` or `secrets` effects, or whose nodes after the gate
 include a merge, push, deploy or publish step (by id, title or script path),
 unless the gate sets `auto_decide_ok: true`. The inferred `external` effect
 does not count (every playbook with an agent has it). The run re-checks the
-same rule with the declared effects of the sub-playbooks it runs and refuses
-with `enforce_refused: effects`. `allow` may contain only `needs_changes`,
+same rule with the declared effects of every sub-playbook it runs, at any
+depth and in any scope (resolved as the run gate resolves them), and refuses
+with `enforce_refused: effects`; a sub-playbook tree that does not resolve is
+refused the same way. `allow` may contain only `needs_changes`,
 never `approve` (V72).

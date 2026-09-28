@@ -7,27 +7,22 @@ use super::*;
 
 use crate::decision::review_triage::{self, Recommendation};
 
-/// The declared effects of every sub-playbook the playbook runs, loaded from
-/// the project's registry (best effort: a child that does not load adds
-/// nothing, and the playbook's own declaration still counts).
-fn inherited_effects(root: &Path, playbook: &Playbook) -> Vec<apb_core::schema::Effect> {
-    let Ok(reg) = apb_core::registry::Registry::open(root) else {
-        return Vec::new();
-    };
-    playbook
-        .nodes
-        .iter()
-        .filter_map(|n| match &n.kind {
-            NodeKind::Playbook { playbook, .. } => reg.load(&playbook.id, None).ok(),
-            _ => None,
-        })
-        .flat_map(|l| l.playbook.effects.clone())
-        .collect()
+/// The effects of every sub-playbook the playbook runs, recursively and in
+/// any scope, resolved as the run gate resolves them. `None` when the tree
+/// does not resolve: the automatic decision is then refused (fail-closed).
+fn inherited_effects(
+    root: &Path,
+    run_dir: &Path,
+    playbook: &Playbook,
+) -> Option<Vec<apb_core::schema::Effect>> {
+    let origin = node::parent_run_origin(run_dir);
+    crate::gate::tree_effects(root, playbook, &origin).map(|set| set.into_iter().collect())
 }
 
 /// Asks for the recommendation of one gate visit.
 pub(crate) fn recommend(
     root: &Path,
+    run_dir: &Path,
     runner: &crate::decision::DecisionRunner,
     journal: &Journal,
     playbook: &Playbook,
@@ -58,10 +53,16 @@ pub(crate) fn recommend(
         }
     }
     let visit = crate::event::review_requested_count(events, gate) as u32 + 1;
-    let refusal = node.auto_decide.as_ref().and_then(|_| {
-        apb_core::validate::auto_decide_refusal(playbook, gate, &inherited_effects(root, playbook))
-            .map(|_| "effects")
-    });
+    let refusal =
+        node.auto_decide
+            .as_ref()
+            .and_then(|_| match inherited_effects(root, run_dir, playbook) {
+                Some(inherited) => {
+                    apb_core::validate::auto_decide_refusal(playbook, gate, &inherited)
+                        .map(|_| "effects")
+                }
+                None => Some("effects"),
+            });
     review_triage::recommend(
         runner,
         journal,

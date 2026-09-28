@@ -852,6 +852,56 @@ fn review_auto_decide_is_refused_for_inherited_effects_and_waits() {
 }
 
 #[test]
+fn review_auto_decide_is_refused_for_a_grandchilds_effects() {
+    // The child declares nothing; the playbook it runs declares
+    // `irreversible`. The run-time check walks the whole tree.
+    let yaml = gate_playbook("", ", auto_decide: { allow: [needs_changes] }", "fix").replace(
+        "  - { id: fix, type: agent_task, prompt: \"Apply fixes\" }\n",
+        "  - { id: fix, type: playbook, playbook: child }\n",
+    );
+    let p = Project::new(&yaml, "echo 'Review: one blocking defect.'");
+    let write_playbook = |id: &str, body: &str| {
+        let dir = p.root.path().join(format!(".apb/playbooks/{id}/1.0.0"));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(dir.join("playbook.yaml"), body).unwrap();
+        fs::write(
+            p.root.path().join(format!(".apb/playbooks/{id}/current")),
+            "1.0.0",
+        )
+        .unwrap();
+    };
+    write_playbook(
+        "child",
+        "schema: 2\nid: child\nname: Child\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: run, type: playbook, playbook: grandchild }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: run }\n  - { from: run, to: done }\n",
+    );
+    write_playbook(
+        "grandchild",
+        "schema: 2\nid: grandchild\nname: Grandchild\nversion: 1.0.0\neffects: [irreversible]\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+    );
+    let server = StubServer::start_with_fallback(vec![], decision_reply("needs_changes", 0.99));
+    p.decisions(&config(
+        &server.base_url,
+        "enforce",
+        "  review_triage: { mode: enforce }\n",
+    ));
+    p.threshold(&[("review_triage", 0.5)]);
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let rx = run_in_background(p.root.path().to_path_buf(), RunOptions::default());
+    let run_dir = find_run_dir(p.root.path());
+    let (_, rec) = poll("review_requested", || review_requested(&run_dir));
+    assert!(!rec.unwrap().applied, "fail-closed: the gate waits");
+    let d = decisions(&read_all(&run_dir).unwrap(), "review_triage");
+    assert_eq!(d[0].enforce_refused.as_deref(), Some("effects"));
+    apb_engine::stop::stop_run(
+        p.root.path(),
+        run_dir.file_name().unwrap().to_str().unwrap(),
+    )
+    .ok();
+    let _ = rx.recv_timeout(Duration::from_secs(20));
+}
+
+#[test]
 fn an_earlier_human_decision_wins_over_auto_decide() {
     let p = Project::new(
         &gate_playbook("", ", auto_decide: { allow: [needs_changes] }", "fix"),
