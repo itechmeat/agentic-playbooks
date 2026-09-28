@@ -30,7 +30,7 @@ trigger:
   - a quick one-off question or trivial edit without process
   - refining a task is the goal, with no implementation
   examples:
-  - Возьми задачу с доски в работу
+  - Take a task from the board into work
   - Implement issue 35 from the board
   - Start implementation of the connectors task
 requires:
@@ -134,16 +134,18 @@ nodes:
     picked: '{{nodes.pick_task.output}}'
   questions:
     needs_brainstorm:
-      type: noul
-      instructions: Does the `needs_brainstorm` line of the task block in `picked` say yes?
+      type: choice
+      instructions: Does this task, described in `picked`, need a brainstorm before implementation?
+      criteria:
+        'yes': The task leaves the approach, the scope or the acceptance criteria open, or names design questions still to settle.
+        'no': The task states a concrete scope, an agreed approach and acceptance criteria an implementer can follow directly.
+        unclear: '`picked` is empty, cut off, or does not describe exactly one task.'
   thresholds:
     needs_brainstorm:
-      yes_at: 0.5
+      min_confidence: 0.6
+      below: unclear
   on_unavailable:
-    route: brainstorm_legacy_gate
-- id: brainstorm_legacy_gate
-  title: needs_brainstorm marker (no decision model)
-  type: condition
+    route: aborted
 - id: brainstorm_child
   title: null
   expected_duration: 1h
@@ -1086,6 +1088,22 @@ edges:
   fallback: false
   join: null
 - from: pick_task
+  to: brainstorm_child
+  condition:
+    type: output_match
+    node: pick_task
+    pattern: 'needs_brainstorm: yes'
+  fallback: false
+  join: null
+- from: pick_task
+  to: lock_scope
+  condition:
+    type: output_match
+    node: pick_task
+    pattern: 'needs_brainstorm: no'
+  fallback: false
+  join: null
+- from: pick_task
   to: brainstorm_gate
   condition:
     type: node_status
@@ -1099,25 +1117,7 @@ edges:
   fallback: true
   join: null
 - from: brainstorm_gate
-  to: brainstorm_child
-  condition:
-    type: output_field
-    node: brainstorm_gate
-    field: needs_brainstorm
-    equals: 'true'
-  fallback: false
-  join: null
-- from: brainstorm_gate
-  to: lock_scope
-  condition:
-    type: output_field
-    node: brainstorm_gate
-    field: needs_brainstorm
-    equals: 'false'
-  fallback: false
-  join: null
-- from: brainstorm_gate
-  to: brainstorm_legacy_gate
+  to: aborted
   condition:
     type: output_field
     node: brainstorm_gate
@@ -1126,27 +1126,33 @@ edges:
   fallback: false
   join: null
 - from: brainstorm_gate
-  to: aborted
-  condition: null
-  fallback: true
-  join: null
-- from: brainstorm_legacy_gate
   to: brainstorm_child
   condition:
-    type: output_match
-    node: pick_task
-    pattern: 'needs_brainstorm: yes'
+    type: output_field
+    node: brainstorm_gate
+    field: needs_brainstorm
+    equals: 'yes'
   fallback: false
   join: null
-- from: brainstorm_legacy_gate
+- from: brainstorm_gate
+  to: brainstorm_child
+  condition:
+    type: output_field
+    node: brainstorm_gate
+    field: needs_brainstorm
+    equals: unclear
+  fallback: false
+  join: null
+- from: brainstorm_gate
   to: lock_scope
   condition:
-    type: output_match
-    node: pick_task
-    pattern: 'needs_brainstorm: no'
+    type: output_field
+    node: brainstorm_gate
+    field: needs_brainstorm
+    equals: 'no'
   fallback: false
   join: null
-- from: brainstorm_legacy_gate
+- from: brainstorm_gate
   to: aborted
   condition: null
   fallback: true
