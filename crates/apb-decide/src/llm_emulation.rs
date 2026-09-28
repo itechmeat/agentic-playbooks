@@ -230,12 +230,31 @@ fn object_schema(properties: serde_json::Map<String, Value>) -> Value {
     })
 }
 
+/// The longest reply prefix searched for a JSON object. A reply is untrusted
+/// text (an agent or an endpoint wrote it), so the search is bounded.
+const MAX_REPLY_SCAN_BYTES: usize = 64 * 1024;
+
+/// The most `{` positions tried as the start of an object.
+const MAX_OBJECT_STARTS: usize = 64;
+
 /// The first complete JSON object in `text` (a reply may wrap it in a code
-/// fence or a sentence), or `None`.
+/// fence or a sentence), or `None`. Only the first [`MAX_REPLY_SCAN_BYTES`]
+/// and at most [`MAX_OBJECT_STARTS`] candidate starts are searched, so a
+/// hostile reply costs linear time.
 pub fn first_json_object(text: &str) -> Option<Value> {
+    let mut end = text.len().min(MAX_REPLY_SCAN_BYTES);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let text = &text[..end];
     let bytes = text.as_bytes();
     let mut start = 0;
+    let mut tries = 0;
     while let Some(off) = text[start..].find('{') {
+        tries += 1;
+        if tries > MAX_OBJECT_STARTS {
+            return None;
+        }
         let open = start + off;
         let (mut depth, mut in_str, mut esc) = (0usize, false, false);
         for (i, &b) in bytes.iter().enumerate().skip(open) {
@@ -440,7 +459,11 @@ impl LlmEmulation {
             .headers()
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok());
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            // The header comes from the provider: bound it so that a huge
+            // value can neither overflow the deadline arithmetic nor be
+            // passed on as a wait.
+            .map(|s| s.min(crate::http::MAX_RETRY_AFTER_SECS));
         let text = response
             .into_body()
             .read_to_string()
@@ -533,7 +556,7 @@ impl DecisionProvider for LlmEmulation {
                 422 => return Err(DecideError::Invalid(self.scrub(&text))),
                 s if retryable(s) => {
                     let wait = Duration::from_secs(retry_after.unwrap_or(0));
-                    if retries >= MAX_RETRIES || Instant::now() + wait >= deadline {
+                    if retries >= MAX_RETRIES || wait >= deadline.saturating_duration_since(Instant::now()) {
                         return Err(if s == 429 {
                             DecideError::RateLimited {
                                 retry_after: retry_after.map(Duration::from_secs),
@@ -555,6 +578,24 @@ impl DecisionProvider for LlmEmulation {
 mod tests {
     use super::*;
     use crate::{ChoiceCriteria, UseSite};
+
+    #[test]
+    fn a_hostile_reply_is_searched_in_linear_time() {
+        // Unbalanced braces used to cost a scan to the end per `{`.
+        let started = std::time::Instant::now();
+        assert!(first_json_object(&"{".repeat(1_000_000)).is_none());
+        assert!(first_json_object(&"{\"a\": [".repeat(200_000)).is_none());
+        assert!(
+            started.elapsed() < std::time::Duration::from_secs(1),
+            "took {:?}",
+            started.elapsed()
+        );
+        // An ordinary chatty reply still yields its object.
+        assert_eq!(
+            first_json_object("Sure: {x} then ```json\n{\"q1\": 0.2}\n```"),
+            Some(json!({"q1": 0.2}))
+        );
+    }
 
     fn request(state: Value) -> DecisionRequest {
         DecisionRequest {

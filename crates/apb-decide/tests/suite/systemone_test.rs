@@ -236,6 +236,19 @@ fn retry_after_is_honoured_only_within_the_timeout() {
         }
     );
     assert_eq!(server.count(), 1);
+
+    // A value too large for the clock is an ordinary rate limit, bounded,
+    // never a panic.
+    let server = StubServer::start(vec![
+        StubResponse::json(429, "{}").header("retry-after", "18446744073709551615"),
+    ]);
+    let err = provider(&server, None).decide(&request()).unwrap_err();
+    assert_eq!(
+        err,
+        DecideError::RateLimited {
+            retry_after: Some(Duration::from_secs(3600))
+        }
+    );
 }
 
 #[test]

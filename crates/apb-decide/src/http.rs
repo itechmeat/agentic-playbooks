@@ -93,7 +93,11 @@ impl Route {
             .headers()
             .get("retry-after")
             .and_then(|v| v.to_str().ok())
-            .and_then(|s| s.trim().parse::<u64>().ok());
+            .and_then(|s| s.trim().parse::<u64>().ok())
+            // The header comes from the provider: bound it so that a huge
+            // value can neither overflow the deadline arithmetic nor be
+            // passed on as a wait.
+            .map(|s| s.min(crate::http::MAX_RETRY_AFTER_SECS));
         let text = response
             .into_body()
             .read_to_string()
@@ -127,7 +131,7 @@ impl Route {
                 }
                 s if retryable(s) => {
                     let wait = Duration::from_secs(retry_after.unwrap_or(0));
-                    let fits = Instant::now() + wait < deadline;
+                    let fits = wait < deadline.saturating_duration_since(Instant::now());
                     if retries >= MAX_RETRIES || !fits {
                         return Err(if s == 429 {
                             DecideError::RateLimited {
@@ -145,6 +149,10 @@ impl Route {
         }
     }
 }
+
+/// The longest `retry-after` a reply may ask for; a larger value is read as
+/// this one.
+pub(crate) const MAX_RETRY_AFTER_SECS: u64 = 3600;
 
 /// Whether a status is worth another try: request timeout, conflict, rate
 /// limit, server errors and the overload code.
