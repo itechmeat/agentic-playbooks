@@ -243,7 +243,11 @@ on outputs.
 
 Written to the run journal through the attempt journal *before* anything reads
 the answer, so a resumed run replays a journaled decision (same use, node,
-attempt, state and questions) with no request.
+attempt, state and questions) with no request. Each journaled decision is
+replayed once, the latest first; a failed one replays as the same failure.
+Within one drive nothing is replayed: a node executed again (a loop, a
+`node_retry`) is asked anew, journaled and counted, and an identical state
+is then answered from the run's cache.
 
 ```json
 {"type":"decision_made","use_site":"completion_check","node":"fix","attempt":2,
@@ -648,7 +652,9 @@ When a rule fails, the decision is journaled with `enforce_refused`
 (`not_opted_in`, `uncalibrated`, `no_threshold`, `cap`, or `effects` at a
 gate) and the use behaves as advise. An acting decision is journaled with
 `applied: true` before anything acts on it, and a resumed run replays it
-without a request, so the same path repeats. Every path is fail-open except
+without a request, so the same path repeats, as long as the use is still in
+enforce (after the kill switch or a lowered ceiling the replayed answer is
+not acted on). Every path is fail-open except
 the review auto-decision, which is fail-closed.
 
 | Path | Opt-in | Acts when | Action |

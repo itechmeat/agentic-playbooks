@@ -12,8 +12,10 @@
 //! 3. Redaction ([`redact`]), then each field's own clip, then the share of
 //!    `privacy.max_state_bytes` it may take, head and tail kept.
 //! 4. sha256 of the state and of the questions.
-//! 5. A decision journaled earlier in this run for the same use, node,
-//!    attempt, state and questions is replayed: no request.
+//! 5. A decision journaled before this drive started for the same use,
+//!    node, attempt, state and questions is replayed once (a failure as the
+//!    same failure, an action only while the use is still in enforce): no
+//!    request.
 //! 6. A spent budget journals `error: budget` and skips.
 //! 7. The provider chain, through the run's cache, within `timeout_ms`.
 //! 8. `DecisionMade` is appended to the journal; the answer is returned only
@@ -181,7 +183,9 @@ pub(crate) enum DecisionOutcome {
     Failed { error_kind: String },
 }
 
-/// A journaled answer that a later identical ask replays.
+/// A decision journaled before this drive started, which the same ask of a
+/// resumed execution replays once instead of asking again. A failed one
+/// replays as the same failure.
 #[derive(Debug, Clone)]
 struct Replay {
     use_site: String,
@@ -191,6 +195,8 @@ struct Replay {
     questions_digest: String,
     answers: BTreeMap<String, DecisionAnswer>,
     meta: AnswerMeta,
+    /// The journaled error kind.
+    error: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -284,7 +290,8 @@ impl DecisionRunner {
                 if *applied {
                     *ledger.actions.entry(use_site.clone()).or_default() += 1;
                 }
-                if error.is_none() {
+                // A routing exclusion asked nothing: nothing to replay.
+                if !state_digest.is_empty() {
                     ledger.replay.push(Replay {
                         use_site: use_site.clone(),
                         node: node.clone(),
@@ -300,6 +307,7 @@ impl DecisionRunner {
                             enforce_refused: enforce_refused.clone(),
                             seq: None,
                         },
+                        error: error.clone(),
                     });
                 }
             }
@@ -422,21 +430,21 @@ impl DecisionRunner {
         state_digest: &str,
         questions_digest: &str,
         answered_by: Option<&[String]>,
-    ) -> Option<(BTreeMap<String, DecisionAnswer>, AnswerMeta)> {
-        let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
-        ledger
-            .replay
-            .iter()
-            .find(|r| {
-                r.use_site == site.as_str()
-                    && r.node.as_deref() == node
-                    && r.attempt == attempt
-                    && r.state_digest == state_digest
-                    && r.questions_digest == questions_digest
-                    && answered_by
-                        .is_none_or(|ids| r.meta.provider.as_ref().is_some_and(|p| ids.contains(p)))
-            })
-            .map(|r| (r.answers.clone(), r.meta.clone()))
+    ) -> Option<Replay> {
+        let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        // The latest match: a resume continues the latest execution.
+        let i = ledger.replay.iter().rposition(|r| {
+            r.use_site == site.as_str()
+                && r.node.as_deref() == node
+                && r.attempt == attempt
+                && r.state_digest == state_digest
+                && r.questions_digest == questions_digest
+                && answered_by
+                    .is_none_or(|ids| r.meta.provider.as_ref().is_some_and(|p| ids.contains(p)))
+        })?;
+        // Used once: a later execution that happens to ask the same thing
+        // is asked (and journaled, and counted) anew.
+        Some(ledger.replay.remove(i))
     }
 
     /// The enforce gate (Part 14 common rules), after an answer arrived.
@@ -554,7 +562,7 @@ impl DecisionRunner {
             ),
             Route::Custom { id, .. } => Some(vec![id.to_string()]),
         };
-        if let Some((answers, meta)) = self.replayed(
+        if let Some(r) = self.replayed(
             call.site,
             call.node,
             call.attempt,
@@ -562,10 +570,24 @@ impl DecisionRunner {
             &questions_digest,
             route_ids.as_deref(),
         ) {
+            if let Some(kind) = r.error {
+                return if kind == "budget" {
+                    (DecisionOutcome::Skipped { reason: "budget" }, None)
+                } else {
+                    (DecisionOutcome::Failed { error_kind: kind }, None)
+                };
+            }
+            let mut meta = r.meta;
+            // A journaled action is repeated only while the use is still in
+            // enforce: the kill switch or a lowered ceiling stops it on a
+            // resume too. A judge's declared route applies whatever the mode.
+            if !declared && mode != DecisionMode::Enforce {
+                meta.applied = false;
+            }
             let source = meta.source();
             return (
                 DecisionOutcome::Answered {
-                    answers,
+                    answers: r.answers,
                     mode,
                     replayed: true,
                     meta,
@@ -766,17 +788,6 @@ impl DecisionRunner {
                     .actions
                     .entry(call.site.as_str().to_string())
                     .or_default() += 1;
-            }
-            if let Some(answers) = &outcome_answers {
-                ledger.replay.push(Replay {
-                    use_site: call.site.as_str().to_string(),
-                    node: call.node.map(str::to_string),
-                    attempt: call.attempt,
-                    state_digest,
-                    questions_digest,
-                    answers: answers.clone(),
-                    meta: meta.clone(),
-                });
             }
         }
         if self.settings.privacy.debug_state {
@@ -1163,8 +1174,8 @@ pub fn decision_totals(events: &[Event]) -> DecisionTotals {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Barrier;
     use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::{Arc, Barrier};
 
     use apb_decide::{FakeProvider, ProviderChain};
 
@@ -1184,12 +1195,68 @@ mod tests {
         }
     }
 
-    fn enforce_runner(cfg: &Path, root: &Path) -> DecisionRunner {
-        std::fs::write(
-            cfg.join(apb_core::decisions::DECISIONS_FILE),
-            "mode: enforce\nproviders: [{ id: fake, kind: systemone, base_url: 'http://127.0.0.1:1', model: fake-1 }]\nuses:\n  completion_check: { mode: enforce, max_actions: 1, allow_uncalibrated: true }\n",
-        )
-        .unwrap();
+    /// A journal that keeps what it was given, as events.
+    #[derive(Default)]
+    struct Recorder(Mutex<Vec<Event>>);
+
+    impl DecisionJournal for Recorder {
+        fn append_decision(&self, payload: EventPayload) -> Result<u64, EngineError> {
+            let mut events = self.0.lock().unwrap();
+            let seq = events.len() as u64 + 1;
+            events.push(Event {
+                seq,
+                ts: 0,
+                payload,
+            });
+            Ok(seq)
+        }
+    }
+
+    impl Recorder {
+        fn events(&self) -> Vec<Event> {
+            self.0.lock().unwrap().clone()
+        }
+    }
+
+    /// A fake provider the test keeps a handle on (to count its calls).
+    #[derive(Debug)]
+    struct Shared(Arc<FakeProvider>);
+
+    impl apb_decide::DecisionProvider for Shared {
+        fn id(&self) -> &str {
+            self.0.id()
+        }
+        fn model(&self) -> &str {
+            self.0.model()
+        }
+        fn limits(&self) -> apb_decide::Limits {
+            self.0.limits()
+        }
+        fn decide(
+            &self,
+            req: &DecisionRequest,
+        ) -> Result<apb_decide::DecisionResponse, apb_decide::DecideError> {
+            self.0.decide(req)
+        }
+    }
+
+    const ENFORCE: &str = "mode: enforce\nproviders: [{ id: fake, kind: systemone, base_url: 'http://127.0.0.1:1', model: fake-1 }]\nuses:\n  completion_check: { mode: enforce, max_actions: 1, allow_uncalibrated: true }\n";
+
+    fn write_config(cfg: &Path, body: &str) {
+        std::fs::write(cfg.join(apb_core::decisions::DECISIONS_FILE), body).unwrap();
+    }
+
+    /// A runner in enforce for `completion_check` (cap 1, a stored
+    /// threshold) over `events`, answering through `fake`.
+    fn runner_over(
+        cfg: &Path,
+        root: &Path,
+        events: &[Event],
+        fake: &Arc<FakeProvider>,
+    ) -> DecisionRunner {
+        if !cfg.join(apb_core::decisions::DECISIONS_FILE).exists() {
+            write_config(cfg, ENFORCE);
+        }
         apb_core::decision_thresholds::set_threshold_in(
             cfg,
             "completion_check",
@@ -1198,22 +1265,81 @@ mod tests {
             0.5,
         )
         .unwrap();
-        let settings = apb_core::decisions::resolve_in(cfg, root).active().unwrap();
-        let mut runner = DecisionRunner::with_settings(settings, root, root, &[], &[]);
+        let settings = apb_core::decisions::load_file(cfg).unwrap().unwrap();
+        let mut runner = DecisionRunner::with_settings(settings, root, root, events, &[]);
         runner.config_dir = Some(cfg.to_path_buf());
-        let fake = || -> Box<dyn apb_decide::DecisionProvider> {
-            Box::new(FakeProvider::new("fake").answer("q", json!({"type": "noul", "noul": 0.9})))
-        };
+        let one = || -> Box<dyn apb_decide::DecisionProvider> { Box::new(Shared(fake.clone())) };
         runner
             .chain
             .set(Chains {
-                all: ProviderChain::new(vec![fake()]),
-                native: ProviderChain::new(vec![fake()]),
+                all: ProviderChain::new(vec![one()]),
+                native: ProviderChain::new(vec![one()]),
                 emulation: ProviderChain::new(Vec::new()),
                 keys: Vec::new(),
             })
             .unwrap();
         runner
+    }
+
+    fn fake() -> Arc<FakeProvider> {
+        Arc::new(FakeProvider::new("fake").answer("q", json!({"type": "noul", "noul": 0.9})))
+    }
+
+    fn enforce_runner(cfg: &Path, root: &Path) -> DecisionRunner {
+        runner_over(cfg, root, &[], &fake())
+    }
+
+    fn acts(_: &BTreeMap<String, DecisionAnswer>, _: f64) -> bool {
+        true
+    }
+
+    fn no_judgement(_: &BTreeMap<String, DecisionAnswer>) -> Judgement {
+        Judgement::default()
+    }
+
+    /// One completion-check ask for `node` whose enforce path always acts.
+    fn ask(runner: &DecisionRunner, journal: &dyn DecisionJournal, node: &str) -> DecisionOutcome {
+        runner.decide(
+            journal,
+            DecisionCall {
+                site: UseSite::CompletionCheck,
+                node: Some(node),
+                attempt: Some(1),
+                state: StateParts {
+                    fields: vec![StateField {
+                        name: "output",
+                        class: FieldClass::Output,
+                        text: format!("output of {node}"),
+                        head: 1024,
+                        tail: 0,
+                    }],
+                    meta: Default::default(),
+                },
+                questions: BTreeMap::from([(
+                    "q".to_string(),
+                    Question::Noul {
+                        instructions: json!("done?"),
+                        criteria: None,
+                    },
+                )]),
+                baseline: None,
+                judge: &no_judgement,
+                join: BTreeMap::new(),
+                join_from: None,
+                enforce: Some(Enforce {
+                    opted_in: true,
+                    refused: None,
+                    acts: &acts,
+                }),
+            },
+        )
+    }
+
+    fn meta_of(o: &DecisionOutcome) -> (&AnswerMeta, bool) {
+        match o {
+            DecisionOutcome::Answered { meta, replayed, .. } => (meta, *replayed),
+            other => panic!("not answered: {other:?}"),
+        }
     }
 
     #[test]
@@ -1243,56 +1369,12 @@ mod tests {
             barrier: Barrier::new(2),
             seq: AtomicU64::new(1),
         };
-        let acts = |_: &BTreeMap<String, DecisionAnswer>, _: f64| true;
-        let judge = |_: &BTreeMap<String, DecisionAnswer>| Judgement::default();
-        let ask = |node: &'static str| {
-            runner.decide(
-                &journal,
-                DecisionCall {
-                    site: UseSite::CompletionCheck,
-                    node: Some(node),
-                    attempt: Some(1),
-                    state: StateParts {
-                        fields: vec![StateField {
-                            name: "output",
-                            class: FieldClass::Output,
-                            text: format!("output of {node}"),
-                            head: 1024,
-                            tail: 0,
-                        }],
-                        meta: Default::default(),
-                    },
-                    questions: BTreeMap::from([(
-                        "q".to_string(),
-                        Question::Noul {
-                            instructions: json!("done?"),
-                            criteria: None,
-                        },
-                    )]),
-                    baseline: None,
-                    judge: &judge,
-                    join: BTreeMap::new(),
-                    join_from: None,
-                    enforce: Some(Enforce {
-                        opted_in: true,
-                        refused: None,
-                        acts: &acts,
-                    }),
-                },
-            )
-        };
         let outcomes: Vec<DecisionOutcome> = std::thread::scope(|s| {
-            let a = s.spawn(|| ask("a"));
-            let b = s.spawn(|| ask("b"));
+            let a = s.spawn(|| ask(&runner, &journal, "a"));
+            let b = s.spawn(|| ask(&runner, &journal, "b"));
             vec![a.join().unwrap(), b.join().unwrap()]
         });
-        let metas: Vec<&AnswerMeta> = outcomes
-            .iter()
-            .map(|o| match o {
-                DecisionOutcome::Answered { meta, .. } => meta,
-                other => panic!("not answered: {other:?}"),
-            })
-            .collect();
+        let metas: Vec<&AnswerMeta> = outcomes.iter().map(|o| meta_of(o).0).collect();
         assert_eq!(metas.iter().filter(|m| m.applied).count(), 1, "{metas:?}");
         assert_eq!(
             metas
@@ -1302,5 +1384,73 @@ mod tests {
             1,
             "{metas:?}"
         );
+    }
+
+    #[test]
+    fn the_same_ask_in_a_later_execution_is_journaled_and_counted_anew() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let runner = enforce_runner(cfg.path(), root.path());
+        let journal = Recorder::default();
+        let first = ask(&runner, &journal, "a");
+        let second = ask(&runner, &journal, "a");
+        assert!(meta_of(&first).0.applied);
+        let (meta, replayed) = meta_of(&second);
+        assert!(!replayed, "a live ask is never replayed in the same drive");
+        assert!(!meta.applied, "the cap of 1 is spent");
+        assert_eq!(meta.enforce_refused.as_deref(), Some("cap"));
+        assert_eq!(journal.events().len(), 2);
+    }
+
+    #[test]
+    fn a_resume_repeats_a_journaled_action_only_while_the_use_is_still_enforced() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let journal = Recorder::default();
+        let provider = fake();
+        let first = runner_over(cfg.path(), root.path(), &[], &provider);
+        assert!(meta_of(&ask(&first, &journal, "a")).0.applied);
+        assert_eq!(provider.calls(), 1);
+        let events = journal.events();
+
+        // Still enforce: the resume replays the action without a request.
+        let resumed = runner_over(cfg.path(), root.path(), &events, &provider);
+        let outcome = ask(&resumed, &Recorder::default(), "a");
+        let (meta, replayed) = meta_of(&outcome);
+        assert!(replayed && meta.applied);
+        assert_eq!(provider.calls(), 1);
+
+        // Lowered to shadow before the resume: replayed, but not acted on.
+        write_config(
+            cfg.path(),
+            &ENFORCE.replace("mode: enforce, max", "mode: shadow, max"),
+        );
+        let resumed = runner_over(cfg.path(), root.path(), &events, &provider);
+        let outcome = ask(&resumed, &Recorder::default(), "a");
+        let (meta, replayed) = meta_of(&outcome);
+        assert!(replayed && !meta.applied, "{meta:?}");
+        assert_eq!(provider.calls(), 1);
+    }
+
+    #[test]
+    fn a_journaled_failure_replays_as_the_same_failure_without_a_request() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let journal = Recorder::default();
+        let provider = Arc::new(
+            FakeProvider::new("fake")
+                .answer("q", json!({"type": "noul", "noul": 0.9}))
+                .fail_next(apb_decide::DecideError::Timeout),
+        );
+        let first = runner_over(cfg.path(), root.path(), &[], &provider);
+        let failed = ask(&first, &journal, "a");
+        assert!(
+            matches!(failed, DecisionOutcome::Failed { .. }),
+            "{failed:?}"
+        );
+        assert_eq!(provider.calls(), 1);
+        let resumed = runner_over(cfg.path(), root.path(), &journal.events(), &provider);
+        assert_eq!(ask(&resumed, &Recorder::default(), "a"), failed);
+        assert_eq!(provider.calls(), 1, "no request on the resume");
     }
 }
