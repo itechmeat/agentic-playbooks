@@ -354,9 +354,12 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
     let cx = model_check::ModelContext::load();
     let mut ok = true;
     for (name, doc) in &docs {
-        let chain = std::iter::once((&doc.executor.agent, &doc.executor.model))
-            .chain(doc.executor.fallbacks.iter().map(|f| (&f.agent, &f.model)));
-        for (agent, model) in chain {
+        // The executor, its fallbacks and every tier (issue #165 Part 12).
+        for problem in doc.tiers.problems() {
+            println!("profile {name}: error profile_tiers_invalid {problem}");
+            ok = false;
+        }
+        for (agent, model) in doc.executor_pairs() {
             let Some(issue) = model_check::check(agent, model, &cx) else {
                 continue;
             };

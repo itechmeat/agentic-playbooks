@@ -56,6 +56,38 @@ pub struct ManifestProfile {
     /// manifests) means `yolo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
+    // --- tier routing (issue #165 Part 12) ---
+    /// The profile's executor tiers, lightest first, resolved at run start
+    /// like the chain. Empty for a profile without tiers (and old
+    /// manifests), which is never routed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<ManifestTier>,
+    /// Set only on a rebind-overlay entry written by tier routing: the tier
+    /// the node was routed to. A supervisor's own rebind never has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_tier: Option<String>,
+    /// How many leading chain steps of a routed entry are tiers below the
+    /// profile's own executor: an agent failure there goes up a tier at
+    /// once instead of spending same-executor retries.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cascade: u32,
+    // --- end tier routing ---
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// A profile tier as a run snapshots it (issue #165 Part 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestTier {
+    pub name: String,
+    /// The work the tier is for (the routing question's criterion).
+    #[serde(rename = "for")]
+    pub for_work: String,
+    /// The tier's own executor; `None` for `use: executor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<ResolvedInvocation>,
 }
 
 impl ManifestProfile {
@@ -257,6 +289,9 @@ mod tests {
             ephemeral: false,
             hermetic: true,
             zcode_mode: None,
+            tiers: Vec::new(),
+            routed_tier: None,
+            cascade: 0,
         };
         let yaml = serde_yaml_ng::to_string(&mp).unwrap();
         let back: ManifestProfile = serde_yaml_ng::from_str(&yaml).unwrap();

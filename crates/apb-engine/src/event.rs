@@ -227,6 +227,13 @@ pub enum EventPayload {
         from_model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_model: Option<String>,
+        /// Why the chain moved on when it was not an ordinary failure:
+        /// `routing` for a tier-routing cascade (issue #165 Part 14.5), when
+        /// an agent failure on a routed lower tier goes up a tier before the
+        /// profile's own fallbacks. `None` for every ordinary fallback and for
+        /// old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     RunPaused {
         reason: String,
@@ -276,6 +283,17 @@ pub enum EventPayload {
         trigger: WakeTrigger,
         node: String,
         detail: String,
+        /// The decision model's recommendation for a park wake (issue #165
+        /// Part 10), present only when `supervisor_triage` is in advise or
+        /// enforce for the run and the model answered. Advisory unless
+        /// `applied`. Additive: old logs and every other wake carry none, and
+        /// a shape this binary cannot read is dropped.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        triage: Option<WakeTriage>,
     },
     SupervisorAction {
         action: String,
@@ -355,6 +373,16 @@ pub enum EventPayload {
         /// options. `None` for a promptless node and for old logs. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// The decision model's advisory recommendation for this visit
+        /// (issue #165 Part 11), present only when `review_triage` is in
+        /// advise or enforce for the run and the model answered. Never
+        /// preselected and never applied by itself. Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        recommendation: Option<ReviewRecommendation>,
     },
     ReviewDecided {
         node: String,
@@ -466,6 +494,23 @@ pub enum EventPayload {
         /// `invalid`, or `None` when answered. Never a key or a body.
         #[serde(default)]
         error: Option<String>,
+        // --- labels and enforce (issue #165 Parts 9-14) ---
+        /// Why an enforce-mode decision acted as advise instead:
+        /// `no_threshold` (none stored for this use, provider and model),
+        /// `uncalibrated`, `cap` (the use spent its automatic actions for
+        /// the run), `not_opted_in` (the playbook did not opt in) or
+        /// `effects` (the gate's effects forbid an automatic decision).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enforce_refused: Option<String>,
+        /// Join keys a report labels the decision by: `wake_seq`,
+        /// `gate_visit`, `profile`, `tier`, `retries_left` and similar.
+        #[serde(
+            default,
+            skip_serializing_if = "std::collections::BTreeMap::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        join: std::collections::BTreeMap<String, serde_json::Value>,
+        // --- end labels and enforce ---
     },
     /// An explicit cycle-progress report (spec 2026-07-17): the current
     /// iteration `done` of `total` for the cycle group anchored at `node_id`.
@@ -830,6 +875,7 @@ pub fn propagate_wake_to_parent(
     trigger: WakeTrigger,
     child_node: &str,
     detail: &str,
+    triage: Option<&WakeTriage>,
 ) -> Result<(), EngineError> {
     let cfg = match crate::run_config::read_run_config(child_run_dir) {
         Ok(c) => c,
@@ -881,6 +927,7 @@ pub fn propagate_wake_to_parent(
         trigger,
         node: parent_node,
         detail: mirrored_detail,
+        triage: triage.cloned(),
     })?;
     Ok(())
 }
@@ -894,14 +941,28 @@ pub fn raise_wake(
     node: &str,
     detail: impl Into<String>,
 ) -> Result<(), EngineError> {
+    raise_wake_with_triage(run_dir, log, trigger, node, detail, None)
+}
+
+/// [`raise_wake`] carrying a decision model's `triage` (issue #165 Part 10),
+/// mirrored to the parent run with the wake.
+pub(crate) fn raise_wake_with_triage(
+    run_dir: &Path,
+    log: &mut EventLog,
+    trigger: WakeTrigger,
+    node: &str,
+    detail: impl Into<String>,
+    triage: Option<WakeTriage>,
+) -> Result<(), EngineError> {
     let detail = detail.into();
     log.append(EventPayload::WakeRaised {
         trigger,
         node: node.to_string(),
         detail: detail.clone(),
+        triage: triage.clone(),
     })?;
     // Propagation is best-effort for the parent; never fail the child on it.
-    let _ = propagate_wake_to_parent(run_dir, trigger, node, &detail);
+    let _ = propagate_wake_to_parent(run_dir, trigger, node, &detail, triage.as_ref());
     Ok(())
 }
 
@@ -968,6 +1029,52 @@ pub struct DecisionAnswer {
     pub confidence: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub invalid: Option<String>,
+}
+
+/// A decision model's recommendation on a park wake
+/// ([`EventPayload::WakeRaised`] `triage`, issue #165 Part 10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct WakeTriage {
+    /// The recommended action: `retry_same`, `retry_with_note`,
+    /// `switch_executor`, `continue_from_next`, `pause_for_human` or
+    /// `needs_supervisor`.
+    pub action: String,
+    #[serde(default)]
+    pub p: f64,
+    #[serde(default)]
+    pub confidence: f64,
+    /// The probability that the output repeats a failure already tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub looping_p: Option<f64>,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    /// The engine posted the retry itself (enforce, Part 14.3).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub applied: bool,
+}
+
+/// A decision model's recommendation at a review gate
+/// ([`EventPayload::ReviewRequested`] `recommendation`, issue #165 Part 11).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ReviewRecommendation {
+    /// One of the gate's options.
+    pub option: String,
+    #[serde(default)]
+    pub p: f64,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub calibrated: bool,
+    /// The engine posted this option as the decision itself (enforce,
+    /// `auto_decide`, Part 14.4).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub applied: bool,
 }
 
 /// A code-only verdict recorded next to a decision (the completion check's

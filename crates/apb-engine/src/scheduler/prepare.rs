@@ -189,6 +189,42 @@ pub(crate) fn snapshot_loaded_profile(
     }
     let soul_empty = loaded.soul.trim().is_empty();
     let chain = crate::invocation::filter_chain(chain, loaded.doc.soul, soul_empty)?;
+    // Executor tiers (issue #165 Part 12), resolved like the chain so an
+    // unknown agent fails the run start the same way. An ephemeral executor
+    // replaces the chain, so its entry is never routed.
+    let mut tiers = Vec::new();
+    if eph.is_none() {
+        let problems = loaded.doc.tiers.problems();
+        if !problems.is_empty() {
+            return Err(EngineError::Invalid(format!(
+                "profile `{key}`: {}",
+                problems.join("; ")
+            )));
+        }
+        for (name, t) in loaded.doc.tiers.iter() {
+            let invocation = match t.executor() {
+                Some((agent, model)) => {
+                    let program = crate::invocation::program_for(agent, global);
+                    let ri = crate::invocation::resolve_invocation(agent, model, &program, global)?;
+                    // A tier whose agent cannot carry a required native
+                    // SOUL is left out, as `filter_chain` drops such a step.
+                    if loaded.doc.soul == apb_core::profile::SoulRequirement::NativeRequired
+                        && !soul_empty
+                        && ri.soul_delivery != apb_core::config::SoulDelivery::Native
+                    {
+                        continue;
+                    }
+                    Some(ri)
+                }
+                None => None,
+            };
+            tiers.push(crate::manifest::ManifestTier {
+                name: name.clone(),
+                for_work: t.for_work.clone(),
+                invocation,
+            });
+        }
+    }
 
     Ok(ManifestProfile {
         scope: scope.to_string(),
@@ -204,6 +240,9 @@ pub(crate) fn snapshot_loaded_profile(
         // run's value, not the live profile (issue #136 item 4).
         hermetic: loaded.doc.environment() == apb_core::profile::AgentEnvironment::Minimal,
         zcode_mode: loaded.doc.zcode_mode,
+        tiers,
+        routed_tier: None,
+        cascade: 0,
     })
 }
 
@@ -358,6 +397,21 @@ pub(crate) fn build_run_manifest(
             return Err(EngineError::Invalid(
                 "profile set changed since the trust check (key set mismatch)".into(),
             ));
+        }
+    }
+    // `route: auto` (issue #165 Part 12) needs a profile with tiers; an
+    // ephemeral executor replaces the chain and is never routed.
+    for n in &playbook.nodes {
+        if n.route == Some(apb_core::schema::RouteSetting::Auto)
+            && let Some(p) = manifest.for_node(&n.id)
+            && !p.ephemeral
+            && p.tiers.is_empty()
+        {
+            return Err(EngineError::Invalid(format!(
+                "node `{}` has `route: auto`, but its profile `{}` declares no tiers",
+                n.id,
+                p.key()
+            )));
         }
     }
     Ok(manifest)

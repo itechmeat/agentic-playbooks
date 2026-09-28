@@ -193,6 +193,20 @@ pub struct UseSettings {
     pub mode: DecisionMode,
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub thresholds: BTreeMap<String, f64>,
+    // --- enforce settings (issue #165 Part 14) ---
+    /// Enforce only: act on answers from a provider that reports itself
+    /// uncalibrated (the LLM emulation). Refused by default.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub allow_uncalibrated: bool,
+    /// Enforce only: how many automatic actions this use may take per run
+    /// before it falls back to advise. Absent: [`DEFAULT_MAX_ACTIONS`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_actions: Option<u32>,
+    // --- end enforce settings ---
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// The settings a run works with: the machine's file, capped by its
@@ -470,6 +484,12 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
             .entry("final_result".into())
             .or_insert(COMPLETION_FINAL_RESULT_CUT);
     }
+    // Defaults of the other engine uses (issue #165 Parts 9-12).
+    for (name, u) in uses.iter_mut() {
+        for (key, value) in default_thresholds(name) {
+            u.thresholds.entry((*key).to_string()).or_insert(*value);
+        }
+    }
     Ok(Some(EffectiveDecisions {
         mode: doc.mode,
         timeout_ms: doc.timeout_ms,
@@ -479,6 +499,110 @@ pub fn load_file(config_dir: &Path) -> Result<Option<EffectiveDecisions>, String
         uses,
     }))
 }
+
+// --- engine-use defaults and the enforce threshold store (issue #165 Parts
+// 9-12 and 14) ----------------------------------------------------------------
+
+/// Automatic actions per use and run before an enforce use falls back to
+/// advise (`uses.<name>.max_actions`).
+pub const DEFAULT_MAX_ACTIONS: u32 = 3;
+
+/// The advisory thresholds each engine use starts from, filled in under
+/// `uses.<name>.thresholds` when the file does not set them. Every value is a
+/// placeholder until measured on shadow data (issue #165, 2026-09-27
+/// correction 10); none of them lets a use act on its own: acting needs a
+/// stored threshold (see [`stored_threshold`]).
+///
+/// - `retry_advice.min_confidence`: `next` would change the retry when it is
+///   not `retry_same_likely_helps` at this confidence or more.
+/// - `supervisor_triage.looping_max`: an automatic retry only below this
+///   `looping` probability.
+/// - `routing.hysteresis`: after a node of the same profile ran on a tier, a
+///   different tier needs this confidence.
+pub fn default_thresholds(use_name: &str) -> &'static [(&'static str, f64)] {
+    match use_name {
+        "retry_advice" => &[("min_confidence", 0.6)],
+        "supervisor_triage" => &[("looping_max", 0.3)],
+        "routing" => &[("hysteresis", 0.75)],
+        _ => &[],
+    }
+}
+
+impl EffectiveDecisions {
+    /// The automatic-action cap of an enforce use.
+    pub fn max_actions(&self, use_name: &str) -> u32 {
+        self.uses
+            .get(use_name)
+            .and_then(|u| u.max_actions)
+            .unwrap_or(DEFAULT_MAX_ACTIONS)
+    }
+
+    /// Whether an enforce use may act on uncalibrated answers.
+    pub fn allows_uncalibrated(&self, use_name: &str) -> bool {
+        self.uses.get(use_name).is_some_and(|u| u.allow_uncalibrated)
+    }
+}
+
+/// The measured-threshold store, a sibling of `decisions.yaml`.
+pub const THRESHOLDS_FILE: &str = "decisions-thresholds.yaml";
+
+#[derive(Debug, Default, Deserialize)]
+struct ThresholdsDoc {
+    #[serde(default)]
+    thresholds: Vec<StoredThreshold>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StoredThreshold {
+    #[serde(rename = "use")]
+    use_name: String,
+    provider: String,
+    model: String,
+    threshold: f64,
+}
+
+/// The threshold stored for `(use, provider, model)`, which an enforce path
+/// needs before it may act (issue #165 Part 14). The model must match
+/// exactly: a new model id never inherits an older one's threshold. `None`
+/// without a store, without an entry, or when the store does not load.
+///
+/// Minimal reader: the report and `apb decisions thresholds set` (Part 13)
+/// own the file; this reads `thresholds: [{use, provider, model,
+/// threshold}]` and ignores everything else.
+pub fn stored_threshold(use_name: &str, provider: &str, model: &str) -> Option<f64> {
+    let dir = crate::config::config_dir()?;
+    stored_threshold_in(&dir, use_name, provider, model)
+}
+
+/// [`stored_threshold`] with an explicit config dir.
+pub fn stored_threshold_in(
+    config_dir: &Path,
+    use_name: &str,
+    provider: &str,
+    model: &str,
+) -> Option<f64> {
+    let raw = std::fs::read_to_string(config_dir.join(THRESHOLDS_FILE)).ok()?;
+    let doc: ThresholdsDoc = serde_yaml_ng::from_str(&raw).ok()?;
+    doc.thresholds
+        .into_iter()
+        .find(|t| t.use_name == use_name && t.provider == provider && t.model == model)
+        .map(|t| t.threshold)
+        .filter(|t| t.is_finite())
+}
+
+/// A use's mode as the machine and the project say NOW, for re-checking a
+/// run's snapshot per decision: the kill switch, a lowered ceiling or use
+/// mode, a removed or broken file, or a project opt-out stop every use
+/// mid-run. Raising a mode mid-run has no effect (the caller takes the
+/// minimum with its snapshot).
+pub fn live_mode(root: &Path, use_name: &str) -> DecisionMode {
+    match resolve(root) {
+        Resolution::Active(eff) => eff.mode_for(use_name),
+        _ => DecisionMode::Off,
+    }
+}
+
+// --- end engine-use defaults ---
 
 // --- project narrowing -----------------------------------------------------
 

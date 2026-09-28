@@ -200,10 +200,12 @@ pub fn diagnose(root: &Path) -> DoctorReport {
                     continue;
                 }
                 let cx = model_cx.get_or_insert_with(crate::model_check::ModelContext::load);
-                let ex = &lp.doc.executor;
-                let chain = std::iter::once((&ex.agent, &ex.model))
-                    .chain(ex.fallbacks.iter().map(|f| (&f.agent, &f.model)));
-                for (agent, model) in chain {
+                // The executor, its fallbacks and every tier (issue #165
+                // Part 12).
+                for (agent, _) in lp.doc.executor_pairs() {
+                    agents.insert(agent.to_string());
+                }
+                for (agent, model) in lp.doc.executor_pairs() {
                     use crate::model_check::ModelIssue;
                     let Some(issue) = crate::model_check::check(agent, model, cx) else {
                         continue;

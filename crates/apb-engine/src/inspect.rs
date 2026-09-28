@@ -11,12 +11,16 @@ use crate::run_view::read_events;
 use crate::state::RunState;
 
 /// A wake event handed to the calling code: the first `WakeRaised` after the cursor.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct WakeEvent {
     pub seq: u64,
     pub trigger: WakeTrigger,
     pub node: String,
     pub detail: String,
+    /// The decision model's advisory recommendation on a park wake (issue
+    /// #165 Part 10); absent on every other wake.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub triage: Option<crate::event::WakeTriage>,
 }
 
 /// Checks `run_id` for directory traversal and that the run directory
@@ -61,12 +65,14 @@ pub fn wait_wake(
                     trigger,
                     node,
                     detail,
+                    triage,
                 } => {
                     return Ok(Some(WakeEvent {
                         seq: event.seq,
                         trigger: *trigger,
                         node: node.clone(),
                         detail: detail.clone(),
+                        triage: triage.clone(),
                     }));
                 }
                 EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => {
@@ -110,12 +116,19 @@ pub fn run_inspect(root: &Path, run_id: &str) -> Result<serde_json::Value, Engin
                 trigger,
                 node,
                 detail,
-            } => Some(serde_json::json!({
-                "seq": e.seq,
-                "trigger": trigger,
-                "node": node,
-                "detail": detail,
-            })),
+                triage,
+            } => {
+                let mut wake = serde_json::json!({
+                    "seq": e.seq,
+                    "trigger": trigger,
+                    "node": node,
+                    "detail": detail,
+                });
+                if let Some(t) = triage {
+                    wake["triage"] = serde_json::json!(t);
+                }
+                Some(wake)
+            }
             _ => None,
         })
         .collect();
@@ -214,6 +227,7 @@ pub fn supervisor_report_or_summary(root: &Path, run_id: &str) -> Result<String,
             trigger,
             node,
             detail,
+            ..
         } = &e.payload
         {
             let _ = writeln!(

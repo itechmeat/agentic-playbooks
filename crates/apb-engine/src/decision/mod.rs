@@ -23,6 +23,11 @@
 
 pub(crate) mod completion;
 mod redact;
+// Engine uses (issue #165 Parts 9-12 and 14), one module each.
+pub(crate) mod retry_advice;
+pub(crate) mod review_triage;
+pub(crate) mod routing;
+pub(crate) mod supervisor_triage;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -108,6 +113,22 @@ pub(crate) struct Judgement {
     pub(crate) would_change: Option<bool>,
 }
 
+/// The enforce path of a use (issue #165 Part 14). The runner decides
+/// whether the use may act: the use in `enforce` for the run, the playbook's
+/// opt-in, a calibrated answer (or `allow_uncalibrated`), a stored threshold
+/// for the answering provider and model, and the per-run action cap. Only
+/// then does it ask `acts` with that threshold; `applied: true` is journaled
+/// before the caller acts. Anything short of that journals `enforce_refused`
+/// and the caller treats the answer as advise.
+pub(crate) struct Enforce<'a> {
+    /// The playbook (or node) opted in to the enforce path.
+    pub(crate) opted_in: bool,
+    /// A refusal the use knows before asking (e.g. `effects` at a gate).
+    pub(crate) refused: Option<&'static str>,
+    /// Whether the answers call for the action at the stored threshold.
+    pub(crate) acts: &'a dyn Fn(&BTreeMap<String, DecisionAnswer>, f64) -> bool,
+}
+
 /// One question to ask.
 pub(crate) struct DecisionCall<'a> {
     pub(crate) site: UseSite,
@@ -119,6 +140,26 @@ pub(crate) struct DecisionCall<'a> {
     pub(crate) baseline: Option<DecisionBaseline>,
     /// Decides `applied` and `would_change` from the answers.
     pub(crate) judge: &'a dyn Fn(&BTreeMap<String, DecisionAnswer>) -> Judgement,
+    /// Join keys journaled with the decision for the report's labellers.
+    pub(crate) join: BTreeMap<String, Value>,
+    /// Join keys that depend on the answers (added when it arrives).
+    pub(crate) join_from: Option<&'a dyn Fn(&BTreeMap<String, DecisionAnswer>) -> BTreeMap<String, Value>>,
+    /// The use's enforce path, if it has one.
+    pub(crate) enforce: Option<Enforce<'a>>,
+}
+
+/// What a caller needs besides the answers: who answered and whether the
+/// enforce path acted (both read back from the journal on a replay).
+#[derive(Debug, Clone, PartialEq, Default)]
+pub(crate) struct AnswerMeta {
+    pub(crate) provider: Option<String>,
+    pub(crate) model: Option<String>,
+    pub(crate) calibrated: bool,
+    /// The enforce path acted: the caller must apply the action.
+    pub(crate) applied: bool,
+    pub(crate) enforce_refused: Option<String>,
+    /// The `decision_made` seq (`None` on a replay).
+    pub(crate) seq: Option<u64>,
 }
 
 /// The result of one call. The caller applies its fallback on anything but
@@ -129,6 +170,7 @@ pub(crate) enum DecisionOutcome {
         answers: BTreeMap<String, DecisionAnswer>,
         mode: DecisionMode,
         replayed: bool,
+        meta: AnswerMeta,
     },
     /// Nothing asked: the use is off, or the budget is spent.
     Skipped { reason: &'static str },
@@ -145,6 +187,7 @@ struct Replay {
     state_digest: String,
     questions_digest: String,
     answers: BTreeMap<String, DecisionAnswer>,
+    meta: AnswerMeta,
 }
 
 #[derive(Debug, Default)]
@@ -152,6 +195,8 @@ struct Ledger {
     requests: u32,
     cost_usd: f64,
     replay: Vec<Replay>,
+    /// Automatic actions taken per use this run (the enforce cap).
+    actions: BTreeMap<String, u32>,
 }
 
 /// List price in USD per million input tokens for the models whose provider
@@ -201,6 +246,10 @@ impl DecisionRunner {
                 cost_usd,
                 cached,
                 error,
+                model,
+                calibrated,
+                applied,
+                enforce_refused,
                 ..
             } = &e.payload
             {
@@ -208,6 +257,9 @@ impl DecisionRunner {
                     ledger.requests += 1;
                 }
                 ledger.cost_usd += cost_usd.unwrap_or(0.0);
+                if *applied {
+                    *ledger.actions.entry(use_site.clone()).or_default() += 1;
+                }
                 if error.is_none() {
                     ledger.replay.push(Replay {
                         use_site: use_site.clone(),
@@ -216,6 +268,14 @@ impl DecisionRunner {
                         state_digest: state_digest.clone(),
                         questions_digest: questions_digest.clone(),
                         answers: answers.clone(),
+                        meta: AnswerMeta {
+                            provider: provider.clone(),
+                            model: model.clone(),
+                            calibrated: *calibrated,
+                            applied: *applied,
+                            enforce_refused: enforce_refused.clone(),
+                            seq: None,
+                        },
                     });
                 }
             }
@@ -236,13 +296,25 @@ impl DecisionRunner {
         &self.settings
     }
 
-    /// The use's mode now: the snapshot, unless the kill switch is set.
+    /// The use's mode now: the snapshot, capped by what the machine and the
+    /// project say at this moment (the kill switch, a lowered ceiling or use
+    /// mode, a removed file), so every path stops mid-run.
     pub(crate) fn mode_for(&self, site: UseSite) -> DecisionMode {
         if apb_core::decisions::killed_by_switch() {
-            DecisionMode::Off
-        } else {
-            self.settings.mode_for(site.as_str())
+            return DecisionMode::Off;
         }
+        let snapshot = self.settings.mode_for(site.as_str());
+        if snapshot == DecisionMode::Off {
+            return snapshot;
+        }
+        snapshot.min(apb_core::decisions::live_mode(&self.root, site.as_str()))
+    }
+
+    /// A use's threshold from the run's settings, or `default`.
+    pub(crate) fn threshold_or(&self, site: UseSite, name: &str, default: f64) -> f64 {
+        self.settings
+            .threshold(site.as_str(), name)
+            .unwrap_or(default)
     }
 
     /// Builds the provider chain on first use: keys resolve now, and a
@@ -345,7 +417,7 @@ impl DecisionRunner {
         attempt: Option<u32>,
         state_digest: &str,
         questions_digest: &str,
-    ) -> Option<BTreeMap<String, DecisionAnswer>> {
+    ) -> Option<(BTreeMap<String, DecisionAnswer>, AnswerMeta)> {
         let ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
         ledger
             .replay
@@ -357,7 +429,56 @@ impl DecisionRunner {
                     && r.state_digest == state_digest
                     && r.questions_digest == questions_digest
             })
-            .map(|r| r.answers.clone())
+            .map(|r| (r.answers.clone(), r.meta.clone()))
+    }
+
+    /// The enforce gate (Part 14 common rules), after an answer arrived.
+    /// Returns `(applied, enforce_refused)`.
+    fn enforce_gate(
+        &self,
+        site: UseSite,
+        mode: DecisionMode,
+        enforce: Option<&Enforce>,
+        answers: &BTreeMap<String, DecisionAnswer>,
+        provider: &str,
+        model: &str,
+        calibrated: bool,
+    ) -> (bool, Option<&'static str>) {
+        let Some(en) = enforce else {
+            return (false, None);
+        };
+        if mode != DecisionMode::Enforce {
+            return (false, None);
+        }
+        if !en.opted_in {
+            return (false, Some("not_opted_in"));
+        }
+        if let Some(r) = en.refused {
+            return (false, Some(r));
+        }
+        if !calibrated && !self.settings.allows_uncalibrated(site.as_str()) {
+            return (false, Some("uncalibrated"));
+        }
+        let Some(threshold) =
+            apb_core::decisions::stored_threshold(site.as_str(), provider, model)
+        else {
+            return (false, Some("no_threshold"));
+        };
+        if !(en.acts)(answers, threshold) {
+            return (false, None);
+        }
+        let taken = self
+            .ledger
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .actions
+            .get(site.as_str())
+            .copied()
+            .unwrap_or(0);
+        if taken >= self.settings.max_actions(site.as_str()) {
+            return (false, Some("cap"));
+        }
+        (true, None)
     }
 
     fn budget_spent(&self) -> bool {
@@ -380,7 +501,7 @@ impl DecisionRunner {
         let state_bytes = serde_json::to_string(&state).map_or(0, |s| s.len()) as u64;
         let state_digest = apb_decide::digest::digest(&state);
         let questions_digest = apb_decide::digest::questions_digest(&call.questions);
-        if let Some(answers) = self.replayed(
+        if let Some((answers, meta)) = self.replayed(
             call.site,
             call.node,
             call.attempt,
@@ -391,6 +512,7 @@ impl DecisionRunner {
                 answers,
                 mode,
                 replayed: true,
+                meta,
             };
         }
         let base = EventPayload::DecisionMade {
@@ -414,6 +536,8 @@ impl DecisionRunner {
             cost_estimated: false,
             cached: false,
             error: None,
+            enforce_refused: None,
+            join: call.join.clone(),
         };
         if self.budget_spent() {
             let mut event = base;
@@ -441,6 +565,7 @@ impl DecisionRunner {
         let mut event = base;
         let mut full: Option<BTreeMap<String, Answer>> = None;
         let outcome_answers;
+        let mut meta = AnswerMeta::default();
         if let EventPayload::DecisionMade {
             provider,
             model,
@@ -454,6 +579,8 @@ impl DecisionRunner {
             cost_estimated,
             cached,
             error,
+            enforce_refused,
+            join,
             ..
         } = &mut event
         {
@@ -465,12 +592,33 @@ impl DecisionRunner {
                         .map(|(k, a)| (k.clone(), compact_answer(a)))
                         .collect();
                     let verdict = (call.judge)(&compact);
+                    let (enforced, refused) = self.enforce_gate(
+                        call.site,
+                        mode,
+                        call.enforce.as_ref(),
+                        &compact,
+                        &resp.provider,
+                        &resp.model,
+                        resp.calibrated,
+                    );
                     *provider = Some(resp.provider.clone());
                     *model = Some(resp.model.clone());
                     *calibrated = resp.calibrated;
                     *answers = compact.clone();
+                    if let Some(extra) = call.join_from {
+                        join.extend(extra(&compact));
+                    }
                     // Never applied in shadow, whatever the use concluded.
-                    *applied = verdict.applied && mode > DecisionMode::Shadow;
+                    *applied = (verdict.applied && mode > DecisionMode::Shadow) || enforced;
+                    *enforce_refused = refused.map(str::to_string);
+                    meta = AnswerMeta {
+                        provider: provider.clone(),
+                        model: model.clone(),
+                        calibrated: resp.calibrated,
+                        applied: *applied,
+                        enforce_refused: enforce_refused.clone(),
+                        seq: None,
+                    };
                     *would_change = verdict.would_change;
                     *latency_ms = if resp.cached {
                         0
@@ -502,6 +650,7 @@ impl DecisionRunner {
         } else {
             unreachable!("the event is a DecisionMade")
         }
+        let applied_now = meta.applied;
         let (cost, counted) = match &event {
             EventPayload::DecisionMade {
                 cost_usd,
@@ -525,6 +674,12 @@ impl DecisionRunner {
                 ledger.requests += 1;
             }
             ledger.cost_usd += cost;
+            if applied_now {
+                *ledger
+                    .actions
+                    .entry(call.site.as_str().to_string())
+                    .or_default() += 1;
+            }
             if let Some(answers) = &outcome_answers {
                 ledger.replay.push(Replay {
                     use_site: call.site.as_str().to_string(),
@@ -533,6 +688,7 @@ impl DecisionRunner {
                     state_digest,
                     questions_digest,
                     answers: answers.clone(),
+                    meta: meta.clone(),
                 });
             }
         }
@@ -544,6 +700,10 @@ impl DecisionRunner {
                 answers,
                 mode,
                 replayed: false,
+                meta: AnswerMeta {
+                    seq: Some(seq),
+                    ..meta
+                },
             },
             (None, Err(e)) => DecisionOutcome::Failed {
                 error_kind: e.kind().to_string(),
@@ -552,6 +712,48 @@ impl DecisionRunner {
                 error_kind: "unavailable".into(),
             },
         }
+    }
+
+    /// Journals that a use was not asked on purpose (a routing exclusion
+    /// such as a handoff node): a `decision_made` with no provider, no
+    /// answers and `join.excluded` naming why. Nothing when the use is off.
+    /// No request is made and none is counted.
+    pub(crate) fn record_excluded(
+        &self,
+        journal: &dyn DecisionJournal,
+        site: UseSite,
+        node: Option<&str>,
+        attempt: Option<u32>,
+        reason: &str,
+    ) {
+        let mode = self.mode_for(site);
+        if mode == DecisionMode::Off {
+            return;
+        }
+        let _ = journal.append_decision(EventPayload::DecisionMade {
+            use_site: site.as_str().to_string(),
+            node: node.map(str::to_string),
+            attempt,
+            provider: None,
+            model: None,
+            calibrated: false,
+            mode: mode.as_str().to_string(),
+            questions_digest: String::new(),
+            state_digest: String::new(),
+            state_bytes: 0,
+            answers: BTreeMap::new(),
+            applied: false,
+            would_change: None,
+            baseline: None,
+            latency_ms: 0,
+            input_tokens: None,
+            cost_usd: None,
+            cost_estimated: false,
+            cached: false,
+            error: None,
+            enforce_refused: None,
+            join: BTreeMap::from([("excluded".to_string(), Value::from(reason))]),
+        });
     }
 
     /// Step 9: the redacted state, the questions and the full answers, for

@@ -67,8 +67,9 @@ impl<'a> Journal<'a> {
             trigger,
             node: node.to_string(),
             detail: detail.clone(),
+            triage: None,
         })?;
-        let _ = crate::event::propagate_wake_to_parent(run_dir, trigger, node, &detail);
+        let _ = crate::event::propagate_wake_to_parent(run_dir, trigger, node, &detail, None);
         Ok(())
     }
 }
