@@ -129,6 +129,10 @@ pub(crate) struct Enforce<'a> {
     pub(crate) acts: &'a dyn Fn(&BTreeMap<String, DecisionAnswer>, f64) -> bool,
 }
 
+/// Join keys computed from the answers.
+pub(crate) type JoinFrom<'a> =
+    dyn Fn(&BTreeMap<String, DecisionAnswer>) -> BTreeMap<String, Value> + 'a;
+
 /// One question to ask.
 pub(crate) struct DecisionCall<'a> {
     pub(crate) site: UseSite,
@@ -143,8 +147,7 @@ pub(crate) struct DecisionCall<'a> {
     /// Join keys journaled with the decision for the report's labellers.
     pub(crate) join: BTreeMap<String, Value>,
     /// Join keys that depend on the answers (added when it arrives).
-    pub(crate) join_from:
-        Option<&'a dyn Fn(&BTreeMap<String, DecisionAnswer>) -> BTreeMap<String, Value>>,
+    pub(crate) join_from: Option<&'a JoinFrom<'a>>,
     /// The use's enforce path, if it has one.
     pub(crate) enforce: Option<Enforce<'a>>,
 }
@@ -435,6 +438,7 @@ impl DecisionRunner {
 
     /// The enforce gate (Part 14 common rules), after an answer arrived.
     /// Returns `(applied, enforce_refused)`.
+    #[allow(clippy::too_many_arguments)]
     fn enforce_gate(
         &self,
         site: UseSite,

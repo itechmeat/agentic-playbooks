@@ -57,7 +57,9 @@ engine. Do not introduce import cycles (enforced by code-ranker, see below).
   supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
   policy gate every launch surface calls (`gate.rs`), and the decision runner
   (`decision/`: the one entry point for decision-model uses, redaction,
-  budget, replay, the `decision_made` event, and the shadow completion check;
+  budget, replay, the `decision_made` event, the enforce gate, and one module per
+  use: completion check, retry advice, supervisor wake triage, review
+  recommendation, tier routing;
   see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
