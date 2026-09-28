@@ -419,14 +419,14 @@ pub fn output_fields(
 }
 
 /// Where a judge node's `emulate` fallback runs: its own `profile`, else the
-/// playbook's default profile. `None` for any other fallback.
+/// playbook's default profile (`defaults.profile`). `None` for any other fallback.
 pub fn emulation_profile(
     on_unavailable: Option<&JudgeFallback>,
     profile: Option<&QualifiedProfileRef>,
-    defaults: &crate::schema::Defaults,
+    default_profile: Option<&QualifiedProfileRef>,
 ) -> Option<QualifiedProfileRef> {
     match on_unavailable {
-        Some(JudgeFallback::Emulate) => profile.cloned().or_else(|| defaults.profile.clone()),
+        Some(JudgeFallback::Emulate) => profile.or(default_profile).cloned(),
         _ => None,
     }
 }
