@@ -1,0 +1,63 @@
+schema: 2
+id: review-triage
+name: Review triage with a judge node
+description: >-
+  An agent reviews a change; a judge node classifies the review with a
+  decision model and routes on the verdict. Without a configured decision
+  provider (or with the judge_node use below enforce) the judge takes its
+  on_unavailable route to a human review, so the playbook runs on any
+  machine.
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - id: review
+    type: agent_task
+    title: Review the change
+    expected_duration: 5m
+    prompt: >-
+      Review the change described in {{run.instruction}}. List every
+      blocking defect with file and line, or say there is none.
+  - id: triage
+    type: judge
+    title: Classify the review result
+    state:
+      request: "{{run.instruction}}"
+      review_output: "{{nodes.review.output}}"
+    questions:
+      verdict:
+        type: choice
+        instructions: "Which outcome does `review_output` report for the change described in `request`?"
+        criteria:
+          clean: "No blocking findings; only style notes or none."
+          needs_fix: "At least one concrete defect that must be fixed before merge."
+          unclear: "The review is cut off, empty, or does not address the change."
+      risky:
+        type: noul
+        instructions: "Does `review_output` mention deleted tests, committed secrets or schema migrations?"
+    thresholds:
+      verdict: { min_confidence: 0.6, below: unclear }
+      risky: { yes_at: 0.7 }
+    on_unavailable: { route: human_review }
+  - id: fix
+    type: agent_task
+    title: Fix the findings
+    expected_duration: 10m
+    prompt: "Fix the blocking defects listed in {{nodes.review.output}}."
+  - id: human_review
+    type: human_review
+    title: Decide the review by hand
+    prompt: The decision model was not available or unsure; read the review and decide.
+    options: [approve, needs_fix]
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: review }
+  - { from: review, to: triage }
+  - { from: triage, to: fix, condition: { type: output_field, node: triage, field: verdict, equals: needs_fix } }
+  - { from: triage, to: done, condition: { type: output_field, node: triage, field: verdict, equals: clean } }
+  - { from: triage, to: human_review, condition: { type: output_field, node: triage, field: decided_by, equals: unavailable } }
+  - { from: triage, to: human_review, fallback: true }
+  - { from: human_review, to: fix, condition: { type: review_status, equals: needs_fix } }
+  - { from: human_review, to: done, condition: { type: review_status, equals: approve } }
+  - { from: fix, to: done }

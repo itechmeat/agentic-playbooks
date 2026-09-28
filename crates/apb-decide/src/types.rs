@@ -80,6 +80,11 @@ impl ChoiceCriteria {
     pub fn names(&self) -> impl Iterator<Item = &str> {
         self.0.iter().map(|(k, _)| k.as_str())
     }
+
+    /// The options with their descriptions, in order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, Option<&Value>)> {
+        self.0.iter().map(|(k, v)| (k.as_str(), v.as_ref()))
+    }
 }
 
 impl<K: Into<String>> FromIterator<(K, Option<Value>)> for ChoiceCriteria {

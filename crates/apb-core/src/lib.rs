@@ -16,6 +16,7 @@ pub mod effects;
 pub mod fingerprint;
 pub mod fsutil;
 pub mod graphutil;
+pub mod judge;
 pub mod migration;
 pub mod model_check;
 pub mod models_table;

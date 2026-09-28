@@ -12,7 +12,8 @@
 //!   [`FakeProvider`] answers from a script. [`VercelEvaluate`] (Vercel AI
 //!   Gateway `/v1/evaluate`), [`OpenRouterDecisions`] (OpenRouter's alpha
 //!   Decisions API) and [`Cloudflare`] (Workers AI REST) map their route's
-//!   variant of the format onto the same types (issue #165 Part 15).
+//!   variant of the format onto the same types (issue #165 Part 15). [`LlmEmulation`] imitates the
+//!   interface with a chat model (uncalibrated, see [`llm_emulation`]).
 //! - [`validate`] holds the client-side limit checks, the strict reply
 //!   validation and the confidence recompute every provider shares.
 //! - [`ProviderChain`] tries providers in order; [`DecisionCache`] is the
@@ -31,6 +32,7 @@ mod error;
 mod fake;
 mod http;
 mod key;
+pub mod llm_emulation;
 mod openrouter_decisions;
 mod systemone;
 #[cfg(feature = "testing")]
@@ -45,6 +47,7 @@ pub use cloudflare::{CLOUDFLARE_BASE_URL, Cloudflare};
 pub use error::DecideError;
 pub use fake::FakeProvider;
 pub use key::ApiKey;
+pub use llm_emulation::{LlmEmulation, StructuredOutput};
 pub use openrouter_decisions::OpenRouterDecisions;
 pub use systemone::SystemOne;
 pub use types::{

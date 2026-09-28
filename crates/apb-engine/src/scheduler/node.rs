@@ -567,6 +567,11 @@ pub(crate) fn execute_node(
             output: String::new(),
             events,
         }),
+        // issue #165 Part 5: the judge node.
+        NodeKind::Judge { .. } => super::judge::execute(
+            playbook, run_dir, workdir, node_id, run_id, state, cfg, cancel, env_scrub, journal,
+            decisions,
+        ),
         NodeKind::AgentTask {
             prompt,
             profile,

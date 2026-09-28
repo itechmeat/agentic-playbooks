@@ -63,6 +63,14 @@ pub(crate) fn check_templates(playbook: &Playbook, r: &mut ValidationReport) {
 /// The single place that knows which node kinds carry a template, so V13 and
 /// V38 always scan exactly the same texts.
 pub(crate) fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
+    // A judge node's state fields are templates too (issue #165 Part 5).
+    let judge_state = playbook.nodes.iter().flat_map(|n| match &n.kind {
+        NodeKind::Judge { state, .. } => state
+            .iter()
+            .map(|(_, text)| (n.id.as_str(), text.as_str()))
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    });
     playbook
         .nodes
         .iter()
@@ -81,6 +89,7 @@ pub(crate) fn template_texts(playbook: &Playbook) -> Vec<(&str, &str)> {
             };
             Some((n.id.as_str(), text))
         })
+        .chain(judge_state)
         .collect()
 }
 
@@ -242,9 +251,9 @@ pub(crate) fn check_refs(playbook: &Playbook, ctx: &ValidationContext, r: &mut V
             continue;
         }
         let node_profile = match &n.kind {
-            NodeKind::AgentTask { profile, .. } | NodeKind::Finish { profile, .. } => {
-                profile.as_ref()
-            }
+            NodeKind::AgentTask { profile, .. }
+            | NodeKind::Finish { profile, .. }
+            | NodeKind::Judge { profile, .. } => profile.as_ref(),
             _ => None,
         };
         if let Some(p) = node_profile {

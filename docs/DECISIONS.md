@@ -22,11 +22,14 @@ One use exists, in shadow mode only:
 |---|---|---|
 | `completion_check` | whether a successful agent reply is a finished result rather than a progress note, a plan or a question back | `off`, `shadow` |
 | `catalog_rank` | which catalog playbook fits the task an agent names, whether the task needs a playbook at all, and whether a silenced suggestion covers it (MCP, outside runs) | `off`, `shadow`, `advise` (`enforce` acts as `advise`) |
+| `judge_node` | the questions a playbook's `judge` node declares | `off`, `shadow`, `advise` (journal only), `enforce` (routes) |
+| `judge_edge` | the yes/no question of a `judge` edge condition | `off`, `shadow`, `advise` (journal only), `enforce` (routes) |
 
 Shadow means journal only: the answer is recorded in the run's journal and
-nothing acts on it. Advise mode (showing a flag where a person or supervisor
-decides), the `judge` node and edge, and the other uses come later, once shadow
-data exists to set their thresholds.
+nothing acts on it. The `judge` node and edge are declared by a playbook and
+route only at `enforce`; below it they take their declared fallback (see their
+sections below). Advise mode for the engine's own uses and the other uses come
+later, once shadow data exists to set their thresholds.
 
 ## Configuration: `<config_dir>/decisions.yaml`
 
@@ -414,4 +417,104 @@ Each decision is logged as one line of `<root>/.apb/decisions.jsonl`
 (git-ignored): the `decision_made` fields without node and attempt, plus
 `ts_ms`. Past `max_requests_per_day` a line with `error: budget` is logged and
 nothing is sent.
+## Judge node (`judge_node`)
+
+A playbook's `judge` node (authoring: HOWTO-authoring.md, "Judge nodes and
+judge edges") asks its own typed questions over its rendered state. The use
+decides what happens with the answer:
+
+- `enforce`: the answer is thresholded in code and becomes the node output;
+  the `decision_made` has `applied: true` and is journaled before the output.
+- `shadow`, `advise`: the question is asked and journaled (`applied: false`,
+  `would_change` when the answer would have routed differently from the
+  fallback), and the node applies its `on_unavailable` with reason `mode`.
+- `off`, no `decisions.yaml`, `APB_DECISIONS=off`: nothing is asked and
+  nothing is journaled; the node applies `on_unavailable` (reason
+  `not_configured` or `off`).
+
+A judge node's own question goes to the decision models of the chain only
+(`systemone`, `fake`), never to an `llm_emulation` provider; those are used
+by `on_unavailable: emulate`. The judge node needs no stored threshold: its
+thresholds are declared by the author in the playbook, for the provider and
+model the machine pins. Answers from an uncalibrated provider are used, since
+the node declared them (the uncalibrated refusal applies to the engine's own
+enforce uses).
+
+State: every `state` field is rendered like a prompt; a field reading a node
+output (or `run.context`) is `outputs` material, any other `prompts`, so
+`privacy.send` applies. Each field is clipped (head and tail, 12 kB each)
+before its share of `privacy.max_state_bytes`. `decision_made` carries
+`node` and no `attempt`, so an unchanged state replays across a resume and
+across loop passes.
+
+Cache: with `cache: auto`, a judge node answered at enforce is stored in the
+node cache under the node definition (questions, thresholds), the digest of
+the rendered state and the first native provider and its pinned model; the
+working tree is not part of the key. Fallback and emulated outputs are never
+stored. A hit makes no request.
+
+## LLM emulation (uncalibrated)
+
+A chat model can imitate the decision interface through structured output,
+which keeps judge playbooks portable to machines without a decision model and
+makes A/B comparisons possible. Its probabilities are self-reported, not
+calibrated: every emulated answer is journaled with `calibrated: false`,
+reports group it apart, and thresholds tuned on a native model do not apply to
+it. It costs roughly 10 to 25 times more per decision and is slower, so it is
+never a silent substitute: it runs only where configured or declared.
+
+The request (both backends): one JSON schema per request (a `noul` a number,
+a `choice` an object with one number per option, a `score` one number per
+level, all keyed by neutral ids `q1`, `q2`, ... rather than the playbook's
+question ids), a system prompt asking for probabilities only and no reasoning,
+and the state wrapped in `<document>...</document>` as untrusted data whose
+instructions are to be ignored (a closing tag inside the state is defused).
+The reply is normalised in code: each distribution is scaled to sum to 1, a
+`choice` takes its argmax, a `score` its expected level index, the confidence
+is recomputed with the native formula; a missing option or a value outside
+[0, 1] makes that item invalid.
+
+Two backends:
+
+- **An OpenAI-compatible endpoint**, a provider in `decisions.yaml`:
+
+  ```yaml
+  providers:
+    - { id: emulated, kind: llm_emulation, via: openai_compatible, base_url: https://api.example-llm-provider.com/v1, model: some-small-model, api_key: "{{env.EMULATION_API_KEY}}", structured_output: json_schema }
+  ```
+
+  `POST {base_url}/chat/completions`; `structured_output: json_schema`
+  (default) sends `response_format: {type: json_schema, strict: true}`,
+  `prompt_only` embeds the schema and parses the first JSON object of the
+  reply. Keys by reference, retries and error mapping as for `systemone`. Fast,
+  but a second credential.
+- **An APB agent profile**, declared on the judge node: `on_unavailable:
+  emulate` with `profile` (or `defaults.profile`). One attempt on the
+  profile's primary executor (no fallback chain, at most one retry), a fresh
+  session, no handoff, no autonomy grant, no status-verdict protocol; the
+  reply's first JSON object is the answer. Journaled as a normal attempt of
+  the node plus a `decision_made` with `provider: profile:<name>` and
+  `calibrated: false`. No new credential, but an agent's cold start. The
+  profile is snapshotted and trust-checked like any node profile. A
+  `via: profile` entry in `decisions.yaml` is refused: declare it on the node.
+
+`emulate` tries the configured `llm_emulation` providers first (when the
+`judge_node` use is above off), then the profile. The profile backend runs
+whatever the use's mode, `APB_DECISIONS=off` included, because it is the
+playbook's own declared executor; its answer is replayed on resume like any
+decision.
+
+## Judge edge (`judge_edge`)
+
+A `judge` edge condition asks one yes/no question about its source node's
+output. When a node succeeds, all its judge edges are asked in one request
+(question ids `edge_<index>`, the edge's position among the node's outgoing
+edges; state `step`, the node title, and `output`), journaled with the node's
+execution count as `attempt` before any routing, so each loop pass gets its
+own answer. Edge selection stays a pure fold over the journal: an edge
+matches at `p >= min_p` when that execution's decision was applied (the use
+at enforce), and otherwise exactly when its mandatory `on_unavailable` is
+true. A drive that stopped between the node's finish and the decision asks on
+resume; an execution already decided is never asked again. A failed source
+asks nothing. Judge edges go to the decision models only, never to emulation.
 

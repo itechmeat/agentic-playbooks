@@ -101,6 +101,26 @@ export const NODE_FIELDS = {
     label: 'Instruction',
     hint: 'Template rendered with this run context; the result becomes the child run input and overrides whatever draft the child carries. Empty leaves the child on its own draft.',
   },
+  judge_state: {
+    label: 'State',
+    hint: 'The named fields a decision model judges, as YAML: one field per line, each value a template like a prompt ({{ nodes.<id>.output }}, {{ run.instruction }}). Keep it small: cite one field of a node output where you can, and name the fields in the questions in backticks.',
+  },
+  judge_questions: {
+    label: 'Questions',
+    hint: 'A map of question id to question, as YAML. choice: 2 to 255 named options, each described by its criterion, always with an unclear option. score: 2 to 10 levels, lowest first, described in words. noul: the probability of yes. One judgment per question; facts (a file exists, a test passed) belong in a script, not here.',
+  },
+  judge_thresholds: {
+    label: 'Thresholds',
+    hint: 'How an answer becomes the output, applied in code, per question: min_confidence with below (the safe option under it) for a choice, yes_at for a noul, bands of level indexes for a score. Thresholds belong to one provider model version; measure 20 to 30 labelled examples before trusting one.',
+  },
+  on_unavailable: {
+    label: 'When unavailable',
+    hint: 'What the node does when no usable answer comes back, which includes every machine without a decision model at enforce: fail, emulate (ask an emulation backend, then this node profile), { route: <node> } (with an output_field edge on decided_by == unavailable) or { default: { <question>: <value> } }.',
+  },
+  judge_profile: {
+    label: 'Emulation profile',
+    hint: 'The profile whose agent answers the questions when on_unavailable is emulate and no emulation provider is configured. Its answers are uncalibrated and cost an agent turn. Empty falls back to the playbook default profile.',
+  },
 } as const satisfies Record<string, NodeFieldInfo>
 
 export type NodeFieldKey = keyof typeof NODE_FIELDS

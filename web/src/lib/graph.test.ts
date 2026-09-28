@@ -250,6 +250,20 @@ describe('nodeExits', () => {
     condition: { type: 'node_status', node, equals },
   })
 
+  it('captions a judge edge with its min_p and what happens without an answer', () => {
+    const judge = (to: string, fallback: boolean) => ({
+      from: 'work',
+      to,
+      condition: { type: 'judge', question: 'Is `output` broken?', min_p: 0.7, on_unavailable: fallback },
+    })
+    const exits = nodeExits(pb([judge('a', false), judge('b', true)]), 'work')
+    expect(exits?.mode).toBe('one-of')
+    expect(exits?.list.map((e) => e.label)).toEqual(['1 judge: 0.7', '2 judge: 0.7'])
+    expect(exits?.list[0].title).toContain('it is not taken')
+    expect(exits?.list[1].title).toContain('it is taken')
+    expect(exits?.list[1].title).toContain('Is `output` broken?')
+  })
+
   it('says nothing about a node with one exit', () => {
     expect(nodeExits(pb([status('success', 'a')]), 'work')).toBeNull()
     expect(nodeExits(pb([]), 'work')).toBeNull()

@@ -406,6 +406,7 @@ mod tests {
                 answers: BTreeMap::from([("best".to_string(), best)]),
                 account_id: None,
                 zero_data_retention: false,
+                structured_output: None,
             }],
             budget: Budget::default(),
             privacy: Privacy::default(),
