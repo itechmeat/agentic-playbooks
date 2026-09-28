@@ -225,14 +225,14 @@ pub(crate) fn check_cache(playbook: &Playbook, r: &mut ValidationReport) {
     for node in &playbook.nodes {
         let cacheable = matches!(
             node.kind,
-            NodeKind::AgentTask { .. } | NodeKind::Script { .. }
+            NodeKind::AgentTask { .. } | NodeKind::Script { .. } | NodeKind::Judge { .. }
         );
         if node.cache_mode() == CacheMode::Auto && !cacheable {
             r.error(
                 "V27",
                 Some(&node.id),
                 format!(
-                    "node `{}` sets cache: auto but only agent_task and script nodes are cached",
+                    "node `{}` sets cache: auto but only agent_task, script and judge nodes are cached",
                     node.id
                 ),
             );

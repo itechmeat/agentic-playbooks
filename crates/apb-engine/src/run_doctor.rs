@@ -812,10 +812,14 @@ mod tests {
                 ephemeral: false,
                 hermetic: false,
                 zcode_mode: None,
+                tiers: Vec::new(),
+                routed_tier: None,
+                cascade: 0,
             }],
             node_bindings: BTreeMap::from([("a".to_string(), "project/x".to_string())]),
             connectors: Vec::new(),
             connector_grants: BTreeMap::new(),
+            decisions: None,
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }

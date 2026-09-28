@@ -1,5 +1,6 @@
 use serde::ser::SerializeStruct;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 
 use crate::profile::{ProfileScope, QualifiedProfileRef};
 
@@ -67,7 +68,7 @@ impl JoinMode {
 /// Every node `type` tag, in declaration order. [`NodeKind::type_str`] reads
 /// from it, so this is the one list of node types (the dashboard's generated
 /// types, the authoring guide's doc test).
-pub const NODE_TYPES: [&str; 9] = [
+pub const NODE_TYPES: [&str; 10] = [
     "start",
     "agent_task",
     "script",
@@ -77,6 +78,7 @@ pub const NODE_TYPES: [&str; 9] = [
     "wait",
     "finish",
     "playbook",
+    "judge",
 ];
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -438,6 +440,10 @@ impl NodeKind {
             | NodeKind::Finish {
                 prompt: Some(_), ..
             } => true,
+            // A judge whose fallback is `emulate` may run its profile's agent.
+            NodeKind::Judge { on_unavailable, .. } => {
+                matches!(on_unavailable, Some(crate::judge::JudgeFallback::Emulate))
+            }
             NodeKind::Start
             | NodeKind::Script { .. }
             | NodeKind::Prompt { .. }
@@ -502,6 +508,15 @@ impl NodeKind {
                 profile,
                 ..
             } => profile.clone().or_else(|| defaults.profile.clone()),
+            NodeKind::Judge {
+                on_unavailable,
+                profile,
+                ..
+            } => crate::judge::emulation_profile(
+                on_unavailable.as_ref(),
+                profile.as_ref(),
+                defaults.profile.as_ref(),
+            ),
             _ => None,
         }
     }
@@ -532,6 +547,7 @@ impl NodeKind {
             NodeKind::Wait { .. } => 6,
             NodeKind::Finish { .. } => 7,
             NodeKind::Playbook { .. } => 8,
+            NodeKind::Judge { .. } => 9,
         }]
     }
 }
@@ -601,6 +617,13 @@ pub struct Defaults {
     /// [`ContextLimits`]; a node's own `context` wins field by field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextLimits>,
+    /// Retry advice (issue #165 Part 14.2): `enforce` lets a confident
+    /// `switch_executor` skip the remaining same-executor retries and a
+    /// confident `stop_and_route_failure` fail the node at once, when the
+    /// machine puts `retry_advice` in enforce and a threshold is stored.
+    /// Additive to schema 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub retry_advice: Option<DecisionOptIn>,
 }
 
 /// For `skip_serializing_if` on additive boolean flags: a `false` value is
@@ -692,6 +715,13 @@ pub struct Supervisor {
     pub profile: Option<QualifiedProfileRef>,
     #[serde(default)]
     pub policy: Option<serde_yaml_ng::Value>, // details land in phase 3A
+    /// Supervisor wake pre-triage (issue #165 Part 14.3): `enforce` lets the
+    /// engine post a `retry_same` or `retry_with_note` recommendation itself
+    /// (at most `uses.supervisor_triage.max_actions` per run) when the
+    /// machine puts `supervisor_triage` in enforce and a threshold is
+    /// stored. Additive to schema 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_triage: Option<DecisionOptIn>,
 }
 
 /// Estimated wall time of ONE execution of a node (spec 2026-07-17). Accepts
@@ -929,8 +959,96 @@ pub struct Node {
     /// `defaults.context` field by field. See [`ContextLimits`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context: Option<ContextLimits>,
+    /// The decision-model completion check on this node's successful
+    /// attempts (issue #165 Part 8). `auto` (the default) runs it when the
+    /// machine's `decisions.yaml` turns the use on; `off` switches it off for
+    /// this node, for instance on a collector whose output is a list rather
+    /// than a report. The field can only switch the check off, never on.
+    /// Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completion_check: Option<CompletionCheckSetting>,
+    // --- decision-model opt-ins (issue #165 Parts 11, 12 and 14) ---
+    /// Executor tier routing (issue #165 Part 12) on an `agent_task`: `auto`
+    /// lets a decision model pick one of the profile's `tiers` for the first
+    /// attempt (in shadow it only journals which one it would pick); `off`,
+    /// the default, never routes. `auto` needs a profile with `tiers`.
+    /// Additive to schema 2; no migration.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub route: Option<RouteSetting>,
+    /// A `human_review` gate's option meanings (issue #165 Part 11): shown
+    /// to the reviewer and used as the criteria of the recommendation
+    /// question. Keys must be declared options. Additive to schema 2.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub option_descriptions: BTreeMap<String, String>,
+    /// A `human_review` gate's automatic decision (issue #165 Part 14.4):
+    /// with `review_triage` in enforce and a stored threshold, a
+    /// recommendation of an allowed option at `min_confidence` or more is
+    /// posted as the decision, noted `auto: <provider>/<model> p=<p>`. Only
+    /// `needs_changes` may be allowed, never `approve`. The validator refuses
+    /// it on a playbook that declares `irreversible` or `secrets` effects or
+    /// has a merge, push, deploy or publish step after the gate, unless
+    /// `auto_decide_ok: true`. Additive to schema 2.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub auto_decide: Option<AutoDecide>,
+    /// The author's explicit override of the `auto_decide` effects and
+    /// downstream-step refusal. Additive to schema 2.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_decide_ok: bool,
+    // --- end decision-model opt-ins ---
     #[serde(flatten)]
     pub kind: NodeKind,
+}
+
+/// A node's `completion_check` setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CompletionCheckSetting {
+    #[default]
+    Auto,
+    Off,
+    /// Opt in to the enforce path (issue #165 Part 14.1): a confident "not
+    /// a finished result" fails the attempt, consuming a retry. Acts only
+    /// when the machine puts `completion_check` in enforce and a threshold
+    /// is stored for the answering model; otherwise the same as `auto`.
+    Enforce,
+}
+
+/// A node's `route` setting (issue #165 Part 12).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RouteSetting {
+    #[default]
+    Off,
+    Auto,
+}
+
+/// A `human_review` node's `auto_decide` block (issue #165 Part 14.4).
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct AutoDecide {
+    /// The options the engine may pick on its own: `needs_changes` only.
+    pub allow: Vec<String>,
+    /// The recommendation's confidence needed, in (0, 1]. Default 0.9.
+    #[serde(default = "default_auto_decide_confidence")]
+    pub min_confidence: f64,
+}
+
+fn default_auto_decide_confidence() -> f64 {
+    0.9
+}
+
+/// The one option an `auto_decide` block may allow.
+pub const AUTO_DECIDE_ALLOWED: &str = "needs_changes";
+
+/// The decision-model mode a playbook opts a use into (`defaults.retry_advice`,
+/// `supervisor.pre_triage`, issue #165 Part 14). Only `enforce` changes
+/// anything, and only where the machine enables the use in enforce too.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecisionOptIn {
+    #[default]
+    Advise,
+    Enforce,
 }
 
 /// Post-agent success gate on an `agent_task` node (spec 6.2, plus issue 45
@@ -1121,6 +1239,33 @@ pub enum NodeKind {
         #[serde(default)]
         instruction: Option<String>,
     },
+    // --- issue #165 Part 5: the judge node --------------------------------
+    /// Asks a decision model typed questions over a small named state and
+    /// publishes the answers as a compact JSON object (see
+    /// [`crate::judge`]). Routes on the answer only when the machine's
+    /// `judge_node` use is at `enforce`; otherwise, and whenever no usable
+    /// answer comes back, it applies `on_unavailable`. Additive to schema 2;
+    /// older binaries reject the node type.
+    Judge {
+        /// Named state fields, each a template rendered like a prompt.
+        #[serde(default)]
+        state: crate::judge::OrderedMap<String>,
+        /// The questions, a map from id to question.
+        #[serde(default)]
+        questions: crate::judge::JudgeQuestions,
+        /// How an answer becomes an output value, by question id.
+        #[serde(default, skip_serializing_if = "crate::judge::OrderedMap::is_empty")]
+        thresholds: crate::judge::OrderedMap<crate::judge::JudgeThreshold>,
+        /// What the node does without a usable answer; absent means `fail`
+        /// (and a validator warning).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_unavailable: Option<crate::judge::JudgeFallback>,
+        /// The profile an `emulate` fallback runs (falls back to
+        /// `defaults.profile`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<QualifiedProfileRef>,
+    },
+    // --- end judge node ----------------------------------------------------
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -1233,6 +1378,23 @@ pub enum EdgeCondition {
         field: String,
         equals: String,
     },
+    // --- issue #165 Part 7: the judge edge condition -------------------------
+    /// A yes/no question to a decision model about the SOURCE node's output
+    /// (its only state, with the source's title as `step`), asked once when
+    /// the source finishes, together with every other judge edge of that
+    /// node, and journaled before routing. The edge matches when the answer's
+    /// probability is at least `min_p`; without a usable answer (no provider,
+    /// the `judge_edge` use below enforce, an error) it matches exactly when
+    /// `on_unavailable` is true. `on_unavailable` is mandatory (validator
+    /// V59); it is optional here only so a missing value is a validation
+    /// error rather than a parse error.
+    Judge {
+        question: String,
+        min_p: crate::judge::Probability,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        on_unavailable: Option<bool>,
+    },
+    // --- end judge edge condition ----------------------------------------------
 }
 
 /// One top-level field of a node output that parses as a JSON object, as the
@@ -1290,6 +1452,7 @@ mod tests {
             "{ id: n6, type: wait, wait_for: { type: timer, seconds: 1 }, timeout_seconds: 5 }",
             "{ id: n7, type: finish, outcome: success }",
             "{ id: n8, type: playbook, playbook: other }",
+            "{ id: n9, type: judge, state: { s: x }, questions: { q: { type: noul, instructions: i } } }",
         ]
         .map(|n| format!("  - {n}\n"))
         .concat();

@@ -197,6 +197,17 @@ export interface ParsedProfileDoc {
   fallbacks: ExecutorGroup[]
   description: string
   skills: string[]
+  /** Executor tiers for tier routing (issue #165 Part 12), lightest first.
+   * Read-only here: no write surface edits them, and a save keeps them. */
+  tiers: ProfileTier[]
+}
+
+/** One declared executor tier: an agent and model, or the profile's own
+ * executor (`use: executor`), and what work it is for. */
+export interface ProfileTier {
+  name: string
+  executor: string
+  for: string
 }
 
 /**
@@ -211,6 +222,7 @@ export function parseProfileDoc(yamlText: string): ParsedProfileDoc {
     description?: string
     executor?: { agent?: string; model?: string; fallbacks?: { agent?: string; model?: string }[] }
     skills?: (string | { name: string })[]
+    tiers?: Record<string, { agent?: string; model?: string; use?: string; for?: string } | null>
   }
   return {
     agent: doc.executor?.agent ?? 'claude',
@@ -221,5 +233,11 @@ export function parseProfileDoc(yamlText: string): ParsedProfileDoc {
     })),
     description: doc.description ?? '',
     skills: (doc.skills ?? []).map((s) => (typeof s === 'string' ? s : s.name)),
+    tiers: Object.entries(doc.tiers ?? {}).map(([name, t]) => ({
+      name,
+      executor:
+        t?.use === 'executor' ? 'the profile executor' : [t?.agent, t?.model].filter(Boolean).join(' / '),
+      for: t?.for ?? '',
+    })),
   }
 }

@@ -169,11 +169,15 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
 }
 
 /// The fields a run view carries only when they apply: the token usage its
-/// attempts reported, and the note about events a newer apb wrote that this
+/// attempts reported, the decision-model totals, and the note about events a newer apb wrote that this
 /// binary skipped. Shared by `run_status` and `run_report`.
 fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
     if let Some(usage) = view.usage() {
         out["usage"] = json!(usage);
+    }
+    // One compact object; each decision's detail stays in `run_events`.
+    if let Some(decisions) = view.decisions() {
+        out["decisions"] = json!(decisions);
     }
     if !view.unknown.is_empty() {
         out["unknown_events"] = json!(view.unknown.len());
@@ -594,6 +598,41 @@ mod progress_tests {
         let a = table.iter().find(|e| e["node"] == "a").unwrap();
         assert_eq!(a["expected_seconds"], 100);
         assert_eq!(a["measured_seconds"], 5);
+    }
+
+    /// Issue #165 Part 4: `run_status` and `run_report` carry the decision
+    /// totals as one compact object, and only when the run journaled one.
+    #[test]
+    fn run_status_and_report_carry_decisions_only_when_journaled() {
+        let tmp = tempfile::tempdir().unwrap();
+        let run_dir = tmp.path().join(".apb/runs/r1");
+        std::fs::create_dir_all(&run_dir).unwrap();
+        let start = "{\"seq\":0,\"ts\":0,\"type\":\"run_started\",\"playbook\":\"p\",\"version\":\"1.0.0\"}\n";
+        std::fs::write(run_dir.join("events.jsonl"), start).unwrap();
+        assert!(
+            run_status(tmp.path(), "r1")
+                .unwrap()
+                .get("decisions")
+                .is_none()
+        );
+        assert!(
+            run_report(tmp.path(), "r1")
+                .unwrap()
+                .get("decisions")
+                .is_none()
+        );
+        let decision = "{\"seq\":1,\"ts\":1,\"type\":\"decision_made\",\"use_site\":\"completion_check\",\"node\":\"a\",\"attempt\":1,\"provider\":\"main\",\"model\":\"m\",\"calibrated\":true,\"mode\":\"shadow\",\"answers\":{},\"would_change\":true,\"latency_ms\":200,\"cost_usd\":0.0001,\"cached\":false,\"error\":null}\n";
+        std::fs::write(run_dir.join("events.jsonl"), format!("{start}{decision}")).unwrap();
+        for out in [
+            run_status(tmp.path(), "r1").unwrap(),
+            run_report(tmp.path(), "r1").unwrap(),
+        ] {
+            let d = &out["decisions"];
+            assert_eq!(d["decisions"], 1);
+            assert_eq!(d["requests"], 1);
+            assert_eq!(d["p50_latency_ms"], 200);
+            assert_eq!(d["by_use"]["completion_check"]["shadow_would_change"], 1);
+        }
     }
 
     /// #102.2 product decision: the goal is never evaluated by the engine, but

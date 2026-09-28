@@ -57,6 +57,12 @@ pub fn supervisor_wait_result(
             if clipped {
                 v["detail_truncated"] = json!(true);
             }
+            // The decision model's advisory recommendation on a park wake
+            // (issue #165 Part 10); absent otherwise, so the shape is
+            // unchanged without it.
+            if let Some(t) = &w.triage {
+                v["triage"] = json!(t);
+            }
             (v, Some(w.seq), "wake")
         }
         SupervisorWait::Review { seq, .. } => (Value::Null, Some(*seq), "review"),

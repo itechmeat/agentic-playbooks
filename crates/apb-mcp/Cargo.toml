@@ -8,6 +8,7 @@ repository.workspace = true
 [dependencies]
 apb-core = { path = "../apb-core" }
 apb-engine = { path = "../apb-engine" }
+apb-decide = { path = "../apb-decide" }
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
@@ -21,4 +22,5 @@ sha2.workspace = true
 uuid.workspace = true
 
 [dev-dependencies]
+apb-decide = { path = "../apb-decide", features = ["testing"] }
 tempfile = "3.27.0"

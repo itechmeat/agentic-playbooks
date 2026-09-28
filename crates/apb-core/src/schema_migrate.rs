@@ -157,6 +157,7 @@ fn profile_yaml_for(name: &str, ex: &LegacyExec) -> String {
         environment: None,
         hermetic: None,
         zcode_mode: None,
+        tiers: Default::default(),
     };
     serde_yaml_ng::to_string(&doc).unwrap_or_default()
 }

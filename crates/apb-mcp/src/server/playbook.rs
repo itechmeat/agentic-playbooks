@@ -30,7 +30,7 @@ impl WfMcp {
     }
 
     #[tool(
-        description = "Compact structured catalog of playbooks (project and global scope) with trigger, effects, trust and shadowing. Call once per task when matching a user request to a playbook. Pass revision to skip the body when unchanged.",
+        description = "Compact structured catalog of playbooks (project and global scope) with trigger, effects, trust and shadowing. Call once per task when matching a user request to a playbook. Pass revision to skip the body when unchanged. Optional query (the task in one sentence): where the machine enabled decision-model ranking, adds an advisory ranked list, needs_playbook_p and covered_by; entries stay unchanged and your own matching still decides.",
         annotations(read_only_hint = true)
     )]
     pub(crate) async fn playbook_catalog(
@@ -39,18 +39,41 @@ impl WfMcp {
             revision,
             limit,
             workspace,
+            query,
         }): Parameters<PlaybookCatalogArgs>,
     ) -> CallToolResult {
         let root = match self.effective_root(workspace.as_deref()) {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Ok(e)),
         };
-        to_call_tool_result(tools::playbook_catalog(
-            &root,
-            workspace.as_deref(),
-            revision.as_deref(),
-            limit,
-        ))
+        let Some(query) = query.filter(|q| !q.trim().is_empty()) else {
+            return to_call_tool_result(tools::playbook_catalog(
+                &root,
+                workspace.as_deref(),
+                revision.as_deref(),
+                limit,
+            ));
+        };
+        // Issue #165 Part 16: a decision request is blocking network IO, so
+        // it runs on the blocking pool and never stalls the server's runtime.
+        let cache = std::sync::Arc::clone(&self.rank_cache);
+        let result = tokio::task::spawn_blocking(move || {
+            crate::catalog_rank::playbook_catalog_ranked(
+                &root,
+                workspace.as_deref(),
+                revision.as_deref(),
+                limit,
+                &query,
+                &cache,
+            )
+        })
+        .await
+        .unwrap_or_else(|e| {
+            Err(tools::ToolError::Engine(format!(
+                "catalog task failed: {e}"
+            )))
+        });
+        to_call_tool_result(result)
     }
 
     #[tool(

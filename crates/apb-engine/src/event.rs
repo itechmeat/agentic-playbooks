@@ -227,6 +227,13 @@ pub enum EventPayload {
         from_model: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         to_model: Option<String>,
+        /// Why the chain moved on when it was not an ordinary failure:
+        /// `routing` for a tier-routing cascade (issue #165 Part 14.5), when
+        /// an agent failure on a routed lower tier goes up a tier before the
+        /// profile's own fallbacks. `None` for every ordinary fallback and for
+        /// old logs. Additive.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<String>,
     },
     RunPaused {
         reason: String,
@@ -276,6 +283,17 @@ pub enum EventPayload {
         trigger: WakeTrigger,
         node: String,
         detail: String,
+        /// The decision model's recommendation for a park wake (issue #165
+        /// Part 10), present only when `supervisor_triage` is in advise or
+        /// enforce for the run and the model answered. Advisory unless
+        /// `applied`. Additive: old logs and every other wake carry none, and
+        /// a shape this binary cannot read is dropped.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        triage: Option<WakeTriage>,
     },
     SupervisorAction {
         action: String,
@@ -355,6 +373,16 @@ pub enum EventPayload {
         /// options. `None` for a promptless node and for old logs. Additive.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         prompt: Option<String>,
+        /// The decision model's advisory recommendation for this visit
+        /// (issue #165 Part 11), present only when `review_triage` is in
+        /// advise or enforce for the run and the model answered. Never
+        /// preselected and never applied by itself. Additive.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        recommendation: Option<ReviewRecommendation>,
     },
     ReviewDecided {
         node: String,
@@ -393,6 +421,105 @@ pub enum EventPayload {
         compact_file: String,
         model: String,
         up_to_seq: u64,
+    },
+    /// One decision a decision model was asked (issue #165 Part 3), written
+    /// by the decision runner through the attempt journal BEFORE anything
+    /// reads the answer, so a resumed run replays it instead of asking again.
+    /// In shadow mode nothing acts on it at all (`applied` stays false).
+    ///
+    /// Safe to skip up to the next checkpoint: an older apb that does not know
+    /// the type loses only this record. The attempt it belongs to still ends
+    /// with its own `attempt_finished` and `node_finished`, whose status and
+    /// output a shadow decision never changes.
+    ///
+    /// Carries no key, no request or reply body and no state text: the state
+    /// is identified by `state_digest`, and the redacted state itself is kept
+    /// only in `runs/<id>/decisions/<seq>.json` when `privacy.debug_state` is
+    /// on. Optional fields default so a shape a newer apb writes still reads.
+    DecisionMade {
+        use_site: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        node: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt: Option<u32>,
+        /// The configured id of the provider that answered (or was asked last).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        provider: Option<String>,
+        /// The model that answered, as the provider named it.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model: Option<String>,
+        #[serde(default)]
+        calibrated: bool,
+        /// The use's effective mode when it was asked.
+        #[serde(default)]
+        mode: String,
+        #[serde(default)]
+        questions_digest: String,
+        #[serde(default)]
+        state_digest: String,
+        /// Bytes of the state as sent (after redaction and clipping).
+        #[serde(default)]
+        state_bytes: u64,
+        /// Characters of the output-class text the use judged, before
+        /// redaction and clipping (the completion check: the attempt's raw
+        /// reply). The report reads it to set long outputs apart; absent in
+        /// journals written before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_chars: Option<u64>,
+        /// Compact answers by question id: the value, its probability and the
+        /// confidence. Full distributions only in the debug state file.
+        #[serde(default, deserialize_with = "lenient_default")]
+        answers: std::collections::BTreeMap<String, DecisionAnswer>,
+        /// Whether engine behaviour changed because of this answer. Never in
+        /// shadow.
+        #[serde(default)]
+        applied: bool,
+        /// Whether a mode above shadow would have changed behaviour.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        would_change: Option<bool>,
+        /// A code-only verdict on the same input, recorded for comparison.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_option"
+        )]
+        baseline: Option<DecisionBaseline>,
+        #[serde(default)]
+        latency_ms: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_tokens: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cost_usd: Option<f64>,
+        /// `cost_usd` comes from the price table, not the provider.
+        #[serde(default, skip_serializing_if = "is_false")]
+        cost_estimated: bool,
+        /// Answered from the run's cache: no request was made.
+        #[serde(default)]
+        cached: bool,
+        /// `unavailable`, `timeout`, `rate_limited`, `auth`, `budget`,
+        /// `invalid`, `cancelled` (the run stopped the ask; a resume asks
+        /// again), or `None` when answered. Never a key or a body.
+        #[serde(default)]
+        error: Option<String>,
+        // --- labels and enforce (issue #165 Parts 9-14) ---
+        /// Why an enforce-mode decision acted as advise instead:
+        /// `no_threshold` (none stored for this use, provider and model),
+        /// `uncalibrated`, `cap` (the use spent its automatic actions for
+        /// the run), `not_opted_in` (the playbook did not opt in),
+        /// `effects` (the gate's effects forbid an automatic decision) or
+        /// `no_retry` (a completion rejection would have no retry to
+        /// consume).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        enforce_refused: Option<String>,
+        /// Join keys a report labels the decision by: `wake_seq`,
+        /// `gate_visit`, `profile`, `tier`, `retries_left` and similar.
+        #[serde(
+            default,
+            skip_serializing_if = "std::collections::BTreeMap::is_empty",
+            deserialize_with = "lenient_default"
+        )]
+        join: std::collections::BTreeMap<String, serde_json::Value>,
+        // --- end labels and enforce ---
     },
     /// An explicit cycle-progress report (spec 2026-07-17): the current
     /// iteration `done` of `total` for the cycle group anchored at `node_id`.
@@ -695,6 +822,11 @@ impl EventLog {
         })
     }
 
+    /// The seq the next appended event gets.
+    pub(crate) fn peek_next_seq(&self) -> u64 {
+        self.next_seq
+    }
+
     /// Re-reads the last on-disk seq and advances `next_seq` past it when a
     /// concurrent append (child-to-parent wake mirror) raced ahead of this
     /// handle. Call after nested child work returns and before any further
@@ -757,6 +889,7 @@ pub fn propagate_wake_to_parent(
     trigger: WakeTrigger,
     child_node: &str,
     detail: &str,
+    triage: Option<&WakeTriage>,
 ) -> Result<(), EngineError> {
     let cfg = match crate::run_config::read_run_config(child_run_dir) {
         Ok(c) => c,
@@ -808,6 +941,7 @@ pub fn propagate_wake_to_parent(
         trigger,
         node: parent_node,
         detail: mirrored_detail,
+        triage: triage.cloned(),
     })?;
     Ok(())
 }
@@ -821,14 +955,28 @@ pub fn raise_wake(
     node: &str,
     detail: impl Into<String>,
 ) -> Result<(), EngineError> {
+    raise_wake_with_triage(run_dir, log, trigger, node, detail, None)
+}
+
+/// [`raise_wake`] carrying a decision model's `triage` (issue #165 Part 10),
+/// mirrored to the parent run with the wake.
+pub(crate) fn raise_wake_with_triage(
+    run_dir: &Path,
+    log: &mut EventLog,
+    trigger: WakeTrigger,
+    node: &str,
+    detail: impl Into<String>,
+    triage: Option<WakeTriage>,
+) -> Result<(), EngineError> {
     let detail = detail.into();
     log.append(EventPayload::WakeRaised {
         trigger,
         node: node.to_string(),
         detail: detail.clone(),
+        triage: triage.clone(),
     })?;
     // Propagation is best-effort for the parent; never fail the child on it.
-    let _ = propagate_wake_to_parent(run_dir, trigger, node, &detail);
+    let _ = propagate_wake_to_parent(run_dir, trigger, node, &detail, triage.as_ref());
     Ok(())
 }
 
@@ -877,6 +1025,100 @@ pub(crate) fn review_requested_count(events: &[Event], node: &str) -> usize {
 fn lenient_usage<'de, D>(d: D) -> Result<Option<apb_core::agent_output::AgentUsage>, D::Error>
 where
     D: serde::Deserializer<'de>,
+{
+    let v = Option::<serde_json::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_json::from_value(v).ok()))
+}
+
+/// A compact answer in [`EventPayload::DecisionMade`]: `value` is the chosen
+/// option (choice) or the expected level (score), `p` its probability (the
+/// "yes" probability for a noul), `invalid` the reason an item was refused.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct DecisionAnswer {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub p: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub confidence: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invalid: Option<String>,
+}
+
+/// A decision model's recommendation on a park wake
+/// ([`EventPayload::WakeRaised`] `triage`, issue #165 Part 10).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct WakeTriage {
+    /// The recommended action: `retry_same`, `retry_with_note`,
+    /// `switch_executor`, `continue_from_next`, `pause_for_human` or
+    /// `needs_supervisor`.
+    pub action: String,
+    #[serde(default)]
+    pub p: f64,
+    #[serde(default)]
+    pub confidence: f64,
+    /// The probability that the output repeats a failure already tried.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub looping_p: Option<f64>,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    /// The engine posted the retry itself (enforce, Part 14.3).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub applied: bool,
+}
+
+/// A decision model's recommendation at a review gate
+/// ([`EventPayload::ReviewRequested`] `recommendation`, issue #165 Part 11).
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, Default)]
+pub struct ReviewRecommendation {
+    /// One of the gate's options.
+    pub option: String,
+    #[serde(default)]
+    pub p: f64,
+    #[serde(default)]
+    pub confidence: f64,
+    #[serde(default)]
+    pub provider: String,
+    #[serde(default)]
+    pub model: String,
+    #[serde(default)]
+    pub calibrated: bool,
+    /// The engine posted this option as the decision itself (enforce,
+    /// `auto_decide`, Part 14.4).
+    #[serde(default, skip_serializing_if = "is_false")]
+    #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
+    pub applied: bool,
+}
+
+/// A code-only verdict recorded next to a decision (the completion check's
+/// generic regex baseline): whether it flags, and the pattern that did.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DecisionBaseline {
+    #[serde(default)]
+    pub regex_flag: bool,
+    #[serde(default)]
+    pub pattern: Option<String>,
+}
+
+/// Decodes a structured field of a known event, or its default when the
+/// shape is one this binary cannot read (a newer apb's).
+fn lenient_default<'de, D, T>(d: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned + Default,
+{
+    let v = serde_json::Value::deserialize(d)?;
+    Ok(serde_json::from_value(v).unwrap_or_default())
+}
+
+/// [`lenient_default`] for an optional field.
+fn lenient_option<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: serde::de::DeserializeOwned,
 {
     let v = Option::<serde_json::Value>::deserialize(d)?;
     Ok(v.and_then(|v| serde_json::from_value(v).ok()))
@@ -1371,6 +1613,7 @@ mod tests {
             profile: Some("project/main".into()),
             from_model: Some("haiku".into()),
             to_model: Some("opus".into()),
+            reason: None,
         };
         let line = serde_json::to_string(&payload).unwrap();
         let back: EventPayload = serde_json::from_str(&line).unwrap();
@@ -1567,5 +1810,57 @@ mod tests {
             serde_json::to_string(&strict).unwrap(),
             serde_json::to_string(&lossy).unwrap()
         );
+    }
+
+    #[test]
+    fn a_decision_record_parses_and_reads_leniently() {
+        let line = r#"{"seq":3,"ts":1,"type":"decision_made","use_site":"completion_check","node":"w","attempt":1,"provider":"p","model":"m","calibrated":true,"mode":"shadow","questions_digest":"sha256:q","state_digest":"sha256:s","state_bytes":10,"answers":{"final_result":{"p":0.9}},"applied":false,"would_change":false,"baseline":{"regex_flag":false,"pattern":null},"latency_ms":5,"input_tokens":7,"cost_usd":0.1,"cached":false,"error":null}"#;
+        let ev: Event = serde_json::from_str(line).unwrap();
+        assert!(is_known_kind("decision_made"));
+        assert!(
+            !ev.payload.is_checkpoint(),
+            "skipping it relies on the next checkpoint"
+        );
+        // Structured fields of a shape this binary cannot read decode as
+        // empty instead of failing the journal.
+        let newer = line
+            .replace(
+                r#""answers":{"final_result":{"p":0.9}}"#,
+                r#""answers":["a newer shape"]"#,
+            )
+            .replace(
+                r#""baseline":{"regex_flag":false,"pattern":null}"#,
+                r#""baseline":"newer""#,
+            );
+        let ev: Event = serde_json::from_str(&newer).unwrap();
+        let EventPayload::DecisionMade {
+            answers, baseline, ..
+        } = ev.payload
+        else {
+            panic!("a decision_made")
+        };
+        assert!(answers.is_empty() && baseline.is_none());
+    }
+
+    #[test]
+    fn the_new_optional_fields_leave_old_lines_byte_identical() {
+        // Lines as an apb before issue #165 Parts 10-12 wrote them: they
+        // parse, and written back they are the same bytes (the new fields
+        // are absent when unset).
+        for line in [
+            r#"{"seq":1,"ts":1,"type":"wake_raised","trigger":"node_failed","node":"w","detail":"boom"}"#,
+            r#"{"seq":2,"ts":1,"type":"review_requested","node":"g","options":["approve","reject"],"instruction":"x"}"#,
+            r#"{"seq":3,"ts":1,"type":"fallback_triggered","node":"w","from":"a","to":"b","from_model":"m","to_model":"n"}"#,
+        ] {
+            let ev: Event = serde_json::from_str(line).unwrap();
+            assert_eq!(serde_json::to_string(&ev).unwrap(), line);
+        }
+        // A triage of a shape this binary cannot read is dropped, not fatal.
+        let newer = r#"{"seq":1,"ts":1,"type":"wake_raised","trigger":"node_failed","node":"w","detail":"d","triage":"newer"}"#;
+        let ev: Event = serde_json::from_str(newer).unwrap();
+        assert!(matches!(
+            ev.payload,
+            EventPayload::WakeRaised { triage: None, .. }
+        ));
     }
 }

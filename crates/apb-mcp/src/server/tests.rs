@@ -1724,3 +1724,70 @@ fn tier0_reaches_both_the_initialize_and_discover_channels() {
         "server/discover lost TIER0"
     );
 }
+
+// --- issue #165 Part 16: catalog ranking off the async runtime --------------
+
+/// A slow decision provider must not stall the server: the ranking request
+/// runs on the blocking pool, so another tool call on the same
+/// current-thread runtime completes while it is in flight. The server's
+/// instructions stay TIER0 with the use enabled.
+#[tokio::test]
+async fn catalog_ranking_runs_off_the_runtime_and_keeps_tier0() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let reply = r#"{"model":"jev-test","answers":{"best":{"type":"choice","choice":"p1","probabilities":{"p1":0.9,"none_of_these":0.1},"confidence":0.8},"needs_playbook":{"type":"noul","noul":0.7}},"usage":{"input_tokens":10,"output_tokens":1}}"#;
+    let stub = apb_decide::testing::StubServer::start(vec![
+        apb_decide::testing::StubResponse::json(200, reply)
+            .delayed(std::time::Duration::from_millis(1200)),
+    ]);
+    fs::write(
+        cfg.path().join("decisions.yaml"),
+        format!(
+            "mode: advise\ntimeout_ms: 5000\nproviders: [{{ id: slow, kind: systemone, base_url: '{}', model: jev-test }}]\nuses: {{ catalog_rank: {{ mode: advise }} }}\n",
+            stub.base_url
+        ),
+    )
+    .unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        std::env::remove_var("APB_DECISIONS");
+    }
+    let dir = seeded_root();
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let started = std::time::Instant::now();
+    let ranking = {
+        let server = server.clone();
+        tokio::spawn(async move {
+            server
+                .playbook_catalog(Parameters(PlaybookCatalogArgs {
+                    revision: None,
+                    limit: None,
+                    workspace: None,
+                    query: Some("implement the task".into()),
+                }))
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    let list = server
+        .playbook_list(Parameters(WorkspaceArg::default()))
+        .await;
+    assert_eq!(list.is_error, Some(false));
+    assert!(
+        started.elapsed() < std::time::Duration::from_millis(1000),
+        "the concurrent call waited for the ranking: {:?}",
+        started.elapsed()
+    );
+    assert!(!ranking.is_finished(), "the ranking is still in flight");
+    let result = ranking.await.unwrap();
+    let v: serde_json::Value = serde_json::from_str(&result_text(&result)).unwrap();
+    assert_eq!(v["ranked"][0]["p"], serde_json::json!(0.9), "{v}");
+    assert_eq!(v["ranking"]["provider"], "slow");
+    assert_eq!(
+        server.get_info().instructions.as_deref(),
+        Some(crate::instructions::TIER0)
+    );
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+}

@@ -21,6 +21,8 @@ mod advisory_tools_test;
 mod ask_server_test;
 #[path = "suite/capture_tools_test.rs"]
 mod capture_tools_test;
+#[path = "suite/catalog_rank_test.rs"]
+mod catalog_rank_test;
 #[path = "suite/catalog_tools_test.rs"]
 mod catalog_tools_test;
 #[path = "suite/connector_policy.rs"]

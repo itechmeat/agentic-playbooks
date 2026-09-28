@@ -138,6 +138,7 @@ fn review_requested(node: &str) -> apb_engine::event::EventPayload {
         title: None,
         instruction: String::new(),
         prompt: None,
+        recommendation: None,
     }
 }
 
@@ -201,6 +202,7 @@ async fn get_run_detail_exposes_pending_review_prompt() {
         title: None,
         instruction: String::new(),
         prompt: Some("Check the changelog first.".into()),
+        recommendation: None,
     };
     seed_gate_run_yaml(dir.path(), "gate-2", GATE_PROMPT, &[prompt]);
     let app = build_router(AppState::new(dir.path().to_path_buf()));
@@ -1191,7 +1193,7 @@ async fn run_detail_reads_a_journal_with_a_future_event_and_totals_usage() {
         [
             r#"{"seq":0,"ts":1,"type":"run_started","playbook":"noagent","version":"1.0.0"}"#,
             r#"{"seq":1,"ts":2,"type":"attempt_finished","node":"note","attempt":1,"status":"succeeded","duration_ms":5,"session":null,"summary":null,"usage":{"input_tokens":10,"output_tokens":4,"cache_read_tokens":90,"cache_write_tokens":0,"cost_usd":0.002,"source":"reported"}}"#,
-            r#"{"seq":2,"ts":3,"type":"decision_made","use":"completion_check"}"#,
+            r#"{"seq":2,"ts":3,"type":"future_event","use":"completion_check"}"#,
             r#"{"seq":3,"ts":4,"type":"node_finished","node":"note","status":"succeeded","attempt":1,"output":"ok","artifacts":[]}"#,
             r#"{"seq":4,"ts":5,"type":"run_finished","outcome":"succeeded"}"#,
             "",

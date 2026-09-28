@@ -227,6 +227,9 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
             ephemeral: false,
             hermetic: false,
             zcode_mode: None,
+            tiers: Vec::new(),
+            routed_tier: None,
+            cascade: 0,
         }],
         node_bindings: std::collections::BTreeMap::from([(
             "a".to_string(),
@@ -234,6 +237,7 @@ fn doctor_run_warns_autonomy_for_a_node_with_no_non_interactive_flag() {
         )]),
         connectors: Vec::new(),
         connector_grants: std::collections::BTreeMap::new(),
+        decisions: None,
     };
     apb_engine::manifest::write(&rd, &manifest).unwrap();
 

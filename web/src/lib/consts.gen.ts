@@ -6,7 +6,7 @@
 export const CURRENT_SCHEMA = 2
 
 /** Every node `type` tag. */
-export const NODE_TYPES = ['start', 'agent_task', 'script', 'prompt', 'condition', 'human_review', 'wait', 'finish', 'playbook'] as const
+export const NODE_TYPES = ['start', 'agent_task', 'script', 'prompt', 'condition', 'human_review', 'wait', 'finish', 'playbook', 'judge'] as const
 export type NodeType = (typeof NODE_TYPES)[number]
 
 /** The decisions a human_review gate without options offers. */

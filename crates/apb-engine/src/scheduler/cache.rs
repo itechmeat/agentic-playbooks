@@ -79,10 +79,92 @@ fn cache_eligible<'a>(playbook: &'a Playbook, node_id: &str, cfg: &RunConfig) ->
         return None;
     }
     match &node.kind {
-        NodeKind::Script { .. } | NodeKind::AgentTask { .. } => Some(node),
+        NodeKind::Script { .. } | NodeKind::AgentTask { .. } | NodeKind::Judge { .. } => Some(node),
         _ => None,
     }
 }
+
+// --- issue #165 Part 5: judge node cache key ---------------------------------
+
+/// The `workspace_fingerprint` a judge node's key carries: its answer
+/// depends on its state and questions, never on the working tree.
+const JUDGE_FINGERPRINT: &str = "judge";
+
+/// The rendered-state digest and the `(provider, model)` of a judge key.
+type JudgeKey = (String, (String, String));
+
+/// A judge node's key parts: the rendered state (canonical JSON) and the
+/// `(provider, pinned model)` that would answer. `None` (no cache) unless
+/// the run's `judge_node` use is at enforce, because below it the output is
+/// a fallback, never an answer worth keeping.
+fn judge_key_parts(
+    playbook: &Playbook,
+    node_id: &str,
+    run_dir: &Path,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+) -> Result<Option<JudgeKey>, EngineError> {
+    let Some(NodeKind::Judge { state: fields, .. }) = playbook.node(node_id).map(|n| &n.kind)
+    else {
+        return Ok(None);
+    };
+    let Some(decisions) = crate::manifest::read(run_dir)
+        .ok()
+        .flatten()
+        .and_then(|m| m.decisions)
+    else {
+        return Ok(None);
+    };
+    // The snapshot and what the machine says now (the kill switch, a
+    // lowered ceiling or use mode, a removed file): a cached answer routes
+    // the run only while the use is still at enforce.
+    if apb_core::decisions::killed_by_switch()
+        || decisions.mode_for("judge_node") != apb_core::decisions::DecisionMode::Enforce
+        || apb_core::decisions::live_mode(&super::judge::cfg_root(run_dir), "judge_node")
+            != apb_core::decisions::DecisionMode::Enforce
+    {
+        return Ok(None);
+    }
+    let Some(primary) = decisions
+        .providers
+        .iter()
+        .find(|p| !matches!(p.kind, apb_core::decisions::ProviderKind::LlmEmulation))
+    else {
+        return Ok(None);
+    };
+    let mut rendered = serde_json::Map::new();
+    for (name, template) in fields.iter() {
+        let text = render_node_prompt(
+            run_dir,
+            run_id,
+            state,
+            cfg,
+            template,
+            &playbook.context_budget(node_id),
+        )?;
+        rendered.insert(name.to_string(), serde_json::Value::String(text));
+    }
+    Ok(Some((
+        apb_decide::digest::digest(&serde_json::Value::Object(rendered)),
+        (
+            primary.id.clone(),
+            primary.model.clone().unwrap_or_default(),
+        ),
+    )))
+}
+
+/// Whether a judge output is a provider's answer (worth caching), not a
+/// fallback or an emulation.
+fn judge_output_is_answer(output: &str) -> bool {
+    apb_core::schema::output_field_value(output, apb_core::judge::DECIDED_BY).is_some_and(|by| {
+        by != apb_core::judge::UNAVAILABLE
+            && by != apb_core::judge::DEFAULT
+            && !by.starts_with("emulated:")
+    })
+}
+
+// --- end judge node cache key ---------------------------------------------------
 
 /// The pre-execution workspace fingerprint for one node, taken against the
 /// tree as it stands NOW. The concurrent batch takes every member's
@@ -158,7 +240,8 @@ pub(crate) fn prepare(
                 )
             }
             NodeKind::AgentTask { .. } => (None, None, "agent_task"),
-            _ => unreachable!("cache_eligible only returns script or agent_task nodes"),
+            NodeKind::Judge { .. } => (None, None, "judge"),
+            _ => unreachable!("cache_eligible only returns script, agent_task or judge nodes"),
         };
 
     // Declared outputs are excluded from BOTH the pre-execution fingerprint
@@ -173,6 +256,7 @@ pub(crate) fn prepare(
         .map(|o| o.files.clone())
         .unwrap_or_default();
     let fingerprint = match probe_ctx.pre_fingerprint {
+        _ if node_type == "judge" => JUDGE_FINGERPRINT.to_string(),
         Some(f) => f.to_string(),
         None => match node.inputs.as_ref() {
             Some(inp) if !inp.files.is_empty() => {
@@ -352,6 +436,8 @@ impl NodeCacheCtx {
             };
         }
         let post = match playbook.node(&self.node_id).and_then(|n| n.inputs.as_ref()) {
+            // A judge node reads no files and writes none.
+            _ if self.node_type == "judge" => Some(JUDGE_FINGERPRINT.to_string()),
             Some(inp) if !inp.files.is_empty() => {
                 files_fingerprint(workdir, &inp.files, &self.exclude).ok()
             }
@@ -489,6 +575,23 @@ pub(crate) fn probe(
         agent_model = Some((agent, model));
         connector_digests = digests;
     }
+    if matches!(
+        playbook.node(node_id).map(|n| &n.kind),
+        Some(NodeKind::Judge { .. })
+    ) {
+        match judge_key_parts(playbook, node_id, run_dir, run_id, state, cfg)? {
+            Some((state_digest, provider_model)) => {
+                rendered_prompt = Some(state_digest);
+                agent_model = Some(provider_model);
+            }
+            None => {
+                return Ok(CacheProbe::Miss {
+                    ctx: None,
+                    events: Vec::new(),
+                });
+            }
+        }
+    }
     // A declared cache key, rendered unclipped so a clip note (which names
     // this run's directory) can never leak into it. A key that renders empty
     // (the value it reads was never published) skips the cache for this
@@ -566,6 +669,30 @@ pub(crate) fn probe(
     }
 }
 
+/// The declared `outputs.fields` a successful output leaves out (absent,
+/// `null`, or an output that is not a JSON object at all). Empty for a node
+/// that declares none. The one definition behind `OutputFieldsMissing` and
+/// the completion check's `missing_fields`.
+pub(crate) fn missing_output_fields(node: &apb_core::schema::Node, output: &str) -> Vec<String> {
+    let Some(fields) = node.outputs.as_ref().map(|o| &o.fields) else {
+        return Vec::new();
+    };
+    if fields.is_empty() {
+        return Vec::new();
+    }
+    let parsed: Option<serde_json::Map<String, serde_json::Value>> =
+        serde_json::from_str(output).ok();
+    fields
+        .iter()
+        .filter(|f| {
+            parsed
+                .as_ref()
+                .is_none_or(|o| o.get(f.as_str()).is_none_or(|v| v.is_null()))
+        })
+        .cloned()
+        .collect()
+}
+
 /// The post-execution half of the per-node unit: captures the node's declared
 /// output artifacts, checks the declaration, and decides cache admission.
 ///
@@ -613,26 +740,12 @@ pub(crate) fn settle(
     let mut events = Vec::new();
     // Declared named outputs (issue #67 item 4): a warning per execution that
     // left any of them out, never a failure.
-    if let Some(fields) = node.outputs.as_ref().map(|o| &o.fields)
-        && !fields.is_empty()
-    {
-        let parsed: Option<serde_json::Map<String, serde_json::Value>> =
-            serde_json::from_str(output).ok();
-        let missing: Vec<String> = fields
-            .iter()
-            .filter(|f| {
-                parsed
-                    .as_ref()
-                    .is_none_or(|o| o.get(f.as_str()).is_none_or(|v| v.is_null()))
-            })
-            .cloned()
-            .collect();
-        if !missing.is_empty() {
-            events.push(EventPayload::OutputFieldsMissing {
-                node: node_id.to_string(),
-                fields: missing,
-            });
-        }
+    let missing = missing_output_fields(node, output);
+    if !missing.is_empty() {
+        events.push(EventPayload::OutputFieldsMissing {
+            node: node_id.to_string(),
+            fields: missing,
+        });
     }
     if declared.is_empty() && ctx.is_none() {
         return (Vec::new(), events);
@@ -647,7 +760,15 @@ pub(crate) fn settle(
                 });
             }
             let artifacts = captured.iter().map(|(a, _)| a.clone()).collect();
-            if let Some(ctx) = ctx {
+            if let Some(ctx) = ctx
+                && ctx.node_type == "judge"
+                && !judge_output_is_answer(output)
+            {
+                events.push(EventPayload::NodeCacheRejected {
+                    node: node_id.to_string(),
+                    reason: "judge output is a fallback, not a provider answer".into(),
+                });
+            } else if let Some(ctx) = ctx {
                 // Scan the run log for this node's connector calls (written out
                 // of band by the connector-call subprocess) and verify each
                 // against the read_only set in the run's connector snapshot. A

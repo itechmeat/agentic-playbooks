@@ -332,3 +332,21 @@ describe('saveNotice', () => {
     })
   })
 })
+
+describe('adding a judge node', () => {
+  it('seeds a question skeleton so the new node is not an empty judge', () => {
+    const doc = parseDocument('schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes: []\nedges: []\n')
+    const next = addNode(doc, 'judge', 'judge-1')
+    const node = (next.toJS() as { nodes: Record<string, unknown>[] }).nodes[0]
+    expect(node.type).toBe('judge')
+    expect(Object.keys(node.questions as object)).toEqual(['verdict'])
+    const verdict = (node.questions as { verdict: { criteria: Record<string, string> } }).verdict
+    expect(Object.keys(verdict.criteria)).toContain('unclear')
+    expect(node.on_unavailable).toBe('fail')
+    expect(node.state).toEqual({ input: '{{run.instruction}}' })
+    // Other kinds are unchanged: id, type and title only.
+    const plain = (addNode(doc, 'condition', 'c').toJS() as { nodes: Record<string, unknown>[] }).nodes[0]
+    expect(Object.keys(plain)).toEqual(['id', 'type', 'title'])
+  })
+})
+

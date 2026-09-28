@@ -8,7 +8,9 @@
 //! one long file.
 
 mod connectors;
+mod decisions;
 mod graph;
+mod judge;
 mod node_io;
 mod nodes;
 mod templates;
@@ -23,10 +25,13 @@ use crate::schema::{
 };
 
 use connectors::check_connectors;
+use decisions::check_decision_opt_ins;
+pub use decisions::{auto_decide_refusal, downstream_nodes};
 use graph::{
     check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,
     check_joins, check_reachability, check_start_finish, check_unique_ids,
 };
+use judge::{check_judge_edges, check_judge_nodes};
 use node_io::{
     check_cache_key, check_declared_fields, check_session_handoff, check_workdir, check_worktree,
 };
@@ -154,6 +159,9 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     check_failure_policy(playbook, &mut r); // V35
+    check_judge_nodes(playbook, &mut r); // V50-V58, V61 (issue #165 Part 5)
+    check_judge_edges(playbook, &mut r); // V59, V60 (issue #165 Part 7)
+    check_decision_opt_ins(playbook, &mut r); // V70, V71, V72, V73, V74
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

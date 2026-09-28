@@ -49,6 +49,7 @@ fn wait_wake_finds_wake_then_none_after_cursor_past_it() {
             trigger: WakeTrigger::NodeFailed,
             node: "impl".into(),
             detail: "exit 1".into(),
+            triage: None,
         })
         .unwrap();
 
@@ -83,6 +84,7 @@ fn run_inspect_reports_wakes_status_and_context() {
         trigger: WakeTrigger::NodeFailed,
         node: "impl".into(),
         detail: "exit 1".into(),
+        triage: None,
     })
     .unwrap();
 

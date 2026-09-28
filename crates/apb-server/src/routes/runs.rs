@@ -60,6 +60,12 @@ pub struct RunDetail {
     pub answer: Option<String>,
     /// Token usage the run's attempts reported; null when none did.
     pub usage: Option<apb_engine::run_view::RunUsage>,
+    /// Decision-model totals (issue #165 Part 4); absent when the run
+    /// journaled no decision. Each decision itself is a `decision_made` in
+    /// `events`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub decisions: Option<apb_engine::run_view::RunDecisions>,
     /// Events of a type this binary does not know (a newer apb wrote them),
     /// left out of `events`; 0 for a journal read in full.
     pub unknown_events: usize,
@@ -158,6 +164,7 @@ pub(crate) async fn get_run_handler(
     let children = view.children(&run_dir);
     let failure_reason = view.failure_reason();
     let usage = view.usage();
+    let decisions = view.decisions();
     let nodes = view.nodes();
     Json(RunDetail {
         run_id: id,
@@ -176,6 +183,7 @@ pub(crate) async fn get_run_handler(
         hooks,
         children,
         usage,
+        decisions,
         unknown_events: view.unknown.len(),
         progress: view.progress,
         answer,

@@ -41,6 +41,7 @@ function edgeLabel(e: PlaybookEdgeModel): string | undefined {
   if (c.type === 'review_status') return `review: ${c.equals}`
   if (c.type === 'output_match') return `match: ${c.pattern}`
   if (c.type === 'output_field') return `${c.field}: ${c.equals}`
+  if (c.type === 'judge') return `judge p>=${c.min_p}`
   return c.type
 }
 
@@ -147,6 +148,14 @@ function exitCaption(
       tone: 'default',
     }
   }
+  if (c.type === 'judge') {
+    const fallback = c.on_unavailable === true ? 'taken' : 'not taken'
+    return {
+      label: `judge: ${String(c.min_p)}`,
+      title: `taken when a decision model answers yes to "${String(c.question)}" with p >= ${String(c.min_p)}; without an answer (no provider, the judge_edge use below enforce) it is ${fallback}; goes to ${e.to}`,
+      tone: 'default',
+    }
+  }
   return { label: String(c.type), title: `${c.type}, goes to ${e.to}`, tone: 'default' }
 }
 
@@ -190,7 +199,8 @@ export function nodeExits(playbook: PlaybookModel, nodeId: string): NodeExits | 
 // own kind, so a `condition` used as a join is left unmarked here even though
 // the policy does handle its failure. Closing that needs the edge `join` field,
 // which the editor's client-side parse does not carry today.
-const FAILABLE_KINDS = new Set(['agent_task', 'script', 'playbook', 'wait'])
+// A `judge` fails when no answer comes back and its on_unavailable is `fail`.
+const FAILABLE_KINDS = new Set(['agent_task', 'script', 'playbook', 'wait', 'judge'])
 
 /** What the playbook's failure policy does for one node, when it applies. */
 export type FailureEffect = { kind: 'stop' } | { kind: 'route'; node: string }

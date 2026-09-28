@@ -10,6 +10,7 @@
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
+  import DecisionsPanel from '../lib/DecisionsPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -203,6 +204,9 @@
               {#if pr.prompt}
                 <pre class="whitespace-pre-wrap break-words text-sm">{pr.prompt}</pre>
               {/if}
+              {#if pr.recommendation}
+                <p class="text-xs text-muted-foreground" data-testid="review-recommendation">{pr.recommendation}</p>
+              {/if}
               <div class="flex flex-wrap gap-1">
                 {#each pr.options as opt (opt)}
                   <Button
@@ -298,6 +302,10 @@
           {/if}
         </Card.Content>
       </Card.Root>
+    {/if}
+
+    {#if detail}
+      <DecisionsPanel decisions={detail.decisions} events={detail.events} />
     {/if}
 
     {#if detail?.instruction}

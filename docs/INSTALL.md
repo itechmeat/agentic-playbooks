@@ -159,3 +159,11 @@ apb doctor
 
 Shows the availability of agent binaries and runner runtimes, playbook
 validity, and the state of the config and registry.
+
+## Optional: decision models
+
+apb can ask a small decision model (for example Jev, through TypeSafe, a
+gateway or a self-hosted server) typed questions about a run (completion
+checks, judge nodes and edges, retry advice, wake triage, review
+recommendations, tier routing) and rank the MCP catalog. It is off unless
+`<config_dir>/decisions.yaml` exists; see DECISIONS.md.

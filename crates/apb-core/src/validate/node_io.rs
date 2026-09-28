@@ -97,12 +97,20 @@ pub(crate) fn check_session_handoff(playbook: &Playbook, r: &mut ValidationRepor
 /// without that field. Nodes that declare nothing are not checked, so
 /// existing playbooks see no new warnings.
 pub(crate) fn check_declared_fields(playbook: &Playbook, r: &mut ValidationReport) {
+    // A judge node publishes the fields its questions produce even when it
+    // declares none (issue #165 Part 5).
+    let judge_fields: HashMap<&str, Vec<String>> = playbook
+        .nodes
+        .iter()
+        .filter_map(|n| super::judge::judge_output_fields(n).map(|f| (n.id.as_str(), f)))
+        .collect();
     let declared = |id: &str| -> Option<&Vec<String>> {
         playbook
             .node(id)
             .and_then(|n| n.outputs.as_ref())
             .map(|o| &o.fields)
             .filter(|f| !f.is_empty())
+            .or_else(|| judge_fields.get(id))
     };
     let report = |owner: Option<&str>, source: &str, field: &str, r: &mut ValidationReport| {
         if let Some(fields) = declared(source)

@@ -72,9 +72,14 @@ pub fn spawn_watcher(
 /// The global config store entries the machine-wide dashboard shows:
 /// global profiles, installed connectors and connector accounts (watched
 /// recursively), plus the files directly in `config_dir` whose change is
-/// visible in the UI (trust decisions, the agent config).
+/// visible in the UI (trust decisions, the agent config, the decision-model
+/// config).
 const GLOBAL_SUBDIRS: [&str; 3] = ["profiles", "connectors", "connector-config"];
-const GLOBAL_FILES: [&str; 2] = ["trust.json", "config.yaml"];
+const GLOBAL_FILES: [&str; 3] = [
+    "trust.json",
+    "config.yaml",
+    apb_core::decisions::DECISIONS_FILE,
+];
 
 const CONFIG_CHANGED: &str = r#"{"type":"config_changed"}"#;
 

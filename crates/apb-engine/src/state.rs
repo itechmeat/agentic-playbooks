@@ -197,6 +197,24 @@ pub struct RunState {
     /// `WorktreeResolved`: the directory agent_task and script nodes without
     /// their own `workdir` run in. `None`: the execution root.
     pub worktree: Option<String>,
+    /// The judge-edge answers of each source node (issue #165 Part 7), from
+    /// its latest error-free `judge_edge` decision.
+    pub judge_edges: BTreeMap<String, JudgeEdgeAnswers>,
+    /// How many times each node has finished, folded from `NodeFinished`: a
+    /// judge-edge answer belongs to the execution it was asked after.
+    pub finished_counts: BTreeMap<String, u32>,
+}
+
+/// One node's judge-edge answers, as journaled by the `judge_edge` decision
+/// asked when it finished.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct JudgeEdgeAnswers {
+    /// The source's execution the answers belong to (its finish count).
+    pub execution: u32,
+    /// The answers were applied: the `judge_edge` use was at enforce.
+    pub applied: bool,
+    /// The "yes" probability by question id (`edge_<index>`).
+    pub p: BTreeMap<String, f64>,
 }
 
 impl RunState {
@@ -240,6 +258,7 @@ impl RunState {
                     s.nodes.insert(node.clone(), NodeStatus::from_label(status));
                     s.outputs.insert(node.clone(), output.clone());
                     s.last_node = Some(node.clone());
+                    *s.finished_counts.entry(node.clone()).or_insert(0) += 1;
                 }
                 EventPayload::RunPaused { .. } => s.run_status = RunStatus::Paused,
                 EventPayload::RunResumed { .. } => s.run_status = RunStatus::Running,
@@ -281,6 +300,31 @@ impl RunState {
                 // Context compaction is a materialized rendering artifact,
                 // it does not affect run state.
                 EventPayload::ContextCompacted { .. } => {}
+                // A decision record changes no run state (a shadow answer is
+                // journal only), except the judge-edge answers routing reads
+                // back (issue #165 Part 7): edge selection stays a pure fold.
+                EventPayload::DecisionMade {
+                    use_site,
+                    node: Some(node),
+                    attempt: Some(execution),
+                    answers,
+                    applied,
+                    error: None,
+                    ..
+                } if use_site == "judge_edge" => {
+                    s.judge_edges.insert(
+                        node.clone(),
+                        JudgeEdgeAnswers {
+                            execution: *execution,
+                            applied: *applied,
+                            p: answers
+                                .iter()
+                                .filter_map(|(k, a)| a.p.map(|p| (k.clone(), p)))
+                                .collect(),
+                        },
+                    );
+                }
+                EventPayload::DecisionMade { .. } => {}
                 // An accepted environment drift is an audit record, it does not change state.
                 EventPayload::EnvironmentDriftAccepted { .. } => {}
                 // Progress is an audit-only cycle report, it does not change state.

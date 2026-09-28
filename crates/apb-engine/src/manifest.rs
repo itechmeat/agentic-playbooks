@@ -56,6 +56,38 @@ pub struct ManifestProfile {
     /// manifests) means `yolo`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub zcode_mode: Option<apb_core::profile::ZcodeMode>,
+    // --- tier routing (issue #165 Part 12) ---
+    /// The profile's executor tiers, lightest first, resolved at run start
+    /// like the chain. Empty for a profile without tiers (and old
+    /// manifests), which is never routed.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tiers: Vec<ManifestTier>,
+    /// Set only on a rebind-overlay entry written by tier routing: the tier
+    /// the node was routed to. A supervisor's own rebind never has it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routed_tier: Option<String>,
+    /// How many leading chain steps of a routed entry are tiers below the
+    /// profile's own executor: an agent failure there goes up a tier at
+    /// once instead of spending same-executor retries.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub cascade: u32,
+    // --- end tier routing ---
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
+}
+
+/// A profile tier as a run snapshots it (issue #165 Part 12).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestTier {
+    pub name: String,
+    /// The work the tier is for (the routing question's criterion).
+    #[serde(rename = "for")]
+    pub for_work: String,
+    /// The tier's own executor; `None` for `use: executor`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invocation: Option<ResolvedInvocation>,
 }
 
 impl ManifestProfile {
@@ -120,11 +152,40 @@ pub struct RunExecutionManifest {
     /// Binding from `node_id` -> the grants that node holds.
     #[serde(default)]
     pub connector_grants: BTreeMap<String, Vec<ManifestConnectorGrant>>,
+    /// The decision-model settings of the run (issue #165 Part 3), present
+    /// only when at least one use is above off at start: providers (ids,
+    /// kinds, URLs, pinned models, data class, the key REFERENCE, never a
+    /// key), per-use modes and thresholds, budget and privacy. Retry and
+    /// resume read it from here, so a later edit of `decisions.yaml` does not
+    /// reach a started run. Absent in older manifests and in every run on a
+    /// machine without `decisions.yaml`, which therefore serializes as before.
+    ///
+    /// Read leniently: the settings types refuse unknown fields, so a block a
+    /// newer apb wrote (a new privacy knob, a new provider kind) reads as
+    /// `None` here (the layer off for the run) instead of making the whole
+    /// manifest unreadable.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "lenient_decisions"
+    )]
+    pub decisions: Option<apb_core::decisions::EffectiveDecisions>,
+}
+
+fn lenient_decisions<'de, D>(
+    d: D,
+) -> Result<Option<apb_core::decisions::EffectiveDecisions>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    use serde::Deserialize;
+    let v = Option::<serde_yaml_ng::Value>::deserialize(d)?;
+    Ok(v.and_then(|v| serde_yaml_ng::from_value(v).ok()))
 }
 
 impl RunExecutionManifest {
     pub fn is_empty(&self) -> bool {
-        self.profiles.is_empty() && self.connectors.is_empty()
+        self.profiles.is_empty() && self.connectors.is_empty() && self.decisions.is_none()
     }
 
     pub fn for_node(&self, node_id: &str) -> Option<&ManifestProfile> {
@@ -216,6 +277,18 @@ mod tests {
     use super::*;
 
     #[test]
+    fn a_decisions_block_from_a_newer_apb_leaves_the_manifest_readable() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            manifest_path(dir.path()),
+            "profiles: []\nnode_bindings: {}\ndecisions:\n  mode: shadow\n  timeout_ms: 3000\n  providers: []\n  budget: { max_requests_per_run: 5, max_usd_per_run: 1.0 }\n  privacy: { send: [prompts], redact: true, max_state_bytes: 24000, debug_state: false, future_knob: 1 }\n  uses: {}\n",
+        )
+        .unwrap();
+        let m = read(dir.path()).unwrap().unwrap();
+        assert!(m.decisions.is_none());
+    }
+
+    #[test]
     fn manifest_account_cmd_defaults_to_empty_and_roundtrips() {
         let acct = ManifestAccount {
             name: "a".to_string(),
@@ -248,6 +321,9 @@ mod tests {
             ephemeral: false,
             hermetic: true,
             zcode_mode: None,
+            tiers: Vec::new(),
+            routed_tier: None,
+            cascade: 0,
         };
         let yaml = serde_yaml_ng::to_string(&mp).unwrap();
         let back: ManifestProfile = serde_yaml_ng::from_str(&yaml).unwrap();

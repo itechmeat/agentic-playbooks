@@ -354,9 +354,12 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
     let cx = model_check::ModelContext::load();
     let mut ok = true;
     for (name, doc) in &docs {
-        let chain = std::iter::once((&doc.executor.agent, &doc.executor.model))
-            .chain(doc.executor.fallbacks.iter().map(|f| (&f.agent, &f.model)));
-        for (agent, model) in chain {
+        // The executor, its fallbacks and every tier (issue #165 Part 12).
+        for problem in doc.tiers.problems() {
+            println!("profile {name}: error profile_tiers_invalid {problem}");
+            ok = false;
+        }
+        for (agent, model) in doc.executor_pairs() {
             let Some(issue) = model_check::check(agent, model, &cx) else {
                 continue;
             };
@@ -831,6 +834,9 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
     if let Some(u) = view.usage() {
         println!("  usage: {}", usage_line(&u));
     }
+    if let Some(d) = view.decisions() {
+        println!("  decisions: {}", d.line());
+    }
     if !view.unknown.is_empty() {
         println!("  {}", unknown_events_note(view.unknown.len()));
     }
@@ -933,9 +939,16 @@ pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> 
         }
     };
     let status = res.status.as_str();
+    let decisions = res.view.decisions();
+    let print_decisions = || {
+        if let Some(d) = &decisions {
+            println!("  decisions: {}", d.line());
+        }
+    };
     match res.reason {
         WaitReason::Finished => {
             println!("run {run_id} finished: {status}");
+            print_decisions();
             if res.status == RunStatus::Succeeded {
                 ExitCode::SUCCESS
             } else {
@@ -953,6 +966,7 @@ pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> 
                 _ => "a supervisor decision is pending".to_string(),
             };
             println!("run {run_id} needs input ({status}): {how}; then `apb wait {run_id}` again");
+            print_decisions();
             ExitCode::from(3)
         }
         WaitReason::Stopped => {
@@ -963,10 +977,12 @@ pub(crate) fn wait_cmd(root: &Path, run_id: &str, timeout_secs: Option<u64>) -> 
             } else {
                 println!("run {run_id} stopped ({status}): `apb resume {run_id}` continues it");
             }
+            print_decisions();
             ExitCode::from(4)
         }
         WaitReason::Timeout => {
             println!("run {run_id} still {status} after the timeout");
+            print_decisions();
             ExitCode::from(5)
         }
     }

@@ -85,3 +85,23 @@ describe('runEventJournal notes', () => {
     ])
   })
 })
+
+describe('wake triage note', () => {
+  const wake = { seq: 1, ts: 1, type: 'wake_raised', trigger: 'node_failed', node: 'a', detail: 'failed' }
+
+  it('is hidden for a wake without triage', () => {
+    expect(runEventJournal([wake as WfEvent])[0].note).toBeUndefined()
+  })
+
+  it('shows the triage action, p, looping and who answered', () => {
+    const e = { ...wake, triage: { action: 'retry_with_note', p: 0.78, confidence: 0.6, looping_p: 0.1, provider: 'main', model: 'jev-1.13.0' } }
+    expect(runEventJournal([e as unknown as WfEvent])[0].note).toBe(
+      'triage: retry_with_note p=0.78, looping p=0.10, main/jev-1.13.0',
+    )
+  })
+
+  it('marks a triage the engine applied', () => {
+    const e = { ...wake, triage: { action: 'retry_same', p: 0.9, confidence: 0.8, provider: 'main', model: 'm', applied: true } }
+    expect(runEventJournal([e as unknown as WfEvent])[0].note).toBe('triage: retry_same p=0.90, main/m (applied)')
+  })
+})

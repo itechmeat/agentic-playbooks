@@ -47,7 +47,7 @@ fn unknown_event_types_are_skipped_and_counted() {
         .iter()
         .map(|u| (u.seq, u.kind.as_str()))
         .collect();
-    assert_eq!(kinds, vec![(9, "decision_made"), (19, "decision_made")]);
+    assert_eq!(kinds, vec![(9, "future_event"), (19, "future_event")]);
     // Every known line is still there, in order, with its own seq.
     let known: Vec<u64> = journal.events.iter().map(|e| e.seq).collect();
     let expected: Vec<u64> = (0..=22).filter(|s| *s != 9 && *s != 19).collect();
@@ -64,7 +64,7 @@ fn a_known_event_with_a_broken_body_is_still_an_error() {
         r#"{"seq":0,"ts":1,"type":"node_started","node":"a","attempt":"one"}"#,
         r#"{"seq":0,"ts":1,"type":"node_started"}"#,
         r#"{"seq":0,"ts":1}"#,
-        r#"{"ts":1,"type":"decision_made"}"#,
+        r#"{"ts":1,"type":"future_event"}"#,
         // Not the shape of an event tag: corruption, never a newer type
         // (and never echoed into a terminal message).
         r#"{"seq":0,"ts":1,"type":"Decision\u001b[2J"}"#,
@@ -104,7 +104,7 @@ fn an_unknown_event_after_the_last_checkpoint_stops_the_engine() {
     // last checkpoint (`run_paused` at seq 13).
     let dir = write_run(tmp.path(), "r1", &cut);
     let err = read_all(&dir).unwrap_err().to_string();
-    assert!(err.contains("decision_made"), "{err}");
+    assert!(err.contains("future_event"), "{err}");
     assert!(err.contains("newer apb"), "{err}");
     assert!(err.contains(env!("CARGO_PKG_VERSION")), "{err}");
     // Appending would write into a run this binary cannot fold: refused too.
@@ -149,7 +149,7 @@ fn crash_after_a_with_future_event(root: &Path, run_id: &str, after_checkpoint: 
         .position(|e| matches!(&e.payload, EventPayload::NodeFinished { node, .. } if node == "a"))
         .expect("node a finished");
     let future = |seq: u64| {
-        format!(r#"{{"seq":{seq},"ts":1,"type":"decision_made","use":"completion_check"}}"#)
+        format!(r#"{{"seq":{seq},"ts":1,"type":"future_event","use":"completion_check"}}"#)
     };
     let line = |e: &Event| serde_json::to_string(e).unwrap();
     let mut out: Vec<String> = Vec::new();

@@ -30,7 +30,7 @@ Reads (read-only):
 | Tool | What it does |
 | --- | --- |
 | `playbook_list` | List of the project's playbooks |
-| `playbook_catalog` | Compact structural catalog (project + global scope): trigger, effects, trust, shadowing; `catalog_revision` for cheap repeat calls |
+| `playbook_catalog` | Compact structural catalog (project + global scope): trigger, effects, trust, shadowing; `catalog_revision` for cheap repeat calls; optional `query` for opt-in advisory ranking |
 | `projects_list` | User's workspace registry: id, name, path, state |
 | `playbook_howto` | Tier 2: authoring detail (pull only when creating/reworking) |
 | `playbook_interview` | Tier 2: the interview guide for building a playbook from a user interview (pull only when the user describes a process to automate) |
@@ -39,10 +39,10 @@ Reads (read-only):
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
 | `runs_list` | List of runs |
-| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none |
+| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none |
 | `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status` |
 | `run_events` | Run events, optionally from a given seq |
-| `run_report` | Short run summary; carries `usage` and `unknown_events` like `run_status` |
+| `run_report` | Short run summary; carries `usage`, `decisions` and `unknown_events` like `run_status` |
 | `profile_list` | Profiles (project + global) with bundle trust status |
 | `profile_get` | Profile contents (profile.yaml + SOUL.md) and digests |
 | `connectors_list` | Installed connectors an `agent_task` can bind: version, trust, `update_available` (the built-in version when the installed copy differs), function names, configured account names and `account_commands` (per account, each secret read from a command, with the command line); never other account fields or secrets |
@@ -63,7 +63,9 @@ registered id to another directory while the original directory still holds
 it (a copied checkout keeps its own registration off until it gets its own id:
 delete the copied `workspace.local`).
 
-`playbook_catalog` returns both `dismissed_patterns` (the slug list, unchanged) and `suppressed_suggestions`: the active suggestion-decision records for the current project, merged from the project store `.apb/suggestions.json` and the global `<config-dir>/suggestions.json`, each with `pattern`, `synopsis`, `kind`, `scope`, `declines` and `snoozed_until`. Matching a candidate action against those records is done by the meaning of the synopsis, on the agent side; the server does no language processing. Both fields fold into `catalog_revision`, so an `unchanged: true` response stays correct after any dismiss write. Timing defaults are `soft_backoff_days: [1, 7, 30, 90]` and `hard_ttl_days: 90`, overridable per key by a `suggestions:` section in the global `config.yaml` and in the project `.apb/config.yaml` (project wins). `apb suggestions list|allow|reset` and the dashboard's silenced-suggestions section manage the same records.
+`playbook_catalog` returns both `dismissed_patterns` (the slug list, unchanged) and `suppressed_suggestions`: the active suggestion-decision records for the current project, merged from the project store `.apb/suggestions.json` and the global `<config-dir>/suggestions.json`, each with `pattern`, `synopsis`, `kind`, `scope`, `declines` and `snoozed_until`. Matching a candidate action against those records is done by the meaning of the synopsis, on the agent side; the server does no language processing unless the user enabled catalog ranking (below). Both fields fold into `catalog_revision`, so an `unchanged: true` response stays correct after any dismiss write. Timing defaults are `soft_backoff_days: [1, 7, 30, 90]` and `hard_ttl_days: 90`, overridable per key by a `suggestions:` section in the global `config.yaml` and in the project `.apb/config.yaml` (project wins). `apb suggestions list|allow|reset` and the dashboard's silenced-suggestions section manage the same records.
+
+`playbook_catalog` also takes an optional `query` (the task in one sentence). It changes nothing unless the machine enabled decision-model catalog ranking (`uses.catalog_rank` in `decisions.yaml`, see DECISIONS.md "Catalog ranking") and a provider key resolves. Then, in advise mode, the response carries the unchanged catalog plus `ranked: [{ref, p, trusted, lifecycle, ambiguous}]` (top five; the trust facts are copied from the entry), `confidence`, `needs_playbook_p`, `covered_by: {pattern, scope, p}` when a silenced suggestion covers the task, and `ranking: {provider, model, calibrated}`; on a provider failure `ranking: {error}` instead. The fields are advisory: entries are not filtered or reordered, the host's own matching still decides, and `revision` is bypassed while a query is ranked. The decision request runs on the blocking pool, so a slow provider never delays other tool calls. This is the one place the server does language processing, and only through this opt-in; TIER0 is unchanged whether the feature is on or off.
 
 Mutations (destructive):
 
@@ -175,7 +177,13 @@ model turn for the supervisor, so pass the largest value the host's tool-call
 limit allows: the server refreshes the supervisor heartbeat while it blocks
 (so a long wait never reads as a lost supervisor) and sends progress
 notifications every 15 s when the call carries a progress token. On `timeout`,
-just call again. A wake's `detail` is capped at its last 16 KiB
+just call again. A park wake may carry `triage: {action, p, confidence,
+looping_p, provider, model, applied?}`, a decision model's recommendation
+(only when the machine's `decisions.yaml` puts `supervisor_triage` in advise
+or enforce; `applied: true` means the engine already posted the retry). A
+`pending_review` may carry `recommendation: {option, p, confidence,
+provider, model, calibrated, applied?}`, advisory and never preselected (see
+DECISIONS.md). A wake's `detail` is capped at its last 16 KiB
 (`detail_truncated: true`); `supervisor_run_inspect` has the full output.
 `supervisor_run_inspect` itself elides texts over 512 bytes inside `events`
 (they repeat `outputs`, `context` and `wakes`); pass `full_events: true` for

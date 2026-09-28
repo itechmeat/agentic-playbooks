@@ -1,3 +1,4 @@
+import { decisionNote } from './rundecisions'
 import { attemptUsageNote } from './runusage'
 import type { WfEvent } from './types'
 
@@ -8,6 +9,19 @@ export interface JournalEntry {
   label: string
   node?: string | null
   detail?: string
+}
+
+// A park wake's decision-model triage (issue #165 Part 10), as one line:
+// `triage: retry_with_note p=0.78, looping p=0.10, provider/model`. Nothing for
+// a wake without one (the use off, or the provider down).
+export function triageNote(t: unknown): string | undefined {
+  if (!t || typeof t !== 'object') return undefined
+  const r = t as Record<string, unknown>
+  if (typeof r.action !== 'string' || !r.action) return undefined
+  const p = typeof r.p === 'number' ? ` p=${r.p.toFixed(2)}` : ''
+  const looping = typeof r.looping_p === 'number' ? `, looping p=${r.looping_p.toFixed(2)}` : ''
+  const who = [r.provider, r.model].filter((x) => typeof x === 'string' && x).join('/')
+  return `triage: ${r.action}${p}${looping}${who ? `, ${who}` : ''}${r.applied ? ' (applied)' : ''}`
 }
 
 // Pure function: extracts only wake_raised/supervisor_action from the full
@@ -45,8 +59,9 @@ export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
 
 // The detail line of an event kind that has one (issue #67): how a session
 // handoff started, which declared output fields a node left out, where an
-// attempt's transcript is, the tokens an attempt reported (issue #167), and
-// which working tree the run moved into. Every other kind has none.
+// attempt's transcript is, the tokens an attempt reported (issue #167),
+// which working tree the run moved into, and what a decision model answered
+// (issue #165). Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -60,6 +75,10 @@ function eventNote(e: WfEvent): string | undefined {
       return typeof r.transcript === 'string' ? `transcript: ${r.transcript}` : undefined
     case 'attempt_finished':
       return attemptUsageNote(r.usage)
+    case 'decision_made':
+      return decisionNote(e)
+    case 'wake_raised':
+      return triageNote(r.triage)
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

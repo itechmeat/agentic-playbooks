@@ -45,6 +45,7 @@ mod control_apply;
 mod entry;
 mod handoff;
 mod journal;
+mod judge;
 mod listing;
 mod live;
 mod node;
@@ -53,6 +54,7 @@ mod patch;
 mod prepare;
 mod rebind;
 mod resume;
+mod review_gate;
 mod skills_copy;
 mod status_file;
 mod supervisor;
@@ -420,6 +422,11 @@ fn drive_inner(
     if !reap_dead_attempts(&entry_events, log)?.is_empty() {
         entry_events = read_all(run_dir)?;
     }
+    // The run's decision runner (issue #165), only when its manifest carries
+    // a decisions block. Seeded from the journal: the budget spent so far and
+    // the answers a resumed attempt replays instead of asking again.
+    let decisions =
+        crate::decision::DecisionRunner::for_run(root, run_dir, &entry_events, &env_scrub);
     // The journal as this drive starts. A fresh run has barely one event; a drive
     // over an existing run dir (a resume) needs it twice: the `After` seed
     // evaluates the finished node's edges against it, and both modes rebuild from
@@ -438,10 +445,28 @@ fn drive_inner(
             // sibling branch that never started blocks a join here instead of
             // being written off as dead.
             let outstanding = parallel::pending_heads(&playbook, &entry_state);
+            // A drive that died between the node's finish and its judge-edge
+            // decision (issue #165 Part 7) asks now; an execution already
+            // decided is not asked again.
+            let edge_state = match entry_state.nodes.get(&start_node).copied() {
+                Some(st)
+                    if judge::decide_edges(
+                        &playbook,
+                        run_dir,
+                        &start_node,
+                        st,
+                        decisions.as_ref(),
+                        &Journal::new(&mut *log),
+                    )? =>
+                {
+                    RunState::fold(&read_all(run_dir)?)
+                }
+                _ => entry_state.clone(),
+            };
             advance_frontier(
                 &playbook,
                 &start_node,
-                &entry_state,
+                &edge_state,
                 &mut frontier,
                 &outstanding,
                 log,
@@ -994,6 +1019,7 @@ fn drive_inner(
                             let cancel_c = Arc::clone(&cancel);
                             let scrub_c = env_scrub.clone();
                             let journal_ref = &journal;
+                            let decisions_ref = decisions.as_ref();
                             scope.spawn(move || {
                                 let res = execute_node(
                                     &playbook_c,
@@ -1007,6 +1033,7 @@ fn drive_inner(
                                     &cancel_c,
                                     &scrub_c,
                                     journal_ref,
+                                    decisions_ref,
                                     // Interactive nodes are excluded from the
                                     // concurrent batch, so neither a resume nor
                                     // the live sidecar ever originates here.
@@ -1064,6 +1091,15 @@ fn drive_inner(
                                 output,
                                 artifacts,
                             })?;
+                            // Judge edges (issue #165 Part 7), before routing.
+                            judge::decide_edges(
+                                &playbook,
+                                run_dir,
+                                &node,
+                                status,
+                                decisions.as_ref(),
+                                &journal,
+                            )?;
                             // If this branch successfully fed a join:any - cancel the others.
                             if status == NodeStatus::Succeeded {
                                 let state_peek = RunState::fold(&read_all(run_dir)?);
@@ -1174,6 +1210,7 @@ fn drive_inner(
                         &mut frontier,
                         &mut last_applied_patch,
                         &failed,
+                        decisions.as_ref(),
                     )? {
                         BatchWake::NoFailures => {}
                         BatchWake::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
@@ -1293,19 +1330,49 @@ fn drive_inner(
                 // options are, and how to answer.
                 if review_open_count(&events, &current) == 0 {
                     let title = playbook.node(&current).and_then(|n| n.title.clone());
-                    let instruction = crate::progress::review_instruction(
+                    let mut instruction = crate::progress::review_instruction(
                         &current,
                         title.as_deref(),
                         options,
                         prompt.as_deref(),
                     );
+                    // The review recommendation (issue #165 Part 11, 14.4),
+                    // once per visit, before the request is declared.
+                    let rec = match decisions.as_ref() {
+                        Some(runner) => {
+                            let journal = Journal::new(&mut *log);
+                            review_gate::recommend(
+                                root, run_dir, runner, &journal, &playbook, &current, &events,
+                            )
+                        }
+                        None => Default::default(),
+                    };
+                    if let Some(r) = &rec.recommendation {
+                        instruction.push_str(&crate::decision::review_triage::instruction_line(r));
+                    }
                     log.append(EventPayload::ReviewRequested {
                         node: current.clone(),
                         options: apb_core::schema::effective_review_options(options),
                         title,
                         instruction,
                         prompt: prompt.clone(),
+                        recommendation: rec.recommendation.clone(),
                     })?;
+                    // Enforced: post through the review channel, so it is
+                    // consumed and journaled like a person's decision; a
+                    // decision a person already queued wins (the channel
+                    // refuses a second one), and any failure waits for the
+                    // person (fail-closed).
+                    if let Some((decision, note)) = rec.auto {
+                        let _ = crate::review::post_review(
+                            run_dir,
+                            crate::review::ReviewCommand {
+                                node: current.clone(),
+                                decision,
+                                note,
+                            },
+                        );
+                    }
                 }
                 // A directive that moves the run elsewhere (`node_retry`,
                 // `run_continue_from`) is what a supervisor sends when it sees,
@@ -1761,6 +1828,7 @@ fn drive_inner(
                         &run_cancel,
                         &env_scrub,
                         &journal,
+                        decisions.as_ref(),
                         // Resume context set by the answer-consumed arm above;
                         // `None` on the first attempt of a visit and on the
                         // reprompt path.
@@ -1961,6 +2029,7 @@ fn drive_inner(
                         &run_cancel,
                         &env_scrub,
                         &journal,
+                        decisions.as_ref(),
                         // Non-interactive nodes never resume.
                         None,
                         // ...and never run the live sidecar.
@@ -2010,6 +2079,15 @@ fn drive_inner(
             output: output.clone(),
             artifacts: node_artifacts,
         })?;
+        // Judge edges of this node (issue #165 Part 7), journaled before routing.
+        judge::decide_edges(
+            &playbook,
+            run_dir,
+            &current,
+            status,
+            decisions.as_ref(),
+            &Journal::new(&mut *log),
+        )?;
 
         rebuild_context_md(run_dir)?;
 
@@ -2058,6 +2136,7 @@ fn drive_inner(
                 &mut last_applied_patch,
                 status,
                 &output,
+                decisions.as_ref(),
             )? {
                 WakeOutcome::Terminal(outcome) => return Ok(RunResult { run_id, outcome }),
                 WakeOutcome::Resumed => continue,

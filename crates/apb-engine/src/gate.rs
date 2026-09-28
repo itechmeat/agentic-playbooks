@@ -171,6 +171,20 @@ struct TreeResolution {
     untrusted: Vec<String>,
 }
 
+/// The effects of `playbook` and of every sub-playbook it runs, recursively,
+/// resolved the way the run gate resolves them (read-only about trust).
+/// `None` when the tree does not resolve. The review auto-decision (issue
+/// #165 Part 14.4) reads it at run time and refuses on `None`.
+pub(crate) fn tree_effects(
+    root: &Path,
+    playbook: &Playbook,
+    origin: &Origin,
+) -> Option<std::collections::BTreeSet<Effect>> {
+    resolve_tree(root, playbook, origin, &playbook.id, true)
+        .ok()
+        .map(|t| t.effects)
+}
+
 /// Seeds the effects union and cycle path with the parent itself, then walks and
 /// verifies its sub-playbook tree once. `parent_id`/`origin` identify the parent
 /// for cycle detection and `auto` scope resolution of its children.

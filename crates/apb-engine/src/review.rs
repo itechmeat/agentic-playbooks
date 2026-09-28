@@ -108,6 +108,11 @@ fn check_review_target(run_dir: &Path, node: &str) -> Result<(), EngineError> {
 
 pub fn post_review(run_dir: &Path, cmd: ReviewCommand) -> Result<u64, EngineError> {
     crate::driver::ensure_run_dir(run_dir)?;
+    // The check and the append under one lock: two posters (a person and
+    // the engine's automatic decision, issue #165 Part 14.4) that both pass
+    // the check would queue two decisions for one visit, and the second
+    // would decide the gate's next visit unseen.
+    let _lock = apb_core::fsutil::lock_dir(run_dir, "reviews.jsonl.lock")?;
     check_review_target(run_dir, &cmd.node)?;
 
     let seq = read_reviews_after(run_dir, None)?.len() as u64;

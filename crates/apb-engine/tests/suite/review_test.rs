@@ -184,6 +184,7 @@ fn human_review_entry_event_carries_instruction_and_options() {
                         title,
                         instruction,
                         prompt,
+                        ..
                     } if node == "gate" => Some((options, title, instruction, prompt)),
                     _ => None,
                 })
@@ -394,6 +395,7 @@ fn review_requested(node: &str) -> EventPayload {
         title: None,
         instruction: String::new(),
         prompt: None,
+        recommendation: None,
     }
 }
 
@@ -548,4 +550,28 @@ fn post_review_without_a_run_snapshot_stays_permissive() {
     // behavior rather than becoming undecidable.
     let dir = tempfile::tempdir().unwrap();
     assert_eq!(decide_on(dir.path(), "gate").unwrap(), 0);
+}
+
+#[test]
+fn concurrent_decisions_for_one_pending_gate_queue_only_one() {
+    // A person and the engine's automatic decision can post at the same
+    // moment; the check and the append are one step.
+    for _ in 0..5 {
+        let dir = synthetic_run_dir(WF_REVIEW, &[review_requested("gate")]);
+        let barrier = std::sync::Barrier::new(8);
+        let results: Vec<bool> = std::thread::scope(|s| {
+            let handles: Vec<_> = (0..8)
+                .map(|_| {
+                    s.spawn(|| {
+                        barrier.wait();
+                        decide_on(dir.path(), "gate").is_ok()
+                    })
+                })
+                .collect();
+            handles.into_iter().map(|h| h.join().unwrap()).collect()
+        });
+        assert_eq!(results.iter().filter(|ok| **ok).count(), 1, "{results:?}");
+        let channel = fs::read_to_string(dir.path().join("reviews.jsonl")).unwrap();
+        assert_eq!(channel.lines().count(), 1, "{channel}");
+    }
 }

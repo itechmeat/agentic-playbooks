@@ -7,6 +7,10 @@ repository.workspace = true
 
 [dependencies]
 apb-core = { path = "../apb-core" }
+# Decision models (issue #165): the provider client the decision runner asks.
+apb-decide = { path = "../apb-decide" }
+# The decision runner's redaction patterns (token shapes, e-mail, paths).
+regex.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml_ng.workspace = true
@@ -48,6 +52,8 @@ ts = ["dep:ts-rs"]
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# The multi-response HTTP stub the decision tests point a provider at.
+apb-decide = { path = "../apb-decide", features = ["testing"] }
 # Decodes the recorded XOAUTH2 SASL payload in the imap listener tests.
 base64 = "0.23"
 # Reads the fixture ZCode desktop task index in the zcode ui_sync tests.

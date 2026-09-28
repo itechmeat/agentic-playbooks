@@ -176,6 +176,226 @@ impl RunView {
     }
 }
 
+// --- decision totals (issue #165 Part 4) -----------------------------------
+
+/// What the run's decision-model uses cost and how fast they answered,
+/// totalled from its `decision_made` events (see
+/// [`crate::decision::decision_totals`]). Absent from every surface when the
+/// run journaled no decision, so an unconfigured run reads as before.
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct RunDecisions {
+    /// Decisions journaled: answered, failed, or skipped for the budget.
+    pub decisions: u32,
+    /// Requests actually sent to a provider.
+    pub requests: u32,
+    /// Decisions answered without a request (the run's cache).
+    pub replayed: u32,
+    pub errors: u32,
+    /// Provider-reported cost, or the list-price estimate where the
+    /// provider reported none (then `cost_estimated`).
+    pub cost_usd: f64,
+    pub cost_estimated: bool,
+    /// Over the requests actually sent; absent when none was.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub p50_latency_ms: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(feature = "ts", ts(optional))]
+    pub p95_latency_ms: Option<u64>,
+    pub by_use: BTreeMap<String, RunDecisionUse>,
+}
+
+/// One use's share of [`RunDecisions`].
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
+pub struct RunDecisionUse {
+    pub requests: u32,
+    pub errors: u32,
+    /// Decisions that changed engine behaviour (never in shadow).
+    pub applied: u32,
+    /// Shadow decisions whose answer a higher mode would have acted on.
+    pub shadow_would_change: u32,
+}
+
+impl RunDecisions {
+    /// The totals over `events`, `None` when no decision was journaled.
+    pub fn from_events(events: &[Event]) -> Option<Self> {
+        let t = crate::decision::decision_totals(events);
+        (t.decisions > 0).then(|| RunDecisions {
+            decisions: t.decisions,
+            requests: t.requests,
+            replayed: t.cached,
+            errors: t.errors,
+            cost_usd: t.cost_usd,
+            cost_estimated: t.cost_estimated,
+            p50_latency_ms: t.p50_latency_ms,
+            p95_latency_ms: t.p95_latency_ms,
+            by_use: t
+                .by_use
+                .into_iter()
+                .map(|(name, u)| {
+                    (
+                        name,
+                        RunDecisionUse {
+                            requests: u.requests,
+                            errors: u.errors,
+                            applied: u.applied,
+                            shadow_would_change: u.shadow_would_change,
+                        },
+                    )
+                })
+                .collect(),
+        })
+    }
+
+    /// Shadow decisions a higher mode would have acted on, over every use.
+    pub fn shadow_would_change(&self) -> u32 {
+        self.by_use.values().map(|u| u.shadow_would_change).sum()
+    }
+
+    /// The one line `apb runs <id>` and `apb wait` print:
+    /// `14 (2 replayed, 1 error), $0.0004, p50 190 ms; shadow would change: 3`.
+    pub fn line(&self) -> String {
+        let mut extra = Vec::new();
+        if self.replayed > 0 {
+            extra.push(format!("{} replayed", self.replayed));
+        }
+        if self.errors > 0 {
+            let noun = if self.errors == 1 { "error" } else { "errors" };
+            extra.push(format!("{} {noun}", self.errors));
+        }
+        let mut line = self.decisions.to_string();
+        if !extra.is_empty() {
+            line.push_str(&format!(" ({})", extra.join(", ")));
+        }
+        line.push_str(&format!(", ${:.4}", self.cost_usd));
+        if self.cost_estimated {
+            line.push_str(" estimated");
+        }
+        if let Some(p50) = self.p50_latency_ms {
+            line.push_str(&format!(", p50 {p50} ms"));
+        }
+        let would = self.shadow_would_change();
+        if would > 0 {
+            line.push_str(&format!("; shadow would change: {would}"));
+        }
+        line
+    }
+}
+
+impl RunView {
+    /// The run's decision totals, `None` when it journaled no decision.
+    pub fn decisions(&self) -> Option<RunDecisions> {
+        RunDecisions::from_events(&self.events)
+    }
+}
+
+#[cfg(test)]
+mod decision_tests {
+    use super::*;
+    use crate::event::DecisionAnswer;
+
+    fn made(
+        seq: u64,
+        mode: &str,
+        would_change: Option<bool>,
+        cached: bool,
+        error: Option<&str>,
+    ) -> Event {
+        let answered = error.is_none();
+        Event {
+            seq,
+            ts: seq as u128,
+            payload: EventPayload::DecisionMade {
+                enforce_refused: None,
+                join: BTreeMap::new(),
+                use_site: "completion_check".into(),
+                node: Some("w".into()),
+                attempt: Some(1),
+                provider: Some("main".into()),
+                model: answered.then(|| "jev-1.13.0".to_string()),
+                calibrated: answered,
+                mode: mode.into(),
+                questions_digest: String::new(),
+                state_digest: String::new(),
+                state_bytes: 10,
+                output_chars: None,
+                answers: std::collections::BTreeMap::from([(
+                    "final_result".to_string(),
+                    DecisionAnswer {
+                        p: Some(0.5),
+                        ..Default::default()
+                    },
+                )]),
+                applied: false,
+                would_change,
+                baseline: None,
+                latency_ms: if cached { 0 } else { 100 + seq * 10 },
+                input_tokens: Some(1000),
+                cost_usd: (!cached && answered).then_some(0.000042),
+                cost_estimated: !cached && answered,
+                cached,
+                error: error.map(str::to_string),
+            },
+        }
+    }
+
+    fn json(events: &[Event]) -> Option<String> {
+        RunDecisions::from_events(events).map(|d| serde_json::to_string(&d).unwrap())
+    }
+
+    #[test]
+    fn a_run_without_decisions_has_no_block() {
+        let events = [Event {
+            seq: 0,
+            ts: 0,
+            payload: EventPayload::RunStarted {
+                playbook: "p".into(),
+                version: "1.0.0".into(),
+            },
+        }];
+        assert_eq!(json(&events), None);
+    }
+
+    #[test]
+    fn a_shadow_run_totals_its_decisions() {
+        let events = [
+            made(1, "shadow", Some(true), false, None),
+            made(2, "shadow", Some(false), false, None),
+        ];
+        assert_eq!(
+            json(&events).unwrap(),
+            r#"{"decisions":2,"requests":2,"replayed":0,"errors":0,"cost_usd":0.000084,"cost_estimated":true,"p50_latency_ms":110,"p95_latency_ms":120,"by_use":{"completion_check":{"requests":2,"errors":0,"applied":0,"shadow_would_change":1}}}"#
+        );
+        let d = RunDecisions::from_events(&events).unwrap();
+        assert_eq!(
+            d.line(),
+            "2, $0.0001 estimated, p50 110 ms; shadow would change: 1"
+        );
+    }
+
+    #[test]
+    fn errors_and_replayed_decisions_are_counted_apart() {
+        let events = [
+            made(1, "shadow", Some(false), false, None),
+            made(2, "shadow", Some(false), true, None),
+            made(3, "shadow", None, false, Some("timeout")),
+        ];
+        let d = RunDecisions::from_events(&events).unwrap();
+        assert_eq!(
+            serde_json::to_string(&d).unwrap(),
+            r#"{"decisions":3,"requests":2,"replayed":1,"errors":1,"cost_usd":0.000042,"cost_estimated":true,"p50_latency_ms":110,"p95_latency_ms":130,"by_use":{"completion_check":{"requests":2,"errors":1,"applied":0,"shadow_would_change":0}}}"#
+        );
+        assert_eq!(
+            d.line(),
+            "3 (1 replayed, 1 error), $0.0000 estimated, p50 110 ms"
+        );
+    }
+}
+
+// --- end of decision totals -------------------------------------------------
+
 #[cfg(test)]
 mod tests {
     use super::*;

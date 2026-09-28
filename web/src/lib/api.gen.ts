@@ -26,6 +26,17 @@ answer_by: string,
  */
 asked_at: number, };
 
+export type ReviewRecommendation = { 
+/**
+ * One of the gate's options.
+ */
+option: string, p: number, confidence: number, provider: string, model: string, calibrated: boolean, 
+/**
+ * The engine posted this option as the decision itself (enforce,
+ * `auto_decide`, Part 14.4).
+ */
+applied?: boolean, };
+
 export type PendingReview = { node: string, 
 /**
  * The gate node's title from the playbook, when it has one.
@@ -52,7 +63,13 @@ how_to_decide: string,
  * shows it above the options). Already folded into `instruction` too.
  * Template placeholders inside are NOT rendered - literal text.
  */
-prompt?: string, };
+prompt?: string, 
+/**
+ * The decision model's advisory recommendation for this visit (issue
+ * #165 Part 11), from the open `review_requested`; already appended to
+ * `instruction` as one sentence. Never preselected.
+ */
+recommendation?: ReviewRecommendation, };
 
 export type PendingSupervisor = { node: string, 
 /**
@@ -148,6 +165,39 @@ cost_attempts: number,
  */
 estimated?: boolean, };
 
+export type RunDecisions = { 
+/**
+ * Decisions journaled: answered, failed, or skipped for the budget.
+ */
+decisions: number, 
+/**
+ * Requests actually sent to a provider.
+ */
+requests: number, 
+/**
+ * Decisions answered without a request (the run's cache).
+ */
+replayed: number, errors: number, 
+/**
+ * Provider-reported cost, or the list-price estimate where the
+ * provider reported none (then `cost_estimated`).
+ */
+cost_usd: number, cost_estimated: boolean, 
+/**
+ * Over the requests actually sent; absent when none was.
+ */
+p50_latency_ms?: number, p95_latency_ms?: number, by_use: { [key in string]: RunDecisionUse }, };
+
+export type RunDecisionUse = { requests: number, errors: number, 
+/**
+ * Decisions that changed engine behaviour (never in shadow).
+ */
+applied: number, 
+/**
+ * Shadow decisions whose answer a higher mode would have acted on.
+ */
+shadow_would_change: number, };
+
 export type UsageSource = "reported" | "estimated";
 
 export type AgentUsage = { 
@@ -238,6 +288,12 @@ progress: ProgressSummary | null, answer: string | null,
  * Token usage the run's attempts reported; null when none did.
  */
 usage: RunUsage | null, 
+/**
+ * Decision-model totals (issue #165 Part 4); absent when the run
+ * journaled no decision. Each decision itself is a `decision_made` in
+ * `events`.
+ */
+decisions?: RunDecisions, 
 /**
  * Events of a type this binary does not know (a newer apb wrote them),
  * left out of `events`; 0 for a journal read in full.
