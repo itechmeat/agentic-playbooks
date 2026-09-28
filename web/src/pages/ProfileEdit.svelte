@@ -21,6 +21,7 @@
     type ExecutorGroup,
   } from '../lib/profileedit'
   import type { Project } from '../lib/types'
+  import type { ProfileTier } from '../lib/profileedit'
   import { untrack } from 'svelte'
   import Plus from '@lucide/svelte/icons/plus'
   import Trash2 from '@lucide/svelte/icons/trash-2'
@@ -67,6 +68,7 @@
   let groups = $state<ExecutorGroup[]>([{ agent: '', model: '' }])
   let description = $state('')
   let skills = $state<string[]>([])
+  let tiers = $state<ProfileTier[]>([])
   let soul = $state('')
   let expectedDigest = $state<string | null>(null)
   let saving = $state(false)
@@ -194,6 +196,7 @@
       groups = [{ agent: parsed.agent, model: parsed.model }, ...parsed.fallbacks]
       description = parsed.description
       skills = parsed.skills
+      tiers = parsed.tiers
     } catch (e) {
       if (token === loadToken) toast.error('Failed to load profile', { description: String(e) })
     }
@@ -476,6 +479,24 @@
           {/if}
         </Button>
       </Field.FieldSet>
+
+      {#if tiers.length}
+        <Field.FieldSet data-testid="profile-tiers">
+          <Field.FieldLegend variant="label">Executor tiers</Field.FieldLegend>
+          <Field.FieldDescription>
+            Declared in profile.yaml for tier routing (nodes with <code>route: auto</code>), lightest
+            first. Read-only here; saving keeps them.
+          </Field.FieldDescription>
+          <ul class="flex flex-col gap-1 text-sm">
+            {#each tiers as t (t.name)}
+              <li class="rounded-md border border-border bg-muted/30 px-3 py-2">
+                <span class="font-mono">{t.name}</span>: {t.executor}
+                {#if t.for}<span class="block text-xs text-muted-foreground">{t.for}</span>{/if}
+              </li>
+            {/each}
+          </ul>
+        </Field.FieldSet>
+      {/if}
 
       <Field.Field>
         <Field.FieldLabel>Skills</Field.FieldLabel>

@@ -204,6 +204,9 @@
               {#if pr.prompt}
                 <pre class="whitespace-pre-wrap break-words text-sm">{pr.prompt}</pre>
               {/if}
+              {#if pr.recommendation}
+                <p class="text-xs text-muted-foreground" data-testid="review-recommendation">{pr.recommendation}</p>
+              {/if}
               <div class="flex flex-wrap gap-1">
                 {#each pr.options as opt (opt)}
                   <Button

@@ -324,3 +324,18 @@ skills: []
     }
   })
 })
+
+describe('parseProfileDoc tiers (read-only display)', () => {
+  it('has no tiers for a profile without them', () => {
+    expect(parseProfileDoc('executor: { agent: claude, model: sonnet }\n').tiers).toEqual([])
+  })
+
+  it('lists the declared tiers in order, the executor tier named as such', () => {
+    const yaml =
+      'executor: { agent: claude, model: sonnet }\ntiers:\n  light: { agent: opencode, model: small, for: "Mechanical edits." }\n  standard: { use: executor, for: "Ordinary tasks." }\n'
+    expect(parseProfileDoc(yaml).tiers).toEqual([
+      { name: 'light', executor: 'opencode / small', for: 'Mechanical edits.' },
+      { name: 'standard', executor: 'the profile executor', for: 'Ordinary tasks.' },
+    ])
+  })
+})

@@ -92,3 +92,31 @@ describe('runGates', () => {
     expect(gates.waits).toEqual(['w'])
   })
 })
+
+describe('review recommendation', () => {
+  const review = { node: 'g', options: ['approve', 'needs_changes'], instruction: 'i', how_to_decide: 'h' }
+  const rec = { option: 'needs_changes', p: 0.861, confidence: 0.7, provider: 'main', model: 'jev-1.13.0', calibrated: true }
+
+  it('is hidden when the gate has no recommendation', () => {
+    const d = detail([], progress({ pending_reviews: [review] }), 'running')
+    expect(runGates(d).reviews[0]).toEqual({ node: 'g', options: ['approve', 'needs_changes'] })
+  })
+
+  it('shows one advisory line when the gate carries one', () => {
+    const d = detail([], progress({ pending_reviews: [{ ...review, recommendation: rec }] }), 'running')
+    expect(runGates(d).reviews[0].recommendation).toBe(
+      'Advisory recommendation: needs_changes (p=0.86), main/jev-1.13.0',
+    )
+  })
+
+  it('marks an uncalibrated or engine-applied recommendation', () => {
+    const d = detail(
+      [],
+      progress({ pending_reviews: [{ ...review, recommendation: { ...rec, calibrated: false, applied: true } }] }),
+      'running',
+    )
+    expect(runGates(d).reviews[0].recommendation).toBe(
+      'Decided: needs_changes (p=0.86), main/jev-1.13.0 [uncalibrated, applied by the engine]',
+    )
+  })
+})
