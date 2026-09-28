@@ -224,6 +224,9 @@ pub(crate) struct DecisionRunner {
     redactor: OnceLock<redact::Redactor>,
     cache: DecisionCache,
     ledger: Mutex<Ledger>,
+    /// The machine config dir: the live mode and the threshold store are
+    /// read from it at every decision.
+    config_dir: Option<PathBuf>,
 }
 
 impl DecisionRunner {
@@ -310,6 +313,7 @@ impl DecisionRunner {
             redactor: OnceLock::new(),
             cache: DecisionCache::new(),
             ledger: Mutex::new(ledger),
+            config_dir: apb_core::config::config_dir(),
         }
     }
 
@@ -328,7 +332,11 @@ impl DecisionRunner {
         if snapshot == DecisionMode::Off {
             return snapshot;
         }
-        snapshot.min(apb_core::decisions::live_mode(&self.root, site.as_str()))
+        let live = match &self.config_dir {
+            Some(dir) => apb_core::decisions::live_mode_in(dir, &self.root, site.as_str()),
+            None => DecisionMode::Off,
+        };
+        snapshot.min(live)
     }
 
     /// A use's threshold from the run's settings, or `default`.
@@ -452,26 +460,33 @@ impl DecisionRunner {
         if !calibrated && !self.settings.allows_uncalibrated(site.as_str()) {
             return (false, Some("uncalibrated"));
         }
-        let Some(threshold) =
-            apb_core::decision_thresholds::stored_threshold(site.as_str(), provider, model)
-        else {
+        let Some(threshold) = self.config_dir.as_deref().and_then(|dir| {
+            apb_core::decision_thresholds::stored_threshold_in(dir, site.as_str(), provider, model)
+        }) else {
             return (false, Some("no_threshold"));
         };
         if !(en.acts)(answers, threshold) {
             return (false, None);
         }
-        let taken = self
-            .ledger
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .actions
-            .get(site.as_str())
-            .copied()
-            .unwrap_or(0);
-        if taken >= self.settings.max_actions(site.as_str()) {
+        // Check and take the action slot under one lock: parallel branches
+        // share the runner, and a check here with the count raised only
+        // after the journal append would let two of them past the cap.
+        let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        let taken = ledger.actions.entry(site.as_str().to_string()).or_default();
+        if *taken >= self.settings.max_actions(site.as_str()) {
             return (false, Some("cap"));
         }
+        *taken += 1;
         (true, None)
+    }
+
+    /// Gives back an action slot taken by [`Self::enforce_gate`] when its
+    /// decision could not be journaled (the caller does not act).
+    fn release_action(&self, site: UseSite) {
+        let mut ledger = self.ledger.lock().unwrap_or_else(|e| e.into_inner());
+        if let Some(n) = ledger.actions.get_mut(site.as_str()) {
+            *n = n.saturating_sub(1);
+        }
     }
 
     fn budget_spent(&self) -> bool {
@@ -611,6 +626,8 @@ impl DecisionRunner {
         let mut full: Option<BTreeMap<String, Answer>> = None;
         let outcome_answers;
         let mut meta = AnswerMeta::default();
+        // An action slot the enforce gate took (counted already).
+        let mut reserved = false;
         if let EventPayload::DecisionMade {
             provider,
             model,
@@ -646,6 +663,7 @@ impl DecisionRunner {
                         &resp.model,
                         resp.calibrated,
                     );
+                    reserved = enforced;
                     *provider = Some(resp.provider.clone());
                     *model = Some(resp.model.clone());
                     *calibrated = resp.calibrated;
@@ -719,6 +737,9 @@ impl DecisionRunner {
         let seq = match journal.append_decision(event) {
             Ok(seq) => seq,
             Err(_) => {
+                if reserved {
+                    self.release_action(call.site);
+                }
                 return (
                     DecisionOutcome::Failed {
                         error_kind: "journal".into(),
@@ -733,7 +754,7 @@ impl DecisionRunner {
                 ledger.requests += 1;
             }
             ledger.cost_usd += cost;
-            if applied_now {
+            if applied_now && !reserved {
                 *ledger
                     .actions
                     .entry(call.site.as_str().to_string())
@@ -874,6 +895,7 @@ impl DecisionRunner {
             redactor: OnceLock::new(),
             cache: DecisionCache::new(),
             ledger: Mutex::new(Ledger::default()),
+            config_dir: apb_core::config::config_dir(),
         }
     }
 
@@ -1130,4 +1152,130 @@ pub fn decision_totals(events: &[Event]) -> DecisionTotals {
     t.p50_latency_ms = percentile(&latencies, 0.5);
     t.p95_latency_ms = percentile(&latencies, 0.95);
     t
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Barrier;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    use apb_decide::{FakeProvider, ProviderChain};
+
+    use super::*;
+
+    /// A journal whose appends wait until every branch has reached one, so
+    /// parallel decisions overlap between the enforce gate and the append.
+    struct BarrierJournal {
+        barrier: Barrier,
+        seq: AtomicU64,
+    }
+
+    impl DecisionJournal for BarrierJournal {
+        fn append_decision(&self, _payload: EventPayload) -> Result<u64, EngineError> {
+            self.barrier.wait();
+            Ok(self.seq.fetch_add(1, Ordering::SeqCst))
+        }
+    }
+
+    fn enforce_runner(cfg: &Path, root: &Path) -> DecisionRunner {
+        std::fs::write(
+            cfg.join(apb_core::decisions::DECISIONS_FILE),
+            "mode: enforce\nproviders: [{ id: fake, kind: systemone, base_url: 'http://127.0.0.1:1', model: fake-1 }]\nuses:\n  completion_check: { mode: enforce, max_actions: 1, allow_uncalibrated: true }\n",
+        )
+        .unwrap();
+        apb_core::decision_thresholds::set_threshold_in(
+            cfg,
+            "completion_check",
+            "fake",
+            "fake-1",
+            0.5,
+        )
+        .unwrap();
+        let settings = apb_core::decisions::resolve_in(cfg, root).active().unwrap();
+        let mut runner = DecisionRunner::with_settings(settings, root, root, &[], &[]);
+        runner.config_dir = Some(cfg.to_path_buf());
+        let fake = || -> Box<dyn apb_decide::DecisionProvider> {
+            Box::new(FakeProvider::new("fake").answer("q", json!({"type": "noul", "noul": 0.9})))
+        };
+        runner
+            .chain
+            .set(Chains {
+                all: ProviderChain::new(vec![fake()]),
+                native: ProviderChain::new(vec![fake()]),
+                emulation: ProviderChain::new(Vec::new()),
+                keys: Vec::new(),
+            })
+            .unwrap();
+        runner
+    }
+
+    #[test]
+    fn parallel_branches_never_act_past_the_per_run_cap() {
+        let cfg = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let runner = enforce_runner(cfg.path(), root.path());
+        let journal = BarrierJournal {
+            barrier: Barrier::new(2),
+            seq: AtomicU64::new(1),
+        };
+        let acts = |_: &BTreeMap<String, DecisionAnswer>, _: f64| true;
+        let judge = |_: &BTreeMap<String, DecisionAnswer>| Judgement::default();
+        let ask = |node: &'static str| {
+            runner.decide(
+                &journal,
+                DecisionCall {
+                    site: UseSite::CompletionCheck,
+                    node: Some(node),
+                    attempt: Some(1),
+                    state: StateParts {
+                        fields: vec![StateField {
+                            name: "output",
+                            class: FieldClass::Output,
+                            text: format!("output of {node}"),
+                            head: 1024,
+                            tail: 0,
+                        }],
+                        meta: Default::default(),
+                    },
+                    questions: BTreeMap::from([(
+                        "q".to_string(),
+                        Question::Noul {
+                            instructions: json!("done?"),
+                            criteria: None,
+                        },
+                    )]),
+                    baseline: None,
+                    judge: &judge,
+                    join: BTreeMap::new(),
+                    join_from: None,
+                    enforce: Some(Enforce {
+                        opted_in: true,
+                        refused: None,
+                        acts: &acts,
+                    }),
+                },
+            )
+        };
+        let outcomes: Vec<DecisionOutcome> = std::thread::scope(|s| {
+            let a = s.spawn(|| ask("a"));
+            let b = s.spawn(|| ask("b"));
+            vec![a.join().unwrap(), b.join().unwrap()]
+        });
+        let metas: Vec<&AnswerMeta> = outcomes
+            .iter()
+            .map(|o| match o {
+                DecisionOutcome::Answered { meta, .. } => meta,
+                other => panic!("not answered: {other:?}"),
+            })
+            .collect();
+        assert_eq!(metas.iter().filter(|m| m.applied).count(), 1, "{metas:?}");
+        assert_eq!(
+            metas
+                .iter()
+                .filter(|m| m.enforce_refused.as_deref() == Some("cap"))
+                .count(),
+            1,
+            "{metas:?}"
+        );
+    }
 }

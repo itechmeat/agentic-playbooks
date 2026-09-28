@@ -734,7 +734,15 @@ impl EffectiveDecisions {
 /// mid-run. Raising a mode mid-run has no effect (the caller takes the
 /// minimum with its snapshot).
 pub fn live_mode(root: &Path, use_name: &str) -> DecisionMode {
-    match resolve(root) {
+    match crate::config::config_dir() {
+        Some(dir) => live_mode_in(&dir, root, use_name),
+        None => DecisionMode::Off,
+    }
+}
+
+/// [`live_mode`] with an explicit config dir.
+pub fn live_mode_in(config_dir: &Path, root: &Path, use_name: &str) -> DecisionMode {
+    match resolve_in(config_dir, root) {
         Resolution::Active(eff) => eff.mode_for(use_name),
         _ => DecisionMode::Off,
     }
