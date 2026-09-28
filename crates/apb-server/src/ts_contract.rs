@@ -50,6 +50,8 @@ fn render_types() -> String {
         apb_engine::progress::ProgressSummary::decl(&cfg),
         apb_engine::run_view::ChildRun::decl(&cfg),
         apb_engine::run_view::RunUsage::decl(&cfg),
+        apb_engine::run_view::RunDecisions::decl(&cfg),
+        apb_engine::run_view::RunDecisionUse::decl(&cfg),
         apb_core::agent_output::UsageSource::decl(&cfg),
         apb_core::agent_output::AgentUsage::decl(&cfg),
         apb_engine::RunSummary::decl(&cfg),

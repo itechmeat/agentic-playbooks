@@ -32,6 +32,8 @@ mod demo_playbooks_test;
 // Unix-only: the module drives process groups through
 // `std::os::unix::process::CommandExt` and inspects them with `ps`/`kill`.
 #[cfg(unix)]
+#[path = "suite/decisions_cli_test.rs"]
+mod decisions_cli_test;
 #[path = "suite/detached_driver_test.rs"]
 mod detached_driver_test;
 #[path = "suite/ingest_cli_test.rs"]

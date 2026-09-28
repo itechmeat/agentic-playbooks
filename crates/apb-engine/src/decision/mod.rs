@@ -23,6 +23,7 @@
 
 pub(crate) mod completion;
 mod redact;
+pub mod report;
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -380,6 +381,7 @@ impl DecisionRunner {
         let state_bytes = serde_json::to_string(&state).map_or(0, |s| s.len()) as u64;
         let state_digest = apb_decide::digest::digest(&state);
         let questions_digest = apb_decide::digest::questions_digest(&call.questions);
+        let output_chars = output_chars(&call.state);
         if let Some(answers) = self.replayed(
             call.site,
             call.node,
@@ -404,6 +406,7 @@ impl DecisionRunner {
             questions_digest: questions_digest.clone(),
             state_digest: state_digest.clone(),
             state_bytes,
+            output_chars,
             answers: BTreeMap::new(),
             applied: false,
             would_change: None,
@@ -537,7 +540,13 @@ impl DecisionRunner {
             }
         }
         if self.settings.privacy.debug_state {
-            self.write_debug_state(seq, &state, &call.questions, full.as_ref());
+            self.write_debug_state(
+                seq,
+                &state,
+                &request.state_order,
+                &call.questions,
+                full.as_ref(),
+            );
         }
         match (outcome_answers, result) {
             (Some(answers), _) => DecisionOutcome::Answered {
@@ -560,11 +569,14 @@ impl DecisionRunner {
         &self,
         seq: u64,
         state: &Value,
+        state_order: &[String],
         questions: &BTreeMap<String, Question>,
         answers: Option<&BTreeMap<String, Answer>>,
     ) {
         let dir = self.run_dir.join("decisions");
-        let body = json!({"seq": seq, "state": state, "questions": questions, "answers": answers});
+        // `state_order` lets `apb decisions replay` send the state in the
+        // order it was sent (key order is part of the prompt).
+        let body = json!({"seq": seq, "state": state, "state_order": state_order, "questions": questions, "answers": answers});
         if std::fs::create_dir_all(&dir).is_ok()
             && let Ok(text) = serde_json::to_string_pretty(&body)
         {
@@ -573,6 +585,60 @@ impl DecisionRunner {
         }
     }
 }
+
+/// Characters of the output-class fields as the use handed them (before
+/// redaction and clipping), `None` when the state has none.
+fn output_chars(parts: &StateParts) -> Option<u64> {
+    let mut outputs = parts
+        .fields
+        .iter()
+        .filter(|f| f.class == FieldClass::Output)
+        .peekable();
+    outputs.peek()?;
+    Some(outputs.map(|f| f.text.chars().count() as u64).sum())
+}
+
+// --- replay (issue #165 Part 13) ---------------------------------------------
+
+impl DecisionRunner {
+    /// A runner over `settings` for `apb decisions replay`: bound to no run
+    /// and no journal. Only [`DecisionRunner::ask_unjournaled`] is meant
+    /// for it.
+    pub(crate) fn for_replay(settings: EffectiveDecisions, root: &Path) -> Self {
+        DecisionRunner {
+            settings,
+            root: root.to_path_buf(),
+            run_dir: root.to_path_buf(),
+            scrub_names: Vec::new(),
+            chain: OnceLock::new(),
+            redactor: OnceLock::new(),
+            cache: DecisionCache::new(),
+            ledger: Mutex::new(Ledger::default()),
+        }
+    }
+
+    /// Sends a request that was already redacted and clipped (a debug
+    /// state) to the chain: no journal, no budget, no cache. Evaluation
+    /// only; a run never calls this.
+    pub(crate) fn ask_unjournaled(
+        &self,
+        request: &DecisionRequest,
+    ) -> Result<apb_decide::DecisionResponse, apb_decide::DecideError> {
+        self.chain().0.decide(request, None)
+    }
+}
+
+/// The compact journal form of answers, shared with replay.
+pub(crate) fn compact_answers(
+    answers: &BTreeMap<String, Answer>,
+) -> BTreeMap<String, DecisionAnswer> {
+    answers
+        .iter()
+        .map(|(k, a)| (k.clone(), compact_answer(a)))
+        .collect()
+}
+
+// --- end of replay -----------------------------------------------------------
 
 fn resolve_key(spec: &ProviderSpec) -> Result<Option<String>, String> {
     match &spec.key {
@@ -663,6 +729,8 @@ pub struct DecisionTotals {
 #[derive(Debug, Clone, Default, PartialEq, serde::Serialize)]
 pub struct UseTotals {
     pub decisions: u32,
+    /// Requests actually sent for this use.
+    pub requests: u32,
     pub errors: u32,
     pub applied: u32,
     pub shadow_would_change: u32,
@@ -710,6 +778,7 @@ pub fn decision_totals(events: &[Event]) -> DecisionTotals {
             t.cached += 1;
         } else if provider.is_some() {
             t.requests += 1;
+            u.requests += 1;
             latencies.push(*latency_ms);
         }
         if *applied {

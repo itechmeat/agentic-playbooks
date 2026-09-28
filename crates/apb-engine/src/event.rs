@@ -432,6 +432,12 @@ pub enum EventPayload {
         /// Bytes of the state as sent (after redaction and clipping).
         #[serde(default)]
         state_bytes: u64,
+        /// Characters of the output-class text the use judged, before
+        /// redaction and clipping (the completion check: the attempt's raw
+        /// reply). The report reads it to set long outputs apart; absent in
+        /// journals written before it existed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_chars: Option<u64>,
         /// Compact answers by question id: the value, its probability and the
         /// confidence. Full distributions only in the debug state file.
         #[serde(default, deserialize_with = "lenient_default")]

@@ -104,6 +104,7 @@ apb suggestions     inspect and undo recorded suggestion decisions
 apb migrate         migrate schema 1 playbooks to schema 2
 apb doctor          diagnose environment, or one run with --run
 apb cache           inspect and manage the node result cache
+apb decisions       decision-model report, stored thresholds, replay
 apb projects        list or manage the workspace registry
 apb dashboard       web UI on port 7321
 apb ingest          only the inbound webhook listener (headless)

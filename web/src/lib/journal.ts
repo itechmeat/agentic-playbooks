@@ -1,3 +1,4 @@
+import { decisionNote } from './rundecisions'
 import { attemptUsageNote } from './runusage'
 import type { WfEvent } from './types'
 
@@ -45,8 +46,9 @@ export function runEventJournal(events: WfEvent[]): EventJournalEntry[] {
 
 // The detail line of an event kind that has one (issue #67): how a session
 // handoff started, which declared output fields a node left out, where an
-// attempt's transcript is, the tokens an attempt reported (issue #167), and
-// which working tree the run moved into. Every other kind has none.
+// attempt's transcript is, the tokens an attempt reported (issue #167),
+// which working tree the run moved into, and what a decision model answered
+// (issue #165). Every other kind has none.
 function eventNote(e: WfEvent): string | undefined {
   const r = e as unknown as Record<string, unknown>
   switch (e.type) {
@@ -60,6 +62,8 @@ function eventNote(e: WfEvent): string | undefined {
       return typeof r.transcript === 'string' ? `transcript: ${r.transcript}` : undefined
     case 'attempt_finished':
       return attemptUsageNote(r.usage)
+    case 'decision_made':
+      return decisionNote(e)
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`

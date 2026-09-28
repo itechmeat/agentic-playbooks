@@ -10,6 +10,7 @@
   import { subscribeChanges } from '../lib/ws'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import QuestionPanel from '../lib/QuestionPanel.svelte'
+  import DecisionsPanel from '../lib/DecisionsPanel.svelte'
   import type { RunDetail } from '../lib/types'
   import RunProgress from '$lib/RunProgress.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
@@ -298,6 +299,10 @@
           {/if}
         </Card.Content>
       </Card.Root>
+    {/if}
+
+    {#if detail}
+      <DecisionsPanel decisions={detail.decisions} events={detail.events} />
     {/if}
 
     {#if detail?.instruction}
