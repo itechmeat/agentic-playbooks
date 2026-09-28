@@ -471,10 +471,12 @@ engine's resilience features exist to handle.
 
 `start`, `agent_task`, `script`, `prompt`, `condition`, `human_review`,
 `wait`, `finish`, `playbook` (runs another playbook as a sub-run, see
-"Sub-playbooks" below). A playbook needs exactly one `start` and at least one
-`finish`. Edges connect node ids; conditional edges gate on node status,
-review status, an output substring match, or one structured field of a node's
-output.
+"Sub-playbooks" below), `judge` (asks a decision model typed questions, see
+"Judge nodes and judge edges" below). A playbook needs exactly one `start` and
+at least one `finish`. Edges connect node ids; conditional edges gate on node
+status, review status, an output substring match, one structured field of a
+node's output, or a decision model's yes/no answer about the source node's
+output (`judge`).
 
 ## Template variables
 
@@ -587,6 +589,132 @@ nodes:
 
 A finish-with-prompt composer is bounded the same way. The budget changes the
 rendered prompt, so it also moves the node's cache key.
+
+## Judge nodes and judge edges
+
+A `judge` node asks a decision model (see DECISIONS.md) typed questions over a
+small named state and publishes the answers as a compact JSON object, so the
+usual `output_field` edges and `{{nodes.<id>.output.<field>}}` templates route
+on them. It replaces a verdict-only `agent_task` or a brittle `output_match`
+gate, at a fraction of a second and of a cent per decision. The playbook
+names no provider, URL, model or key: the machine's `decisions.yaml` decides
+whether and where the questions are asked.
+
+```yaml
+- id: triage
+  type: judge
+  title: Classify the review result
+  state:                         # named fields; each value is a template
+    request: "{{run.instruction}}"
+    review_output: "{{nodes.review.output}}"
+  questions:                     # a map, never a list
+    verdict:
+      type: choice
+      instructions: "Which outcome does `review_output` report for the change described in `request`?"
+      criteria:
+        clean: "No blocking findings; only style notes or none."
+        needs_fix: "At least one concrete defect that must be fixed before merge."
+        unclear: "The review is cut off, empty, or does not address the change."
+    risky: { type: noul, instructions: "Does `review_output` mention deleted tests, committed secrets or schema migrations?" }
+    effort:
+      type: score
+      instructions: "How much work do the findings in `review_output` imply?"
+      levels: ["nothing to do", "a one-line fix", "a local change in one file", "changes across several files", "a redesign"]
+  thresholds:
+    verdict: { min_confidence: 0.6, below: unclear }
+    risky:   { yes_at: 0.7 }
+    effort:  { bands: { small: [0, 1.5], medium: [1.5, 2.5], large: [2.5, 4] } }
+  on_unavailable: { route: human_gate }  # or { default: { verdict: unclear, risky: true } } | fail | emulate
+```
+
+Question types: `choice` (2 to 255 named options, each described by its
+criterion), `score` (2 to 10 levels, lowest first, each described in words)
+and `noul` (the probability of yes; optional `criteria` under the keys `true`
+and `false`). At most 32 questions per node.
+
+The output, for the node above:
+`{"verdict":"needs_fix","verdict_p":0.83,"verdict_confidence":0.71,"risky":false,"risky_p":0.12,"effort":"medium","effort_score":1.9,"decided_by":"typesafe/jev-1.13.0"}`.
+A `choice` gives `<id>`, `<id>_p` and `<id>_confidence`; a `noul` gives
+`<id>` (true or false) and `<id>_p`; a `score` gives `<id>_score` (the
+expected level index, 0 = lowest) and, with bands, `<id>`. Thresholds are
+applied in code, never by the model: a `choice` below `min_confidence` becomes
+the declared `below` option; a `noul` is true at `p >= yes_at` (0.5 without a
+threshold); a score falls into the band `[lo, hi)` (the last band closed).
+`decided_by` is `<provider>/<model>`, `emulated:<provider>`, `default` or
+`unavailable`.
+
+Route with `output_field` edges: `{ type: output_field, node: triage, field: verdict, equals: needs_fix }`.
+
+**When the answer is used.** Only when the machine's `judge_node` use is at
+`enforce` and every answer is valid. Below enforce (shadow, advise), without a
+`decisions.yaml`, with `APB_DECISIONS=off`, or when the provider is down,
+times out, is out of budget or returns an invalid item, the node applies
+`on_unavailable`, so a judge playbook runs on any machine:
+
+- `{ route: <node> }` succeeds with `{"decided_by":"unavailable","reason":"..."}`.
+  The route is an explicit edge, required by the validator:
+  `{ from: triage, to: <node>, condition: { type: output_field, node: triage, field: decided_by, equals: unavailable } }`.
+- `{ default: { <question>: <value> } }` succeeds with those values,
+  `decided_by: default` and the reason.
+- `fail` fails the node like any node (failure edges, `defaults.on_failure`,
+  a supervisor park). Absent `on_unavailable` means `fail`, with a V55 warning.
+- `emulate` asks an emulation backend: the `llm_emulation` providers of
+  `decisions.yaml`, then the node's `profile` (falls back to
+  `defaults.profile`) as one agent attempt that answers in JSON. Emulated
+  answers are uncalibrated (DECISIONS.md) and cost an agent turn; the node
+  fails when the emulation gives no answer either.
+
+The `reason` names why: `not_configured`, `off`, `mode`, `budget`,
+`unavailable`, `timeout`, `rate_limited`, `auth`, `invalid`.
+
+Every answer is journaled as a `decision_made` before the output is written;
+a resumed or re-run judge with the same state replays it without a request.
+With `cache: auto` the answer is reused across runs, keyed by the node
+definition (questions and thresholds), the rendered state and the pinned
+provider model; only answers at enforce are stored, never a fallback.
+
+**Writing good questions.**
+
+- One judgment per question. Two things to decide are two questions.
+- Describe situations, not degrees: "At least one concrete defect that must be
+  fixed before merge", not "very bad". Score levels are words ("a one-line
+  fix"), never numbers: the model never sees them (V57 warns on digits).
+- Always give a `choice` an `unclear` (or `other`, `none`) option, and use it
+  as `below` (V56 warns without one). The options come from you, the author.
+- Facts stay in code. Whether a file exists, a test passed, a count or a
+  date is a `script` node or a `success_check`, never a question.
+- Keep the state small and named, and cite its fields in backticks in the
+  instructions (`review_output`). Read one field of a node output where the
+  source declares `outputs.fields`; a whole transcript is clipped (V58).
+- Thresholds belong to one provider and model version. Pin versioned model
+  ids in `decisions.yaml` (`jev-1.13.0`, not an alias): a threshold tuned on
+  one version does not transfer to the next.
+- Collect 20-30 labelled examples of the decision before trusting a
+  threshold, and run the use in shadow first; switch `judge_node` to enforce
+  only once the journaled answers agree with what you would have decided.
+- References: https://docs.typesafe.ai/patterns and
+  https://docs.typesafe.ai/model-jaggedness/jev-1.13.
+
+**Judge edge.** A binary branch without an extra node:
+
+```yaml
+- from: review
+  to: fix
+  condition: { type: judge, question: "Does the review in `output` report at least one defect that must be fixed before merge?", min_p: 0.7, on_unavailable: false }
+```
+
+Always a yes/no question over the source node's output (`output`) and title
+(`step`), nothing else. All judge edges of a node go in one request when the
+node succeeds, journaled before routing; each loop execution is asked anew.
+The edge matches at `p >= min_p` when the `judge_edge` use is at enforce, and
+otherwise exactly when `on_unavailable` is true, which is mandatory (V59).
+A failed source asks nothing. Prefer a judge node when you need more than a
+yes/no, more than a few edges (V60 warns above eight), or the answer in a
+template.
+
+Validator codes: V50 questions shape, V51 question content, V52 thresholds,
+V53 `on_unavailable`, V54 state, V59 judge edges (errors); V55, V56, V57, V58,
+V60, V61 (warnings).
 
 ## Human review and conditional edges
 

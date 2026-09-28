@@ -763,4 +763,20 @@ mod tests {
         assert!(has(&p, "V46", Severity::Warning), "{:?}", issues(&p));
         assert!(!has(&pb(GOOD, "", EDGES), "V46", Severity::Warning));
     }
+
+    #[test]
+    fn the_repository_judge_playbooks_validate_clean() {
+        for yaml in [
+            include_str!("../../../../examples/playbooks/review-triage.yaml"),
+            include_str!("../../../../.apb/playbooks/apb-task-implement/1.15.0/playbook.yaml"),
+        ] {
+            let p = Playbook::from_yaml(yaml).unwrap();
+            assert!(judge_codes(&p).is_empty(), "{:?}", issues(&p));
+            let ctx = ValidationContext {
+                profiles: vec!["developer".into(), "janitor".into()],
+                ..Default::default()
+            };
+            assert!(validate(&p, &ctx).is_valid(), "{:?}", issues(&p));
+        }
+    }
 }

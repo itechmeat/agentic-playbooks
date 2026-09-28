@@ -36,8 +36,8 @@ engine. Do not introduce import cycles (enforced by code-ranker, see below).
   (`agent_output.rs`), the decision-model config (`decisions.rs`: the
   machine's `decisions.yaml`, project narrowing, the doctor line).
 - `apb-decide` - a blocking, provider-agnostic decision-model client: the
-  `DecisionProvider` trait, question and answer types, the `systemone` and
-  `fake` providers, limit checks and strict reply validation, retries, the
+  `DecisionProvider` trait, question and answer types, the `systemone`,
+  `fake` and `llm_emulation` (uncalibrated) providers, limit checks and strict reply validation, retries, the
   provider chain, the per-run cache and the `ApiKey` wrapper; the `testing`
   feature adds a multi-response HTTP stub. Knows nothing about runs.
 - `apb-engine` - execution. The drive loop (`scheduler.rs`) with its phases in
@@ -57,7 +57,8 @@ engine. Do not introduce import cycles (enforced by code-ranker, see below).
   supervisor spawn, legacy run-resume shim (`legacy_snapshot.rs`), the run
   policy gate every launch surface calls (`gate.rs`), and the decision runner
   (`decision/`: the one entry point for decision-model uses, redaction,
-  budget, replay, the `decision_made` event, and the shadow completion check;
+  budget, replay, the `decision_made` event, the shadow completion check,
+  and the judge node and edge answers; `scheduler/judge` runs them;
   see `docs/DECISIONS.md`).
 - `apb-mcp` - rmcp stdio MCP server (`server/`) and the tool layer in `tools/`
   (one module per domain: `playbook`, `run`, `supervisor`, `trial`, `capture`,
