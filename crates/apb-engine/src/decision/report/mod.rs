@@ -206,6 +206,13 @@ impl RunJournal {
 pub fn run_dirs(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
     for root in roots {
+        // `.apb` and `.apb/runs` must be real directories: a link would
+        // read (and `replay` would send) another project's runs under this
+        // project's narrowing.
+        let real_dir = |p: &Path| std::fs::symlink_metadata(p).is_ok_and(|m| m.is_dir());
+        if !real_dir(&root.join(".apb")) || !real_dir(&root.join(".apb/runs")) {
+            continue;
+        }
         let Ok(entries) = std::fs::read_dir(root.join(".apb/runs")) else {
             continue;
         };

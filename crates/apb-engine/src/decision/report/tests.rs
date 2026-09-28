@@ -566,3 +566,21 @@ fn the_run_count_covers_only_the_runs_the_filter_keeps() {
     );
     assert_eq!(none.runs, 0);
 }
+
+#[cfg(unix)]
+#[test]
+fn a_linked_runs_directory_is_not_read() {
+    // A repository can ship `.apb/runs` (or `.apb`) as a link to another
+    // project's runs; report and replay must not read them as its own.
+    let other = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(other.path().join(".apb/runs/r-1")).unwrap();
+    let linked = tempfile::tempdir().unwrap();
+    std::fs::create_dir_all(linked.path().join(".apb")).unwrap();
+    std::os::unix::fs::symlink(
+        other.path().join(".apb/runs"),
+        linked.path().join(".apb/runs"),
+    )
+    .unwrap();
+    assert_eq!(run_dirs(&[other.path().to_path_buf()]).len(), 1);
+    assert!(run_dirs(&[linked.path().to_path_buf()]).is_empty());
+}
