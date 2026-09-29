@@ -770,6 +770,28 @@ fn a_model_turn_failure_never_falls_back() {
 }
 
 #[test]
+fn an_auth_error_after_a_model_turn_never_falls_back() {
+    let h = Host::new(&one_node(", max_retries: 1"), &[]);
+    // A real turn (a reply on stdout), then a push that the remote refused.
+    h.agent("echo 'pushed the branch, opening the PR'\necho 'error: Bad credentials' >&2\nexit 1");
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(CLI_SESSION);
+    let (status, events) = h.finish(&run_id);
+    assert_eq!(status, RunStatus::Failed);
+    // As in a plain CLI run: an auth failure is non-transient, no retry.
+    assert_eq!(attempt_statuses(&events, "w"), vec!["failed"]);
+    assert!(fallback_events(&events).is_empty());
+    assert_eq!(
+        count(&events, |p| matches!(
+            p,
+            EventPayload::HostTaskRequested { .. }
+        )),
+        0
+    );
+}
+
+#[test]
 fn a_cli_started_run_keeps_refusing_as_before() {
     let h = Host::new(&one_node(""), &[]);
     let _lock = common::env_lock();

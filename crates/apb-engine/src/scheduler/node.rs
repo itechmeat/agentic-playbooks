@@ -1751,13 +1751,17 @@ fn execute_node_kind(
                     }
                     // Host fallback (0.23.0): whether this CLI attempt failed
                     // before any model turn - the process never started (a
-                    // missing binary) or the agent is not logged in.
+                    // missing binary) or the agent is not logged in. An
+                    // auth-looking message after a model turn (reported
+                    // usage, a real reply) is the agent's own failure: the
+                    // step never re-runs as a host task then.
                     let unstartable = !step.host
                         && match &outcome {
                             Err(f) => {
                                 spawn_at.get().is_none()
-                                    || crate::failure_class::classify(&f.message)
-                                        == FailureKind::Auth
+                                    || (!f.model_turn
+                                        && crate::failure_class::classify(&f.message)
+                                            == FailureKind::Auth)
                             }
                             Ok(_) => false,
                         };
@@ -2135,6 +2139,7 @@ fn execute_node_kind(
                             class,
                             message: msg,
                             usage: failed_usage,
+                            ..
                         }) => {
                             // Cancellation mid-adapter-work: kill returned Transport,
                             // but this is not a failure - mark the node Cancelled.
@@ -2920,6 +2925,7 @@ pub(crate) fn execute_finish_answer(
                     class,
                     message: msg,
                     usage: failed_usage,
+                    ..
                 }) => {
                     last_timed_out = class == ErrorClass::Timeout;
                     journal.append(EventPayload::AttemptFinished {

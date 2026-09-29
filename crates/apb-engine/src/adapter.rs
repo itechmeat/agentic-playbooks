@@ -281,6 +281,12 @@ pub struct AgentFailure {
     /// non-zero. `None` when the failed output reported none. The drive loop
     /// writes it into the failed `AttemptFinished.usage`.
     pub usage: Option<apb_core::agent_output::AgentUsage>,
+    /// Whether the failed attempt shows a model turn: it reported token
+    /// usage, or printed a reply that is not an error result. The host
+    /// fallback treats an auth-looking failure as "cannot start" only
+    /// without one, so text such as a `git push` 403 printed after real work
+    /// never re-runs the step as a host task.
+    pub model_turn: bool,
 }
 
 impl AgentFailure {
@@ -289,7 +295,15 @@ impl AgentFailure {
             class,
             message: message.into(),
             usage: None,
+            model_turn: false,
         }
+    }
+
+    /// The same failure, marked as having had a model turn.
+    #[must_use]
+    pub fn after_model_turn(mut self, turn: bool) -> Self {
+        self.model_turn = turn;
+        self
     }
 
     /// The same failure, with the usage the output reported.
@@ -1554,6 +1568,14 @@ impl ClaudeAdapter {
             // The tokens were spent either way: claude prints its errored
             // result, usage included, and exits non-zero, so the failed
             // attempt records what the output reported.
+            let usage = apb_core::agent_output::usage(task.agent, &stdout);
+            let spent = usage.as_ref().is_some_and(|u| {
+                u.input_tokens + u.output_tokens + u.cache_read_tokens + u.cache_write_tokens > 0
+            });
+            let replied = match apb_core::agent_output::reply(task.agent, &stdout) {
+                Some(r) => !r.is_error && !r.text.trim().is_empty(),
+                None => !stdout.is_empty(),
+            };
             return Err(AgentFailure::new(
                 ErrorClass::ProcessExit,
                 format!(
@@ -1562,7 +1584,8 @@ impl ClaudeAdapter {
                     exit_detail(&stderr, &said())
                 ),
             )
-            .with_usage(apb_core::agent_output::usage(task.agent, &stdout)));
+            .with_usage(usage)
+            .after_model_turn(spent || replied));
         }
         // Status comes from the structured report block (spec 6.2); the node
         // output is the reply body with that block stripped, and raw is the full
