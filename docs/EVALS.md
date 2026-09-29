@@ -35,9 +35,24 @@ in an eval that could ship something:
 
 Such a playbook is refused before anything is created
 (`eval_refused_effects`, exit 2), and `apb validate` reports it as V81.
-There is no case-level switch that lifts the refusal. Use the case `env` to
-cut the logged-in CLIs you know about (for example `GH_CONFIG_DIR` pointing
-into the scratch directory and an empty `GH_TOKEN`).
+There is no case-level switch that lifts the refusal.
+
+What the agent still has:
+
+- The operator's environment. Agents inherit the environment `apb eval`
+  runs in, minus the variables an installed connector references (the same
+  scrub as every run); `environment: minimal` changes which claude settings
+  load, not the environment variables. `ANTHROPIC_API_KEY`, `GH_TOKEN`,
+  cloud credentials and the like reach eval agents unless the case env cuts
+  them.
+- Logged-in CLIs and git credential helpers. The scratch repository clears
+  `credential.helper` for itself, but an agent can still run `gh`, a cloud
+  CLI or git in another directory with the operator's credentials. Use the
+  case `env` to cut the ones you know about (for example `GH_CONFIG_DIR`
+  pointing into the scratch directory and an empty `GH_TOKEN`).
+- The operator's filesystem. Nothing confines the agent to the scratch
+  tree; the run journal the checks read lives in that tree, so an agent
+  could edit it (the result records `journal_agent_writable: true`).
 
 The agent's own configuration follows the node's profile, as in any run
 (PROFILES.md, "Agent environment"). With the default `environment: minimal`
@@ -85,7 +100,7 @@ fixture:
   dir: fixtures/window-max/base   # or git: <commit, tag or branch>
   change: fixtures/window-max/planted
   branch: eval-change             # default eval-change
-env:                              # overlay for the run's processes
+env:                              # overlay for the agents and scripts
   GH_CONFIG_DIR: "{{eval.scratch}}/gh"
 checks:
   goal: required                  # required (default) | report | ignore
@@ -117,6 +132,16 @@ tags: [quick]
 `budget.max_usd_per_invocation` (default 10 USD); a case's values win, the
 env maps merge and the tag lists add up.
 
+The `env` overlay is set on every agent, script node, goal script and case
+script the run spawns, after the connector scrub. It never reaches apb
+itself: the `apb run` that starts the repetition gets it as a run setting,
+and its config directory is pinned to the one `apb eval` resolved. So a
+suite cannot set a variable that reconfigures apb, the shell, the loader or
+git (V80): `APB_*`, `HOME`, `XDG_*`, `PATH`, `LD_*`, `DYLD_*`, `GIT_DIR`,
+`GIT_WORK_TREE` and the other repository-location variables, `GIT_CONFIG*`,
+and the shell variables (`SHELL`, `ENV`, `BASH_ENV`, `IFS`, `CDPATH`,
+`BASH_FUNC_*` and similar).
+
 A case that sets `connectors`, `answers`, `stop_before`,
 `checks.connector_calls` or `checks.pushed` is refused (V80): those need
 the second half of the suite, and a case written for a later apb never runs
@@ -140,6 +165,19 @@ system temporary directory:
   real remote.
 - `change:` is copied over the base and committed on `branch`, which stays
   checked out: a branch to review against `main`.
+- A `git:` ref is resolved once per case, so every repetition materializes
+  the same commit and the case digest names it.
+- Nothing apb writes goes through a link the fixture planted. After each
+  layer (the export or copy, the definitions, the overlay) the tree is
+  walked without following links, and the fixture is refused when a
+  symlink is absolute, resolves outside the tree, or sits at or below
+  `.apb`, and when the fixture carries a `.git`. The definitions and the
+  overlay are copied without ever writing through an existing link.
+- Every git call apb makes there is hardened: `GIT_DIR`, `GIT_WORK_TREE` and
+  the other location variables of the operator's shell are removed, no
+  filesystem monitor or hook runs, only the local transport is allowed and
+  the system config is not read. The repository sets `credential.helper`
+  empty, `remote.pushDefault=origin` and `push.default=current`.
 
 ### Checks
 
@@ -151,17 +189,23 @@ the run journal and the tree; none asks a model.
 | Check | Reads |
 |---|---|
 | `run.outcome` | the terminal event, or `stopped` when the runner stopped the run |
-| `goal` | the playbook's own `goal.criteria`, from their `goal_checked` events (never re-run). `required`: every script and marker criterion passed; a run stopped before its finish node counts as `not_reached` when the case accepts `stopped`. Skipped when the playbook has no such criteria |
+| `goal` | the playbook's own `goal.criteria`, from their `goal_checked` events (never re-run). `required`: every script and marker criterion passed; a run stopped before its finish node counts as `not_reached` when the case accepts `stopped`. Skipped when the playbook has no such criteria; a case that says `goal: required` explicitly for such a version is a V80 |
 | `route` | the visited nodes in order: `node_started`, a gate's `review_requested`, and start and finish nodes |
 | `outputs` | the node's latest output; `field` reads a key of it parsed as JSON |
-| `files` | the tree after the run; `unchanged_from_fixture` compares with the fixture commit |
-| `events` | journal event types and counts |
+| `files` | the tree after the run; `unchanged_from_fixture` compares with the fixture commit. A symlink at the path or on a directory below the tree is never followed (the check fails), and `matches` on a missing file fails |
+| `events` | journal event types and counts; a type the journal cannot hold is a V80 |
 | `deliverables` | no `deliverable_missing` or `output_fields_missing` |
 | `scripts` | `sh <script>` in the tree, exit 0 passes, 10 minute cap |
 
-Case scripts get `APB_EVAL_RUN_DIR`, `APB_RUN_ID`, `APB_EVAL_CASE`,
-`APB_EVAL_REPETITION` and `APB_EVAL_SCRATCH`. Regular expressions use the
-`regex` crate (linear time).
+Case scripts get the case env overlay, then `APB_EVAL_RUN_DIR`,
+`APB_RUN_ID`, `APB_EVAL_CASE`, `APB_EVAL_REPETITION` and
+`APB_EVAL_SCRATCH`. They run after untrusted agent activity in the tree:
+the agent could have edited `.git/config`, hooks or any file. Their own git
+calls get apb's hardening through `GIT_CONFIG_PARAMETERS`
+(`core.fsmonitor=false`, an empty `core.hooksPath`, the local transport
+only) with the location variables removed; anything else a script runs
+reads the tree as the agent left it, with the rest of the operator's
+environment. Regular expressions use the `regex` crate (linear time).
 
 ## Running
 
@@ -204,30 +248,60 @@ budget (`--max-usd`, else `budget.max_usd_per_invocation`, else 10 USD)
 keeps the next repetition from starting once the spend reported so far
 reaches it; the result is then marked `incomplete`.
 
+The budget and `max_usd` count only the cost an agent CLI reports. claude
+reports one; codex does not, and a custom invocation form or a plain-text
+stub reports nothing. When a repetition reports no cost, `apb eval` warns
+once (`warnings` in `--json`) that the budget cannot be enforced for that
+executor; `max_tokens` and `timeout` still apply.
+
+The wall clock is enforced twice: by `apb eval` while it follows the run,
+and by the run's own driver, which aborts the run at the deadline (the
+timeout plus the five-second grace) even when no `apb eval` follows it any
+more. SIGINT or SIGTERM stops the live repetition's run, waits for its
+driver, stores what ran and removes the scratch directory (exit 130); a
+second signal ends the process at once. A scratch directory left by an
+invocation that was killed is removed at the next start once its owner and
+its drivers are gone.
+
 After the checks the run directory moves to
 `<config-dir>/evals/runs/<playbook>/<run-id>/`, with a copy of every file a
 `files` check names under `eval-files/`, and the scratch directory is
 removed. Eval runs therefore never appear in the project's `.apb/runs`, in
-`apb stats` or in `apb decisions report`. A repetition whose driver does not
-exit after a stop keeps its tree and says where.
+`apb stats` or in `apb decisions report`. A tree is never deleted while its
+driver lives: a repetition whose driver does not exit within 30 seconds of
+a stop moves, run directory included, to
+`<config-dir>/evals/kept/<eval-id>/<case>-<n>/`, and the result's
+`kept_worktree` and `run_dir` name it. Remove it once the driver is gone.
+When the driver has exited, anything left in its process group is killed
+before the tree is removed.
 
 Exit codes: 0 when every repetition passed, 1 otherwise, 2 for a refusal or
-a usage error.
+a usage error, 130 when interrupted.
 
 ### Suite approval
 
-Case scripts are code outside every version digest. The suite runs from a
-copy made at the start of the invocation, and the digest of that copy must
-be approved on this machine: `--yes` (or answering yes on a terminal)
-approves it. Approvals are kept in `<config-dir>/evals/approved.json`, apart
-from the trust store, so an older apb never meets a trust kind it does not
-know.
+Case scripts and the env overlay are outside every version digest. The
+suite runs from a copy made at the start of the invocation, and the digest
+of that copy, computed in the same pass, must be approved on this machine:
+`--yes` (or answering yes on a terminal) approves it, scripts and env
+together. A suite that cannot be digested (a symlink, a special file, a
+name that is not UTF-8, more than the suite limits of 50,000 files or
+1 GiB) is refused, never approved; `apb validate` reports it as V80. A `git:`
+fixture's content is not part of the suite digest: it is whatever the ref
+names when the eval starts. Approvals are kept in
+`<config-dir>/evals/approved.json`, apart from the trust store, so an older
+apb never meets a trust kind it does not know; the file is updated under a
+lock.
 
 ## Results and comparison
 
-Results live in `<config-dir>/evals/<playbook>/<key>.json` (mode 0600), one
-file per configuration key, each holding every invocation that ran under
-it. The key is the SHA-256 of the canonical JSON of:
+Results live in `<config-dir>/evals/results/<playbook>/<key>.json` (mode
+0600), one file per configuration key, each holding every invocation that
+ran under it, written under a lock. A key file that does not parse (a newer
+apb wrote it, or it is damaged) is moved aside to `<key>.json.corrupt-<ms>`
+and never overwritten. An invocation in which no repetition started a run
+has no configuration to be keyed by: it is reported and not stored. The key
+is the SHA-256 of the canonical JSON of:
 
 - the playbook digest (`playbook.yaml` and `scripts/`, from the run's
   `run_provenance`),
@@ -243,18 +317,23 @@ file, the fixture directories and scripts it references and the resolved
 Per case the result shows the pass count over the repetitions (`2/3`) with
 the Wilson 95% interval for information, and the median cost and duration.
 Every invocation ends with a comparison against the most recent other
-stored invocation of the same playbook: "configuration: unchanged" or
+stored invocation of the same playbook in the same project (another
+repository with a playbook of the same id is not a baseline): "configuration: unchanged" or
 "configuration changed" with the digest, bundle, executor or overrides that
 moved, then per case `baseline 3/3 -> candidate 1/3`, the delta, the check
 that failed most often and the median cost and duration on both sides.
 `apb eval <id> --compare` prints the same for the latest stored result
 against the one before, without running anything.
 
-`--json` prints `{ result, comparison, stored }`; `result` has
-`eval_id`, `playbook`, `version`, `started_at_ms`, `finished_at_ms`,
-`apb_version`, `workspace`, `config_key`, `config`, `cases` (each with
-`case`, `case_digest`, `passes`, `of`, `wilson95`, `repetitions`),
-`incomplete`, `total_cost_usd` and `total_tokens`; a repetition has
+`--json` prints `{ result, note, full_environment_nodes, warnings,
+comparison, stored }` (`stored` is null when nothing was stored; `note` is
+the not-a-sandbox note and `full_environment_nodes` lists `{node, profile}`
+for every node with `environment: full`, as the `--dry-run --json` plan
+does); `result` has `eval_id`, `playbook`, `version`, `started_at_ms`,
+`finished_at_ms`, `apb_version`, `workspace`, `config_key`, `config`,
+`cases` (each with `case`, `case_digest`, `passes`, `of`, `wilson95`,
+`repetitions`), `incomplete`, `total_cost_usd`, `total_tokens` and
+`journal_agent_writable`; a repetition has
 `repetition`, `run_id`, `run_dir`, `verdict`, `outcome`, `stopped`,
 `checks`, `goal`, `usage`, `duration_ms` and `kept_worktree`.
 
@@ -266,7 +345,11 @@ against the one before, without running anything.
   uses a field of a later release, a check names a node the version does
   not have, a path leaves `evals/scripts/` or `evals/fixtures/`, a regex
   does not compile, a param is not declared, a duration or range does not
-  parse.
+  parse, an `events` check names a type the journal cannot hold, an
+  explicit `goal: required` meets a version without script or marker
+  criteria, an env key reconfigures apb, the shell, the loader or git, the
+  suite holds a symlink or cannot be digested. The node, param and goal
+  checks skip a case whose `versions` range excludes the version.
 - **V81** (error): the playbook cannot be evaluated at all (the refusal
   above).
 - **V82** (warning): a `human_review` or interactive node; the run is stopped
@@ -280,6 +363,7 @@ the design: `review-planted-defect` (a branch adds `window_max` with an
 off-by-one loop at line 16 of `src/lib.rs`; the report must exist, be the
 only change, and point at the defect within three lines) and
 `review-clean-branch` (the same function written correctly; no finding may
-be ranked above the lowest severity, a text heuristic documented in its
-script). `branch-quality-review` is a draft, so run them with
+be ranked above the lowest severity, a heuristic over finding labels
+documented in its script). The playbook declares no goal criteria yet, so
+both cases record the goal (`goal: report`) rather than require it. `branch-quality-review` is a draft, so run them with
 `apb eval branch-quality-review --draft`.

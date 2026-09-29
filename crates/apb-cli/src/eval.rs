@@ -66,7 +66,7 @@ pub(crate) struct EvalArgs {
 }
 
 /// Printed once per invocation: the honest boundary of an eval run.
-const NOT_A_SANDBOX: &str = "note: an eval run is not a sandbox: it runs in a scratch repository with no real remote, but agents keep the network and any CLI you are logged in to; use the case `env` to cut known ones (for example GH_CONFIG_DIR)";
+const NOT_A_SANDBOX: &str = "note: an eval run is not a sandbox: it runs in a scratch repository with no real remote, but agents keep the network, your environment (apart from connector variables) and any CLI or git credential helper you are logged in to; use the case `env` to cut known ones (for example GH_CONFIG_DIR)";
 
 /// How often the wait loop re-reads the journal for limits.
 const POLL: Duration = Duration::from_secs(2);

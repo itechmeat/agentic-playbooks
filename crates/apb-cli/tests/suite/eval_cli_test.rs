@@ -207,7 +207,7 @@ fn the_json_output_matches_its_snapshot() {
     let expected = serde_json::json!({
         "comparison": null,
         "stored": "*",
-        "note": "note: an eval run is not a sandbox: it runs in a scratch repository with no real remote, but agents keep the network and any CLI you are logged in to; use the case `env` to cut known ones (for example GH_CONFIG_DIR)",
+        "note": "note: an eval run is not a sandbox: it runs in a scratch repository with no real remote, but agents keep the network, your environment (apart from connector variables) and any CLI or git credential helper you are logged in to; use the case `env` to cut known ones (for example GH_CONFIG_DIR)",
         "full_environment_nodes": [],
         "warnings": ["case `writes-report` repetition 1 reported no cost: the invocation budget ($10.00) and max_usd cannot be enforced for this executor"],
         "result": {
