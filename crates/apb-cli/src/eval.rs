@@ -406,6 +406,16 @@ fn materialize(
     // Every layer is checked before anything else writes into the tree: a
     // link the fixture planted must never redirect apb's own writes.
     check_layer(&tree, true)?;
+    // The run uses the project's definitions only: whatever `.apb` the
+    // fixture brought (playbooks, profiles, skills, config, a git ref's run
+    // history) goes before they are copied, so it can neither replace the
+    // definition the eval refusal checked nor add profiles or config the
+    // project does not have. It holds no symlink (checked above).
+    let fixture_apb = tree.join(".apb");
+    if fixture_apb.exists() {
+        std::fs::remove_dir_all(&fixture_apb)
+            .map_err(|e| format!("removing the fixture's .apb: {e}"))?;
+    }
     git(hooks, &tree, &["init", "-q", "-b", "main"])?;
     copy_definitions(root, id, &tree, draft)
         .map_err(|e| format!("copying the definitions: {e}"))?;
@@ -451,6 +461,13 @@ fn materialize(
                 "the change overlay carries `{}`; a fixture may not hold a git directory",
                 g.display()
             ));
+        }
+        // The overlay may not replace what runs: the definitions the eval
+        // checked live in `.apb`.
+        if std::fs::symlink_metadata(overlay_src.join(".apb")).is_ok() {
+            return Err(
+                "the change overlay carries `.apb`; a change may not replace the playbook, profiles, skills or config the eval runs".into(),
+            );
         }
         apb_core::fsutil::copy_tree_no_follow(&overlay_src, rep_dir, &tree)
             .map_err(|e| e.to_string())?;

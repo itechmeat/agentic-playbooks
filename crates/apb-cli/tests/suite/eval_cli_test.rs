@@ -1190,3 +1190,41 @@ fn a_spent_invocation_budget_stops_the_next_repetition() {
         "the cost was reported"
     );
 }
+
+/// A fixture's own `.apb` never replaces what the eval checked: the run
+/// uses the project's playbook even when the fixture ships another version
+/// of it, and a change overlay that carries `.apb` is refused. The fixture
+/// half also passed before the fix (the definitions copy already replaced
+/// the playbook directory); the overlay half fails without it.
+#[test]
+fn a_fixture_or_change_cannot_replace_the_definitions() {
+    let env = setup(PLAYBOOK);
+    let ev = env.project.path().join(".apb/playbooks/rev/evals");
+    let swapped = PLAYBOOK.replace("prompt: review", "prompt: swapped");
+    write(
+        &ev.join("fixtures/base/.apb/playbooks/rev/1.0.0/playbook.yaml"),
+        &swapped,
+    );
+    write(
+        &ev.join("fixtures/base/.apb/profiles/extra/profile.yaml"),
+        "name: extra\nexecutor:\n  agent: claude\n  model: claude-haiku-4-5-20251001\n",
+    );
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 0, "{v:#}");
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    let run_dir = PathBuf::from(rep["run_dir"].as_str().expect("stored run"));
+    let snapshot = fs::read_to_string(run_dir.join("playbook.yaml")).unwrap();
+    assert!(snapshot.contains("prompt: review"), "{snapshot}");
+    assert!(!snapshot.contains("swapped"), "{snapshot}");
+
+    write(
+        &ev.join("fixtures/change/.apb/playbooks/rev/1.0.0/playbook.yaml"),
+        &swapped,
+    );
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 1, "{v:#}");
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    assert_eq!(rep["verdict"], "error", "{rep:#}");
+    let detail = rep["checks"][0]["detail"].as_str().unwrap();
+    assert!(detail.contains("carries `.apb`"), "{detail}");
+}

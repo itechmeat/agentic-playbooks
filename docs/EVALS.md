@@ -156,15 +156,17 @@ system temporary directory:
 - `dir:` copies a directory under `evals/fixtures/`; `git:` exports the tree
   of a commit, tag or branch of this repository (`git archive`), resolved to
   a commit id that becomes part of the case digest.
-- The playbook's own directory (without `evals/`) and the project's
-  `profiles/`, `skills/` and `config.yaml` are copied into its `.apb`, so
-  the run uses exactly the definition the project has now, uncommitted
-  edits included. The digests, and therefore trust, are the project's.
+- The fixture's own `.apb`, if it has one, is removed. The playbook's own
+  directory (without `evals/`) and the project's `profiles/`, `skills/` and
+  `config.yaml` are then copied into it, so the run uses exactly the
+  definition the project has now, uncommitted edits included, and nothing
+  the fixture brought. The digests, and therefore trust, are the project's.
 - That tree is committed as `main` and pushed to a bare repository next to
   it, which is the tree's `origin`: a push succeeds locally and reaches no
   real remote.
 - `change:` is copied over the base and committed on `branch`, which stays
-  checked out: a branch to review against `main`.
+  checked out: a branch to review against `main`. A change that carries
+  `.apb` is refused: it could replace what the eval checked.
 - A `git:` ref is resolved once per case, so every repetition materializes
   the same commit and the case digest names it.
 - Nothing apb writes goes through a link the fixture planted. After each
