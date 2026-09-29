@@ -40,6 +40,8 @@
           <dd>{rateText(v.first_pass)}</dd>
           <dt class="text-muted-foreground">retries</dt>
           <dd>{perRunText(v.retries)}</dd>
+          <dt class="text-muted-foreground">fallbacks</dt>
+          <dd>{perRunText(v.fallbacks)}</dd>
           <dt class="text-muted-foreground">loops</dt>
           <dd>{perRunText(v.loop_traversals)}</dd>
           <dt class="text-muted-foreground">gate wait</dt>

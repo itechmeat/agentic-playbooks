@@ -1470,7 +1470,7 @@ In host mode apb spawns no agent CLI. Every agent step (and a finish answer)
 becomes a host task that `run_wait` returns in `pending_tasks`, each with the
 full `prompt` (the rendered node prompt, report contract included), the
 profile's `role_prompt`, the `skills` paths, the `workdir`, the `env` to set
-(`APB_RUN_DIR`, `APB_NODE_ID`, `APB_STATUS_FILE`), the `outputs` contract, a
+(`APB_RUN_DIR`, `APB_RUN_ID`, `APB_NODE_ID`, `APB_STATUS_FILE`), the `outputs` contract, a
 `deadline` from the node's `timeout_seconds`, and a `model_hint` for fallback
 entries and routed tiers. Run each with a subagent (independent tasks may run
 concurrently) and submit its final reply verbatim with `run_task_submit`
@@ -1487,7 +1487,8 @@ invocation `command`, `environment: minimal` (a claude-only mechanism) and
 `continue_session` (a host subagent has no session apb can continue; the node
 starts cold with `session_handoff.reason: host_mode`). The role prompt,
 skills, `timeout_seconds`, `expected_duration`, `outputs`, `success_check`,
-`require_verdict` and `completion_check` apply as always. Context compaction
+`require_verdict`, `completion_check`, `protect` and the goal criteria apply as
+always. Context compaction
 is skipped (it would spawn a CLI).
 
 Host fallback: a `cli` run you start in the background or under `supervise:
