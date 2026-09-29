@@ -364,6 +364,58 @@ fn the_kill_switch_over_execution_host_is_said_on_stderr() {
 }
 
 #[test]
+fn apb_tasks_never_prints_terminal_escapes_from_a_prompt() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    let run_id = start_detached(root);
+    let plan = task_of(root, &run_id, "plan");
+    let id = plan["task_id"].as_str().unwrap();
+    // A prompt embeds upstream agent output: plant an escape sequence.
+    let prompt = run_dir(root, &run_id)
+        .join("tasks")
+        .join(id)
+        .join("prompt.md");
+    fs::write(&prompt, "Plan it \x1b]0;pwn\x07 now\nsecond line").unwrap();
+    fs::write(
+        run_dir(root, &run_id)
+            .join("tasks")
+            .join(id)
+            .join("role.md"),
+        "role \x1b[2J",
+    )
+    .unwrap();
+    for args in [
+        vec!["tasks", run_id.as_str()],
+        vec!["tasks", run_id.as_str(), "--full"],
+    ] {
+        let out = crate::common::apb_std()
+            .args(&args)
+            .current_dir(root)
+            .output()
+            .unwrap();
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        assert!(out.status.success(), "{args:?}");
+        assert!(!stdout.contains('\x1b'), "{args:?}: {stdout:?}");
+        assert!(!stdout.contains('\x07'), "{args:?}: {stdout:?}");
+        assert!(stdout.contains("Plan it"), "{args:?}: {stdout}");
+    }
+    // `--full` keeps the prompt's lines; `--json` stays raw.
+    let full = crate::common::apb_std()
+        .args(["tasks", run_id.as_str(), "--full"])
+        .current_dir(root)
+        .output()
+        .unwrap();
+    assert!(String::from_utf8_lossy(&full.stdout).contains(" now\nsecond line"));
+    let raw = tasks_json(root, &run_id);
+    assert!(raw[0]["prompt"].as_str().unwrap().contains('\x1b'));
+    submit(root, &run_id, id, "PLAN");
+    let build = task_of(root, &run_id, "build");
+    submit(root, &run_id, build["task_id"].as_str().unwrap(), "built");
+    assert_eq!(wait_outcome(root, &run_id), "succeeded");
+}
+
+#[test]
 fn doctor_states_the_execution_mode() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());

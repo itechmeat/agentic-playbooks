@@ -67,8 +67,29 @@ fn collect(root: &Path, run_id: Option<&str>) -> Result<Vec<PendingHostTask>, St
     Ok(out)
 }
 
-fn first_line(text: &str) -> &str {
-    text.lines().find(|l| !l.trim().is_empty()).unwrap_or("")
+fn first_line(text: &str) -> String {
+    one_line(text.lines().find(|l| !l.trim().is_empty()).unwrap_or(""))
+}
+
+/// Text for the terminal, whole: newlines and tabs stay, every other control
+/// character (escape sequences start with one) and the bidirectional
+/// overrides are dropped. A prompt embeds upstream agent output, so it must
+/// not drive the terminal. `--json` prints the raw text.
+fn for_terminal(text: &str) -> String {
+    text.chars()
+        .filter(|&c| {
+            c == '\n'
+                || c == '\t'
+                || !(c.is_control()
+                    || ('\u{202a}'..='\u{202e}').contains(&c)
+                    || ('\u{2066}'..='\u{2069}').contains(&c))
+        })
+        .collect()
+}
+
+/// [`for_terminal`] on one line: newlines and tabs become spaces.
+fn one_line(text: &str) -> String {
+    for_terminal(text).replace(['\n', '\t'], " ")
 }
 
 pub(crate) fn tasks_cmd(
@@ -123,34 +144,35 @@ fn list(root: &Path, run_id: Option<&str>, full: bool, json: bool) -> ExitCode {
     for t in &tasks {
         println!(
             "{}  {}  node {}  attempt {}{}",
-            t.run_id,
-            t.task_id,
-            t.node,
+            one_line(&t.run_id),
+            one_line(&t.task_id),
+            one_line(&t.node),
             t.attempt,
             t.model_hint
                 .as_deref()
-                .map(|m| format!("  model hint {m}"))
+                .map(|m| format!("  model hint {}", one_line(m)))
                 .unwrap_or_default()
         );
-        println!("  workdir: {}", t.workdir);
+        println!("  workdir: {}", one_line(&t.workdir));
         if let Some(d) = t.deadline {
             let left = (d as i128 - apb_core::clock::now_ms() as i128) / 1000;
             println!("  deadline: in {}s", left.max(0));
         }
         for s in &t.skills {
-            println!("  skill: {s}");
+            println!("  skill: {}", one_line(s));
         }
         if full {
             if let Some(role) = &t.role_prompt {
-                println!("  role prompt:\n{role}\n");
+                println!("  role prompt:\n{}\n", for_terminal(role));
             }
-            println!("  prompt:\n{}\n", t.prompt);
+            println!("  prompt:\n{}\n", for_terminal(&t.prompt));
         } else {
             println!("  prompt: {}", first_line(&t.prompt));
         }
         println!(
             "  submit: apb tasks submit {} {} --status succeeded --output-file <reply>",
-            t.run_id, t.task_id
+            one_line(&t.run_id),
+            one_line(&t.task_id)
         );
     }
     ExitCode::SUCCESS
@@ -211,8 +233,8 @@ fn submit(
         Ok(r) => {
             println!(
                 "submitted {} (node {}): {}",
-                r.task_id,
-                r.node,
+                one_line(&r.task_id),
+                one_line(&r.node),
                 r.status.as_str()
             );
             ExitCode::SUCCESS
@@ -239,12 +261,29 @@ pub(crate) fn announce_tasks(
                 if !seen.contains(&t.task_id) {
                     eprintln!(
                         "host task {} (node {}) waits: `apb tasks {}` shows it, `apb tasks submit {} {} --status succeeded --output-file <reply>` answers it",
-                        t.task_id, t.node, run_id, t.run_id, t.task_id
+                        one_line(&t.task_id),
+                        one_line(&t.node),
+                        one_line(&run_id),
+                        one_line(&t.run_id),
+                        one_line(&t.task_id)
                     );
                     seen.push(t.task_id);
                 }
             }
         }
         std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn terminal_text_keeps_lines_and_drops_escapes() {
+        let raw = "line one\x1b]0;pwn\x07\n\tline \x1b[31mtwo\u{202e}\r";
+        let clean = for_terminal(raw);
+        assert_eq!(clean, "line one]0;pwn\n\tline [31mtwo");
+        assert_eq!(one_line(raw), "line one]0;pwn  line [31mtwo");
     }
 }
