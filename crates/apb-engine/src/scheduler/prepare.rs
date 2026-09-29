@@ -469,6 +469,17 @@ pub(crate) fn prepare_run_target(
     // The global config is needed to resolve profile invocations (agents, program).
     // A broken config is a start-up error, not a silent default.
     let global = GlobalConfig::load().map_err(EngineError::Invalid)?;
+    // Host execution mode (0.23.0): resolved once, before anything is
+    // written, so a refusal leaves no run behind. The manifest keeps it.
+    let execution =
+        apb_core::execution::resolve_for(root, &opts.execution).map_err(EngineError::Invalid)?;
+    if execution.mode == apb_core::execution::ExecutionMode::Host
+        && opts.mode.expects_supervisor_agent()
+    {
+        return Err(EngineError::Invalid(
+            "host execution mode spawns no agent CLI, so it cannot start a background supervisor agent: supervise the run from the host session (supervise: self) instead".into(),
+        ));
+    }
 
     // Run-level overrides (spec 11): produce an "effective playbook" = version +
     // overrides. All the code afterward works only with it. Empty overrides
@@ -701,6 +712,9 @@ pub(crate) fn prepare_run_target(
     if !manifest.profiles.is_empty() {
         manifest.decisions = crate::decision::snapshot(root);
     }
+    // Host execution mode (0.23.0): absent for cli, so a CLI run's manifest
+    // stays byte-identical.
+    manifest.execution = crate::manifest::ManifestExecution::from_resolved(&execution);
     if !manifest.is_empty() {
         prep_try(&mut log, crate::manifest::write(&run_dir, &manifest))?;
     }

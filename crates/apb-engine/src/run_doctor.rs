@@ -820,6 +820,7 @@ mod tests {
             connectors: Vec::new(),
             connector_grants: BTreeMap::new(),
             decisions: None,
+            execution: None,
         };
         crate::manifest::write(run_dir, &manifest).unwrap();
     }

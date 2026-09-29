@@ -50,7 +50,7 @@ export type RunStatus = "created" | "running" | "paused" | "succeeded" | "failed
 
 export type NodeStatus = "pending" | "ready" | "running" | "succeeded" | "failed" | "unknown" | "timed_out" | "interrupted" | "skipped" | "cancelled";
 
-export type WaitingKind = "human_review" | "wait" | "question" | "supervisor";
+export type WaitingKind = "human_review" | "wait" | "question" | "supervisor" | "host_task";
 
 export type PendingQuestion = { node: string, question: string, options: Array<string>, 
 /**
@@ -67,6 +67,52 @@ answer_by: string,
  * synthesizing a non-deterministic clock reading here.
  */
 asked_at: number, };
+
+export type PendingHostTask = { 
+/**
+ * The run the task belongs to: the run itself, or a sub-playbook child
+ * run it started (a child inherits its parent's host). Submit with this
+ * id or the parent's.
+ */
+run_id: string, task_id: string, node: string, attempt: number, 
+/**
+ * The task for the subagent: the rendered node prompt, the report
+ * contract included.
+ */
+prompt: string, 
+/**
+ * The subagent's system context (the profile's role prompt), when the
+ * profile has one.
+ */
+role_prompt: string | null, 
+/**
+ * Paths of the skills the subagent should load.
+ */
+skills: Array<string>, 
+/**
+ * The directory the subagent works in.
+ */
+workdir: string, 
+/**
+ * The node's declared `outputs` contract, if any.
+ */
+outputs: unknown, 
+/**
+ * Wall-clock milliseconds by which the task must be submitted.
+ */
+deadline: number | null, 
+/**
+ * The model a fallback entry or tier routing asks for (a hint).
+ */
+model_hint: string | null, 
+/**
+ * Environment variables to set for the subagent.
+ */
+env: { [key in string]: string }, 
+/**
+ * Milliseconds since epoch when the task was requested.
+ */
+requested_at: number, };
 
 export type ReviewRecommendation = { 
 /**
@@ -170,6 +216,12 @@ pending_questions: Array<PendingQuestion>,
  * playbook order.
  */
 pending_waits: Array<string>, 
+/**
+ * Host execution mode (0.23.0): every host task waiting for the host
+ * session, in request order, prompts inline (read from the run
+ * directory, so only the `from_run_dir` family fills it).
+ */
+pending_tasks: Array<PendingHostTask>, 
 /**
  * Deterministic identity of the work plan behind this percent (spec
  * section 3): the playbook version bound to the run plus the latest
@@ -447,7 +499,16 @@ decisions?: RunDecisions,
  * Events of a type this binary does not know (a newer apb wrote them),
  * left out of `events`; 0 for a journal read in full.
  */
-unknown_events: number, events: WfEvent[], };
+unknown_events: number, 
+/**
+ * Who executes the run's agent steps, from its manifest: `cli` (the
+ * profiles' CLIs) or `host` (the host session's subagents). Read-only.
+ */
+execution: "cli" | "host", 
+/**
+ * A `cli` run whose steps fall back to host tasks when no CLI can start.
+ */
+execution_fallback: boolean, events: WfEvent[], };
 
 export type TrashEntry = { 
 /**

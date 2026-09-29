@@ -115,7 +115,18 @@ pub fn playbook_adopt_report(root: &Path, id: Option<&str>) -> Result<Value, Too
             }
         }
     }
-    Ok(json!({ "playbooks": reports }))
+    // Host execution mode (0.23.0): how this machine executes agent steps.
+    // The findings above judge the profile CLIs, which a run started with
+    // execution: host ignores.
+    let (_, execution) = apb_core::execution::doctor_line(root);
+    Ok(json!({
+        "playbooks": reports,
+        "execution": {
+            "default": "cli",
+            "detail": execution,
+            "host_mode": "a run started with execution: host spawns no agent CLI; agent, model, fallback agents and command of profiles are ignored, so agent and model findings above do not block such a run",
+        },
+    }))
 }
 
 /// Checks one playbook profile and appends findings with spec 5.2 codes.

@@ -407,9 +407,29 @@ pub(crate) fn run_cmd(
     refresh_cache: bool,
     continued_from: Option<String>,
     worktree: Option<String>,
+    execution: Option<&str>,
 ) -> ExitCode {
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
+        return ExitCode::from(2);
+    }
+    // Host execution mode (0.23.0): a CLI start never gets the host
+    // fallback (nothing here serves tasks unless the caller asked for host).
+    let execution_mode = match execution {
+        None => None,
+        Some(v) => match apb_core::execution::ExecutionMode::parse(v) {
+            Some(m) => Some(m),
+            None => {
+                eprintln!("bad --execution `{v}` (expected cli or host)");
+                return ExitCode::from(2);
+            }
+        },
+    };
+    let host = execution_mode == Some(apb_core::execution::ExecutionMode::Host);
+    if supervise && host {
+        eprintln!(
+            "--execution host spawns no agent CLI, so it cannot start a background supervisor agent (--supervise)"
+        );
         return ExitCode::from(2);
     }
     // clap's `conflicts_with` already refuses `--no-cache --refresh-cache`
@@ -497,6 +517,10 @@ pub(crate) fn run_cmd(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
+        execution: apb_core::execution::ExecutionRequest {
+            mode: execution_mode,
+            ..Default::default()
+        },
         // The `expected_*` pins come from the run gate (`gate_run`).
         ..Default::default()
     };
@@ -504,10 +528,18 @@ pub(crate) fn run_cmd(
         eprintln!("run failed: {msg}");
         return ExitCode::from(2);
     }
+    let host = host
+        && apb_core::execution::resolve_for(root, &opts.execution)
+            .is_ok_and(|r| r.mode == apb_core::execution::ExecutionMode::Host);
     if detach {
         return match apb_engine::start_detached(root, name, version, opts) {
             Ok(run_id) => {
                 println!("run started: {run_id}");
+                if host {
+                    println!(
+                        "host execution mode: its agent steps wait as host tasks; `apb tasks {run_id}` lists them"
+                    );
+                }
                 ExitCode::SUCCESS
             }
             Err(e) => {
@@ -516,10 +548,59 @@ pub(crate) fn run_cmd(
             }
         };
     }
+    if host {
+        return run_host_foreground(root, name, version, opts);
+    }
     match run(root, name, version, opts) {
         Ok(res) => {
             println!("run {} finished: {}", res.run_id, res.outcome.as_str());
             match res.outcome {
+                RunStatus::Succeeded => ExitCode::SUCCESS,
+                _ => ExitCode::from(1),
+            }
+        }
+        Err(e) => {
+            eprintln!("run failed: {e}");
+            ExitCode::from(2)
+        }
+    }
+}
+
+/// A foreground host-mode run (0.23.0): drives the run on a thread of this
+/// process, names every host task as it appears (it waits for `apb tasks
+/// submit`), and returns with the run's outcome.
+fn run_host_foreground(
+    root: &Path,
+    name: &str,
+    version: Option<&str>,
+    opts: RunOptions,
+) -> ExitCode {
+    let run_id = match apb_engine::run_background(root, name, version, opts) {
+        Ok(id) => id,
+        Err(e) => {
+            eprintln!("run failed: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    println!("run started: {run_id} (host execution mode)");
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let announcer = {
+        let (root, run_id, stop) = (root.to_path_buf(), run_id.clone(), stop.clone());
+        std::thread::spawn(move || crate::tasks::announce_tasks(root, run_id, stop))
+    };
+    let outcome = loop {
+        match apb_engine::run_wait::wait_run(root, &run_id, std::time::Duration::from_secs(3600)) {
+            Ok(r) if r.reason == apb_engine::run_wait::WaitReason::Finished => break Ok(r.status),
+            Ok(_) => continue,
+            Err(e) => break Err(e),
+        }
+    };
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    let _ = announcer.join();
+    match outcome {
+        Ok(status) => {
+            println!("run {run_id} finished: {}", status.as_str());
+            match status {
                 RunStatus::Succeeded => ExitCode::SUCCESS,
                 _ => ExitCode::from(1),
             }
@@ -926,6 +1007,31 @@ pub(crate) fn resume_cmd(
         .ok()
         .flatten()
         .is_some();
+    // Host execution mode (0.23.0): this process cannot serve the run's host
+    // tasks, so a host-mode run resumes in a detached driver and the command
+    // says where its tasks wait instead of blocking on the first of them.
+    let host_run = is_safe_segment(run_id)
+        && apb_engine::manifest::run_execution_mode(&root.join(".apb/runs").join(run_id))
+            .is_ok_and(|m| m == apb_core::execution::ExecutionMode::Host);
+    if host_run {
+        return match apb_engine::resume_detached_with(
+            root,
+            run_id,
+            from_node,
+            allow_environment_drift,
+        ) {
+            Ok(_) => {
+                println!(
+                    "resumed {run_id} in the background (host execution mode): `apb tasks {run_id}` lists what waits for a host"
+                );
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("resume failed: {e}");
+                ExitCode::from(2)
+            }
+        };
+    }
     match resume_with(root, run_id, from_node, allow_environment_drift) {
         Ok(res) => {
             println!("resume {} finished: {}", res.run_id, res.outcome.as_str());

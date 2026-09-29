@@ -62,6 +62,9 @@ pub enum NeedsInput {
     Question,
     Review,
     Supervisor,
+    /// Host execution mode (0.23.0): the host has tasks to execute
+    /// (`pending_tasks`).
+    HostTask,
 }
 
 impl NeedsInput {
@@ -70,6 +73,7 @@ impl NeedsInput {
             NeedsInput::Question => "question",
             NeedsInput::Review => "review",
             NeedsInput::Supervisor => "supervisor",
+            NeedsInput::HostTask => "host_task",
         }
     }
 }
@@ -132,6 +136,8 @@ fn snapshot_of(view: &crate::run_view::RunView) -> RunSnapshot {
             Some(NeedsInput::Review)
         } else if p.pending_supervisor.is_some() {
             Some(NeedsInput::Supervisor)
+        } else if !p.pending_tasks.is_empty() {
+            Some(NeedsInput::HostTask)
         } else {
             None
         }
@@ -258,6 +264,14 @@ pub enum SupervisorWait {
     /// A human-review gate opened after the cursor: the supervisor relays it.
     /// `seq` is the `ReviewRequested` event, the cursor for the next wait.
     Review { seq: u64, node: String },
+    /// Host execution mode (0.23.0): a host task was requested after the
+    /// cursor; the supervising host session executes it. `seq` is the
+    /// `host_task_requested` event, the cursor for the next wait.
+    HostTask {
+        seq: u64,
+        node: String,
+        task_id: String,
+    },
     /// The run has ended; nothing is left to wake for.
     Ended,
     /// The timeout ran out with nothing new.
@@ -334,6 +348,13 @@ pub fn wait_supervisor_event_with(
                     return Ok(SupervisorWait::Review {
                         seq: event.seq,
                         node,
+                    });
+                }
+                EventPayload::HostTaskRequested { node, task_id, .. } => {
+                    return Ok(SupervisorWait::HostTask {
+                        seq: event.seq,
+                        node,
+                        task_id,
                     });
                 }
                 EventPayload::RunFinished { .. } | EventPayload::RunAborted { .. } => {

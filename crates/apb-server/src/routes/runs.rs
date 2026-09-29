@@ -83,6 +83,14 @@ pub struct RunDetail {
     /// Events of a type this binary does not know (a newer apb wrote them),
     /// left out of `events`; 0 for a journal read in full.
     pub unknown_events: usize,
+    // --- host execution mode (0.23.0) ---
+    /// Who executes the run's agent steps, from its manifest: `cli` (the
+    /// profiles' CLIs) or `host` (the host session's subagents). Read-only.
+    #[cfg_attr(test, ts(type = "\"cli\" | \"host\""))]
+    pub execution: String,
+    /// A `cli` run whose steps fall back to host tasks when no CLI can start.
+    pub execution_fallback: bool,
+    // --- end host execution mode ---
     #[cfg_attr(test, ts(type = "WfEvent[]"))]
     pub events: Vec<apb_engine::event::Event>,
 }
@@ -182,6 +190,14 @@ pub(crate) async fn get_run_handler(
     let commits = view.commits();
     let goal = view.goal(&run_dir);
     let nodes = view.nodes();
+    let manifest = apb_engine::manifest::read(&run_dir).ok().flatten();
+    let execution = manifest
+        .as_ref()
+        .and_then(|m| m.execution_mode().ok())
+        .unwrap_or_default()
+        .as_str()
+        .to_string();
+    let execution_fallback = manifest.as_ref().is_some_and(|m| m.falls_back_to_host());
     Json(RunDetail {
         run_id: id,
         playbook: playbook_id,
@@ -203,6 +219,8 @@ pub(crate) async fn get_run_handler(
         usage,
         decisions,
         unknown_events: view.unknown.len(),
+        execution,
+        execution_fallback,
         progress: view.progress,
         answer,
         events: view.events,

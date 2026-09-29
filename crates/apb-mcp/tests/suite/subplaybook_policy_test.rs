@@ -182,6 +182,7 @@ fn gated_run_threads_child_pins_into_parent_config() {
         permit.connector_accounts.clone(),
         None,
         None,
+        Default::default(),
     )
     .expect("gated run");
     let run_id = out["run_id"].as_str().expect("run_id");

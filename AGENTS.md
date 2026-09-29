@@ -34,7 +34,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   (`content.rs`), trust store (`trust.rs`), atomic state IO, symlinks and dir
   locks (`fsutil.rs`), the single wall-clock source (`clock.rs`), the readers of
   each agent CLI's machine output: reply and reported token usage
-  (`agent_output.rs`), the decision-model config (`decisions.rs`: the
+  (`agent_output.rs`), the execution mode resolution (`execution.rs`: the
+  `execution` config section, `cli` or `host` per run, the fallback rule),
+  the decision-model config (`decisions.rs`: the
   machine's `decisions.yaml`, project narrowing, the doctor line), the
   doctor's free per-provider request (`decision_probe.rs`) and the
   measured-threshold store (`decision_thresholds.rs`).
@@ -52,7 +54,14 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   `patch`, `rebind`, `cache`, `prepare`, `live`, `listing`, `handoff` the warm
   session handoff between nodes, `node_workdir` a node's templated working
   directory, `skills_copy` the shared per-profile skills copy, `transcript`
-  per-attempt output, `worktree` the run's working tree and its lock move),
+  per-attempt output, `worktree` the run's working tree and its lock move,
+  `protect` the protected-path snapshot and restore, `goal` the goal criteria
+  checked at run end, `provenance` the run id in the agent env and the
+  commits a node made, `host` the host-mode adapter that turns an agent step
+  into a host task), the host task store behind `run_task_submit` and
+  `apb tasks` (`host_task.rs`), the read-only goal and commits blocks of the
+  run surfaces (`run_outcome.rs`), the cross-run metrics behind `apb stats`
+  (`run_stats.rs`, `run_stats/`),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution

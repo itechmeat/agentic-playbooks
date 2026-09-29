@@ -90,6 +90,7 @@ apb resume <run>    resume a paused or interrupted run
 apb stop <run>      stop a run
 apb review          decide a pending human_review node
 apb answer          answer an interactive node's pending question
+apb tasks           list or submit host tasks (host execution mode)
 apb note            post a supervisor note to a run
 apb export          export a playbook (with layout) to a bundle file
 apb import          import a playbook bundle into this project

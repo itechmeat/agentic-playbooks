@@ -29,6 +29,8 @@ pub fn playbook_run(
     expected_connector_accounts: BTreeMap<String, String>,
     continued_from: Option<String>,
     worktree: Option<String>,
+    // host execution mode (0.23.0)
+    execution: apb_core::execution::ExecutionRequest,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -54,6 +56,7 @@ pub fn playbook_run(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
+        execution,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -83,6 +86,8 @@ pub fn playbook_run_background(
     expected_connector_accounts: BTreeMap<String, String>,
     continued_from: Option<String>,
     worktree: Option<String>,
+    // host execution mode (0.23.0)
+    execution: apb_core::execution::ExecutionRequest,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -108,6 +113,7 @@ pub fn playbook_run_background(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
+        execution,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -164,6 +170,19 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "superseded_by": cfg.superseded_by,
         "failure_reason": failure_reason,
     });
+    // Host execution mode (0.23.0): the run's execution block and the tasks
+    // the host executes, prompts inline. Only on a run whose manifest has an
+    // execution block (host mode, or a `cli` run with the host fallback), so a
+    // plain `cli` run's status reads exactly as before.
+    let execution = run_execution(&dir);
+    if !execution.is_null() {
+        out["pending_tasks"] = json!(
+            progress
+                .map(|p| p.pending_tasks.clone())
+                .unwrap_or_default()
+        );
+        out["execution"] = execution;
+    }
     add_journal_extras(&mut out, &view);
     add_outcome_blocks(&mut out, &view, &dir);
     Ok(out)
@@ -210,6 +229,62 @@ fn add_journal_extras(out: &mut Value, view: &apb_engine::run_view::RunView) {
 
 pub use apb_engine::run_wait::{RUN_WAIT_DEFAULT_MS, RUN_WAIT_MAX_MS};
 
+// --- host execution mode (0.23.0) ---
+/// `run_wait`'s `next` when the run waits for the host to execute tasks.
+pub const HOST_TASK_NEXT: &str = "execute pending_tasks: for each task spawn a subagent with role_prompt as its system context and prompt as its task, have it load skills, work in workdir with env set, and consider model_hint; submit its final reply verbatim with run_task_submit (status succeeded, failed, or blocked with the question for the user), then call run_wait again. Independent tasks may run concurrently";
+
+/// The execution block of a run's manifest, for `run_status`: `null` for a
+/// plain `cli` run.
+fn run_execution(run_dir: &Path) -> Value {
+    match apb_engine::manifest::read(run_dir) {
+        Ok(Some(m)) => json!(m.execution),
+        _ => Value::Null,
+    }
+}
+
+/// Records a host's reply to a pending host task (`run_task_submit`). The
+/// task may belong to the run or to one of its sub-playbook runs.
+#[allow(clippy::too_many_arguments)]
+pub fn run_task_submit(
+    root: &Path,
+    run_id: &str,
+    task_id: &str,
+    status: &str,
+    output: String,
+    usage: Option<apb_engine::host_task::SubmittedUsage>,
+    note: Option<String>,
+    submitted_by: &str,
+    client: Option<String>,
+) -> Result<Value, ToolError> {
+    let Some(status) = apb_engine::host_task::SubmitStatus::parse(status) else {
+        return Ok(json!({
+            "error": "unknown_status",
+            "detail": format!("status must be succeeded, failed or blocked, got `{status}`"),
+        }));
+    };
+    let receipt = apb_engine::host_task::submit_to_run(
+        root,
+        run_id,
+        apb_engine::host_task::SubmitRequest {
+            task_id: task_id.to_string(),
+            status,
+            output,
+            usage,
+            note,
+            submitted_by: submitted_by.to_string(),
+            client,
+        },
+    )?;
+    Ok(json!({
+        "run_id": run_id,
+        "task_id": receipt.task_id,
+        "node": receipt.node,
+        "status": receipt.status,
+        "next": "call run_wait again: it returns the next pending task, a question, a gate, or the end of the run",
+    }))
+}
+// --- end host execution mode ---
+
 /// Clamps a caller's `timeout_ms` for `run_wait`/`supervisor_wait_event`.
 pub fn wait_timeout(timeout_ms: Option<u64>) -> std::time::Duration {
     std::time::Duration::from_millis(
@@ -248,6 +323,7 @@ pub fn run_wait_result(
             Some(apb_engine::run_wait::NeedsInput::Review) => {
                 "relay pending_review to the user, record it with review_decide, then call run_wait again"
             }
+            Some(apb_engine::run_wait::NeedsInput::HostTask) => HOST_TASK_NEXT,
             _ => "the run is parked for a supervisor decision (pending_supervisor)",
         },
         WaitReason::Stopped if res.driver_alive == Some(false) => {
@@ -283,6 +359,13 @@ pub fn run_wait_result(
         (
             "pending_supervisor",
             json!(progress.and_then(|p| p.pending_supervisor.clone())),
+        ),
+        (
+            "pending_tasks",
+            progress
+                .filter(|p| !p.pending_tasks.is_empty())
+                .map(|p| json!(p.pending_tasks))
+                .unwrap_or(Value::Null),
         ),
         ("failure_reason", json!(view.failure_reason())),
         (
@@ -445,6 +528,8 @@ pub fn playbook_run_supervised(
     expected_connector_accounts: BTreeMap<String, String>,
     continued_from: Option<String>,
     worktree: Option<String>,
+    // host execution mode (0.23.0)
+    execution: apb_core::execution::ExecutionRequest,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
@@ -473,6 +558,7 @@ pub fn playbook_run_supervised(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
+        execution,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

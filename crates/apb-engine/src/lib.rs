@@ -14,6 +14,8 @@ pub mod inspect;
 pub mod invocation;
 pub mod legacy_snapshot;
 pub mod liveness;
+// host execution mode (0.23.0)
+pub mod host_task;
 pub mod manifest;
 pub mod parallel;
 pub mod proc;

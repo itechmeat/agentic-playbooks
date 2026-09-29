@@ -82,6 +82,13 @@ pub struct RunOptions {
     /// playbook's `worktree` template. `None`: the playbook decides, and
     /// without a template the run works in the execution root as before.
     pub worktree: Option<String>,
+    // --- host execution mode (0.23.0) ---
+    /// What the launch surface asks for (the run argument and the MCP client
+    /// name); resolved once at preparation against the global config, the
+    /// project config and `APB_EXECUTION`, and written into the manifest.
+    /// The default asks for nothing: the machine default applies.
+    pub execution: apb_core::execution::ExecutionRequest,
+    // --- end host execution mode ---
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry

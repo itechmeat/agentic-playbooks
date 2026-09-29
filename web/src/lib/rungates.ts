@@ -1,5 +1,5 @@
 import { pendingSupervisorFromPayload, type SupervisorEntry } from './supervisors'
-import type { ReviewRecommendation } from './api.gen'
+import type { PendingHostTask, ReviewRecommendation } from './api.gen'
 import type { RunDetail } from './types'
 
 // A pending human-review gate as the review panel renders it: one button per
@@ -23,12 +23,50 @@ export interface QuestionEntry {
   options: string[]
 }
 
+// A host task as the host task panel renders it (host execution mode,
+// 0.23.0): read-only, the host session submits it, never the page.
+export interface HostTaskEntry {
+  runId: string
+  taskId: string
+  node: string
+  attempt: number
+  prompt: string
+  rolePrompt: string | null
+  modelHint: string | null
+  /** Milliseconds since epoch by which the host must submit, or null. */
+  deadline: number | null
+}
+
 // Every gate the run page renders a panel for.
 export interface RunGates {
   reviews: ReviewEntry[]
   questions: QuestionEntry[]
   waits: string[]
   supervisor: SupervisorEntry | null
+  tasks: HostTaskEntry[]
+}
+
+export function hostTaskEntry(t: PendingHostTask): HostTaskEntry {
+  return {
+    runId: t.run_id,
+    taskId: t.task_id,
+    node: t.node,
+    attempt: t.attempt,
+    prompt: t.prompt,
+    rolePrompt: t.role_prompt,
+    modelHint: t.model_hint,
+    deadline: t.deadline,
+  }
+}
+
+// `in 42s`, `in 3m`, `overdue`: how long the host has left for a task.
+export function deadlineNote(deadline: number | null, now: number): string | null {
+  if (deadline === null) return null
+  const left = Math.round((deadline - now) / 1000)
+  if (left <= 0) return 'overdue'
+  if (left < 120) return `in ${left}s`
+  if (left < 7200) return `in ${Math.round(left / 60)}m`
+  return `in ${Math.round(left / 3600)}h`
 }
 
 // The run page's gates, read from the server's derived progress: the same
@@ -38,7 +76,7 @@ export interface RunGates {
 // "awaiting signal" on a run that had already stopped).
 export function runGates(detail: RunDetail): RunGates {
   const p = detail.progress
-  if (!p) return { reviews: [], questions: [], waits: [], supervisor: null }
+  if (!p) return { reviews: [], questions: [], waits: [], supervisor: null, tasks: [] }
   return {
     reviews: p.pending_reviews.map(({ node, options, prompt, recommendation }) => {
       const entry: ReviewEntry = prompt ? { node, options, prompt } : { node, options }
@@ -53,6 +91,8 @@ export function runGates(detail: RunDetail): RunGates {
     })),
     waits: p.pending_waits,
     supervisor: pendingSupervisorFromPayload(p.pending_supervisor),
+    // Absent on a payload from an older server.
+    tasks: (p.pending_tasks ?? []).map(hostTaskEntry),
   }
 }
 

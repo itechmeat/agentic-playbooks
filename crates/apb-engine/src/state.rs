@@ -354,7 +354,12 @@ impl RunState {
                 // state effect.
                 EventPayload::DeliverableMissing { .. }
                 | EventPayload::OutputFieldsMissing { .. }
-                | EventPayload::SessionHandoff { .. } => {}
+                | EventPayload::SessionHandoff { .. }
+                // Host execution mode (0.23.0): the attempt events around a
+                // host task carry the state; the task records are views.
+                | EventPayload::HostTaskRequested { .. }
+                | EventPayload::HostTaskSubmitted { .. }
+                | EventPayload::ExecutionFallback { .. } => {}
                 // 0.23.0 records (provenance, goal criteria, protected paths):
                 // reports about the tree and the run's goal, no state effect.
                 EventPayload::ArtifactsCommitted { .. }

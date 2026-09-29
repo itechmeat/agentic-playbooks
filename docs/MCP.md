@@ -39,10 +39,10 @@ Reads (read-only):
 | `playbook_trash_list` | The project's deleted playbooks, newest first: `name` (the restore handle), `id`, `deleted_at_ms`, `versions`, `current`, and `conflict` (a playbook with that id exists again) |
 | `playbook_prepare_run` | Phase 1 of a cross-workspace run: preflight + a signed `plan_token` (executes nothing); the plan lists the parent's and every sub-playbook child's digest and trust |
 | `runs_list` | List of runs |
-| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none |
-| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status` |
+| `run_status` | Current run status (nodes, outputs, `worktree`: the run's working tree, null for the project root). `usage`: token totals over the attempts whose agent CLI reported them (`attempts`, `input_tokens`, `output_tokens`, `cache_read_tokens`, `cache_write_tokens`, `cost_usd` only when a CLI reported a cost, `cost_attempts`, `estimated`: set only for counts apb estimated itself, which none are yet), absent when none did. The numbers are recorded as each agent CLI reports them (apb only moves the cache reads a CLI counts inside its input into the cache fields), so they may not be comparable across agents. `decisions`: decision-model totals (`decisions`, `requests`, `replayed`, `errors`, `cost_usd`, `cost_estimated`, `p50_latency_ms`, `p95_latency_ms`, `by_use` with `requests`, `errors`, `applied`, `shadow_would_change` per use), absent when the run journaled no decision; each decision is a `decision_made` in `run_events` (see `docs/DECISIONS.md`). `unknown_events` and `unknown_events_note`: events of a type this apb does not know (a newer apb wrote them), skipped; absent when there are none. `goal`: the playbook's goal and its criteria results (`statement`, `enforce`, `checked`, `criteria` with `status` `passed`, `failed` or `manual`, and the `passed`/`failed`/`manual` counts), absent when the playbook declares no goal criteria; `commits`: per node, the commits it made on a git tree (`node`, `before`, `after`, `commits`, `omitted`), absent when no node committed. `pending_tasks` and `execution`: see Host execution mode below |
+| `run_wait` | Block server-side until a run finishes, needs input or stops, or `timeout_ms` ends; compact answer with `reason` and `next`. Use it instead of polling `run_status`. In host execution mode it also returns `pending_tasks` (see below) |
 | `run_events` | Run events, optionally from a given seq |
-| `run_report` | Short run summary; carries `usage`, `decisions` and `unknown_events` like `run_status` |
+| `run_report` | Short run summary; carries `usage`, `decisions`, `goal`, `commits` and `unknown_events` like `run_status` |
 | `profile_list` | Profiles (project + global) with bundle trust status |
 | `profile_get` | Profile contents (profile.yaml + SOUL.md) and digests |
 | `connectors_list` | Installed connectors an `agent_task` can bind: version, trust, `update_available` (the built-in version when the installed copy differs), function names, configured account names and `account_commands` (per account, each secret read from a command, with the command line); never other account fields or secrets |
@@ -73,7 +73,7 @@ Mutations (destructive):
 
 | Tool | What it does |
 | --- | --- |
-| `playbook_run` | Run a playbook (spawns agents, changes project files). Server-side policy gate: draft/untrusted/cross-workspace are rejected. `worktree` gives the run its own working tree (a directory in the project or a git worktree of it): its nodes run there and it does not wait on runs over other trees |
+| `playbook_run` | Run a playbook (spawns agents, changes project files). Server-side policy gate: draft/untrusted/cross-workspace are rejected. `worktree` gives the run its own working tree (a directory in the project or a git worktree of it): its nodes run there and it does not wait on runs over other trees. `execution: "host"` (only when the person asks for mono, host or single-agent mode, or for your own subagents) spawns no agent CLI: every agent step becomes a host task, and the run always starts in the background; see "Host execution mode" below |
 | `playbook_capture` | Distill an action into a draft playbook in the chosen scope (not executed until trial) |
 | `playbook_trial` | Trial run of a draft against the effects matrix: filesystem writes go into a git worktree with a diff; irreversible effects are forbidden. Accepts an `instruction`, exactly like `playbook_run` |
 | `playbook_approve` | Activation after trial/confirmation: lifecycle active, digest trusted |
@@ -88,7 +88,8 @@ Mutations (destructive):
 | `run_stop` | Stop a run: interrupt whatever node it is executing right now, and finalize it outright if the process driving it is gone |
 | `review_decide` | Decide a run's human_review node |
 | `run_progress_report` | Report cycle progress from inside a run: `done` of `total` iterations of the current cycle group, optional `label`; pass your own node id (`APB_NODE_ID`) when branches run concurrently |
-| `run_answer` | Answer a pending interactive question on a run (an `agent_task` with `interactive: true`); plain `run_id` path posts `answered_by: "human"`, supervisor-token path posts `answered_by: "supervisor"` |
+| `run_answer` | Answer a pending interactive question on a run (an `agent_task` with `interactive: true`, or a host task submitted as `blocked`); plain `run_id` path posts `answered_by: "human"`, supervisor-token path posts `answered_by: "supervisor"` |
+| `run_task_submit` | Host execution mode: submit a subagent's reply to a pending host task (`run_id`, `task_id`, `status` `succeeded`, `failed` or `blocked`, `output` verbatim, optional `usage` and `note`); attributed `submitted_by: host` with the MCP client name. A parent run accepts its sub-playbook runs' tasks |
 | `profile_write` | Create/update a profile (CAS via expected_digest, auto-approves the bundle); current workspace only |
 | `profile_move` | Copy a profile between scopes (the source remains) |
 | `profile_delete` | Delete a profile (blocked on references unless forced) |
@@ -284,6 +285,27 @@ code (0 succeeded, 1 failed or aborted, 3 needs input, 4 paused or
 driverless, 5 timeout); no status polling, no tokens while it blocks. A plain
 `apb run <id>` also blocks, but it cannot report a gate: it just keeps waiting
 until someone answers it.
+
+## Host execution mode
+
+`playbook_run` with `execution: "host"` runs a playbook without any agent
+CLI: every agent step becomes a host task the calling session executes with
+its own subagents. `run_wait` returns `needs: host_task` with
+`pending_tasks` (`run_id`, `task_id`, `node`, `attempt`, `prompt` with the
+report contract, `role_prompt`, `skills`, `workdir`, `env`, `outputs`,
+`deadline`, `model_hint`, `requested_at`); the session runs each with a
+subagent and submits its final reply with `run_task_submit`, then waits
+again. `run_status` carries `pending_tasks` and the run's `execution`
+block (both absent on a plain `cli` run), and `supervisor_wait_event` returns
+`reason: host_task` with `pending_tasks` for a session that supervises its
+own run. The TIER0 instructions carry none of this (their byte budget is
+spent, and a test pins them byte for byte); the protocol lives in the tool
+descriptions of `playbook_run`, `run_wait` and `run_task_submit` and in
+`playbook_howto`. A background or supervised `cli` run a session starts also
+hands a single step to it as a host task when none of the step's CLIs can
+start (`execution_fallback`). `docs/HOST-INTEGRATION.md` has the whole
+protocol, when an agent should choose the mode, and the fallback's
+switches.
 
 ## Detached runs, resume, and stop
 

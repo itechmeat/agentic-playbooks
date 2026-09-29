@@ -25,6 +25,8 @@ export function waitingKindText(kind: ProgressSummary['waiting_kind']): string {
       return 'waiting for answer'
     case 'supervisor':
       return 'waiting for supervisor'
+    case 'host_task':
+      return 'waiting for host'
     default:
       return 'waiting'
   }

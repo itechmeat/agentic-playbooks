@@ -105,3 +105,24 @@ describe('wake triage note', () => {
     expect(runEventJournal([e as unknown as WfEvent])[0].note).toBe('triage: retry_same p=0.90, main/m (applied)')
   })
 })
+
+describe('host execution mode rows', () => {
+  it('names the task, its hint, the submitter and a fallback reason', () => {
+    const rows = runEventJournal([
+      { seq: 1, ts: 1, type: 'host_task_requested', node: 'plan', task_id: 'plan-1', model_hint: 'sonnet' },
+      { seq: 2, ts: 2, type: 'host_task_submitted', task_id: 'plan-1', status: 'succeeded', submitted_by: 'host', client: 'claude-code' },
+      { seq: 3, ts: 3, type: 'host_task_submitted', task_id: 'build-1', status: 'expired', submitted_by: 'engine' },
+      { seq: 4, ts: 4, type: 'execution_fallback', node: 'build', attempt: 2, reason: 'spawn `claude` failed' },
+    ] as unknown as WfEvent[])
+    expect(rows.map((r) => r.type)).toEqual([
+      'host_task_requested',
+      'host_task_submitted',
+      'host_task_submitted',
+      'execution_fallback',
+    ])
+    expect(rows[0]).toMatchObject({ node: 'plan', note: 'task plan-1, model hint sonnet' })
+    expect(rows[1].note).toBe('task plan-1: succeeded by host (claude-code)')
+    expect(rows[2].note).toBe('task build-1: expired by engine')
+    expect(rows[3].note).toBe('no CLI could start, running as a host task: spawn `claude` failed')
+  })
+})

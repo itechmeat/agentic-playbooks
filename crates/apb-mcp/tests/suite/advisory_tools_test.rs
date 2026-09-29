@@ -333,3 +333,25 @@ fn catalog_revision_independent_of_profile_count() {
     );
     assert_eq!(after["profiles_hint"]["count"], serde_json::json!(1));
 }
+
+// Host execution mode (0.23.0): the adoption report states how this machine
+// executes agent steps, and that host mode ignores the profile CLIs it judges.
+#[test]
+fn adopt_report_states_the_execution_mode() {
+    let _l = lock();
+    let c = setup();
+    apb_core::registry::init_project(&c.root).unwrap();
+    let report = advisory_tools::playbook_adopt_report(&c.root, None).unwrap();
+    assert_eq!(report["execution"]["default"], "cli");
+    let detail = report["execution"]["detail"].as_str().unwrap();
+    assert!(
+        detail.contains("host fallback for MCP-started runs on"),
+        "{detail}"
+    );
+    assert!(
+        report["execution"]["host_mode"]
+            .as_str()
+            .unwrap()
+            .contains("ignored")
+    );
+}
