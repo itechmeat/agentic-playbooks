@@ -315,20 +315,45 @@ fn open_requests(events: &[Event]) -> Vec<(String, String)> {
 /// yet is no longer the host's work), in request order, followed by those of
 /// the sub-playbook child runs the run started (depth first).
 pub fn pending_tasks(run_dir: &Path, events: &[Event]) -> Vec<PendingHostTask> {
-    let mut out = own_pending(run_dir, events);
+    let mut visited = std::collections::BTreeSet::new();
+    if let Some(name) = run_dir.file_name() {
+        visited.insert(name.to_string_lossy().into_owned());
+    }
+    let mut out = Vec::new();
+    collect_pending(run_dir, events, 0, &mut visited, &mut out);
+    out
+}
+
+/// How deep sub-playbook nesting is followed. The engine's own nesting cap
+/// is far below this; it only bounds a corrupted journal.
+const MAX_CHILD_DEPTH: usize = 32;
+
+/// [`pending_tasks`] of one run and its children, each run once: a journal
+/// whose `child_run_started` names an ancestor (or itself) is not followed
+/// again.
+fn collect_pending(
+    run_dir: &Path,
+    events: &[Event],
+    depth: usize,
+    visited: &mut std::collections::BTreeSet<String>,
+    out: &mut Vec<PendingHostTask>,
+) {
+    out.extend(own_pending(run_dir, events));
+    if depth >= MAX_CHILD_DEPTH {
+        return;
+    }
+    let Some(runs) = run_dir.parent() else {
+        return;
+    };
     for child in child_runs(events) {
-        let Some(runs) = run_dir.parent() else {
-            continue;
-        };
-        if !apb_core::registry::is_safe_segment(&child) {
+        if !apb_core::registry::is_safe_segment(&child) || !visited.insert(child.clone()) {
             continue;
         }
         let child_dir = runs.join(&child);
         if let Ok(child_events) = crate::event::read_all_lossy_tail(&child_dir) {
-            out.extend(pending_tasks(&child_dir, &child_events));
+            collect_pending(&child_dir, &child_events, depth + 1, visited, out);
         }
     }
-    out
 }
 
 fn own_pending(run_dir: &Path, events: &[Event]) -> Vec<PendingHostTask> {
@@ -761,5 +786,33 @@ mod tests {
         assert_eq!(read_submission(&child, "build-1").unwrap().output, "done");
         // With the child's task submitted, the parent id is unambiguous again.
         submit_to_run(root, "parent", req).unwrap();
+    }
+
+    #[test]
+    fn pending_tasks_survives_a_child_run_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // a -> b -> a, and b names itself too.
+        let a = seed_run(root, "a", &[("x-1", "x")], Some("b"));
+        let b = seed_run(root, "b", &[("y-1", "y")], Some("a"));
+        crate::event::EventLog::open(&b)
+            .unwrap()
+            .append(EventPayload::ChildRunStarted {
+                node_id: "sub".into(),
+                run_id: "b".into(),
+            })
+            .unwrap();
+        let events = crate::event::read_all(&a).unwrap();
+        let ids: Vec<(String, String)> = pending_tasks(&a, &events)
+            .into_iter()
+            .map(|t| (t.run_id, t.task_id))
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                ("a".to_string(), "x-1".to_string()),
+                ("b".to_string(), "y-1".to_string())
+            ]
+        );
     }
 }
