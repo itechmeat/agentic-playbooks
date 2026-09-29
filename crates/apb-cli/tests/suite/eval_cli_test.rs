@@ -679,3 +679,301 @@ fn the_env_overlay_reaches_the_agent_and_the_scripts() {
     let cfg = fs::read_to_string(&settings).unwrap_or_default();
     assert!(cfg.contains("EVAL_PROBE"), "a run setting: {cfg}");
 }
+
+// --- limits, interruption and cleanup ---------------------------------------
+
+/// Whether process `pid` exists.
+#[cfg(unix)]
+fn alive(pid: i32) -> bool {
+    // SAFETY: kill(pid, 0) only probes.
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+/// Polls `f` every 50 ms for up to `secs` seconds.
+fn eventually(secs: u64, mut f: impl FnMut() -> bool) -> bool {
+    let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
+    while std::time::Instant::now() < end {
+        if f() {
+            return true;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    f()
+}
+
+fn read_pid(path: &Path) -> i32 {
+    fs::read_to_string(path).unwrap().trim().parse().unwrap()
+}
+
+/// A stub agent that records its pid in `$PROBE_DIR/agent.pid`, then runs
+/// `tail` (the rest of the script).
+fn slow_stub(env: &Env, tail: &str) {
+    write(
+        &env.stub,
+        &format!("#!/bin/sh\necho $$ > \"$PROBE_DIR/agent.pid\"\n{tail}\n"),
+    );
+}
+
+/// The case with a wall clock and the probe directory in its env.
+fn with_limits(env: &Env, timeout: &str) -> PathBuf {
+    let probe = env.cfg.path().join("probe");
+    fs::create_dir_all(&probe).unwrap();
+    write(
+        &env.project
+            .path()
+            .join(".apb/playbooks/rev/evals/writes-report.yaml"),
+        &CASE.replace(
+            "repeat: 1\n",
+            &format!(
+                "repeat: 1\nlimits: {{ timeout: {timeout} }}\nenv: {{ PROBE_DIR: \"{}\" }}\n",
+                probe.display()
+            ),
+        ),
+    );
+    probe
+}
+
+/// E3: the wall clock stops a run that never ends; the agent's process is
+/// gone afterwards and nothing is kept.
+#[cfg(unix)]
+#[test]
+fn a_run_past_its_timeout_is_stopped_and_its_agent_is_gone() {
+    let env = setup(PLAYBOOK);
+    let probe = with_limits(&env, "2s");
+    slow_stub(&env, "exec sleep 30");
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 1, "{v:#}");
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    assert_eq!(rep["verdict"], "incomplete", "{rep:#}");
+    assert!(
+        rep["stopped"]
+            .as_str()
+            .unwrap()
+            .starts_with("timeout after 2s"),
+        "{rep:#}"
+    );
+    assert!(rep["kept_worktree"].is_null(), "{rep:#}");
+    let agent = read_pid(&probe.join("agent.pid"));
+    assert!(
+        eventually(10, || !alive(agent)),
+        "the agent outlived the eval"
+    );
+    assert!(!env.cfg.path().join("evals/scratch").exists());
+}
+
+/// E4: a repetition whose driver will not exit after the stop keeps its
+/// tree, moved out of the scratch directory, and the path the result names
+/// still exists after `apb eval` returned.
+#[cfg(unix)]
+#[test]
+fn a_kept_tree_survives_the_scratch_cleanup() {
+    let env = setup(PLAYBOOK);
+    let probe = with_limits(&env, "1s");
+    // A detached helper that reads as an apb driver of this run (argv[0]
+    // `apb`, its pid in the run's `driver.pid`) for as long as it lives, so
+    // the runner sees a driver that does not exit after the stop.
+    write(
+        &probe.join("holder.sh"),
+        "echo $$ > \"$PROBE_DIR/helper.pid\"\nwhile :; do echo $$ > \"$RUN/driver.pid\" 2>/dev/null; sleep 0.2; done\n",
+    );
+    slow_stub(
+        &env,
+        "RUN=\"$APB_RUN_DIR\" setsid bash -c 'exec -a apb sh \"$0\"' \"$PROBE_DIR/holder.sh\" >/dev/null 2>&1 &\nexec sleep 45",
+    );
+    let (code, v) = env.eval_json(&[]);
+    let helper = read_pid(&probe.join("helper.pid"));
+    let rep = v["result"]["cases"][0]["repetitions"][0].clone();
+    // Clean up before asserting: the helper holds the driver.
+    // SAFETY: plain kill(2).
+    unsafe { libc::kill(helper, libc::SIGKILL) };
+    assert_eq!(code, 1, "{v:#}");
+    let kept = PathBuf::from(rep["kept_worktree"].as_str().expect("kept_worktree"));
+    assert!(
+        kept.starts_with(env.cfg.path().join("evals/kept")),
+        "{kept:?}"
+    );
+    assert!(kept.join(".apb").is_dir(), "the kept tree was deleted");
+    let run_dir = PathBuf::from(rep["run_dir"].as_str().unwrap());
+    assert!(run_dir.starts_with(&kept), "{run_dir:?}");
+    assert!(!env.cfg.path().join("evals/scratch").exists());
+}
+
+/// E1: a run the gate refuses to start is an `error` repetition with a
+/// `start` check, and nothing is left behind.
+#[test]
+fn a_run_that_cannot_start_is_an_error_and_leaves_nothing() {
+    let env = setup(&PLAYBOOK.replace(
+        "effects: [fs_read, fs_write]",
+        "effects: [fs_read, fs_write]\nrequires: { commands: [apb-eval-definitely-not-installed] }",
+    ));
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 1, "{v:#}");
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    assert_eq!(rep["verdict"], "error", "{rep:#}");
+    assert_eq!(rep["checks"][0]["kind"], "start", "{rep:#}");
+    assert!(rep["kept_worktree"].is_null());
+    assert!(!env.cfg.path().join("evals/scratch").exists());
+}
+
+/// E2: a fixture ref that does not resolve is an `error` repetition named
+/// `fixture:`, and nothing is left behind.
+#[test]
+fn a_fixture_that_cannot_materialize_is_an_error_and_leaves_nothing() {
+    let env = setup(PLAYBOOK);
+    write(
+        &env.project
+            .path()
+            .join(".apb/playbooks/rev/evals/writes-report.yaml"),
+        &CASE.replace(
+            "  dir: fixtures/base\n  change: fixtures/change\n",
+            "  git: no-such-ref\n",
+        ),
+    );
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 1, "{v:#}");
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    assert_eq!(rep["verdict"], "error", "{rep:#}");
+    assert!(
+        rep["checks"][0]["detail"]
+            .as_str()
+            .unwrap()
+            .starts_with("fixture:"),
+        "{rep:#}"
+    );
+    assert!(!env.cfg.path().join("evals/scratch").exists());
+}
+
+/// The engine enforces an eval run's deadline itself: a run started with
+/// one is aborted by its own driver, with nobody following it.
+#[cfg(unix)]
+#[test]
+fn the_driver_aborts_an_eval_run_at_its_deadline() {
+    let env = setup(PLAYBOOK);
+    let probe = env.cfg.path().join("probe");
+    fs::create_dir_all(&probe).unwrap();
+    slow_stub(&env, "exec sleep 30");
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let settings = env.cfg.path().join("settings.json");
+    write(
+        &settings,
+        &serde_json::json!({
+            "spawn_env": { "PROBE_DIR": probe },
+            "deadline_ms": now + 1500,
+        })
+        .to_string(),
+    );
+    let out = apb()
+        .args(["run", "rev", "--detach", "--eval-settings"])
+        .arg(&settings)
+        .current_dir(env.project.path())
+        .env("APB_CONFIG_DIR", env.cfg.path())
+        .env("APB_AGENT_CMD", &env.stub)
+        .env("APB_NO_REGISTRY", "1")
+        .output()
+        .unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let run_id = stdout
+        .lines()
+        .find_map(|l| l.strip_prefix("run started: "))
+        .unwrap_or_else(|| panic!("{stdout}{}", String::from_utf8_lossy(&out.stderr)))
+        .split_whitespace()
+        .next()
+        .unwrap()
+        .to_string();
+    apb()
+        .args(["wait", &run_id, "--timeout", "30"])
+        .current_dir(env.project.path())
+        .env("APB_CONFIG_DIR", env.cfg.path())
+        .assert()
+        .code(1);
+    let journal = fs::read_to_string(
+        env.project
+            .path()
+            .join(".apb/runs")
+            .join(&run_id)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(
+        journal.contains(apb_engine::scheduler::DEADLINE_REASON),
+        "{journal}"
+    );
+    let agent = read_pid(&probe.join("agent.pid"));
+    assert!(
+        eventually(10, || !alive(agent)),
+        "the agent outlived the deadline"
+    );
+}
+
+/// SIGINT stops the live repetition's run, waits for its driver and
+/// removes the scratch directory; the process ends with 130.
+#[cfg(unix)]
+#[test]
+fn an_interrupted_eval_stops_its_run_and_cleans_up() {
+    let env = setup(PLAYBOOK);
+    let probe = with_limits(&env, "60s");
+    slow_stub(&env, "exec sleep 30");
+    let mut child = crate::common::apb_std()
+        .args(["eval", "rev", "--yes", "--json"])
+        .current_dir(env.project.path())
+        .env("APB_CONFIG_DIR", env.cfg.path())
+        .env("APB_AGENT_CMD", &env.stub)
+        .env("APB_NO_REGISTRY", "1")
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    assert!(
+        eventually(20, || probe.join("agent.pid").is_file()),
+        "the agent never started"
+    );
+    let agent = read_pid(&probe.join("agent.pid"));
+    // SAFETY: plain kill(2) on our own child.
+    unsafe { libc::kill(child.id() as i32, libc::SIGINT) };
+    let finished = eventually(40, || child.try_wait().unwrap().is_some());
+    if !finished {
+        let _ = child.kill();
+    }
+    let out = child.wait_with_output().unwrap();
+    assert!(finished, "apb eval did not exit after SIGINT");
+    assert_eq!(out.status.code(), Some(130));
+    let v: Value = serde_json::from_slice(&out.stdout).unwrap();
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    assert!(
+        rep["stopped"].as_str().unwrap().starts_with("interrupted"),
+        "{rep:#}"
+    );
+    assert!(
+        eventually(10, || !alive(agent)),
+        "the agent outlived the eval"
+    );
+    assert!(!env.cfg.path().join("evals/scratch").exists());
+}
+
+/// The scratch of an earlier invocation that died is swept at the next
+/// start; one whose owner still runs is left alone.
+#[cfg(unix)]
+#[test]
+fn stale_scratch_directories_are_swept_at_start() {
+    let env = setup(PLAYBOOK);
+    let scratch = env.cfg.path().join("evals/scratch");
+    let dead = std::process::Command::new("true").spawn().unwrap();
+    let dead_pid = dead.id();
+    let _ = dead.wait_with_output();
+    write(&scratch.join("eval-1/owner.pid"), &dead_pid.to_string());
+    write(&scratch.join("eval-1/writes-report-1/tree/x"), "x");
+    write(
+        &scratch.join("eval-2/owner.pid"),
+        &std::process::id().to_string(),
+    );
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 0, "{v:#}");
+    assert!(!scratch.join("eval-1").exists(), "the stale scratch stayed");
+    assert!(
+        scratch.join("eval-2").exists(),
+        "a live owner's scratch went"
+    );
+}

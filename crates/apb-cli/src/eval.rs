@@ -533,7 +533,9 @@ fn start_run(
         .find_map(|l| l.strip_prefix("run started: "))
         .map(|s| s.split_whitespace().next().unwrap_or_default().to_string())
     {
-        Some(run_id) if out.status.success() && !run_id.is_empty() => Ok(Started { run_id }),
+        Some(run_id) if out.status.success() && apb_core::registry::is_safe_segment(&run_id) => {
+            Ok(Started { run_id })
+        }
         _ => Err(format!(
             "the run did not start: {}{}",
             String::from_utf8_lossy(&out.stderr).trim(),
@@ -585,6 +587,12 @@ fn follow(tree: &Path, run_id: &str, limits: &core_eval::Limits) -> Option<StopR
     let deadline = Instant::now() + timeout;
     let run_dir = tree.join(".apb/runs").join(run_id);
     let reason = loop {
+        if interrupted() {
+            break Some(StopReason {
+                text: INTERRUPTED_REASON.into(),
+                limit: true,
+            });
+        }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
             break Some(StopReason {
@@ -659,6 +667,20 @@ fn driver_gone(run_dir: &Path, run_id: &str) -> bool {
     true
 }
 
+/// Moves a run directory out of the tree. The agent could have replaced
+/// it with a symlink: that is refused, and so is a destination that is
+/// not a real directory afterwards.
+fn move_run_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+    if std::fs::symlink_metadata(from)?.file_type().is_symlink() {
+        return Err(std::io::Error::other("the run directory is a symlink"));
+    }
+    move_dir(from, to)?;
+    if !std::fs::symlink_metadata(to)?.is_dir() {
+        return Err(std::io::Error::other("the stored run is not a directory"));
+    }
+    Ok(())
+}
+
 /// Moves `from` to `to`, copying when a rename cannot cross filesystems.
 fn move_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     if let Some(p) = to.parent() {
@@ -684,6 +706,174 @@ fn keep_checked_files(case: &core_eval::EvalCase, tree: &Path, stored: &Path) {
             {
                 let _ = std::fs::copy(&from, &to);
             }
+        }
+    }
+}
+
+// --- interruption, the live run and the scratch lifecycle --------------------
+
+/// The `stopped` text of a repetition the operator interrupted.
+const INTERRUPTED_REASON: &str = "interrupted: apb eval received a signal";
+
+static INTERRUPTED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+fn interrupted() -> bool {
+    INTERRUPTED.load(std::sync::atomic::Ordering::SeqCst)
+}
+
+#[cfg(unix)]
+extern "C" fn on_signal(sig: libc::c_int) {
+    // A second signal ends the process the ordinary way.
+    if INTERRUPTED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+        // SAFETY: signal() and raise() are async-signal-safe.
+        unsafe {
+            libc::signal(sig, libc::SIG_DFL);
+            libc::raise(sig);
+        }
+    }
+}
+
+/// SIGINT and SIGTERM stop the live repetition's run, wait for its driver
+/// and clean up instead of leaving a detached run with no limit behind (the
+/// driver is in its own process group, so a terminal's Ctrl-C does not
+/// reach it). A second signal ends the process at once.
+fn install_signal_handlers() {
+    #[cfg(unix)]
+    // SAFETY: the handler only touches an atomic and async-signal-safe calls.
+    unsafe {
+        let h = on_signal as extern "C" fn(libc::c_int) as libc::sighandler_t;
+        libc::signal(libc::SIGINT, h);
+        libc::signal(libc::SIGTERM, h);
+    }
+}
+
+/// The repetition whose run is in flight, for the scratch guard.
+struct LiveRun {
+    tree: PathBuf,
+    run_id: String,
+}
+
+static LIVE: std::sync::Mutex<Option<LiveRun>> = std::sync::Mutex::new(None);
+
+fn set_live(run: Option<LiveRun>) {
+    if let Ok(mut l) = LIVE.lock() {
+        *l = run;
+    }
+}
+
+/// Kills what is left of a finished driver's process group (the driver led
+/// it; an agent helper it spawned may linger).
+fn kill_leftover_group(driver_pid: Option<u32>) {
+    #[cfg(unix)]
+    if let Some(pid) = driver_pid.and_then(|p| libc::pid_t::try_from(p).ok())
+        && pid > 1
+    {
+        // SAFETY: plain kill(2) on a process group id.
+        unsafe {
+            if libc::kill(-pid, 0) == 0 {
+                libc::kill(-pid, libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = driver_pid;
+}
+
+/// Whether the process `pid` exists.
+fn pid_alive(pid: u32) -> bool {
+    #[cfg(unix)]
+    {
+        let Ok(p) = libc::pid_t::try_from(pid) else {
+            return false;
+        };
+        // SAFETY: kill(pid, 0) only probes.
+        let r = unsafe { libc::kill(p, 0) };
+        r == 0 || std::io::Error::last_os_error().raw_os_error() == Some(libc::EPERM)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = pid;
+        true
+    }
+}
+
+/// The file in an invocation's scratch directory naming its owner.
+const OWNER_FILE: &str = "owner.pid";
+
+/// Owns an invocation's scratch directory: removes it on every exit path,
+/// early returns and panics included. A run still in flight at that point
+/// is stopped first; a repetition whose driver will not exit is moved to
+/// `<evals>/kept/` instead of being deleted under it.
+struct ScratchGuard {
+    scratch: PathBuf,
+    evals_home: PathBuf,
+}
+
+impl ScratchGuard {
+    fn new(evals_home: &Path, scratch: &Path) -> std::io::Result<Self> {
+        std::fs::create_dir_all(scratch)?;
+        std::fs::write(scratch.join(OWNER_FILE), std::process::id().to_string())?;
+        Ok(ScratchGuard {
+            scratch: scratch.to_path_buf(),
+            evals_home: evals_home.to_path_buf(),
+        })
+    }
+}
+
+impl Drop for ScratchGuard {
+    fn drop(&mut self) {
+        let live = LIVE.lock().ok().and_then(|mut l| l.take());
+        if let Some(run) = live {
+            let _ = apb_engine::stop_run(&run.tree, &run.run_id);
+            let run_dir = run.tree.join(".apb/runs").join(&run.run_id);
+            if !driver_gone(&run_dir, &run.run_id)
+                && let (Some(rep), Some(eval)) = (run.tree.parent(), self.scratch.file_name())
+                && let Some(name) = rep.file_name()
+            {
+                let _ = move_dir(rep, &self.evals_home.join("kept").join(eval).join(name));
+            }
+        }
+        let _ = std::fs::remove_dir_all(&self.scratch);
+        let _ = std::fs::remove_dir(self.evals_home.join("scratch"));
+    }
+}
+
+/// Removes the scratch directories of earlier invocations that ended
+/// without cleaning up (killed, crashed): an owner that is gone and no live
+/// driver in any of its trees. Anything else is left alone.
+fn sweep_stale_scratch(evals_home: &Path) {
+    let Ok(entries) = std::fs::read_dir(evals_home.join("scratch")) else {
+        return;
+    };
+    for e in entries.flatten() {
+        let dir = e.path();
+        let is_eval = e.file_name().to_string_lossy().starts_with("eval-");
+        if !is_eval || !e.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let owner = std::fs::read_to_string(dir.join(OWNER_FILE))
+            .ok()
+            .and_then(|s| s.trim().parse::<u32>().ok());
+        if owner.is_some_and(pid_alive) {
+            continue;
+        }
+        let live_driver = std::fs::read_dir(&dir)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .any(|rep| {
+                let runs = rep.path().join("tree/.apb/runs");
+                std::fs::read_dir(runs)
+                    .into_iter()
+                    .flatten()
+                    .flatten()
+                    .any(|r| {
+                        let id = r.file_name().to_string_lossy().into_owned();
+                        apb_engine::liveness::driver_alive(&r.path(), &id) == Some(true)
+                    })
+            });
+        if !live_driver {
+            let _ = std::fs::remove_dir_all(&dir);
         }
     }
 }
@@ -722,6 +912,7 @@ struct RepContext<'a> {
     suite_copy: &'a Path,
     scratch: &'a Path,
     evals_home: &'a Path,
+    eval_id: &'a str,
     overrides_file: Option<&'a Path>,
 }
 
@@ -790,9 +981,16 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
             return (error_rep(n, e, None), None);
         }
     };
-    let stop = follow(&tree, &started.run_id, &limits);
     let run_dir = tree.join(".apb/runs").join(&started.run_id);
+    // Read now: the driver removes its pid file when it exits.
+    let driver_pid = apb_engine::driver::read_driver_pid(&run_dir);
+    set_live(Some(LiveRun {
+        tree: tree.clone(),
+        run_id: started.run_id.clone(),
+    }));
+    let stop = follow(&tree, &started.run_id, &limits);
     let clean = driver_gone(&run_dir, &started.run_id);
+    set_live(None);
     let events = apb_engine::run_view::read_events(&run_dir).unwrap_or_default();
     let raw_types = checks::raw_event_types(&run_dir);
     // The scripts get the case env overlay, as the agents did, then the
@@ -829,25 +1027,43 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
     } else {
         checks::verdict(&check_results).to_string()
     };
-    let stored = cx
-        .evals_home
-        .join("runs")
-        .join(&cx.args.id)
-        .join(&started.run_id);
-    let moved = move_dir(&run_dir, &stored).is_ok();
-    if moved {
-        keep_checked_files(&lc.case, &tree, &stored);
-    }
-    let kept = if clean {
+    let (stored, kept) = if clean {
+        // The driver is gone; whatever it left in its process group goes
+        // with it before the tree is removed.
+        kill_leftover_group(driver_pid);
+        let stored = cx
+            .evals_home
+            .join("runs")
+            .join(&cx.args.id)
+            .join(&started.run_id);
+        let moved = move_run_dir(&run_dir, &stored).is_ok();
+        if moved {
+            keep_checked_files(&lc.case, &tree, &stored);
+        }
         let _ = std::fs::remove_dir_all(&rep_dir);
-        None
+        (moved.then_some(stored), None)
     } else {
-        Some(tree.to_string_lossy().into_owned())
+        // The driver still lives: its tree is never deleted under it. The
+        // whole repetition moves out of the scratch directory, run
+        // directory included, and the result names where.
+        let kept_rep = cx
+            .evals_home
+            .join("kept")
+            .join(cx.eval_id)
+            .join(format!("{}-{n}", lc.case.id));
+        match move_dir(&rep_dir, &kept_rep) {
+            Ok(()) => {
+                let kept_tree = kept_rep.join("tree");
+                let run = kept_tree.join(".apb/runs").join(&started.run_id);
+                (Some(run), Some(kept_tree.to_string_lossy().into_owned()))
+            }
+            Err(_) => (None, Some(tree.to_string_lossy().into_owned())),
+        }
     };
     let rep = Repetition {
         repetition: n,
         run_id: Some(started.run_id.clone()),
-        run_dir: moved.then(|| stored.to_string_lossy().into_owned()),
+        run_dir: stored.as_ref().map(|s| s.to_string_lossy().into_owned()),
         verdict,
         outcome: checks::outcome(&events, stop.as_ref().map(|s| s.text.as_str())),
         stopped: stop.map(|s| s.text),
@@ -857,7 +1073,7 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
         duration_ms: checks::duration_ms(&events),
         kept_worktree: kept,
     };
-    (rep, moved.then_some(stored))
+    (rep, stored)
 }
 
 fn overrides_digest(ov: Option<&RunOverrides>) -> Option<String> {
@@ -993,6 +1209,18 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     };
     let eval_id = format!("eval-{}", apb_core::clock::now_ms());
     let scratch = evals_home.join("scratch").join(&eval_id);
+    sweep_stale_scratch(&evals_home);
+    let guard = match ScratchGuard::new(&evals_home, &scratch) {
+        Ok(g) => g,
+        Err(e) => {
+            return fail(
+                args.json,
+                "scratch",
+                format!("cannot create the scratch: {e}"),
+            );
+        }
+    };
+    install_signal_handlers();
     let suite_copy = scratch.join(core_eval::EVALS_DIR);
     // The suite runs from a copy made now, and the digest a person approves
     // is computed in the same pass over the same bytes, so it is the content
@@ -1004,7 +1232,6 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     ) {
         Ok(d) => d,
         Err(e) => {
-            let _ = std::fs::remove_dir_all(&scratch);
             return fail(
                 args.json,
                 "invalid_suite",
@@ -1024,8 +1251,7 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
         overrides.as_ref(),
         &eval_id,
     );
-    let _ = std::fs::remove_dir_all(&scratch);
-    let _ = std::fs::remove_dir(evals_home.join("scratch"));
+    drop(guard);
     outcome
 }
 
@@ -1221,6 +1447,7 @@ fn run_eval(
         suite_copy,
         scratch,
         evals_home,
+        eval_id,
         overrides_file: overrides_file.as_deref(),
     };
     let started_at_ms = apb_core::clock::now_ms();
@@ -1233,6 +1460,9 @@ fn run_eval(
         let lc = p.lc;
         let mut reps = Vec::new();
         for n in 1..=p.repeat {
+            if interrupted() {
+                incomplete = Some(INTERRUPTED_REASON.into());
+            }
             if incomplete.is_some() {
                 break;
             }
@@ -1308,7 +1538,9 @@ fn run_eval(
             println!("no earlier result to compare with");
         }
     }
-    if p == o && o > 0 && result.incomplete.is_none() {
+    if interrupted() {
+        ExitCode::from(130)
+    } else if p == o && o > 0 && result.incomplete.is_none() {
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)

@@ -28,6 +28,10 @@ cliclack = "0.5.5"
 axoupdater = { version = "0.10.0", default-features = false, features = ["github_releases", "blocking"] }
 serde_yaml_ng.workspace = true
 
+# `apb eval`: the SIGINT/SIGTERM handler and the process-group cleanup.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [dev-dependencies]
 assert_cmd = "2.2.2"
 predicates = "3.1.4"
