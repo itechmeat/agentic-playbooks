@@ -398,7 +398,8 @@ fn drafts_bad_cases_and_unknown_cases_are_refused() {
 
 /// The repository's own suite for `branch-quality-review` runs with a stub
 /// reviewer: both first cases pass, the planted-defect script finds the
-/// line the stub names. The playbook's `requires.commands` is cut to the
+/// line the stub names. That the scripts also fail where they should is
+/// the table test below. The playbook's `requires.commands` is cut to the
 /// tools every CI runner has (the review tools are the reviewer's business).
 #[test]
 fn the_branch_quality_review_suite_runs_with_a_stub_reviewer() {
@@ -416,9 +417,9 @@ fn the_branch_quality_review_suite_runs_with_a_stub_reviewer() {
     .unwrap();
     let current = fs::read_to_string(dst.join("current")).unwrap();
     let yaml_path = dst.join(current.trim()).join("playbook.yaml");
-    let yaml = fs::read_to_string(&yaml_path)
-        .unwrap()
-        .replace("  - code-ranker\n  - bun\n", "");
+    let original = fs::read_to_string(&yaml_path).unwrap();
+    let yaml = original.replace("  - code-ranker\n  - bun\n", "");
+    assert_ne!(yaml, original, "the requires.commands cut matched nothing");
     fs::write(&yaml_path, yaml).unwrap();
     // The suite's fixtures carry the files the playbook requires.
     let stub = cfg.path().join("reviewer.sh");
@@ -1095,4 +1096,82 @@ fn v82_is_a_warning_in_apb_validate() {
             "rev: warning V82 node(s) `gate` wait for a person",
         ))
         .stdout(predicate::str::contains("rev: OK"));
+}
+
+/// E7: the negative controls of the repository's review scripts. Each
+/// script runs with `sh` in a scratch git tree over a written report and
+/// must both pass and fail on the inputs its comment promises.
+#[test]
+fn the_review_scripts_pass_and_fail_on_their_documented_inputs() {
+    let scripts = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../.apb/playbooks/branch-quality-review/evals/scripts");
+    let run = |script: &str, report: Option<&str>, edit_source: bool| -> bool {
+        let t = tempfile::tempdir().unwrap();
+        git_in(t.path(), &["init", "-q", "-b", "main"]);
+        write(&t.path().join("src/lib.rs"), "fn x() {}\n");
+        git_in(t.path(), &["add", "-A"]);
+        git_in(t.path(), &["commit", "-q", "-m", "fixture"]);
+        if let Some(r) = report {
+            write(&t.path().join("docs/reviews/_date_time_review.md"), r);
+        }
+        if edit_source {
+            write(&t.path().join("src/lib.rs"), "fn y() {}\n");
+        }
+        std::process::Command::new("sh")
+            .arg(scripts.join(script))
+            .current_dir(t.path())
+            .output()
+            .unwrap()
+            .status
+            .success()
+    };
+    let planted = "names-the-planted-defect.sh";
+    for (report, pass) in [
+        ("1. Low: src/lib.rs:16 skips the last window.", true),
+        ("src/lib.rs#L15: the loop bound", true),
+        ("In src/lib.rs, lines 14-18 skip the last window.", true),
+        ("**Line:** 17 of src/lib.rs", true),
+        ("src/lib.rs:30 is fine", false),
+        ("src/lib.rs has a problem somewhere", false),
+        ("the loop on line 16 is wrong", false),
+    ] {
+        assert_eq!(
+            run(planted, Some(report), false),
+            pass,
+            "{planted}: {report}"
+        );
+    }
+    let severe = "no-severe-finding.sh";
+    for (report, pass) in [
+        (
+            "# Review\n\n## High-level summary\n\n1. Low: src/lib.rs:16 nit.\n",
+            true,
+        ),
+        (
+            "## Findings\n\n- Low: naming\n\nThe high cost of this is low.\n",
+            true,
+        ),
+        ("## High\n\n- src/lib.rs:16\n", false),
+        ("### Critical findings\n", false),
+        ("- **[P1]** src/lib.rs:16 skips a window\n", false),
+        ("- src/lib.rs:16, severity: critical\n", false),
+        ("1. High: src/lib.rs:16 skips a window\n", false),
+        ("- [major] the loop bound\n", false),
+    ] {
+        assert_eq!(
+            run(severe, Some(report), false),
+            pass,
+            "{severe}: {report:?}"
+        );
+    }
+    let only = "only-the-review-file.sh";
+    assert!(
+        run(only, Some("review\n"), false),
+        "{only}: only the report"
+    );
+    assert!(
+        !run(only, Some("review\n"), true),
+        "{only}: an edited source"
+    );
+    assert!(!run(only, None, false), "{only}: no report");
 }
