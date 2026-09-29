@@ -175,9 +175,11 @@ playbook policy. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Status
 
-Pre-release (`0.1.0`). The engine, web editor, versioning, MCP surface, and
-supervisor are implemented and tested; the schema and CLI may still change
-before the first tagged release. Design specs live in
+Released on the `0.x` line (the latest release is `0.22.1`); each tagged
+release has its notes in [docs/release-notes/](docs/release-notes/) and on
+the GitHub releases page. The engine, web editor, versioning, MCP surface, and
+supervisor are implemented and tested; until `1.0` the schema and CLI may
+still change between minor releases. Design specs live in
 [docs/superpowers/specs/](docs/superpowers/specs/).
 
 ## Development

@@ -2,9 +2,9 @@
 
 Format: [Keep a Changelog], versions: semver (major - breaking changes to the playbook.yaml schema or CLI, minor - new features, patch - fixes).
 
-The version stays at `0.1.0` (in development) until the full plan functionality is implemented and tested; the version is not bumped for individual phases.
+Releases are tagged `vX.Y.Z`, and the notes for each one live in [`docs/release-notes/`](docs/release-notes/) (`docs/release-notes/<tag>.md`, also published as the GitHub release body). This file is not updated per release; the section below records the untagged `0.1.0` development line that came before the tagged releases.
 
-## [0.1.0] - in development
+## [0.1.0] - untagged development line
 
 ### Added
 - playbook.yaml schema (schema: 1) and validator V01-V15.
