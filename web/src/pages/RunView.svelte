@@ -306,7 +306,7 @@
     {/if}
 
     {#if detail}
-      <RunOutcomePanel commits={detail.commits} />
+      <RunOutcomePanel goal={detail.goal} commits={detail.commits} />
     {/if}
 
     {#if detail}

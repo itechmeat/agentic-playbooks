@@ -148,9 +148,10 @@ pub struct Requires {
     pub commands: Vec<String>,
 }
 
-/// How a goal criterion is verified after a run (spec 2026-08-15).
-/// `Script` execution is not wired into run verdicts yet; the variant
-/// records the contract for later engine work.
+/// How a goal criterion is verified after a run (spec 2026-08-15). The
+/// engine checks `Script` and `Marker` when the run reaches a finish node,
+/// after every earlier node and the finish answer, and journals one
+/// `goal_checked` per criterion; `Manual` stays a checklist for a person.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GoalCheck {
@@ -178,6 +179,11 @@ pub struct Goal {
     pub statement: String,
     #[serde(default)]
     pub criteria: Vec<GoalCriterion>,
+    /// Opt-in: a failed `script` or `marker` criterion fails a run that
+    /// would otherwise succeed. Default `false`: the criteria are reported
+    /// only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enforce: bool,
 }
 
 /// Class of a run effect (spec 8.5). Ord/Hash - so it can be put into a

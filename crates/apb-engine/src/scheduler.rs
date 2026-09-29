@@ -43,6 +43,7 @@ pub use crate::run_config::RunMode;
 mod cache;
 mod control_apply;
 mod entry;
+mod goal;
 mod handoff;
 mod journal;
 mod judge;
@@ -727,6 +728,27 @@ fn drive_inner(
                 (Outcome::Success, None) => RunStatus::Succeeded,
                 _ => RunStatus::Failed,
             };
+            // --- 0.23.0 goal criteria (C1): checked after every earlier node
+            // and the finish answer, before the finish node's checkpoint. ---
+            let goal_failure = goal::check(
+                &playbook,
+                run_dir,
+                &workdir,
+                &answer_output,
+                &run_cancel,
+                log,
+            )?;
+            let outcome = match goal_failure {
+                Some(reason) if outcome == RunStatus::Succeeded => {
+                    log.append(EventPayload::RunError {
+                        node: Some(current.clone()),
+                        reason,
+                    })?;
+                    RunStatus::Failed
+                }
+                _ => outcome,
+            };
+            // --- end of goal criteria ---
             let s = match outcome {
                 RunStatus::Succeeded => "succeeded",
                 _ => "failed",

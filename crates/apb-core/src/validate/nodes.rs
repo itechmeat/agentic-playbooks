@@ -84,6 +84,18 @@ pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport) {
             "goal.criteria is empty, at least one criterion is required".to_string(),
         );
     }
+    // `enforce` acts on script and marker criteria only: with nothing but
+    // manual ones it can never fail a run.
+    if g.enforce
+        && !g.criteria.is_empty()
+        && g.criteria.iter().all(|c| c.check == GoalCheck::Manual)
+    {
+        r.warn(
+            "V41",
+            None,
+            "goal.enforce is set but every criterion is manual, so it never fails a run; add a script or marker criterion".to_string(),
+        );
+    }
     for (i, c) in g.criteria.iter().enumerate() {
         if c.description.trim().is_empty() {
             r.error(

@@ -1491,13 +1491,32 @@ validates its playbooks.
   recorded in the tracking sheet and sent for approval".
 - `criteria` (list): each `{ description, check? }`.
   - `check: { type: manual }` (default when omitted): a person confirms the
-    criterion.
-  - `check: { type: marker, marker: <string> }`: the marker string is
-    expected in the run result. Marker matching is not wired into run
-    verdicts yet; the field records the contract, same as `script` below.
-  - `check: { type: script, path: <relative path> }`: a check script
-    confirms the criterion. Script execution is not wired into run verdicts
-    yet; the field records the contract.
+    criterion. The engine never checks it; every run surface lists it as an
+    item to confirm.
+  - `check: { type: marker, marker: <string> }`: the literal string must
+    appear in the finish answer or in the latest output of any node.
+  - `check: { type: script, path: scripts/<file> }`: a script under the
+    version's `scripts/` (covered by the trust digest like every script) runs
+    with `sh` in the run's working tree, with `APB_RUN_ID` and `APB_RUN_DIR`
+    set; exit 0 passes. It may run for up to 10 minutes.
+- `enforce` (bool, default `false`): a failed `script` or `marker` criterion
+  fails a run that would otherwise succeed, with a `run_error` naming the
+  criterion. Without it the results are only reported. V41 warns when
+  `enforce` is set and every criterion is manual, because nothing could fail.
+
+When the checks run: when the run reaches a finish node, after every node
+before it has run and after the finish answer is composed, just before the
+finish node's `node_finished`. Every criterion journals one `goal_checked`
+event (`index`, `description`, `check`, `status`: `passed`, `failed`,
+`manual` or `error` when the check could not run, and a `detail`). A run that
+ends before a finish node (a failure no route handles, a stop) checks
+nothing. Because the checks run after cleanup-style nodes (a node that
+deletes a scratch worktree or resets a branch), write criteria against
+persistent outcomes: a pushed branch, a file in the repository, a passing
+test suite, a published release, not scratch state a later node removes.
+
+`run_status`, `run_report`, `apb runs <id>` and the dashboard run page show
+the goal with each criterion's result (`pending` until the run is checked).
 
 The goal is the contract of the run: agents and supervisors may adapt the
 process, but must never weaken or rewrite the criteria; only a person may

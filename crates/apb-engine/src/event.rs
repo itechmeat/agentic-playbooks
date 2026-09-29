@@ -686,6 +686,27 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "is_zero")]
         omitted: usize,
     },
+    /// One goal criterion checked when the run reached a finish node (C1):
+    /// `check` is `script`, `marker` or `manual`; `status` is `passed`,
+    /// `failed`, `manual` (left to a person) or `error` (the check could not
+    /// run), with `detail` saying why. `enforced` marks a script or marker
+    /// criterion under `goal.enforce: true`. Written before the finish
+    /// node's `node_finished`, so it is safe to skip up to that checkpoint;
+    /// an enforced failure also journals a `run_error` there.
+    GoalChecked {
+        #[serde(default)]
+        index: usize,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        check: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        enforced: bool,
+    },
     // --- end of the 0.23.0 block -------------------------------------------
     /// Every hop the drive loop actually took out of a node (spec
     /// 2026-07-20-run-reliability, widened by #82): a declared edge (bounded or

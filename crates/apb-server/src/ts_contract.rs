@@ -44,6 +44,8 @@ fn render_types() -> String {
         // 0.23.0 run outcome blocks (C1, C7).
         apb_engine::event::CommittedArtifact::decl(&cfg),
         apb_engine::run_outcome::NodeCommits::decl(&cfg),
+        apb_engine::run_outcome::GoalCriterionResult::decl(&cfg),
+        apb_engine::run_outcome::RunGoal::decl(&cfg),
         apb_engine::state::RunStatus::decl(&cfg),
         apb_engine::state::NodeStatus::decl(&cfg),
         apb_engine::progress::WaitingKind::decl(&cfg),

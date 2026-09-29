@@ -24,6 +24,28 @@ commits: Array<CommittedArtifact>,
  */
 omitted: number, };
 
+export type GoalCriterionResult = { index: number, description: string, 
+/**
+ * `script`, `marker` or `manual`.
+ */
+check: string, 
+/**
+ * `passed`, `failed`, `error`, `manual` (a person confirms it), or
+ * `pending` while the run has not reached a finish node.
+ */
+status: string, detail?: string, };
+
+export type RunGoal = { statement: string, 
+/**
+ * `goal.enforce: true`: a failed script or marker criterion fails the
+ * run.
+ */
+enforce: boolean, 
+/**
+ * Whether the criteria were checked (the run reached a finish node).
+ */
+checked: boolean, criteria: Array<GoalCriterionResult>, passed: number, failed: number, manual: number, };
+
 export type RunStatus = "created" | "running" | "paused" | "succeeded" | "failed" | "aborted" | "interrupted";
 
 export type NodeStatus = "pending" | "ready" | "running" | "succeeded" | "failed" | "unknown" | "timed_out" | "interrupted" | "skipped" | "cancelled";
@@ -299,6 +321,11 @@ model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[];
  * Sub-runs started by a `playbook` node, one per `ChildRunStarted`.
  */
 children: Array<ChildRun>, 
+/**
+ * The playbook's goal with each criterion's result (C1); absent for a
+ * playbook without a goal.
+ */
+goal?: RunGoal, 
 /**
  * The commits the run's nodes made on a git tree (C7); empty when none.
  */

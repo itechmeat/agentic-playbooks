@@ -55,6 +55,11 @@ pub struct RunDetail {
     /// Sub-runs started by a `playbook` node, one per `ChildRunStarted`.
     pub children: Vec<apb_engine::run_view::ChildRun>,
     // --- 0.23.0: run outcome blocks (C1, C7) ---
+    /// The playbook's goal with each criterion's result (C1); absent for a
+    /// playbook without a goal.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    #[cfg_attr(test, ts(optional))]
+    pub goal: Option<apb_engine::run_outcome::RunGoal>,
     /// The commits the run's nodes made on a git tree (C7); empty when none.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     #[cfg_attr(
@@ -175,6 +180,7 @@ pub(crate) async fn get_run_handler(
     let usage = view.usage();
     let decisions = view.decisions();
     let commits = view.commits();
+    let goal = view.goal(&run_dir);
     let nodes = view.nodes();
     Json(RunDetail {
         run_id: id,
@@ -193,6 +199,7 @@ pub(crate) async fn get_run_handler(
         hooks,
         children,
         commits,
+        goal,
         usage,
         decisions,
         unknown_events: view.unknown.len(),

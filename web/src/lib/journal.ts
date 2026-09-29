@@ -72,6 +72,7 @@ function eventNote(e: WfEvent): string | undefined {
         : `cold${r.reason ? ` (${String(r.reason)})` : ''}`
     // 0.23.0 outcome events (provenance, goal criteria, protected paths).
     case 'artifacts_committed':
+    case 'goal_checked':
       return outcomeEventNote(e)
     case 'output_fields_missing':
       return Array.isArray(r.fields) ? `missing fields: ${r.fields.join(', ')}` : undefined
