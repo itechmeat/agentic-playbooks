@@ -212,11 +212,15 @@ pub(crate) struct RunBody {
     #[serde(default)]
     worktree: Option<String>,
     /// 0.24.0: the person confirmed the playbook's irreversible effects in
-    /// the Run dialog. Without it such a run is refused (409,
-    /// `irreversible_requires_confirmation`), which is also what an event
-    /// bridge posting here gets: a trigger is not a person's consent.
+    /// the Run dialog: the `consent_nonce` of the 409 refusal the dialog
+    /// showed (a bare `true` is accepted for one release with a deprecation
+    /// note). Without it such a run is refused (409,
+    /// `irreversible_requires_confirmation`, with `sources` and
+    /// `consent_nonce`), which is also what an event bridge posting here
+    /// without the field gets. The API trusts its authenticated caller: any
+    /// holder of the dashboard token can send the field.
     #[serde(default)]
-    confirm_irreversible: bool,
+    confirm_irreversible: Option<apb_engine::consent::Confirmation>,
 }
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
@@ -274,9 +278,6 @@ pub(crate) async fn run_playbook_handler(
         // parameters are already persisted, so nothing depends on the caller
         // still being around when the engine frees up.
         workdir_queue_wait: state.workdir_queue_wait,
-        consent: body
-            .confirm_irreversible
-            .then(|| apb_engine::consent::RunConsent::irreversible("dashboard")),
         ..Default::default()
     };
 
@@ -296,16 +297,25 @@ pub(crate) async fn run_playbook_handler(
             return (status, Json(refusal)).into_response();
         }
     };
-    // 0.24.0: an irreversible tree needs the dialog's confirmation.
-    if let Err(refusal) = permit.consent_refusal(opts.consent.as_ref()) {
-        return (StatusCode::CONFLICT, Json(refusal)).into_response();
+    // 0.24.0: an irreversible tree needs the dialog's confirmation, bound
+    // to the nonce of the refusal the dialog showed.
+    let deprecation = match permit.check_confirmation(body.confirm_irreversible.as_ref()) {
+        Ok(note) => note,
+        Err(refusal) => return (StatusCode::CONFLICT, Json(refusal)).into_response(),
+    };
+    if permit.needs_consent() {
+        opts.consent = Some(apb_engine::consent::RunConsent::irreversible("dashboard"));
     }
     let warnings = permit.warnings.clone();
     permit.apply(&mut opts);
 
     match apb_engine::start_detached(&root, &id, None, opts) {
         Ok(run_id) => {
-            Json(serde_json::json!({ "run_id": run_id, "warnings": warnings })).into_response()
+            let mut answer = serde_json::json!({ "run_id": run_id, "warnings": warnings });
+            if let Some(note) = deprecation {
+                answer["deprecation"] = serde_json::json!(note);
+            }
+            Json(answer).into_response()
         }
         Err(apb_engine::EngineError::NotFound(what)) => {
             (StatusCode::NOT_FOUND, what).into_response()

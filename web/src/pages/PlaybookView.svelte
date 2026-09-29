@@ -11,7 +11,6 @@
     runPlaybook,
     setFrozen,
   } from '../lib/api'
-  import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { subscribeChanges } from '../lib/ws'
   import { onEscape } from '../lib/hooks/escape.svelte'
@@ -19,6 +18,7 @@
   import type { VersionInfo, PlaybookNode as PlaybookNodeType } from '../lib/types'
   import CodeEditor from '../lib/CodeEditor.svelte'
   import NodePanel from '../lib/NodePanel.svelte'
+  import IrreversibleRunDialog from '../lib/IrreversibleRunDialog.svelte'
   import PlaybookNode from '../lib/PlaybookNode.svelte'
   import Topbar from '$lib/components/Topbar.svelte'
   import { Button } from '$lib/components/ui/button'
@@ -158,22 +158,24 @@
   const reload = () => load(++loadToken)
 
   // --- 0.24.0 irreversible consent: the server refuses an irreversible
-  // playbook until the person confirms it here; the dialog shows what the
-  // refusal names, and only its confirm button sends the consent.
+  // playbook until the person confirms it here; the dialog lists the
+  // refusal's structured sources, and only its confirm button sends the
+  // refusal's consent nonce, which binds the consent to what it showed.
   let irreversibleOpen = $state(false)
-  let irreversibleDetail = $state('')
+  let irreversibleSources = $state<string[]>([])
+  let irreversibleNonce = $state('')
 
-  async function run(confirmIrreversible = false) {
+  async function run(consentNonce?: string) {
     starting = true
     try {
-      const { run_id } = await runPlaybook(id, workspace, confirmIrreversible)
+      const { run_id } = await runPlaybook(id, workspace, consentNonce)
       location.hash = `#/run/${encodeURIComponent(workspace)}/${encodeURIComponent(run_id)}`
     } catch (e) {
       starting = false
       if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
-        // The refusal's detail names what is irreversible, then how each
-        // surface consents; the person needs only the first part here.
-        irreversibleDetail = (e.detail ?? '').split(';')[0].trim()
+        const sources = e.body?.sources
+        irreversibleSources = Array.isArray(sources) ? sources.map(String) : []
+        irreversibleNonce = typeof e.body?.consent_nonce === 'string' ? e.body.consent_nonce : ''
         irreversibleOpen = true
         return
       }
@@ -182,8 +184,7 @@
   }
 
   function confirmIrreversibleRun() {
-    irreversibleOpen = false
-    void run(true)
+    void run(irreversibleNonce || undefined)
   }
   // --- end 0.24.0 irreversible consent ---
 
@@ -470,20 +471,9 @@
 </div>
 
 <!-- 0.24.0 irreversible consent -->
-<AlertDialog.Root bind:open={irreversibleOpen}>
-  <AlertDialog.Content>
-    <AlertDialog.Header>
-      <AlertDialog.Title>Run a playbook with irreversible effects?</AlertDialog.Title>
-      <AlertDialog.Description>
-        {irreversibleDetail
-          ? `The ${irreversibleDetail}.`
-          : 'This playbook declares irreversible effects, such as a push, a merge or a deploy.'}
-        Starting it records your consent in the run manifest, and its sub-playbooks inherit it.
-      </AlertDialog.Description>
-    </AlertDialog.Header>
-    <AlertDialog.Footer>
-      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
-      <AlertDialog.Action onclick={confirmIrreversibleRun}>Run it</AlertDialog.Action>
-    </AlertDialog.Footer>
-  </AlertDialog.Content>
-</AlertDialog.Root>
+<IrreversibleRunDialog
+  bind:open={irreversibleOpen}
+  playbookId={id}
+  sources={irreversibleSources}
+  onconfirm={confirmIrreversibleRun}
+/>
