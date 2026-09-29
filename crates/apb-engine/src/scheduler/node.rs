@@ -1810,6 +1810,29 @@ fn execute_node_kind(
                         Some(snapshot) => snapshot.check_and_restore(journal)?,
                         None => None,
                     };
+                    // A tampered snapshot copy fails the node at once: a retry
+                    // would start from a tree the engine could not restore.
+                    if let Some(v) = protect_violation.as_ref().filter(|v| v.fatal) {
+                        let duration_ms = spawn_at.get().map(|t| t.elapsed().as_millis() as u64);
+                        journal.append(EventPayload::AttemptFinished {
+                            node: node_id.into(),
+                            attempt,
+                            status: "failed".into(),
+                            duration_ms,
+                            session: None,
+                            summary: None,
+                            rejected_output: outcome.as_ref().ok().map(|r| r.output.clone()),
+                            partial_output: None,
+                            failure_kind: None,
+                            usage: None,
+                        })?;
+                        return Ok(AttemptOutcome::Finished {
+                            status: NodeStatus::Failed,
+                            output: v.reason.clone(),
+                            events,
+                        });
+                    }
+                    let protect_violation = protect_violation.map(|v| v.reason);
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
                     // fix): the adapter tore the agent down on the abort flag.
                     // Fail this attempt with the node-named message, journaling

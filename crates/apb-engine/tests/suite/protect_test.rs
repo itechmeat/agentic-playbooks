@@ -238,3 +238,230 @@ fn a_node_without_protect_is_not_checked() {
         "expect anything\n"
     );
 }
+
+/// The `guard` playbook with its own `protect` list, retry budget and fake
+/// agent body (a shell script run in the project root).
+fn seed_with(root: &Path, protect: &str, retries: u32, body: &str) -> String {
+    let agent = seed(root);
+    let pb = root.join(".apb/playbooks/guard/1.0.0/playbook.yaml");
+    fs::write(
+        &pb,
+        PLAYBOOK.replace(
+            "max_retries: 1, protect: [\"tests/**\"]",
+            &format!("max_retries: {retries}, protect: {protect}"),
+        ),
+    )
+    .unwrap();
+    common::write_sync(Path::new(&agent), &format!("#!/bin/sh\n{body}\n"));
+    agent
+}
+
+fn restore_failed(events: &[Event]) -> Vec<String> {
+    events
+        .iter()
+        .flat_map(|e| match &e.payload {
+            EventPayload::ProtectedPathsModified { restore_failed, .. } => restore_failed.clone(),
+            _ => Vec::new(),
+        })
+        .collect()
+}
+
+/// A file git ignored before the attempt was never protected: an attempt
+/// that stops ignoring it (edits `.gitignore`) does not get it removed as
+/// "added".
+#[test]
+fn a_pre_existing_ignored_file_is_never_removed_when_the_ignore_rules_change() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let agent = seed_with(root, "[\"*.cfg\"]", 0, ": > .gitignore\necho ok");
+    fs::write(root.join("main.cfg"), "tracked\n").unwrap();
+    fs::write(root.join("local.cfg"), "my local settings\n").unwrap();
+    fs::write(root.join(".gitignore"), ".apb/\nlocal.cfg\n").unwrap();
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    let (outcome, events) = run_guard(root, &agent);
+    assert_eq!(
+        fs::read_to_string(root.join("local.cfg")).unwrap(),
+        "my local settings\n"
+    );
+    assert!(modified(&events).is_empty(), "{:?}", modified(&events));
+    assert_eq!(outcome, RunStatus::Succeeded);
+}
+
+/// A protected directory the attempt replaced with a symlink to a directory
+/// outside the tree: the restore removes the link and recreates the real
+/// directory, writing nothing into the outside one.
+#[test]
+fn a_symlinked_protected_dir_is_restored_without_writing_outside() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let out = outside.path().display();
+    let agent = seed_with(
+        root,
+        "[\"tests/**\"]",
+        0,
+        &format!("rm -rf tests\nln -s '{out}' tests\necho ok"),
+    );
+    let (outcome, events) = run_guard(root, &agent);
+    assert_eq!(outcome, RunStatus::Failed);
+    let written: Vec<_> = fs::read_dir(outside.path()).unwrap().collect();
+    assert!(written.is_empty(), "{written:?}");
+    assert!(
+        fs::symlink_metadata(root.join("tests"))
+            .unwrap()
+            .file_type()
+            .is_dir()
+    );
+    assert_eq!(
+        fs::read_to_string(root.join("tests/spec.txt")).unwrap(),
+        "expect 42\n"
+    );
+    assert!(restore_failed(&events).is_empty());
+}
+
+/// A tracked protected path missing before the attempt, that resolves
+/// through a planted directory symlink afterwards, is never read as added
+/// and never deleted outside the tree.
+#[test]
+fn a_file_behind_a_symlinked_dir_is_never_deleted() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let out = outside.path().display();
+    let agent = seed_with(
+        root,
+        "[\"tests/**\"]",
+        0,
+        &format!("rm -rf tests\nln -s '{out}' tests\necho ok"),
+    );
+    fs::write(root.join("tests/gone.txt"), "tracked\n").unwrap();
+    fs::write(root.join(".gitignore"), ".apb/\n").unwrap();
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    fs::remove_file(root.join("tests/gone.txt")).unwrap();
+    fs::write(outside.path().join("gone.txt"), "precious\n").unwrap();
+    let (_outcome, events) = run_guard(root, &agent);
+    assert_eq!(
+        fs::read_to_string(outside.path().join("gone.txt")).unwrap(),
+        "precious\n"
+    );
+    assert!(
+        !modified(&events)
+            .iter()
+            .any(|(_, c)| c.iter().any(|(p, _)| p == "tests/gone.txt")),
+        "{:?}",
+        modified(&events)
+    );
+}
+
+/// A protected file the attempt replaced with a hardlink to a file outside
+/// the tree: the restore replaces the link, the outside file keeps its
+/// content.
+#[test]
+fn a_hardlinked_protected_file_is_restored_without_touching_the_other_file() {
+    let tmp = tempfile::tempdir().unwrap();
+    let outside = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let secret = outside.path().join("secret.txt");
+    fs::write(&secret, "outside content\n").unwrap();
+    let agent = seed_with(
+        root,
+        "[\"tests/**\"]",
+        0,
+        &format!("ln -f '{}' tests/spec.txt\necho ok", secret.display()),
+    );
+    let (outcome, _) = run_guard(root, &agent);
+    assert_eq!(outcome, RunStatus::Failed);
+    assert_eq!(fs::read_to_string(&secret).unwrap(), "outside content\n");
+    assert_eq!(
+        fs::read_to_string(root.join("tests/spec.txt")).unwrap(),
+        "expect 42\n"
+    );
+}
+
+/// An attempt that edits a protected file and the engine's stored copy of
+/// it alike fails the node: the tampered copy is never written back and no
+/// retry runs from the edited tree.
+#[test]
+fn a_tampered_snapshot_copy_fails_the_node() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let agent = seed_with(
+        root,
+        "[\"tests/**\"]",
+        1,
+        "n=$(cat .count 2>/dev/null || echo 0); n=$((n+1)); echo $n > .count\n\
+         if [ \"$n\" -eq 1 ]; then\n\
+           echo weak > tests/spec.txt\n\
+           cp tests/spec.txt \"$APB_RUN_DIR/protect/fix/1/tests/spec.txt\"\n\
+         fi\necho done $n",
+    );
+    let (outcome, events) = run_guard(root, &agent);
+    assert_eq!(outcome, RunStatus::Failed);
+    assert_eq!(fs::read_to_string(root.join(".count")).unwrap(), "1\n");
+    assert_eq!(restore_failed(&events), ["tests/spec.txt"]);
+    let output = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::NodeFinished { node, output, .. } if node == "fix" => {
+                Some(output.clone())
+            }
+            _ => None,
+        })
+        .unwrap();
+    assert!(
+        output.contains("protected path snapshot was tampered with: tests/spec.txt"),
+        "{output}"
+    );
+}
+
+/// A path that could not be restored keeps the snapshot copies, and the
+/// event names where they are.
+#[test]
+fn the_snapshot_copies_stay_when_a_restore_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let agent = seed_with(root, "[\"cfg/**\"]", 0, "rm -rf cfg\necho x > cfg\necho ok");
+    fs::create_dir_all(root.join("cfg")).unwrap();
+    fs::write(root.join("cfg/a.cfg"), "setting\n").unwrap();
+    let (outcome, events, run_id) = run_guard_id(root, &agent);
+    assert_eq!(outcome, RunStatus::Failed);
+    assert_eq!(restore_failed(&events), ["cfg/a.cfg"]);
+    let kept = root
+        .join(".apb/runs")
+        .join(&run_id)
+        .join("protect/fix/1/cfg/a.cfg");
+    assert_eq!(fs::read_to_string(&kept).unwrap(), "setting\n");
+    let named = events.iter().find_map(|e| match &e.payload {
+        EventPayload::ProtectedPathsModified { kept_copies, .. } => kept_copies.clone(),
+        _ => None,
+    });
+    assert!(named.is_some_and(|k| k.ends_with("protect/fix/1")));
+}
+
+/// The protected-path listing never runs a `core.fsmonitor` hook named in
+/// the repository's own config.
+#[test]
+fn the_protect_listing_never_runs_the_repository_fsmonitor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let agent = seed_with(root, "[\"tests/**\"]", 0, "echo ok");
+    fs::write(root.join(".gitignore"), ".apb/\nmarker\nhook.sh\n").unwrap();
+    git(root, &["init", "-q"]);
+    git(root, &["add", "."]);
+    git(root, &["commit", "-q", "-m", "base"]);
+    let hook = root.join("hook.sh");
+    common::write_sync(
+        &hook,
+        &format!("#!/bin/sh\ntouch '{}'\n", root.join("marker").display()),
+    );
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&hook, fs::Permissions::from_mode(0o755)).unwrap();
+    git(root, &["config", "core.fsmonitor", &hook.to_string_lossy()]);
+    let (outcome, _) = run_guard(root, &agent);
+    assert_eq!(outcome, RunStatus::Succeeded);
+    assert!(!root.join("marker").exists());
+}

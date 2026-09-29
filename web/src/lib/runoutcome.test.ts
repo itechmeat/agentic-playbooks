@@ -131,11 +131,11 @@ describe('protected_paths_modified in the event journal', () => {
           { path: 'tests/b.rs', change: 'added' },
         ],
       },
-      { seq: 2, ts: 2, type: 'protected_paths_modified', node: 'fix', attempt: 2, changes: [{ path: 'x', change: 'deleted' }], restore_failed: ['x'] },
+      { seq: 2, ts: 2, type: 'protected_paths_modified', node: 'fix', attempt: 2, changes: [{ path: 'x', change: 'deleted' }], restore_failed: ['x'], kept_copies: '/r/protect/fix/2' },
     ]
     expect(runEventJournal(events).map((e) => e.note)).toEqual([
       'protected: modified tests/a.rs, added tests/b.rs',
-      'protected: deleted x; not restored: x',
+      'protected: deleted x; not restored: x (copies kept in /r/protect/fix/2)',
     ])
   })
 })

@@ -166,7 +166,29 @@ as they were, without needing a separate worktree. One
 The check works for every agent because it runs after the attempt, not inside
 the agent: it cannot stop a write, only reject and undo it. On a git tree,
 paths git ignores are never protected, so build output under a protected
-directory does not count. `.git` and `.apb` are never covered. A glob that is
+directory does not count; what git ignored when the attempt started stays
+unprotected and untouched even if the attempt edits `.gitignore`, so a local
+file is never removed as "added". `.git` and `.apb` are never covered, and
+neither is a path below a symlinked directory.
+
+The restore is careful about what it writes through. A symlink the attempt
+put in place of a protected directory is removed (the link, never its target)
+and the directory is recreated; nothing is written or removed through it. A
+file is restored by writing the copy beside it and renaming it over the
+path, so a hardlink the attempt made to a file elsewhere never changes that
+file, and a crash leaves either the old file or the whole copy. Every copy is
+checked against the digest taken with it: a copy that changed in the
+meantime (the copies live under the run directory, which the agent can
+reach) is never written back, and the node fails at once with
+`protected path snapshot was tampered with: <path>` instead of retrying.
+A path that could not be restored is listed in the event's `restore_failed`;
+the copies are then kept, and the event's `kept_copies` and the failure
+message name where.
+
+A node with `protect` never runs in a concurrent batch: the check compares
+the whole tree before and after the attempt, so a sibling's legitimate write
+under the node's globs would otherwise be undone and blamed on it. Its
+siblings run before or after it. A glob that is
 absolute, climbs out with `..`, or does not parse is validator error **V75**;
 a glob that matches no file in the project is warning **V76** (from
 `apb validate` and `apb doctor`), because it protects nothing.

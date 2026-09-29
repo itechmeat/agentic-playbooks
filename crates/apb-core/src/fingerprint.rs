@@ -102,15 +102,43 @@ pub fn files_fingerprint(
 
 // --- 0.23.0 protected paths (C6) ---------------------------------------------
 
+/// `git` for the protected-path listings (0.23.0): the same as [`git`] with
+/// the repository's config-driven helpers switched off, so a listing never
+/// runs a program named in the tree's own `.git/config` (a
+/// `core.fsmonitor` hook).
+fn git_listing(root: &Path, args: &[&str]) -> Option<String> {
+    let mut full = vec!["-c", "core.fsmonitor=false"];
+    full.extend_from_slice(args);
+    git(root, &full)
+}
+
+/// Whether a directory between `root` and `rel` (both excluded) is a
+/// symlink, so `root.join(rel)` may resolve outside `root`. A missing
+/// component ends the walk: nothing below it exists to resolve.
+pub fn has_symlinked_parent(root: &Path, rel: &str) -> bool {
+    let mut cur = root.to_path_buf();
+    let mut parts: Vec<&str> = rel.split('/').filter(|s| !s.is_empty()).collect();
+    parts.pop();
+    for part in parts {
+        cur.push(part);
+        match std::fs::symlink_metadata(&cur) {
+            Ok(m) if m.file_type().is_symlink() => return true,
+            Ok(_) => {}
+            Err(_) => return false,
+        }
+    }
+    false
+}
+
 /// The files under `root` that match `include`, as sorted paths relative to
 /// `root` with `/` separators. On a git work tree the candidates are the
 /// files git tracks or would track (`ls-files --cached --others
 /// --exclude-standard`), so ignored paths are never matched; elsewhere every
-/// file. `.git` and `.apb` are always left out, and so are symlinks and
-/// tracked files missing from disk.
+/// file. `.git` and `.apb` are always left out, and so are symlinks, paths
+/// below a symlinked directory and tracked files missing from disk.
 pub fn matching_files(root: &Path, include: &[String]) -> Result<Vec<String>, FingerprintError> {
     let inc = build_globset(include).map_err(FingerprintError::Glob)?;
-    let candidates: Vec<String> = match git(
+    let candidates: Vec<String> = match git_listing(
         root,
         &[
             "ls-files",
@@ -136,12 +164,39 @@ pub fn matching_files(root: &Path, include: &[String]) -> Result<Vec<String>, Fi
         .filter(|p| {
             !p.split('/').any(|seg| seg == ".git" || seg == ".apb")
                 && inc.is_match(p)
+                && !has_symlinked_parent(root, p)
                 && std::fs::symlink_metadata(root.join(p)).is_ok_and(|m| m.is_file())
         })
         .collect();
     out.sort_unstable();
     out.dedup();
     Ok(out)
+}
+
+/// The paths under `root` git ignores right now, relative to `root`: files
+/// by name and wholly ignored directories with a trailing `/`
+/// (`ls-files --others --ignored --exclude-standard --directory`). Empty
+/// outside a git work tree, where nothing is ignored.
+pub fn ignored_paths(root: &Path) -> Vec<String> {
+    git_listing(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--others",
+            "--ignored",
+            "--exclude-standard",
+            "--directory",
+        ],
+    )
+    .map(|listed| {
+        listed
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect()
+    })
+    .unwrap_or_default()
 }
 
 /// The content digest of each of `files` (relative to `root`).

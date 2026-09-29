@@ -813,6 +813,11 @@ pub enum EventPayload {
         changes: Vec<ProtectedChange>,
         #[serde(default, skip_serializing_if = "Vec::is_empty")]
         restore_failed: Vec<String>,
+        /// Where the snapshot copies were kept because a path could not be
+        /// restored; absent when everything was restored and the copies
+        /// were removed.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        kept_copies: Option<String>,
     },
     // --- end of the 0.23.0 block -------------------------------------------
     /// Every hop the drive loop actually took out of a node (spec

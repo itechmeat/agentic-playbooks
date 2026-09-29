@@ -77,7 +77,8 @@ export function outcomeEventNote(e: WfEvent): string | undefined {
       const changes = Array.isArray(r.changes) ? (r.changes as Record<string, unknown>[]) : []
       const list = changes.map((c) => `${str(c.change) ?? '?'} ${str(c.path) ?? ''}`.trim()).join(', ')
       const failed = Array.isArray(r.restore_failed) && r.restore_failed.length ? `; not restored: ${r.restore_failed.join(', ')}` : ''
-      return `protected: ${list || 'changed'}${failed}`
+      const kept = str(r.kept_copies) ? ` (copies kept in ${str(r.kept_copies)})` : ''
+      return `protected: ${list || 'changed'}${failed}${kept}`
     }
     case 'goal_checked': {
       const idx = num(r.index)
