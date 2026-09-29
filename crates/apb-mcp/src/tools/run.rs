@@ -181,7 +181,15 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
     // prompts inline. `pending_tasks` is there only while a task waits, as in
     // `run_wait` and `supervisor_wait_event`, so a `cli` run's status reads
     // as before whenever nothing fell back to the host.
-    let execution = run_execution(&dir);
+    let mut execution = run_execution(&dir);
+    if let Some(obj) = execution.as_object_mut() {
+        // 0.24.0: the nodes that actually fell back, so the JSON carries what
+        // the `apb runs <id>` text line names.
+        let fell_back = apb_engine::run_view::fell_back_nodes(&view.events);
+        if !fell_back.is_empty() {
+            obj.insert("fell_back".to_string(), json!(fell_back));
+        }
+    }
     if !execution.is_null() {
         out["execution"] = execution;
     }

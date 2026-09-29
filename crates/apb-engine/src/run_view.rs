@@ -25,6 +25,22 @@ pub fn read_events(run_dir: &Path) -> Result<Vec<Event>, EngineError> {
     crate::event::read_all_lossy_tail(run_dir)
 }
 
+/// The nodes a run's journal records as having fallen back to the host
+/// (`execution_fallback`), each once, in the order they first fell back.
+/// The one source for `run_status`'s `execution.fell_back` and the
+/// `apb runs <id>` text line.
+pub fn fell_back_nodes(events: &[Event]) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for e in events {
+        if let crate::event::EventPayload::ExecutionFallback { node, .. } = &e.payload
+            && !out.contains(node)
+        {
+            out.push(node.clone());
+        }
+    }
+    out
+}
+
 /// One observation of a run, with the process-table overlay applied once.
 #[derive(Debug)]
 pub struct RunView {
