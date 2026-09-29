@@ -708,21 +708,32 @@ pub fn check_run(
         acknowledge_untrusted,
         supervised,
     )
-    .map_err(|refusal| with_consent_hint(root, &loaded.playbook, &wref.origin, &digest, refusal))
+    .map_err(|refusal| {
+        with_consent_hint(refusal, || {
+            // The hint must be the nonce the retry is checked against: the
+            // same check with trust acknowledged yields the permit whose
+            // pins (and so whose nonce) the retry computes.
+            match check_run_loaded(root, wref, &loaded, digest.clone(), true, supervised) {
+                Ok(permit) => (permit.irreversible.clone(), permit.consent_nonce()),
+                // Another refusal would stop the retry anyway: the live
+                // sources over the playbook digest, a best effort.
+                Err(_) => {
+                    let sources = consent_sources(root, &loaded.playbook, &wref.origin, None);
+                    let nonce = crate::consent::consent_nonce(&digest, &sources);
+                    (sources, nonce)
+                }
+            }
+        })
+    })
 }
 
 /// A trust refusal of a tree that also needs consent to irreversible
 /// effects names those sources and their `consent_nonce` too, so a host asks
 /// the person one question that covers both and passes both answers
-/// (`acknowledge_untrusted` and `confirm_irreversible`) in one retry. The
-/// sources are resolved live, since the tree's pins are not verified yet.
-fn with_consent_hint(
-    root: &Path,
-    playbook: &Playbook,
-    origin: &Origin,
-    digest: &str,
-    mut refusal: Value,
-) -> Value {
+/// (`acknowledge_untrusted` and `confirm_irreversible`) in one retry.
+/// `hint` yields the sources and the nonce; it runs only for a trust
+/// refusal.
+fn with_consent_hint(mut refusal: Value, hint: impl FnOnce() -> (Vec<String>, String)) -> Value {
     let is_trust = refusal
         .get("policy")
         .and_then(Value::as_str)
@@ -730,10 +741,10 @@ fn with_consent_hint(
     if !is_trust {
         return refusal;
     }
-    let sources = consent_sources(root, playbook, origin, None);
+    let (sources, nonce) = hint();
     if !sources.is_empty() {
         refusal["irreversible"] = json!(sources);
-        refusal["consent_nonce"] = json!(crate::consent::consent_nonce(digest, &sources));
+        refusal["consent_nonce"] = json!(nonce);
     }
     refusal
 }

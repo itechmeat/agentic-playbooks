@@ -323,6 +323,44 @@ fn a_trust_refusal_of_an_irreversible_tree_names_its_sources_too() {
     assert_eq!(refusal["consent_nonce"], permit.consent_nonce().as_str());
 }
 
+/// With a sub-playbook the nonce binds the pinned child digests too; the
+/// trust refusal's hint is the nonce the retry is checked against, so the
+/// one question it asks is accepted on the next attempt.
+#[test]
+fn a_trust_refusal_nonce_is_accepted_on_the_retry_of_a_tree_with_a_sub_playbook() {
+    let _env = common::env_lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _cfg = set_config_dir(cfg.path());
+    let dir = tempfile::tempdir().unwrap();
+    seed(
+        dir.path(),
+        "child",
+        &linear("child", "effects: [irreversible]\n", ""),
+    );
+    seed(dir.path(), "parent", &parent_of("child"));
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: "parent".into(),
+        version: None,
+    };
+    let refusal =
+        apb_engine::gate::check_run(dir.path(), &wref, false, false).expect_err("untrusted");
+    assert_eq!(refusal["policy"], "untrusted_requires_acknowledge");
+    assert_eq!(
+        refusal["irreversible"],
+        serde_json::json!(["sub-playbook node sub"])
+    );
+    let hint = refusal["consent_nonce"]
+        .as_str()
+        .expect("a nonce")
+        .to_string();
+    let permit = apb_engine::gate::check_run(dir.path(), &wref, true, false).unwrap();
+    assert_eq!(
+        permit.check_confirmation(Some(&Confirmation::Nonce(hint))),
+        Ok(None)
+    );
+}
+
 // --- supervisor patches ---
 
 /// start -> a -> b -> done, prompt nodes; `b_extra` goes inside node `b`.
