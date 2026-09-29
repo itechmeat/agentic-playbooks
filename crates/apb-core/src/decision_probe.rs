@@ -10,12 +10,13 @@
 //! fake provider), or a key that only a run may produce (`{{cmd:...}}`), falls
 //! back to the TCP connect and says so ("connect only").
 //!
+//! The caller (the doctor line in `decisions`) picks the endpoint per
+//! provider kind and resolves the key; this module only sends.
+//!
 //! The key goes only to the provider's own configured base URL, exactly where
 //! a run sends it, and never into the report.
 
 use std::time::{Duration, Instant};
-
-use crate::decisions::{KeyRef, ProviderKind, ProviderSpec};
 
 /// The free request for one provider: `GET <url>` with an optional bearer.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -66,34 +67,32 @@ impl ProbeResult {
     }
 }
 
-/// The free endpoint of a provider kind, relative to its base URL.
-fn free_endpoint(kind: ProviderKind) -> Option<&'static str> {
-    match kind {
-        // TypeSafe and the systemone-compatible routes list their models.
-        ProviderKind::Systemone | ProviderKind::VercelEvaluate => Some("/v1/models"),
-        // An OpenAI-compatible chat endpoint lists models next to it.
-        ProviderKind::LlmEmulation => Some("/models"),
-        // OpenRouter reports the key's own limits and usage, free.
-        ProviderKind::OpenrouterDecisions => Some("/api/v1/key"),
-        // Cloudflare verifies the API token, free.
-        ProviderKind::Cloudflare => Some("/user/tokens/verify"),
-        ProviderKind::Fake => None,
-    }
+/// The key a probe may send.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ProbeKey {
+    /// The provider needs none.
+    None,
+    /// The resolved key value.
+    Value(String),
+    /// A key only a run can produce, or one that does not resolve: the
+    /// doctor falls back to a connect.
+    Unavailable,
 }
 
-/// The request to send for `spec`, or `None` when the doctor must fall back
-/// to a connect: no free endpoint, no base URL, or a command-produced key.
-/// `resolve_key` turns an `{{env.VAR}}` reference into its value.
+/// The request to send to `base_url` + `path` (the route's free endpoint),
+/// or `None` when the doctor must fall back to a connect: no free endpoint,
+/// no base URL, or no usable key.
 pub fn probe_request(
-    spec: &ProviderSpec,
-    resolve_key: impl Fn(&str) -> Option<String>,
+    base_url: Option<&str>,
+    path: Option<&'static str>,
+    key: ProbeKey,
 ) -> Option<ProbeRequest> {
-    let path = free_endpoint(spec.kind)?;
-    let base = spec.base_url.as_deref()?.trim_end_matches('/');
-    let bearer = match &spec.key {
-        None => None,
-        Some(KeyRef::Env(var)) => Some(resolve_key(var)?),
-        Some(KeyRef::Cmd(_)) => return None,
+    let path = path?;
+    let base = base_url?.trim_end_matches('/');
+    let bearer = match key {
+        ProbeKey::None => None,
+        ProbeKey::Value(v) => Some(v),
+        ProbeKey::Unavailable => return None,
     };
     Some(ProbeRequest {
         url: format!("{base}{path}"),
@@ -150,68 +149,23 @@ mod tests {
     use std::net::TcpListener;
     use std::sync::mpsc;
 
-    fn spec(kind: ProviderKind, base: &str, key: Option<KeyRef>) -> ProviderSpec {
-        ProviderSpec {
-            id: "p".into(),
-            kind,
-            base_url: Some(base.into()),
-            model: Some("m".into()),
-            data_class: crate::decisions::DataClass::Hosted,
-            key,
-            answers: Default::default(),
-            account_id: None,
-            zero_data_retention: false,
-            structured_output: None,
-        }
-    }
-
     #[test]
-    fn each_kind_probes_its_free_endpoint_with_its_key() {
-        let key = |v: &str| (v == "K").then(|| "secret".to_string());
-        let env = || Some(KeyRef::Env("K".into()));
-        for (kind, base, url) in [
-            (
-                ProviderKind::Systemone,
-                "https://api.typesafe.ai",
-                "https://api.typesafe.ai/v1/models",
-            ),
-            (
-                ProviderKind::VercelEvaluate,
-                "https://ai-gateway.vercel.sh",
-                "https://ai-gateway.vercel.sh/v1/models",
-            ),
-            (
-                ProviderKind::LlmEmulation,
-                "http://127.0.0.1:8080/v1/",
-                "http://127.0.0.1:8080/v1/models",
-            ),
-            (
-                ProviderKind::OpenrouterDecisions,
-                "https://openrouter.ai",
-                "https://openrouter.ai/api/v1/key",
-            ),
-            (
-                ProviderKind::Cloudflare,
-                "https://api.cloudflare.com/client/v4",
-                "https://api.cloudflare.com/client/v4/user/tokens/verify",
-            ),
-        ] {
-            let req = probe_request(&spec(kind, base, env()), key).unwrap();
-            assert_eq!(req.url, url, "{kind:?}");
-            assert_eq!(req.bearer.as_deref(), Some("secret"));
-        }
-        // No free endpoint, a command key, or an unset key: connect only.
-        assert!(probe_request(&spec(ProviderKind::Fake, "http://x", None), key).is_none());
-        let cmd = Some(KeyRef::Cmd("pass show k".into()));
-        assert!(probe_request(&spec(ProviderKind::Systemone, "https://x", cmd), key).is_none());
-        let unset = Some(KeyRef::Env("UNSET".into()));
-        assert!(probe_request(&spec(ProviderKind::Systemone, "https://x", unset), key).is_none());
-        // A keyless local server is asked without a key.
-        let local = probe_request(
-            &spec(ProviderKind::Systemone, "http://127.0.0.1:9", None),
-            key,
+    fn a_request_needs_an_endpoint_a_base_and_a_usable_key() {
+        let req = probe_request(
+            Some("http://127.0.0.1:8080/v1/"),
+            Some("/models"),
+            ProbeKey::Value("secret".into()),
+        )
+        .unwrap();
+        assert_eq!(req.url, "http://127.0.0.1:8080/v1/models");
+        assert_eq!(req.bearer.as_deref(), Some("secret"));
+        assert!(probe_request(Some("http://x"), None, ProbeKey::None).is_none());
+        assert!(probe_request(None, Some("/v1/models"), ProbeKey::None).is_none());
+        assert!(
+            probe_request(Some("http://x"), Some("/v1/models"), ProbeKey::Unavailable).is_none()
         );
-        assert_eq!(local.unwrap().bearer, None);
+        let keyless = probe_request(Some("http://x"), Some("/v1/models"), ProbeKey::None);
+        assert_eq!(keyless.unwrap().bearer, None);
     }
 
     /// A one-shot server on the loopback that records the request head and
@@ -255,12 +209,9 @@ mod tests {
             "HTTP/1.1 401 Unauthorized\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{}",
         ));
         let req = probe_request(
-            &spec(
-                ProviderKind::Systemone,
-                &base,
-                Some(KeyRef::Env("K".into())),
-            ),
-            |_| Some("secret".into()),
+            Some(&base),
+            Some("/v1/models"),
+            ProbeKey::Value("secret".into()),
         )
         .unwrap();
         let out = send(&req, Duration::from_secs(5));
@@ -283,7 +234,7 @@ mod tests {
     #[test]
     fn a_host_that_accepts_and_hangs_is_reported_within_the_timeout() {
         let (base, _head) = serve_once(None);
-        let req = probe_request(&spec(ProviderKind::Systemone, &base, None), |_| None).unwrap();
+        let req = probe_request(Some(&base), Some("/v1/models"), ProbeKey::None).unwrap();
         let started = Instant::now();
         let out = send(&req, Duration::from_millis(300));
         assert!(matches!(out, ProbeResult::TimedOut { .. }), "{out:?}");

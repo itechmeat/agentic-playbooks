@@ -125,6 +125,22 @@ impl ProviderKind {
         }
     }
 
+    /// The route's request that costs nothing, relative to the base URL,
+    /// for the doctor's check ([`crate::decision_probe`]).
+    fn free_endpoint(self) -> Option<&'static str> {
+        match self {
+            // TypeSafe and the systemone-compatible routes list their models.
+            ProviderKind::Systemone | ProviderKind::VercelEvaluate => Some("/v1/models"),
+            // An OpenAI-compatible chat endpoint lists models next to it.
+            ProviderKind::LlmEmulation => Some("/models"),
+            // OpenRouter reports the key's own limits and usage, free.
+            ProviderKind::OpenrouterDecisions => Some("/api/v1/key"),
+            // Cloudflare verifies the API token, free.
+            ProviderKind::Cloudflare => Some("/user/tokens/verify"),
+            ProviderKind::Fake => None,
+        }
+    }
+
     /// The base URL a kind uses when the file names none.
     fn default_base_url(self) -> Option<&'static str> {
         match self {
@@ -978,8 +994,16 @@ fn probe(
     spec: &ProviderSpec,
     timeout: std::time::Duration,
 ) -> Option<crate::decision_probe::ProbeResult> {
-    use crate::decision_probe::{ProbeResult, probe_request, send};
-    match probe_request(spec, resolve_key_var) {
+    use crate::decision_probe::{ProbeKey, ProbeResult, probe_request, send};
+    let key = match &spec.key {
+        None => ProbeKey::None,
+        Some(KeyRef::Env(var)) => {
+            resolve_key_var(var).map_or(ProbeKey::Unavailable, ProbeKey::Value)
+        }
+        // Only a run executes a key command.
+        Some(KeyRef::Cmd(_)) => ProbeKey::Unavailable,
+    };
+    match probe_request(spec.base_url.as_deref(), spec.kind.free_endpoint(), key) {
         Some(req) => Some(send(&req, timeout)),
         None => reachable(spec).map(|reachable| ProbeResult::ConnectOnly { reachable }),
     }
@@ -1083,6 +1107,20 @@ uses:
   judge_node: { mode: off }
 privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug_state: true }
 "#;
+
+    #[test]
+    fn each_kind_names_its_free_doctor_endpoint() {
+        for (kind, path) in [
+            (ProviderKind::Systemone, Some("/v1/models")),
+            (ProviderKind::VercelEvaluate, Some("/v1/models")),
+            (ProviderKind::LlmEmulation, Some("/models")),
+            (ProviderKind::OpenrouterDecisions, Some("/api/v1/key")),
+            (ProviderKind::Cloudflare, Some("/user/tokens/verify")),
+            (ProviderKind::Fake, None),
+        ] {
+            assert_eq!(kind.free_endpoint(), path, "{kind:?}");
+        }
+    }
 
     #[test]
     fn a_tampered_snapshot_is_capped_by_the_live_file() {
