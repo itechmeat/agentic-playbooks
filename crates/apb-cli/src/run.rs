@@ -944,7 +944,11 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
     }
     // --- 0.23.0: run outcome blocks (C1, C7) ---
     if let Some(goal) = view.goal(&run_dir) {
-        println!("  goal: {}", goal.line());
+        println!(
+            "  goal: {} ({})",
+            sanitize_for_terminal(&goal.statement, QUESTION_TEXT_MAX),
+            goal.line()
+        );
         for c in &goal.criteria {
             let detail = c
                 .detail

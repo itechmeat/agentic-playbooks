@@ -1172,6 +1172,7 @@ fn run_status_and_report_carry_usage_and_unknown_events_only_when_present() {
             out["usage"],
             serde_json::json!({
                 "attempts": 1,
+                "finished_attempts": 1,
                 "input_tokens": 10,
                 "output_tokens": 4,
                 "cache_read_tokens": 0,
@@ -1187,6 +1188,28 @@ fn run_status_and_report_carry_usage_and_unknown_events_only_when_present() {
         );
     }
 
+    // A goal with a statement and no criteria still shows its statement.
+    let bare = dir.path().join(".apb/runs/r-bare");
+    fs::create_dir_all(&bare).unwrap();
+    fs::write(
+        bare.join("playbook.yaml"),
+        NOAGENT.replace("params:", "goal:\n  statement: just greet\nparams:"),
+    )
+    .unwrap();
+    fs::write(
+        bare.join("events.jsonl"),
+        r#"{"seq":0,"ts":1,"type":"run_started","playbook":"noagent","version":"1.0.0"}
+{"seq":1,"ts":2,"type":"run_finished","outcome":"succeeded"}
+"#,
+    )
+    .unwrap();
+    for out in [
+        run_status(dir.path(), "r-bare").unwrap(),
+        apb_mcp::tools::run_report(dir.path(), "r-bare").unwrap(),
+    ] {
+        assert_eq!(out["goal"]["statement"], "just greet", "{out}");
+        assert_eq!(out["goal"]["criteria"], serde_json::json!([]));
+    }
     let mut params = BTreeMap::new();
     params.insert("who".to_string(), "world".to_string());
     let res = playbook_run(

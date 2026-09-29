@@ -80,6 +80,8 @@ describe('goal', () => {
       criteria: goal.criteria.map((c) => ({ ...c, status: c.check === 'manual' ? 'manual' : 'pending', detail: undefined })),
     }
     expect(goalSummary(pending)).toBe('not checked yet · 3 criteria')
+    // A statement-only goal is never pending.
+    expect(goalSummary({ ...pending, criteria: [] })).toBe('no criteria to check')
     expect(['passed', 'failed', 'error', 'manual', 'pending'].map(goalBadge)).toEqual([
       'default',
       'destructive',

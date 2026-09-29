@@ -161,6 +161,11 @@ impl RunGoal {
     /// The summary line: `2 passed, 1 failed, 1 manual (enforced)`, or
     /// `not checked yet` before the run reached a finish node.
     pub fn line(&self) -> String {
+        // A goal with a statement only: nothing is ever checked, so "not
+        // checked yet" would read as pending forever.
+        if self.criteria.is_empty() {
+            return "no criteria to check".to_string();
+        }
         if !self.checked {
             return format!("not checked yet ({} criteria)", self.criteria.len());
         }
@@ -199,6 +204,19 @@ pub fn commit_lines(commits: &[NodeCommits]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A goal with a statement only keeps its statement and never reads as
+    /// pending.
+    #[test]
+    fn a_statement_only_goal_reads_as_having_nothing_to_check() {
+        let pb = apb_core::schema::Playbook::from_yaml(
+            "schema: 2\nid: g\nname: g\nversion: 1.0.0\ngoal:\n  statement: Ship it\nnodes:\n  - { id: start, type: start }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: done }\n",
+        )
+        .unwrap();
+        let g = goal_from(Some(&pb), &[]).unwrap();
+        assert_eq!(g.statement, "Ship it");
+        assert_eq!(g.line(), "no criteria to check");
+    }
 
     #[test]
     fn the_goal_reads_pending_until_checked_then_the_journaled_results() {

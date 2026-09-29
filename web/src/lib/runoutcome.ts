@@ -48,9 +48,12 @@ export function goalBadge(status: string): GoalBadge {
   return 'secondary'
 }
 
-// The goal summary: `2 passed · 1 failed · 1 to confirm · enforced`, or
-// `not checked yet` before the run reached a finish node.
+// The goal summary: `2 passed · 1 failed · 1 to confirm · enforced`,
+// `not checked yet` before the run reached a finish node, or `no criteria to
+// check` for a goal with a statement only.
 export function goalSummary(g: RunGoal): string {
+  // A goal with a statement only is never checked; do not show it as pending.
+  if (g.criteria.length === 0) return 'no criteria to check'
   if (!g.checked) return `not checked yet · ${g.criteria.length} ${g.criteria.length === 1 ? 'criterion' : 'criteria'}`
   const parts = [`${g.passed} passed`]
   if (g.failed > 0) parts.push(`${g.failed} failed`)
