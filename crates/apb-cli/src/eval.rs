@@ -13,9 +13,11 @@
 //!    a bare repository next to it, so a push succeeds locally and reaches
 //!    no real remote.
 //! 2. `apb run <id> --detach --no-cache --execution cli` inside that tree,
-//!    through the ordinary run gate, with the case env overlay applied to
-//!    the run's processes and `APB_NO_REGISTRY=1` so the scratch tree never
-//!    enters the projects registry.
+//!    through the ordinary run gate, with `APB_NO_REGISTRY=1` so the scratch
+//!    tree never enters the projects registry. The case env overlay and the
+//!    wall-clock deadline go to the engine as run settings
+//!    (`--eval-settings`): the overlay reaches only the agents and scripts
+//!    the run spawns, never apb itself.
 //! 3. The wait: the run is followed with the `apb wait` primitive and
 //!    stopped when it waits for a person (gates cannot be answered yet),
 //!    when its wall clock, token or cost limit is crossed; a spent
@@ -23,6 +25,9 @@
 //! 4. The checks (`apb_engine::eval::checks`), then the run directory moves
 //!    to `<config-dir>/evals/runs/<playbook>/<run-id>` (outside the project,
 //!    so `apb stats` never counts it) and the scratch directory is removed.
+//!    A repetition whose driver does not exit is moved to
+//!    `<config-dir>/evals/kept/` instead: a tree is never deleted under a
+//!    live driver.
 //!
 //! A playbook with `irreversible` effects, a shipping step, a connector or a
 //! sub-playbook is refused before anything is created
@@ -354,6 +359,7 @@ fn check_layer(tree: &Path, fixture: bool) -> Result<(), String> {
 const TREE_EXCLUDES: &str = ".apb/runs/\n.apb/cache/\n.apb/trash/\n.apb/locks/\n.apb/workspace.local\n.apb/workdir.lock\n.apb/decisions.jsonl\n.apb/secrets.env\n";
 
 /// Builds the repetition's repository; returns the fixture commit.
+#[allow(clippy::too_many_arguments)]
 fn materialize(
     hooks: &Path,
     root: &Path,

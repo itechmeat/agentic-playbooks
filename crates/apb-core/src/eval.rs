@@ -68,8 +68,11 @@ pub struct EvalCase {
     #[serde(default)]
     pub params: BTreeMap<String, String>,
     pub fixture: Fixture,
-    /// Overlay for the run's processes (agents and scripts); merged over the
-    /// suite's. `{{eval.scratch}}` expands to the repetition's scratch dir.
+    /// Overlay for the agents and scripts the run spawns and for the case
+    /// scripts, never for apb itself; merged over the suite's. Keys that
+    /// reconfigure apb, the shell, the loader or git are V80
+    /// ([`env_key_problem`]). `{{eval.scratch}}` expands to the
+    /// repetition's scratch dir.
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     #[serde(default)]
