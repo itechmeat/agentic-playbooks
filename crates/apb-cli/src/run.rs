@@ -986,6 +986,11 @@ fn usage_line(u: &apb_engine::run_view::RunUsage) -> String {
         "{} input, {} output, {} cache read, {} cache write tokens over {} {attempts}",
         u.input_tokens, u.output_tokens, u.cache_read_tokens, u.cache_write_tokens, u.attempts
     );
+    // The totals cover only the attempts that reported usage; say how many
+    // of the run's attempts that is when some did not.
+    if u.finished_attempts > u.attempts {
+        line.push_str(&format!(" (of {} finished)", u.finished_attempts));
+    }
     if u.estimated {
         line.push_str(" (partly estimated by apb)");
     }

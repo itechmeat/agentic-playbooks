@@ -67,6 +67,10 @@ pub struct RunUsage {
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     #[cfg_attr(feature = "ts", ts(as = "Option<bool>", optional))]
     pub estimated: bool,
+    /// Every attempt the run finished, with or without usage, so a line
+    /// can say "5 attempts, 3 with usage" instead of passing the reporting
+    /// ones off as all of them.
+    pub finished_attempts: u32,
 }
 
 impl RunUsage {
@@ -74,7 +78,11 @@ impl RunUsage {
     pub fn from_events(events: &[Event]) -> Option<Self> {
         let mut total = RunUsage::default();
         for e in events {
-            let EventPayload::AttemptFinished { usage: Some(u), .. } = &e.payload else {
+            let EventPayload::AttemptFinished { usage, .. } = &e.payload else {
+                continue;
+            };
+            total.finished_attempts = total.finished_attempts.saturating_add(1);
+            let Some(u) = usage else {
                 continue;
             };
             // Saturating: the numbers come from agent output, and a bogus
@@ -399,6 +407,23 @@ mod decision_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The totals cover the attempts that reported usage; the count of all
+    /// finished attempts rides along so no surface passes them off as all.
+    #[test]
+    fn usage_counts_every_finished_attempt_next_to_the_reporting_ones() {
+        let line = |usage: &str| {
+            serde_json::from_str::<Event>(&format!(
+                r#"{{"seq":0,"ts":1,"type":"attempt_finished","node":"a","attempt":1,"status":"failed"{usage}}}"#
+            ))
+            .unwrap()
+        };
+        let reported = r#","usage":{"input_tokens":10,"output_tokens":2,"cache_read_tokens":0,"cache_write_tokens":0,"source":"reported"}"#;
+        let events = vec![line(""), line(reported), line("")];
+        let u = RunUsage::from_events(&events).unwrap();
+        assert_eq!((u.attempts, u.finished_attempts), (1, 3));
+        assert_eq!(RunUsage::from_events(&[line(""), line("")]), None);
+    }
 
     /// A pid that was valid and is now free: spawn, reap, reuse the number.
     fn reaped_pid() -> u32 {

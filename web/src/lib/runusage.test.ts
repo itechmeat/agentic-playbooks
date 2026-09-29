@@ -10,6 +10,7 @@ const total: RunUsage = {
   cache_write_tokens: 0,
   cost_attempts: 3,
   cost_usd: 0.4312,
+  finished_attempts: 3,
 }
 
 describe('formatTokens', () => {
@@ -43,9 +44,15 @@ describe('runUsageSummary', () => {
     )
   })
 
+  it('counts every attempt of the run and says how many reported usage', () => {
+    expect(runUsageSummary({ ...total, cost_attempts: 3, finished_attempts: 5 })).toBe(
+      '1.3k in · 820 out · 1.5M cache read · 5 attempts, 3 with usage · $0.4312 reported by 3 of 5',
+    )
+  })
+
   it('shows no cost when no attempt reported one', () => {
     const { cost_usd: _, ...noCost } = total
-    expect(runUsageSummary({ ...noCost, attempts: 1, cost_attempts: 0 })).toBe('1.3k in · 820 out · 1.5M cache read · 1 attempt')
+    expect(runUsageSummary({ ...noCost, attempts: 1, cost_attempts: 0, finished_attempts: 1 })).toBe('1.3k in · 820 out · 1.5M cache read · 1 attempt')
   })
 })
 

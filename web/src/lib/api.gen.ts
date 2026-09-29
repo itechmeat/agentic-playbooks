@@ -258,7 +258,13 @@ cost_attempts: number,
  * At least one attempt's numbers are apb's own estimate rather than a
  * count the agent CLI printed (`source: estimated`).
  */
-estimated?: boolean, };
+estimated?: boolean, 
+/**
+ * Every attempt the run finished, with or without usage, so a line
+ * can say "5 attempts, 3 with usage" instead of passing the reporting
+ * ones off as all of them.
+ */
+finished_attempts: number, };
 
 export type RunDecisions = { 
 /**

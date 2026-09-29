@@ -30,11 +30,16 @@ function tokenParts(u: Pick<AgentUsage, 'input_tokens' | 'output_tokens' | 'cach
 // the reported cost when any attempt printed one, and which part is partial.
 export function runUsageSummary(u: RunUsage): string {
   const parts = tokenParts(u)
-  parts.push(`${u.attempts} ${u.attempts === 1 ? 'attempt' : 'attempts'}`)
+  // The totals cover only the attempts that reported usage: name every
+  // attempt of the run and how many of them that is, never the reporting
+  // ones alone as if they were all.
+  const all = Math.max(u.finished_attempts ?? u.attempts, u.attempts)
+  const noun = `${all} ${all === 1 ? 'attempt' : 'attempts'}`
+  parts.push(all > u.attempts ? `${noun}, ${u.attempts} with usage` : noun)
   if (u.cost_usd !== undefined) {
     parts.push(
-      u.cost_attempts < u.attempts
-        ? `${formatCost(u.cost_usd)} reported by ${u.cost_attempts} of ${u.attempts}`
+      u.cost_attempts < all
+        ? `${formatCost(u.cost_usd)} reported by ${u.cost_attempts} of ${all}`
         : `${formatCost(u.cost_usd)} reported`,
     )
   }
