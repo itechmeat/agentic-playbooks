@@ -547,3 +547,111 @@ pub fn failing_kinds<'a>(reps: impl Iterator<Item = &'a [CheckResult]>) -> Vec<(
     v.sort_by(|a, b| b.1.cmp(&a.1).then(a.0.cmp(&b.0)));
     v
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ev(seq: u64, payload: EventPayload) -> Event {
+        Event {
+            seq,
+            ts: 1000 + seq as u128 * 10,
+            payload,
+        }
+    }
+
+    fn journal() -> Vec<Event> {
+        vec![
+            ev(0, EventPayload::RunStarted { playbook: "p".into(), version: "1.0.0".into() }),
+            ev(1, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"s","status":"succeeded","attempt":1,"output":"","artifacts":[]})).unwrap()),
+            ev(2, EventPayload::NodeStarted { node: "w".into(), attempt: 1 }),
+            ev(3, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"{\"verdict\":\"ok\",\"n\":3}","artifacts":[]})).unwrap()),
+            ev(4, EventPayload::NodeStarted { node: "w".into(), attempt: 1 }),
+            ev(5, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"{\"verdict\":\"ok\",\"n\":3}","artifacts":[]})).unwrap()),
+            ev(6, serde_json::from_value(serde_json::json!({"type":"node_finished","node":"f","status":"succeeded","attempt":1,"output":"","artifacts":[]})).unwrap()),
+            ev(7, EventPayload::RunFinished { outcome: "succeeded".into() }),
+        ]
+    }
+
+    fn case(yaml: &str) -> EvalCase {
+        apb_core::eval::parse_case(yaml, "c").unwrap()
+    }
+
+    const PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: prompt, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: f }\n";
+
+    fn run(case_yaml: &str) -> Vec<CheckResult> {
+        let c = case(case_yaml);
+        let pb: Playbook = serde_yaml_ng::from_str(PB).unwrap();
+        let events = journal();
+        let tree = tempfile::tempdir().unwrap();
+        let input = CheckInput {
+            case: &c,
+            playbook: &pb,
+            events: &events,
+            raw_types: &[
+                "run_started".into(),
+                "retry_started".into(),
+                "retry_started".into(),
+            ],
+            tree: tree.path(),
+            fixture_commit: "HEAD",
+            suite_dir: tree.path(),
+            stopped: None,
+            script_env: Vec::new(),
+        };
+        evaluate(&input).0
+    }
+
+    fn status(checks: &[CheckResult], kind: &str) -> CheckStatus {
+        checks
+            .iter()
+            .find(|c| c.kind == kind)
+            .unwrap_or_else(|| panic!("{kind} in {checks:?}"))
+            .status
+    }
+
+    #[test]
+    fn visited_counts_executions_and_finish_nodes_once() {
+        assert_eq!(visited(&journal()), ["s", "w", "w", "f"]);
+    }
+
+    #[test]
+    fn route_output_and_event_checks_read_the_journal() {
+        let checks = run(
+            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  route: { visits: [s, w, f], in_order: true, not_visits: [f], max_visits: { w: 1 } }\n  outputs:\n    - { node: w, field: verdict, equals: ok }\n    - { node: w, field: n, equals: \"3\" }\n    - { node: w, not_matches: verdict }\n    - { node: w, field: missing, non_empty: true }\n  events: { absent: [run_error], max: { retry_started: 1 } }\n",
+        );
+        assert_eq!(status(&checks, "run.outcome"), CheckStatus::Passed);
+        assert_eq!(status(&checks, "route.visits"), CheckStatus::Passed);
+        assert_eq!(status(&checks, "route.not_visits"), CheckStatus::Failed);
+        assert_eq!(status(&checks, "route.max_visits[w]"), CheckStatus::Failed);
+        assert_eq!(status(&checks, "outputs[w.verdict]"), CheckStatus::Passed);
+        assert_eq!(status(&checks, "outputs[w.n]"), CheckStatus::Passed);
+        assert_eq!(status(&checks, "outputs[w]"), CheckStatus::Failed);
+        assert_eq!(status(&checks, "outputs[w.missing]"), CheckStatus::Failed);
+        assert_eq!(
+            status(&checks, "events.absent[run_error]"),
+            CheckStatus::Passed
+        );
+        assert_eq!(
+            status(&checks, "events.max[retry_started]"),
+            CheckStatus::Failed
+        );
+        assert_eq!(verdict(&checks), "failed");
+        let order = run(
+            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  route: { visits: [f, w], in_order: true }\n",
+        );
+        assert_eq!(status(&order, "route.visits"), CheckStatus::Failed);
+    }
+
+    #[test]
+    fn a_missing_script_is_an_error_not_a_failure() {
+        let checks = run(
+            "schema: 1\nid: c\nfixture: { dir: fixtures/x }\nchecks:\n  scripts: [scripts/none.sh]\n",
+        );
+        assert_eq!(
+            status(&checks, "script[scripts/none.sh]"),
+            CheckStatus::Error
+        );
+        assert_eq!(verdict(&checks), "error");
+    }
+}
