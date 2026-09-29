@@ -131,6 +131,19 @@ fn shipping_reason(
     })
 }
 
+// --- 0.24.0 eval suites ------------------------------------------------------------
+
+/// Why node `n` counts as a shipping step by its own declaration or its
+/// name: declared `irreversible` or `secrets` effects, or the merge, push,
+/// deploy or publish name heuristic. The eval runner refuses a playbook with
+/// such a node (`apb_core::eval::refusal`); connector bindings are refused
+/// there outright, so the connector leg of the chain is not consulted.
+pub fn node_shipping_reason(n: &crate::schema::Node) -> Option<String> {
+    shipping_reason(n, &BTreeMap::new()).map(|r| r.replace(" after the gate", ""))
+}
+
+// --- end 0.24.0 eval suites ---------------------------------------------------------
+
 /// [`auto_decide_refusal`] that also honours the connector functions a
 /// downstream node is granted, from the installed connectors' `facts`.
 pub fn auto_decide_refusal_with(
