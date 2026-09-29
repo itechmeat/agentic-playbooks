@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { runGates } from './rungates'
+import { deadlineNote, runGates } from './rungates'
 import type { ProgressSummary, RunDetail, WfEvent } from './types'
 
 const progress = (over: Partial<ProgressSummary> = {}): ProgressSummary => ({
@@ -13,6 +13,7 @@ const progress = (over: Partial<ProgressSummary> = {}): ProgressSummary => ({
   pending_reviews: [],
   pending_questions: [],
   pending_waits: [],
+  pending_tasks: [],
   plan_key: '1.0.0|',
   ...over,
 })
@@ -37,6 +38,8 @@ const detail = (events: Partial<WfEvent>[], p: ProgressSummary, status: RunDetai
   answer: null,
   usage: null,
   unknown_events: 0,
+  execution: 'cli',
+  execution_fallback: false,
   events: events.map((e, i) => ({ seq: i, ts: i, type: '', ...e })),
 })
 
@@ -118,5 +121,52 @@ describe('review recommendation', () => {
     expect(runGates(d).reviews[0].recommendation).toBe(
       'Decided: needs_changes (p=0.86), main/jev-1.13.0 [uncalibrated, applied by the engine]',
     )
+  })
+
+  it('shows no host task on a run that has none, and every one it has', () => {
+    expect(runGates(detail([], progress(), 'running')).tasks).toEqual([])
+    const pending = {
+      run_id: 'r',
+      task_id: 'plan-1',
+      node: 'plan',
+      attempt: 2,
+      prompt: 'Plan it',
+      role_prompt: 'You plan.',
+      skills: [],
+      workdir: '/w',
+      outputs: null,
+      deadline: null,
+      model_hint: 'sonnet',
+      env: {},
+      requested_at: 1,
+    }
+    const d = detail([], progress({ waiting_kind: 'host_task', pending_tasks: [pending] }), 'running')
+    expect(runGates(d).tasks).toEqual([
+      {
+        runId: 'r',
+        taskId: 'plan-1',
+        node: 'plan',
+        attempt: 2,
+        prompt: 'Plan it',
+        rolePrompt: 'You plan.',
+        modelHint: 'sonnet',
+        deadline: null,
+      },
+    ])
+  })
+
+  it('reads a payload from a server without pending_tasks as none', () => {
+    const p = progress()
+    delete (p as Partial<ProgressSummary>).pending_tasks
+    expect(runGates(detail([], p, 'running')).tasks).toEqual([])
+  })
+})
+
+describe('deadlineNote', () => {
+  it('names the time left, or overdue', () => {
+    expect(deadlineNote(null, 0)).toBeNull()
+    expect(deadlineNote(30_000, 0)).toBe('in 30s')
+    expect(deadlineNote(600_000, 0)).toBe('in 10m')
+    expect(deadlineNote(1_000, 5_000)).toBe('overdue')
   })
 })

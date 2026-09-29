@@ -79,6 +79,13 @@ function eventNote(e: WfEvent): string | undefined {
       return decisionNote(e)
     case 'wake_raised':
       return triageNote(r.triage)
+    // Host execution mode (0.23.0): the request and submission rows.
+    case 'host_task_requested':
+      return `task ${String(r.task_id ?? '')}${r.model_hint ? `, model hint ${String(r.model_hint)}` : ''}`
+    case 'host_task_submitted':
+      return `task ${String(r.task_id ?? '')}: ${String(r.status ?? '')} by ${String(r.submitted_by ?? '')}${r.client ? ` (${String(r.client)})` : ''}`
+    case 'execution_fallback':
+      return `no CLI could start, running as a host task${r.reason ? `: ${String(r.reason)}` : ''}`
     case 'worktree_resolved':
       return typeof r.path === 'string'
         ? `working tree: ${r.path} (${r.source === 'node' ? `published by ${String(r.node ?? '')}` : `from ${String(r.source ?? '')}`})`
