@@ -736,6 +736,42 @@ fn a_missing_agent_binary_falls_back_to_a_host_task() {
 }
 
 #[test]
+fn an_interactive_fallback_task_asks_the_host_way_and_parks_on_blocked() {
+    let h = Host::new(&one_node(", interactive: true"), &[]);
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let _missing = Env::set(&[("APB_AGENT_CMD", "/nonexistent/apb-test-agent")]);
+    let run_id = h.start(CLI_SESSION);
+    let task = h.task(&run_id, "w");
+    assert!(
+        task.prompt
+            .contains("reply with only the question for the user"),
+        "the host question paragraph: {}",
+        task.prompt
+    );
+    assert!(
+        !task.prompt.contains(apb_engine::adapter::QUESTION_MARKER),
+        "no stdout marker contract for a host step: {}",
+        task.prompt
+    );
+    h.submit(
+        &run_id,
+        &task.task_id,
+        SubmitStatus::Blocked,
+        "Which colour?",
+    );
+    let dir = h.run_dir(&run_id);
+    let question = poll("the pending question", || {
+        let events = read_all(&dir).ok()?;
+        apb_engine::progress::from_run_dir(&dir, &events)?.pending_question
+    });
+    assert_eq!(question.question, "Which colour?");
+    apb_engine::scheduler::run_cancel(h.root.path(), &run_id).unwrap();
+    let (status, _) = h.finish(&run_id);
+    assert_ne!(status, RunStatus::Succeeded);
+}
+
+#[test]
 fn a_logged_out_agent_falls_back_to_a_host_task() {
     let h = Host::new(&one_node(""), &[]);
     h.agent("echo 'Error: Not logged in. Please run /login' >&2\nexit 1");

@@ -1019,15 +1019,21 @@ fn execute_node_kind(
             // re-invocation. Non-interactive nodes receive neither. The marker
             // scan stays active on a live node too, so a live agent that ignores
             // the tool and prints the marker still parks (no regression).
+            // The CLI paragraph appended, so the host fallback step can swap
+            // it for the host one (a host step has neither channel).
+            let mut cli_question_paragraph: Option<String> = None;
             if first_turn && host_mode && *interactive {
                 // Host execution mode (0.23.0): a host subagent has neither
                 // the `ask_user` tool nor the stdout marker; its host submits
                 // the question as a `blocked` task.
                 text = format!("{text}\n\n{}", super::host::HOST_QUESTION_PARAGRAPH);
             } else if first_turn && live.is_some() {
-                text = format!("{text}\n\n{}", crate::adapter::LIVE_PROMPT_PARAGRAPH);
+                cli_question_paragraph = Some(crate::adapter::LIVE_PROMPT_PARAGRAPH.to_string());
             } else if first_turn && *interactive {
-                text = format!("{text}\n\n{}", marker_contract());
+                cli_question_paragraph = Some(marker_contract());
+            }
+            if let Some(p) = &cli_question_paragraph {
+                text = format!("{text}\n\n{p}");
             }
 
             // Status-file contract (subtask S2): a node with a success_check may
@@ -1490,6 +1496,18 @@ fn execute_node_kind(
                     // cut off mid-work. Appended here rather than inside
                     // `render_node_prompt`, so the recovery note (fixed text) does
                     // not shift the node's cache key.
+                    // The host fallback step of a `cli` run asks its
+                    // question the host way (a `blocked` submission), never
+                    // through the CLI's tool or stdout marker.
+                    let step_text: std::borrow::Cow<'_, str> =
+                        match (&cli_question_paragraph, step.fallback_host) {
+                            (Some(p), true) => std::borrow::Cow::Owned(text.replacen(
+                                &format!("\n\n{p}"),
+                                &format!("\n\n{}", super::host::HOST_QUESTION_PARAGRAPH),
+                                1,
+                            )),
+                            _ => std::borrow::Cow::Borrowed(text.as_str()),
+                        };
                     let attempt_prompt: std::borrow::Cow<'_, str> = match &continued {
                         Some(_) if answer_round => std::borrow::Cow::Borrowed(text.as_str()),
                         // A handed-off session holds the earlier step, not
@@ -1517,10 +1535,10 @@ fn execute_node_kind(
                             ))
                         }
                         None if was_interrupted => std::borrow::Cow::Owned(format!(
-                            "{text}\n\n{}",
+                            "{step_text}\n\n{}",
                             super::status_file::INTERRUPTION_NOTE
                         )),
-                        None => std::borrow::Cow::Borrowed(text.as_str()),
+                        None => step_text,
                     };
                     timeout_continuation = false;
                     let task = AgentTask {
