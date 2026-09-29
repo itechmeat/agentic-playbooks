@@ -479,3 +479,114 @@ fn the_plan_names_nodes_that_load_the_operators_full_environment() {
         .success()
         .stderr(predicate::str::contains(note));
 }
+
+/// Runs git in `dir` with a fixed identity, panicking on failure.
+fn git_in(dir: &Path, args: &[&str]) {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "git {args:?}: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Runs git in `dir` with `input` on stdin; returns its trimmed stdout.
+fn git_out(dir: &Path, args: &[&str], input: &str) -> String {
+    use std::io::Write;
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args([
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@t.invalid",
+            "-c",
+            "commit.gpgsign=false",
+        ])
+        .args(args)
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(input.as_bytes())
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert!(out.status.success(), "git {args:?}");
+    String::from_utf8(out.stdout).unwrap().trim().to_string()
+}
+
+/// A `git:` fixture whose tree plants a symlink out of the scratch tree is
+/// refused before apb writes anything through it: the definitions copy
+/// would otherwise delete and rewrite `<config>/profiles` through a `.apb`
+/// link, and a directory link would take later writes outside.
+#[cfg(unix)]
+#[test]
+fn a_symlinked_fixture_cannot_leave_the_tree() {
+    let env = setup(PLAYBOOK);
+    let root = env.project.path();
+    git_in(root, &["init", "-q", "-b", "main"]);
+    write(&root.join("README.md"), "project\n");
+    git_in(root, &["add", "README.md"]);
+    git_in(root, &["commit", "-q", "-m", "base"]);
+    // Each branch is one commit whose tree holds only the planted link,
+    // built with plumbing so the project's own `.apb` is not in the way.
+    // The scratch tree is <config>/evals/scratch/<eval>/<case>-<n>/tree, so
+    // five levels up is the config directory itself.
+    for (branch, link, target) in [
+        ("evil-apb", ".apb", "../../../../.."),
+        ("evil-dir", "docs", "../../../../../profiles"),
+        ("evil-abs", "abs", "/tmp"),
+    ] {
+        let blob = git_out(root, &["hash-object", "-w", "--stdin"], target);
+        let tree = git_out(root, &["mktree"], &format!("120000 blob {blob}\t{link}\n"));
+        let commit = git_out(root, &["commit-tree", &tree, "-m", branch], "");
+        git_in(root, &["branch", branch, &commit]);
+    }
+    let sentinel = env.cfg.path().join("profiles/keep/profile.yaml");
+    write(&sentinel, "name: keep\n");
+    let case_path = root.join(".apb/playbooks/rev/evals/writes-report.yaml");
+    for branch in ["evil-apb", "evil-dir", "evil-abs"] {
+        write(
+            &case_path,
+            &CASE.replace(
+                "  dir: fixtures/base\n  change: fixtures/change\n",
+                &format!("  git: {branch}\n"),
+            ),
+        );
+        let (code, v) = env.eval_json(&[]);
+        assert_eq!(code, 1, "{branch}: {v:#}");
+        let rep = &v["result"]["cases"][0]["repetitions"][0];
+        assert_eq!(rep["verdict"], "error", "{branch}: {rep:#}");
+        let detail = rep["checks"][0]["detail"].as_str().unwrap();
+        assert!(
+            detail.starts_with("fixture:") && detail.contains("symlink"),
+            "{branch}: {detail}"
+        );
+        assert_eq!(
+            fs::read_to_string(&sentinel).unwrap(),
+            "name: keep\n",
+            "{branch}"
+        );
+        assert!(!env.cfg.path().join("playbooks").exists(), "{branch}");
+        assert!(!env.cfg.path().join("profiles/x").exists(), "{branch}");
+        assert!(!env.cfg.path().join("evals/scratch").exists(), "{branch}");
+    }
+}

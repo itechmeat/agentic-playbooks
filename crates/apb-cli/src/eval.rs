@@ -196,11 +196,15 @@ fn confirm(args: &EvalArgs, question: &str) -> bool {
 
 /// The files that make a playbook runnable in a scratch tree: the playbook's
 /// own directory without its suite, and the project profiles, skills and
-/// config.
+/// config. Nothing is removed or written through a symlink: the fixture's
+/// `.apb` was checked by [`check_fixture_layer`], and every write below
+/// goes through the no-follow copier.
 fn copy_definitions(root: &Path, id: &str, tree: &Path, draft: bool) -> std::io::Result<()> {
+    use apb_core::fsutil::{copy_tree_no_follow, ensure_no_symlink_below};
     let src = root.join(".apb");
     let dst = tree.join(".apb");
     let pb_dst = dst.join("playbooks").join(id);
+    ensure_no_symlink_below(tree, &pb_dst)?;
     if pb_dst.exists() {
         std::fs::remove_dir_all(&pb_dst)?;
     }
@@ -211,9 +215,10 @@ fn copy_definitions(root: &Path, id: &str, tree: &Path, draft: bool) -> std::io:
             continue;
         }
         let to = pb_dst.join(entry.file_name());
-        if entry.file_type()?.is_dir() {
-            apb_core::fsutil::copy_tree(&entry.path(), &to)?;
-        } else {
+        let ft = entry.file_type()?;
+        if ft.is_dir() {
+            copy_tree_no_follow(&entry.path(), tree, &to)?;
+        } else if ft.is_file() {
             std::fs::copy(entry.path(), &to)?;
         }
     }
@@ -224,14 +229,119 @@ fn copy_definitions(root: &Path, id: &str, tree: &Path, draft: bool) -> std::io:
         let s = src.join(sub);
         if s.is_dir() {
             let d = dst.join(sub);
+            ensure_no_symlink_below(tree, &d)?;
             if d.exists() {
                 std::fs::remove_dir_all(&d)?;
             }
-            apb_core::fsutil::copy_tree(&s, &d)?;
+            copy_tree_no_follow(&s, tree, &d)?;
         }
     }
     if src.join("config.yaml").is_file() {
-        std::fs::copy(src.join("config.yaml"), dst.join("config.yaml"))?;
+        let to = dst.join("config.yaml");
+        ensure_no_symlink_below(tree, &to)?;
+        std::fs::copy(src.join("config.yaml"), to)?;
+    }
+    Ok(())
+}
+
+/// Where a symlink at `link` (inside `tree`) points, refused when the
+/// target is absolute or resolves outside `tree`. A link whose target does
+/// not exist yet is judged lexically.
+fn link_stays_inside(tree_canon: &Path, tree: &Path, link: &Path) -> Result<(), String> {
+    let target = std::fs::read_link(link).map_err(|e| e.to_string())?;
+    let rel = link.strip_prefix(tree).unwrap_or(link);
+    if target.is_absolute() || target.has_root() {
+        return Err(format!(
+            "`{}` is a symlink to the absolute path `{}`",
+            rel.display(),
+            target.display()
+        ));
+    }
+    let base = link.parent().unwrap_or(tree);
+    let inside = match std::fs::canonicalize(base.join(&target)) {
+        Ok(c) => c.starts_with(tree_canon),
+        Err(_) => {
+            // Lexically: from the link's directory, never above the tree.
+            let mut depth: i64 = rel.components().count() as i64 - 1;
+            let mut ok = true;
+            for c in target.components() {
+                match c {
+                    std::path::Component::ParentDir => depth -= 1,
+                    std::path::Component::Normal(_) => depth += 1,
+                    std::path::Component::CurDir => {}
+                    _ => ok = false,
+                }
+                if depth < 0 {
+                    ok = false;
+                }
+            }
+            ok
+        }
+    };
+    if inside {
+        Ok(())
+    } else {
+        Err(format!(
+            "`{}` is a symlink that leaves the tree (`{}`)",
+            rel.display(),
+            target.display()
+        ))
+    }
+}
+
+/// The first `.git` entry anywhere under `dir`, relative to it.
+fn carries_git(dir: &Path) -> Option<PathBuf> {
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        for e in std::fs::read_dir(&d).ok()?.flatten() {
+            let p = e.path();
+            if e.file_name() == ".git" {
+                return Some(p.strip_prefix(dir).unwrap_or(&p).to_path_buf());
+            }
+            if e.file_type().is_ok_and(|t| t.is_dir()) {
+                stack.push(p);
+            }
+        }
+    }
+    None
+}
+
+/// Walks `tree` without following links and refuses any symlink that is
+/// absolute or resolves outside it. With `fixture` set (a layer that came
+/// from the fixture, not from apb): also refuses a `.git` anywhere and any
+/// symlink at or below `.apb`, the paths apb itself writes next.
+fn check_layer(tree: &Path, fixture: bool) -> Result<(), String> {
+    let canon = std::fs::canonicalize(tree).map_err(|e| e.to_string())?;
+    let mut stack = vec![tree.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let entries = std::fs::read_dir(&dir).map_err(|e| e.to_string())?;
+        for e in entries {
+            let e = e.map_err(|e| e.to_string())?;
+            let p = e.path();
+            let ft = e.file_type().map_err(|e| e.to_string())?;
+            let rel = p.strip_prefix(tree).unwrap_or(&p).to_path_buf();
+            if fixture && e.file_name() == ".git" {
+                return Err(format!(
+                    "the fixture carries `{}`; a fixture may not hold a git directory",
+                    rel.display()
+                ));
+            }
+            if ft.is_symlink() {
+                if fixture && rel.starts_with(".apb") {
+                    return Err(format!(
+                        "`{}` is a symlink; a fixture may not hold symlinks at or below `.apb`",
+                        rel.display()
+                    ));
+                }
+                link_stays_inside(&canon, tree, &p)?;
+            } else if ft.is_dir() {
+                // The repository apb created is its own; nothing in it came
+                // from the fixture.
+                if !(dir == tree && e.file_name() == ".git") {
+                    stack.push(p);
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -278,11 +388,16 @@ fn materialize(
         }
     }
     if let Some(d) = &fx.dir {
-        apb_core::fsutil::copy_tree(&suite_copy.join(d), &tree).map_err(|e| e.to_string())?;
+        apb_core::fsutil::copy_tree_no_follow(&suite_copy.join(d), rep_dir, &tree)
+            .map_err(|e| e.to_string())?;
     }
+    // Every layer is checked before anything else writes into the tree: a
+    // link the fixture planted must never redirect apb's own writes.
+    check_layer(&tree, true)?;
     git(&tree, &["init", "-q", "-b", "main"])?;
     copy_definitions(root, id, &tree, draft)
         .map_err(|e| format!("copying the definitions: {e}"))?;
+    check_layer(&tree, false)?;
     apb_core::registry::init_project(&tree).map_err(|e| e.to_string())?;
     std::fs::write(tree.join(".git/info/exclude"), TREE_EXCLUDES).map_err(|e| e.to_string())?;
     git(&tree, &["add", "-A"])?;
@@ -306,7 +421,16 @@ fn materialize(
             .clone()
             .unwrap_or_else(|| core_eval::DEFAULT_CHANGE_BRANCH.to_string());
         git(&tree, &["checkout", "-q", "-b", &branch])?;
-        apb_core::fsutil::copy_tree(&suite_copy.join(change), &tree).map_err(|e| e.to_string())?;
+        let overlay_src = suite_copy.join(change);
+        if let Some(g) = carries_git(&overlay_src) {
+            return Err(format!(
+                "the change overlay carries `{}`; a fixture may not hold a git directory",
+                g.display()
+            ));
+        }
+        apb_core::fsutil::copy_tree_no_follow(&overlay_src, rep_dir, &tree)
+            .map_err(|e| e.to_string())?;
+        check_layer(&tree, false)?;
         git(&tree, &["add", "-A"])?;
         git(
             &tree,
