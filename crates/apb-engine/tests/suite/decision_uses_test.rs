@@ -1316,3 +1316,120 @@ fn resumed_runs_replay_routing_and_completion_without_a_request() {
     assert_eq!(d[0].use_site, "routing");
     assert!(d[0].error.is_none());
 }
+
+// --- the auto-decision weighs the child versions the gate pinned ------------
+
+/// The gate playbook whose `fix` step runs sub-playbook `child`.
+fn gate_with_child() -> String {
+    gate_playbook("", ", auto_decide: { allow: [needs_changes] }", "fix").replace(
+        "  - { id: fix, type: agent_task, prompt: \"Apply fixes\" }\n",
+        "  - { id: fix, type: playbook, playbook: child }\n",
+    )
+}
+
+/// Writes version `version` of `child`, declaring `effects` (a YAML line or
+/// empty), and makes it current.
+fn seed_child_version(root: &Path, version: &str, effects: &str) {
+    let dir = root.join(format!(".apb/playbooks/child/{version}"));
+    fs::create_dir_all(&dir).unwrap();
+    fs::write(
+        dir.join("playbook.yaml"),
+        format!(
+            "schema: 2\nid: child\nname: Child\nversion: {version}\n{effects}nodes:\n  - {{ id: start, type: start }}\n  - {{ id: done, type: finish, outcome: success }}\nedges:\n  - {{ from: start, to: done }}\n"
+        ),
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/child/current"), version).unwrap();
+}
+
+/// Run options carrying the gate's pins, as every launch surface hands them.
+fn gated_options(root: &Path) -> RunOptions {
+    let wref = apb_core::scope::PlaybookRef {
+        origin: apb_core::scope::Origin::Project { workspace_id: None },
+        id: "d".into(),
+        version: None,
+    };
+    let permit = apb_engine::gate::check_run(root, &wref, true, false).unwrap();
+    let mut opts = RunOptions::default();
+    permit.apply(&mut opts);
+    opts
+}
+
+fn enforce_review_triage(p: &Project, server: &StubServer) {
+    p.decisions(&config(
+        &server.base_url,
+        "enforce",
+        "  review_triage: { mode: enforce }\n",
+    ));
+    p.threshold(&[("review_triage", 0.5)]);
+}
+
+/// The gate pinned a child version that declares `irreversible`; a new
+/// current version declares nothing. The run will execute the pinned one, so
+/// the auto-decision must still refuse on its effects.
+#[test]
+fn review_auto_decide_weighs_the_pinned_child_not_a_newer_current() {
+    let p = Project::new(&gate_with_child(), "echo 'Review: one blocking defect.'");
+    seed_child_version(p.root.path(), "1.0.0", "effects: [irreversible]\n");
+    let server = StubServer::start_with_fallback(vec![], decision_reply("needs_changes", 0.99));
+    enforce_review_triage(&p, &server);
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let opts = gated_options(p.root.path());
+    // Re-versioned after the gate pinned 1.0.0.
+    seed_child_version(p.root.path(), "1.1.0", "");
+
+    let rx = run_in_background(p.root.path().to_path_buf(), opts);
+    let run_dir = find_run_dir(p.root.path());
+    let (_, rec) = poll("review_requested", || review_requested(&run_dir));
+    assert!(!rec.unwrap().applied, "the pinned child is irreversible");
+    let d = decisions(&read_all(&run_dir).unwrap(), "review_triage");
+    assert_eq!(d[0].enforce_refused.as_deref(), Some("effects"));
+    apb_engine::stop::stop_run(
+        p.root.path(),
+        run_dir.file_name().unwrap().to_str().unwrap(),
+    )
+    .ok();
+    let _ = rx.recv_timeout(Duration::from_secs(20));
+}
+
+/// The reverse: the pinned child declares nothing and a newer current one is
+/// `irreversible`. The newer version never runs in this run, so it does not
+/// block the auto-decision.
+#[test]
+fn review_auto_decide_ignores_effects_of_a_child_version_the_run_will_not_execute() {
+    let p = Project::new(&gate_with_child(), "echo 'Review: one blocking defect.'");
+    seed_child_version(p.root.path(), "1.0.0", "");
+    let server = StubServer::start_with_fallback(vec![], decision_reply("needs_changes", 0.99));
+    enforce_review_triage(&p, &server);
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let opts = gated_options(p.root.path());
+    seed_child_version(p.root.path(), "1.1.0", "effects: [irreversible]\n");
+
+    // In the background with a deadline: a gate that wrongly waits for a
+    // person must fail this test, not hang the suite.
+    let rx = run_in_background(p.root.path().to_path_buf(), opts);
+    let run_dir = find_run_dir(p.root.path());
+    let res = match rx.recv_timeout(Duration::from_secs(20)) {
+        Ok(res) => res,
+        Err(_) => {
+            let d = decisions(&read_all(&run_dir).unwrap(), "review_triage");
+            apb_engine::stop::stop_run(
+                p.root.path(),
+                run_dir.file_name().unwrap().to_str().unwrap(),
+            )
+            .ok();
+            panic!("timed out after 20s waiting for the gated run to finish; review_triage: {d:?}");
+        }
+    };
+    let events = read_all(&p.run_dir(&res.run_id)).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let d = decisions(&events, "review_triage");
+    assert!(d[0].applied, "{:?}", d[0].enforce_refused);
+    assert!(
+        events.iter().any(|e| matches!(&e.payload,
+            EventPayload::ReviewDecided { decision, .. } if decision == "needs_changes")),
+        "the gate decided by itself"
+    );
+}

@@ -174,7 +174,8 @@ struct TreeResolution {
 /// The effects of `playbook` and of every sub-playbook it runs, recursively,
 /// resolved the way the run gate resolves them (read-only about trust).
 /// `None` when the tree does not resolve. The review auto-decision (issue
-/// #165 Part 14.4) reads it at run time and refuses on `None`.
+/// #165 Part 14.4) reads it at run time for an ungated run (no pins) and
+/// refuses on `None`; a gated run reads [`pinned_tree_effects`] instead.
 pub(crate) fn tree_effects(
     root: &Path,
     playbook: &Playbook,
@@ -183,6 +184,60 @@ pub(crate) fn tree_effects(
     resolve_tree(root, playbook, origin, &playbook.id, true)
         .ok()
         .map(|t| t.effects)
+}
+
+/// The effects of `playbook` and of every sub-playbook the run's gate pinned
+/// (`expected_children`), recursively, each read from its PINNED version: the
+/// version a gated run will actually execute, not whatever is current now. A
+/// child re-versioned after the gate (a new `current` with other declared
+/// effects) must not change what the review auto-decision weighs. `None` when a
+/// sub-playbook node has no pin, a pinned version no longer resolves, or its
+/// content no longer matches the pinned digest: the caller refuses then
+/// (fail-closed), exactly as the run would refuse to spawn that child.
+pub(crate) fn pinned_tree_effects(
+    root: &Path,
+    playbook: &Playbook,
+    pins: &std::collections::BTreeMap<String, ChildExpectation>,
+) -> Option<std::collections::BTreeSet<Effect>> {
+    let mut effects = apb_core::effects::effective(playbook);
+    collect_pinned_effects(root, playbook, pins, &mut effects)?;
+    Some(effects)
+}
+
+/// Walks `playbook`'s sub-playbook nodes along `pins` (finite: the gate built
+/// the pin tree with cycle detection, and the walk follows the pins).
+fn collect_pinned_effects(
+    root: &Path,
+    playbook: &Playbook,
+    pins: &std::collections::BTreeMap<String, ChildExpectation>,
+    effects: &mut std::collections::BTreeSet<Effect>,
+) -> Option<()> {
+    for n in &playbook.nodes {
+        if !matches!(n.kind, NodeKind::Playbook { .. }) {
+            continue;
+        }
+        let pin = pins.get(&n.id)?;
+        let origin = match pin.scope {
+            ProfileScope::Global => Origin::Global,
+            _ => Origin::Project { workspace_id: None },
+        };
+        let cref = PlaybookRef {
+            origin,
+            id: pin.id.clone(),
+            version: Some(pin.version.clone()),
+        };
+        let resolved = apb_core::store::resolve(root, &cref).ok()?;
+        if resolved.digest != pin.playbook_digest {
+            return None;
+        }
+        let loaded = Registry::open_dir(&resolved.definition_parent)
+            .ok()?
+            .load(&resolved.id, Some(&resolved.version))
+            .ok()?;
+        effects.extend(apb_core::effects::effective(&loaded.playbook));
+        collect_pinned_effects(root, &loaded.playbook, &pin.children, effects)?;
+    }
+    Some(())
 }
 
 /// Seeds the effects union and cycle path with the parent itself, then walks and
