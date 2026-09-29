@@ -26,7 +26,7 @@ use crate::schema::{
 
 use connectors::check_connectors;
 use decisions::check_decision_opt_ins;
-pub use decisions::{auto_decide_refusal, downstream_nodes};
+pub use decisions::{auto_decide_refusal, auto_decide_refusal_with, downstream_nodes};
 use graph::{
     check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,
     check_joins, check_reachability, check_start_finish, check_unique_ids,
@@ -162,7 +162,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_failure_policy(playbook, &mut r); // V35
     check_judge_nodes(playbook, &mut r); // V50-V58, V61 (issue #165 Part 5)
     check_judge_edges(playbook, &mut r); // V59, V60 (issue #165 Part 7)
-    check_decision_opt_ins(playbook, &mut r); // V70, V71, V72, V73, V74
+    check_decision_opt_ins(playbook, ctx, &mut r); // V70, V71, V72, V73, V74
     if r.is_valid() {
         check_reachability(playbook, &mut r); // V07, V08
         check_conditions(playbook, &mut r); // V09, V10

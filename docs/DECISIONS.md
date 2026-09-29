@@ -728,8 +728,14 @@ the review auto-decision, which is fail-closed.
 
 The review auto-decision is refused by the validator (V73) on a playbook that
 declares `irreversible` or `secrets` effects, or whose nodes after the gate
-include a merge, push, deploy or publish step (by id, title or script path),
-unless the gate sets `auto_decide_ok: true`. The inferred `external` effect
+include a step that ships something out of reach of a later correction,
+unless the gate sets `auto_decide_ok: true`. A node after the gate counts as
+such a step when it declares node-level `effects: [irreversible]` (or
+`secrets`), when it is granted a connector function its manifest flags
+`irreversible: true`, or, as the fallback, when its id, title or script path
+names a merge, push, deploy or publish. A node granted connector functions
+that are merely not `read_only` gets a V73 warning naming them, not a
+refusal. The inferred `external` effect
 does not count (every playbook with an agent has it). The run re-checks the
 same rule with the declared effects of every sub-playbook it runs, at any
 depth and in any scope (resolved as the run gate resolves them), and refuses

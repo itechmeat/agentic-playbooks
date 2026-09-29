@@ -950,6 +950,13 @@ pub struct Node {
     pub id: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// Effects this node declares (0.23.0), for example `[irreversible]` on
+    /// a merge, deploy or publish step. Like the playbook's `effects` they
+    /// only widen: they join the playbook's effective effects, and a node
+    /// declaring `irreversible` or `secrets` after a `human_review` gate
+    /// refuses the gate's `auto_decide` (V73) whatever the node is called.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Effect>,
     /// Estimated time of ONE execution (spec 2026-07-17). Absent -> the per-kind
     /// default (see `expected_seconds`). Additive to schema 2; no migration.
     #[serde(default)]

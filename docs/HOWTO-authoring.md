@@ -205,8 +205,10 @@ without a `decisions.yaml` that enables the use (validator V74 notes them).
 - `auto_decide: { allow: [needs_changes], min_confidence: 0.9 }` on a
   `human_review` (V72, V73): let a confident recommendation of
   `needs_changes` decide the gate. Never `approve`. Refused on a playbook that
-  declares `irreversible` or `secrets` effects or runs a merge, push, deploy
-  or publish step after the gate, unless the gate sets `auto_decide_ok: true`.
+  declares `irreversible` or `secrets` effects, or when a node after the gate
+  declares them itself, is granted a connector function flagged
+  `irreversible: true`, or is named like a merge, push, deploy or publish
+  step, unless the gate sets `auto_decide_ok: true` (see "effects").
 - `defaults.retry_advice: enforce`: let retry advice skip doomed
   same-executor retries.
 - `supervisor: { pre_triage: enforce }`: let wake pre-triage post a retry
@@ -1500,6 +1502,21 @@ the server infers from node types, never narrow it. Values: `fs_read`,
 `fs_write`, `network`, `external`, `secrets`, `irreversible`. Declare
 `irreversible` for anything that cannot be rolled back (deploys, publishes,
 external notifications) so the policy layer requires explicit confirmation.
+
+A node can declare its own `effects` too, for example on the one step that
+merges or deploys:
+
+```yaml
+- id: release
+  type: agent_task
+  prompt: "Publish the release"
+  effects: [irreversible]
+```
+
+A node's declaration widens the playbook's effective effects the same way,
+and it is what V73 reads before the name of the node: an automatic review
+decision (`auto_decide`) is refused on a gate followed by a node that
+declares `irreversible` or `secrets`, whatever the node is called.
 
 ## goal (target and criteria)
 

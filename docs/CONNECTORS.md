@@ -145,7 +145,11 @@ pattern as `skills`:
 
 `functions: read_only` grants exactly the functions the manifest marks
 `read_only: true`, resolved at run start and frozen in the manifest grant, so a
-later connector edit cannot widen a running grant. `max_calls` is a safety budget
+later connector edit cannot widen a running grant. A function whose call
+cannot be taken back (a merge, a deletion, a payment, a publication) can be
+flagged `irreversible: true` in the manifest: a node granted it after a
+`human_review` gate refuses that gate's `auto_decide` (V73), and a granted
+function that is merely not `read_only` makes V73 warn. `max_calls` is a safety budget
 against a looping agent, not a rate limiter; exceeding it returns a `permission`
 error.
 

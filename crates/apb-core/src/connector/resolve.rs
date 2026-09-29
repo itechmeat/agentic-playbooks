@@ -325,6 +325,11 @@ pub struct ConnectorFacts {
     pub has_webhook: bool,
     /// Names of its `inbox` functions, in manifest order.
     pub inbox_functions: Vec<String>,
+    /// Names of its functions flagged `irreversible: true` (V73).
+    pub irreversible_functions: Vec<String>,
+    /// Names of its functions not marked `read_only` (V73 warns about a
+    /// grant of one after an `auto_decide` gate).
+    pub write_functions: Vec<String>,
     /// Account field names the webhook block's `{{secret.*}}` placeholders
     /// reference, sorted and deduplicated. Empty when there is no block.
     pub webhook_secret_fields: Vec<String>,
@@ -414,6 +419,14 @@ pub fn validation_facts() -> std::collections::BTreeMap<String, ConnectorFacts> 
             ConnectorFacts {
                 has_webhook: loaded.doc.webhook.is_some(),
                 inbox_functions: loaded.doc.inbox_functions(),
+                irreversible_functions: loaded.doc.irreversible_functions(),
+                write_functions: loaded
+                    .doc
+                    .functions
+                    .iter()
+                    .filter(|f| !f.read_only)
+                    .map(|f| f.name.clone())
+                    .collect(),
                 webhook_secret_fields,
                 accounts,
                 load_error: None,
