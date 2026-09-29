@@ -707,6 +707,23 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "is_false")]
         enforced: bool,
     },
+    /// An agent_task attempt changed files its node protects (C6): each
+    /// path with `modified`, `deleted` or `added`. The engine restored them
+    /// from its pre-attempt copy (`restore_failed` names any it could not)
+    /// and a reported success was rejected. Written before the attempt's
+    /// `attempt_finished`; the next checkpoint is the node's
+    /// `node_finished`, and it is safe to skip up to there: the attempt's
+    /// own result carries the effect.
+    ProtectedPathsModified {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        changes: Vec<ProtectedChange>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        restore_failed: Vec<String>,
+    },
     // --- end of the 0.23.0 block -------------------------------------------
     /// Every hop the drive loop actually took out of a node (spec
     /// 2026-07-20-run-reliability, widened by #82): a declared edge (bounded or
@@ -813,6 +830,16 @@ pub struct CommittedArtifact {
     pub sha: String,
     #[serde(default)]
     pub subject: String,
+}
+
+/// One path of an [`EventPayload::ProtectedPathsModified`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectedChange {
+    #[serde(default)]
+    pub path: String,
+    /// `modified`, `deleted` or `added`.
+    #[serde(default)]
+    pub change: String,
 }
 
 fn is_zero(n: &usize) -> bool {

@@ -536,6 +536,15 @@ impl NodeKind {
         }
     }
 
+    /// The `protect` globs of an `agent_task` (C6), empty for every other
+    /// kind.
+    pub fn protect_globs(&self) -> &[String] {
+        match self {
+            NodeKind::AgentTask { protect, .. } => protect,
+            _ => &[],
+        }
+    }
+
     /// The serde `type` tag of this variant, mirroring
     /// `#[serde(tag = "type", rename_all = "snake_case")]` on [`NodeKind`].
     /// Single source of truth for the node-type string a summary or catalog
@@ -1184,6 +1193,15 @@ pub enum NodeKind {
         /// node starts cold, as without the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         continue_session: Option<String>,
+        /// Protected paths (C6): globs, relative to the node's working
+        /// directory, of files an attempt must not change. The engine
+        /// snapshots the matching files before every attempt and compares
+        /// them after it; a change fails the attempt with `protected path
+        /// modified: <path>` (a normal retry) and the files are restored from
+        /// the snapshot before anything else runs. Paths git ignores are not
+        /// covered. Empty (the default) checks nothing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        protect: Vec<String>,
     },
     Script {
         script: String,

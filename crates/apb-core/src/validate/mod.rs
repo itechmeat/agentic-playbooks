@@ -156,6 +156,7 @@ pub fn validate(playbook: &Playbook, ctx: &ValidationContext) -> ValidationRepor
     check_edges(playbook, &mut r); // V30, V34
     check_interactive(playbook, &mut r); // V31, V32
     check_success_check(playbook, &mut r); // V33
+    nodes::check_protect(playbook, &mut r); // V75 (C6)
     check_start_finish(playbook, &mut r); // V03, V04, V05
     check_edges_exist(playbook, &mut r); // V06
     check_failure_policy(playbook, &mut r); // V35

@@ -126,6 +126,32 @@ pub(crate) fn check_goal(playbook: &Playbook, r: &mut ValidationReport) {
     }
 }
 
+/// V75: an agent_task's `protect` globs (C6) must each be a non-empty,
+/// valid glob relative to the node's working directory: not absolute and
+/// without a `..` segment, so the check cannot reach (or restore) files
+/// outside the tree the node works in.
+pub(crate) fn check_protect(playbook: &Playbook, r: &mut ValidationReport) {
+    for n in &playbook.nodes {
+        for g in n.kind.protect_globs() {
+            let why = if g.trim().is_empty() {
+                Some("is empty")
+            } else if g.starts_with('/')
+                || g.starts_with('\\')
+                || g.split(['/', '\\']).any(|seg| seg == "..")
+            {
+                Some("must be relative to the node's working directory, without `..`")
+            } else if globset::Glob::new(g).is_err() {
+                Some("is not a valid glob")
+            } else {
+                None
+            };
+            if let Some(why) = why {
+                r.error("V75", Some(&n.id), format!("protect glob `{g}` {why}"));
+            }
+        }
+    }
+}
+
 /// V16: isolation is declared. The engine materializes skills as copies into
 /// an isolated per-node workdir (skills_mode: materialized), but does not yet
 /// enforce full sandboxing (project tree, process) (spec 8.3). A warning so the

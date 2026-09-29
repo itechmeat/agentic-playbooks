@@ -140,6 +140,37 @@ attempt and exposed to downstream templates as
 `{{nodes.<id>.rejected_output}}`, so a fix or review node can read exactly what
 the rejected attempt claimed.
 
+### Protected paths (protect)
+
+`protect` on an `agent_task` lists globs of files the attempt must not
+change, relative to the node's working directory (the run's working tree, or
+the node's own `workdir`):
+
+```yaml
+- id: fix
+  type: agent_task
+  prompt: "Make the failing test pass without touching the tests"
+  protect: ["tests/**", "docs/spec/*.md"]
+```
+
+Before every attempt the engine copies the matching files into the run
+directory; after the attempt's process has ended it lists the matches again.
+A file that was modified, deleted or added under a protected glob fails the
+attempt with `protected path modified: <path>`: a normal retry that keeps the
+report as `rejected_output`, exactly like a failed success check. The engine
+restores the protected files from its copy (an added one is removed) before
+anything else runs, so the retry and every later node start from the files
+as they were, without needing a separate worktree. One
+`protected_paths_modified` event names each changed path and how it changed.
+
+The check works for every agent because it runs after the attempt, not inside
+the agent: it cannot stop a write, only reject and undo it. On a git tree,
+paths git ignores are never protected, so build output under a protected
+directory does not count. `.git` and `.apb` are never covered. A glob that is
+absolute, climbs out with `..`, or does not parse is validator error **V75**;
+a glob that matches no file in the project is warning **V76** (from
+`apb validate` and `apb doctor`), because it protects nothing.
+
 ### Completion check (decision models)
 
 When the machine's `decisions.yaml` turns the `completion_check` use on, each

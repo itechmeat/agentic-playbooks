@@ -2,7 +2,8 @@ import type { NodeCommits, RunGoal } from './api.gen'
 import type { WfEvent } from './types'
 
 // What a run produced beyond its node outputs (0.23.0): its goal criteria and
-// their results (C1) and the commits its nodes made on a git tree (C7). Events are read defensively: a newer apb may extend
+// their results (C1), the commits its nodes made on a git tree (C7), and the
+// protected paths an attempt changed (C6, event journal only). Events are read defensively: a newer apb may extend
 // their shape.
 
 function str(v: unknown): string | undefined {
@@ -68,6 +69,12 @@ export function outcomeEventNote(e: WfEvent): string | undefined {
       const first = commits[0] as Record<string, unknown> | undefined
       const head = first ? `${(str(first.sha) ?? '').slice(0, 12)} ${str(first.subject) ?? ''}`.trim() : ''
       return `${n} ${n === 1 ? 'commit' : 'commits'}${head ? `: ${head}` : ''}`
+    }
+    case 'protected_paths_modified': {
+      const changes = Array.isArray(r.changes) ? (r.changes as Record<string, unknown>[]) : []
+      const list = changes.map((c) => `${str(c.change) ?? '?'} ${str(c.path) ?? ''}`.trim()).join(', ')
+      const failed = Array.isArray(r.restore_failed) && r.restore_failed.length ? `; not restored: ${r.restore_failed.join(', ')}` : ''
+      return `protected: ${list || 'changed'}${failed}`
     }
     case 'goal_checked': {
       const idx = num(r.index)

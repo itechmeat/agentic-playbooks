@@ -295,11 +295,17 @@ fn observe_control(
 /// agent process died (spec 2026-08-05 section 2.1). A recovered verdict
 /// therefore does NOT bypass the gate.
 fn success_check_rejection(
+    protect_violation: Option<&str>,
     check: Option<&apb_core::schema::SuccessCheck>,
     run_dir: &Path,
     attempt_workdir: &Path,
     output: &str,
 ) -> Result<Option<String>, EngineError> {
+    // A protected file the attempt changed (C6) rejects the report before
+    // any check runs: the check would judge a tree the engine just restored.
+    if let Some(reason) = protect_violation {
+        return Ok(Some(reason.to_string()));
+    }
     match check {
         // Deterministic sh-script check (spec 6.2): a non-zero exit rejects the
         // report regardless of the agent's self-assessment. Run in the SAME
@@ -1605,6 +1611,15 @@ fn execute_node_kind(
                         on_poll: &on_control_poll,
                         interrupt: &interrupt,
                     };
+                    // --- 0.23.0 protected paths (C6): the files as they were
+                    // before this attempt. ---
+                    let protect_snapshot = super::protect::Snapshot::take(
+                        run_dir,
+                        node_id,
+                        attempt,
+                        &node_dir,
+                        node.kind.protect_globs(),
+                    )?;
                     let mut outcome = adapter.run_cancellable(
                         &task,
                         cancel,
@@ -1636,6 +1651,12 @@ fn execute_node_kind(
                             attempt,
                         })?;
                     }
+                    // --- 0.23.0 protected paths (C6): undo and name any change
+                    // to a protected file before anything else reads the tree. ---
+                    let protect_violation = match protect_snapshot {
+                        Some(snapshot) => snapshot.check_and_restore(journal)?,
+                        None => None,
+                    };
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
                     // fix): the adapter tore the agent down on the abort flag.
                     // Fail this attempt with the node-named message, journaling
@@ -1861,6 +1882,7 @@ fn execute_node_kind(
                                 // branch was not cancelled) - we do not propagate
                                 // cancellation here.
                                 let rejection = success_check_rejection(
+                                    protect_violation.as_deref(),
                                     node.success_check.as_ref(),
                                     run_dir,
                                     &attempt_workdir,
@@ -2084,6 +2106,7 @@ fn execute_node_kind(
                                     // consumes a retry with the discarded text
                                     // preserved (S3 behavior).
                                     match success_check_rejection(
+                                        protect_violation.as_deref(),
                                         node.success_check.as_ref(),
                                         run_dir,
                                         &attempt_workdir,

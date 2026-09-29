@@ -100,6 +100,65 @@ pub fn files_fingerprint(
     Ok(sha256_hex(&acc))
 }
 
+// --- 0.23.0 protected paths (C6) ---------------------------------------------
+
+/// The files under `root` that match `include`, as sorted paths relative to
+/// `root` with `/` separators. On a git work tree the candidates are the
+/// files git tracks or would track (`ls-files --cached --others
+/// --exclude-standard`), so ignored paths are never matched; elsewhere every
+/// file. `.git` and `.apb` are always left out, and so are symlinks and
+/// tracked files missing from disk.
+pub fn matching_files(root: &Path, include: &[String]) -> Result<Vec<String>, FingerprintError> {
+    let inc = build_globset(include).map_err(FingerprintError::Glob)?;
+    let candidates: Vec<String> = match git(
+        root,
+        &[
+            "ls-files",
+            "-z",
+            "--cached",
+            "--others",
+            "--exclude-standard",
+        ],
+    ) {
+        Some(listed) => listed
+            .split('\0')
+            .filter(|p| !p.is_empty())
+            .map(str::to_string)
+            .collect(),
+        None => {
+            let mut paths = Vec::new();
+            walk(root, root, &mut paths)?;
+            paths
+        }
+    };
+    let mut out: Vec<String> = candidates
+        .into_iter()
+        .filter(|p| {
+            !p.split('/').any(|seg| seg == ".git" || seg == ".apb")
+                && inc.is_match(p)
+                && std::fs::symlink_metadata(root.join(p)).is_ok_and(|m| m.is_file())
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    Ok(out)
+}
+
+/// The content digest of each of `files` (relative to `root`).
+pub fn file_digests(
+    root: &Path,
+    files: &[String],
+) -> Result<std::collections::BTreeMap<String, String>, FingerprintError> {
+    let mut out = std::collections::BTreeMap::new();
+    for rel in files {
+        let bytes = std::fs::read(root.join(rel))?;
+        out.insert(rel.clone(), sha256_hex(&bytes));
+    }
+    Ok(out)
+}
+
+// --- end of protected paths ------------------------------------------------------
+
 /// Recursively collect `dir`'s files as paths relative to `root`, skipping
 /// `.git` and `.apb` directories.
 ///

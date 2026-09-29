@@ -114,3 +114,26 @@ describe('goal', () => {
     expect(runEventJournal(events).map((e) => e.note)).toEqual(['criterion 2: failed (not found)', 'criterion 1: passed'])
   })
 })
+
+describe('protected_paths_modified in the event journal', () => {
+  it('lists each change and any path that could not be restored', () => {
+    const events: WfEvent[] = [
+      {
+        seq: 1,
+        ts: 1,
+        type: 'protected_paths_modified',
+        node: 'fix',
+        attempt: 1,
+        changes: [
+          { path: 'tests/a.rs', change: 'modified' },
+          { path: 'tests/b.rs', change: 'added' },
+        ],
+      },
+      { seq: 2, ts: 2, type: 'protected_paths_modified', node: 'fix', attempt: 2, changes: [{ path: 'x', change: 'deleted' }], restore_failed: ['x'] },
+    ]
+    expect(runEventJournal(events).map((e) => e.note)).toEqual([
+      'protected: modified tests/a.rs, added tests/b.rs',
+      'protected: deleted x; not restored: x',
+    ])
+  })
+})

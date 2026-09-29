@@ -53,6 +53,7 @@ mod node;
 mod node_workdir;
 mod patch;
 mod prepare;
+mod protect;
 mod provenance;
 mod rebind;
 mod resume;
