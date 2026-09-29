@@ -73,16 +73,20 @@ pub fn supervisor_wait_result(
     // Surface the pending human-review gate here too (issue #42 finding 4): a
     // supervisor that wakes on a run must see the gate and its owner-facing
     // instruction so it relays the decision to the user rather than blocking.
-    Ok(json!({
+    let mut out = json!({
         "wake": wake,
         "reason": reason,
         "next_after_seq": next_after_seq,
         "run_status": status["run_status"],
         "pending_review": status["pending_review"],
         "pending_supervisor": status["pending_supervisor"],
-        // Host execution mode (0.23.0): the tasks this session executes.
-        "pending_tasks": status["pending_tasks"],
-    }))
+    });
+    // Host execution mode (0.23.0): the tasks this session executes, only
+    // while one waits (absent, never null, exactly as in `run_status`).
+    if let Some(tasks) = status.get("pending_tasks") {
+        out["pending_tasks"] = tasks.clone();
+    }
+    Ok(out)
 }
 
 /// Strings in the `events` list longer than this are elided by default in

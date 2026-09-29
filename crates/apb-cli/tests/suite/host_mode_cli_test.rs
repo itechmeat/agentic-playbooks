@@ -454,7 +454,7 @@ fn a_stub_mcp_host_drives_a_host_mode_run_end_to_end() {
     assert_eq!(submitted, vec!["plan", "build"]);
     let status = mcp.call("run_status", json!({"run_id": run_id}));
     assert_eq!(status["execution"]["mode"], "host");
-    assert_eq!(status["pending_tasks"], json!([]));
+    assert!(status.get("pending_tasks").is_none(), "{status}");
     let events = read_all(&run_dir(root, &run_id)).unwrap();
     let clients: Vec<Option<String>> = events
         .iter()

@@ -170,18 +170,17 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "superseded_by": cfg.superseded_by,
         "failure_reason": failure_reason,
     });
-    // Host execution mode (0.23.0): the run's execution block and the tasks
-    // the host executes, prompts inline. Only on a run whose manifest has an
-    // execution block (host mode, or a `cli` run with the host fallback), so a
-    // plain `cli` run's status reads exactly as before.
+    // Host execution mode (0.23.0): the run's execution block (host mode, or
+    // a `cli` run with the host fallback) and the tasks the host executes,
+    // prompts inline. `pending_tasks` is there only while a task waits, as in
+    // `run_wait` and `supervisor_wait_event`, so a `cli` run's status reads
+    // as before whenever nothing fell back to the host.
     let execution = run_execution(&dir);
     if !execution.is_null() {
-        out["pending_tasks"] = json!(
-            progress
-                .map(|p| p.pending_tasks.clone())
-                .unwrap_or_default()
-        );
         out["execution"] = execution;
+    }
+    if let Some(p) = progress.filter(|p| !p.pending_tasks.is_empty()) {
+        out["pending_tasks"] = json!(p.pending_tasks);
     }
     add_journal_extras(&mut out, &view);
     add_outcome_blocks(&mut out, &view, &dir);

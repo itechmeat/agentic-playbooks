@@ -296,8 +296,10 @@ its own subagents. `run_wait` returns `needs: host_task` with
 report contract, `role_prompt`, `skills`, `workdir`, `env`, `outputs`,
 `deadline`, `model_hint`, `requested_at`); the session runs each with a
 subagent and submits its final reply with `run_task_submit`, then waits
-again. `run_status` carries `pending_tasks` and the run's `execution`
-block (both absent on a plain `cli` run), and `supervisor_wait_event` returns
+again. `run_status` carries the run's `execution` block (absent on a `cli`
+run started without the host fallback) and `pending_tasks` only while a task
+waits (absent, never null or empty, in `run_status`, `run_wait` and
+`supervisor_wait_event` alike), and `supervisor_wait_event` returns
 `reason: host_task` with `pending_tasks` for a session that supervises its
 own run. The TIER0 instructions carry none of this (their byte budget is
 spent, and a test pins them byte for byte); the protocol lives in the tool

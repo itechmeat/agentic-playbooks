@@ -683,6 +683,10 @@ fn supervisor_wait_event_returns_a_cursor_and_clips_huge_details() {
     assert!(kept.len() < 17 * 1024, "kept {} bytes", kept.len());
     assert!(kept.ends_with("FATAL: the real error"));
 
+    // A plain run has no host tasks: the key is absent, not null, as in
+    // `run_status`.
+    assert!(out.get("pending_tasks").is_none(), "{out}");
+
     let out = supervisor_wait_event(dir.path(), "big", Some(wake.seq), Some(2_000)).unwrap();
     assert_eq!(out["reason"], "ended");
     assert!(out["wake"].is_null());
@@ -771,4 +775,9 @@ fn supervisor_wait_event_surfaces_a_host_task_of_the_supervised_run() {
     .unwrap();
     assert_eq!(submitted["node"], "work");
     wait_for_status(dir.path(), &run_id, "succeeded");
+    // With nothing left to do, the host run's status keeps its execution
+    // block but carries no `pending_tasks`, the same as `run_wait`.
+    let status = apb_mcp::tools::run_status(dir.path(), &run_id).unwrap();
+    assert_eq!(status["execution"]["mode"], "host", "{status}");
+    assert!(status.get("pending_tasks").is_none(), "{status}");
 }
