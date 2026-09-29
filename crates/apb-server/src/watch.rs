@@ -1,5 +1,5 @@
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use notify::event::{AccessKind, AccessMode, EventKind};
@@ -86,7 +86,7 @@ const CONFIG_CHANGED: &str = r#"{"type":"config_changed"}"#;
 /// The message for an event under the global config dir `cfg`, or `None`
 /// when it touches nothing the dashboard shows (the server's own lock,
 /// `projects.json`, detection caches, temp files of an atomic write).
-fn config_message(event: &Event, cfg: &std::path::Path) -> Option<&'static str> {
+fn config_message(event: &Event, cfg: &Path) -> Option<&'static str> {
     let relevant = event.paths.iter().any(|p| {
         let Ok(rel) = p.strip_prefix(cfg) else {
             return false;
@@ -107,6 +107,26 @@ fn config_message(event: &Event, cfg: &std::path::Path) -> Option<&'static str> 
         }
     });
     relevant.then_some(CONFIG_CHANGED)
+}
+
+/// The message for an event seen by the global watcher: a config message
+/// for a path under the global config dir `cfg`, a project change message
+/// otherwise. The watch backend may report the resolved path rather than the
+/// spelling that was watched (macOS FSEvents reports `/private/var/...` for a
+/// watch on `/var/...`, and a config dir reached through a symlink resolves
+/// the same way), so both spellings of `cfg` count as the config dir.
+fn global_message(event: &Event, cfg: Option<&Path>) -> Option<&'static str> {
+    let Some(cfg) = cfg else {
+        return Some(change_message(event));
+    };
+    let canonical = std::fs::canonicalize(cfg).ok();
+    let roots = std::iter::once(cfg).chain(canonical.as_deref());
+    for root in roots {
+        if event.paths.iter().any(|p| p.starts_with(root)) {
+            return config_message(event, root);
+        }
+    }
+    Some(change_message(event))
 }
 
 /// The running global watcher. Dropping it stops the rescan thread (within
@@ -137,16 +157,9 @@ pub fn spawn_global_watcher(tx: broadcast::Sender<String>) -> notify::Result<Glo
     let mut watcher = notify::recommended_watcher(move |res: notify::Result<Event>| {
         if let Ok(event) = res
             && is_change(&event)
+            && let Some(msg) = global_message(&event, cfg_for_events.as_deref())
         {
-            let msg = match &cfg_for_events {
-                Some(c) if event.paths.iter().any(|p| p.starts_with(c)) => {
-                    config_message(&event, c)
-                }
-                _ => Some(change_message(&event)),
-            };
-            if let Some(msg) = msg {
-                let _ = tx.send(msg.to_string());
-            }
+            let _ = tx.send(msg.to_string());
         }
     })?;
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -200,4 +213,37 @@ pub fn spawn_global_watcher(tx: broadcast::Sender<String>) -> notify::Result<Glo
         }
     });
     Ok(GlobalWatcher { stop })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{CreateKind, EventKind};
+
+    fn event(path: PathBuf) -> Event {
+        Event::new(EventKind::Create(CreateKind::File)).add_path(path)
+    }
+
+    /// A config dir reached through a symlink: the backend reports the
+    /// resolved path, which must still read as a config change. This is what
+    /// macOS does for every temp dir (`/var` -> `/private/var`).
+    #[cfg(unix)]
+    #[test]
+    fn a_resolved_event_path_under_a_symlinked_config_dir_is_a_config_change() {
+        let real = tempfile::tempdir().unwrap();
+        let links = tempfile::tempdir().unwrap();
+        let cfg = links.path().join("apb");
+        std::os::unix::fs::symlink(real.path(), &cfg).unwrap();
+        let resolved = std::fs::canonicalize(real.path()).unwrap();
+
+        let profile = event(resolved.join("profiles/p/profile.yaml"));
+        assert_eq!(global_message(&profile, Some(&cfg)), Some(CONFIG_CHANGED));
+        let registry = event(resolved.join("projects.json"));
+        assert_eq!(global_message(&registry, Some(&cfg)), None);
+        let as_watched = event(cfg.join("trust.json"));
+        assert_eq!(
+            global_message(&as_watched, Some(&cfg)),
+            Some(CONFIG_CHANGED)
+        );
+    }
 }
