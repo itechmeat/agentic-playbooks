@@ -25,13 +25,13 @@ notify = "8.2"
 uuid = { version = "1.23.4", features = ["v4"] }
 rust-embed = "8.12"
 mime_guess = "2.0.5"
-apb-engine = { version = "0.23.0", path = "../apb-engine" }
-apb-mcp = { version = "0.23.0", path = "../apb-mcp" }
+apb-engine = { version = "0.24.0", path = "../apb-engine" }
+apb-mcp = { version = "0.24.0", path = "../apb-mcp" }
 
 [dev-dependencies]
 # The generated-TypeScript contract test (`src/ts_contract.rs`) needs the run
 # types' and the trash types' TS derives.
-apb-engine = { version = "0.23.0", path = "../apb-engine", features = ["ts"] }
+apb-engine = { version = "0.24.0", path = "../apb-engine", features = ["ts"] }
 apb-core = { path = "../apb-core", features = ["ts"] }
 ts-rs = "12"
 http-body-util = "0.1.3"
