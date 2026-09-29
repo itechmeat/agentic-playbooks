@@ -71,8 +71,10 @@ pub(crate) fn recommend(
         }
         match inherited_effects(root, run_dir, playbook) {
             // The installed connectors' flags (0.23.0): a granted
-            // `irreversible` function after the gate refuses too.
-            Some(inherited) => apb_core::validate::auto_decide_refusal_with(
+            // `irreversible` function after the gate refuses too, and so
+            // does a bound connector whose manifest no longer loads or that
+            // is not installed (its effects are unknown: fail-closed).
+            Some(inherited) => apb_core::validate::auto_decide_run_refusal(
                 playbook,
                 gate,
                 &inherited,

@@ -26,7 +26,9 @@ use crate::schema::{
 
 use connectors::check_connectors;
 use decisions::check_decision_opt_ins;
-pub use decisions::{auto_decide_refusal, auto_decide_refusal_with, downstream_nodes};
+pub use decisions::{
+    auto_decide_refusal, auto_decide_refusal_with, auto_decide_run_refusal, downstream_nodes,
+};
 use graph::{
     check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,
     check_joins, check_reachability, check_start_finish, check_unique_ids,

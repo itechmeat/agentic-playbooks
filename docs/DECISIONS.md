@@ -742,7 +742,12 @@ such a step when it declares node-level `effects: [irreversible]` (or
 `irreversible: true`, or, as the fallback, when its id, title or script path
 names a merge, push, deploy or publish. A node granted connector functions
 that are merely not `read_only` gets a V73 warning naming them, not a
-refusal. The inferred `external` effect
+refusal. A node after the gate bound to a connector whose installed manifest
+no longer loads gets a V73 warning (its effects are unknown), and at run time
+such a connector, or one bound but not installed, refuses the automatic
+decision with `enforce_refused: effects` (a `read_only` grant does not). The
+run reads the installed connectors live, not the run's frozen grant. The
+inferred `external` effect
 does not count (every playbook with an agent has it). The run re-checks the
 same rule with the declared effects of every sub-playbook it runs, at any
 depth and in any scope (resolved as the run gate resolves them), and refuses

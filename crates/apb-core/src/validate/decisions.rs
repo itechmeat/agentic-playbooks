@@ -170,6 +170,61 @@ pub fn auto_decide_refusal_with(
     (!reasons.is_empty()).then(|| reasons.join("; "))
 }
 
+/// Downstream nodes bound to a connector whose effects cannot be known: its
+/// installed manifest no longer loads (`load_error`) or, when
+/// `missing_is_unknown`, it is not installed at all. A `read_only` grant is
+/// left out: it never reaches a write function whatever the manifest says.
+/// Validation passes `false` (a context without a connector store knows
+/// nothing); the run-time check passes `true`.
+fn unknown_connector_effects(
+    playbook: &Playbook,
+    node: &str,
+    connectors: &BTreeMap<String, ConnectorFacts>,
+    missing_is_unknown: bool,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in downstream_nodes(playbook, node) {
+        let Some(n) = playbook.node(&id) else {
+            continue;
+        };
+        for b in n.kind.connector_bindings() {
+            if matches!(b.functions, crate::schema::FunctionsAllow::ReadOnly) {
+                continue;
+            }
+            let why = match connectors.get(&b.name) {
+                Some(f) if f.load_error.is_some() => "whose manifest does not load",
+                None if missing_is_unknown => "which is not installed",
+                _ => continue,
+            };
+            out.push(format!(
+                "node `{id}` after the gate binds connector `{}`, {why} (effects unknown)",
+                b.name
+            ));
+        }
+    }
+    out
+}
+
+/// The run-time refusal of an automatic decision: [`auto_decide_refusal_with`]
+/// over the installed connectors, and fail-closed on a connector bound after
+/// the gate whose effects cannot be known (its manifest does not load, or it
+/// is not installed). `auto_decide_ok: true` still overrides.
+pub fn auto_decide_run_refusal(
+    playbook: &Playbook,
+    node: &str,
+    inherited: &[Effect],
+    connectors: &BTreeMap<String, ConnectorFacts>,
+) -> Option<String> {
+    if let Some(why) = auto_decide_refusal_with(playbook, node, inherited, connectors) {
+        return Some(why);
+    }
+    if playbook.node(node)?.auto_decide_ok {
+        return None;
+    }
+    let unknown = unknown_connector_effects(playbook, node, connectors, true);
+    (!unknown.is_empty()).then(|| unknown.join("; "))
+}
+
 /// Downstream nodes granted a connector function that is not `read_only`:
 /// `(node, connector, functions)`. Not a refusal (a comment on a tracker is
 /// not a deploy), but V73 names them so an author sees what an automatic
@@ -312,6 +367,18 @@ pub(super) fn check_decision_opt_ins(
                             ),
                         );
                     } else if !n.auto_decide_ok {
+                        let unknown =
+                            unknown_connector_effects(playbook, &n.id, &ctx.connectors, false);
+                        if !unknown.is_empty() {
+                            r.warn(
+                                "V73",
+                                id,
+                                format!(
+                                    "`auto_decide` cannot tell what nodes after the gate may do: {}; a run refuses the automatic decision until the manifest loads again",
+                                    unknown.join("; ")
+                                ),
+                            );
+                        }
                         let writes = downstream_writes(playbook, &n.id, &ctx.connectors);
                         if !writes.is_empty() {
                             r.warn(
@@ -370,6 +437,7 @@ pub(super) fn check_decision_opt_ins(
 #[cfg(test)]
 mod tests {
     use super::super::{Severity, ValidationContext, validate};
+    use super::auto_decide_run_refusal;
     use crate::schema::Playbook;
     use std::collections::BTreeMap;
 
@@ -512,6 +580,49 @@ mod tests {
 
         let overridden = all.replace(AUTO, &format!("{AUTO}, auto_decide_ok: true"));
         assert!(issues_with(&overridden, &tracker()).is_empty());
+    }
+
+    /// A connector bound after the gate whose manifest no longer loads (or
+    /// that is not installed at run time) has unknown effects: the run
+    /// refuses the automatic decision, validation warns. A `read_only` grant
+    /// never reaches a write function, so it stays allowed.
+    #[test]
+    fn auto_decide_is_refused_at_run_time_for_a_connector_with_unknown_effects() {
+        let broken = ValidationContext {
+            connectors: BTreeMap::from([(
+                "t".to_string(),
+                crate::connector::resolve::ConnectorFacts {
+                    load_error: Some("bad manifest".into()),
+                    ..Default::default()
+                },
+            )]),
+            ..Default::default()
+        };
+        let yaml = gate_with(", connectors: [t]", "finalize");
+        let p = Playbook::from_yaml(&yaml).unwrap();
+        let why = auto_decide_run_refusal(&p, "g", &[], &broken.connectors).unwrap();
+        assert!(
+            why.contains("`finalize`") && why.contains("effects unknown"),
+            "{why}"
+        );
+        // Not installed at run time: unknown too.
+        let why = auto_decide_run_refusal(&p, "g", &[], &BTreeMap::new()).unwrap();
+        assert!(why.contains("not installed"), "{why}");
+        let got = issues_with(&yaml, &broken);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].1, Severity::Warning);
+        assert!(got[0].2.contains("effects unknown"), "{}", got[0].2);
+        // Validation without facts knows nothing and says nothing.
+        assert!(issues_with(&yaml, &ValidationContext::default()).is_empty());
+        let read_only = gate_with(
+            ", connectors: [{ name: t, functions: read_only }]",
+            "finalize",
+        );
+        let p = Playbook::from_yaml(&read_only).unwrap();
+        assert!(auto_decide_run_refusal(&p, "g", &[], &broken.connectors).is_none());
+        let overridden = yaml.replace(AUTO, &format!("{AUTO}, auto_decide_ok: true"));
+        let p = Playbook::from_yaml(&overridden).unwrap();
+        assert!(auto_decide_run_refusal(&p, "g", &[], &broken.connectors).is_none());
     }
 
     #[test]

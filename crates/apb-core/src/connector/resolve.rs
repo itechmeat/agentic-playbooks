@@ -939,6 +939,33 @@ accounts:
         assert!(!v42.message.contains('\u{2014}'), "no em-dashes");
     }
 
+    /// V73 at run time reads these live facts: a connector bound after an
+    /// `auto_decide` gate whose manifest stopped parsing yields no
+    /// irreversible functions, so it must refuse (effects unknown) rather
+    /// than let the automatic decision through.
+    #[test]
+    fn an_unparsable_connector_after_an_auto_decide_gate_refuses_the_automatic_decision() {
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        let _guard = set_config_dir(cfg.path());
+        let dir = cfg.path().join("connectors").join("t");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("connector.yaml"),
+            "name: t\nfunctions: [unclosed\n",
+        )
+        .unwrap();
+        let pb = crate::schema::Playbook::from_yaml(
+            "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: g, type: human_review, options: [approve, needs_changes], auto_decide: { allow: [needs_changes] } }\n  - { id: finalize, type: agent_task, prompt: y, profile: m, connectors: [t] }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: g }\n  - { from: g, to: finalize }\n  - { from: finalize, to: done }\n",
+        )
+        .unwrap();
+        let facts = validation_facts();
+        assert!(facts["t"].load_error.is_some());
+        let why = crate::validate::auto_decide_run_refusal(&pb, "g", &[], &facts)
+            .expect("unknown effects refuse");
+        assert!(why.contains("effects unknown"), "{why}");
+    }
+
     #[test]
     fn all_referenced_env_names_empty_without_config_dir() {
         let _lock = crate::env_test_lock();
