@@ -176,28 +176,56 @@ fn synthetic_run(root: &Path, run_id: &str) -> EventLog {
     log
 }
 
+fn stored_beat(hb: &Path) -> Option<u128> {
+    fs::read_to_string(hb).ok()?.trim().parse().ok()
+}
+
 #[test]
 fn supervisor_wait_keeps_the_heartbeat_fresh_while_it_blocks() {
     let dir = tempfile::tempdir().unwrap();
-    let _log = synthetic_run(dir.path(), "hb");
+    let mut log = synthetic_run(dir.path(), "hb");
     let hb = dir.path().join(".apb/runs/hb/supervisor/heartbeat");
 
-    let out = wait_supervisor_event_with(
-        dir.path(),
-        "hb",
-        None,
-        Duration::from_millis(600),
-        Duration::from_millis(50),
-    )
+    // Readiness, not a wall-clock bound: the wait blocks far longer than the
+    // test needs, and the test only asks whether a newer heartbeat lands while
+    // it is still blocking. A loaded runner delays the refresh but cannot fake
+    // one, so a slow host passes and a wait that beats only on entry fails.
+    let root = dir.path().to_path_buf();
+    let waiter = std::thread::spawn(move || {
+        wait_supervisor_event_with(
+            &root,
+            "hb",
+            None,
+            Duration::from_secs(60),
+            Duration::from_millis(50),
+        )
+    });
+
+    let limit = Instant::now() + Duration::from_secs(30);
+    let entry = loop {
+        if let Some(beat) = stored_beat(&hb) {
+            break beat;
+        }
+        assert!(Instant::now() < limit, "no heartbeat on entry");
+        std::thread::sleep(Duration::from_millis(10));
+    };
+    loop {
+        if stored_beat(&hb).is_some_and(|beat| beat > entry) {
+            break;
+        }
+        assert!(!waiter.is_finished(), "the wait returned before it blocked");
+        assert!(
+            Instant::now() < limit,
+            "the heartbeat was never refreshed while the wait blocked"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    log.append(EventPayload::RunFinished {
+        outcome: "success".into(),
+    })
     .unwrap();
-    assert_eq!(out, SupervisorWait::TimedOut);
-    // The heartbeat was written during the wait, not only on entry: its age is
-    // well below the wait's own length.
-    let age = apb_engine::heartbeat_age_ms(dir.path(), "hb")
-        .unwrap()
-        .expect("heartbeat written");
-    assert!(age < 400, "heartbeat is {age} ms old");
-    assert!(hb.is_file());
+    assert_eq!(waiter.join().unwrap().unwrap(), SupervisorWait::Ended);
 }
 
 #[test]
