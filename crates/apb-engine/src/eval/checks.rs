@@ -218,14 +218,19 @@ fn goal_check(input: &CheckInput, goal: &[GoalResult], accepted: &[String]) -> O
 }
 
 /// The nodes a run visited, in order, once per execution: every
-/// `node_started`, plus a `node_finished` with no open start (a finish or
-/// start node, which the engine journals without `node_started`).
+/// `node_started`, every `review_requested` (a gate the run reached), plus
+/// a `node_finished` with no open start (a finish or start node, which the
+/// engine journals without `node_started`).
 pub fn visited(events: &[Event]) -> Vec<&str> {
     let mut open: BTreeMap<&str, usize> = BTreeMap::new();
     let mut out = Vec::new();
     for e in events {
         match &e.payload {
             EventPayload::NodeStarted { node, .. } => {
+                *open.entry(node.as_str()).or_default() += 1;
+                out.push(node.as_str());
+            }
+            EventPayload::ReviewRequested { node, .. } => {
                 *open.entry(node.as_str()).or_default() += 1;
                 out.push(node.as_str());
             }

@@ -58,7 +58,9 @@ impl ConfigKey {
             ..Default::default()
         };
         if let Ok(Some(m)) = crate::manifest::read(run_dir) {
-            for p in m.profiles.iter().filter(|p| !p.ephemeral) {
+            // An ephemeral executor's entry (`ephemeral/<node>`) still carries
+            // the node profile's SOUL and skills in its bundle digest.
+            for p in &m.profiles {
                 key.profile_bundles.insert(p.key(), p.bundle_digest.clone());
             }
             for node in m.node_bindings.keys() {

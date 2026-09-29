@@ -18,8 +18,8 @@
 //!    enters the projects registry.
 //! 3. The wait: the run is followed with the `apb wait` primitive and
 //!    stopped when it waits for a person (gates cannot be answered yet),
-//!    when its wall clock, token or cost limit is crossed, or when the
-//!    invocation budget is spent.
+//!    when its wall clock, token or cost limit is crossed; a spent
+//!    invocation budget keeps the next repetition from starting.
 //! 4. The checks (`apb_engine::eval::checks`), then the run directory moves
 //!    to `<config-dir>/evals/runs/<playbook>/<run-id>` (outside the project,
 //!    so `apb stats` never counts it) and the scratch directory is removed.
@@ -70,6 +70,8 @@ const NOT_A_SANDBOX: &str = "note: an eval run is not a sandbox: it runs in a sc
 
 /// How often the wait loop re-reads the journal for limits.
 const POLL: Duration = Duration::from_secs(2);
+/// How long a run that crossed a limit gets to finish on its own.
+const LIMIT_GRACE: Duration = Duration::from_secs(5);
 /// How long a stopped run's driver gets to exit before the tree is kept.
 const DRIVER_EXIT_WAIT: Duration = Duration::from_secs(30);
 
@@ -386,12 +388,8 @@ struct StopReason {
     limit: bool,
 }
 
-fn over_limit(
-    usage: &RepUsage,
-    limits: &core_eval::Limits,
-    spent_before: f64,
-    budget: f64,
-) -> Option<String> {
+/// A per-repetition limit the run's reported usage crossed.
+fn over_limit(usage: &RepUsage, limits: &core_eval::Limits) -> Option<String> {
     if let Some(max) = limits.max_tokens
         && usage.tokens() > max
     {
@@ -406,23 +404,18 @@ fn over_limit(
     {
         return Some(format!("limit: ${cost:.4} > max_usd {max}"));
     }
-    if spent_before + cost > budget {
-        return Some(format!(
-            "budget: ${:.4} > invocation budget {budget}",
-            spent_before + cost
-        ));
-    }
     None
 }
 
 /// Follows the run until it is terminal; stops it when it must be stopped.
-fn follow(
-    tree: &Path,
-    run_id: &str,
-    limits: &core_eval::Limits,
-    spent_before: f64,
-    budget: f64,
-) -> Option<StopReason> {
+///
+/// Usage is only known once an attempt finishes, so a limit can be crossed
+/// by up to one attempt's spend. Crossing one stops the run unless it ends
+/// within [`LIMIT_GRACE`] (the spend is already made, and stopping right
+/// before the finish node would only lose the result). The invocation
+/// budget never stops a running repetition; it keeps the next one from
+/// starting.
+fn follow(tree: &Path, run_id: &str, limits: &core_eval::Limits) -> Option<StopReason> {
     let timeout = Duration::from_secs(
         limits
             .timeout_secs()
@@ -458,13 +451,11 @@ fn follow(
             }
             Ok(_) => {
                 let events = apb_engine::run_view::read_events(&run_dir).unwrap_or_default();
-                if let Some(text) = over_limit(
-                    &RepUsage::from_events(&events),
-                    limits,
-                    spent_before,
-                    budget,
-                ) {
-                    break Some(StopReason { text, limit: true });
+                if let Some(text) = over_limit(&RepUsage::from_events(&events), limits) {
+                    match apb_engine::run_wait::wait_run(tree, run_id, LIMIT_GRACE) {
+                        Ok(r) if r.reason == WaitReason::Finished => break None,
+                        _ => break Some(StopReason { text, limit: true }),
+                    }
                 }
             }
             Err(e) => {
@@ -506,6 +497,23 @@ fn move_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::remove_dir_all(from)
 }
 
+/// Copies every file a `files` check names that exists in the tree into
+/// `<stored run>/eval-files/`, so a failed check can be read after the
+/// scratch tree is gone.
+fn keep_checked_files(case: &core_eval::EvalCase, tree: &Path, stored: &Path) {
+    for f in &case.checks.files {
+        let from = tree.join(&f.path);
+        if from.is_file() {
+            let to = stored.join("eval-files").join(&f.path);
+            if let Some(p) = to.parent()
+                && std::fs::create_dir_all(p).is_ok()
+            {
+                let _ = std::fs::copy(&from, &to);
+            }
+        }
+    }
+}
+
 struct RepContext<'a> {
     root: &'a Path,
     args: &'a EvalArgs,
@@ -516,7 +524,6 @@ struct RepContext<'a> {
     scratch: &'a Path,
     evals_home: &'a Path,
     overrides_file: Option<&'a Path>,
-    budget: f64,
 }
 
 fn error_rep(n: u32, detail: String, kept: Option<String>) -> Repetition {
@@ -541,12 +548,7 @@ fn error_rep(n: u32, detail: String, kept: Option<String>) -> Repetition {
 
 /// One repetition end to end. Returns the repetition and, when the run
 /// started, its stored run directory.
-fn run_repetition(
-    cx: &RepContext,
-    lc: &LoadedCase,
-    n: u32,
-    spent: f64,
-) -> (Repetition, Option<PathBuf>) {
+fn run_repetition(cx: &RepContext, lc: &LoadedCase, n: u32) -> (Repetition, Option<PathBuf>) {
     let rep_dir = cx.scratch.join(format!("{}-{n}", lc.case.id));
     let tree = rep_dir.join("tree");
     let fixture_commit = match materialize(
@@ -580,7 +582,7 @@ fn run_repetition(
         }
     };
     let limits = lc.case.limits.over(&cx.suite.suite.limits);
-    let stop = follow(&tree, &started.run_id, &limits, spent, cx.budget);
+    let stop = follow(&tree, &started.run_id, &limits);
     let run_dir = tree.join(".apb/runs").join(&started.run_id);
     let clean = driver_gone(&run_dir, &started.run_id);
     let events = apb_engine::run_view::read_events(&run_dir).unwrap_or_default();
@@ -615,6 +617,9 @@ fn run_repetition(
         .join(&cx.args.id)
         .join(&started.run_id);
     let moved = move_dir(&run_dir, &stored).is_ok();
+    if moved {
+        keep_checked_files(&lc.case, &tree, &stored);
+    }
     let kept = if clean {
         let _ = std::fs::remove_dir_all(&rep_dir);
         None
@@ -921,7 +926,6 @@ fn run_eval(
         scratch,
         evals_home,
         overrides_file: overrides_file.as_deref(),
-        budget,
     };
     let started_at_ms = apb_core::clock::now_ms();
     let mut spent = 0.0_f64;
@@ -947,7 +951,7 @@ fn run_eval(
             if !args.json {
                 eprintln!("running {} #{n}", lc.case.id);
             }
-            let (rep, stored) = run_repetition(&cx, lc, n, spent);
+            let (rep, stored) = run_repetition(&cx, lc, n);
             spent += rep.usage.cost_usd.unwrap_or(0.0);
             tokens += rep.usage.tokens();
             if key.is_none()
@@ -959,14 +963,6 @@ fn run_eval(
                     &events,
                     overrides_digest(overrides),
                 ));
-            }
-            if rep.verdict == "incomplete"
-                && rep
-                    .stopped
-                    .as_deref()
-                    .is_some_and(|s| s.starts_with("budget"))
-            {
-                incomplete = rep.stopped.clone();
             }
             reps.push(rep);
         }
