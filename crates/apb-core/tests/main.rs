@@ -77,6 +77,8 @@ mod validate_inbox_test;
 mod validate_node_io_test;
 #[path = "suite/validate_profiles_test.rs"]
 mod validate_profiles_test;
+#[path = "suite/validate_protect_test.rs"]
+mod validate_protect_test;
 #[path = "suite/validate_semantics_test.rs"]
 mod validate_semantics_test;
 #[path = "suite/validate_structure_test.rs"]

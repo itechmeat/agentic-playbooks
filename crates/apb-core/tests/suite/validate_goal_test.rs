@@ -105,3 +105,32 @@ fn v41_script_check_absolute_path_fails() {
     );
     assert!(error_codes(&yaml).contains(&"V41"));
 }
+
+fn warning_codes(yaml: &str) -> Vec<&'static str> {
+    let playbook = Playbook::from_yaml(yaml).unwrap();
+    validate(&playbook, &ctx())
+        .issues
+        .iter()
+        .filter(|i| i.severity == Severity::Warning)
+        .map(|i| i.code)
+        .collect()
+}
+
+/// `enforce` acts on script and marker criteria only: with manual ones
+/// alone it can never fail a run, which V41 warns about.
+#[test]
+fn v41_warns_when_enforce_has_only_manual_criteria() {
+    let manual = with_goal(
+        "goal:\n  statement: the invoice is recorded\n  enforce: true\n  criteria:\n    - description: a person checks the sheet\n",
+    );
+    assert!(warning_codes(&manual).contains(&"V41"));
+    assert!(!error_codes(&manual).contains(&"V41"));
+    let marker = with_goal(
+        "goal:\n  statement: the invoice is recorded\n  enforce: true\n  criteria:\n    - description: a person checks the sheet\n    - { description: it says so, check: { type: marker, marker: RECORDED } }\n",
+    );
+    assert!(!warning_codes(&marker).contains(&"V41"));
+    let reported = with_goal(
+        "goal:\n  statement: the invoice is recorded\n  criteria:\n    - description: a person checks the sheet\n",
+    );
+    assert!(!warning_codes(&reported).contains(&"V41"));
+}

@@ -317,6 +317,21 @@ pub struct GroupReport {
     pub eligible: bool,
     pub eligibility: Vec<String>,
     pub notes: Vec<String>,
+    /// Labelled decisions whose answer the labelling person saw (an
+    /// advisory review recommendation), kept out of every figure above:
+    /// agreement with a recommendation one was shown is a biased label.
+    /// Absent for uses without such decisions (0.23.0, C9).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shown_to_reviewer: Option<ShownLabels>,
+}
+
+/// The labels of decisions shown to the person who labelled them.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ShownLabels {
+    pub labelled: usize,
+    /// The person chose what the model recommended.
+    pub agreed: usize,
+    pub agreement: Option<f64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
@@ -491,8 +506,11 @@ fn group_report(
         input.records.iter().filter(|(r, _)| r.answered()).collect();
     let mut unlabelled = BTreeMap::new();
     let mut items = Vec::new();
+    // Labels a person gave after seeing the answer (C9): counted apart.
+    let mut shown: Vec<bool> = Vec::new();
     for (r, label) in &answered {
         match act_of(label) {
+            Some(act) if l.shown_to_labeller(r) => shown.push(act),
             Some(act) => items.push(Item { r, act }),
             None => {
                 if let Label::Unlabelled(why) = label {
@@ -626,6 +644,14 @@ fn group_report(
         eligible,
         eligibility,
         notes,
+        shown_to_reviewer: (!shown.is_empty()).then(|| {
+            let agreed = shown.iter().filter(|a| **a).count();
+            ShownLabels {
+                labelled: shown.len(),
+                agreed,
+                agreement: rate(agreed, shown.len()),
+            }
+        }),
     }
 }
 

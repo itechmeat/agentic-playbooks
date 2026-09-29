@@ -66,6 +66,8 @@ mod run_wait_cli_test;
 mod runs_detail_cli_test;
 #[path = "suite/server_key_cli_test.rs"]
 mod server_key_cli_test;
+#[path = "suite/stats_cli_test.rs"]
+mod stats_cli_test;
 #[cfg(unix)]
 #[path = "suite/stdio_profile_e2e_test.rs"]
 mod stdio_profile_e2e_test;

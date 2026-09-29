@@ -148,6 +148,8 @@ mod finish_context_test;
 mod global_config_test;
 #[path = "suite/global_scope_run_test.rs"]
 mod global_scope_run_test;
+#[path = "suite/goal_criteria_test.rs"]
+mod goal_criteria_test;
 #[path = "suite/heartbeat_lost_test.rs"]
 mod heartbeat_lost_test;
 #[path = "suite/inspect_wait_test.rs"]
@@ -202,9 +204,11 @@ mod process_group_test;
 mod profile_run_test;
 #[path = "suite/progress_api_test.rs"]
 mod progress_api_test;
-#[cfg(unix)]
 #[path = "suite/prompt_cache_test.rs"]
 mod prompt_cache_test;
+#[cfg(unix)]
+#[path = "suite/protect_test.rs"]
+mod protect_test;
 #[path = "suite/question_channel_test.rs"]
 mod question_channel_test;
 #[cfg(unix)]
@@ -225,6 +229,8 @@ mod retry_test;
 mod review_state_test;
 #[path = "suite/review_test.rs"]
 mod review_test;
+#[path = "suite/run_provenance_test.rs"]
+mod run_provenance_test;
 #[path = "suite/run_wait_test.rs"]
 mod run_wait_test;
 #[path = "suite/runner_registry_test.rs"]

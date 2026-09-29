@@ -295,11 +295,17 @@ fn observe_control(
 /// agent process died (spec 2026-08-05 section 2.1). A recovered verdict
 /// therefore does NOT bypass the gate.
 fn success_check_rejection(
+    protect_violation: Option<&str>,
     check: Option<&apb_core::schema::SuccessCheck>,
     run_dir: &Path,
     attempt_workdir: &Path,
     output: &str,
 ) -> Result<Option<String>, EngineError> {
+    // A protected file the attempt changed (C6) rejects the report before
+    // any check runs: the check would judge a tree the engine just restored.
+    if let Some(reason) = protect_violation {
+        return Ok(Some(reason.to_string()));
+    }
     match check {
         // Deterministic sh-script check (spec 6.2): a non-zero exit rejects the
         // report regardless of the agent's self-assessment. Run in the SAME
@@ -609,8 +615,64 @@ fn journal_missing_inputs(
     )
 }
 
+// --- 0.23.0 run provenance (C7) ----------------------------------------------
+
+/// Executes one node: [`execute_node_kind`] plus the provenance record of a
+/// git tree's `HEAD` around it (see [`super::provenance`]). A suspended node
+/// (an interactive question) records nothing yet; its answer round does.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
+    playbook: &Playbook,
+    run_dir: &Path,
+    workdir: &Path,
+    node_id: &str,
+    run_id: &str,
+    state: &RunState,
+    cfg: &RunConfig,
+    override_prompt: Option<String>,
+    cancel: &AtomicBool,
+    env_scrub: &[String],
+    journal: &Journal,
+    decisions: Option<&crate::decision::DecisionRunner>,
+    resume: Option<ResumeContext>,
+    live: Option<LiveContext>,
+) -> Result<AttemptOutcome, EngineError> {
+    let tracker = super::provenance::Tracker::start(playbook, node_id, workdir, |t| {
+        render_node_prompt(
+            run_dir,
+            run_id,
+            state,
+            cfg,
+            t,
+            &playbook.context_budget(node_id),
+        )
+    });
+    let outcome = execute_node_kind(
+        playbook,
+        run_dir,
+        workdir,
+        node_id,
+        run_id,
+        state,
+        cfg,
+        override_prompt,
+        cancel,
+        env_scrub,
+        journal,
+        decisions,
+        resume,
+        live,
+    )?;
+    if let (Some(t), AttemptOutcome::Finished { .. }) = (tracker, &outcome) {
+        t.finish(journal)?;
+    }
+    Ok(outcome)
+}
+
+// --- end of run provenance ----------------------------------------------------
+
+#[allow(clippy::too_many_arguments)]
+fn execute_node_kind(
     playbook: &Playbook,
     run_dir: &Path,
     workdir: &Path,
@@ -1549,6 +1611,15 @@ pub(crate) fn execute_node(
                         on_poll: &on_control_poll,
                         interrupt: &interrupt,
                     };
+                    // --- 0.23.0 protected paths (C6): the files as they were
+                    // before this attempt. ---
+                    let protect_snapshot = super::protect::Snapshot::take(
+                        run_dir,
+                        node_id,
+                        attempt,
+                        &node_dir,
+                        node.kind.protect_globs(),
+                    )?;
                     let mut outcome = adapter.run_cancellable(
                         &task,
                         cancel,
@@ -1580,6 +1651,12 @@ pub(crate) fn execute_node(
                             attempt,
                         })?;
                     }
+                    // --- 0.23.0 protected paths (C6): undo and name any change
+                    // to a protected file before anything else reads the tree. ---
+                    let protect_violation = match protect_snapshot {
+                        Some(snapshot) => snapshot.check_and_restore(journal)?,
+                        None => None,
+                    };
                     // Question-timeout-without-default (spec 2026-07-20, Task 11
                     // fix): the adapter tore the agent down on the abort flag.
                     // Fail this attempt with the node-named message, journaling
@@ -1805,6 +1882,7 @@ pub(crate) fn execute_node(
                                 // branch was not cancelled) - we do not propagate
                                 // cancellation here.
                                 let rejection = success_check_rejection(
+                                    protect_violation.as_deref(),
                                     node.success_check.as_ref(),
                                     run_dir,
                                     &attempt_workdir,
@@ -2028,6 +2106,7 @@ pub(crate) fn execute_node(
                                     // consumes a retry with the discarded text
                                     // preserved (S3 behavior).
                                     match success_check_rejection(
+                                        protect_violation.as_deref(),
                                         node.success_check.as_ref(),
                                         run_dir,
                                         &attempt_workdir,
@@ -2368,7 +2447,15 @@ pub(crate) fn execute_node(
             // Pass through cancel: in a parallel batch (join:any) the winning
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
-            let r = run_script(run_dir, workdir, script, runner, timeout, Some(cancel))?;
+            let r = crate::script::run_script_with_env(
+                run_dir,
+                workdir,
+                script,
+                runner,
+                timeout,
+                Some(cancel),
+                &crate::script::run_env(run_dir, Some(node_id)),
+            )?;
             // A killed script's captured stdout is whatever it happened to
             // print before the signal landed (often nothing at all), not the
             // stable "cancelled" text the agent_task cancel paths already

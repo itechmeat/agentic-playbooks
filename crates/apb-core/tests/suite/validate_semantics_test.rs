@@ -298,11 +298,23 @@ fn v13_message_includes_variable_and_known_namespaces() {
             "known namespaces: params.*, nodes.<id>.output, nodes.<id>.report, \
              nodes.<id>.output.<field>, nodes.<id>.report.<field>, nodes.<id>.review_note, \
              nodes.<id>.review_decision, nodes.<id>.rejected_output, run.instruction, \
-             run.context, run.hooks.*"
+             run.context, run.id, run.hooks.*"
         ),
         "message must carry the exact known-namespaces suffix: {}",
         issue.message
     );
+}
+
+/// `{{run.id}}` (C7) names the run and resolves anywhere a prompt renders.
+#[test]
+fn v13_resolves_the_run_id() {
+    let with_id = VALID.replace("{{params.task}}", "{{run.id}}");
+    assert!(
+        !error_codes(&with_id).contains(&"V13"),
+        "{{{{run.id}}}} must resolve"
+    );
+    let typo = VALID.replace("{{params.task}}", "{{run.ids}}");
+    assert!(error_codes(&typo).contains(&"V13"));
 }
 
 const PARENT_WITH_INSTRUCTION: &str = "schema: 2\nid: parent\nname: parent\nversion: 1.0.0\n\

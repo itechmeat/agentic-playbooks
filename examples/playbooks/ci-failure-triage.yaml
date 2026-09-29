@@ -1,0 +1,57 @@
+schema: 2
+id: ci-failure-triage
+name: CI failure triage
+description: >-
+  Read a failed build's log and reduce it to a three-field summary: what
+  failed, the most likely cause, and the next action. Read-only: the agent
+  reads the log and the source tree and changes nothing. Meant to run in
+  CI after a failed job (see docs/CI.md), with the log saved to a file in
+  the working tree.
+version: 1.0.0
+params:
+  - { name: log_path, type: text, label: "Path of the build log, relative to the working tree" }
+defaults:
+  profile: main
+trigger:
+  when:
+    - a CI job failed and its log needs a short triage
+  avoid_when:
+    - the job passed
+    - the fix itself is wanted
+  examples:
+    - Triage the failed build log in build.log
+effects: [fs_read]
+goal:
+  statement: >-
+    A person reading only the summary knows which step failed, why, and
+    what to do next, without opening the log.
+  criteria:
+    - description: The summary names the failing step
+      check: { type: marker, marker: '"failing_step"' }
+    - description: The summary proposes a next action
+      check: { type: marker, marker: '"next_action"' }
+    - description: The cause is the first real error in the log, not a later symptom
+      check: { type: manual }
+nodes:
+  - { id: start, type: start }
+  - id: triage
+    type: agent_task
+    title: Triage the build log
+    expected_duration: 3m
+    prompt: >-
+      Read the build log at {{params.log_path}}. Do not modify, create or
+      delete any file. Find the first error that caused the failure
+      (earlier than any cascade of follow-up errors) and look at the source
+      it points to if that helps. Reply with one JSON object with exactly
+      three one-line string fields: `failing_step` (the job step or test
+      that failed), `likely_cause` (the most likely cause, citing the log
+      line) and `next_action` (the one next action a developer should
+      take). Your own outcome is a success once the summary is written:
+      the failed build is your input, not your result.
+    outputs:
+      fields: [failing_step, likely_cause, next_action]
+    success_check: { marker: '"likely_cause"' }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: triage }
+  - { from: triage, to: done }

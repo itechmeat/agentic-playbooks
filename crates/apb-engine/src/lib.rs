@@ -23,6 +23,10 @@ pub mod review;
 pub mod run_config;
 pub mod run_doctor;
 mod run_lineage;
+pub mod run_outcome;
+// --- 0.23.0 stats (C3) ---
+pub mod run_stats;
+// --- end of 0.23.0 stats ---
 pub mod run_view;
 pub mod run_wait;
 pub mod scheduler;

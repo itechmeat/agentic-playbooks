@@ -148,9 +148,10 @@ pub struct Requires {
     pub commands: Vec<String>,
 }
 
-/// How a goal criterion is verified after a run (spec 2026-08-15).
-/// `Script` execution is not wired into run verdicts yet; the variant
-/// records the contract for later engine work.
+/// How a goal criterion is verified after a run (spec 2026-08-15). The
+/// engine checks `Script` and `Marker` when the run reaches a finish node,
+/// after every earlier node and the finish answer, and journals one
+/// `goal_checked` per criterion; `Manual` stays a checklist for a person.
 #[derive(Debug, Clone, Default, PartialEq, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum GoalCheck {
@@ -178,6 +179,11 @@ pub struct Goal {
     pub statement: String,
     #[serde(default)]
     pub criteria: Vec<GoalCriterion>,
+    /// Opt-in: a failed `script` or `marker` criterion fails a run that
+    /// would otherwise succeed. Default `false`: the criteria are reported
+    /// only.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub enforce: bool,
 }
 
 /// Class of a run effect (spec 8.5). Ord/Hash - so it can be put into a
@@ -526,6 +532,15 @@ impl NodeKind {
     pub fn connector_bindings(&self) -> &[ConnectorBinding] {
         match self {
             NodeKind::AgentTask { connectors, .. } => connectors,
+            _ => &[],
+        }
+    }
+
+    /// The `protect` globs of an `agent_task` (C6), empty for every other
+    /// kind.
+    pub fn protect_globs(&self) -> &[String] {
+        match self {
+            NodeKind::AgentTask { protect, .. } => protect,
             _ => &[],
         }
     }
@@ -935,6 +950,13 @@ pub struct Node {
     pub id: String,
     #[serde(default)]
     pub title: Option<String>,
+    /// Effects this node declares (0.23.0), for example `[irreversible]` on
+    /// a merge, deploy or publish step. Like the playbook's `effects` they
+    /// only widen: they join the playbook's effective effects, and a node
+    /// declaring `irreversible` or `secrets` after a `human_review` gate
+    /// refuses the gate's `auto_decide` (V73) whatever the node is called.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub effects: Vec<Effect>,
     /// Estimated time of ONE execution (spec 2026-07-17). Absent -> the per-kind
     /// default (see `expected_seconds`). Additive to schema 2; no migration.
     #[serde(default)]
@@ -1178,6 +1200,15 @@ pub enum NodeKind {
         /// node starts cold, as without the field.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         continue_session: Option<String>,
+        /// Protected paths (C6): globs, relative to the node's working
+        /// directory, of files an attempt must not change. The engine
+        /// snapshots the matching files before every attempt and compares
+        /// them after it; a change fails the attempt with `protected path
+        /// modified: <path>` (a normal retry) and the files are restored from
+        /// the snapshot before anything else runs. Paths git ignores are not
+        /// covered. Empty (the default) checks nothing.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        protect: Vec<String>,
     },
     Script {
         script: String,

@@ -10,7 +10,9 @@
 //! rule with the effects of pinned sub-playbooks (see
 //! [`auto_decide_refusal`]).
 
-use std::collections::{BTreeSet, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
+
+use crate::connector::resolve::ConnectorFacts;
 
 use super::*;
 use crate::schema::{
@@ -57,11 +59,85 @@ pub fn downstream_nodes(playbook: &Playbook, from: &str) -> BTreeSet<String> {
 /// allowed: declared `irreversible` or `secrets` effects (the playbook's own
 /// plus `inherited`, the pinned sub-playbooks' declared effects the run
 /// knows), or a merge, push, deploy or publish step downstream of the gate.
-/// `auto_decide_ok: true` on the gate overrides both.
+/// `auto_decide_ok: true` on the gate overrides both. The installed
+/// connectors are not consulted here; [`auto_decide_refusal_with`] does.
 pub fn auto_decide_refusal(
     playbook: &Playbook,
     node: &str,
     inherited: &[Effect],
+) -> Option<String> {
+    auto_decide_refusal_with(playbook, node, inherited, &BTreeMap::new())
+}
+
+// --- 0.23.0 V73 by declared effects ---------------------------------------------
+
+/// The functions of `facts` a binding grants, among `names`.
+fn granted<'a>(binding: &crate::schema::ConnectorBinding, names: &'a [String]) -> Vec<&'a String> {
+    use crate::schema::FunctionsAllow;
+    match &binding.functions {
+        FunctionsAllow::All => names.iter().collect(),
+        // A `read_only` grant never reaches a write function.
+        FunctionsAllow::ReadOnly => Vec::new(),
+        FunctionsAllow::List(list) => names.iter().filter(|n| list.contains(n)).collect(),
+    }
+}
+
+/// Why node `n` counts as a step that ships something out of reach of a
+/// later correction, strongest evidence first: its own declared
+/// `irreversible` or `secrets` effects, a granted connector function flagged
+/// `irreversible`, then the name heuristic ([`ships`]) as the fallback.
+fn shipping_reason(
+    n: &crate::schema::Node,
+    connectors: &BTreeMap<String, ConnectorFacts>,
+) -> Option<String> {
+    let declared: Vec<&str> = n
+        .effects
+        .iter()
+        .filter_map(|e| match e {
+            Effect::Irreversible => Some("irreversible"),
+            Effect::Secrets => Some("secrets"),
+            _ => None,
+        })
+        .collect();
+    if !declared.is_empty() {
+        return Some(format!(
+            "node `{}` after the gate declares {} effects",
+            n.id,
+            declared.join(" and ")
+        ));
+    }
+    for b in n.kind.connector_bindings() {
+        let Some(facts) = connectors.get(&b.name) else {
+            continue;
+        };
+        let fns = granted(b, &facts.irreversible_functions);
+        if !fns.is_empty() {
+            return Some(format!(
+                "node `{}` after the gate may call irreversible {} function(s) {}",
+                n.id,
+                b.name,
+                fns.iter()
+                    .map(|f| format!("`{f}`"))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+        }
+    }
+    ships(n).then(|| {
+        format!(
+            "node `{}` after the gate looks like a merge, push, deploy or publish step",
+            n.id
+        )
+    })
+}
+
+/// [`auto_decide_refusal`] that also honours the connector functions a
+/// downstream node is granted, from the installed connectors' `facts`.
+pub fn auto_decide_refusal_with(
+    playbook: &Playbook,
+    node: &str,
+    inherited: &[Effect],
+    connectors: &BTreeMap<String, ConnectorFacts>,
 ) -> Option<String> {
     let gate = playbook.node(node)?;
     if gate.auto_decide_ok {
@@ -83,25 +159,59 @@ pub fn auto_decide_refusal(
             dangerous.into_iter().collect::<Vec<_>>().join(" and ")
         ));
     }
-    let shipping: Vec<String> = downstream_nodes(playbook, node)
+    let reasons: Vec<String> = downstream_nodes(playbook, node)
         .into_iter()
-        .filter(|id| playbook.node(id).is_some_and(ships))
+        .filter_map(|id| {
+            playbook
+                .node(&id)
+                .and_then(|n| shipping_reason(n, connectors))
+        })
         .collect();
-    if !shipping.is_empty() {
-        return Some(format!(
-            "node(s) {} after the gate look like a merge, push, deploy or publish step",
-            shipping
-                .iter()
-                .map(|s| format!("`{s}`"))
-                .collect::<Vec<_>>()
-                .join(", ")
-        ));
-    }
-    None
+    (!reasons.is_empty()).then(|| reasons.join("; "))
 }
 
+/// Downstream nodes granted a connector function that is not `read_only`:
+/// `(node, connector, functions)`. Not a refusal (a comment on a tracker is
+/// not a deploy), but V73 names them so an author sees what an automatic
+/// decision would let through.
+fn downstream_writes(
+    playbook: &Playbook,
+    node: &str,
+    connectors: &BTreeMap<String, ConnectorFacts>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for id in downstream_nodes(playbook, node) {
+        let Some(n) = playbook.node(&id) else {
+            continue;
+        };
+        for b in n.kind.connector_bindings() {
+            let Some(facts) = connectors.get(&b.name) else {
+                continue;
+            };
+            let fns = granted(b, &facts.write_functions);
+            if !fns.is_empty() {
+                out.push(format!(
+                    "`{id}` ({} {})",
+                    b.name,
+                    fns.iter()
+                        .map(|f| f.as_str())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ));
+            }
+        }
+    }
+    out
+}
+
+// --- end of V73 by declared effects ----------------------------------------------
+
 /// V70-V74.
-pub(super) fn check_decision_opt_ins(playbook: &Playbook, r: &mut ValidationReport) {
+pub(super) fn check_decision_opt_ins(
+    playbook: &Playbook,
+    ctx: &ValidationContext,
+    r: &mut ValidationReport,
+) {
     let mut enforce_uses: Vec<&'static str> = Vec::new();
     for n in &playbook.nodes {
         let id = Some(n.id.as_str());
@@ -191,7 +301,9 @@ pub(super) fn check_decision_opt_ins(playbook: &Playbook, r: &mut ValidationRepo
                             "`auto_decide.min_confidence` must be in (0, 1]".into(),
                         );
                     }
-                    if let Some(why) = auto_decide_refusal(playbook, &n.id, &[]) {
+                    if let Some(why) =
+                        auto_decide_refusal_with(playbook, &n.id, &[], &ctx.connectors)
+                    {
                         r.error(
                             "V73",
                             id,
@@ -199,6 +311,18 @@ pub(super) fn check_decision_opt_ins(playbook: &Playbook, r: &mut ValidationRepo
                                 "`auto_decide` is refused: {why}; an automatic decision must not remove this approval boundary (set `auto_decide_ok: true` to override)"
                             ),
                         );
+                    } else if !n.auto_decide_ok {
+                        let writes = downstream_writes(playbook, &n.id, &ctx.connectors);
+                        if !writes.is_empty() {
+                            r.warn(
+                                "V73",
+                                id,
+                                format!(
+                                    "`auto_decide` lets nodes after the gate write through connectors: {}; flag a function that cannot be taken back `irreversible: true` in its connector, or declare `effects: [irreversible]` on the node, to keep a person at this gate",
+                                    writes.join(", ")
+                                ),
+                            );
+                        }
                     }
                     enforce_uses.push("review_triage");
                 }
@@ -247,6 +371,7 @@ pub(super) fn check_decision_opt_ins(playbook: &Playbook, r: &mut ValidationRepo
 mod tests {
     use super::super::{Severity, ValidationContext, validate};
     use crate::schema::Playbook;
+    use std::collections::BTreeMap;
 
     fn issues(yaml: &str) -> Vec<(String, Severity)> {
         let p = Playbook::from_yaml(yaml).unwrap();
@@ -299,6 +424,94 @@ mod tests {
             "merge",
         ));
         assert!(!got.iter().any(|(c, _)| c == "V73"), "{got:?}");
+    }
+
+    /// The downstream node, by its `after` id with extra fields.
+    fn gate_with(extra_after: &str, after: &str) -> String {
+        gate(AUTO, "", after).replace(
+            &format!("{{ id: {after}, type: agent_task, prompt: y, profile: m }}"),
+            &format!("{{ id: {after}, type: agent_task, prompt: y, profile: m{extra_after} }}"),
+        )
+    }
+
+    fn issues_with(yaml: &str, ctx: &ValidationContext) -> Vec<(String, Severity, String)> {
+        let p = Playbook::from_yaml(yaml).unwrap();
+        validate(&p, ctx)
+            .issues
+            .into_iter()
+            .filter(|i| i.code == "V73")
+            .map(|i| (i.code.to_string(), i.severity, i.message))
+            .collect()
+    }
+
+    fn tracker() -> ValidationContext {
+        let facts = crate::connector::resolve::ConnectorFacts {
+            irreversible_functions: vec!["merge_request".into()],
+            write_functions: vec!["merge_request".into(), "add_comment".into()],
+            ..Default::default()
+        };
+        ValidationContext {
+            connectors: BTreeMap::from([("tracker".to_string(), facts)]),
+            ..Default::default()
+        }
+    }
+
+    /// V73 honours what a node declares, not only what it is called: a
+    /// neutral id with `effects: [irreversible]` refuses, and so does a
+    /// granted connector function flagged `irreversible`; a `read_only`
+    /// grant or a list without it does not, and a plain write function is a
+    /// warning. `auto_decide_ok` still overrides.
+    #[test]
+    fn auto_decide_is_refused_by_declared_node_effects_and_irreversible_functions() {
+        let none = ValidationContext::default();
+        let declared = gate_with(", effects: [irreversible]", "finalize");
+        let got = issues_with(&declared, &none);
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].1, Severity::Error);
+        assert!(
+            got[0]
+                .2
+                .contains("`finalize` after the gate declares irreversible"),
+            "{}",
+            got[0].2
+        );
+        // A neutral name without a declaration stays allowed.
+        assert!(issues_with(&gate_with("", "finalize"), &none).is_empty());
+
+        let all = gate_with(", connectors: [tracker]", "finalize");
+        let got = issues_with(&all, &tracker());
+        assert_eq!(got[0].1, Severity::Error, "{got:?}");
+        assert!(
+            got[0]
+                .2
+                .contains("irreversible tracker function(s) `merge_request`"),
+            "{}",
+            got[0].2
+        );
+        // Without the installed connector's facts nothing is known.
+        assert!(issues_with(&all, &none).is_empty());
+
+        let read_only = gate_with(
+            ", connectors: [{ name: tracker, functions: read_only }]",
+            "finalize",
+        );
+        assert!(issues_with(&read_only, &tracker()).is_empty());
+
+        let comment = gate_with(
+            ", connectors: [{ name: tracker, functions: [add_comment] }]",
+            "finalize",
+        );
+        let got = issues_with(&comment, &tracker());
+        assert_eq!(got.len(), 1, "{got:?}");
+        assert_eq!(got[0].1, Severity::Warning);
+        assert!(
+            got[0].2.contains("`finalize` (tracker add_comment)"),
+            "{}",
+            got[0].2
+        );
+
+        let overridden = all.replace(AUTO, &format!("{AUTO}, auto_decide_ok: true"));
+        assert!(issues_with(&overridden, &tracker()).is_empty());
     }
 
     #[test]

@@ -311,7 +311,8 @@ impl From<(ErrorClass, String)> for AgentFailure {
 /// config (both scopes), removed from the child so a connector token can never
 /// be inherited by an agent. `run_dir`/`node_id`, when set, become the
 /// `APB_RUN_DIR`/`APB_NODE_ID` context env that `apb connector call` (a child
-/// of the agent) reads to locate the run manifest and check its grants. The
+/// of the agent) reads to locate the run manifest and check its grants, plus
+/// `APB_RUN_ID` (the run directory's name) for provenance. The
 /// default is empty: no scrub and no context env, so non-connector spawn paths
 /// are untouched.
 #[derive(Debug, Clone, Default)]
@@ -330,6 +331,11 @@ impl ConnectorEnvPolicy {
         }
         if let Some(dir) = &self.run_dir {
             cmd.env("APB_RUN_DIR", dir);
+            // The run id (C7), for an `Apb-Run:` commit trailer or a tracker
+            // record: the run directory's name is the id.
+            if let Some(id) = dir.file_name() {
+                cmd.env("APB_RUN_ID", id);
+            }
         }
         if let Some(node) = &self.node_id {
             cmd.env("APB_NODE_ID", node);

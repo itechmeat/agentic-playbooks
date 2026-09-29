@@ -96,9 +96,9 @@ pub fn connector_problems(root: &Path, playbook: &Playbook) -> Vec<String> {
 }
 
 /// Every reason [`requires_unmet`], [`connector_problems`] and
-/// [`cold_handoffs`] give for `playbook`, as `(code, message)` pairs for a
-/// report: `requires_unmet`, `requires_unsafe`, `connector_unconfigured` and
-/// `session_handoff_cold`.
+/// [`cold_handoffs`] and [`unmatched_protect_globs`] give for `playbook`, as
+/// `(code, message)` pairs for a report: `requires_unmet`, `requires_unsafe`,
+/// `connector_unconfigured`, `session_handoff_cold` and `V76`.
 pub fn findings(root: &Path, playbook: &Playbook) -> Vec<(&'static str, String)> {
     let mut out = Vec::new();
     if let Some(req) = &playbook.requires {
@@ -123,6 +123,30 @@ pub fn findings(root: &Path, playbook: &Playbook) -> Vec<(&'static str, String)>
     }
     for problem in cold_handoffs(root, playbook) {
         out.push(("session_handoff_cold", problem));
+    }
+    for problem in unmatched_protect_globs(root, playbook) {
+        out.push(("V76", problem));
+    }
+    out
+}
+
+/// V76 (C6): one line per `protect` glob that matches no file in `root`
+/// (the project tree; a node with its own `workdir` is checked against the
+/// root too, as the closest tree known before a run). Such a glob protects
+/// nothing, which is usually a typo. Invalid globs are V75's business.
+pub fn unmatched_protect_globs(root: &Path, playbook: &Playbook) -> Vec<String> {
+    let mut out = Vec::new();
+    for node in &playbook.nodes {
+        for g in node.kind.protect_globs() {
+            if let Ok(files) = crate::fingerprint::matching_files(root, std::slice::from_ref(g))
+                && files.is_empty()
+            {
+                out.push(format!(
+                    "node `{}`: protect glob `{g}` matches no file in the project, so it protects nothing",
+                    node.id
+                ));
+            }
+        }
     }
     out
 }

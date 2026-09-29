@@ -65,6 +65,40 @@ pub fn run_script(
     timeout: Option<Duration>,
     cancel: Option<&AtomicBool>,
 ) -> Result<ScriptResult, EngineError> {
+    run_script_with_env(
+        version_dir,
+        workdir,
+        script_rel,
+        runner,
+        timeout,
+        cancel,
+        &[],
+    )
+}
+
+/// The run context a script node gets (C7): `APB_RUN_DIR`, `APB_RUN_ID` and
+/// `APB_NODE_ID`, the same names an agent gets. `run_dir`'s name is the id.
+pub fn run_env(run_dir: &Path, node_id: Option<&str>) -> Vec<(&'static str, String)> {
+    let mut env = vec![("APB_RUN_DIR", run_dir.to_string_lossy().into_owned())];
+    if let Some(id) = run_dir.file_name() {
+        env.push(("APB_RUN_ID", id.to_string_lossy().into_owned()));
+    }
+    if let Some(node) = node_id {
+        env.push(("APB_NODE_ID", node.to_string()));
+    }
+    env
+}
+
+/// [`run_script`] with extra environment variables for the script.
+pub fn run_script_with_env(
+    version_dir: &Path,
+    workdir: &Path,
+    script_rel: &str,
+    runner: &str,
+    timeout: Option<Duration>,
+    cancel: Option<&AtomicBool>,
+    env: &[(&str, String)],
+) -> Result<ScriptResult, EngineError> {
     let script_path = version_dir.join(script_rel);
     if !script_path.is_file() {
         return Err(EngineError::Script(format!(
@@ -80,6 +114,9 @@ pub fn run_script(
     })?;
     let mut cmd = command_for_runtime(program, &script_path);
     cmd.current_dir(workdir);
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     let captured = run_capture(cmd, timeout, cancel)?;
     let status = match captured.status {
         // Cancellation (another join:any branch won) - neither a failure nor a timeout.

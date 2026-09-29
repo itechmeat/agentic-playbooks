@@ -4,6 +4,48 @@
 
 import type { PlaybookEdge, PlaybookNode, WfEvent, WfLayout } from './types'
 
+export type CommittedArtifact = { sha: string, subject: string, };
+
+export type NodeCommits = { node: string, 
+/**
+ * `HEAD` before the node ran.
+ */
+before: string, 
+/**
+ * `HEAD` after it.
+ */
+after: string, 
+/**
+ * Newest first, at most 50.
+ */
+commits: Array<CommittedArtifact>, 
+/**
+ * Commits past the listed ones.
+ */
+omitted: number, };
+
+export type GoalCriterionResult = { index: number, description: string, 
+/**
+ * `script`, `marker` or `manual`.
+ */
+check: string, 
+/**
+ * `passed`, `failed`, `error`, `manual` (a person confirms it), or
+ * `pending` while the run has not reached a finish node.
+ */
+status: string, detail?: string, };
+
+export type RunGoal = { statement: string, 
+/**
+ * `goal.enforce: true`: a failed script or marker criterion fails the
+ * run.
+ */
+enforce: boolean, 
+/**
+ * Whether the criteria were checked (the run reached a finish node).
+ */
+checked: boolean, criteria: Array<GoalCriterionResult>, passed: number, failed: number, manual: number, };
+
 export type RunStatus = "created" | "running" | "paused" | "succeeded" | "failed" | "aborted" | "interrupted";
 
 export type NodeStatus = "pending" | "ready" | "running" | "succeeded" | "failed" | "unknown" | "timed_out" | "interrupted" | "skipped" | "cancelled";
@@ -198,6 +240,104 @@ applied: number,
  */
 shadow_would_change: number, };
 
+export type Rate = { count: number, of: number, rate?: number, };
+
+export type PerRun = { total: number, runs: number, per_run?: number, };
+
+export type Waits = { count: number, median_ms?: number, max_ms?: number, };
+
+export type Outcomes = { succeeded: number, failed: number, aborted: number, 
+/**
+ * Still running, paused, or ended without a terminal event.
+ */
+other: number, };
+
+export type Spend = { 
+/**
+ * Runs whose attempts reported usage.
+ */
+runs_with_usage: number, 
+/**
+ * Input plus output tokens (cache reads and writes not included).
+ */
+tokens: PerRun, 
+/**
+ * Runs that reported a cost.
+ */
+runs_with_cost: number, cost_usd: number, cost_per_run_usd?: number, };
+
+export type GoalStats = { index: number, description: string, 
+/**
+ * `script`, `marker` or `manual`.
+ */
+check: string, 
+/**
+ * Runs that checked it.
+ */
+checked: number, passed: Rate, failed: number, 
+/**
+ * `error`: the check could not run.
+ */
+errors: number, manual: number, };
+
+export type NodeStats = { node: string, 
+/**
+ * Runs the node started in.
+ */
+runs: number, 
+/**
+ * Runs where the node's first result was a success on attempt 1, with
+ * no retry, fallback or later re-entry.
+ */
+first_pass: Rate, retries: number, fallbacks: number, 
+/**
+ * Starts after the first in the same run (a loop back into it).
+ */
+reentries: number, duration: Waits, 
+/**
+ * The declared `expected_duration`, in seconds.
+ */
+expected_s?: number, 
+/**
+ * Finished executions that took longer than `expected_s`.
+ */
+over_expected?: Rate, deliverable_missing: number, output_fields_missing: number, };
+
+export type VersionStats = { playbook: string, version: string, runs: number, outcomes: Outcomes, 
+/**
+ * Succeeded runs over finished runs (succeeded, failed, aborted).
+ */
+success: Rate, 
+/**
+ * Succeeded runs with no retry, fallback or loop traversal, over
+ * finished runs.
+ */
+first_pass: Rate, retries: PerRun, fallbacks: PerRun, loop_traversals: PerRun, gate_wait: Waits, question_wait: Waits, 
+/**
+ * Run start to its terminal event.
+ */
+duration: Waits, spend: Spend, deliverable_missing: number, output_fields_missing: number, 
+/**
+ * Empty when the runs checked no goal.
+ */
+goal: Array<GoalStats>, nodes: Array<NodeStats>, note?: string, };
+
+export type Comparison = { playbook: string, base: string, 
+/**
+ * `None` when no other version of the playbook has runs.
+ */
+against?: string, success_delta?: number, first_pass_delta?: number, retries_per_run_delta?: number, loops_per_run_delta?: number, median_duration_delta_ms?: number, cost_per_run_delta_usd?: number, };
+
+export type StatsReport = { runs: number, 
+/**
+ * By playbook id, then version (oldest first).
+ */
+versions: Array<VersionStats>, compare?: Comparison, 
+/**
+ * [`NO_RUNS`] when no run matched.
+ */
+note?: string, };
+
 export type UsageSource = "reported" | "estimated";
 
 export type AgentUsage = { 
@@ -279,6 +419,15 @@ model: { id: string; name: string; nodes: PlaybookNode[]; edges: PlaybookEdge[];
  * Sub-runs started by a `playbook` node, one per `ChildRunStarted`.
  */
 children: Array<ChildRun>, 
+/**
+ * The playbook's goal with each criterion's result (C1); absent for a
+ * playbook without a goal.
+ */
+goal?: RunGoal, 
+/**
+ * The commits the run's nodes made on a git tree (C7); empty when none.
+ */
+commits?: Array<NodeCommits>, 
 /**
  * Progress and every open gate (reviews, questions, waits, supervisor):
  * the run page renders its panels from this, never from `events`.

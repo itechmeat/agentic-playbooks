@@ -842,6 +842,31 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
     if let Some(d) = view.decisions() {
         println!("  decisions: {}", d.line());
     }
+    // --- 0.23.0: run outcome blocks (C1, C7) ---
+    if let Some(goal) = view.goal(&run_dir) {
+        println!("  goal: {}", goal.line());
+        for c in &goal.criteria {
+            let detail = c
+                .detail
+                .as_deref()
+                .map(|d| format!(": {d}"))
+                .unwrap_or_default();
+            println!(
+                "    [{}] {} ({}){}",
+                c.status,
+                sanitize_for_terminal(&c.description, QUESTION_TEXT_MAX),
+                c.check,
+                sanitize_for_terminal(&detail, QUESTION_TEXT_MAX)
+            );
+        }
+    }
+    for line in apb_engine::run_outcome::commit_lines(&view.commits()) {
+        println!(
+            "  commit {}",
+            sanitize_for_terminal(&line, QUESTION_TEXT_MAX)
+        );
+    }
+    // --- end of the 0.23.0 blocks ---
     if !view.unknown.is_empty() {
         println!("  {}", unknown_events_note(view.unknown.len()));
     }

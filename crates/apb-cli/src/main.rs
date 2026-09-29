@@ -9,6 +9,9 @@ mod run;
 mod selfupdate;
 mod serve;
 mod server;
+// --- 0.23.0 stats (C3) ---
+mod stats;
+// --- end of 0.23.0 stats ---
 mod suggestions;
 mod trash;
 mod trust;
@@ -235,6 +238,31 @@ enum Command {
         #[command(subcommand)]
         action: DecisionsAction,
     },
+    // --- 0.23.0 stats (C3) ---
+    /// Cross-run metrics per playbook version and node, from the run
+    /// journals only: outcome rate, first-pass success, retries, fallbacks
+    /// and loops per run, gate and question waits, durations against
+    /// expected_duration, tokens and cost, goal results. Read-only
+    Stats {
+        /// Only runs of this playbook id
+        #[arg(long)]
+        playbook: Option<String>,
+        /// Only runs started since a date (2026-09-20, UTC) or a duration
+        /// back from now (30d, 24h)
+        #[arg(long)]
+        since: Option<String>,
+        /// Compare this version with the latest other version (needs
+        /// --playbook)
+        #[arg(long, value_name = "VERSION")]
+        compare: Option<String>,
+        /// Every registered project, not only this one
+        #[arg(long)]
+        all_projects: bool,
+        /// Machine-readable output
+        #[arg(long)]
+        json: bool,
+    },
+    // --- end of 0.23.0 stats ---
     /// Inspect and manage the project-local node result cache
     Cache {
         #[command(subcommand)]
@@ -476,6 +504,22 @@ fn main() -> ExitCode {
         Some(Command::Connector { action }) => connector_cmd(&root, action),
         Some(Command::Cache { cmd }) => cache_cmd(&root, cmd),
         Some(Command::Decisions { action }) => decisions_cmd(&root, action),
+        // --- 0.23.0 stats (C3) ---
+        Some(Command::Stats {
+            playbook,
+            since,
+            compare,
+            all_projects,
+            json,
+        }) => stats::stats_cmd(
+            &root,
+            playbook,
+            since.as_deref(),
+            compare,
+            all_projects,
+            json,
+        ),
+        // --- end of 0.23.0 stats ---
         Some(Command::Migrate { apply }) => migrate_cmd(&root, apply),
         Some(Command::Detect { refresh }) => detect_cmd(refresh),
         Some(Command::Adopt { name }) => adopt_cmd(&root, name.as_deref()),

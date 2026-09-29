@@ -165,8 +165,27 @@ pub fn run_status(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "failure_reason": failure_reason,
     });
     add_journal_extras(&mut out, &view);
+    add_outcome_blocks(&mut out, &view, &dir);
     Ok(out)
 }
+
+// --- 0.23.0: run outcome blocks (C1, C7) ---
+
+/// The run's goal with the criteria results (C1) and the commits its nodes
+/// made (C7), each only when there is one: a run of a playbook without a
+/// goal on a tree without commits reads as before. Shared by `run_status`
+/// and `run_report`.
+fn add_outcome_blocks(out: &mut Value, view: &apb_engine::run_view::RunView, dir: &Path) {
+    if let Some(goal) = view.goal(dir) {
+        out["goal"] = json!(goal);
+    }
+    let commits = view.commits();
+    if !commits.is_empty() {
+        out["commits"] = json!(commits);
+    }
+}
+
+// --- end of the 0.23.0 blocks ---
 
 /// The fields a run view carries only when they apply: the token usage its
 /// attempts reported, the decision-model totals, and the note about events a newer apb wrote that this
@@ -335,6 +354,7 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         "answer": answer,
     });
     add_journal_extras(&mut base, &view);
+    add_outcome_blocks(&mut base, &view, &dir);
 
     // duration_table is always present (empty when there is no snapshot), as
     // before; it is now built from the single events read above.
@@ -349,27 +369,8 @@ pub fn run_report(root: &Path, run_id: &str) -> Result<Value, ToolError> {
         obj.insert("duration_table".into(), json!(table));
     }
 
-    // #102.2 product decision: the goal (`statement` + `criteria`) is never
-    // evaluated by the engine - no consumer checks a `marker` or `script`
-    // check against the run result. Surface it verbatim anyway, labeled as
-    // an unevaluated contract, so a supervisor reading the report can check
-    // it by hand instead of having to go find the playbook definition.
-    // Absent when the playbook snapshot has no `goal` block at all, rather
-    // than a null placeholder.
-    if let Some(goal) = pb.as_ref().and_then(|p| p.goal.as_ref()) {
-        let mut goal_json = serde_json::to_value(goal).unwrap_or(Value::Null);
-        if let Some(goal_obj) = goal_json.as_object_mut() {
-            goal_obj.insert(
-                "note".into(),
-                json!(
-                    "this goal is not evaluated by the engine: criteria are not checked against the run result. A supervisor must confirm them by hand."
-                ),
-            );
-        }
-        if let Some(obj) = base.as_object_mut() {
-            obj.insert("goal".into(), goal_json);
-        }
-    }
+    // The goal with each criterion's result (C1) is in `add_outcome_blocks`,
+    // shared with `run_status`.
 
     Ok(base)
 }
@@ -635,12 +636,10 @@ mod progress_tests {
         }
     }
 
-    /// #102.2 product decision: the goal is never evaluated by the engine, but
-    /// `run_report` surfaces it verbatim so a supervisor can check it by hand.
-    /// The report must label it as an unevaluated contract, not present it as
-    /// a verdict.
+    /// The report shows the goal with each criterion's result (C1): before
+    /// the run reached a finish node a checked criterion reads `pending`.
     #[test]
-    fn run_report_includes_goal_labeled_unevaluated() {
+    fn run_report_includes_the_goal_with_pending_criteria() {
         let tmp = tempfile::tempdir().unwrap();
         let run_dir = tmp.path().join(".apb/runs/r1");
         std::fs::create_dir_all(&run_dir).unwrap();
@@ -666,16 +665,14 @@ mod progress_tests {
             goal["statement"],
             "the invoice is filed and sent for approval"
         );
+        assert_eq!(goal["checked"], false);
         let criteria = goal["criteria"].as_array().unwrap();
         assert_eq!(
             criteria[0]["description"],
             "invoice appears in the tracking sheet"
         );
-        assert_eq!(criteria[0]["check"]["type"], "marker");
-        assert_eq!(criteria[0]["check"]["marker"], "FILED");
-        // Labeled as an unevaluated contract, not a pass/fail verdict.
-        let note = goal["note"].as_str().expect("goal note must be a string");
-        assert!(note.contains("not evaluated"));
+        assert_eq!(criteria[0]["check"], "marker");
+        assert_eq!(criteria[0]["status"], "pending");
     }
 
     /// A playbook snapshot with no `goal` block emits no `goal` key at all,

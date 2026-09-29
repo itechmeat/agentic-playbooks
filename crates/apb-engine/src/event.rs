@@ -668,6 +668,63 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         detail: Option<String>,
     },
+    // --- 0.23.0: run provenance, goal criteria, protected paths ----------
+    /// A node moved `HEAD` of the git tree it ran in (C7): the commits it
+    /// made, newest first. Written only on a git tree with a commit and only
+    /// when `HEAD` changed, just before the node's `node_finished`, so it is
+    /// safe to skip up to that checkpoint: it records history, the engine
+    /// never reads it back. `omitted` counts commits past the listed ones.
+    ArtifactsCommitted {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        before: String,
+        #[serde(default)]
+        after: String,
+        #[serde(default)]
+        commits: Vec<CommittedArtifact>,
+        #[serde(default, skip_serializing_if = "is_zero")]
+        omitted: usize,
+    },
+    /// One goal criterion checked when the run reached a finish node (C1):
+    /// `check` is `script`, `marker` or `manual`; `status` is `passed`,
+    /// `failed`, `manual` (left to a person) or `error` (the check could not
+    /// run), with `detail` saying why. `enforced` marks a script or marker
+    /// criterion under `goal.enforce: true`. Written before the finish
+    /// node's `node_finished`, so it is safe to skip up to that checkpoint;
+    /// an enforced failure also journals a `run_error` there.
+    GoalChecked {
+        #[serde(default)]
+        index: usize,
+        #[serde(default)]
+        description: String,
+        #[serde(default)]
+        check: String,
+        #[serde(default)]
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        detail: Option<String>,
+        #[serde(default, skip_serializing_if = "is_false")]
+        enforced: bool,
+    },
+    /// An agent_task attempt changed files its node protects (C6): each
+    /// path with `modified`, `deleted` or `added`. The engine restored them
+    /// from its pre-attempt copy (`restore_failed` names any it could not)
+    /// and a reported success was rejected. Written before the attempt's
+    /// `attempt_finished`; the next checkpoint is the node's
+    /// `node_finished`, and it is safe to skip up to there: the attempt's
+    /// own result carries the effect.
+    ProtectedPathsModified {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        changes: Vec<ProtectedChange>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        restore_failed: Vec<String>,
+    },
+    // --- end of the 0.23.0 block -------------------------------------------
     /// Every hop the drive loop actually took out of a node (spec
     /// 2026-07-20-run-reliability, widened by #82): a declared edge (bounded or
     /// not), or a `defaults.on_failure` policy hop that consulted no edge at
@@ -763,6 +820,30 @@ pub enum EventPayload {
         #[serde(default)]
         reason: String,
     },
+}
+
+/// One commit of an [`EventPayload::ArtifactsCommitted`].
+#[cfg_attr(feature = "ts", derive(ts_rs::TS))]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommittedArtifact {
+    #[serde(default)]
+    pub sha: String,
+    #[serde(default)]
+    pub subject: String,
+}
+
+/// One path of an [`EventPayload::ProtectedPathsModified`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProtectedChange {
+    #[serde(default)]
+    pub path: String,
+    /// `modified`, `deleted` or `added`.
+    #[serde(default)]
+    pub change: String,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

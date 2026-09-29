@@ -1198,3 +1198,68 @@ fn run_status_and_report_carry_usage_and_unknown_events_only_when_present() {
     assert!(plain.get("usage").is_none());
     assert!(plain.get("unknown_events").is_none());
 }
+
+/// The goal criteria results (C1) and the commits (C7) a journal carries:
+/// `run_status` and `run_report` show both, read with the goal from the
+/// run's playbook snapshot; a run of a playbook without a goal and without
+/// commits carries neither key.
+#[test]
+fn run_status_and_report_carry_the_goal_and_commits_only_when_present() {
+    let dir = tempfile::tempdir().unwrap();
+    seed(dir.path());
+    let run = dir.path().join(".apb/runs/r-goal");
+    fs::create_dir_all(&run).unwrap();
+    fs::write(
+        run.join("playbook.yaml"),
+        NOAGENT.replace(
+            "params:",
+            "goal:\n  statement: greet\n  criteria:\n    - { description: says hi, check: { type: marker, marker: hi } }\n    - { description: a person smiles }\nparams:",
+        ),
+    )
+    .unwrap();
+    fs::write(
+        run.join("events.jsonl"),
+        [
+            r#"{"seq":0,"ts":1,"type":"run_started","playbook":"noagent","version":"1.0.0"}"#,
+            r#"{"seq":1,"ts":2,"type":"artifacts_committed","node":"note","before":"a","after":"b","commits":[{"sha":"b","subject":"greet"}]}"#,
+            r#"{"seq":2,"ts":3,"type":"node_finished","node":"note","status":"succeeded","attempt":1,"output":"hi","artifacts":[]}"#,
+            r#"{"seq":3,"ts":4,"type":"goal_checked","index":0,"description":"says hi","check":"marker","status":"passed"}"#,
+            r#"{"seq":4,"ts":5,"type":"goal_checked","index":1,"description":"a person smiles","check":"manual","status":"manual"}"#,
+            r#"{"seq":5,"ts":6,"type":"node_finished","node":"done","status":"succeeded","attempt":1,"output":"","artifacts":[]}"#,
+            r#"{"seq":6,"ts":7,"type":"run_finished","outcome":"succeeded"}"#,
+            "",
+        ]
+        .join("\n"),
+    )
+    .unwrap();
+    for out in [
+        run_status(dir.path(), "r-goal").unwrap(),
+        apb_mcp::tools::run_report(dir.path(), "r-goal").unwrap(),
+    ] {
+        assert_eq!(out["goal"]["statement"], "greet");
+        assert_eq!(out["goal"]["checked"], true);
+        assert_eq!(out["goal"]["criteria"][0]["status"], "passed");
+        assert_eq!(out["goal"]["criteria"][1]["status"], "manual");
+        assert_eq!(out["commits"][0]["commits"][0]["subject"], "greet");
+    }
+    let mut params = BTreeMap::new();
+    params.insert("who".to_string(), "world".to_string());
+    let res = playbook_run(
+        dir.path(),
+        "noagent",
+        None,
+        params,
+        None,
+        None,
+        None,
+        None,
+        Default::default(),
+        Default::default(),
+        None,
+        None,
+    )
+    .unwrap();
+    let plain = run_status(dir.path(), res["run_id"].as_str().unwrap()).unwrap();
+    assert!(plain.get("goal").is_none());
+    assert!(plain.get("commits").is_none());
+}

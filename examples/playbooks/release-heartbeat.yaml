@@ -14,6 +14,15 @@ params:
 defaults:
   profile: main
 effects: [network, external, irreversible]
+goal:
+  statement: >-
+    The release channel knows the state of the latest pipeline on the
+    ref, and a failed pipeline has exactly one tracking issue.
+  criteria:
+    - description: The pipeline check reports the pipeline status
+      check: { type: marker, marker: "PIPELINE STATUS:" }
+    - description: A failed pipeline has one YouTrack issue, a passing one has none
+      check: { type: manual }
 nodes:
   - { id: start, type: start }
   - id: check_pipeline
@@ -23,7 +32,8 @@ nodes:
       project {{params.gitlab_project}} using the gitlab connector's
       list_pipelines function (pass ref {{params.gitlab_ref}}, leave
       status unset, first page), then fetch that pipeline's details with
-      get_pipeline. Report the pipeline id, status, ref, and web_url.
+      get_pipeline. Report the pipeline id, status, ref, and web_url, and
+      end with a line `PIPELINE STATUS: <status>`.
     connectors:
       - { name: gitlab, accounts: [default], functions: [list_pipelines, get_pipeline], max_calls: 5 }
   - id: summarize

@@ -1,4 +1,5 @@
 import { decisionNote } from './rundecisions'
+import { outcomeEventNote } from './runoutcome'
 import { attemptUsageNote } from './runusage'
 import type { WfEvent } from './types'
 
@@ -69,6 +70,11 @@ function eventNote(e: WfEvent): string | undefined {
       return r.warm
         ? `warm: continues the session of ${String(r.from_node ?? '')}`
         : `cold${r.reason ? ` (${String(r.reason)})` : ''}`
+    // 0.23.0 outcome events (provenance, goal criteria, protected paths).
+    case 'artifacts_committed':
+    case 'goal_checked':
+    case 'protected_paths_modified':
+      return outcomeEventNote(e)
     case 'output_fields_missing':
       return Array.isArray(r.fields) ? `missing fields: ${r.fields.join(', ')}` : undefined
     case 'attempt_started':

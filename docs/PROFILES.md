@@ -52,11 +52,13 @@ already reported, and a plugin can inject unrelated context.
 
 With `minimal`, a claude or claude-code executor is launched with:
 
-- `--settings <run>/agent-settings/<node>.json`: an apb-owned settings file with no
-  hooks, no plugins and no auto-enabled project MCP servers;
-- `--setting-sources project,local`: the user's settings, `CLAUDE.md`, skills and
-  agents stay out, while the project's own `CLAUDE.md` and `.claude/skills` still
-  load;
+- `--settings <run>/agent-settings/<node>.json`: an apb-owned settings file with an
+  empty `hooks` object, no plugins and no auto-enabled project MCP servers (the
+  empty `hooks` does not remove the project's own hooks: those still run, see
+  GUARDRAILS.md "Host agent settings");
+- `--setting-sources project,local`: the user's settings (and their hooks),
+  `CLAUDE.md`, skills and agents stay out, while the project's own `CLAUDE.md`,
+  `.claude/skills` and `.claude/settings.json` hooks still load;
 - `--strict-mcp-config`: only the MCP servers apb passes itself (the `ask_user`
   server of a live interactive node);
 - `--add-dir <run>/agent-skills/bundle-<digest>` when the profile declares
