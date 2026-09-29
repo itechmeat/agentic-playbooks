@@ -131,7 +131,13 @@ impl ProjectsFile {
     /// requires (a file 0.22.0 wrote). Upgrading once is what keeps a still
     /// running 0.20.x/0.21.x dashboard from choking on it.
     fn needs_upgrade(&self) -> bool {
-        self.schema_version < SCHEMA_VERSION || self.entries.values().any(|e| e.name.is_empty())
+        // An entry whose path yields no name at all cannot be filled in, and
+        // must not make every listing rewrite the file.
+        self.schema_version < SCHEMA_VERSION
+            || self
+                .entries
+                .values()
+                .any(|e| e.name.is_empty() && !workspace_name(Path::new(&e.path)).is_empty())
     }
 }
 
@@ -1078,6 +1084,36 @@ mod tests {
             upgraded,
             "a listing rewrote the upgraded file"
         );
+    }
+
+    /// An entry whose path yields no name cannot be filled in; it must not
+    /// count as a pending upgrade, or every listing would rewrite the file.
+    #[test]
+    fn an_entry_without_a_derivable_name_does_not_force_rewrites() {
+        use std::os::unix::fs::MetadataExt;
+        let _lock = crate::env_test_lock();
+        let cfg = tempfile::tempdir().unwrap();
+        setup(cfg.path());
+        let _g = EnvGuard;
+        let file = registry_file(cfg.path());
+        let v2 = serde_json::json!({
+            "schema_version": SCHEMA_VERSION,
+            "entries": { "ws-nameless": {
+                "workspace_id": "ws-nameless",
+                "path": "",
+                "last_seen_ms": 1,
+                "state": { "kind": "tombstoned", "since_ms": crate::clock::now_ms_u64() }
+            }}
+        });
+        std::fs::write(&file, v2.to_string()).unwrap();
+        let stamp = |p: &Path| {
+            let m = std::fs::metadata(p).unwrap();
+            (m.ino(), m.mtime(), m.mtime_nsec())
+        };
+        let before = stamp(&file);
+        let _ = list_active();
+        let _ = list_active();
+        assert_eq!(stamp(&file), before, "a listing rewrote the file");
     }
 
     #[test]
