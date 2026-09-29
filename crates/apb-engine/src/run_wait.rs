@@ -62,6 +62,9 @@ pub enum NeedsInput {
     Question,
     Review,
     Supervisor,
+    /// Host execution mode (0.23.0): the host has tasks to execute
+    /// (`pending_tasks`).
+    HostTask,
 }
 
 impl NeedsInput {
@@ -70,6 +73,7 @@ impl NeedsInput {
             NeedsInput::Question => "question",
             NeedsInput::Review => "review",
             NeedsInput::Supervisor => "supervisor",
+            NeedsInput::HostTask => "host_task",
         }
     }
 }
@@ -132,6 +136,8 @@ fn snapshot_of(view: &crate::run_view::RunView) -> RunSnapshot {
             Some(NeedsInput::Review)
         } else if p.pending_supervisor.is_some() {
             Some(NeedsInput::Supervisor)
+        } else if !p.pending_tasks.is_empty() {
+            Some(NeedsInput::HostTask)
         } else {
             None
         }

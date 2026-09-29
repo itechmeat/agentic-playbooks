@@ -326,6 +326,12 @@ pub(crate) fn check_environment_drift(
     let Some(manifest) = crate::manifest::read(run_dir)? else {
         return Ok(drift_events);
     };
+    // Host execution mode (0.23.0): a mode this binary does not know refuses
+    // the resume with a version message, and a host-mode run executes no
+    // profile binary, so a changed one is not drift.
+    if manifest.is_host_mode()? {
+        return Ok(drift_events);
+    }
     for p in &manifest.profiles {
         for ri in &p.chain {
             // Fingerprint exactly the fixed binary (the one that will be

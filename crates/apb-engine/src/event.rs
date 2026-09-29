@@ -660,6 +660,96 @@ pub enum EventPayload {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         reason: Option<String>,
     },
+    // --- host execution mode (0.23.0) ---
+    /// An agent attempt of a host-mode run became a host task (see
+    /// `crate::host_task`): the engine spawned nothing and waits for the host
+    /// session that started the run to execute `task_id` with its own
+    /// subagent and submit the reply. Journaled by the drive before it parks.
+    /// The prompt texts live in the run directory (`prompt_ref`,
+    /// `role_prompt_ref`, relative to it), never in the event.
+    ///
+    /// Safe to skip up to the next checkpoint: an older apb that does not know
+    /// the type loses only this record. The attempt it belongs to still ends
+    /// with its own `attempt_finished` and `node_finished`. Every field
+    /// defaults, so a shape a newer apb writes still reads.
+    HostTaskRequested {
+        #[serde(default)]
+        task_id: String,
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        prompt_ref: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        role_prompt_ref: Option<String>,
+        /// Paths of the skills the step may load (materialized from the run
+        /// snapshot).
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        skills: Vec<String>,
+        #[serde(default)]
+        workdir: String,
+        /// The node's declared `outputs` contract, as JSON.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        outputs: Option<serde_json::Value>,
+        /// Wall-clock milliseconds by which the task must be submitted (the
+        /// node's timeout); `None` without a timeout.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        deadline_ms: Option<u64>,
+        /// The model a fallback entry or tier routing asks for; a hint the
+        /// host may ignore.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        model_hint: Option<String>,
+    },
+    /// A host task was closed: the host submitted it (`submitted_by: host`,
+    /// `client` names the MCP host), or the engine closed it (`submitted_by:
+    /// engine`, status `expired`, `cancelled` or `interrupted`). The reply
+    /// text lives in the run directory (`output_ref`).
+    ///
+    /// Safe to skip up to the next checkpoint: an older apb that does not know
+    /// the type loses only this record; the attempt still ends with its own
+    /// `attempt_finished`. Every field defaults.
+    HostTaskSubmitted {
+        #[serde(default)]
+        task_id: String,
+        /// `succeeded`, `failed`, `blocked`, or an engine closure.
+        #[serde(default)]
+        status: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        output_ref: Option<String>,
+        /// Token usage the host reported, if any (`source: reported`). Read
+        /// leniently like `attempt_finished.usage`.
+        #[serde(
+            default,
+            skip_serializing_if = "Option::is_none",
+            deserialize_with = "lenient_usage"
+        )]
+        usage: Option<apb_core::agent_output::AgentUsage>,
+        #[serde(default)]
+        submitted_by: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        note: Option<String>,
+    },
+    /// A `cli` run started by an MCP host session could not start any CLI
+    /// of an agent step's chain (every binary missing, or not logged in), so
+    /// the step continues as a host task (see `crate::host_task`). `attempt`
+    /// is the host task's attempt; `reason` the last start failure. Later
+    /// steps keep using their CLIs.
+    ///
+    /// Safe to skip up to the next checkpoint: an older apb that does not know
+    /// the type loses only this record; the attempt still ends with its own
+    /// `attempt_finished`. Every field defaults.
+    ExecutionFallback {
+        #[serde(default)]
+        node: String,
+        #[serde(default)]
+        attempt: u32,
+        #[serde(default)]
+        reason: String,
+    },
+    // --- end host execution mode ---
     DeliverableMissing {
         #[serde(default)]
         node: String,

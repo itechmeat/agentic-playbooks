@@ -44,6 +44,8 @@ mod cache;
 mod control_apply;
 mod entry;
 mod handoff;
+// host execution mode (0.23.0)
+mod host;
 mod journal;
 mod judge;
 mod listing;
@@ -1557,6 +1559,16 @@ fn drive_inner(
             // moves mid-run because the manifest is immutable.
             let (prim_agent, prim_interaction) = node_primary_invocation(run_dir, &current)?
                 .unwrap_or_else(|| (String::new(), Interaction::Reprompt));
+            // Host execution mode (0.23.0): a host task has no CLI transport;
+            // its questions come back as `blocked` submissions and an answer
+            // round is a reprompt, never a live sidecar or a resumed session.
+            let (prim_agent, prim_interaction) = if crate::manifest::run_execution_mode(run_dir)?
+                == apb_core::execution::ExecutionMode::Host
+            {
+                (String::new(), Interaction::Reprompt)
+            } else {
+                (prim_agent, prim_interaction)
+            };
             let live_exe: Option<std::path::PathBuf> = apb_core::fsutil::reexec_exe().ok();
             let live_claude = apb_core::detect::canonical_agent_id(&prim_agent) == "claude";
             let live_injectable =

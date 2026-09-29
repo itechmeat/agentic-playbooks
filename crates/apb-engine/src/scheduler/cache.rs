@@ -320,7 +320,15 @@ pub(crate) fn agent_key_parts(
         .flatten()?;
     let primary = entry.chain.first()?;
     let bundle = entry.bundle_digest.clone();
-    let agent = primary.agent_id.clone();
+    // Host execution mode (0.23.0): the host, not the profile's CLI, produces
+    // the output, so a host run keys under `host` and never shares an entry
+    // with a CLI run of the same node (either way round). A CLI run's key is
+    // unchanged, so existing cache entries stay valid.
+    let agent = if manifest.is_host_mode().ok()? {
+        "host".to_string()
+    } else {
+        primary.agent_id.clone()
+    };
     let model = primary.model.clone();
     let mut digests: Vec<String> = manifest
         .grants_for(node_id)
