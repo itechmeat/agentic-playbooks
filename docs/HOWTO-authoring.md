@@ -1329,6 +1329,25 @@ looping forever - wire an edge for the fully-exhausted case (an escalation to
 `human_review`, or a plain failure edge) if that outcome must be handled
 gracefully.
 
+A loop edge may also point straight back at its own source, for a node that
+repeats itself without a separate fix step. It needs `max_traversals` like any
+other loop edge, and a `fallback` edge for the way out:
+
+```yaml
+edges:
+  - { from: start,  to: review }
+  - { from: review, to: review, condition: { type: node_status, node: review, equals: success }, max_traversals: 2 }
+  - { from: review, to: done,   fallback: true }
+```
+
+`review` runs three times: the first pass plus two traversals of the
+self-edge, each journaled as a counted `edge_traversed review -> review`.
+After that the capped self-edge stops matching and the run takes the
+`fallback` edge to `done`. A self-edge whose condition stops matching earlier
+ends the loop there. This behaves the same as routing the loop through a
+`condition` node (`review -> again -> review` with `max_loops: 2` on `again`),
+including on resume and inside parallel branches.
+
 ## expected_duration (progress estimates)
 
 Every node may carry an optional `expected_duration`: the estimated wall time
