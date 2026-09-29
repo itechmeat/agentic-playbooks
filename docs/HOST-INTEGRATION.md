@@ -82,7 +82,7 @@ Host mode changes who executes, not what is allowed: the run gate (trusted playb
 ### Other surfaces
 
 - CLI: `apb run <id> --execution host` (the scripted hand-off: `apb tasks [run]` lists the tasks, `apb tasks submit <run> <task_id> --status succeeded --output-file <file>` answers one).
-- `apb doctor` and `playbook_adopt_report` state the default and whether the fallback is on; `run_status` carries the run's `execution`.
+- `apb doctor` and `playbook_adopt_report` state the default and whether the fallback is on; `run_status` carries the run's `execution`, and `apb runs <run>` prints it as an `execution:` line (`--json` gives the `run_status` object).
 - The dashboard's run page shows a read-only host mode badge, the pending host tasks with their prompts, and the request and submission rows in its timeline.
 - `docs/PROFILES.md` lists what host mode ignores in a profile.
 

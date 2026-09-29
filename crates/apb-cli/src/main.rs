@@ -6,6 +6,9 @@ mod manage;
 mod onboarding;
 mod profile;
 mod run;
+// --- 0.24.0 run execution mode lines ---
+mod run_mode;
+// --- end 0.24.0 run execution mode lines ---
 mod selfupdate;
 mod serve;
 mod server;
@@ -208,6 +211,9 @@ enum Command {
     Runs {
         /// Show only this run
         run_id: Option<String>,
+        /// With a run id: the run as JSON, the same object as MCP run_status
+        #[arg(long, requires = "run_id")]
+        json: bool,
     },
     /// Resume a paused/interrupted run
     Resume {
@@ -492,7 +498,7 @@ fn main() -> ExitCode {
             full,
             json,
         }) => tasks_cmd(&root, action, run_id, full, json),
-        Some(Command::Runs { run_id }) => runs_cmd(&root, run_id.as_deref()),
+        Some(Command::Runs { run_id, json }) => runs_cmd(&root, run_id.as_deref(), json),
         Some(Command::Resume {
             run_id,
             from_node,

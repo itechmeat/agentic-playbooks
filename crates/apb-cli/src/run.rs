@@ -859,9 +859,9 @@ pub(crate) fn drive_run_child(
     }
 }
 
-pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>) -> ExitCode {
+pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCode {
     if let Some(run_id) = run_id {
-        return run_detail_cmd(root, run_id);
+        return run_detail_cmd(root, run_id, json);
     }
     match list_runs(root) {
         Ok(runs) if runs.is_empty() => {
@@ -869,12 +869,24 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(runs) => {
-            for r in runs {
+            // The execution mode column (0.24.0) appears only when some run
+            // has an execution block, so a table of plain `cli` runs reads
+            // exactly as before.
+            let modes: Vec<Option<String>> = runs
+                .iter()
+                .map(|r| crate::run_mode::list_mode(root, &r.run_id))
+                .collect();
+            let show_mode = modes.iter().any(Option::is_some);
+            for (r, mode) in runs.into_iter().zip(modes) {
                 // The status column stays exactly as it always has (a script
                 // parsing it must keep working); a dead driver and events a
                 // newer apb wrote are called out as appended markers rather
                 // than a rewrite of that text (#85 finding 4).
                 let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+                if show_mode {
+                    line.push('\t');
+                    line.push_str(mode.as_deref().unwrap_or("cli"));
+                }
                 if r.driver_dead {
                     line.push_str("\tdriver dead");
                 }
@@ -901,8 +913,9 @@ fn unknown_events_note(n: usize) -> String {
 }
 
 /// `apb runs <run_id>`: one run through the same run view as `run_status`,
-/// with the token usage its attempts reported when there is any.
-fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
+/// with the token usage its attempts reported when there is any. `--json`
+/// prints the MCP `run_status` object itself.
+fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     if !is_safe_segment(run_id) {
         eprintln!("runs: invalid run id `{run_id}`");
         return ExitCode::from(2);
@@ -911,6 +924,18 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
     if !run_dir.is_dir() {
         eprintln!("runs: run `{run_id}` not found");
         return ExitCode::from(2);
+    }
+    if json {
+        return match apb_mcp::tools::run::run_status(root, run_id) {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("runs failed: {e}");
+                ExitCode::from(2)
+            }
+        };
     }
     let view = match apb_engine::run_view::RunView::load(&run_dir, run_id) {
         Ok(v) => v,
@@ -930,6 +955,13 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
         })
         .unwrap_or_default();
     println!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
+    println!(
+        "  execution: {}",
+        sanitize_for_terminal(
+            &crate::run_mode::detail_line(&run_dir, &view.events),
+            QUESTION_TEXT_MAX
+        )
+    );
     if view.driver_alive == Some(false) {
         println!("  driver dead");
     }

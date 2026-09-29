@@ -37,7 +37,12 @@ input" and "timed out" from "failed", and a wait can be bounded with `--timeout`
 without stopping the run itself.
 
 `apb runs <run_id>` prints the node statuses, the failure reason, the token
-usage and cost the agents reported, and the goal criteria results; the journal
+usage and cost the agents reported, the goal criteria results and the
+execution mode (`execution: cli`, `execution: host (argument, client ...)`,
+and `host fallback: <nodes>` for steps the journal records as
+`execution_fallback`); `apb runs <run_id> --json` prints the same object as
+the MCP `run_status`, for a step that parses it. The `apb runs` table gets a
+mode column only when some run has an execution block. The journal
 itself is `.apb/runs/<run_id>/events.jsonl`. Upload `.apb/runs/<run_id>/` as a
 build artifact to keep the evidence.
 
