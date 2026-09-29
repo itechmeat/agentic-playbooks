@@ -317,3 +317,51 @@ fn a_host_execution_fallback_counts_as_a_fallback() {
     let work = v.nodes.iter().find(|n| n.node == "work").unwrap();
     assert_eq!(work.fallbacks, 1);
 }
+
+#[test]
+fn a_withdrawn_review_request_is_not_paired_with_the_next_decision() {
+    use serde_json::json;
+    let rr = || json!({"type": "review_requested", "node": "g", "options": ["approve"]});
+    let rd = || json!({"type": "review_decided", "node": "g", "decision": "approve", "note": ""});
+    let runs = vec![run(
+        "w",
+        "1.0.0",
+        None,
+        &[
+            (1_000, rr()),
+            (
+                1_010,
+                json!({"type": "review_withdrawn", "node": "g", "reason": "node_retry"}),
+            ),
+            (1_100, rr()),
+            (1_160, rd()),
+            (1_500, rr()),
+            (1_520, rd()),
+            (1_600, end("succeeded")),
+        ],
+    )];
+    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    // Waits of 60 ms and 20 ms; the withdrawn request records none (paired
+    // with the first decision it would read 160 ms).
+    assert_eq!(v.gate_wait.count, 2);
+    assert_eq!(v.gate_wait.max_ms, Some(60));
+    assert_eq!(v.gate_wait.median_ms, Some(20));
+}
+
+#[test]
+fn an_infrastructure_retry_without_retry_started_is_not_a_first_pass_run() {
+    let runs = vec![run(
+        "infra",
+        "1.0.0",
+        None,
+        &[
+            (1_000, started("w")),
+            (2_000, finished("w", "succeeded", 2)),
+            (3_000, end("succeeded")),
+        ],
+    )];
+    let v = &build(&runs, &StatsFilter::default()).versions[0];
+    assert_eq!(v.first_pass.text(), "0/1 (0%)");
+    let w = v.nodes.iter().find(|n| n.node == "w").unwrap();
+    assert_eq!(w.first_pass.text(), "0/1 (0%)");
+}

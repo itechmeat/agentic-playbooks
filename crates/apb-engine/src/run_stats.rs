@@ -408,6 +408,9 @@ struct RunFacts {
     retries: u64,
     fallbacks: u64,
     loops: u64,
+    /// A node visit whose result came from a later attempt than the first
+    /// (an infrastructure retry journals no `retry_started`).
+    later_attempt: bool,
     gate_waits: Vec<u64>,
     question_waits: Vec<u64>,
     duration: Option<u64>,
@@ -443,11 +446,14 @@ fn ms(from: u128, to: u128) -> u64 {
 }
 
 /// Pairs each `open` of a node with the next `close` of the same node, in
-/// journal order, and returns the waits in milliseconds.
+/// journal order, and returns the waits in milliseconds. A `withdraw` closes
+/// the oldest open request of the node without a wait: the request was never
+/// answered, and the next visit asks anew.
 fn waits(
     events: &[Event],
     open: fn(&EventPayload) -> Option<&str>,
     close: fn(&EventPayload) -> Option<&str>,
+    withdraw: fn(&EventPayload) -> Option<&str>,
 ) -> Vec<u64> {
     let mut pending: BTreeMap<&str, Vec<u128>> = BTreeMap::new();
     let mut out = Vec::new();
@@ -460,6 +466,11 @@ fn waits(
         {
             let t = q.remove(0);
             out.push(ms(t, e.ts));
+        } else if let Some(n) = withdraw(&e.payload)
+            && let Some(q) = pending.get_mut(n)
+            && !q.is_empty()
+        {
+            q.remove(0);
         }
     }
     out
@@ -494,6 +505,9 @@ fn run_facts(
                 first_result
                     .entry(node)
                     .or_insert((status == "succeeded", *attempt));
+                if *attempt > 1 {
+                    f.later_attempt = true;
+                }
                 if let Some(t) = open_at.remove(node.as_str()) {
                     nodes
                         .entry(node.clone())
@@ -587,6 +601,10 @@ fn run_facts(
             EventPayload::ReviewDecided { node, .. } => Some(node),
             _ => None,
         },
+        |p| match p {
+            EventPayload::ReviewWithdrawn { node, .. } => Some(node),
+            _ => None,
+        },
     );
     f.question_waits = waits(
         ev,
@@ -598,6 +616,7 @@ fn run_facts(
             EventPayload::QuestionAnswered { node, .. } => Some(node),
             _ => None,
         },
+        |_| None,
     );
     f
 }
@@ -620,7 +639,12 @@ fn version_stats(playbook: &str, version: &str, runs: &[&StatsRun]) -> VersionSt
             Some("aborted") => outcomes.aborted += 1,
             _ => outcomes.other += 1,
         }
-        if f.outcome == Some("succeeded") && f.retries == 0 && f.fallbacks == 0 && f.loops == 0 {
+        if f.outcome == Some("succeeded")
+            && f.retries == 0
+            && f.fallbacks == 0
+            && f.loops == 0
+            && !f.later_attempt
+        {
             first_pass += 1;
         }
         retries += f.retries;
