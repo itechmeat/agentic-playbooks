@@ -58,6 +58,9 @@ pub(crate) struct EvalArgs {
     pub max_usd: Option<f64>,
     pub compare: bool,
     pub dry_run: bool,
+    /// Evaluate a draft: the scratch copy is marked active, the project's
+    /// lifecycle is never touched (the trial path's lifecycle exception).
+    pub draft: bool,
     pub yes: bool,
     pub json: bool,
 }
@@ -192,7 +195,7 @@ fn confirm(args: &EvalArgs, question: &str) -> bool {
 /// The files that make a playbook runnable in a scratch tree: the playbook's
 /// own directory without its suite, and the project profiles, skills and
 /// config.
-fn copy_definitions(root: &Path, id: &str, tree: &Path) -> std::io::Result<()> {
+fn copy_definitions(root: &Path, id: &str, tree: &Path, draft: bool) -> std::io::Result<()> {
     let src = root.join(".apb");
     let dst = tree.join(".apb");
     let pb_dst = dst.join("playbooks").join(id);
@@ -211,6 +214,9 @@ fn copy_definitions(root: &Path, id: &str, tree: &Path) -> std::io::Result<()> {
         } else {
             std::fs::copy(entry.path(), &to)?;
         }
+    }
+    if draft {
+        apb_core::trust::write_lifecycle(&pb_dst, apb_core::trust::Lifecycle::Active)?;
     }
     for sub in ["profiles", "skills"] {
         let s = src.join(sub);
@@ -238,6 +244,7 @@ fn materialize(
     lc: &LoadedCase,
     suite_copy: &Path,
     rep_dir: &Path,
+    draft: bool,
 ) -> Result<String, String> {
     let tree = rep_dir.join("tree");
     std::fs::create_dir_all(&tree).map_err(|e| e.to_string())?;
@@ -271,7 +278,8 @@ fn materialize(
         apb_core::fsutil::copy_tree(&suite_copy.join(d), &tree).map_err(|e| e.to_string())?;
     }
     git(&tree, &["init", "-q", "-b", "main"])?;
-    copy_definitions(root, id, &tree).map_err(|e| format!("copying the definitions: {e}"))?;
+    copy_definitions(root, id, &tree, draft)
+        .map_err(|e| format!("copying the definitions: {e}"))?;
     apb_core::registry::init_project(&tree).map_err(|e| e.to_string())?;
     std::fs::write(tree.join(".git/info/exclude"), TREE_EXCLUDES).map_err(|e| e.to_string())?;
     git(&tree, &["add", "-A"])?;
@@ -541,7 +549,14 @@ fn run_repetition(
 ) -> (Repetition, Option<PathBuf>) {
     let rep_dir = cx.scratch.join(format!("{}-{n}", lc.case.id));
     let tree = rep_dir.join("tree");
-    let fixture_commit = match materialize(cx.root, &cx.args.id, lc, cx.suite_copy, &rep_dir) {
+    let fixture_commit = match materialize(
+        cx.root,
+        &cx.args.id,
+        lc,
+        cx.suite_copy,
+        &rep_dir,
+        cx.args.draft,
+    ) {
         Ok(c) => c,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&rep_dir);
@@ -704,6 +719,31 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
         return ExitCode::from(2);
     }
     let playbook_dir = root.join(".apb/playbooks").join(&args.id);
+    match apb_core::trust::read_lifecycle(&playbook_dir) {
+        apb_core::trust::Lifecycle::Active => {}
+        apb_core::trust::Lifecycle::Draft if args.draft => {}
+        apb_core::trust::Lifecycle::Draft => {
+            return fail(
+                args.json,
+                "draft_requires_draft_flag",
+                format!(
+                    "`{}` is a draft: pass --draft to evaluate it (only the scratch copy is marked active)",
+                    args.id
+                ),
+            );
+        }
+        other => {
+            return fail(
+                args.json,
+                "lifecycle",
+                format!(
+                    "`{}` is {}: it cannot be evaluated",
+                    args.id,
+                    other.as_str()
+                ),
+            );
+        }
+    }
     let issues = core_eval::validate_suite(&playbook_dir, &playbook);
     let errors: Vec<String> = issues
         .iter()

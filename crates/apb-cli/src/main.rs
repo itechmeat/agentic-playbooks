@@ -328,6 +328,9 @@ enum Command {
         /// Print the plan without starting anything
         #[arg(long)]
         dry_run: bool,
+        /// Evaluate a draft playbook (only the scratch copy is marked active)
+        #[arg(long)]
+        draft: bool,
         /// Approve the suite and start without asking
         #[arg(long)]
         yes: bool,
@@ -614,6 +617,7 @@ fn main() -> ExitCode {
             max_usd,
             compare,
             dry_run,
+            draft,
             yes,
             json,
         }) => eval::eval_cmd(
@@ -630,6 +634,7 @@ fn main() -> ExitCode {
                 max_usd,
                 compare,
                 dry_run,
+                draft,
                 yes,
                 json,
             },

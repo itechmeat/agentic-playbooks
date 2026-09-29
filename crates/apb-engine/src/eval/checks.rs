@@ -217,18 +217,33 @@ fn goal_check(input: &CheckInput, goal: &[GoalResult], accepted: &[String]) -> O
     }))
 }
 
+/// The nodes a run visited, in order, once per execution: every
+/// `node_started`, plus a `node_finished` with no open start (a finish or
+/// start node, which the engine journals without `node_started`).
+pub fn visited(events: &[Event]) -> Vec<&str> {
+    let mut open: BTreeMap<&str, usize> = BTreeMap::new();
+    let mut out = Vec::new();
+    for e in events {
+        match &e.payload {
+            EventPayload::NodeStarted { node, .. } => {
+                *open.entry(node.as_str()).or_default() += 1;
+                out.push(node.as_str());
+            }
+            EventPayload::NodeFinished { node, .. } => match open.get_mut(node.as_str()) {
+                Some(n) if *n > 0 => *n -= 1,
+                _ => out.push(node.as_str()),
+            },
+            _ => {}
+        }
+    }
+    out
+}
+
 fn route_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
     let Some(route) = &input.case.checks.route else {
         return;
     };
-    let started: Vec<&str> = input
-        .events
-        .iter()
-        .filter_map(|e| match &e.payload {
-            EventPayload::NodeStarted { node, .. } => Some(node.as_str()),
-            _ => None,
-        })
-        .collect();
+    let started = visited(input.events);
     if !route.visits.is_empty() {
         let missing: Vec<&String> = route
             .visits
