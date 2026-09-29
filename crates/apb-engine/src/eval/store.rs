@@ -247,6 +247,11 @@ pub struct EvalResult {
     pub incomplete: Option<String>,
     pub total_cost_usd: f64,
     pub total_tokens: u64,
+    /// The run journal the checks read lives in the agent's own tree, so the
+    /// agent under test could have edited it (usage, route and deliverable
+    /// events). Always `true` in this release; the verdict trusts it.
+    #[serde(default)]
+    pub journal_agent_writable: bool,
 }
 
 impl EvalResult {
@@ -641,6 +646,7 @@ mod tests {
             incomplete: None,
             total_cost_usd: 0.0,
             total_tokens: 0,
+            journal_agent_writable: true,
         }
     }
 

@@ -394,11 +394,30 @@ fn fixture_file(
     Ok(out.status.success().then_some(out.stdout))
 }
 
+/// The checked file's bytes, `None` when absent. A symlink at the path, or
+/// on any directory below the tree, is never followed: the agent could
+/// point it anywhere on the operator's filesystem.
+fn read_checked(tree: &Path, rel: &str) -> Result<Option<Vec<u8>>, String> {
+    let path = tree.join(rel);
+    apb_core::fsutil::ensure_no_symlink_below(tree, &path)
+        .map_err(|_| format!("`{rel}` is reached through a symlink, which is not followed"))?;
+    match std::fs::symlink_metadata(&path) {
+        Ok(m) if m.is_file() => std::fs::read(&path).map(Some).map_err(|e| e.to_string()),
+        Ok(_) => Err(format!("`{rel}` is not a regular file")),
+        Err(_) => Ok(None),
+    }
+}
+
 fn file_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
     for f in &input.case.checks.files {
         let kind = format!("files[{}]", f.path);
-        let path = input.tree.join(&f.path);
-        let now = std::fs::read(&path).ok();
+        let now = match read_checked(input.tree, &f.path) {
+            Ok(n) => n,
+            Err(why) => {
+                out.push(CheckResult::new(kind, false, || why));
+                continue;
+            }
+        };
         let mut problems = Vec::new();
         if let Some(want) = f.exists
             && want != now.is_some()

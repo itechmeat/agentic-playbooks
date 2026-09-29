@@ -699,7 +699,10 @@ fn move_dir(from: &Path, to: &Path) -> std::io::Result<()> {
 fn keep_checked_files(case: &core_eval::EvalCase, tree: &Path, stored: &Path) {
     for f in &case.checks.files {
         let from = tree.join(&f.path);
-        if from.is_file() {
+        // Never through a link the agent planted.
+        let plain = apb_core::fsutil::ensure_no_symlink_below(tree, &from).is_ok()
+            && std::fs::symlink_metadata(&from).is_ok_and(|m| m.is_file());
+        if plain {
             let to = stored.join("eval-files").join(&f.path);
             if let Some(p) = to.parent()
                 && std::fs::create_dir_all(p).is_ok()
@@ -1293,6 +1296,13 @@ fn full_environment_nodes(
     out
 }
 
+fn full_env_json(nodes: &[(String, String)]) -> serde_json::Value {
+    nodes
+        .iter()
+        .map(|(node, profile)| json!({ "node": node, "profile": profile }))
+        .collect()
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_eval(
     root: &Path,
@@ -1367,9 +1377,10 @@ fn run_eval(
     let total: u32 = planned.iter().map(|p| p.repeat).sum();
     let mut approvals = core_eval::SuiteApprovals::load();
     let approved = approvals.is_approved(suite_digest);
+    let full_env = full_environment_nodes(root, playbook, overrides);
     if !args.json {
         eprintln!("{NOT_A_SANDBOX}");
-        for (node, profile) in full_environment_nodes(root, playbook, overrides) {
+        for (node, profile) in &full_env {
             eprintln!(
                 "note: node `{node}` runs profile `{profile}` with `environment: full`: the operator's own agent setup (user-scope hooks, plugins, MCP servers) loads in its eval runs and can act outside the scratch repository"
             );
@@ -1389,6 +1400,8 @@ fn run_eval(
     if args.dry_run {
         if args.json {
             print_json(&json!({
+                "note": NOT_A_SANDBOX,
+                "full_environment_nodes": full_env_json(&full_env),
                 "plan": {
                     "playbook": args.id, "version": version, "budget_usd": budget,
                     "suite_digest": suite_digest, "suite_approved": approved,
@@ -1463,6 +1476,7 @@ fn run_eval(
     let mut incomplete: Option<String> = None;
     let mut key: Option<ConfigKey> = None;
     let mut results = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     for p in &planned {
         let lc = p.lc;
         let mut reps = Vec::new();
@@ -1481,6 +1495,16 @@ fn run_eval(
                 eprintln!("running {} #{n}", lc.case.id);
             }
             let (rep, stored) = run_repetition(&cx, p, n);
+            if rep.run_id.is_some() && rep.usage.cost_usd.is_none() && warnings.is_empty() {
+                let w = format!(
+                    "case `{}` repetition {n} reported no cost: the invocation budget (${budget:.2}) and max_usd cannot be enforced for this executor",
+                    lc.case.id
+                );
+                if !args.json {
+                    eprintln!("warning: {w}");
+                }
+                warnings.push(w);
+            }
             spent += rep.usage.cost_usd.unwrap_or(0.0);
             tokens += rep.usage.tokens();
             if key.is_none()
@@ -1518,6 +1542,7 @@ fn run_eval(
         incomplete,
         total_cost_usd: (spent * 1e6).round() / 1e6,
         total_tokens: tokens,
+        journal_agent_writable: true,
     };
     let stored_at = if started {
         Some(store::store(evals_home, &result))
@@ -1534,6 +1559,9 @@ fn run_eval(
         let cmp = print_compare(&result, &all, true);
         print_json(&json!({
             "result": result,
+            "note": NOT_A_SANDBOX,
+            "full_environment_nodes": full_env_json(&full_env),
+            "warnings": warnings,
             "comparison": cmp,
             "stored": stored_at.as_ref().and_then(|s| s.as_ref().ok()).map(|p| p.to_string_lossy().into_owned()),
         }));

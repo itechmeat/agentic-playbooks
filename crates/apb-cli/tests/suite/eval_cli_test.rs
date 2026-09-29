@@ -221,6 +221,9 @@ fn the_json_output_matches_its_snapshot() {
     let expected = serde_json::json!({
         "comparison": null,
         "stored": "*",
+        "note": "note: an eval run is not a sandbox: it runs in a scratch repository with no real remote, but agents keep the network and any CLI you are logged in to; use the case `env` to cut known ones (for example GH_CONFIG_DIR)",
+        "full_environment_nodes": [],
+        "warnings": ["case `writes-report` repetition 1 reported no cost: the invocation budget ($10.00) and max_usd cannot be enforced for this executor"],
         "result": {
             "eval_id": "*", "playbook": "rev", "version": "1.0.0",
             "started_at_ms": "*", "finished_at_ms": "*", "apb_version": "*",
@@ -254,7 +257,8 @@ fn the_json_output_matches_its_snapshot() {
                 }]
             }],
             "total_cost_usd": 0.0,
-            "total_tokens": 0
+            "total_tokens": 0,
+            "journal_agent_writable": true
         }
     });
     assert_eq!(v, expected, "{v:#}");
@@ -478,6 +482,19 @@ fn the_plan_names_nodes_that_load_the_operators_full_environment() {
     env.eval(&["rev", "--dry-run"])
         .success()
         .stderr(predicate::str::contains(note));
+    // `--json` automation is told the same, with the not-a-sandbox note.
+    let out = env
+        .eval(&["rev", "--dry-run", "--json"])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(
+        v["full_environment_nodes"],
+        serde_json::json!([{ "node": "review", "profile": "x" }])
+    );
+    assert!(v["note"].as_str().unwrap().contains("not a sandbox"));
 }
 
 /// Runs git in `dir` with a fixed identity, panicking on failure.
