@@ -105,7 +105,7 @@ fn log_lines(root: &Path) -> Vec<Value> {
 }
 
 fn ranked(root: &Path, query: &str, cache: &RankCache) -> Value {
-    playbook_catalog_ranked(root, None, None, None, query, cache).unwrap()
+    playbook_catalog_ranked(root, root, None, None, None, query, cache).unwrap()
 }
 
 #[test]
@@ -128,6 +128,7 @@ fn a_query_changes_nothing_without_configuration_key_or_use() {
         assert_eq!(
             bytes(
                 &playbook_catalog_ranked(
+                    root.path(),
                     root.path(),
                     None,
                     Some(&revision),
@@ -422,4 +423,62 @@ fn an_off_ceiling_or_a_project_opt_out_turns_ranking_off() {
         assert_eq!(bytes(&out), bytes(&plain), "{case}");
         assert!(log_lines(root.path()).is_empty(), "{case}");
     }
+}
+
+/// A cross-workspace catalog with a query: the stricter of the caller's and
+/// the target's project settings applies, whichever of the two is stricter.
+#[test]
+fn a_cross_workspace_query_applies_the_stricter_project_setting() {
+    let _l = lock();
+    let cfg = tempfile::tempdir().unwrap();
+    let _e = Env::new(cfg.path());
+    fake_config(cfg.path(), "advise", "");
+    let opt_out = |root: &Path| {
+        std::fs::write(
+            root.join(".apb/config.yaml"),
+            "decisions:\n  uses:\n    catalog_rank: { mode: off }\n",
+        )
+        .unwrap();
+    };
+    for strict in ["caller", "target"] {
+        let caller = project();
+        let target = project();
+        opt_out(if strict == "caller" {
+            caller.path()
+        } else {
+            target.path()
+        });
+        let cache = RankCache::default();
+        let plain = playbook_catalog(target.path(), None, None, None).unwrap();
+        let out = playbook_catalog_ranked(
+            caller.path(),
+            target.path(),
+            None,
+            None,
+            None,
+            "publish the new crate version",
+            &cache,
+        )
+        .unwrap();
+        assert_eq!(bytes(&out), bytes(&plain), "{strict} turned ranking off");
+        assert!(
+            log_lines(target.path()).is_empty(),
+            "{strict}: nothing asked"
+        );
+    }
+    // Neither opted out: the cross-workspace query ranks.
+    let caller = project();
+    let target = project();
+    let out = playbook_catalog_ranked(
+        caller.path(),
+        target.path(),
+        None,
+        None,
+        None,
+        "publish the new crate version",
+        &RankCache::default(),
+    )
+    .unwrap();
+    assert_eq!(out["ranking"]["provider"], "fake", "{out}");
+    assert_eq!(log_lines(target.path()).len(), 1, "journaled in the target");
 }

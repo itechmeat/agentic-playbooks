@@ -461,6 +461,12 @@ applied: the host still decides what to run and whether to offer a capture.
 the server's lifetime per project, catalog revision and query. A failure
 keeps the full catalog with `ranking: {error}`.
 
+A query about another workspace's catalog (`workspace` set) is narrowed by
+both projects: the calling session's project and the target project each
+apply their `decisions:` section, so the stricter setting of the two wins
+(either one turning `catalog_rank` off keeps the plain catalog). The request
+is logged in the target project.
+
 The response is byte-identical to today without `decisions.yaml`, with the
 use off, with `APB_DECISIONS=off`, when no provider key resolves, in shadow,
 and whenever `query` is absent or blank. The server's instructions (TIER0)

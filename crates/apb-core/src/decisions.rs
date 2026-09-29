@@ -904,7 +904,24 @@ pub fn resolve(root: &Path) -> Resolution {
 
 /// [`resolve`] with an explicit config dir.
 pub fn resolve_in(config_dir: &Path, root: &Path) -> Resolution {
-    let eff = match load_file(config_dir) {
+    resolve_in_all(config_dir, &[root])
+}
+
+/// The configuration for a request that concerns several projects at once,
+/// such as an agent in `caller` asking for `target`'s catalog: narrowed by
+/// every project in turn, so the stricter setting of each wins and any one of
+/// them opting out turns the layer off. The same project twice is the same as
+/// once.
+pub fn resolve_for_all(roots: &[&Path]) -> Resolution {
+    let Some(dir) = crate::config::config_dir() else {
+        return Resolution::NotConfigured;
+    };
+    resolve_in_all(&dir, roots)
+}
+
+/// [`resolve_for_all`] with an explicit config dir.
+pub fn resolve_in_all(config_dir: &Path, roots: &[&Path]) -> Resolution {
+    let mut eff = match load_file(config_dir) {
         Ok(Some(eff)) => eff,
         Ok(None) => return Resolution::NotConfigured,
         Err(e) => return Resolution::Invalid(e),
@@ -912,11 +929,17 @@ pub fn resolve_in(config_dir: &Path, root: &Path) -> Resolution {
     if killed_by_switch() {
         return Resolution::KilledBySwitch;
     }
-    match project_section(root) {
-        Ok(Some(p)) => narrow(eff, p),
-        Ok(None) => finish(eff),
-        Err(reason) => Resolution::OptedOut(reason),
+    for root in roots {
+        match project_section(root) {
+            Ok(Some(p)) => match narrow(eff, p) {
+                Resolution::Active(narrowed) => eff = narrowed,
+                other => return other,
+            },
+            Ok(None) => {}
+            Err(reason) => return Resolution::OptedOut(reason),
+        }
     }
+    finish(eff)
 }
 
 /// Resolves a provider key variable from the process environment, then the

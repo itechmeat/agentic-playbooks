@@ -57,8 +57,10 @@ impl WfMcp {
         // Issue #165 Part 16: a decision request is blocking network IO, so
         // it runs on the blocking pool and never stalls the server's runtime.
         let cache = std::sync::Arc::clone(&self.rank_cache);
+        let caller = (*self.root).clone();
         let result = tokio::task::spawn_blocking(move || {
             crate::catalog_rank::playbook_catalog_ranked(
+                &caller,
                 &root,
                 workspace.as_deref(),
                 revision.as_deref(),

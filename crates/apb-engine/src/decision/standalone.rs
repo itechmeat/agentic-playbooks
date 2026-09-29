@@ -86,6 +86,16 @@ impl StandaloneDecider {
             .map(|s| Self::with_settings(s, root))
     }
 
+    /// The decider for a request made from `caller`'s project about
+    /// `target`'s content: both projects' `decisions:` sections narrow it
+    /// (the stricter of each wins, either opting out turns it off). Requests
+    /// are journaled in `target`, whose content they carry.
+    pub fn for_projects(caller: &Path, target: &Path) -> Option<Self> {
+        apb_core::decisions::resolve_for_all(&[caller, target])
+            .active()
+            .map(|s| Self::with_settings(s, target))
+    }
+
     /// A decider over explicit settings (already resolved and capped).
     pub fn with_settings(settings: EffectiveDecisions, root: &Path) -> Self {
         StandaloneDecider {

@@ -79,8 +79,11 @@ impl RankCache {
 }
 
 /// `playbook_catalog` with a query. Falls back to the plain catalog
-/// whenever ranking is not enabled for this project.
+/// whenever ranking is not enabled. `caller` is the project the asking agent
+/// works in; for a cross-workspace catalog it differs from `root`, and the
+/// stricter of both projects' decision settings applies.
 pub fn playbook_catalog_ranked(
+    caller: &Path,
     root: &Path,
     workspace_id: Option<&str>,
     revision: Option<&str>,
@@ -93,7 +96,7 @@ pub fn playbook_catalog_ranked(
     if query.is_empty() {
         return plain();
     }
-    let Some(decider) = StandaloneDecider::for_project(root) else {
+    let Some(decider) = StandaloneDecider::for_projects(caller, root) else {
         return plain();
     };
     let mode = decider.mode_for(UseSite::CatalogRank);

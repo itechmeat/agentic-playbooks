@@ -67,6 +67,8 @@ delete the copied `workspace.local`).
 
 `playbook_catalog` also takes an optional `query` (the task in one sentence). It changes nothing unless the machine enabled decision-model catalog ranking (`uses.catalog_rank` in `decisions.yaml`, see DECISIONS.md "Catalog ranking") and a provider key resolves. Then, in advise mode, the response carries the unchanged catalog plus `ranked: [{ref, p, trusted, lifecycle, ambiguous}]` (top five; the trust facts are copied from the entry), `confidence`, `needs_playbook_p`, `covered_by: {pattern, scope, p}` when a silenced suggestion covers the task, and `ranking: {provider, model, calibrated}`; on a provider failure `ranking: {error}` instead. The fields are advisory: entries are not filtered or reordered, the host's own matching still decides, and `revision` is bypassed while a query is ranked. The decision request runs on the blocking pool, so a slow provider never delays other tool calls. This is the one place the server does language processing, and only through this opt-in; TIER0 is unchanged whether the feature is on or off.
 
+With `workspace` set to another project, the ranking follows the stricter of both projects' settings: the calling session's project and the target project each narrow the machine's configuration through their own `decisions:` section in `.apb/config.yaml`, so either one switching `catalog_rank` off (or lowering it, or opting out of decisions entirely) applies to the cross-workspace query. The request is journaled in the target project's `.apb/decisions.jsonl`, since it carries the target's catalog.
+
 Mutations (destructive):
 
 | Tool | What it does |
