@@ -8,7 +8,7 @@
 //! fewer than [`MIN_RUNS`] runs carries a note saying so.
 //!
 //! Figures per version: run outcomes; first-pass runs (succeeded with no
-//! retry, no fallback and no loop traversal); retries, fallbacks and loop
+//! retry, no fallback, no loop traversal and every node on attempt 1); retries, fallbacks and loop
 //! traversals (bounded edges back into a node that ran) per run; human gate wait (`review_requested` to the matching
 //! `review_decided`) and question wait (`question_asked` to
 //! `question_answered`); run duration; tokens and cost per run; missing
@@ -872,7 +872,12 @@ pub fn render_text(r: &StatsReport) -> String {
     }
     if let Some(c) = &r.compare {
         out.push_str(&format!("\ncompare {} {}", c.playbook, c.base));
+        let base_ran = r
+            .versions
+            .iter()
+            .any(|v| v.playbook == c.playbook && v.version == c.base);
         match &c.against {
+            _ if !base_ran => out.push_str(&format!(": no runs of {}\n", c.base)),
             None => out.push_str(": no other version has runs\n"),
             Some(a) => {
                 out.push_str(&format!(" -> {a}\n"));

@@ -365,3 +365,14 @@ fn an_infrastructure_retry_without_retry_started_is_not_a_first_pass_run() {
     let w = v.nodes.iter().find(|n| n.node == "w").unwrap();
     assert_eq!(w.first_pass.text(), "0/1 (0%)");
 }
+
+#[test]
+fn compare_against_a_version_without_runs_says_so() {
+    let filter = StatsFilter {
+        playbook: Some("p".into()),
+        compare: Some("9.9.9".into()),
+        ..Default::default()
+    };
+    let text = render_text(&build(&three_runs(), &filter));
+    assert!(text.contains("compare p 9.9.9: no runs of 9.9.9"), "{text}");
+}

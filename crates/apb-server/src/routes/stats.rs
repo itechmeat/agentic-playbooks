@@ -44,6 +44,10 @@ pub(crate) async fn get_stats_handler(
         since_ms,
         compare: q.compare.filter(|c| !c.is_empty()),
     };
+    // Like `apb stats --compare` (exit 2): a version is one playbook's.
+    if filter.compare.is_some() && filter.playbook.is_none() {
+        return (StatusCode::BAD_REQUEST, "compare needs playbook").into_response();
+    }
     // Reading every journal is blocking file IO.
     match tokio::task::spawn_blocking(move || apb_engine::run_stats::stats(&[root], &filter)).await
     {

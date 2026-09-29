@@ -67,6 +67,9 @@ async fn stats_reports_the_runs_of_a_playbook_and_an_empty_project() {
         serde_json::json!({"count": 2, "of": 2, "rate": 1.0})
     );
     assert_eq!(v["first_pass"]["count"], 2);
-    let (status, _) = get_json(app, "/api/stats?since=soon").await;
+    let (status, _) = get_json(app.clone(), "/api/stats?since=soon").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    // `compare` names a version of one playbook, like the CLI's `--compare`.
+    let (status, _) = get_json(app, "/api/stats?compare=1.0.0").await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
 }
