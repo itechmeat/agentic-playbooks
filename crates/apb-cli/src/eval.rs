@@ -1330,24 +1330,11 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
             );
         }
     }
-    let issues = checks::validate_suite(&playbook_dir, &playbook);
-    let errors: Vec<String> = issues
-        .iter()
-        .filter(|i| i.severity == apb_core::validate::Severity::Error)
-        .map(|i| format!("{} {}", i.code, i.message))
-        .collect();
     if !core_eval::has_suite(&playbook_dir) {
         return fail(
             args.json,
             "no_suite",
             format!("`{}` has no evals/ directory", args.id),
-        );
-    }
-    if !errors.is_empty() {
-        return fail(
-            args.json,
-            "invalid_suite",
-            format!("the suite is invalid:\n  {}", errors.join("\n  ")),
         );
     }
     let overrides = match build_overrides(&args, &playbook) {
@@ -1370,22 +1357,9 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     };
     install_signal_handlers();
     let suite_copy = scratch.join(core_eval::EVALS_DIR);
-    // The suite runs from a copy made now, and the digest a person approves
-    // is computed in the same pass over the same bytes, so it is the content
-    // that runs.
-    let suite_digest = match apb_core::content::snapshot_tree(
-        &core_eval::suite_dir(&playbook_dir),
-        &suite_copy,
-        &core_eval::suite_limits(),
-    ) {
+    let suite_digest = match snapshot_suite(&playbook_dir, &playbook, &scratch, |_| {}) {
         Ok(d) => d,
-        Err(e) => {
-            return fail(
-                args.json,
-                "invalid_suite",
-                format!("the suite cannot be digested: {e}"),
-            );
-        }
+        Err(e) => return fail(args.json, "invalid_suite", e),
     };
     let outcome = run_eval(
         root,
@@ -1402,6 +1376,39 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     );
     drop(guard);
     outcome
+}
+
+/// Copies the suite of `playbook_dir` into `scratch` and validates that
+/// copy. The digest a person approves is computed in the same pass over the
+/// same bytes as the copy, and the validation reads the copy too, so what
+/// was checked, what was approved and what runs are one snapshot: a suite
+/// edited while the invocation starts cannot pass the checks with one
+/// content and run with another. `after_copy` runs between the copy and the
+/// validation (a no-op outside the tests, which use it to stand in for a
+/// concurrent edit).
+fn snapshot_suite(
+    playbook_dir: &Path,
+    playbook: &Playbook,
+    scratch: &Path,
+    after_copy: impl FnOnce(&Path),
+) -> Result<String, String> {
+    let suite_copy = scratch.join(core_eval::EVALS_DIR);
+    let digest = apb_core::content::snapshot_tree(
+        &core_eval::suite_dir(playbook_dir),
+        &suite_copy,
+        &core_eval::suite_limits(),
+    )
+    .map_err(|e| format!("the suite cannot be digested: {e}"))?;
+    after_copy(&suite_copy);
+    let errors: Vec<String> = checks::validate_suite(scratch, playbook)
+        .iter()
+        .filter(|i| i.severity == apb_core::validate::Severity::Error)
+        .map(|i| format!("{} {}", i.code, i.message))
+        .collect();
+    if !errors.is_empty() {
+        return Err(format!("the suite is invalid:\n  {}", errors.join("\n  ")));
+    }
+    Ok(digest)
 }
 
 /// The agent nodes whose profile (after `overrides`) declares
@@ -1767,6 +1774,39 @@ mod tests {
             "mine"
         );
         assert!(!to.exists(), "nothing was moved into the store");
+    }
+
+    const SUITE_PB: &str = "schema: 2\nid: p\nname: p\nversion: 1.0.0\nnodes:\n  - { id: s, type: start }\n  - { id: w, type: prompt, prompt: hi }\n  - { id: f, type: finish, outcome: success }\nedges:\n  - { from: s, to: w }\n  - { from: w, to: f }\n";
+    const SUITE_CASE: &str = "schema: 1\nid: good\nfixture: { dir: fixtures/base }\nchecks:\n  run: { outcome: [succeeded] }\n";
+
+    /// The checks read the copy the run uses, not the live suite: a case
+    /// that turns invalid after the copy was made (a concurrent edit, here
+    /// written into the copy itself) is refused, and a live suite that
+    /// changes after the copy does not matter.
+    #[test]
+    fn the_suite_is_validated_on_the_copy_that_runs() {
+        let t = tempfile::tempdir().unwrap();
+        let playbook_dir = t.path().join("pb");
+        let evals = playbook_dir.join(core_eval::EVALS_DIR);
+        std::fs::create_dir_all(evals.join("fixtures/base")).unwrap();
+        std::fs::write(evals.join("fixtures/base/a.txt"), "a").unwrap();
+        std::fs::write(evals.join("good.yaml"), SUITE_CASE).unwrap();
+        let playbook: Playbook = serde_yaml_ng::from_str(SUITE_PB).unwrap();
+        let bad = SUITE_CASE.replace("fixtures/base", "fixtures/missing");
+
+        let scratch = t.path().join("scratch-1");
+        let err = snapshot_suite(&playbook_dir, &playbook, &scratch, |copy| {
+            std::fs::write(copy.join("good.yaml"), &bad).unwrap();
+        })
+        .expect_err("the copy that runs is invalid");
+        assert!(err.contains("the suite is invalid"), "{err}");
+
+        let scratch = t.path().join("scratch-2");
+        let digest = snapshot_suite(&playbook_dir, &playbook, &scratch, |_| {
+            std::fs::write(evals.join("good.yaml"), &bad).unwrap();
+        })
+        .expect("the copy is valid, whatever the live suite says now");
+        assert!(digest.starts_with("sha256:"), "{digest}");
     }
 
     #[test]
