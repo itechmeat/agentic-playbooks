@@ -604,7 +604,7 @@ fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
 /// - **V80** (error): a case does not parse, its id is not its file stem, it
 ///   uses a field of a later release, a check names a node the version does
 ///   not have, a path leaves `evals/scripts/` or `evals/fixtures/`, a regex
-///   does not compile.
+///   does not compile; the suite holds a symlink or cannot be digested.
 /// - **V81** (error): the playbook has a suite but cannot be evaluated at
 ///   all ([`refusal`]): irreversible effects, shipping steps, connectors or
 ///   sub-playbooks.
@@ -620,6 +620,21 @@ pub fn validate_suite(playbook_dir: &Path, playbook: &Playbook) -> Vec<Issue> {
     }
     let loaded = load_suite(playbook_dir);
     let mut out = loaded.issues.clone();
+    let dir = suite_dir(playbook_dir);
+    for link in symlinks_under(&dir) {
+        out.push(issue(
+            "V80",
+            Severity::Error,
+            format!("`evals/{link}` is a symlink; an eval suite may not contain symlinks"),
+        ));
+    }
+    if let Err(e) = suite_digest(&dir) {
+        out.push(issue(
+            "V80",
+            Severity::Error,
+            format!("the suite cannot be digested: {e}"),
+        ));
+    }
     for lc in &loaded.cases {
         for problem in case_problems(lc, playbook) {
             out.push(issue(
@@ -735,22 +750,36 @@ impl VersionRange {
     }
 }
 
-fn file_sha(path: &Path) -> String {
-    std::fs::read(path)
-        .map(|b| crate::content::sha256_hex(&b))
-        .unwrap_or_else(|_| "missing".into())
+/// The walk limits of an eval suite and its fixtures. Fixtures are real
+/// repositories, far bigger than the skill bundles the default
+/// [`crate::content::TreeLimits`] are sized for; a suite over these limits
+/// cannot be digested and is refused, never approved under a shared value.
+pub fn suite_limits() -> crate::content::TreeLimits {
+    crate::content::TreeLimits {
+        max_total_bytes: 1024 * 1024 * 1024,
+        max_files: 50_000,
+        max_depth: 64,
+        max_file_bytes: 128 * 1024 * 1024,
+    }
 }
 
-fn dir_digest(path: &Path) -> String {
-    crate::content::tree_digest(path, &crate::content::TreeLimits::default())
-        .unwrap_or_else(|_| "missing".into())
+fn file_sha(path: &Path) -> Result<String, String> {
+    std::fs::read(path)
+        .map(|b| crate::content::sha256_hex(&b))
+        .map_err(|e| format!("`{}`: {e}", path.display()))
+}
+
+fn dir_digest(path: &Path) -> Result<String, String> {
+    crate::content::tree_digest(path, &suite_limits())
+        .map_err(|e| format!("`{}`: {e}", path.display()))
 }
 
 /// The case digest: the case file, every fixture directory and check script
 /// it references, and the fixture ref resolved to a commit (`resolved_git`,
 /// when the fixture is `git:`). A stored result is valid for a case only
-/// while this digest is unchanged.
-pub fn case_digest(lc: &LoadedCase, resolved_git: Option<&str>) -> String {
+/// while this digest is unchanged. A part that cannot be read or digested
+/// is an error, never a placeholder shared with other cases.
+pub fn case_digest(lc: &LoadedCase, resolved_git: Option<&str>) -> Result<String, String> {
     let dir = lc.path.parent().unwrap_or(Path::new("."));
     let mut parts: Vec<String> = vec![format!(
         "case:{}",
@@ -760,21 +789,54 @@ pub fn case_digest(lc: &LoadedCase, resolved_git: Option<&str>) -> String {
         .into_iter()
         .flatten()
     {
-        parts.push(format!("dir:{d}:{}", dir_digest(&dir.join(d))));
+        parts.push(format!("dir:{d}:{}", dir_digest(&dir.join(d))?));
     }
     for s in &lc.case.checks.scripts {
-        parts.push(format!("script:{s}:{}", file_sha(&dir.join(s))));
+        parts.push(format!("script:{s}:{}", file_sha(&dir.join(s))?));
     }
     if let Some(c) = resolved_git {
         parts.push(format!("git:{c}"));
     }
-    crate::content::sha256_hex(parts.join("\n").as_bytes())
+    Ok(crate::content::sha256_hex(parts.join("\n").as_bytes()))
 }
 
 /// The suite digest: the whole `evals/` tree. It is what a person approves
-/// before the suite's scripts run on this machine (`apb eval --yes`).
-pub fn suite_digest(suite_dir: &Path) -> String {
+/// before the suite's scripts run on this machine (`apb eval --yes`). A
+/// suite that cannot be digested (a symlink, a special file, a name that is
+/// not UTF-8, over [`suite_limits`]) is an error: the run is refused and
+/// nothing is approved.
+pub fn suite_digest(suite_dir: &Path) -> Result<String, String> {
     dir_digest(suite_dir)
+}
+
+/// Every symlink under `dir`, relative to it, sorted. An eval suite may not
+/// carry one (V80): a link re-resolves differently once the suite is copied
+/// into a scratch tree, and content reached through it is not what the
+/// digest covers.
+fn symlinks_under(dir: &Path) -> Vec<String> {
+    fn walk(base: &Path, dir: &Path, out: &mut Vec<String>) {
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let Ok(ft) = e.file_type() else { continue };
+            if ft.is_symlink() {
+                out.push(
+                    p.strip_prefix(base)
+                        .unwrap_or(&p)
+                        .to_string_lossy()
+                        .into_owned(),
+                );
+            } else if ft.is_dir() {
+                walk(base, &p, out);
+            }
+        }
+    }
+    let mut out = Vec::new();
+    walk(dir, dir, &mut out);
+    out.sort();
+    out
 }
 
 // --- eval suite approvals ------------------------------------------------------
@@ -803,25 +865,43 @@ fn approvals_path() -> Option<PathBuf> {
     evals_home().map(|d| d.join("approved.json"))
 }
 
+/// The value an older apb stored for every suite it could not digest. It
+/// never names content, so it is dropped on load and can never match.
+const LEGACY_UNDIGESTED: &str = "missing";
+
 impl SuiteApprovals {
-    pub fn load() -> Self {
-        approvals_path()
-            .and_then(|p| std::fs::read_to_string(p).ok())
+    fn read(path: &Path) -> Self {
+        let mut a: SuiteApprovals = std::fs::read_to_string(path)
+            .ok()
             .and_then(|raw| serde_json::from_str(&raw).ok())
-            .unwrap_or_default()
+            .unwrap_or_default();
+        a.approved.remove(LEGACY_UNDIGESTED);
+        a
+    }
+
+    pub fn load() -> Self {
+        approvals_path().map(|p| Self::read(&p)).unwrap_or_default()
     }
 
     pub fn is_approved(&self, digest: &str) -> bool {
-        self.approved.contains_key(digest)
+        digest != LEGACY_UNDIGESTED && self.approved.contains_key(digest)
     }
 
     /// Records the approval of `digest` for `playbook` and writes the file.
+    /// The file is re-read under a lock, so an approval another invocation
+    /// recorded in the meantime is kept.
     pub fn approve(&mut self, digest: &str, playbook: &str) -> std::io::Result<()> {
+        if digest == LEGACY_UNDIGESTED {
+            return Err(std::io::Error::other("not a suite digest"));
+        }
         let path =
             approvals_path().ok_or_else(|| std::io::Error::other("no apb config directory"))?;
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
+        let parent = path
+            .parent()
+            .ok_or_else(|| std::io::Error::other("no apb config directory"))?;
+        std::fs::create_dir_all(parent)?;
+        let _lock = crate::fsutil::lock_dir(parent, "approved.lock")?;
+        *self = Self::read(&path);
         self.approved.insert(
             digest.to_string(),
             SuiteApproval {
@@ -975,14 +1055,71 @@ mod tests {
     fn the_case_digest_moves_with_the_case_its_fixture_and_its_scripts() {
         let dir = suite_with(&[("good.yaml", GOOD)]);
         let load = || load_suite(dir.path()).cases.remove(0);
-        let a = case_digest(&load(), None);
-        assert_eq!(a, case_digest(&load(), None), "stable across loads");
-        assert_ne!(a, case_digest(&load(), Some("abc")));
+        let a = case_digest(&load(), None).unwrap();
+        assert_eq!(
+            a,
+            case_digest(&load(), None).unwrap(),
+            "stable across loads"
+        );
+        assert_ne!(a, case_digest(&load(), Some("abc")).unwrap());
         let evals = dir.path().join(EVALS_DIR);
         std::fs::write(evals.join("fixtures/base/a.txt"), "b").unwrap();
-        let b = case_digest(&load(), None);
+        let b = case_digest(&load(), None).unwrap();
         assert_ne!(a, b, "fixture change");
         std::fs::write(evals.join("scripts/ok.sh"), "exit 1").unwrap();
-        assert_ne!(b, case_digest(&load(), None), "script change");
+        assert_ne!(b, case_digest(&load(), None).unwrap(), "script change");
+    }
+
+    /// Two suites over the skill-bundle limits (more than 512 files) are
+    /// digested under the suite limits and never share a value; a suite that
+    /// cannot be digested is an error and a V80, never a placeholder.
+    #[test]
+    fn oversized_suites_get_their_own_digests_and_undigestable_ones_are_refused() {
+        let a = suite_with(&[("good.yaml", GOOD)]);
+        let b = suite_with(&[("good.yaml", GOOD)]);
+        for (dir, tag) in [(&a, "a"), (&b, "b")] {
+            let big = dir.path().join(EVALS_DIR).join("fixtures/big");
+            std::fs::create_dir_all(&big).unwrap();
+            for i in 0..600 {
+                std::fs::write(big.join(format!("f{i}.txt")), format!("{tag}{i}")).unwrap();
+            }
+        }
+        let da = suite_digest(&suite_dir(a.path())).unwrap();
+        let db = suite_digest(&suite_dir(b.path())).unwrap();
+        assert_ne!(da, db);
+        #[cfg(unix)]
+        {
+            let evals = suite_dir(a.path());
+            std::os::unix::fs::symlink("../../outside", evals.join("fixtures/base/out")).unwrap();
+            assert!(suite_digest(&evals).is_err());
+            assert!(case_digest(&load_suite(a.path()).cases[0], None).is_err());
+            let got = codes(&validate_suite(a.path(), &pb(PB)));
+            for needle in [
+                "`evals/fixtures/base/out` is a symlink",
+                "the suite cannot be digested",
+            ] {
+                assert!(
+                    got.iter().any(|(c, m)| *c == "V80" && m.contains(needle)),
+                    "missing `{needle}` in {got:?}"
+                );
+            }
+        }
+    }
+
+    /// The approval an older apb stored for every undigestable suite is
+    /// dropped on load and matches nothing.
+    #[test]
+    fn a_stored_missing_approval_is_dropped_on_load() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("approved.json");
+        std::fs::write(
+            &path,
+            r#"{"approved":{"missing":{"playbook":"p","approved_at_ms":1},"sha256:ab":{"playbook":"p","approved_at_ms":2}}}"#,
+        )
+        .unwrap();
+        let a = SuiteApprovals::read(&path);
+        assert_eq!(a.approved.keys().collect::<Vec<_>>(), ["sha256:ab"]);
+        assert!(!a.is_approved("missing"));
+        assert!(a.is_approved("sha256:ab"));
     }
 }

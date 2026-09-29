@@ -244,6 +244,7 @@ fn materialize(
     root: &Path,
     id: &str,
     lc: &LoadedCase,
+    git_commit: Option<&str>,
     suite_copy: &Path,
     rep_dir: &Path,
     draft: bool,
@@ -251,8 +252,7 @@ fn materialize(
     let tree = rep_dir.join("tree");
     std::fs::create_dir_all(&tree).map_err(|e| e.to_string())?;
     let fx = &lc.case.fixture;
-    if let Some(r) = &fx.git {
-        let commit = git(root, &["rev-parse", "--verify", &format!("{r}^{{commit}}")])?;
+    if let Some(commit) = git_commit {
         let tar = rep_dir.join("fixture.tar");
         git(
             root,
@@ -261,7 +261,8 @@ fn materialize(
                 "--format=tar",
                 "-o",
                 &tar.to_string_lossy(),
-                &commit,
+                "--end-of-options",
+                commit,
             ],
         )?;
         let st = Command::new("tar")
@@ -514,6 +515,28 @@ fn keep_checked_files(case: &core_eval::EvalCase, tree: &Path, stored: &Path) {
     }
 }
 
+/// One selected case of the invocation.
+struct Planned<'a> {
+    lc: &'a LoadedCase,
+    repeat: u32,
+    /// The commit a `git:` fixture resolved to, once for every repetition.
+    fixture_commit: Option<Result<String, String>>,
+    digest: String,
+}
+
+/// A fixture ref of this repository as a commit id.
+fn resolve_ref(root: &Path, r: &str) -> Result<String, String> {
+    git(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--end-of-options",
+            &format!("{r}^{{commit}}"),
+        ],
+    )
+}
+
 struct RepContext<'a> {
     root: &'a Path,
     args: &'a EvalArgs,
@@ -548,17 +571,21 @@ fn error_rep(n: u32, detail: String, kept: Option<String>) -> Repetition {
 
 /// One repetition end to end. Returns the repetition and, when the run
 /// started, its stored run directory.
-fn run_repetition(cx: &RepContext, lc: &LoadedCase, n: u32) -> (Repetition, Option<PathBuf>) {
+fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<PathBuf>) {
+    let lc = p.lc;
     let rep_dir = cx.scratch.join(format!("{}-{n}", lc.case.id));
     let tree = rep_dir.join("tree");
-    let fixture_commit = match materialize(
-        cx.root,
-        &cx.args.id,
-        lc,
-        cx.suite_copy,
-        &rep_dir,
-        cx.args.draft,
-    ) {
+    let fixture_commit = match p.fixture_commit.clone().transpose().and_then(|commit| {
+        materialize(
+            cx.root,
+            &cx.args.id,
+            lc,
+            commit.as_deref(),
+            cx.suite_copy,
+            &rep_dir,
+            cx.args.draft,
+        )
+    }) {
         Ok(c) => c,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&rep_dir);
@@ -776,12 +803,24 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     let eval_id = format!("eval-{}", apb_core::clock::now_ms());
     let scratch = evals_home.join("scratch").join(&eval_id);
     let suite_copy = scratch.join(core_eval::EVALS_DIR);
-    // The suite runs from a copy made now, so the digest a person approves
-    // is the content that runs.
-    if let Err(e) = apb_core::fsutil::copy_tree(&core_eval::suite_dir(&playbook_dir), &suite_copy) {
-        let _ = std::fs::remove_dir_all(&scratch);
-        return fail(args.json, "scratch", format!("cannot copy the suite: {e}"));
-    }
+    // The suite runs from a copy made now, and the digest a person approves
+    // is computed in the same pass over the same bytes, so it is the content
+    // that runs.
+    let suite_digest = match apb_core::content::snapshot_tree(
+        &core_eval::suite_dir(&playbook_dir),
+        &suite_copy,
+        &core_eval::suite_limits(),
+    ) {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = std::fs::remove_dir_all(&scratch);
+            return fail(
+                args.json,
+                "invalid_suite",
+                format!("the suite cannot be digested: {e}"),
+            );
+        }
+    };
     let outcome = run_eval(
         root,
         &args,
@@ -790,6 +829,7 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
         &evals_home,
         &scratch,
         &suite_copy,
+        &suite_digest,
         overrides.as_ref(),
         &eval_id,
     );
@@ -838,6 +878,7 @@ fn run_eval(
     evals_home: &Path,
     scratch: &Path,
     suite_copy: &Path,
+    suite_digest: &str,
     overrides: Option<&RunOverrides>,
     eval_id: &str,
 ) -> ExitCode {
@@ -860,21 +901,35 @@ fn run_eval(
         .max_usd
         .or(suite.suite.budget.max_usd_per_invocation)
         .unwrap_or(core_eval::DEFAULT_MAX_USD_PER_INVOCATION);
-    let planned: Vec<(&LoadedCase, u32)> = cases
-        .iter()
-        .map(|lc| {
-            (
-                *lc,
-                args.repeat
-                    .unwrap_or_else(|| lc.repeat(&suite.suite))
-                    .max(1),
-            )
-        })
-        .collect();
-    let total: u32 = planned.iter().map(|(_, n)| n).sum();
-    let suite_digest = core_eval::suite_digest(suite_copy);
+    let mut planned: Vec<Planned> = Vec::new();
+    for lc in &cases {
+        // A `git:` fixture ref is resolved once per case: every repetition
+        // materializes the same commit, and the case digest names it.
+        let fixture_commit = lc.case.fixture.git.as_ref().map(|r| resolve_ref(root, r));
+        let resolved = fixture_commit.as_ref().and_then(|c| c.as_ref().ok());
+        let digest = match core_eval::case_digest(lc, resolved.map(String::as_str)) {
+            Ok(d) => d,
+            Err(e) => {
+                return fail(
+                    args.json,
+                    "invalid_suite",
+                    format!("the case `{}` cannot be digested: {e}", lc.case.id),
+                );
+            }
+        };
+        planned.push(Planned {
+            lc,
+            repeat: args
+                .repeat
+                .unwrap_or_else(|| lc.repeat(&suite.suite))
+                .max(1),
+            fixture_commit,
+            digest,
+        });
+    }
+    let total: u32 = planned.iter().map(|p| p.repeat).sum();
     let mut approvals = core_eval::SuiteApprovals::load();
-    let approved = approvals.is_approved(&suite_digest);
+    let approved = approvals.is_approved(suite_digest);
     if !args.json {
         eprintln!("{NOT_A_SANDBOX}");
         for (node, profile) in full_environment_nodes(root, playbook, overrides) {
@@ -900,13 +955,13 @@ fn run_eval(
                 "plan": {
                     "playbook": args.id, "version": version, "budget_usd": budget,
                     "suite_digest": suite_digest, "suite_approved": approved,
-                    "cases": planned.iter().map(|(lc, n)| json!({"case": lc.case.id, "repeat": n})).collect::<Vec<_>>(),
+                    "cases": planned.iter().map(|p| json!({"case": p.lc.case.id, "repeat": p.repeat})).collect::<Vec<_>>(),
                 }
             }));
         } else {
             println!("{plan_line}");
-            for (lc, n) in &planned {
-                println!("  {} x{n}", lc.case.id);
+            for p in &planned {
+                println!("  {} x{}", p.lc.case.id, p.repeat);
             }
         }
         return ExitCode::SUCCESS;
@@ -926,7 +981,7 @@ fn run_eval(
             "refused without confirmation (pass --yes to approve the suite and start)".into(),
         );
     }
-    if !approved && let Err(e) = approvals.approve(&suite_digest, &args.id) {
+    if !approved && let Err(e) = approvals.approve(suite_digest, &args.id) {
         return fail(
             args.json,
             "approval",
@@ -969,14 +1024,10 @@ fn run_eval(
     let mut incomplete: Option<String> = None;
     let mut key: Option<ConfigKey> = None;
     let mut results = Vec::new();
-    for (lc, repeat) in &planned {
-        let resolved_git =
-            lc.case.fixture.git.as_ref().and_then(|r| {
-                git(root, &["rev-parse", "--verify", &format!("{r}^{{commit}}")]).ok()
-            });
-        let digest = core_eval::case_digest(lc, resolved_git.as_deref());
+    for p in &planned {
+        let lc = p.lc;
         let mut reps = Vec::new();
-        for n in 1..=*repeat {
+        for n in 1..=p.repeat {
             if incomplete.is_some() {
                 break;
             }
@@ -987,7 +1038,7 @@ fn run_eval(
             if !args.json {
                 eprintln!("running {} #{n}", lc.case.id);
             }
-            let (rep, stored) = run_repetition(&cx, lc, n);
+            let (rep, stored) = run_repetition(&cx, p, n);
             spent += rep.usage.cost_usd.unwrap_or(0.0);
             tokens += rep.usage.tokens();
             if key.is_none()
@@ -1003,7 +1054,7 @@ fn run_eval(
             reps.push(rep);
         }
         if !reps.is_empty() {
-            results.push(CaseResult::new(&lc.case.id, &digest, reps));
+            results.push(CaseResult::new(&lc.case.id, &p.digest, reps));
         }
     }
     let config = key.unwrap_or_else(|| ConfigKey {
