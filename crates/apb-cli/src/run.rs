@@ -258,6 +258,11 @@ fn doctor_env(root: &Path) -> ExitCode {
         };
         println!("{marker} {}: {}", c.name, c.detail);
     }
+    match crate::dashboard_check::dashboard_version_line() {
+        Some(Ok(detail)) => println!("[ok]   dashboard: {detail}"),
+        Some(Err(detail)) => println!("[warn] dashboard: {detail}"),
+        None => {}
+    }
     if report.has_failure() {
         eprintln!("doctor: found blocking problems");
         ExitCode::from(1)

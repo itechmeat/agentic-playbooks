@@ -1,5 +1,6 @@
 mod cache;
 mod connector;
+mod dashboard_check;
 mod decisions;
 mod manage;
 mod onboarding;
