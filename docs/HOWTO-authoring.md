@@ -1581,9 +1581,13 @@ the server infers from node types, never narrow it. Values: `fs_read`,
 `irreversible` for anything that cannot be rolled back (a push, a merged or
 opened pull request, deploys, publishes, external notifications): a run of a
 playbook whose tree declares it starts only with an explicit consent (MCP
-`acknowledge_untrusted: true` after asking the person, `apb run` from a
-terminal or with `--confirm-irreversible`, the dashboard's Run dialog), which
+`confirm_irreversible` with the refusal's `consent_nonce` after asking the
+person, a `y` to the question `apb run` asks at a terminal or
+`--confirm-irreversible=<consent_nonce>`, the dashboard's Run dialog), which
 the run manifest records as `consent: { irreversible: true, by: ... }`. A
+connector function flagged `irreversible: true` that a node is granted counts
+the same way. A node that looks like a merge, push, deploy or publish step by
+its name but declares nothing is warning V90: declare it. A
 trigger or a headless start without that consent is refused before the run is
 created. A sub-playbook inherits its parent's consent, so declaring
 `irreversible` on a child makes every parent that runs it ask once, at start.
