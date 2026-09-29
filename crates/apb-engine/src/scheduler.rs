@@ -1032,6 +1032,7 @@ fn drive_inner(
                     let journal = Journal::new(&mut *log);
                     let (tx, rx) = mpsc::channel();
                     std::thread::scope(|scope| -> Result<(), EngineError> {
+                        let solo = spawn.len() < 2;
                         for &n in &spawn {
                             let playbook_c = playbook.clone();
                             let rd = run_dir.to_path_buf();
@@ -1065,6 +1066,10 @@ fn drive_inner(
                                     // the live sidecar ever originates here.
                                     None,
                                     None,
+                                    // Siblings running at the same time move
+                                    // the same HEAD: no commit is attributed
+                                    // to a node that did not run alone.
+                                    solo,
                                 );
                                 let _ = tx.send((node, res));
                             });
@@ -1884,6 +1889,7 @@ fn drive_inner(
                         } else {
                             None
                         },
+                        true,
                     )?
                 };
                 match outcome {
@@ -2070,6 +2076,7 @@ fn drive_inner(
                         None,
                         // ...and never run the live sidecar.
                         None,
+                        true,
                     )?
                 };
                 let (st, out, evs) = match outcome {

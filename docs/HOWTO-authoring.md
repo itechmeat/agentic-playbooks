@@ -249,6 +249,16 @@ event and shown by `run_report`, `run_status`, `apb runs <id>` and the
 dashboard run page. Outside git, or on a repository without a commit, nothing
 is recorded.
 
+Only commits added on top of where the node started are recorded: when
+`HEAD` ends on another branch than it started on, or moved anywhere but
+forward (a checkout, a reset, a rebase), the node gets no record, since the
+difference would list someone else's history. An interactive node that
+commits and then asks a question keeps the `HEAD` it started from, so its
+record after the answer covers both rounds. Nodes that run at the same time
+in a concurrent batch share one `HEAD`, so a node gets a record only when it
+ran alone; commits made in a parallel fan-out are linked to the run by the
+`Apb-Run:` trailer below, not by `artifacts_committed`.
+
 That links a run to its commits. For the other direction, from a commit to
 its run, write the run id as a commit trailer:
 

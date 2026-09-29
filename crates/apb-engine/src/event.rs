@@ -761,7 +761,7 @@ pub enum EventPayload {
     // --- 0.23.0: run provenance, goal criteria, protected paths ----------
     /// A node moved `HEAD` of the git tree it ran in (C7): the commits it
     /// made, newest first. Written only on a git tree with a commit and only
-    /// when `HEAD` changed, just before the node's `node_finished`, so it is
+    /// when `HEAD` moved forward on the branch the node started on, just before the node's `node_finished`, so it is
     /// safe to skip up to that checkpoint: it records history, the engine
     /// never reads it back. `omitted` counts commits past the listed ones.
     ArtifactsCommitted {

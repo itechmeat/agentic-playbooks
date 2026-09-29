@@ -619,7 +619,11 @@ fn journal_missing_inputs(
 
 /// Executes one node: [`execute_node_kind`] plus the provenance record of a
 /// git tree's `HEAD` around it (see [`super::provenance`]). A suspended node
-/// (an interactive question) records nothing yet; its answer round does.
+/// (an interactive question) records nothing yet; it keeps the `HEAD` it
+/// started from, and its answer round records the whole span.
+/// `track_provenance` is false for a member of a concurrent batch that
+/// shares the tree with a sibling: `HEAD` moves by both, so no commit could
+/// be attributed to one node.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn execute_node(
     playbook: &Playbook,
@@ -636,17 +640,22 @@ pub(crate) fn execute_node(
     decisions: Option<&crate::decision::DecisionRunner>,
     resume: Option<ResumeContext>,
     live: Option<LiveContext>,
+    track_provenance: bool,
 ) -> Result<AttemptOutcome, EngineError> {
-    let tracker = super::provenance::Tracker::start(playbook, node_id, workdir, |t| {
-        render_node_prompt(
-            run_dir,
-            run_id,
-            state,
-            cfg,
-            t,
-            &playbook.context_budget(node_id),
-        )
-    });
+    let tracker = track_provenance
+        .then(|| {
+            super::provenance::Tracker::start(playbook, run_dir, node_id, workdir, |t| {
+                render_node_prompt(
+                    run_dir,
+                    run_id,
+                    state,
+                    cfg,
+                    t,
+                    &playbook.context_budget(node_id),
+                )
+            })
+        })
+        .flatten();
     let outcome = execute_node_kind(
         playbook,
         run_dir,
@@ -663,8 +672,10 @@ pub(crate) fn execute_node(
         resume,
         live,
     )?;
-    if let (Some(t), AttemptOutcome::Finished { .. }) = (tracker, &outcome) {
-        t.finish(journal)?;
+    match (tracker, &outcome) {
+        (Some(t), AttemptOutcome::Finished { .. }) => t.finish(run_dir, journal)?,
+        (Some(t), AttemptOutcome::Suspended { .. }) => t.park(run_dir),
+        (None, _) => {}
     }
     Ok(outcome)
 }

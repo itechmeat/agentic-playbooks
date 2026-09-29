@@ -184,3 +184,251 @@ fn a_tree_without_git_journals_no_provenance() {
         ]
     );
 }
+
+/// Seeds playbook `p2` from `yaml` with the given scripts.
+fn seed_other(root: &Path, yaml: &str, scripts: &[(&str, &str)]) {
+    init_project(root).unwrap();
+    let dir = root.join(".apb/playbooks/p2/1.0.0");
+    fs::create_dir_all(dir.join("scripts")).unwrap();
+    fs::write(dir.join("playbook.yaml"), yaml).unwrap();
+    for (name, body) in scripts {
+        fs::write(dir.join("scripts").join(name), body).unwrap();
+    }
+    fs::write(root.join(".apb/playbooks/p2/current"), "1.0.0").unwrap();
+}
+
+fn git_repo(root: &Path) {
+    fs::write(root.join(".gitignore"), ".apb/\n").unwrap();
+    git(root, &["init", "-q", "-b", "main"]);
+    git(root, &["add", ".gitignore"]);
+    git(root, &["commit", "-q", "-m", "base"]);
+}
+
+fn listed(events: &[apb_engine::event::Event]) -> Vec<(String, Vec<String>)> {
+    events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::ArtifactsCommitted { node, commits, .. } => Some((
+                node.clone(),
+                commits.iter().map(|c| c.subject.clone()).collect(),
+            )),
+            _ => None,
+        })
+        .collect()
+}
+
+/// A node that only switches branches committed nothing: the other
+/// branch's history is never listed as its commits.
+#[test]
+fn a_branch_switch_lists_no_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    seed_other(
+        root,
+        r#"
+schema: 2
+id: p2
+name: Switch
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: switch, type: script, script: "scripts/switch.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: switch }
+  - { from: switch, to: done }
+"#,
+        &[("switch.sh", "git checkout -q main\n")],
+    );
+    git_repo(root);
+    git(root, &["checkout", "-q", "-b", "feat"]);
+    git(root, &["checkout", "-q", "main"]);
+    git(
+        root,
+        &["commit", "-q", "--allow-empty", "-m", "only on main"],
+    );
+    git(root, &["checkout", "-q", "feat"]);
+    let res = run(root, "p2", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap();
+    assert!(listed(&events).is_empty(), "{:?}", listed(&events));
+}
+
+/// Nodes that run at the same time on one tree move the same `HEAD`: no
+/// node is credited with a sibling's commit.
+#[test]
+fn concurrent_nodes_never_list_each_others_commits() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let commit = |name: &str, delay: &str| {
+        format!(
+            "sleep {delay}\necho {name} > {name}.txt\ngit add {name}.txt\n\
+             git -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false \
+             commit -q -m 'by {name}'\n"
+        )
+    };
+    seed_other(
+        root,
+        r#"
+schema: 2
+id: p2
+name: Fork
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: a, type: script, script: "scripts/a.sh", runner: sh }
+  - { id: b, type: script, script: "scripts/b.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: a }
+  - { from: start, to: b }
+  - { from: a, to: done }
+  - { from: b, to: done }
+"#,
+        &[("a.sh", &commit("a", "0.2")), ("b.sh", &commit("b", "1"))],
+    );
+    git_repo(root);
+    let res = run(root, "p2", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap();
+    for (node, subjects) in listed(&events) {
+        assert!(
+            subjects.iter().all(|s| *s == format!("by {node}")),
+            "{node}: {subjects:?}"
+        );
+    }
+}
+
+/// Reading the node's commits never runs the repository's `gpg.program`
+/// through `log.showSignature`.
+#[test]
+fn listing_commits_never_runs_the_repository_gpg_program() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path();
+    let bin = tempfile::tempdir().unwrap();
+    let marker = bin.path().join("verified");
+    let gpg = bin.path().join("gpg.sh");
+    fs::write(
+        &gpg,
+        format!(
+            "#!/bin/sh\ncase \"$*\" in *--verify*) touch '{}'; exit 1;; esac\n\
+             cat >/dev/null\necho '[GNUPG:] SIG_CREATED D 1 8 00 0 FP' >&2\n\
+             printf -- '-----BEGIN PGP SIGNATURE-----\\n\\nx\\n-----END PGP SIGNATURE-----\\n'\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&gpg, fs::Permissions::from_mode(0o755)).unwrap();
+    seed_other(
+        root,
+        r#"
+schema: 2
+id: p2
+name: Signed
+version: 1.0.0
+nodes:
+  - { id: start, type: start }
+  - { id: sign, type: script, script: "scripts/sign.sh", runner: sh }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: sign }
+  - { from: sign, to: done }
+"#,
+        &[(
+            "sign.sh",
+            "git -c user.name=t -c user.email=t@example.invalid commit -q -S -m signed --allow-empty\n",
+        )],
+    );
+    git_repo(root);
+    git(root, &["config", "gpg.program", &gpg.to_string_lossy()]);
+    git(root, &["config", "log.showSignature", "true"]);
+    let res = run(root, "p2", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&root.join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_eq!(listed(&events), [("sign".into(), vec!["signed".into()])]);
+    assert!(!marker.exists());
+}
+
+/// An interactive node that commits, then asks a question, then finishes
+/// after the answer: its one record lists the commit made before the
+/// question.
+#[test]
+fn an_interactive_node_records_the_commits_made_before_its_question() {
+    let tmp = tempfile::tempdir().unwrap();
+    let root = tmp.path().to_path_buf();
+    seed_other(
+        &root,
+        r#"
+schema: 2
+id: p2
+name: Ask
+version: 1.0.0
+defaults:
+  profile: main
+nodes:
+  - { id: start, type: start }
+  - { id: ask, type: agent_task, prompt: "work, then ask", interactive: true }
+  - { id: done, type: finish, outcome: success }
+edges:
+  - { from: start, to: ask }
+  - { from: ask, to: done }
+"#,
+        &[],
+    );
+    crate::common::seed_main(&root);
+    git_repo(&root);
+    let bin = tempfile::tempdir().unwrap();
+    let agent = bin.path().join("agent.sh");
+    crate::common::write_sync(
+        &agent,
+        &format!(
+            "#!/bin/sh\nc='{}'\nn=$(cat \"$c\" 2>/dev/null || echo 0); n=$((n+1)); echo $n > \"$c\"\n\
+             if [ \"$n\" = 1 ]; then\n\
+               echo one > one.txt; git add one.txt\n\
+               git -c user.name=t -c user.email=t@example.invalid -c commit.gpgsign=false commit -q -m 'before the question'\n\
+               printf '%s\\n' '<<<apb:question>>>'\n\
+               printf '%s\\n' '{{\"question\":\"Go on?\",\"options\":[\"yes\",\"no\"]}}'\n\
+               exit 0\n\
+             fi\necho done\n",
+            bin.path().join("count").display()
+        ),
+    );
+    use std::os::unix::fs::PermissionsExt;
+    fs::set_permissions(&agent, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let _env = crate::common::env_lock();
+    unsafe {
+        std::env::set_var("APB_AGENT_CMD", &agent);
+    }
+    let r = root.clone();
+    let handle = std::thread::spawn(move || run(&r, "p2", None, RunOptions::default()));
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+    let run_dir = loop {
+        let asked = fs::read_dir(root.join(".apb/runs"))
+            .ok()
+            .and_then(|mut d| d.find_map(|e| e.ok().map(|e| e.path())))
+            .filter(|dir| {
+                read_all(dir).is_ok_and(|evs| {
+                    evs.iter()
+                        .any(|e| matches!(e.payload, EventPayload::QuestionAsked { .. }))
+                })
+            });
+        if let Some(dir) = asked {
+            break dir;
+        }
+        assert!(std::time::Instant::now() < deadline, "no question asked");
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    };
+    apb_engine::question::post_answer(&run_dir, Some("ask"), "yes", "human").unwrap();
+    let res = handle.join().unwrap().unwrap();
+    unsafe {
+        std::env::remove_var("APB_AGENT_CMD");
+    }
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&run_dir).unwrap();
+    assert_eq!(
+        listed(&events),
+        [("ask".into(), vec!["before the question".into()])]
+    );
+}
