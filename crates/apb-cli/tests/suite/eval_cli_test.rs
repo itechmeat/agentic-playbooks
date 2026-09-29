@@ -773,23 +773,29 @@ fn a_run_past_its_timeout_is_stopped_and_its_agent_is_gone() {
 fn a_kept_tree_survives_the_scratch_cleanup() {
     let env = setup(PLAYBOOK);
     let probe = with_limits(&env, "1s");
-    // A detached helper that reads as an apb driver of this run (argv[0]
-    // `apb`, its pid in the run's `driver.pid`) for as long as it lives, so
-    // the runner sees a driver that does not exit after the stop.
+    // A detached helper that reads as the apb driver of this run: argv[0]
+    // `apb`, its pid in the run's `driver.pid`, and the run directory made
+    // read-only so the real driver cannot remove that file when it exits.
     write(
         &probe.join("holder.sh"),
-        "echo $$ > \"$PROBE_DIR/helper.pid\"\nwhile :; do echo $$ > \"$RUN/driver.pid\" 2>/dev/null; sleep 0.2; done\n",
+        "echo $$ > \"$RUN/driver.pid\"\nchmod a-w \"$RUN\"\necho $$ > \"$PROBE_DIR/helper.pid\"\nwhile :; do sleep 1; done\n",
     );
     slow_stub(
         &env,
-        "RUN=\"$APB_RUN_DIR\" setsid bash -c 'exec -a apb sh \"$0\"' \"$PROBE_DIR/holder.sh\" >/dev/null 2>&1 &\nexec sleep 45",
+        "RUN=\"$APB_RUN_DIR\" setsid bash -c 'exec -a apb sh \"$0\"' \"$PROBE_DIR/holder.sh\" >/dev/null 2>&1 &\nwhile [ ! -s \"$PROBE_DIR/helper.pid\" ]; do sleep 0.05; done\nexec sleep 45",
     );
     let (code, v) = env.eval_json(&[]);
-    let helper = read_pid(&probe.join("helper.pid"));
     let rep = v["result"]["cases"][0]["repetitions"][0].clone();
-    // Clean up before asserting: the helper holds the driver.
-    // SAFETY: plain kill(2).
-    unsafe { libc::kill(helper, libc::SIGKILL) };
+    // Clean up before asserting: the helper and the agent outlive the eval.
+    for f in ["helper.pid", "agent.pid"] {
+        // SAFETY: plain kill(2).
+        unsafe { libc::kill(read_pid(&probe.join(f)), libc::SIGKILL) };
+    }
+    let run_dir = rep["run_dir"].as_str().map(PathBuf::from);
+    if let Some(d) = &run_dir {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(d, fs::Permissions::from_mode(0o755));
+    }
     assert_eq!(code, 1, "{v:#}");
     let kept = PathBuf::from(rep["kept_worktree"].as_str().expect("kept_worktree"));
     assert!(
@@ -797,8 +803,7 @@ fn a_kept_tree_survives_the_scratch_cleanup() {
         "{kept:?}"
     );
     assert!(kept.join(".apb").is_dir(), "the kept tree was deleted");
-    let run_dir = PathBuf::from(rep["run_dir"].as_str().unwrap());
-    assert!(run_dir.starts_with(&kept), "{run_dir:?}");
+    assert!(run_dir.unwrap().starts_with(&kept), "{rep:#}");
     assert!(!env.cfg.path().join("evals/scratch").exists());
 }
 

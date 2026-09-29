@@ -771,21 +771,49 @@ fn set_live(run: Option<LiveRun>) {
 }
 
 /// Kills what is left of a finished driver's process group (the driver led
-/// it; an agent helper it spawned may linger).
-fn kill_leftover_group(driver_pid: Option<u32>) {
-    #[cfg(unix)]
-    if let Some(pid) = driver_pid.and_then(|p| libc::pid_t::try_from(p).ok())
-        && pid > 1
+/// it; an agent helper it spawned may linger). The driver is gone, so its
+/// pid, and with it the group id, may already name someone else's group:
+/// only members whose working directory lies inside the repetition are
+/// killed, one by one. Linux only (it reads `/proc`); elsewhere a leftover
+/// helper is left to the operator.
+fn kill_leftover_group(driver_pid: Option<u32>, rep_dir: &Path) {
+    #[cfg(target_os = "linux")]
     {
-        // SAFETY: plain kill(2) on a process group id.
-        unsafe {
-            if libc::kill(-pid, 0) == 0 {
-                libc::kill(-pid, libc::SIGKILL);
+        let Some(pgid) = driver_pid.filter(|p| *p > 1) else {
+            return;
+        };
+        let Ok(rep) = std::fs::canonicalize(rep_dir) else {
+            return;
+        };
+        let Ok(procs) = std::fs::read_dir("/proc") else {
+            return;
+        };
+        for e in procs.flatten() {
+            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
+                continue;
+            };
+            // `/proc/<pid>/stat`: `pid (comm) state ppid pgrp ...`; comm may
+            // hold spaces, so the fields are counted after the last `)`.
+            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
+                continue;
+            };
+            let pgrp = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(2))
+                .and_then(|g| g.parse::<u32>().ok());
+            let inside =
+                std::fs::read_link(e.path().join("cwd")).is_ok_and(|c| c.starts_with(&rep));
+            if pgrp == Some(pgid)
+                && inside
+                && let Ok(p) = libc::pid_t::try_from(pid)
+            {
+                // SAFETY: plain kill(2) on a process we just identified.
+                unsafe { libc::kill(p, libc::SIGKILL) };
             }
         }
     }
-    #[cfg(not(unix))]
-    let _ = driver_pid;
+    #[cfg(not(target_os = "linux"))]
+    let _ = (driver_pid, rep_dir);
 }
 
 /// Whether the process `pid` exists.
@@ -863,8 +891,22 @@ fn sweep_stale_scratch(evals_home: &Path) {
         let owner = std::fs::read_to_string(dir.join(OWNER_FILE))
             .ok()
             .and_then(|s| s.trim().parse::<u32>().ok());
-        if owner.is_some_and(pid_alive) {
-            continue;
+        match owner {
+            Some(pid) if pid_alive(pid) => continue,
+            Some(_) => {}
+            // No owner file: an invocation that is just creating its
+            // scratch, or one that died before it wrote the file. Only an
+            // old one is stale.
+            None => {
+                let recent = std::fs::metadata(&dir)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_none_or(|age| age < Duration::from_secs(600));
+                if recent {
+                    continue;
+                }
+            }
         }
         let live_driver = std::fs::read_dir(&dir)
             .into_iter()
@@ -1039,7 +1081,7 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
     let (stored, kept) = if clean {
         // The driver is gone; whatever it left in its process group goes
         // with it before the tree is removed.
-        kill_leftover_group(driver_pid);
+        kill_leftover_group(driver_pid, &rep_dir);
         let stored = cx
             .evals_home
             .join("runs")
