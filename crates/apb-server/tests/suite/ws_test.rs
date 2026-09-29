@@ -107,7 +107,17 @@ async fn watcher_ignores_reads_and_still_reports_writes() {
     let mut rx = state.events.subscribe();
     let _watcher =
         apb_server::watch::spawn_watcher(dir.path().to_path_buf(), state.events.clone()).unwrap();
-    tokio::time::sleep(Duration::from_millis(300)).await;
+    // Let the setup writes settle before the read: macOS FSEvents can deliver
+    // the create and write above after the watch starts, and those are
+    // changes, not the read under test. Bounded, so a watcher that never
+    // goes quiet fails the assertion below rather than hanging.
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        if rx.try_recv().is_err() {
+            break;
+        }
+        while rx.try_recv().is_ok() {}
+    }
 
     assert_eq!(fs::read_to_string(&file).unwrap(), "id: demo");
     tokio::time::sleep(Duration::from_millis(500)).await;
