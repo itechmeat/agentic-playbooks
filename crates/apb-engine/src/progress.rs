@@ -352,6 +352,12 @@ pub struct ProgressSummary {
     /// Host execution mode (0.23.0): every host task waiting for the host
     /// session, in request order, prompts inline (read from the run
     /// directory, so only the `from_run_dir` family fills it).
+    /// Absent when empty, so a run without host tasks serializes as before.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    #[cfg_attr(
+        feature = "ts",
+        ts(as = "Option<Vec<crate::host_task::PendingHostTask>>", optional)
+    )]
     pub pending_tasks: Vec<crate::host_task::PendingHostTask>,
     /// Deterministic identity of the work plan behind this percent (spec
     /// section 3): the playbook version bound to the run plus the latest

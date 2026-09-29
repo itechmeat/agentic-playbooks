@@ -220,8 +220,9 @@ pending_waits: Array<string>,
  * Host execution mode (0.23.0): every host task waiting for the host
  * session, in request order, prompts inline (read from the run
  * directory, so only the `from_run_dir` family fills it).
+ * Absent when empty, so a run without host tasks serializes as before.
  */
-pending_tasks: Array<PendingHostTask>, 
+pending_tasks?: Array<PendingHostTask>, 
 /**
  * Deterministic identity of the work plan behind this percent (spec
  * section 3): the playbook version bound to the run plus the latest
