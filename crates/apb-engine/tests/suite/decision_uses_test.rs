@@ -453,6 +453,8 @@ fn an_uncalibrated_provider_is_refused_unless_allowed() {
 fn a_lowered_ceiling_mid_run_stops_the_enforce_path() {
     // The first node's agent lowers the machine's ceiling to shadow while
     // the run is going: the second node's decision is shadow and acts not.
+    // The agent edits with `sed` plus a rename, not `sed -i`, which BSD sed
+    // (macOS) parses differently.
     let yaml = playbook(
         "",
         "  - { id: w, type: agent_task, prompt: \"First\", completion_check: enforce, max_retries: 1 }\n  - { id: w2, type: agent_task, prompt: \"Second\", completion_check: enforce, max_retries: 1 }\n",
@@ -462,7 +464,7 @@ fn a_lowered_ceiling_mid_run_stops_the_enforce_path() {
     let cfg_file = p.cfg.path().join("decisions.yaml");
     let marker = p.path("lowered");
     p.agent_body(&format!(
-        "if [ ! -f '{m}' ]; then touch '{m}'; sed -i 's/^mode: enforce/mode: shadow/' '{c}'; echo 'Done: first step finished and verified end to end.'; else echo '{RUNNING}'; fi",
+        "if [ ! -f '{m}' ]; then touch '{m}'; sed 's/^mode: enforce/mode: shadow/' '{c}' > '{c}.tmp' && mv '{c}.tmp' '{c}'; echo 'Done: first step finished and verified end to end.'; else echo '{RUNNING}'; fi",
         m = marker.display(),
         c = cfg_file.display()
     ));

@@ -77,20 +77,37 @@ fn registered_paths(projects_json: &Path) -> Vec<String> {
         .unwrap_or_default()
 }
 
+/// The registry stores canonical paths, so the expected entry is the
+/// canonical project path, not the spelling the command ran under. On macOS
+/// the temp dir itself sits behind a symlink (`/var` -> `/private/var`); on
+/// unix the project is entered through a symlink here so a comparison against
+/// the raw spelling fails on every platform, not only on macOS.
 #[test]
 fn sandboxed_apb_registers_into_the_sandbox_not_the_real_config() {
     let dir = tempfile::tempdir().unwrap();
-    let project = dir.path().to_string_lossy().into_owned();
+    let project = std::fs::canonicalize(dir.path())
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    #[cfg(unix)]
+    let (_links, cwd) = {
+        let links = tempfile::tempdir().unwrap();
+        let link = links.path().join("project");
+        std::os::unix::fs::symlink(dir.path(), &link).unwrap();
+        (links, link)
+    };
+    #[cfg(not(unix))]
+    let cwd = dir.path().to_path_buf();
     crate::common::apb()
         .arg("init")
-        .current_dir(dir.path())
+        .current_dir(&cwd)
         .assert()
         .success();
     // Registration is off under CI; force it on so the check means something
     // there too.
     crate::common::apb()
         .arg("list")
-        .current_dir(dir.path())
+        .current_dir(&cwd)
         .env_remove("CI")
         .env_remove("APB_NO_REGISTRY")
         .assert()
