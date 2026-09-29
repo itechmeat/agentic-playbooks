@@ -695,18 +695,144 @@ fn driver_gone(run_dir: &Path, run_id: &str) -> bool {
 /// a symlink to a directory outside: that is refused before anything moves,
 /// so an outside directory is never moved or deleted, and so is a
 /// destination that is not a real directory afterwards.
+///
+/// On unix the check and the move cannot drift apart: every directory from
+/// the tree down to the run directory's parent is opened without following
+/// a link, and the rename is made relative to that open parent (`renameat`),
+/// so a link swapped in after the check is not followed; a run directory
+/// replaced by a link at the last moment is moved as the link itself and
+/// then refused. Only a cross-filesystem move falls back to a copy by path,
+/// checked again right before it.
 fn move_run_dir(tree: &Path, from: &Path, to: &Path) -> std::io::Result<()> {
-    apb_core::fsutil::ensure_no_symlink_below(tree, from).map_err(|e| {
-        std::io::Error::other(format!("the run directory is behind a symlink: {e}"))
-    })?;
+    move_run_dir_with(tree, from, to, || {})
+}
+
+/// [`move_run_dir`]; `between` runs after the checks and before the move
+/// (a no-op outside the tests, which use it to stand in for the agent).
+fn move_run_dir_with(
+    tree: &Path,
+    from: &Path,
+    to: &Path,
+    between: impl FnOnce(),
+) -> std::io::Result<()> {
+    let behind =
+        |e: String| std::io::Error::other(format!("the run directory is behind a symlink: {e}"));
+    apb_core::fsutil::ensure_no_symlink_below(tree, from).map_err(|e| behind(e.to_string()))?;
     if std::fs::symlink_metadata(from)?.file_type().is_symlink() {
         return Err(std::io::Error::other("the run directory is a symlink"));
     }
-    move_dir(from, to)?;
+    if let Some(p) = to.parent() {
+        std::fs::create_dir_all(p)?;
+    }
+    #[cfg(unix)]
+    let moved = {
+        let parent = nofollow::open_parent(tree, from)?;
+        between();
+        parent.rename_to(to)
+    };
+    #[cfg(not(unix))]
+    let moved = {
+        between();
+        std::fs::rename(from, to)
+    };
+    match moved {
+        Ok(()) => {}
+        Err(e) if is_cross_device(&e) => {
+            apb_core::fsutil::ensure_no_symlink_below(tree, from)
+                .map_err(|e| behind(e.to_string()))?;
+            move_dir(from, to)?;
+        }
+        Err(e) => return Err(e),
+    }
     if !std::fs::symlink_metadata(to)?.is_dir() {
         return Err(std::io::Error::other("the stored run is not a directory"));
     }
     Ok(())
+}
+
+fn is_cross_device(e: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        e.raw_os_error() == Some(libc::EXDEV)
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = e;
+        false
+    }
+}
+
+/// Directory handles opened without following links, for [`move_run_dir`].
+#[cfg(unix)]
+mod nofollow {
+    use std::ffi::CString;
+    use std::os::fd::{AsRawFd as _, FromRawFd as _, OwnedFd};
+    use std::os::unix::ffi::OsStrExt as _;
+    use std::path::{Component, Path};
+
+    /// An open directory and the name of an entry in it.
+    pub(super) struct Parent {
+        dir: OwnedFd,
+        name: CString,
+    }
+
+    fn cstr(b: &[u8]) -> std::io::Result<CString> {
+        CString::new(b).map_err(|_| std::io::Error::other("a path holds a NUL byte"))
+    }
+
+    fn open_dir_at(at: libc::c_int, name: &CString) -> std::io::Result<OwnedFd> {
+        let flags = libc::O_RDONLY | libc::O_DIRECTORY | libc::O_NOFOLLOW | libc::O_CLOEXEC;
+        // SAFETY: `name` is a valid C string; the fd is owned on success.
+        let fd = unsafe { libc::openat(at, name.as_ptr(), flags) };
+        if fd < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+        // SAFETY: `fd` was just returned by openat and is owned by nobody else.
+        Ok(unsafe { OwnedFd::from_raw_fd(fd) })
+    }
+
+    /// Opens every directory from `tree` down to the parent of `from`
+    /// (which lies below `tree`), none of them through a link.
+    pub(super) fn open_parent(tree: &Path, from: &Path) -> std::io::Result<Parent> {
+        let rel = from
+            .strip_prefix(tree)
+            .map_err(|_| std::io::Error::other("the run directory is not inside the tree"))?;
+        let mut names = Vec::new();
+        for c in rel.components() {
+            match c {
+                Component::Normal(n) => names.push(cstr(n.as_bytes())?),
+                _ => return Err(std::io::Error::other("the run directory path is not plain")),
+            }
+        }
+        let name = names
+            .pop()
+            .ok_or_else(|| std::io::Error::other("the run directory is the tree"))?;
+        let mut dir = open_dir_at(libc::AT_FDCWD, &cstr(tree.as_os_str().as_bytes())?)?;
+        for n in &names {
+            dir = open_dir_at(dir.as_raw_fd(), n)?;
+        }
+        Ok(Parent { dir, name })
+    }
+
+    impl Parent {
+        /// Renames the entry to `to`; the entry itself is not followed.
+        pub(super) fn rename_to(&self, to: &Path) -> std::io::Result<()> {
+            let to = cstr(to.as_os_str().as_bytes())?;
+            // SAFETY: valid fd and C strings.
+            let r = unsafe {
+                libc::renameat(
+                    self.dir.as_raw_fd(),
+                    self.name.as_ptr(),
+                    libc::AT_FDCWD,
+                    to.as_ptr(),
+                )
+            };
+            if r != 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        }
+    }
 }
 
 /// Moves `from` to `to`, copying when a rename cannot cross filesystems.
@@ -808,6 +934,7 @@ fn install_signal_handlers() {
 struct LiveRun {
     tree: PathBuf,
     run_id: String,
+    driver_pid: Option<u32>,
 }
 
 static LIVE: std::sync::Mutex<Option<LiveRun>> = std::sync::Mutex::new(None);
@@ -818,50 +945,99 @@ fn set_live(run: Option<LiveRun>) {
     }
 }
 
-/// Kills what is left of a finished driver's process group (the driver led
-/// it; an agent helper it spawned may linger). The driver is gone, so its
-/// pid, and with it the group id, may already name someone else's group:
-/// only members whose working directory lies inside the repetition are
-/// killed, one by one. Linux only (it reads `/proc`); elsewhere a leftover
-/// helper is left to the operator.
-fn kill_leftover_group(driver_pid: Option<u32>, rep_dir: &Path) {
+/// Kills what is left of a finished run: its driver's process group (the
+/// driver led it; an agent helper it spawned may linger) and every helper
+/// that detached into a group of its own (`setsid`, a new process group).
+/// The driver is gone, so its pid, and with it the group id, may already
+/// name someone else's group: only members whose working directory lies
+/// inside the repetition are killed from that group, one by one. A detached
+/// helper is recognised by the run's id in its environment (`APB_RUN_ID`,
+/// which the engine gives every agent and script step and which a child
+/// inherits); the groups such helpers lead are killed whole, so their own
+/// children go with them even without the variable. Linux only (it reads
+/// `/proc`); elsewhere a leftover helper is left to the operator.
+fn kill_leftover_group(driver_pid: Option<u32>, rep_dir: &Path, run_id: &str) {
     #[cfg(target_os = "linux")]
     {
-        let Some(pgid) = driver_pid.filter(|p| *p > 1) else {
-            return;
-        };
-        let Ok(rep) = std::fs::canonicalize(rep_dir) else {
-            return;
-        };
-        let Ok(procs) = std::fs::read_dir("/proc") else {
-            return;
-        };
-        for e in procs.flatten() {
-            let Some(pid) = e.file_name().to_str().and_then(|s| s.parse::<u32>().ok()) else {
-                continue;
-            };
-            // `/proc/<pid>/stat`: `pid (comm) state ppid pgrp ...`; comm may
-            // hold spaces, so the fields are counted after the last `)`.
-            let Ok(stat) = std::fs::read_to_string(e.path().join("stat")) else {
-                continue;
-            };
-            let pgrp = stat
-                .rsplit_once(')')
-                .and_then(|(_, rest)| rest.split_whitespace().nth(2))
-                .and_then(|g| g.parse::<u32>().ok());
-            let inside =
-                std::fs::read_link(e.path().join("cwd")).is_ok_and(|c| c.starts_with(&rep));
-            if pgrp == Some(pgid)
-                && inside
-                && let Ok(p) = libc::pid_t::try_from(pid)
-            {
-                // SAFETY: plain kill(2) on a process we just identified.
-                unsafe { libc::kill(p, libc::SIGKILL) };
+        let driver_group = driver_pid.filter(|p| *p > 1);
+        let rep = std::fs::canonicalize(rep_dir).ok();
+        let marker = format!("APB_RUN_ID={run_id}");
+        // SAFETY: getpgrp(2) cannot fail.
+        let own_group = u32::try_from(unsafe { libc::getpgrp() }).ok();
+        // Two passes: a helper forked while the first one ran is caught by
+        // the second.
+        for _ in 0..2 {
+            let mut groups = std::collections::BTreeSet::new();
+            for (pid, pgrp, proc_dir) in proc_entries() {
+                let marked = !run_id.is_empty()
+                    && std::fs::read(proc_dir.join("environ"))
+                        .is_ok_and(|env| env.split(|b| *b == 0).any(|kv| kv == marker.as_bytes()));
+                let inside = rep.as_ref().is_some_and(|rep| {
+                    std::fs::read_link(proc_dir.join("cwd")).is_ok_and(|c| c.starts_with(rep))
+                });
+                let in_driver_group = driver_group.is_some() && pgrp == driver_group;
+                if marked || (in_driver_group && inside) {
+                    kill_pid(pid);
+                }
+                // A marked group leader: its group is the helper's own.
+                if marked && Some(pid) == pgrp && pgrp != own_group {
+                    groups.insert(pid);
+                }
+            }
+            for g in groups {
+                kill_group(g);
             }
         }
     }
     #[cfg(not(target_os = "linux"))]
-    let _ = (driver_pid, rep_dir);
+    let _ = (driver_pid, rep_dir, run_id);
+}
+
+/// Every process as `(pid, process group, /proc/<pid>)`.
+#[cfg(target_os = "linux")]
+fn proc_entries() -> Vec<(u32, Option<u32>, PathBuf)> {
+    let Ok(procs) = std::fs::read_dir("/proc") else {
+        return Vec::new();
+    };
+    procs
+        .flatten()
+        .filter_map(|e| {
+            let pid = e.file_name().to_str()?.parse::<u32>().ok()?;
+            // `/proc/<pid>/stat`: `pid (comm) state ppid pgrp ...`; comm may
+            // hold spaces, so the fields are counted after the last `)`.
+            let stat = std::fs::read_to_string(e.path().join("stat")).ok()?;
+            let pgrp = stat
+                .rsplit_once(')')
+                .and_then(|(_, rest)| rest.split_whitespace().nth(2))
+                .and_then(|g| g.parse::<u32>().ok());
+            Some((pid, pgrp, e.path()))
+        })
+        .collect()
+}
+
+/// SIGKILL to one process; never to 0, 1, or this process.
+#[cfg(target_os = "linux")]
+fn kill_pid(pid: u32) {
+    if pid <= 1 || pid == std::process::id() {
+        return;
+    }
+    if let Ok(p) = libc::pid_t::try_from(pid) {
+        // SAFETY: plain kill(2) on a process we just identified.
+        unsafe { libc::kill(p, libc::SIGKILL) };
+    }
+}
+
+/// SIGKILL to a process group; the group form negates, so it needs `> 1`
+/// (`-1` would be every process this user may signal).
+#[cfg(target_os = "linux")]
+fn kill_group(pgid: u32) {
+    if pgid <= 1 {
+        return;
+    }
+    if let Ok(g) = libc::pid_t::try_from(pgid) {
+        // SAFETY: kill(2) on the group of a process we just identified.
+        unsafe { libc::kill(-g, libc::SIGKILL) };
+    }
 }
 
 /// Whether the process `pid` exists.
@@ -915,7 +1091,11 @@ impl Drop for ScratchGuard {
         if let Some(run) = live {
             let _ = apb_engine::stop_run(&run.tree, &run.run_id);
             let run_dir = run.tree.join(".apb/runs").join(&run.run_id);
-            if !driver_gone(&run_dir, &run.run_id)
+            let gone = driver_gone(&run_dir, &run.run_id);
+            if gone && let Some(rep) = run.tree.parent() {
+                kill_leftover_group(run.driver_pid, rep, &run.run_id);
+            }
+            if !gone
                 && let (Some(rep), Some(eval)) = (run.tree.parent(), self.scratch.file_name())
                 && let Some(name) = rep.file_name()
             {
@@ -1103,6 +1283,7 @@ fn run_repetition(
     set_live(Some(LiveRun {
         tree: tree.clone(),
         run_id: started.run_id.clone(),
+        driver_pid,
     }));
     let stop = follow(&tree, &started.run_id, &limits);
     let clean = driver_gone(&run_dir, &started.run_id);
@@ -1180,7 +1361,7 @@ fn run_repetition(
     let (stored, kept, warning) = if clean {
         // The driver is gone; whatever it left in its process group goes
         // with it before the tree is removed.
-        kill_leftover_group(driver_pid, &rep_dir);
+        kill_leftover_group(driver_pid, &rep_dir, &started.run_id);
         let stored = cx
             .evals_home
             .join("runs")
@@ -1807,6 +1988,120 @@ mod tests {
         })
         .expect("the copy is valid, whatever the live suite says now");
         assert!(digest.starts_with("sha256:"), "{digest}");
+    }
+
+    /// The agent swaps `tree/.apb` for a link to an outside directory after
+    /// the checks passed but before the move: the directory that was checked
+    /// is the one that moves, and the outside run directory stays put.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_directory_swapped_after_the_check_does_not_move_the_outside() {
+        let t = tempfile::tempdir().unwrap();
+        let outside_run = t.path().join("outside/runs/r1");
+        std::fs::create_dir_all(&outside_run).unwrap();
+        std::fs::write(outside_run.join("keep.txt"), "mine").unwrap();
+        let tree = t.path().join("tree");
+        let from = tree.join(".apb/runs/r1");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("events.jsonl"), "{}").unwrap();
+        let to = t.path().join("store/r1");
+
+        let swapped = move_run_dir_with(&tree, &from, &to, || {
+            std::fs::rename(tree.join(".apb"), tree.join(".apb-aside")).unwrap();
+            std::os::unix::fs::symlink(t.path().join("outside"), tree.join(".apb")).unwrap();
+        });
+
+        assert_eq!(
+            std::fs::read_to_string(outside_run.join("keep.txt")).unwrap(),
+            "mine",
+            "the outside run directory was moved ({swapped:?})"
+        );
+        assert!(
+            !to.join("keep.txt").exists(),
+            "the outside content reached the store"
+        );
+    }
+
+    /// Reaps the children a test spawned on every path, the failing one too.
+    #[cfg(target_os = "linux")]
+    struct Reap(Vec<std::process::Child>);
+    #[cfg(target_os = "linux")]
+    impl Drop for Reap {
+        fn drop(&mut self) {
+            for c in &mut self.0 {
+                let _ = c.kill();
+                let _ = c.wait();
+            }
+        }
+    }
+
+    /// Waits until `child` exited, at most 5 seconds; `false` on timeout.
+    #[cfg(target_os = "linux")]
+    fn exits(child: &mut std::process::Child) -> bool {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline {
+            if child.try_wait().ok().flatten().is_some() {
+                return true;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        false
+    }
+
+    /// A helper that detached into a group of its own, with its working
+    /// directory outside the repetition, is killed with its whole group
+    /// (a member that lost `APB_RUN_ID` included); a process of another
+    /// run is left alone. Linux only, like the cleanup it tests.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_detached_helper_group_of_the_run_is_killed() {
+        use std::os::unix::process::CommandExt as _;
+        use std::process::{Command, Stdio};
+        let t = tempfile::tempdir().unwrap();
+        let rep = t.path().join("case-1");
+        std::fs::create_dir_all(&rep).unwrap();
+        let run_id = format!(
+            "eval-test-{}-{}",
+            std::process::id(),
+            apb_core::clock::now_ms()
+        );
+        let sleeper = |id: &str, group: i32| {
+            let mut c = Command::new("sleep");
+            c.arg("30")
+                .current_dir(t.path())
+                .env("APB_RUN_ID", id)
+                .process_group(group)
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null());
+            c
+        };
+        let mut reap = Reap(Vec::new());
+        reap.0.push(sleeper(&run_id, 0).spawn().unwrap());
+        let leader = i32::try_from(reap.0[0].id()).unwrap();
+        let mut member = sleeper("", leader);
+        member.env_remove("APB_RUN_ID");
+        reap.0.push(member.spawn().unwrap());
+        reap.0.push(sleeper("another-run", 0).spawn().unwrap());
+        // A plausible driver pid that is gone: spawned, waited, reaped.
+        let mut gone = Command::new("true").spawn().unwrap();
+        let gone_pid = gone.id();
+        gone.wait().unwrap();
+
+        kill_leftover_group(Some(gone_pid), &rep, &run_id);
+
+        assert!(
+            exits(&mut reap.0[0]),
+            "timed out waiting for the detached helper to be killed"
+        );
+        assert!(
+            exits(&mut reap.0[1]),
+            "timed out waiting for the helper's group member to be killed"
+        );
+        assert!(
+            reap.0[2].try_wait().unwrap().is_none(),
+            "a process of another run was killed"
+        );
     }
 
     #[test]
