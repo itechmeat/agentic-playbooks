@@ -221,21 +221,13 @@ impl Snapshot {
         if !real_parents(&self.root, &c.path) {
             return Restored::Failed;
         }
-        // A symlink or directory the attempt put in the file's place goes
-        // first (a symlink as a link, never its target), so the copy lands
-        // as a plain file.
-        match std::fs::symlink_metadata(&target) {
-            Ok(m) if m.is_dir() => {
-                if std::fs::remove_dir_all(&target).is_err() {
-                    return Restored::Failed;
-                }
-            }
-            Ok(m) if !m.is_file() => {
-                if std::fs::remove_file(&target).is_err() {
-                    return Restored::Failed;
-                }
-            }
-            _ => {}
+        // A directory the attempt put in the file's place goes first (the
+        // rename below replaces a symlink or any other entry as the entry
+        // itself, never its target).
+        if std::fs::symlink_metadata(&target).is_ok_and(|m| m.is_dir())
+            && std::fs::remove_dir_all(&target).is_err()
+        {
+            return Restored::Failed;
         }
         // Written beside the target and renamed over it: the target's
         // directory entry is replaced, never the inode it names (a hardlink
