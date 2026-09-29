@@ -703,7 +703,7 @@ pub enum EventPayload {
     },
     /// A host task was closed: the host submitted it (`submitted_by: host`,
     /// `client` names the MCP host), or the engine closed it (`submitted_by:
-    /// engine`, status `expired`, `cancelled` or `interrupted`). The reply
+    /// engine`, status `expired`, `cancelled`, `interrupted` or `superseded`, the last when a resume re-exposed another open task of the node). The reply
     /// text lives in the run directory (`output_ref`).
     ///
     /// Safe to skip up to the next checkpoint: an older apb that does not know

@@ -491,25 +491,47 @@ fn run_dir_of(root: &Path, run_id: &str) -> Result<PathBuf, EngineError> {
     Ok(run_dir)
 }
 
-/// The latest open task of `node` whose prompt equals `prompt`: a task a
-/// previous drive requested and never closed (the driver died while it
-/// waited). A resume adopts it instead of requesting a new one, so the host
-/// sees the same task, and a submission that landed meanwhile is consumed.
-pub(crate) fn adoptable(
-    run_dir: &Path,
-    events: &[Event],
-    node: &str,
-    prompt: &str,
-) -> Option<TaskRecord> {
-    open_requests(events)
+/// What a resume finds open for a node: the task it adopts and the others it
+/// closes as `superseded`.
+#[derive(Debug, Default)]
+pub(crate) struct Adoption {
+    pub adopted: Option<TaskRecord>,
+    pub superseded: Vec<String>,
+}
+
+/// The open tasks of `node` a previous drive requested and never closed (the
+/// driver died while it waited). A resume adopts one instead of requesting a
+/// new one, whatever its prompt (a resumed attempt's prompt may differ: an
+/// interruption note, a new status-file path), so the host keeps seeing the
+/// same task. It adopts the latest one the host already submitted, so that
+/// reply is consumed rather than lost, else the latest one; every other open
+/// task of the node is superseded.
+pub(crate) fn adoptable(run_dir: &Path, events: &[Event], node: &str) -> Adoption {
+    let open: Vec<String> = open_requests(events)
         .into_iter()
+        .filter(|(t, n)| n == node && is_valid_task_id(t))
+        .map(|(t, _)| t)
+        .collect();
+    let submitted = open
+        .iter()
         .rev()
-        .filter(|(_, n)| n == node)
-        .find_map(|(task_id, _)| {
-            (read_prompt(run_dir, &task_id).as_deref() == Some(prompt))
-                .then(|| read_record(run_dir, &task_id))
-                .flatten()
+        .find(|t| task_dir(run_dir, t).join(SUBMISSION_FILE).exists());
+    let chosen = submitted
+        .or_else(|| {
+            open.iter()
+                .rev()
+                .find(|t| read_record(run_dir, t).is_some())
         })
+        .cloned();
+    let adopted = chosen.as_deref().and_then(|t| read_record(run_dir, t));
+    let superseded = open
+        .into_iter()
+        .filter(|t| Some(t) != chosen.as_ref())
+        .collect();
+    Adoption {
+        adopted,
+        superseded,
+    }
 }
 
 #[cfg(test)]
@@ -660,17 +682,22 @@ mod tests {
     }
 
     #[test]
-    fn adoptable_matches_the_node_and_the_exact_prompt() {
+    fn adoptable_takes_the_node_s_latest_open_task_whatever_its_prompt() {
         let dir = tempfile::tempdir().unwrap();
         let run = dir.path();
-        let id = allocate(run, "plan").unwrap();
-        write_task(run, &record(&id, "plan"), "same prompt", None).unwrap();
-        let events = vec![requested(1, &id, "plan")];
-        assert_eq!(
-            adoptable(run, &events, "plan", "same prompt").map(|r| r.task_id),
-            Some(id)
-        );
-        assert!(adoptable(run, &events, "plan", "other prompt").is_none());
-        assert!(adoptable(run, &events, "build", "same prompt").is_none());
+        let a = allocate(run, "plan").unwrap();
+        write_task(run, &record(&a, "plan"), "first prompt", None).unwrap();
+        let b = allocate(run, "plan").unwrap();
+        write_task(run, &record(&b, "plan"), "second prompt", None).unwrap();
+        let events = vec![requested(1, &a, "plan"), requested(2, &b, "plan")];
+        let found = adoptable(run, &events, "plan");
+        assert_eq!(found.adopted.map(|r| r.task_id), Some(b.clone()));
+        assert_eq!(found.superseded, vec![a.clone()]);
+        assert!(adoptable(run, &events, "build").adopted.is_none());
+        // A task the host already submitted wins, so its reply is used.
+        std::fs::write(task_dir(run, &a).join(SUBMISSION_FILE), "{}").unwrap();
+        let found = adoptable(run, &events, "plan");
+        assert_eq!(found.adopted.map(|r| r.task_id), Some(a));
+        assert_eq!(found.superseded, vec![b]);
     }
 }

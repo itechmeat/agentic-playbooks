@@ -118,26 +118,54 @@ fn task_prompt(task: &AgentTask, env: &BTreeMap<String, String>) -> String {
     prompt
 }
 
+/// A task [`HostAdapter::request`] opened or adopted.
+struct Requested {
+    task_id: String,
+    deadline: Option<std::time::Instant>,
+    /// The status file an adopted task named, when it differs from this
+    /// attempt's (the attempt counter restarts on resume).
+    prior_status_file: Option<String>,
+}
+
 impl HostAdapter<'_, '_> {
-    /// Opens a task for `prompt` (or adopts the open one a dead driver left
-    /// with the same prompt), writes its files and journals the request.
-    /// Returns the task id and its deadline.
+    /// Opens a task for `prompt`, writes its files and journals the request.
+    /// With `adopt` (an attempt's first request), a task of the node a dead
+    /// driver left open is re-exposed under its own id instead, and any other
+    /// open task of the node is closed as `superseded`. Returns the task id,
+    /// its deadline and, for an adopted task, the status file its subagent
+    /// was told to write.
     fn request(
         &self,
         task: &AgentTask,
         prompt: &str,
         env: &BTreeMap<String, String>,
         adopt: bool,
-    ) -> Result<(String, Option<std::time::Instant>), EngineError> {
-        let adopted = if adopt {
-            host_task::adoptable(self.run_dir, &read_all(self.run_dir)?, task.node, prompt)
+    ) -> Result<Requested, EngineError> {
+        let adoption = if adopt {
+            host_task::adoptable(self.run_dir, &read_all(self.run_dir)?, task.node)
         } else {
-            None
+            host_task::Adoption::default()
         };
-        let task_id = match adopted {
-            Some(r) => r.task_id,
-            None => host_task::allocate(self.run_dir, task.node)?,
+        for old in &adoption.superseded {
+            self.close(
+                old,
+                "superseded",
+                "a resumed drive re-exposed another task of this node".into(),
+            )?;
+        }
+        let (task_id, prior_status_file) = match adoption.adopted {
+            Some(r) => (r.task_id, r.env.get("APB_STATUS_FILE").cloned()),
+            None => (host_task::allocate(self.run_dir, task.node)?, None),
         };
+        // A submission already there keeps the task as the host saw it: its
+        // files are not rewritten under the reply.
+        if host_task::read_submission(self.run_dir, &task_id).is_some() {
+            return Ok(Requested {
+                task_id,
+                deadline: task.timeout.map(|t| std::time::Instant::now() + t),
+                prior_status_file,
+            });
+        }
         let now_ms = apb_core::clock::now_ms() as u64;
         let deadline_ms = task
             .timeout
@@ -170,7 +198,11 @@ impl HostAdapter<'_, '_> {
             deadline_ms,
             model_hint: self.model_hint.clone(),
         })?;
-        Ok((task_id, task.timeout.map(|t| std::time::Instant::now() + t)))
+        Ok(Requested {
+            task_id,
+            deadline: task.timeout.map(|t| std::time::Instant::now() + t),
+            prior_status_file,
+        })
     }
 
     /// Closes a task the host never submitted (`expired`, `cancelled`,
@@ -297,8 +329,23 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
     ) -> Result<AgentReport, AgentFailure> {
         let env = task_env(task);
         let mut prompt = task_prompt(task, &env);
-        let (mut task_id, mut deadline) =
-            self.request(task, &prompt, &env, true).map_err(failure)?;
+        let Requested {
+            mut task_id,
+            mut deadline,
+            prior_status_file,
+        } = self.request(task, &prompt, &env, true).map_err(failure)?;
+        // A verdict the adopted task's subagent wrote at the path it was
+        // given is this attempt's verdict.
+        let adopt_verdict = || {
+            if let (Some(old), Some(new)) = (&prior_status_file, &task.status_file) {
+                let old = std::path::Path::new(old);
+                if old != new.as_path() && old.is_file() && !new.exists() {
+                    if let Ok(bytes) = std::fs::read(old) {
+                        let _ = apb_core::fsutil::atomic_write_private(new, &bytes);
+                    }
+                }
+            }
+        };
         // The attempt is "running" in the drive process itself: its pid is
         // the driver's, so the attempt reads as lost exactly when the driver
         // is gone, and the entry reaper closes it then.
@@ -323,6 +370,7 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
                     })
                     .map_err(failure)?;
                 if sub.status != SubmitStatus::Blocked {
+                    adopt_verdict();
                     return Ok(self.report(task, &sub));
                 }
                 // Blocked: the subagent needs the person. Post the question on
@@ -349,7 +397,8 @@ impl crate::adapter::AgentAdapter for HostAdapter<'_, '_> {
                     "{prompt}\n\nYou stopped to ask the person: {}\nTheir answer: {answer}\nContinue the task from where you stopped.",
                     sub.output.trim()
                 );
-                (task_id, deadline) = self.request(task, &prompt, &env, false).map_err(failure)?;
+                let next = self.request(task, &prompt, &env, false).map_err(failure)?;
+                (task_id, deadline) = (next.task_id, next.deadline);
                 continue;
             }
             if cancel.load(Ordering::Relaxed) {

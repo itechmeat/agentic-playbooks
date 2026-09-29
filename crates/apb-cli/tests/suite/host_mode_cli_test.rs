@@ -31,6 +31,10 @@ edges:
 "#;
 
 fn seed(root: &Path) {
+    seed_with(root, TWO_NODES);
+}
+
+fn seed_with(root: &Path, playbook: &str) {
     crate::common::apb_std()
         .arg("init")
         .current_dir(root)
@@ -38,7 +42,7 @@ fn seed(root: &Path) {
         .unwrap();
     let v = root.join(".apb/playbooks/hm/1.0.0");
     fs::create_dir_all(&v).unwrap();
-    fs::write(v.join("playbook.yaml"), TWO_NODES).unwrap();
+    fs::write(v.join("playbook.yaml"), playbook).unwrap();
     fs::write(root.join(".apb/playbooks/hm/current"), "1.0.0").unwrap();
     let p = root.join(".apb/profiles/main");
     fs::create_dir_all(&p).unwrap();
@@ -271,6 +275,66 @@ fn a_resume_after_submission_consumes_it_without_a_new_task() {
     );
     submit(root, &run_id, build["task_id"].as_str().unwrap(), "built");
     assert_eq!(wait_outcome(root, &run_id), "succeeded");
+}
+
+/// Resumed with `require_verdict`, the attempt's prompt changes (the
+/// interruption note, the status-file path of a restarted attempt counter):
+/// the open task is still the one re-exposed, alone.
+#[test]
+fn a_require_verdict_resume_re_exposes_only_the_open_task() {
+    for submit_offline in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        seed_with(
+            root,
+            &TWO_NODES.replace(
+                "prompt: \"Plan it\" }",
+                "prompt: \"Plan it\", require_verdict: true }",
+            ),
+        );
+        let run_id = start_detached(root);
+        let plan = task_of(root, &run_id, "plan");
+        let id = plan["task_id"].as_str().unwrap().to_string();
+        kill_driver(root, &run_id);
+        if submit_offline {
+            submit(root, &run_id, &id, "PLAN-OFFLINE");
+        }
+        resume(root, &run_id);
+        let build = if submit_offline {
+            task_of(root, &run_id, "build")
+        } else {
+            poll("the adopted request", || {
+                (requested_ids(root, &run_id).len() == 2).then_some(())
+            });
+            let pending: Vec<String> = tasks_json(root, &run_id)
+                .iter()
+                .map(|t| t["task_id"].as_str().unwrap().to_string())
+                .collect();
+            assert_eq!(pending, vec![id.clone()], "only the open task");
+            submit(root, &run_id, &id, "PLAN-LATER");
+            task_of(root, &run_id, "build")
+        };
+        let expected = if submit_offline {
+            "Build from PLAN-OFFLINE"
+        } else {
+            "Build from PLAN-LATER"
+        };
+        assert!(
+            build["prompt"].as_str().unwrap().contains(expected),
+            "{}",
+            build["prompt"]
+        );
+        let plan_tasks: Vec<String> = requested_ids(root, &run_id)
+            .into_iter()
+            .filter(|t| t.starts_with("plan-"))
+            .collect();
+        assert!(
+            plan_tasks.iter().all(|t| *t == id),
+            "no new plan task: {plan_tasks:?}"
+        );
+        submit(root, &run_id, build["task_id"].as_str().unwrap(), "built");
+        assert_eq!(wait_outcome(root, &run_id), "succeeded");
+    }
 }
 
 #[test]
