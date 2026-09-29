@@ -1220,3 +1220,53 @@ async fn run_detail_reads_a_journal_with_a_future_event_and_totals_usage() {
         .expect("the run is listed");
     assert_eq!(row["unknown_events"], 1);
 }
+
+// --- 0.24.0 irreversible consent ---
+
+/// Clicking Run is not enough for irreversible effects: the start is refused
+/// with the gate's structured refusal (what an event bridge posting here
+/// gets), and the dialog's `confirm_irreversible` starts it with the
+/// dashboard's consent in the manifest.
+#[tokio::test]
+async fn post_playbook_run_needs_confirm_irreversible() {
+    let dir = tempfile::tempdir().unwrap();
+    apb_core::registry::init_project(dir.path()).unwrap();
+    let vdir = dir.path().join(".apb/playbooks/rel/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(
+        vdir.join("playbook.yaml"),
+        NOAGENT
+            .replace("id: noagent", "id: rel")
+            .replace("nodes:", "effects: [irreversible]\nnodes:"),
+    )
+    .unwrap();
+    fs::write(dir.path().join(".apb/playbooks/rel/current"), "1.0.0").unwrap();
+    let app = build_router(AppState::new(dir.path().to_path_buf()));
+
+    let (status, json) = post_json(
+        app.clone(),
+        "/api/playbooks/rel/run",
+        serde_json::json!({ "params": { "who": "x" } }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(
+        json["policy"], "irreversible_requires_confirmation",
+        "{json}"
+    );
+    assert!(apb_engine::list_runs(dir.path()).unwrap().is_empty());
+
+    let (status, json) = post_json(
+        app,
+        "/api/playbooks/rel/run",
+        serde_json::json!({ "params": { "who": "x" }, "confirm_irreversible": true }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{json}");
+    let run_id = json["run_id"].as_str().unwrap();
+    let consent = apb_engine::manifest::read(&dir.path().join(".apb/runs").join(run_id))
+        .unwrap()
+        .and_then(|m| m.consent)
+        .expect("consent recorded");
+    assert_eq!(consent.by, "dashboard");
+}

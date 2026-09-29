@@ -3096,6 +3096,19 @@ fn child_run_options(
     }
 }
 
+// --- 0.24.0 irreversible consent ---
+/// The consent a sub-playbook of the run in `parent_dir` inherits: the
+/// parent's recorded consent, marked with the parent's run id. `None` when
+/// the parent recorded none (its tree needed none when it started).
+fn inherited_consent(parent_dir: &Path, parent_run_id: &str) -> Option<crate::consent::RunConsent> {
+    let parent = crate::manifest::read(parent_dir).ok().flatten()?.consent?;
+    Some(crate::consent::RunConsent {
+        inherited_from: Some(parent_run_id.to_string()),
+        ..parent
+    })
+}
+// --- end 0.24.0 irreversible consent ---
+
 /// Executes a `playbook` node (spec C): starts (or, on resume, reattaches to) a
 /// full child run and maps its terminal state to this node's status/output. The
 /// child runs in-process, synchronously, with `allow_shared_workdir: true` (the
@@ -3271,6 +3284,8 @@ pub(crate) fn run_playbook_node(
     // Host execution mode (0.23.0): a sub-playbook inherits its parent's mode
     // and host, so its agent steps are host tasks of the same session.
     opts.execution = super::host::child_execution_request(run_dir)?;
+    // 0.24.0: a sub-playbook inherits its parent's irreversible consent.
+    opts.consent = inherited_consent(run_dir, run_id);
 
     // Prepare (get the run id) -> record ChildRunStarted -> drive to terminal.
     let t = PrepareTarget {

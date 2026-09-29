@@ -111,6 +111,8 @@ mod connector_smtp;
 mod connector_youtrack;
 #[path = "suite/connector_zulip.rs"]
 mod connector_zulip;
+#[path = "suite/consent_test.rs"]
+mod consent_test;
 #[path = "suite/context_compaction_test.rs"]
 mod context_compaction_test;
 #[path = "suite/context_test.rs"]

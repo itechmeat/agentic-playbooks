@@ -70,3 +70,119 @@ fn runs_with_an_unknown_id_fails() {
         .code(2)
         .stderr(predicate::str::contains("run `nope` not found"));
 }
+
+// --- 0.24.0: the execution mode in `apb runs` ---
+
+/// A run whose manifest carries an execution block, next to the plain one.
+fn project_with_host_run(execution: &str, extra_events: &str) -> tempfile::TempDir {
+    let dir = project();
+    let run = dir.path().join(".apb/runs/host-1");
+    fs::create_dir_all(&run).unwrap();
+    let fallback = if extra_events.is_empty() {
+        String::new()
+    } else {
+        format!("{extra_events}\n")
+    };
+    let journal = format!(
+        concat!(
+            r#"{{"seq":0,"ts":1790000001000,"type":"run_started","playbook":"demo","version":"1.0.0"}}"#,
+            "\n",
+            r#"{{"seq":1,"ts":1790000001001,"type":"node_started","node":"w","attempt":1}}"#,
+            "\n{}",
+            r#"{{"seq":4,"ts":1790000001004,"type":"node_finished","node":"w","status":"succeeded","attempt":1,"output":"ok","artifacts":[]}}"#,
+            "\n",
+            r#"{{"seq":5,"ts":1790000001005,"type":"run_finished","outcome":"succeeded"}}"#,
+            "\n",
+        ),
+        fallback
+    );
+    fs::write(run.join("events.jsonl"), journal).unwrap();
+    fs::write(
+        run.join("manifest.yaml"),
+        format!("profiles: []\nnode_bindings: {{}}\nexecution:\n{execution}"),
+    )
+    .unwrap();
+    dir
+}
+
+#[test]
+fn runs_with_an_id_names_the_host_execution_mode() {
+    let dir = project_with_host_run(
+        "  mode: host\n  source: argument\n  client: claude-code\n",
+        "",
+    );
+    apb()
+        .args(["runs", "host-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  execution: host (argument, client claude-code)\n",
+        ));
+    apb()
+        .args(["runs", "demo-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("  execution: cli\n"));
+}
+
+#[test]
+fn runs_with_an_id_names_the_nodes_that_fell_back_to_the_host() {
+    let dir = project_with_host_run(
+        "  mode: cli\n  source: default\n  client: claude-code\n  fallback_to_host: true\n",
+        r#"{"seq":3,"ts":1790000001003,"type":"execution_fallback","node":"w","attempt":1,"reason":"spawn failed"}"#,
+    );
+    apb()
+        .args(["runs", "host-1"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "  execution: cli (default, client claude-code, host fallback allowed); host fallback: w\n",
+        ));
+}
+
+#[test]
+fn the_runs_table_gets_a_mode_column_only_when_a_run_has_an_execution_block() {
+    let plain = project();
+    apb()
+        .arg("runs")
+        .current_dir(plain.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\tcli").not())
+        .stdout(predicate::str::contains("\thost").not());
+    let dir = project_with_host_run("  mode: host\n  source: argument\n", "");
+    apb()
+        .arg("runs")
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("host-1\tdemo\tsucceeded\thost\n"))
+        .stdout(predicate::str::contains("demo-1\tdemo\tsucceeded\tcli\t"));
+}
+
+#[test]
+fn runs_json_is_the_run_status_object() {
+    let dir = project_with_host_run("  mode: host\n  source: argument\n", "");
+    let out = apb()
+        .args(["runs", "host-1", "--json"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    let expected = apb_mcp::tools::run::run_status(dir.path(), "host-1").unwrap();
+    // `driver_alive` reads the process table at request time; the rest is
+    // the same fold of the same journal.
+    let strip = |mut v: serde_json::Value| {
+        v.as_object_mut().unwrap().remove("driver_alive");
+        v
+    };
+    assert_eq!(strip(v.clone()), strip(expected));
+    assert_eq!(v["execution"]["mode"], "host");
+    assert_eq!(v["run_status"], "succeeded");
+}

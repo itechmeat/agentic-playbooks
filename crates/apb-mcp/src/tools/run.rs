@@ -31,6 +31,8 @@ pub fn playbook_run(
     worktree: Option<String>,
     // host execution mode (0.23.0)
     execution: apb_core::execution::ExecutionRequest,
+    // 0.24.0: the irreversible consent the caller obtained from the person.
+    consent: Option<apb_engine::consent::RunConsent>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -57,6 +59,7 @@ pub fn playbook_run(
         workdir_queue_wait: None,
         worktree,
         execution,
+        consent,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -88,6 +91,8 @@ pub fn playbook_run_background(
     worktree: Option<String>,
     // host execution mode (0.23.0)
     execution: apb_core::execution::ExecutionRequest,
+    // 0.24.0: the irreversible consent the caller obtained from the person.
+    consent: Option<apb_engine::consent::RunConsent>,
 ) -> Result<Value, ToolError> {
     let opts = RunOptions {
         instruction,
@@ -114,6 +119,7 @@ pub fn playbook_run_background(
         workdir_queue_wait: None,
         worktree,
         execution,
+        consent,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -536,6 +542,8 @@ pub fn playbook_run_supervised(
     worktree: Option<String>,
     // host execution mode (0.23.0)
     execution: apb_core::execution::ExecutionRequest,
+    // 0.24.0: the irreversible consent the caller obtained from the person.
+    consent: Option<apb_engine::consent::RunConsent>,
 ) -> Result<Value, ToolError> {
     // supervise:"self" does not spawn a separate supervisor agent process - the supervisor here is the same
     // MCP session that called playbook_run, hence RunMode::Supervised, not AgentSupervised
@@ -565,6 +573,7 @@ pub fn playbook_run_supervised(
         workdir_queue_wait: None,
         worktree,
         execution,
+        consent,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

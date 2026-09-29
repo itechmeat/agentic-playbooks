@@ -304,4 +304,32 @@ describe('runPlaybook', () => {
     await expect(err).resolves.toMatchObject({ status: 409, code: 'requires_unmet' })
     await expect(err).resolves.toHaveProperty('message', expect.stringMatching(/requires_unmet/))
   })
+
+  // 0.24.0: the irreversible refusal carries its detail for the Run dialog,
+  // and only the dialog's confirmation sends the consent.
+  it('surfaces the irreversible refusal and sends the consent only when confirmed', async () => {
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse(
+        {
+          policy: 'irreversible_requires_confirmation',
+          sources: ['node pr'],
+          detail: 'playbook `p` has irreversible effects (node pr)',
+        },
+        409,
+      ),
+    )
+    const err = runPlaybook('p').catch((e: unknown) => e)
+    await expect(err).resolves.toMatchObject({
+      status: 409,
+      code: 'irreversible_requires_confirmation',
+      detail: 'playbook `p` has irreversible effects (node pr)',
+    })
+    expect(JSON.parse(String(fetchMock.mock.calls[0][1]?.body))).toEqual({})
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ run_id: 'p-1' }))
+    await expect(runPlaybook('p', '', true)).resolves.toEqual({ run_id: 'p-1' })
+    expect(JSON.parse(String(fetchMock.mock.calls[1][1]?.body))).toEqual({
+      confirm_irreversible: true,
+    })
+  })
 })

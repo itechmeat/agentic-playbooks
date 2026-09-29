@@ -28,6 +28,20 @@ use crate::util::open_registry;
 /// will be spawned, so its profile joins the verified bundle set. Consent-time
 /// warnings go to stderr. On `Err` this returns a ready-to-print, actionable
 /// message (see `gate_refusal_message`).
+/// The irreversible consent of an `apb run` (0.24.0): `--confirm-irreversible`
+/// (`cli_flag`), or a person typing the command at an interactive terminal
+/// (`cli`). A headless start without the flag grants none.
+fn cli_consent(flag: bool) -> Option<apb_engine::consent::RunConsent> {
+    use std::io::IsTerminal as _;
+    if flag {
+        Some(apb_engine::consent::RunConsent::irreversible("cli_flag"))
+    } else if std::io::stdin().is_terminal() {
+        Some(apb_engine::consent::RunConsent::irreversible("cli"))
+    } else {
+        None
+    }
+}
+
 fn gate_run(
     root: &Path,
     name: &str,
@@ -41,6 +55,10 @@ fn gate_run(
         version: version.map(str::to_string),
     };
     let permit = apb_engine::gate::check_run(root, &wref, true, supervised)
+        .map_err(|refusal| gate_refusal_message(&refusal))?;
+    // 0.24.0: an irreversible tree needs the consent `run_cmd` derived.
+    permit
+        .consent_refusal(opts.consent.as_ref())
         .map_err(|refusal| gate_refusal_message(&refusal))?;
     for w in &permit.warnings {
         eprintln!("warning: {w}");
@@ -108,6 +126,13 @@ fn gate_refusal_message(refusal: &serde_json::Value) -> String {
                 missing.join(", ")
             )
         }
+        p if p == apb_engine::consent::REFUSAL_POLICY => format!(
+            "run refused ({p}): {}",
+            refusal
+                .get("detail")
+                .and_then(|v| v.as_str())
+                .unwrap_or_default()
+        ),
         other => format!("run refused ({other}): {refusal}"),
     }
 }
@@ -427,6 +452,7 @@ pub(crate) fn run_cmd(
     continued_from: Option<String>,
     worktree: Option<String>,
     execution: Option<&str>,
+    confirm_irreversible: bool,
 ) -> ExitCode {
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
@@ -494,6 +520,8 @@ pub(crate) fn run_cmd(
         eprintln!("--no-cache/--refresh-cache is not yet supported together with --supervise");
         return ExitCode::from(2);
     }
+    // 0.24.0 irreversible consent: the flag, or a person at a terminal.
+    let consent = cli_consent(confirm_irreversible);
     if supervise {
         // Background (non-blocking) supervised run: the engine itself spawns
         // a background agent and watches its heartbeat. The drive loop
@@ -515,6 +543,7 @@ pub(crate) fn run_cmd(
             allow_shared_workdir,
             continued_from.as_deref(),
             worktree.as_deref(),
+            consent.as_ref().map(|c| c.by.as_str()),
         );
     }
     let mut opts = RunOptions {
@@ -540,6 +569,7 @@ pub(crate) fn run_cmd(
             mode: execution_mode,
             ..Default::default()
         },
+        consent,
         // The `expected_*` pins come from the run gate (`gate_run`).
         ..Default::default()
     };
@@ -656,6 +686,7 @@ pub(crate) fn spawn_detached_supervised(
     allow_shared_workdir: bool,
     continued_from: Option<&str>,
     worktree: Option<&str>,
+    consent: Option<&str>,
 ) -> ExitCode {
     let exe = match apb_core::fsutil::reexec_exe() {
         Ok(e) => e,
@@ -689,6 +720,9 @@ pub(crate) fn spawn_detached_supervised(
     }
     if let Some(tree) = worktree {
         cmd.arg("--worktree").arg(tree);
+    }
+    if let Some(by) = consent {
+        cmd.arg("--consent").arg(by);
     }
     cmd.arg("--handshake").arg(&handshake);
     cmd.current_dir(root);
@@ -749,6 +783,7 @@ pub(crate) fn drive_supervised_child(
     allow_shared_workdir: bool,
     continued_from: Option<String>,
     worktree: Option<String>,
+    consent: Option<String>,
     handshake: &Path,
 ) -> ExitCode {
     let mut parsed = BTreeMap::new();
@@ -785,6 +820,7 @@ pub(crate) fn drive_supervised_child(
         // refusal (see `RunOptions::workdir_queue_wait`).
         workdir_queue_wait: None,
         worktree,
+        consent: consent.map(apb_engine::consent::RunConsent::irreversible),
         // The `expected_*` pins come from the run gate (`gate_run`).
         ..Default::default()
     };
@@ -859,9 +895,9 @@ pub(crate) fn drive_run_child(
     }
 }
 
-pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>) -> ExitCode {
+pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>, json: bool) -> ExitCode {
     if let Some(run_id) = run_id {
-        return run_detail_cmd(root, run_id);
+        return run_detail_cmd(root, run_id, json);
     }
     match list_runs(root) {
         Ok(runs) if runs.is_empty() => {
@@ -869,12 +905,24 @@ pub(crate) fn runs_cmd(root: &Path, run_id: Option<&str>) -> ExitCode {
             ExitCode::SUCCESS
         }
         Ok(runs) => {
-            for r in runs {
+            // The execution mode column (0.24.0) appears only when some run
+            // has an execution block, so a table of plain `cli` runs reads
+            // exactly as before.
+            let modes: Vec<Option<String>> = runs
+                .iter()
+                .map(|r| crate::run_mode::list_mode(root, &r.run_id))
+                .collect();
+            let show_mode = modes.iter().any(Option::is_some);
+            for (r, mode) in runs.into_iter().zip(modes) {
                 // The status column stays exactly as it always has (a script
                 // parsing it must keep working); a dead driver and events a
                 // newer apb wrote are called out as appended markers rather
                 // than a rewrite of that text (#85 finding 4).
                 let mut line = format!("{}\t{}\t{}", r.run_id, r.playbook, r.status);
+                if show_mode {
+                    line.push('\t');
+                    line.push_str(mode.as_deref().unwrap_or("cli"));
+                }
                 if r.driver_dead {
                     line.push_str("\tdriver dead");
                 }
@@ -901,8 +949,9 @@ fn unknown_events_note(n: usize) -> String {
 }
 
 /// `apb runs <run_id>`: one run through the same run view as `run_status`,
-/// with the token usage its attempts reported when there is any.
-fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
+/// with the token usage its attempts reported when there is any. `--json`
+/// prints the MCP `run_status` object itself.
+fn run_detail_cmd(root: &Path, run_id: &str, json: bool) -> ExitCode {
     if !is_safe_segment(run_id) {
         eprintln!("runs: invalid run id `{run_id}`");
         return ExitCode::from(2);
@@ -911,6 +960,18 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
     if !run_dir.is_dir() {
         eprintln!("runs: run `{run_id}` not found");
         return ExitCode::from(2);
+    }
+    if json {
+        return match apb_mcp::tools::run::run_status(root, run_id) {
+            Ok(v) => {
+                println!("{}", serde_json::to_string_pretty(&v).unwrap_or_default());
+                ExitCode::SUCCESS
+            }
+            Err(e) => {
+                eprintln!("runs failed: {e}");
+                ExitCode::from(2)
+            }
+        };
     }
     let view = match apb_engine::run_view::RunView::load(&run_dir, run_id) {
         Ok(v) => v,
@@ -930,6 +991,13 @@ fn run_detail_cmd(root: &Path, run_id: &str) -> ExitCode {
         })
         .unwrap_or_default();
     println!("{run_id}\t{playbook}\t{}", view.run_status.as_str());
+    println!(
+        "  execution: {}",
+        sanitize_for_terminal(
+            &crate::run_mode::detail_line(&run_dir, &view.events),
+            QUESTION_TEXT_MAX
+        )
+    );
     if view.driver_alive == Some(false) {
         println!("  driver dead");
     }

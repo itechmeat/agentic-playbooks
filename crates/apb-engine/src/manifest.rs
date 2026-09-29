@@ -178,6 +178,13 @@ pub struct RunExecutionManifest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub execution: Option<ManifestExecution>,
     // --- end host execution mode ---
+    // --- 0.24.0 irreversible consent ---
+    /// Who consented to the run's irreversible effects, present only when the
+    /// run's tree declares `irreversible` (see [`crate::consent`]). Written
+    /// once at start: a resume keeps it, a sub-playbook inherits it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub consent: Option<crate::consent::RunConsent>,
+    // --- end 0.24.0 irreversible consent ---
 }
 
 // --- host execution mode (0.23.0) ---
@@ -277,6 +284,8 @@ impl RunExecutionManifest {
             // host execution mode (0.23.0): a run without agent steps of its
             // own still passes its execution on to its sub-playbooks.
             && self.execution.is_none()
+            // 0.24.0: the consent a sub-playbook inherits.
+            && self.consent.is_none()
     }
 
     pub fn for_node(&self, node_id: &str) -> Option<&ManifestProfile> {

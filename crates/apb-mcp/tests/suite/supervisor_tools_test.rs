@@ -224,6 +224,7 @@ fn playbook_run_supervised_prepares_the_run_and_hands_off_the_drive() {
         None,
         None,
         Default::default(),
+        None,
     )
     .unwrap();
     let elapsed = started.elapsed();

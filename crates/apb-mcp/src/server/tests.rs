@@ -867,6 +867,7 @@ async fn capability_gate_blocks_retry_when_observe_only() {
         None,
         None,
         Default::default(),
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -932,6 +933,7 @@ async fn resolve_session_falls_back_to_disk_when_in_memory_table_is_empty() {
         None,
         None,
         Default::default(),
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -993,6 +995,7 @@ async fn disk_resolved_observe_only_token_is_denied_retry_tool() {
         None,
         None,
         Default::default(),
+        None,
     )
     .expect("playbook_run_supervised");
     let run_id = started["run_id"].as_str().expect("run_id").to_string();
@@ -1867,4 +1870,98 @@ fn playbook_howto_never_lets_the_agent_pick_host_mode_itself() {
     );
     assert!(flat.contains("explicitly asks"), "{flat}");
     assert!(flat.contains("Do not choose it yourself"), "{flat}");
+}
+
+// --- 0.24.0 irreversible consent ---
+
+fn irreversible_args(ack: Option<bool>) -> PlaybookRunArgs {
+    PlaybookRunArgs {
+        id: "rel".into(),
+        version: None,
+        params: BTreeMap::new(),
+        instruction: None,
+        supervise: None,
+        background: None,
+        acknowledge_untrusted: ack,
+        scope: None,
+        continued_from: None,
+        worktree: None,
+        execution: None,
+    }
+}
+
+/// A TRUSTED playbook whose effects include `irreversible` is refused
+/// without the confirmation argument, naming what to ask, and runs with it;
+/// the manifest records the MCP consent.
+#[tokio::test]
+async fn playbook_run_needs_the_confirmation_for_an_irreversible_playbook() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let proj = tempfile::tempdir().unwrap();
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+    }
+    apb_core::registry::init_project(proj.path()).unwrap();
+    let yaml = NOAGENT
+        .replace("id: noagent_sv", "id: rel")
+        .replace("nodes:", "effects: [irreversible]\nnodes:");
+    let vdir = proj.path().join(".apb/playbooks/rel/1.0.0");
+    fs::create_dir_all(&vdir).unwrap();
+    fs::write(vdir.join("playbook.yaml"), &yaml).unwrap();
+    fs::write(proj.path().join(".apb/playbooks/rel/current"), "1.0.0").unwrap();
+    let digest = apb_core::registry::Registry::open(proj.path())
+        .unwrap()
+        .load("rel", None)
+        .unwrap()
+        .trust_digest()
+        .unwrap();
+    apb_core::trust::TrustStore::load()
+        .approve(&digest, "rel", apb_core::trust::OriginKind::LocallyApproved)
+        .unwrap();
+
+    let server = WfMcp::new(proj.path().to_path_buf());
+    let refused = server
+        .playbook_run(Parameters(irreversible_args(None)))
+        .await;
+    let out: serde_json::Value = serde_json::from_str(&result_text(&refused)).unwrap();
+    assert_eq!(
+        out["policy_refusal"]["policy"], "irreversible_requires_confirmation",
+        "got: {out}"
+    );
+    assert_eq!(
+        out["policy_refusal"]["sources"],
+        serde_json::json!(["playbook"])
+    );
+    assert!(
+        out["policy_refusal"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("acknowledge_untrusted: true"),
+        "the refusal says what to pass: {out}"
+    );
+    assert!(
+        !proj.path().join(".apb/runs").is_dir()
+            || fs::read_dir(proj.path().join(".apb/runs"))
+                .unwrap()
+                .next()
+                .is_none(),
+        "a refused start writes no run"
+    );
+
+    let res = server
+        .playbook_run(Parameters(irreversible_args(Some(true))))
+        .await;
+    let out: serde_json::Value = serde_json::from_str(&result_text(&res)).unwrap();
+    let run_id = out["run_id"].as_str().expect("run_id present").to_string();
+    assert!(run_finished(proj.path(), &run_id));
+    let consent = apb_engine::manifest::read(&proj.path().join(".apb/runs").join(&run_id))
+        .unwrap()
+        .and_then(|m| m.consent)
+        .expect("the manifest records the consent");
+    assert!(consent.irreversible);
+    assert_eq!(consent.by, "mcp");
+
+    unsafe {
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
 }

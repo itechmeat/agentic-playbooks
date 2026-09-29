@@ -1,6 +1,8 @@
 pub mod adapter;
 mod agent_home;
 pub mod connector;
+// 0.24.0 irreversible consent
+pub mod consent;
 pub mod context;
 pub mod control;
 pub mod decision;

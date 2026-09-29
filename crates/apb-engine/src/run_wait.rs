@@ -371,7 +371,13 @@ pub fn wait_supervisor_event_with(
             crate::inspect::touch_heartbeat(root, run_id)?;
             last_beat = now;
         }
-        sleep(WAIT_POLL.min(deadline - now));
+        // Wake for whichever comes first: the next poll, the deadline or the
+        // next beat, so a cadence shorter than `WAIT_POLL` is kept rather than
+        // rounded up to it (never below 1 ms, so a zero cadence cannot spin).
+        let next_beat = (last_beat + heartbeat_every)
+            .saturating_duration_since(now)
+            .max(Duration::from_millis(1));
+        sleep(WAIT_POLL.min(deadline - now).min(next_beat));
     }
 }
 

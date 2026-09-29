@@ -802,6 +802,7 @@ mod tests {
             include_str!("../../../../examples/playbooks/review-triage.yaml"),
             include_str!("../../../../.apb/playbooks/apb-task-implement/1.15.0/playbook.yaml"),
             include_str!("../../../../.apb/playbooks/apb-task-implement/1.16.0/playbook.yaml"),
+            include_str!("../../../../.apb/playbooks/apb-task-implement/1.17.0/playbook.yaml"),
         ] {
             let p = Playbook::from_yaml(yaml).unwrap();
             assert!(judge_codes(&p).is_empty(), "{:?}", issues(&p));
@@ -811,6 +812,30 @@ mod tests {
             };
             assert!(validate(&p, &ctx).is_valid(), "{:?}", issues(&p));
         }
+    }
+
+    /// 0.24.0: the current implement playbook pushes a branch, opens a PR
+    /// (`create_pull`), pushes review fixes and deletes the merged branch on
+    /// origin, so those steps declare `irreversible` and a run of it needs
+    /// the person's consent at start.
+    #[test]
+    fn the_repository_implement_playbook_declares_its_irreversible_steps() {
+        let p = Playbook::from_yaml(include_str!(
+            "../../../../.apb/playbooks/apb-task-implement/1.17.0/playbook.yaml"
+        ))
+        .unwrap();
+        let declared: Vec<&str> = p
+            .nodes
+            .iter()
+            .filter(|n| n.effects.contains(&crate::schema::Effect::Irreversible))
+            .map(|n| n.id.as_str())
+            .collect();
+        assert_eq!(declared, ["pr", "post_pr", "finalize"]);
+        assert!(crate::effects::effective(&p).contains(&crate::schema::Effect::Irreversible));
+        assert_eq!(
+            include_str!("../../../../.apb/playbooks/apb-task-implement/current").trim(),
+            "1.17.0"
+        );
     }
 
     #[test]

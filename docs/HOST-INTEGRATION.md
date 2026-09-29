@@ -77,12 +77,12 @@ A supervising session (`supervise: "self"`) also gets each request from `supervi
 
 ### Trust and attribution
 
-Host mode changes who executes, not what is allowed: the run gate (trusted playbook and profiles, effects consent, `irreversible` confirmation) is unchanged. The prompt is rendered from the trusted snapshot exactly as for a CLI attempt, and the host never receives a connector secret (connector calls still go through `apb connector call`). Every submission is journaled as `host_task_submitted` with `submitted_by: host` and the MCP client name (`clientInfo.name`); the engine's own closures of a task (expired, cancelled, interrupted) say `submitted_by: engine`.
+Host mode changes who executes, not what is allowed: the run gate (trusted playbook and profiles, effects consent, `irreversible` confirmation) is unchanged. A host-mode start of a playbook whose tree declares `irreversible` needs the same consent as a `cli` one: the host asks the person and passes `acknowledge_untrusted: true`, the manifest records `consent: { irreversible: true, by: "mcp:<client>" }`, and the sub-playbooks whose steps come back as host tasks inherit it. The host fallback does not change it either: a step that falls back to the host runs under the consent the run started with. The prompt is rendered from the trusted snapshot exactly as for a CLI attempt, and the host never receives a connector secret (connector calls still go through `apb connector call`). Every submission is journaled as `host_task_submitted` with `submitted_by: host` and the MCP client name (`clientInfo.name`); the engine's own closures of a task (expired, cancelled, interrupted) say `submitted_by: engine`.
 
 ### Other surfaces
 
 - CLI: `apb run <id> --execution host` (the scripted hand-off: `apb tasks [run]` lists the tasks, `apb tasks submit <run> <task_id> --status succeeded --output-file <file>` answers one).
-- `apb doctor` and `playbook_adopt_report` state the default and whether the fallback is on; `run_status` carries the run's `execution`.
+- `apb doctor` and `playbook_adopt_report` state the default and whether the fallback is on; `run_status` carries the run's `execution`, and `apb runs <run>` prints it as an `execution:` line (`--json` gives the `run_status` object).
 - The dashboard's run page shows a read-only host mode badge, the pending host tasks with their prompts, and the request and submission rows in its timeline.
 - `docs/PROFILES.md` lists what host mode ignores in a profile.
 

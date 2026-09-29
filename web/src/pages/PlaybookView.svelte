@@ -2,7 +2,16 @@
   import { untrack } from 'svelte'
   import { SvelteFlow, Background, Controls } from '@xyflow/svelte'
   import '@xyflow/svelte/dist/style.css'
-  import { fetchPlaybook, fetchStats, fetchVersions, promoteVersion, runPlaybook, setFrozen } from '../lib/api'
+  import {
+    ApiError,
+    fetchPlaybook,
+    fetchStats,
+    fetchVersions,
+    promoteVersion,
+    runPlaybook,
+    setFrozen,
+  } from '../lib/api'
+  import * as AlertDialog from '$lib/components/ui/alert-dialog'
   import { toFlow, type FlowEdge, type FlowNode } from '../lib/graph'
   import { subscribeChanges } from '../lib/ws'
   import { onEscape } from '../lib/hooks/escape.svelte'
@@ -148,16 +157,35 @@
 
   const reload = () => load(++loadToken)
 
-  async function run() {
+  // --- 0.24.0 irreversible consent: the server refuses an irreversible
+  // playbook until the person confirms it here; the dialog shows what the
+  // refusal names, and only its confirm button sends the consent.
+  let irreversibleOpen = $state(false)
+  let irreversibleDetail = $state('')
+
+  async function run(confirmIrreversible = false) {
     starting = true
     try {
-      const { run_id } = await runPlaybook(id, workspace)
+      const { run_id } = await runPlaybook(id, workspace, confirmIrreversible)
       location.hash = `#/run/${encodeURIComponent(workspace)}/${encodeURIComponent(run_id)}`
     } catch (e) {
-      toast.error('Failed to start run', { description: String(e) })
       starting = false
+      if (e instanceof ApiError && e.code === 'irreversible_requires_confirmation') {
+        // The refusal's detail names what is irreversible, then how each
+        // surface consents; the person needs only the first part here.
+        irreversibleDetail = (e.detail ?? '').split(';')[0].trim()
+        irreversibleOpen = true
+        return
+      }
+      toast.error('Failed to start run', { description: String(e) })
     }
   }
+
+  function confirmIrreversibleRun() {
+    irreversibleOpen = false
+    void run(true)
+  }
+  // --- end 0.24.0 irreversible consent ---
 
   async function toggleFreeze() {
     freezing = true
@@ -299,7 +327,7 @@
     <Button
       size="sm"
       class="max-sm:px-2 bg-success text-success-foreground hover:bg-success/90"
-      onclick={run}
+      onclick={() => run()}
       disabled={starting}
       title="Start a run of this playbook"
     >
@@ -440,3 +468,22 @@
     </aside>
   {/if}
 </div>
+
+<!-- 0.24.0 irreversible consent -->
+<AlertDialog.Root bind:open={irreversibleOpen}>
+  <AlertDialog.Content>
+    <AlertDialog.Header>
+      <AlertDialog.Title>Run a playbook with irreversible effects?</AlertDialog.Title>
+      <AlertDialog.Description>
+        {irreversibleDetail
+          ? `The ${irreversibleDetail}.`
+          : 'This playbook declares irreversible effects, such as a push, a merge or a deploy.'}
+        Starting it records your consent in the run manifest, and its sub-playbooks inherit it.
+      </AlertDialog.Description>
+    </AlertDialog.Header>
+    <AlertDialog.Footer>
+      <AlertDialog.Cancel>Cancel</AlertDialog.Cancel>
+      <AlertDialog.Action onclick={confirmIrreversibleRun}>Run it</AlertDialog.Action>
+    </AlertDialog.Footer>
+  </AlertDialog.Content>
+</AlertDialog.Root>

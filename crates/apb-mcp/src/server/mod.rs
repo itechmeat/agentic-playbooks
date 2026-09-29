@@ -375,6 +375,8 @@ impl WfMcp {
         worktree: Option<String>,
         warnings: Vec<String>,
         execution: apb_core::execution::ExecutionRequest,
+        // 0.24.0: the irreversible consent.
+        consent: Option<apb_engine::consent::RunConsent>,
     ) -> CallToolResult {
         let capabilities = match tools::supervisor_capabilities(&self.root, &id, version.as_deref())
         {
@@ -395,6 +397,7 @@ impl WfMcp {
             continued_from,
             worktree,
             execution,
+            consent,
         );
         let value = match started {
             Ok(v) => v,

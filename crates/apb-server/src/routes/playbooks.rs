@@ -211,6 +211,12 @@ pub(crate) struct RunBody {
     /// `worktree`; the run locks this tree instead of the project root.
     #[serde(default)]
     worktree: Option<String>,
+    /// 0.24.0: the person confirmed the playbook's irreversible effects in
+    /// the Run dialog. Without it such a run is refused (409,
+    /// `irreversible_requires_confirmation`), which is also what an event
+    /// bridge posting here gets: a trigger is not a person's consent.
+    #[serde(default)]
+    confirm_irreversible: bool,
 }
 
 /// POST /api/playbooks/{id}/run: starts an autonomous run in the background and
@@ -242,7 +248,9 @@ pub(crate) struct RunBody {
 /// confirmation, so the call acknowledges untrusted content the way MCP does
 /// after asking the user; connector trust is never bypassable. The returned
 /// permit is applied to the run verbatim (anti-TOCTOU), and its consent-time
-/// warnings ride the 200 answer.
+/// warnings ride the 200 answer. Irreversible effects are the exception to
+/// "clicking Run is the confirmation": they need `confirm_irreversible`, which
+/// the dashboard sends only after its dialog (0.24.0).
 pub(crate) async fn run_playbook_handler(
     State(state): State<AppState>,
     AxPath(id): AxPath<String>,
@@ -266,6 +274,9 @@ pub(crate) async fn run_playbook_handler(
         // parameters are already persisted, so nothing depends on the caller
         // still being around when the engine frees up.
         workdir_queue_wait: state.workdir_queue_wait,
+        consent: body
+            .confirm_irreversible
+            .then(|| apb_engine::consent::RunConsent::irreversible("dashboard")),
         ..Default::default()
     };
 
@@ -285,6 +296,10 @@ pub(crate) async fn run_playbook_handler(
             return (status, Json(refusal)).into_response();
         }
     };
+    // 0.24.0: an irreversible tree needs the dialog's confirmation.
+    if let Err(refusal) = permit.consent_refusal(opts.consent.as_ref()) {
+        return (StatusCode::CONFLICT, Json(refusal)).into_response();
+    }
     let warnings = permit.warnings.clone();
     permit.apply(&mut opts);
 

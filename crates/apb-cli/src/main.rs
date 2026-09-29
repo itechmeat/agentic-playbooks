@@ -6,6 +6,9 @@ mod manage;
 mod onboarding;
 mod profile;
 mod run;
+// --- 0.24.0 run execution mode lines ---
+mod run_mode;
+// --- end 0.24.0 run execution mode lines ---
 mod selfupdate;
 mod serve;
 mod server;
@@ -187,6 +190,11 @@ enum Command {
         /// answers, meant for an MCP host session)
         #[arg(long, value_name = "MODE")]
         execution: Option<String>,
+        /// Consent to the playbook's irreversible effects (a push, a merge,
+        /// a deploy) for a start without an interactive terminal, such as a
+        /// CI step. From a terminal, typing `apb run` is the consent
+        #[arg(long)]
+        confirm_irreversible: bool,
     },
     /// Host tasks of host-execution-mode runs: list what waits for a host
     /// (all runs, or one), or submit a reply
@@ -208,6 +216,9 @@ enum Command {
     Runs {
         /// Show only this run
         run_id: Option<String>,
+        /// With a run id: the run as JSON, the same object as MCP run_status
+        #[arg(long, requires = "run_id")]
+        json: bool,
     },
     /// Resume a paused/interrupted run
     Resume {
@@ -365,6 +376,10 @@ enum Command {
         /// The run's working tree, forwarded from `apb run --worktree`.
         #[arg(long, value_name = "DIR")]
         worktree: Option<String>,
+        /// The irreversible consent `apb run --supervise` was started with
+        /// (`cli` or `cli_flag`), forwarded across the detached spawn.
+        #[arg(long, value_name = "BY")]
+        consent: Option<String>,
         /// Handshake file: written with the run_id as soon as the run is
         /// prepared (before drive starts), so the parent process can report
         /// it and exit without waiting for the run itself to finish.
@@ -470,6 +485,7 @@ fn main() -> ExitCode {
             continued_from,
             worktree,
             execution,
+            confirm_irreversible,
         }) => run_cmd(
             &root,
             &name,
@@ -485,6 +501,7 @@ fn main() -> ExitCode {
             continued_from,
             worktree,
             execution.as_deref(),
+            confirm_irreversible,
         ),
         Some(Command::Tasks {
             action,
@@ -492,7 +509,7 @@ fn main() -> ExitCode {
             full,
             json,
         }) => tasks_cmd(&root, action, run_id, full, json),
-        Some(Command::Runs { run_id }) => runs_cmd(&root, run_id.as_deref()),
+        Some(Command::Runs { run_id, json }) => runs_cmd(&root, run_id.as_deref(), json),
         Some(Command::Resume {
             run_id,
             from_node,
@@ -565,6 +582,7 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             continued_from,
             worktree,
+            consent,
             handshake,
         }) => drive_supervised_child(
             &root,
@@ -575,6 +593,7 @@ fn main() -> ExitCode {
             allow_shared_workdir,
             continued_from,
             worktree,
+            consent,
             &handshake,
         ),
         // Deliberately uses the `--root` it was given, not the process cwd:

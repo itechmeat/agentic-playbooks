@@ -82,7 +82,7 @@ fn a_run_without_decisions_prints_as_before() {
         .current_dir(dir.path())
         .assert()
         .success()
-        .stdout("demo-1\tdemo 1.0.0\tsucceeded\n  w\tsucceeded\n");
+        .stdout("demo-1\tdemo 1.0.0\tsucceeded\n  execution: cli\n  w\tsucceeded\n");
     apb()
         .args(["wait", "demo-1", "--timeout", "5"])
         .current_dir(dir.path())
