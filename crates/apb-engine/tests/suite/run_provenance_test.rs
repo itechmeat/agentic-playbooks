@@ -183,6 +183,15 @@ fn a_tree_without_git_journals_no_provenance() {
             "run_finished",
         ]
     );
+    // A run without goal script criteria pins no scripts digest: its
+    // `run_provenance` reads as in 0.22.
+    let journal = std::fs::read_to_string(
+        root.join(".apb/runs")
+            .join(&res.run_id)
+            .join("events.jsonl"),
+    )
+    .unwrap();
+    assert!(!journal.contains("scripts_digest"), "{journal}");
 }
 
 /// Seeds playbook `p2` from `yaml` with the given scripts.
