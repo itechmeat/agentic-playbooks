@@ -334,6 +334,9 @@ pub struct ConnectorEnvPolicy {
     pub scrub: Vec<String>,
     pub run_dir: Option<PathBuf>,
     pub node_id: Option<String>,
+    /// An eval run's env overlay (`RunConfig::spawn_env`), set after the
+    /// scrub and the run-context env. Empty for every other run.
+    pub overlay: Vec<(String, String)>,
 }
 
 impl ConnectorEnvPolicy {
@@ -359,6 +362,9 @@ impl ConnectorEnvPolicy {
         // when a TTY-like pager path is engaged (see issue #42 finding 12).
         cmd.env("GH_PAGER", "cat");
         cmd.env("PAGER", "cat");
+        for (k, v) in &self.overlay {
+            cmd.env(k, v);
+        }
     }
 }
 
@@ -2464,6 +2470,29 @@ mod tests {
             stdout.lines().any(|l| l == "PAGER=cat"),
             "PAGER=cat missing from child env:\n{stdout}"
         );
+    }
+
+    /// An eval run's env overlay lands on the spawned agent after the
+    /// connector scrub: a scrubbed name the overlay sets keeps the overlay's
+    /// value, and the overlay's own variables arrive.
+    #[test]
+    fn the_eval_overlay_is_applied_after_the_scrub() {
+        let policy = ConnectorEnvPolicy {
+            scrub: vec!["PATH_PROBE_TOKEN".into()],
+            overlay: vec![
+                ("PATH_PROBE_TOKEN".into(), String::new()),
+                ("EVAL_PROBE".into(), "1".into()),
+            ],
+            ..Default::default()
+        };
+        let mut cmd = Command::new("env");
+        cmd.env("PATH_PROBE_TOKEN", "secret");
+        policy.apply(&mut cmd);
+        let out = cmd.output().expect("spawn env");
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        let lines: Vec<&str> = stdout.lines().collect();
+        assert!(lines.contains(&"PATH_PROBE_TOKEN="), "{stdout}");
+        assert!(lines.contains(&"EVAL_PROBE=1"), "{stdout}");
     }
 
     fn stream_task<'a>(policy: &'a ConnectorEnvPolicy, extract: Option<&'a str>) -> AgentTask<'a> {

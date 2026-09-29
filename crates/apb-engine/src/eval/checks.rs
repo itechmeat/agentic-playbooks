@@ -112,8 +112,9 @@ pub struct CheckInput<'a> {
     pub suite_dir: &'a Path,
     /// Set when the runner stopped the run (a gate, the timeout, a budget).
     pub stopped: Option<&'a str>,
-    /// `APB_EVAL_*` and the run ids for the case scripts.
-    pub script_env: Vec<(&'static str, String)>,
+    /// The case env overlay, then `APB_EVAL_*` and the run ids, for the
+    /// case scripts.
+    pub script_env: Vec<(String, String)>,
     /// An empty directory: the hooks path of every git call the checks and
     /// the case scripts make in the tree (see [`super::git`]).
     pub hooks_dir: &'a Path,
@@ -467,7 +468,11 @@ fn script_checks(input: &CheckInput, out: &mut Vec<CheckResult>) {
         let kind = format!("script[{s}]");
         // The scripts run after untrusted agent activity in the tree: their
         // own git calls get the same hardening as apb's.
-        let mut env = input.script_env.clone();
+        let mut env: Vec<(&str, String)> = input
+            .script_env
+            .iter()
+            .map(|(k, v)| (k.as_str(), v.clone()))
+            .collect();
         env.push((
             "GIT_CONFIG_PARAMETERS",
             super::git::config_parameters(input.hooks_dir),

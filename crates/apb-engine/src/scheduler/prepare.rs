@@ -754,6 +754,7 @@ pub(crate) fn prepare_run_target(
         workdir_queue_wait_ms: opts
             .workdir_queue_wait
             .map(|d| d.as_millis().min(u64::MAX as u128) as u64),
+        eval: opts.eval.clone(),
     };
     prep_try_unstarted(&mut log, &unstarted, write_run_config(&run_dir, &cfg))?;
 

@@ -482,6 +482,49 @@ pub fn refusal(playbook: &Playbook) -> Vec<String> {
     why
 }
 
+/// Env names an overlay may not set: they reconfigure apb itself (`APB_*`,
+/// the config-directory variables), the program search path, the dynamic
+/// loader, git's idea of the repository and config, or the shell.
+const ENV_EXACT: [&str; 22] = [
+    "HOME",
+    "PATH",
+    "USERPROFILE",
+    "APPDATA",
+    "SHELL",
+    "ENV",
+    "BASH_ENV",
+    "IFS",
+    "CDPATH",
+    "ZDOTDIR",
+    "PROMPT_COMMAND",
+    "PS4",
+    "SHELLOPTS",
+    "BASHOPTS",
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_COMMON_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+    "GIT_EXEC_PATH",
+    "GIT_SSH_COMMAND",
+];
+const ENV_PREFIXES: [&str; 6] = ["APB_", "XDG_", "LD_", "DYLD_", "GIT_CONFIG", "BASH_FUNC_"];
+
+/// Why an overlay may not set `name`, if it may not.
+pub fn env_key_problem(name: &str) -> Option<String> {
+    if name.is_empty() || name.contains(['=', '\0']) || name.chars().any(char::is_whitespace) {
+        return Some(format!("env `{name}` is not a variable name"));
+    }
+    let upper = name.to_ascii_uppercase();
+    if ENV_EXACT.contains(&upper.as_str()) || ENV_PREFIXES.iter().any(|p| upper.starts_with(p)) {
+        return Some(format!(
+            "env `{name}` cannot be set by an eval suite (it reconfigures apb, the shell, the loader or git)"
+        ));
+    }
+    None
+}
+
 /// Nodes of `playbook` a case names that do not exist.
 fn unknown_nodes(case: &EvalCase, playbook: &Playbook) -> Vec<String> {
     let known: BTreeSet<&str> = playbook.nodes.iter().map(|n| n.id.as_str()).collect();
@@ -590,6 +633,11 @@ fn case_problems(lc: &LoadedCase, playbook: &Playbook) -> Vec<String> {
             playbook.version
         ));
     }
+    for k in c.env.keys() {
+        if let Some(why) = env_key_problem(k) {
+            p.push(why);
+        }
+    }
     let declared: BTreeSet<&str> = playbook.params.iter().map(|p| p.name.as_str()).collect();
     for k in c.params.keys() {
         if !declared.contains(k.as_str()) {
@@ -627,6 +675,15 @@ pub fn validate_suite(playbook_dir: &Path, playbook: &Playbook) -> Vec<Issue> {
             Severity::Error,
             format!("`evals/{link}` is a symlink; an eval suite may not contain symlinks"),
         ));
+    }
+    for k in loaded.suite.env.keys() {
+        if let Some(why) = env_key_problem(k) {
+            out.push(issue(
+                "V80",
+                Severity::Error,
+                format!("eval `{SUITE_FILE}`: {why}"),
+            ));
+        }
     }
     if let Err(e) = suite_digest(&dir) {
         out.push(issue(
@@ -1121,5 +1178,43 @@ mod tests {
         assert_eq!(a.approved.keys().collect::<Vec<_>>(), ["sha256:ab"]);
         assert!(!a.is_approved("missing"));
         assert!(a.is_approved("sha256:ab"));
+    }
+
+    /// The env overlay cannot reconfigure apb, the loader, git or the
+    /// shell, in a case or in `suite.yaml`; an ordinary variable passes.
+    #[test]
+    fn v80_refuses_env_keys_that_reconfigure_apb_the_loader_or_git() {
+        let case = GOOD.replace(
+            "repeat: 2\n",
+            "repeat: 2\nenv: { APB_CONFIG_DIR: x, HOME: x, LD_PRELOAD: x, GIT_CONFIG_GLOBAL: x, xdg_config_home: x, GH_TOKEN: \"\" }\n",
+        );
+        let dir = suite_with(&[
+            ("good.yaml", &case),
+            ("suite.yaml", "env: { PATH: /x, GH_CONFIG_DIR: /y }\n"),
+        ]);
+        let got: Vec<String> = validate_suite(dir.path(), &pb(PB))
+            .iter()
+            .filter(|i| i.code == "V80")
+            .map(|i| i.message.clone())
+            .collect();
+        for key in [
+            "APB_CONFIG_DIR",
+            "HOME",
+            "LD_PRELOAD",
+            "GIT_CONFIG_GLOBAL",
+            "xdg_config_home",
+        ] {
+            assert!(
+                got.iter().any(|m| m.starts_with("eval case `good`: env `")
+                    && m.contains(&format!("`{key}` cannot be set"))),
+                "{key}: {got:#?}"
+            );
+        }
+        assert!(
+            got.iter()
+                .any(|m| m.starts_with("eval `suite.yaml`: env `PATH` cannot be set")),
+            "{got:#?}"
+        );
+        assert_eq!(got.len(), 6, "GH_TOKEN and GH_CONFIG_DIR pass: {got:#?}");
     }
 }

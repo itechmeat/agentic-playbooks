@@ -460,11 +460,19 @@ fn materialize(
 }
 
 /// The case env with `{{eval.scratch}}` expanded.
-fn overlay(env: &BTreeMap<String, String>, rep_dir: &Path) -> Vec<(String, String)> {
+fn overlay(env: &BTreeMap<String, String>, rep_dir: &Path) -> BTreeMap<String, String> {
     let scratch = rep_dir.to_string_lossy();
     env.iter()
         .map(|(k, v)| (k.clone(), v.replace("{{eval.scratch}}", &scratch)))
         .collect()
+}
+
+/// `apb run --eval-settings FILE`: the settings `start_run` wrote.
+pub(crate) fn read_run_settings(
+    path: &Path,
+) -> Result<apb_engine::run_config::EvalRunSettings, String> {
+    let raw = std::fs::read(path).map_err(|e| format!("`{}`: {e}", path.display()))?;
+    serde_json::from_slice(&raw).map_err(|e| format!("`{}`: {e}", path.display()))
 }
 
 struct Started {
@@ -478,9 +486,14 @@ fn start_run(
     tree: &Path,
     rep_dir: &Path,
     overrides_file: Option<&Path>,
-    env: &[(String, String)],
+    settings: &apb_engine::run_config::EvalRunSettings,
 ) -> Result<Started, String> {
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+    // The case env never reaches this process: it goes to the engine as a
+    // run setting, applied only where the run spawns agents and scripts.
+    let settings_file = rep_dir.join("eval-settings.json");
+    let body = serde_json::to_vec(settings).map_err(|e| e.to_string())?;
+    apb_core::fsutil::atomic_write_private(&settings_file, &body).map_err(|e| e.to_string())?;
+    let exe = apb_core::fsutil::reexec_exe().map_err(|e| e.to_string())?;
     let mut cmd = Command::new(exe);
     cmd.current_dir(tree)
         .args([
@@ -492,20 +505,24 @@ fn start_run(
             "--no-cache",
         ])
         .args(["--execution", "cli"])
+        .arg("--eval-settings")
+        .arg(&settings_file)
         .env("APB_NO_REGISTRY", "1")
         .env("APB_EVAL_SCRATCH", rep_dir)
         .stdin(Stdio::null());
+    // The child reads the same config directory (trust store, agents,
+    // connectors) as this process resolved, whatever its env says.
+    if let Some(dir) = apb_core::config::config_dir() {
+        cmd.env("APB_CONFIG_DIR", dir);
+    }
     if let Some(i) = &lc.case.instruction {
-        cmd.args(["--instruction", i]);
+        cmd.arg(format!("--instruction={i}"));
     }
     for (k, v) in &lc.case.params {
         cmd.args(["--param", &format!("{k}={v}")]);
     }
     if let Some(f) = overrides_file {
         cmd.arg("--overrides").arg(f);
-    }
-    for (k, v) in env {
-        cmd.env(k, v);
     }
     let out = cmd
         .output()
@@ -614,6 +631,19 @@ fn follow(tree: &Path, run_id: &str, limits: &core_eval::Limits) -> Option<StopR
         let _ = apb_engine::stop_run(tree, run_id);
     }
     reason
+}
+
+/// The deadline the engine itself enforces: the repetition's wall clock
+/// plus the grace the runner gives a run that crossed a limit, so the
+/// runner's own stop comes first while it is alive, and the run still ends
+/// when it is not.
+fn engine_deadline_ms(limits: &core_eval::Limits) -> u64 {
+    let secs = limits
+        .timeout_secs()
+        .unwrap_or(core_eval::DEFAULT_TIMEOUT_SECS);
+    let now = u64::try_from(apb_core::clock::now_ms()).unwrap_or(u64::MAX);
+    now.saturating_add(secs.saturating_mul(1000))
+        .saturating_add(LIMIT_GRACE.as_millis() as u64)
 }
 
 /// Waits for the run's driver process to exit; `false` when it is still
@@ -740,6 +770,11 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
         }
     };
     let env = overlay(&lc.env(&cx.suite.suite), &rep_dir);
+    let limits = lc.case.limits.over(&cx.suite.suite.limits);
+    let settings = apb_engine::run_config::EvalRunSettings {
+        spawn_env: env.clone(),
+        deadline_ms: Some(engine_deadline_ms(&limits)),
+    };
     let started = match start_run(
         cx.args,
         lc,
@@ -747,7 +782,7 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
         &tree,
         &rep_dir,
         cx.overrides_file,
-        &env,
+        &settings,
     ) {
         Ok(s) => s,
         Err(e) => {
@@ -755,19 +790,24 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
             return (error_rep(n, e, None), None);
         }
     };
-    let limits = lc.case.limits.over(&cx.suite.suite.limits);
     let stop = follow(&tree, &started.run_id, &limits);
     let run_dir = tree.join(".apb/runs").join(&started.run_id);
     let clean = driver_gone(&run_dir, &started.run_id);
     let events = apb_engine::run_view::read_events(&run_dir).unwrap_or_default();
     let raw_types = checks::raw_event_types(&run_dir);
-    let script_env = vec![
-        ("APB_EVAL_RUN_DIR", run_dir.to_string_lossy().into_owned()),
-        ("APB_RUN_ID", started.run_id.clone()),
-        ("APB_EVAL_CASE", lc.case.id.clone()),
-        ("APB_EVAL_REPETITION", n.to_string()),
-        ("APB_EVAL_SCRATCH", rep_dir.to_string_lossy().into_owned()),
-    ];
+    // The scripts get the case env overlay, as the agents did, then the
+    // runner's own variables (an overlay cannot name `APB_*`, V80).
+    let mut script_env: Vec<(String, String)> = env.into_iter().collect();
+    script_env.extend(
+        [
+            ("APB_EVAL_RUN_DIR", run_dir.to_string_lossy().into_owned()),
+            ("APB_RUN_ID", started.run_id.clone()),
+            ("APB_EVAL_CASE", lc.case.id.clone()),
+            ("APB_EVAL_REPETITION", n.to_string()),
+            ("APB_EVAL_SCRATCH", rep_dir.to_string_lossy().into_owned()),
+        ]
+        .map(|(k, v)| (k.to_string(), v)),
+    );
     // The agent had the operator's filesystem: the hooks directory is
     // emptied again before any check runs git.
     let _ = apb_engine::eval::git::empty_hooks_dir(cx.hooks);
@@ -1136,7 +1176,7 @@ fn run_eval(
     let question = if approved {
         format!("start {total} run(s)?")
     } else {
-        "the suite's scripts are not approved on this machine; approve and start?".to_string()
+        "the suite's scripts and its env overlay are not approved on this machine; approve them and start?".to_string()
     };
     if !confirm(args, &question) {
         return fail(

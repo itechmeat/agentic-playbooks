@@ -1071,6 +1071,7 @@ fn execute_node_kind(
                 scrub: env_scrub.to_vec(),
                 run_dir: Some(run_dir.to_path_buf()),
                 node_id: Some(node_id.to_string()),
+                overlay: cfg.spawn_env(),
             };
 
             // Agent sessions this execution's attempts left behind, by binding
@@ -2640,6 +2641,9 @@ fn execute_node_kind(
             // Pass through cancel: in a parallel batch (join:any) the winning
             // branch sets the flag, and a running script is torn down together with
             // its process group - without leaking side effects after a sibling wins.
+            let mut env = crate::script::run_env(run_dir, Some(node_id));
+            let overlay = cfg.spawn_env();
+            env.extend(overlay.iter().map(|(k, v)| (k.as_str(), v.clone())));
             let r = crate::script::run_script_with_env(
                 run_dir,
                 workdir,
@@ -2647,7 +2651,7 @@ fn execute_node_kind(
                 runner,
                 timeout,
                 Some(cancel),
-                &crate::script::run_env(run_dir, Some(node_id)),
+                &env,
             )?;
             // A killed script's captured stdout is whatever it happened to
             // print before the signal landed (often nothing at all), not the
@@ -2796,6 +2800,7 @@ pub(crate) fn execute_finish_answer(
         scrub: env_scrub.to_vec(),
         run_dir: Some(run_dir.to_path_buf()),
         node_id: Some(node_id.to_string()),
+        overlay: cfg.spawn_env(),
     };
     let mut events: Vec<EventPayload> = Vec::new();
     let mut attempt: u32 = 0;
@@ -3490,6 +3495,7 @@ pub(crate) fn maybe_compact_context(
         scrub: env_scrub.to_vec(),
         run_dir: None,
         node_id: None,
+        overlay: cfg.spawn_env(),
     };
     let task = AgentTask {
         prompt: &prompt,

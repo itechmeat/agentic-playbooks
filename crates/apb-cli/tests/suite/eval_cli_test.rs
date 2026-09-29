@@ -642,3 +642,40 @@ fn the_runner_git_ignores_the_operators_git_dir_and_cuts_credentials() {
         .unwrap();
     assert_eq!(String::from_utf8_lossy(&log.stdout).trim(), "1");
 }
+
+/// The case env overlay reaches the agent and the case scripts, with
+/// `{{eval.scratch}}` expanded; it is a run setting, not the environment of
+/// the `apb run` that starts the run.
+#[test]
+fn the_env_overlay_reaches_the_agent_and_the_scripts() {
+    let env = setup(PLAYBOOK);
+    write(
+        &env.stub,
+        "#!/bin/sh\necho \"agent saw $EVAL_PROBE\" > report.md\nprintf 'REPORT-OK\\n```yaml\\nstatus: success\\nsummary: done\\n```\\n'\n",
+    );
+    let ev = env.project.path().join(".apb/playbooks/rev/evals");
+    write(
+        &ev.join("scripts/probe.sh"),
+        "#!/bin/sh\nset -eu\n[ \"$(cat report.md)\" = \"agent saw $EVAL_PROBE\" ]\ncase \"$EVAL_PROBE\" in \"v-$APB_EVAL_SCRATCH\") ;; *) exit 1 ;; esac\n",
+    );
+    write(
+        &ev.join("writes-report.yaml"),
+        &CASE
+            .replace(
+                "scripts: [scripts/branch.sh]",
+                "scripts: [scripts/probe.sh]",
+            )
+            .replace("matches: \"names lib.txt\"", "matches: \"agent saw v-/\"")
+            .replace(
+                "repeat: 1\n",
+                "repeat: 1\nenv: { EVAL_PROBE: \"v-{{eval.scratch}}\" }\n",
+            ),
+    );
+    let (code, v) = env.eval_json(&[]);
+    assert_eq!(code, 0, "{v:#}");
+    let rep = &v["result"]["cases"][0]["repetitions"][0];
+    assert_eq!(rep["verdict"], "passed", "{rep:#}");
+    let settings = Path::new(rep["run_dir"].as_str().unwrap()).join("run.yaml");
+    let cfg = fs::read_to_string(&settings).unwrap_or_default();
+    assert!(cfg.contains("EVAL_PROBE"), "a run setting: {cfg}");
+}

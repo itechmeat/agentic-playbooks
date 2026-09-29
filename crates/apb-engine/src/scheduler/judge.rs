@@ -205,6 +205,7 @@ pub(crate) fn execute(
         node_id,
         cancel,
         env_scrub,
+        overlay: cfg.spawn_env(),
         journal,
         attempt: std::cell::Cell::new(attempt_started_count(&read_all(run_dir)?, node_id) as u32),
     };
@@ -330,6 +331,8 @@ struct ProfileEmulation<'a, 'j> {
     node_id: &'a str,
     cancel: &'a AtomicBool,
     env_scrub: &'a [String],
+    /// The eval env overlay (`RunConfig::spawn_env`).
+    overlay: Vec<(String, String)>,
     journal: &'a Journal<'j>,
     attempt: std::cell::Cell<u32>,
 }
@@ -410,6 +413,7 @@ impl ProfileEmulation<'_, '_> {
             scrub: self.env_scrub.to_vec(),
             run_dir: Some(self.run_dir.to_path_buf()),
             node_id: Some(self.node_id.to_string()),
+            overlay: self.overlay.clone(),
         };
         let stream_log = self
             .run_dir

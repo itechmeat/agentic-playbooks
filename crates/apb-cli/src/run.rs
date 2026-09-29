@@ -467,6 +467,7 @@ pub(crate) fn run_cmd(
     worktree: Option<String>,
     execution: Option<&str>,
     confirm_irreversible: bool,
+    eval_settings: Option<&Path>,
 ) -> ExitCode {
     if Registry::open(root).is_err() {
         eprintln!("no project here (run `apb init`)");
@@ -536,6 +537,18 @@ pub(crate) fn run_cmd(
     }
     // 0.24.0 irreversible consent: the flag, or a person at a terminal.
     let consent = cli_consent(confirm_irreversible);
+    let eval = match eval_settings.map(crate::eval::read_run_settings) {
+        None => None,
+        Some(Ok(s)) => Some(s),
+        Some(Err(e)) => {
+            eprintln!("bad --eval-settings: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    if eval.is_some() && (supervise || host) {
+        eprintln!("--eval-settings is only for a cli run");
+        return ExitCode::from(2);
+    }
     if supervise {
         // Background (non-blocking) supervised run: the engine itself spawns
         // a background agent and watches its heartbeat. The drive loop
@@ -584,6 +597,7 @@ pub(crate) fn run_cmd(
             ..Default::default()
         },
         consent,
+        eval,
         // The `expected_*` pins come from the run gate (`gate_run`).
         ..Default::default()
     };

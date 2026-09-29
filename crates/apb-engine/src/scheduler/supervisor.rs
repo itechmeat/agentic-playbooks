@@ -71,6 +71,9 @@ pub fn spawn_supervisor_agent(
         scrub: apb_core::connector::resolve::all_referenced_env_names(root),
         run_dir: Some(run_dir.clone()),
         node_id: Some("supervisor".to_string()),
+        overlay: crate::run_config::read_run_config(&run_dir)
+            .map(|c| c.spawn_env())
+            .unwrap_or_default(),
     };
     let mut last_err: Option<String> = None;
     for inv in &entry.chain {

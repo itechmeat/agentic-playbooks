@@ -96,6 +96,10 @@ pub struct RunOptions {
     /// headless start, a caller that did not ask the person.
     pub consent: Option<crate::consent::RunConsent>,
     // --- end 0.24.0 irreversible consent ---
+    /// Set by `apb eval` only: the env overlay for spawned agents and
+    /// scripts and the run's wall-clock deadline (see
+    /// [`crate::run_config::EvalRunSettings`]).
+    pub eval: Option<crate::run_config::EvalRunSettings>,
 }
 
 /// The result of the run's shared preparation (steps 1-5 of phase-3): the registry

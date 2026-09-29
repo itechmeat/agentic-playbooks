@@ -198,6 +198,10 @@ enum Command {
         /// CI step. From a terminal, typing `apb run` is the consent
         #[arg(long)]
         confirm_irreversible: bool,
+        /// Internal: the eval settings of a run `apb eval` starts (a JSON
+        /// file with the spawn env overlay and the wall-clock deadline).
+        #[arg(long, value_name = "FILE", hide = true)]
+        eval_settings: Option<PathBuf>,
     },
     /// Host tasks of host-execution-mode runs: list what waits for a host
     /// (all runs, or one), or submit a reply
@@ -538,6 +542,7 @@ fn main() -> ExitCode {
             worktree,
             execution,
             confirm_irreversible,
+            eval_settings,
         }) => run_cmd(
             &root,
             &name,
@@ -554,6 +559,7 @@ fn main() -> ExitCode {
             worktree,
             execution.as_deref(),
             confirm_irreversible,
+            eval_settings.as_deref(),
         ),
         Some(Command::Tasks {
             action,

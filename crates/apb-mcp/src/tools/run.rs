@@ -60,6 +60,7 @@ pub fn playbook_run(
         worktree,
         execution,
         consent,
+        eval: None,
     };
     let res = run(root, id, version, opts)?;
     Ok(json!({ "run_id": res.run_id, "outcome": res.outcome.as_str() }))
@@ -120,6 +121,7 @@ pub fn playbook_run_background(
         worktree,
         execution,
         consent,
+        eval: None,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))
@@ -574,6 +576,7 @@ pub fn playbook_run_supervised(
         worktree,
         execution,
         consent,
+        eval: None,
     };
     let run_id = apb_engine::start_detached(root, id, version, opts)?;
     Ok(json!({ "run_id": run_id }))

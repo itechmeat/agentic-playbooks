@@ -171,6 +171,7 @@ fn adapter_scrubs_connector_env_and_injects_run_context() {
         scrub: vec!["MOCK_SCRUB_TOKEN".to_string()],
         run_dir: Some(dir.path().to_path_buf()),
         node_id: Some("node-a".to_string()),
+        overlay: Vec::new(),
     };
     let report = ad
         .run(&AgentTask {
