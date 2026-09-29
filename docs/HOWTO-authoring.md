@@ -1624,7 +1624,11 @@ validates its playbooks.
   - `check: { type: script, path: scripts/<file> }`: a script under the
     version's `scripts/` (covered by the trust digest like every script) runs
     with `sh` in the run's working tree, with `APB_RUN_ID` and `APB_RUN_DIR`
-    set; exit 0 passes. It may run for up to 10 minutes.
+    set; exit 0 passes. It may run for up to 10 minutes. It runs from the
+    run directory's copy of `scripts/`, and only while that copy still
+    matches the digest the run pinned at start: when an earlier node changed
+    it, every `script` criterion is `error` (so `enforce` fails the run)
+    instead of running an edited check.
 - `enforce` (bool, default `false`): a failed `script` or `marker` criterion
   fails a run that would otherwise succeed, with a `run_error` naming the
   criterion. Without it the results are only reported. V41 warns when

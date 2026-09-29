@@ -7,7 +7,10 @@
 //!
 //! - `script`: the script under the version's `scripts/` (covered by the
 //!   trust digest, copied into the run directory) runs with `sh` in the
-//!   run's working tree with the run context env; exit 0 passes.
+//!   run's working tree with the run context env; exit 0 passes. The copy
+//!   must still match the digest pinned in `run_provenance` at start (an
+//!   earlier node can reach it through `APB_RUN_DIR`); when it does not,
+//!   every script criterion is `error` and none runs.
 //! - `marker`: the literal marker must appear in the finish answer or in the
 //!   latest output of any node.
 //! - `manual`: never checked by the engine; journaled `manual` so every
@@ -63,6 +66,60 @@ fn tail(text: &str) -> String {
         .collect()
 }
 
+/// The content digest of `run_dir/scripts` (the copy script nodes and goal
+/// scripts run from), `none` when there is no such directory or it is
+/// empty. Pinned in `run_provenance` at start.
+pub(crate) fn scripts_digest(run_dir: &Path) -> Result<String, EngineError> {
+    let scripts = run_dir.join("scripts");
+    let empty = match std::fs::read_dir(&scripts) {
+        Ok(mut d) => d.next().is_none(),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => true,
+        Err(e) => return Err(e.into()),
+    };
+    if empty {
+        return Ok("none".into());
+    }
+    apb_core::content::tree_digest(&scripts, &apb_core::content::TreeLimits::default())
+        .map_err(|e| EngineError::Invalid(format!("run scripts cannot be digested: {e}")))
+}
+
+/// Why the run's `scripts/` copy cannot be trusted for goal scripts, or
+/// `None` when it still matches what the run pinned at start. Any earlier
+/// node could rewrite the copy (its path is in `APB_RUN_DIR`), which would
+/// let it decide an enforced goal. A run journaled before the pin existed
+/// is checked against its whole definition digest instead.
+fn scripts_tampered(run_dir: &Path, events: &[crate::event::Event]) -> Option<String> {
+    let (digest, pinned) = events.iter().find_map(|e| match &e.payload {
+        EventPayload::RunProvenance {
+            digest,
+            scripts_digest,
+            ..
+        } => Some((digest.clone(), scripts_digest.clone())),
+        _ => None,
+    })?;
+    let changed =
+        "the run's scripts/ copy changed after the run started, so goal scripts do not run";
+    match (pinned, digest) {
+        (Some(pinned), _) => match scripts_digest(run_dir) {
+            Ok(now) if now == pinned => None,
+            Ok(_) => Some(changed.into()),
+            Err(e) => Some(e.to_string()),
+        },
+        (None, Some(digest)) => {
+            let yaml = match std::fs::read_to_string(run_dir.join("playbook.yaml")) {
+                Ok(y) => y,
+                Err(e) => return Some(format!("the run's playbook snapshot cannot be read: {e}")),
+            };
+            match apb_core::scope::definition_digest(&yaml, run_dir) {
+                Ok(now) if now == digest => None,
+                Ok(_) => Some(changed.into()),
+                Err(e) => Some(format!("run scripts cannot be digested: {e}")),
+            }
+        }
+        (None, None) => None,
+    }
+}
+
 /// Checks every criterion, journals one `goal_checked` each, and returns
 /// the reason the run must fail when `goal.enforce` is set and a script or
 /// marker criterion did not pass. `None` without a goal, without criteria,
@@ -81,7 +138,14 @@ pub(crate) fn check(
     if goal.criteria.is_empty() {
         return Ok(None);
     }
-    let outputs = RunState::fold(&read_all(run_dir)?).outputs;
+    let events = read_all(run_dir)?;
+    let outputs = RunState::fold(&events).outputs;
+    let tampered = goal
+        .criteria
+        .iter()
+        .any(|c| matches!(c.check, GoalCheck::Script { .. }))
+        .then(|| scripts_tampered(run_dir, &events))
+        .flatten();
     let mut enforced_failure: Option<String> = None;
     for (index, c) in goal.criteria.iter().enumerate() {
         let (status, detail) = match &c.check {
@@ -100,6 +164,7 @@ pub(crate) fn check(
                     )
                 }
             }
+            GoalCheck::Script { .. } if tampered.is_some() => (status::ERROR, tampered.clone()),
             GoalCheck::Script { path } => {
                 let env = crate::script::run_env(run_dir, None);
                 match crate::script::run_script_with_env(

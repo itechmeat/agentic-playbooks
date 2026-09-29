@@ -661,6 +661,8 @@ pub(crate) fn prepare_run_target(
     let copied = apb_core::scope::definition_digest(&loaded.yaml, &run_dir)
         .map_err(|e| EngineError::Invalid(format!("run scripts cannot be digested: {e}")));
     let copied = prep_try_unstarted(&mut log, &unstarted, copied)?;
+    let scripts_digest =
+        prep_try_unstarted(&mut log, &unstarted, super::goal::scripts_digest(&run_dir))?;
     if copied != digest {
         return prep_try_unstarted(
             &mut log,
@@ -791,6 +793,7 @@ pub(crate) fn prepare_run_target(
         origin: Some(t.origin_label.into()),
         digest: Some(digest),
         execution_root: Some(t.execution_root.to_string_lossy().into_owned()),
+        scripts_digest: Some(scripts_digest),
         profiles: profiles_prov,
     })?;
     // Right after provenance, so a reader of the journal alone can tell an

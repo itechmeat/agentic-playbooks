@@ -61,6 +61,11 @@ pub enum EventPayload {
         digest: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         execution_root: Option<String>,
+        /// The content digest of the run directory's `scripts/` copy as the
+        /// start verified it (`none` without scripts). Goal `script`
+        /// criteria run only while the copy still matches it (C1).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        scripts_digest: Option<String>,
         /// Profiles used by the run (spec 6.5). Empty for playbooks without
         /// profiles (the executor path).
         #[serde(default, skip_serializing_if = "Vec::is_empty")]

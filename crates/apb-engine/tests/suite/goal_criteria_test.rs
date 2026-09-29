@@ -190,3 +190,47 @@ fn a_playbook_without_a_goal_journals_no_goal_event() {
             .any(|e| matches!(e.payload, EventPayload::RunError { .. }))
     );
 }
+
+/// An earlier node that rewrites the run's copy of an enforced goal script
+/// cannot make it pass: the copy no longer matches what the run pinned at
+/// start, so the criterion is an error and the run fails.
+#[test]
+fn a_goal_script_rewritten_during_the_run_does_not_run() {
+    let goal = r#"goal:
+  statement: Tests pass
+  enforce: true
+  criteria:
+    - { description: tests pass, check: { type: script, path: scripts/fail.sh } }"#;
+    let tmp = tempfile::tempdir().unwrap();
+    seed(tmp.path(), goal);
+    fs::write(
+        tmp.path().join(".apb/playbooks/g/1.0.0/scripts/cleanup.sh"),
+        "printf 'exit 0\\n' > \"$APB_RUN_DIR/scripts/fail.sh\"\n",
+    )
+    .unwrap();
+    let res = run(tmp.path(), "g", None, RunOptions::default()).unwrap();
+    let events = read_all(&tmp.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_eq!(
+        fs::read_to_string(
+            tmp.path()
+                .join(".apb/runs")
+                .join(&res.run_id)
+                .join("scripts/fail.sh")
+        )
+        .unwrap(),
+        "exit 0\n"
+    );
+    assert_eq!(res.outcome, RunStatus::Failed);
+    assert_eq!(
+        checked(&events),
+        [(0, "script".into(), "error".into(), true)]
+    );
+    let detail = events
+        .iter()
+        .find_map(|e| match &e.payload {
+            EventPayload::GoalChecked { detail, .. } => detail.clone(),
+            _ => None,
+        })
+        .unwrap();
+    assert!(detail.contains("scripts/ copy changed"), "{detail}");
+}
