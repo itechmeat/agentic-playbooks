@@ -116,3 +116,44 @@ fn stats_refuses_compare_without_a_playbook_and_a_bad_since() {
         .assert()
         .code(2);
 }
+
+/// A run that fails at start (here: a profile agent with no invocation form,
+/// refused while the manifest is built) still gets `run_started` and the
+/// origin stamp, so `apb stats` counts it as a failed run of its playbook
+/// instead of skipping it as a directory from elsewhere.
+#[test]
+fn stats_counts_a_run_that_failed_at_start() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    apb().arg("init").current_dir(root).assert().success();
+    let v = root.join(".apb/playbooks/early/1.0.0");
+    fs::create_dir_all(&v).unwrap();
+    fs::write(
+        v.join("playbook.yaml"),
+        "schema: 2\nid: early\nname: Early\nversion: 1.0.0\ndefaults:\n  profile: main\nnodes:\n  - { id: start, type: start }\n  - { id: w, type: agent_task, prompt: \"Work\" }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: w }\n  - { from: w, to: done }\n",
+    )
+    .unwrap();
+    fs::write(root.join(".apb/playbooks/early/current"), "1.0.0").unwrap();
+    let p = root.join(".apb/profiles/main");
+    fs::create_dir_all(&p).unwrap();
+    fs::write(
+        p.join("profile.yaml"),
+        "name: main\ndescription: d\nexecutor:\n  agent: pi\n  model: any\n",
+    )
+    .unwrap();
+    fs::write(p.join("SOUL.md"), "Work.").unwrap();
+    apb()
+        .args(["run", "early"])
+        .current_dir(root)
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no invocation for agent `pi`"));
+    apb()
+        .args(["stats", "--playbook", "early"])
+        .current_dir(root)
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("early 1.0.0: 1 runs"))
+        .stdout(predicate::str::contains("outcome: 0/1 (0%) succeeded"))
+        .stdout(predicate::str::contains("skipped").not());
+}

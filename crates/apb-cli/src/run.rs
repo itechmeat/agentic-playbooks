@@ -375,9 +375,7 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
         if let Some(global) = &global {
             let mut seen = std::collections::BTreeSet::new();
             for (agent, _) in doc.executor_pairs() {
-                if seen.insert(agent)
-                    && apb_engine::invocation::spec_for(agent, global).is_err()
-                {
+                if seen.insert(agent) && apb_engine::invocation::spec_for(agent, global).is_err() {
                     println!(
                         "profile {name}: error agent_no_invocation agent `{agent}` has no invocation form (define `agents.{agent}.invocation` in the global config); every run of this profile fails at start"
                     );
