@@ -28,7 +28,7 @@ use connectors::check_connectors;
 use decisions::check_decision_opt_ins;
 pub use decisions::{
     auto_decide_refusal, auto_decide_refusal_with, auto_decide_run_refusal, downstream_nodes,
-    node_shipping_reason,
+    granted as granted_functions, node_shipping_reason,
 };
 use graph::{
     check_conditions, check_cycles, check_edges, check_edges_exist, check_failure_policy,

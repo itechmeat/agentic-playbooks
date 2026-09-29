@@ -71,8 +71,13 @@ pub fn auto_decide_refusal(
 
 // --- 0.23.0 V73 by declared effects ---------------------------------------------
 
-/// The functions of `facts` a binding grants, among `names`.
-fn granted<'a>(binding: &crate::schema::ConnectorBinding, names: &'a [String]) -> Vec<&'a String> {
+/// The functions a binding grants, among `names` (a `read_only` grant
+/// reaches none of them). Shared with the engine's consent gate, which
+/// counts a granted function flagged `irreversible` as a consent source.
+pub fn granted<'a>(
+    binding: &crate::schema::ConnectorBinding,
+    names: &'a [String],
+) -> Vec<&'a String> {
     use crate::schema::FunctionsAllow;
     match &binding.functions {
         FunctionsAllow::All => names.iter().collect(),
