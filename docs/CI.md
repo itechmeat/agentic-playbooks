@@ -91,6 +91,11 @@ the pipeline, so the confirmation moves to code review:
   (`irreversible_requires_confirmation`) unless the step says
   `--confirm-irreversible`, which is the workflow author's standing consent and
   is recorded in the run manifest as `consent: { by: cli_flag }`.
+- **Evals are opt-in there too.** `apb eval` is a paid run per repetition and
+  asks before it starts; a job refuses without `--yes`, which also approves the
+  suite's scripts on that runner (`<config>/evals/approved.json`). Pin the
+  version with `--version`, set `--max-usd`, and review `evals/` changes like
+  any other executable instruction (docs/EVALS.md).
 
 ## Working trees
 

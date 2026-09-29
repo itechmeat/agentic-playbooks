@@ -463,3 +463,19 @@ fn the_branch_quality_review_suite_runs_with_a_stub_reviewer() {
     );
     assert_eq!(out.status.code(), Some(0));
 }
+
+#[test]
+fn the_plan_names_nodes_that_load_the_operators_full_environment() {
+    let env = setup(PLAYBOOK);
+    let note = "node `review` runs profile `x` with `environment: full`";
+    env.eval(&["rev", "--dry-run"])
+        .success()
+        .stderr(predicate::str::contains("environment: full").not());
+    write(
+        &env.project.path().join(".apb/profiles/x/profile.yaml"),
+        "name: x\nexecutor:\n  agent: claude\n  model: claude-haiku-4-5-20251001\nenvironment: full\n",
+    );
+    env.eval(&["rev", "--dry-run"])
+        .success()
+        .stderr(predicate::str::contains(note));
+}

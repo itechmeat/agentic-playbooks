@@ -36,7 +36,8 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   each agent CLI's machine output: reply and reported token usage
   (`agent_output.rs`), the execution mode resolution (`execution.rs`: the
   `execution` config section, `cli` or `host` per run, the fallback rule),
-  the decision-model config (`decisions.rs`: the
+  the eval case and suite format with its V80-V83 checks, digests and the
+  machine's suite approvals (`eval.rs`), the decision-model config (`decisions.rs`: the
   machine's `decisions.yaml`, project narrowing, the doctor line), the
   doctor's free per-provider request (`decision_probe.rs`) and the
   measured-threshold store (`decision_thresholds.rs`).
@@ -61,7 +62,9 @@ engine, mcp. Do not introduce import cycles (enforced by code-ranker, see below)
   into a host task), the host task store behind `run_task_submit` and
   `apb tasks` (`host_task.rs`), the read-only goal and commits blocks of the
   run surfaces (`run_outcome.rs`), the cross-run metrics behind `apb stats`
-  (`run_stats.rs`, `run_stats/`),
+  (`run_stats.rs`, `run_stats/`), the irreversible-effects consent a run
+  start records (`consent.rs`), the eval checks and result store behind
+  `apb eval` (`eval/`),
   the tree-scoped busy lock (`workdir.rs`), attempt failure
   classification and the bounded infrastructure backoff (`failure_class.rs`),
   the immutable write-once run manifest (`manifest.rs`), invocation resolution

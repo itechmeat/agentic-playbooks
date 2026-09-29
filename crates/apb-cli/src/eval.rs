@@ -798,6 +798,37 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
     outcome
 }
 
+/// The agent nodes whose profile (after `overrides`) declares
+/// `environment: full`, as `(node, profile)`. Such a node loads the
+/// operator's user-scope hooks, plugins and MCP servers in the scratch run
+/// (docs/PROFILES.md, "Agent environment"), so the plan names them. An
+/// unresolvable profile is skipped here: the run gate reports it.
+fn full_environment_nodes(
+    root: &Path,
+    playbook: &Playbook,
+    overrides: Option<&RunOverrides>,
+) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    for n in &playbook.nodes {
+        let overridden = overrides
+            .and_then(|o| o.nodes.get(&n.id))
+            .and_then(|o| o.profile.clone());
+        let Some(pref) = overridden.or_else(|| n.kind.effective_profile_ref(&playbook.defaults))
+        else {
+            continue;
+        };
+        if let Ok(p) = apb_core::profile_store::resolve_profile(
+            root,
+            apb_core::profile_store::PlaybookOrigin::Project,
+            &pref,
+        ) && p.doc.environment() == apb_core::profile::AgentEnvironment::Full
+        {
+            out.push((n.id.clone(), p.name));
+        }
+    }
+    out
+}
+
 #[allow(clippy::too_many_arguments)]
 fn run_eval(
     root: &Path,
@@ -846,6 +877,11 @@ fn run_eval(
     let approved = approvals.is_approved(&suite_digest);
     if !args.json {
         eprintln!("{NOT_A_SANDBOX}");
+        for (node, profile) in full_environment_nodes(root, playbook, overrides) {
+            eprintln!(
+                "note: node `{node}` runs profile `{profile}` with `environment: full`: the operator's own agent setup (user-scope hooks, plugins, MCP servers) loads in its eval runs and can act outside the scratch repository"
+            );
+        }
     }
     let plan_line = format!(
         "plan: {} {version}, {} case(s), {total} run(s), invocation budget ${budget:.2}; suite {} {}",

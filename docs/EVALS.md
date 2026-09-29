@@ -39,6 +39,19 @@ There is no case-level switch that lifts the refusal. Use the case `env` to
 cut the logged-in CLIs you know about (for example `GH_CONFIG_DIR` pointing
 into the scratch directory and an empty `GH_TOKEN`).
 
+The agent's own configuration follows the node's profile, as in any run
+(PROFILES.md, "Agent environment"). With the default `environment: minimal`
+a claude node loads only the scratch repository's project and local
+settings, so the operator's user-scope hooks, plugins and MCP servers stay
+out; hooks in a project `.claude/settings.json` that the fixture carries do
+run, as they would in that repository. A profile with `environment: full`
+loads the operator's whole setup in every eval run: a user-scope hook can
+then write outside the scratch repository (a memory or logging hook
+records the eval as real work) and its extra context changes what is being
+measured. The plan names each such node before anything starts; point the
+case at a `minimal` profile with `--profile-override` when the full setup
+is not what the playbook needs.
+
 ## Layout
 
 ```
@@ -259,8 +272,6 @@ against the one before, without running anything.
 - **V82** (warning): a `human_review` or interactive node; the run is stopped
   when it waits there.
 - **V83** (warning): no case applies to the version.
-
-V77 to V79 are left free for other 0.24.0 work.
 
 ## The repository's own suite
 
