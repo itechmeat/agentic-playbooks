@@ -156,6 +156,29 @@ fn validate_refuses_a_zcode_profile_model_off_the_allowlist() {
         .stdout(predicate::str::contains("GLM-5.3-Flash"));
 }
 
+/// A profile whose agent (or a fallback) has no invocation form fails every
+/// run at start, in cli and in host mode; `apb validate` refuses it up front
+/// instead of passing it silently.
+#[test]
+fn validate_refuses_a_profile_agent_without_an_invocation_form() {
+    let dir = seeded_dir();
+    let path = dir.path().join(".apb/profiles/architect/profile.yaml");
+    fs::write(
+        &path,
+        "name: architect\nexecutor:\n  agent: claude\n  model: sonnet\n  fallbacks:\n    - agent: pi\n      model: any\n",
+    )
+    .unwrap();
+    playbook()
+        .arg("validate")
+        .current_dir(dir.path())
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains(
+            "profile architect: error agent_no_invocation agent `pi`",
+        ))
+        .stdout(predicate::str::contains("agent `claude`").not());
+}
+
 /// `apb validate` and `apb doctor` are the local preflight: besides the schema
 /// they check what a run would trip over on this machine, as warnings. A model
 /// id outside the agent's known list (a typo or a made-up id), a `requires`

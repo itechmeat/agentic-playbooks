@@ -338,7 +338,8 @@ pub(crate) fn run_validate(root: &Path, name: Option<String>) -> ExitCode {
 /// ([`apb_core::model_check`]): a model zcode's allowlist or the config's
 /// `model_policy` refuses is an error (`zcode_model_not_allowed`,
 /// `model_policy_violation`); one outside apb's list for its agent, or one the
-/// installed agent does not list, is a warning. Returns whether no profile had
+/// installed agent does not list, is a warning; an agent with no invocation
+/// form is an error (`agent_no_invocation`). Returns whether no profile had
 /// an error. An unreadable profile is left to the run-time resolver, which
 /// reports it with its own error.
 fn validate_profile_models(root: &Path, names: &[String]) -> bool {
@@ -357,12 +358,32 @@ fn validate_profile_models(root: &Path, names: &[String]) -> bool {
         return true;
     }
     let cx = model_check::ModelContext::load();
+    // An agent with no invocation form (neither built in nor defined under
+    // `agents:`) makes every run of the profile fail at start, in cli and in
+    // host mode alike (the run snapshots the whole executor chain before it
+    // knows which steps become host tasks), so it is an error here as it is
+    // in `profile_write`. A broken global config is reported by the run
+    // itself; it is not a finding about the profile.
+    let global = apb_core::config::GlobalConfig::load().ok();
     let mut ok = true;
     for (name, doc) in &docs {
         // The executor, its fallbacks and every tier (issue #165 Part 12).
         for problem in doc.tiers.problems() {
             println!("profile {name}: error profile_tiers_invalid {problem}");
             ok = false;
+        }
+        if let Some(global) = &global {
+            let mut seen = std::collections::BTreeSet::new();
+            for (agent, _) in doc.executor_pairs() {
+                if seen.insert(agent)
+                    && apb_engine::invocation::spec_for(agent, global).is_err()
+                {
+                    println!(
+                        "profile {name}: error agent_no_invocation agent `{agent}` has no invocation form (define `agents.{agent}.invocation` in the global config); every run of this profile fails at start"
+                    );
+                    ok = false;
+                }
+            }
         }
         for (agent, model) in doc.executor_pairs() {
             let Some(issue) = model_check::check(agent, model, &cx) else {
