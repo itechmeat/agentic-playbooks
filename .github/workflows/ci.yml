@@ -86,3 +86,48 @@ jobs:
       # the switch loses no coverage.
       - name: Doctests
         run: cargo test --workspace --doc
+
+  # The release builds macOS archives and runs its test gate inside every
+  # build leg, so a Linux-only assumption in a test (a GNU tool, /proc, the
+  # util-linux `setsid` binary) used to surface first on the release tag.
+  # This leg runs the same tests on macOS for every PR. Web checks, cargo
+  # deny, fmt and clippy stay on the Linux job above; clippy on macOS still
+  # runs in the release gate.
+  test-macos:
+    runs-on: macos-latest
+    # A cold macOS build plus the suite takes roughly 10 to 15 minutes; the
+    # ceiling is headroom, the per-test terminate-after in .config/nextest.toml
+    # catches a stuck test by name.
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Install bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+
+      # Must precede every cargo step: apb-server embeds web/dist through
+      # rust-embed, and web/dist is not checked in.
+      - name: Build web (embedded by apb-server via rust-embed)
+        working-directory: web
+        run: |
+          bun install --frozen-lockfile
+          bun run build
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          # Pinned by SHA, so the toolchain comes from this input, not the ref.
+          toolchain: stable
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@45fceba0fc176f41d2aee1ca9d6598ba628eea62 # nextest
+
+      # The same test command as the release gate (test-gate.yml).
+      - name: Test
+        run: cargo nextest run --profile ci --workspace
+
+      - name: Doctests
+        run: cargo test --workspace --doc

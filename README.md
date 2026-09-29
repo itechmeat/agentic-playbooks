@@ -175,7 +175,7 @@ playbook policy. Details: [docs/MCP.md](docs/MCP.md).
 
 ## Status
 
-Released on the `0.x` line (the latest release is `0.24.0`); each tagged
+Released on the `0.x` line (the latest release is `0.24.1`); each tagged
 release has its notes in [docs/release-notes/](docs/release-notes/) and on
 the GitHub releases page. The engine, web editor, versioning, MCP surface, and
 supervisor are implemented and tested; until `1.0` the schema and CLI may
