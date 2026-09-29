@@ -1799,3 +1799,50 @@ async fn catalog_ranking_runs_off_the_runtime_and_keeps_tier0() {
         std::env::remove_var("APB_CONFIG_DIR");
     }
 }
+
+/// `APB_EXECUTION=cli` wins over `execution: host`, and says so: the start
+/// stays non-blocking and the response carries the execution block and the
+/// note.
+#[tokio::test]
+async fn a_host_request_under_the_kill_switch_returns_the_execution_note() {
+    let _l = CROSS_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let cfg = tempfile::tempdir().unwrap();
+    let dir = tempfile::tempdir().expect("tempdir");
+    unsafe {
+        std::env::set_var("APB_CONFIG_DIR", cfg.path());
+        std::env::set_var("APB_EXECUTION", "cli");
+    }
+    seed_noagent(dir.path());
+    let server = WfMcp::new(dir.path().to_path_buf());
+    let result = server
+        .playbook_run(Parameters(PlaybookRunArgs {
+            id: "noagent_sv".to_string(),
+            version: None,
+            params: BTreeMap::new(),
+            instruction: None,
+            supervise: None,
+            background: None,
+            acknowledge_untrusted: Some(true),
+            scope: None,
+            continued_from: None,
+            worktree: None,
+            execution: Some("host".to_string()),
+        }))
+        .await;
+    unsafe {
+        std::env::remove_var("APB_EXECUTION");
+        std::env::remove_var("APB_CONFIG_DIR");
+    }
+    assert_eq!(result.is_error, Some(false), "{}", result_text(&result));
+    let v: serde_json::Value = serde_json::from_str(&result_text(&result)).expect("json body");
+    assert_eq!(v["execution"]["mode"], "cli", "{v}");
+    let notes = v["execution_notes"].to_string();
+    assert!(
+        notes.contains("execution: host was requested") && notes.contains("APB_EXECUTION=cli"),
+        "{v}"
+    );
+    assert!(
+        v.get("outcome").is_none(),
+        "a host request never becomes a blocking run: {v}"
+    );
+}

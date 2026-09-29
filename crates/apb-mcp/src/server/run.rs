@@ -273,11 +273,15 @@ impl WfMcp {
             Ok(r) => r,
             Err(e) => return to_call_tool_result(Err(ToolError::Engine(e))),
         };
-        let background = if resolved.mode == apb_core::execution::ExecutionMode::Host {
-            Some(true)
-        } else {
-            background
-        };
+        // A host request starts in the background even when APB_EXECUTION=cli
+        // forced cli: the caller expected a quick start, and the response
+        // carries the note that says what happened.
+        let background =
+            if host_requested || resolved.mode == apb_core::execution::ExecutionMode::Host {
+                Some(true)
+            } else {
+                background
+            };
         // --- end host execution mode ---
         // Definition scope: a global playbook runs in the current project.
         // An unknown scope is not silently treated as project - we refuse it (spec 9).
@@ -381,15 +385,18 @@ impl WfMcp {
                     &resolved,
                 );
             }
-            return match apb_engine::run_resolved(&resolved_def, opts) {
-                Ok(res) => to_call_tool_result(with_warnings(
-                    Ok(
-                        json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" }),
-                    ),
-                    &warnings,
-                )),
-                Err(e) => to_call_tool_result(Err(ToolError::from(e))),
-            };
+            return with_execution(
+                match apb_engine::run_resolved(&resolved_def, opts) {
+                    Ok(res) => to_call_tool_result(with_warnings(
+                        Ok(
+                            json!({ "run_id": res.run_id, "outcome": res.outcome.as_str(), "scope": "global" }),
+                        ),
+                        &warnings,
+                    )),
+                    Err(e) => to_call_tool_result(Err(ToolError::from(e))),
+                },
+                &resolved,
+            );
         }
         if background == Some(true) {
             return with_execution(
@@ -414,24 +421,27 @@ impl WfMcp {
                 &resolved,
             );
         }
-        to_call_tool_result(with_warnings(
-            tools::playbook_run(
-                &self.root,
-                &id,
-                version.as_deref(),
-                params,
-                instruction,
-                Some(permit.playbook_digest),
-                Some(permit.profile_bundles),
-                Some(permit.children),
-                permit.connectors,
-                permit.connector_accounts,
-                continued_from,
-                worktree,
-                execution,
-            ),
-            &warnings,
-        ))
+        with_execution(
+            to_call_tool_result(with_warnings(
+                tools::playbook_run(
+                    &self.root,
+                    &id,
+                    version.as_deref(),
+                    params,
+                    instruction,
+                    Some(permit.playbook_digest),
+                    Some(permit.profile_bundles),
+                    Some(permit.children),
+                    permit.connectors,
+                    permit.connector_accounts,
+                    continued_from,
+                    worktree,
+                    execution,
+                ),
+                &warnings,
+            )),
+            &resolved,
+        )
     }
 
     #[tool(

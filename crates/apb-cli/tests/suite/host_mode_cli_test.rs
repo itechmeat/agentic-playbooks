@@ -338,6 +338,32 @@ fn a_require_verdict_resume_re_exposes_only_the_open_task() {
 }
 
 #[test]
+fn the_kill_switch_over_execution_host_is_said_on_stderr() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    seed(root);
+    // The forced cli run spawns the profile's CLI: a stub that answers.
+    let agent = root.join("agent.sh");
+    fs::write(&agent, "#!/bin/sh\necho ok\n").unwrap();
+    let mut perm = fs::metadata(&agent).unwrap().permissions();
+    std::os::unix::fs::PermissionsExt::set_mode(&mut perm, 0o755);
+    fs::set_permissions(&agent, perm).unwrap();
+    let out = crate::common::apb_std()
+        .args(["run", "hm", "--execution", "host"])
+        .env("APB_EXECUTION", "cli")
+        .env("APB_AGENT_CMD", &agent)
+        .current_dir(root)
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("execution: host was requested")
+            && stderr.contains("APB_EXECUTION=cli forces cli"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn doctor_states_the_execution_mode() {
     let dir = tempfile::tempdir().unwrap();
     seed(dir.path());

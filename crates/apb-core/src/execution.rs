@@ -174,6 +174,11 @@ pub fn resolve(
         );
     }
     if killed {
+        if request.mode == Some(ExecutionMode::Host) {
+            notes.push(format!(
+                "execution: host was requested but {EXECUTION_ENV}=cli forces cli: the run spawns the profiles' agent CLIs"
+            ));
+        }
         return ResolvedExecution {
             mode: ExecutionMode::Cli,
             source: ExecutionSource::KillSwitch,
@@ -381,6 +386,21 @@ mod tests {
             (r.mode, r.source, r.fallback_to_host),
             (ExecutionMode::Cli, ExecutionSource::KillSwitch, false)
         );
+        assert_eq!(r.notes.len(), 1, "{:?}", r.notes);
+        assert!(
+            r.notes[0].contains("execution: host was requested")
+                && r.notes[0].contains("APB_EXECUTION=cli forces cli"),
+            "{:?}",
+            r.notes
+        );
+        // Without a host request there is nothing to say.
+        let quiet = resolve(
+            &req(None, true),
+            &ExecutionSettings::default(),
+            &none(),
+            Some("cli"),
+        );
+        assert!(quiet.notes.is_empty(), "{:?}", quiet.notes);
     }
 
     #[test]

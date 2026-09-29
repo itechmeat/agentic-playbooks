@@ -547,9 +547,15 @@ pub(crate) fn run_cmd(
         eprintln!("run failed: {msg}");
         return ExitCode::from(2);
     }
-    let host = host
-        && apb_core::execution::resolve_for(root, &opts.execution)
-            .is_ok_and(|r| r.mode == apb_core::execution::ExecutionMode::Host);
+    let resolved = apb_core::execution::resolve_for(root, &opts.execution);
+    // What the resolution ignored (APB_EXECUTION=cli over --execution host,
+    // a project that tried to set the mode) is said, never silent.
+    if let Ok(r) = &resolved {
+        for note in &r.notes {
+            eprintln!("note: {note}");
+        }
+    }
+    let host = host && resolved.is_ok_and(|r| r.mode == apb_core::execution::ExecutionMode::Host);
     if detach {
         return match apb_engine::start_detached(root, name, version, opts) {
             Ok(run_id) => {
