@@ -56,7 +56,7 @@
   <Card.Root data-testid="run-commits">
     <Card.Header><Card.Title class="text-sm">Commits</Card.Title></Card.Header>
     <Card.Content class="flex flex-col gap-1 text-xs">
-      {#each lines as c (c.node + c.sha)}
+      {#each lines as c, i (i)}
         <div data-testid="run-commit-row" class="break-words">
           <span class="font-mono" title={c.sha}>{c.short}</span>
           <span> {c.subject}</span>
