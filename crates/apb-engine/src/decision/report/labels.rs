@@ -10,9 +10,10 @@
 //! has not shown it yet stays [`Label::Unlabelled`] and is left out of every
 //! accuracy figure (it still counts in the coverage line).
 //!
-//! Only the completion check is labelled today. The other uses are stubs
-//! ([`PendingLabeller`]) until their events journal the join keys named in
-//! [`JoinKey`]; each stub says which later event will label it.
+//! The completion check, the review triage and retry advice are labelled.
+//! The other uses are stubs ([`PendingLabeller`]) until their events journal
+//! the join keys named in [`JoinKey`]; each stub says which later event will
+//! label it.
 
 use std::collections::BTreeMap;
 
@@ -168,12 +169,23 @@ pub trait Labeller: Sync {
     fn pending(&self) -> bool {
         false
     }
+    /// Whether the decision's answer was shown to the person whose later
+    /// action labels it (an advisory review recommendation): such a label
+    /// may follow the recommendation rather than judge it, so the report
+    /// counts it apart from the unbiased (shadow) ones.
+    fn shown_to_labeller(&self, _r: &DecisionRecord) -> bool {
+        false
+    }
 }
 
 /// The labeller of a use name. Every known use has one.
 pub fn labeller_for(use_site: &str) -> Box<dyn Labeller> {
     match use_site {
         "completion_check" => Box::new(CompletionLabeller),
+        // --- 0.23.0 labellers (C9) ---
+        "review_triage" => Box::new(ReviewTriageLabeller),
+        "retry_advice" => Box::new(RetryAdviceLabeller),
+        // --- end of the 0.23.0 labellers ---
         other => Box::new(PendingLabeller::for_use(other)),
     }
 }
@@ -319,6 +331,237 @@ impl Labeller for CompletionLabeller {
     }
 }
 
+// --- the review triage (0.23.0, C9) ------------------------------------------
+
+/// Labels a review recommendation by the person's decision at the same gate
+/// visit (the decision's `attempt` is the visit, the `gate_visit` join key):
+/// `Act` (deciding on the model's answer would have been right) when the
+/// person chose the recommended option, `Keep` when they chose another.
+/// Unlabelled while the visit is undecided or was withdrawn, and when the
+/// model decided the gate itself (`auto:` note). A recommendation shown to
+/// the reviewer (advise or enforce) is labelled too, but counted apart from
+/// shadow ones: the person saw it.
+pub struct ReviewTriageLabeller;
+
+fn answer_value(r: &DecisionRecord, question: &str) -> Option<String> {
+    r.answers
+        .get(question)?
+        .value
+        .as_ref()?
+        .as_str()
+        .map(str::to_string)
+}
+
+fn answer_confidence(r: &DecisionRecord, question: &str) -> Option<f64> {
+    let a = r.answers.get(question)?;
+    a.confidence.or(a.p)
+}
+
+/// The person's decision at visit `visit` of gate `node`: `Ok(decision,
+/// note)`, or why there is none.
+fn gate_visit_decision<'a>(
+    events: &'a [Event],
+    node: &str,
+    visit: u32,
+) -> Result<(&'a str, &'a str), &'static str> {
+    let mut seen = 0u32;
+    let mut open = false;
+    for e in events {
+        match &e.payload {
+            EventPayload::ReviewRequested { node: n, .. } if n == node => {
+                if open {
+                    // The next visit began before this one was decided.
+                    return Err("the gate visit was never decided");
+                }
+                seen += 1;
+                open = seen == visit;
+            }
+            EventPayload::ReviewWithdrawn { node: n, .. } if n == node && open => {
+                return Err("the gate visit was withdrawn");
+            }
+            EventPayload::ReviewDecided {
+                node: n,
+                decision,
+                note,
+            } if n == node && open => return Ok((decision.as_str(), note.as_str())),
+            _ => {}
+        }
+    }
+    Err("the gate visit is not decided yet")
+}
+
+impl Labeller for ReviewTriageLabeller {
+    fn use_site(&self) -> &'static str {
+        "review_triage"
+    }
+
+    fn label_source(&self) -> &'static str {
+        "the review_decided of the same gate visit (advise-shown decisions counted apart)"
+    }
+
+    fn today(&self) -> (Label, &'static str) {
+        (Label::Keep, "a person decides every gate")
+    }
+
+    fn default_threshold(&self) -> f64 {
+        0.9
+    }
+
+    fn act_probability(&self, r: &DecisionRecord) -> Option<f64> {
+        r.p("decision")
+    }
+
+    /// The enforce path acts on a confident answer other than `approve`,
+    /// which is never decided automatically.
+    fn acts_at(&self, r: &DecisionRecord, threshold: f64) -> Option<bool> {
+        let value = answer_value(r, "decision")?;
+        let c = answer_confidence(r, "decision")?;
+        Some(value != "approve" && c >= threshold)
+    }
+
+    fn label(&self, r: &DecisionRecord, events: &[Event]) -> Label {
+        let Some(node) = r.node.as_deref() else {
+            return Label::Unlabelled("no node on the decision");
+        };
+        let Some(visit) = r.attempt else {
+            return Label::Unlabelled("no gate visit on the decision");
+        };
+        let Some(recommended) = answer_value(r, "decision") else {
+            return Label::Unlabelled("no recommended option in the answer");
+        };
+        match gate_visit_decision(events, node, visit) {
+            Err(why) => Label::Unlabelled(why),
+            Ok((_, note)) if note.starts_with("auto:") => {
+                Label::Unlabelled("the model decided the gate itself")
+            }
+            Ok((decision, _)) if decision == recommended => Label::Act,
+            Ok(_) => Label::Keep,
+        }
+    }
+
+    fn shown_to_labeller(&self, r: &DecisionRecord) -> bool {
+        r.mode != "shadow"
+    }
+}
+
+// --- retry advice (0.23.0, C9) ------------------------------------------------
+
+/// Labels retry advice by the outcome of the next attempt of the same node
+/// on the same executor (agent and model): `Keep` (retrying was right, as
+/// today) when it succeeded, `Act` (switching or stopping would have been
+/// right) when it failed too. Unlabelled when no further attempt followed,
+/// when the next attempt ran on another executor (a fallback), and when an
+/// enforced advice changed what ran next.
+pub struct RetryAdviceLabeller;
+
+impl Labeller for RetryAdviceLabeller {
+    fn use_site(&self) -> &'static str {
+        "retry_advice"
+    }
+
+    fn label_source(&self) -> &'static str {
+        "the next same-executor attempt of the node: failed is act, succeeded is keep"
+    }
+
+    fn today(&self) -> (Label, &'static str) {
+        (Label::Keep, "always retry the same executor")
+    }
+
+    fn default_threshold(&self) -> f64 {
+        0.6
+    }
+
+    fn act_probability(&self, r: &DecisionRecord) -> Option<f64> {
+        let p = r.p("next")?;
+        Some(
+            if answer_value(r, "next").as_deref() == Some(crate::decision::retry_advice::RETRY_SAME)
+            {
+                1.0 - p
+            } else {
+                p
+            },
+        )
+    }
+
+    fn acts_at(&self, r: &DecisionRecord, threshold: f64) -> Option<bool> {
+        let value = answer_value(r, "next")?;
+        let c = answer_confidence(r, "next")?;
+        Some(
+            (value == crate::decision::retry_advice::SWITCH
+                || value == crate::decision::retry_advice::STOP)
+                && c >= threshold,
+        )
+    }
+
+    fn label(&self, r: &DecisionRecord, events: &[Event]) -> Label {
+        let (Some(node), Some(failed)) = (r.node.as_deref(), r.attempt) else {
+            return Label::Unlabelled("no node or attempt on the decision");
+        };
+        let executor = |attempt: u32| {
+            events.iter().find_map(|e| match &e.payload {
+                EventPayload::AttemptStarted {
+                    node: n,
+                    attempt: a,
+                    agent,
+                    model,
+                    ..
+                } if n == node && *a == attempt => Some((agent.clone(), model.clone())),
+                _ => None,
+            })
+        };
+        let Some(at) = events.iter().position(|e| e.seq == r.seq) else {
+            return Label::Unlabelled("decision not in its journal");
+        };
+        // Up to the node's next execution: a later visit is not this retry.
+        let window = events[at + 1..].iter().take_while(
+            |e| !matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node),
+        );
+        let mut next_started = false;
+        for e in window {
+            match &e.payload {
+                EventPayload::SupervisorAction {
+                    action,
+                    node: Some(n),
+                    ..
+                } if n == node && action == crate::decision::retry_advice::RETRY_ADVICE_ACTION => {
+                    return Label::Unlabelled("the enforced advice changed what ran next");
+                }
+                EventPayload::FallbackTriggered { node: n, .. } if n == node && !next_started => {
+                    return Label::Unlabelled("the next attempt ran on another executor");
+                }
+                EventPayload::AttemptStarted {
+                    node: n, attempt, ..
+                } if n == node && *attempt == failed + 1 => {
+                    if executor(failed) != executor(failed + 1) {
+                        return Label::Unlabelled("the next attempt ran on another executor");
+                    }
+                    next_started = true;
+                }
+                EventPayload::AttemptFinished {
+                    node: n,
+                    attempt,
+                    status,
+                    ..
+                } if n == node && *attempt == failed + 1 => {
+                    return match status.as_str() {
+                        "succeeded" => Label::Keep,
+                        "failed" | "timed_out" | "interrupted" => Label::Act,
+                        _ => Label::Unlabelled("the next attempt neither failed nor succeeded"),
+                    };
+                }
+                _ => {}
+            }
+        }
+        if next_started {
+            Label::Unlabelled("the next attempt has not finished yet")
+        } else {
+            Label::Unlabelled("no further attempt of the node followed")
+        }
+    }
+}
+
+// --- end of the 0.23.0 labellers ------------------------------------------------
+
 // --- the uses whose events do not carry join keys yet -----------------------
 
 /// A use without a labeller yet: every decision stays unlabelled, with the
@@ -331,17 +574,9 @@ pub struct PendingLabeller {
 impl PendingLabeller {
     pub fn for_use(use_site: &str) -> Self {
         let (use_site, source) = match use_site {
-            "retry_advice" => (
-                "retry_advice",
-                "pending: the next attempt's outcome and fallback of the same node (Attempt key)",
-            ),
             "supervisor_triage" => (
                 "supervisor_triage",
                 "pending: the supervisor directive that answered the wake (Wake key)",
-            ),
-            "review_triage" => (
-                "review_triage",
-                "pending: the review_decided of the same gate visit (GateVisit key)",
             ),
             "routing" => (
                 "routing",
@@ -584,5 +819,212 @@ mod tests {
             },
         ));
         assert!(matches!(label(&forward), Label::Unlabelled(_)));
+    }
+
+    // --- 0.23.0 labellers (C9) ---
+
+    fn answered(
+        use_site: &str,
+        node: &str,
+        attempt: u32,
+        q: &str,
+        value: &str,
+        mode: &str,
+    ) -> DecisionRecord {
+        let mut r = decision(2, node);
+        r.use_site = use_site.into();
+        r.attempt = Some(attempt);
+        r.mode = mode.into();
+        r.answers = BTreeMap::from([(
+            q.to_string(),
+            DecisionAnswer {
+                value: Some(serde_json::json!(value)),
+                p: Some(0.8),
+                confidence: Some(0.95),
+                invalid: None,
+            },
+        )]);
+        r
+    }
+
+    fn requested(seq: u64, node: &str) -> Event {
+        ev(
+            seq,
+            serde_json::from_value(serde_json::json!({
+                "type": "review_requested", "node": node, "options": ["approve", "needs_changes"]
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn decided(seq: u64, node: &str, decision: &str, note: &str) -> Event {
+        ev(
+            seq,
+            EventPayload::ReviewDecided {
+                node: node.into(),
+                decision: decision.into(),
+                note: note.into(),
+            },
+        )
+    }
+
+    #[test]
+    fn a_review_recommendation_is_labelled_by_the_same_visits_decision() {
+        let l = ReviewTriageLabeller;
+        // Visit 1 decided approve, visit 2 decided needs_changes.
+        let events = vec![
+            requested(1, "g"),
+            decided(3, "g", "approve", ""),
+            requested(4, "g"),
+            decided(6, "g", "needs_changes", "fix the date"),
+        ];
+        let first = answered(
+            "review_triage",
+            "g",
+            1,
+            "decision",
+            "needs_changes",
+            "shadow",
+        );
+        assert_eq!(l.label(&first, &events), Label::Keep);
+        let second = answered(
+            "review_triage",
+            "g",
+            2,
+            "decision",
+            "needs_changes",
+            "shadow",
+        );
+        assert_eq!(l.label(&second, &events), Label::Act);
+        // Undecided, withdrawn, and the model's own decision stay unlabelled.
+        let open = vec![requested(1, "g")];
+        assert!(matches!(l.label(&first, &open), Label::Unlabelled(_)));
+        let withdrawn = vec![
+            requested(1, "g"),
+            ev(
+                2,
+                EventPayload::ReviewWithdrawn {
+                    node: "g".into(),
+                    reason: String::new(),
+                },
+            ),
+        ];
+        assert!(matches!(l.label(&first, &withdrawn), Label::Unlabelled(_)));
+        let auto = vec![
+            requested(1, "g"),
+            decided(2, "g", "needs_changes", "auto: main/m p=0.97"),
+        ];
+        assert!(matches!(l.label(&first, &auto), Label::Unlabelled(_)));
+        // Shown to the reviewer outside shadow; acting never picks approve.
+        assert!(!l.shown_to_labeller(&first));
+        assert!(l.shown_to_labeller(&answered(
+            "review_triage",
+            "g",
+            1,
+            "decision",
+            "approve",
+            "advise"
+        )));
+        assert_eq!(l.acts_at(&first, 0.9), Some(true));
+        assert_eq!(
+            l.acts_at(
+                &answered("review_triage", "g", 1, "decision", "approve", "shadow"),
+                0.5
+            ),
+            Some(false)
+        );
+        assert!(!labeller_for("review_triage").pending());
+    }
+
+    fn attempt_started(seq: u64, node: &str, attempt: u32, model: &str) -> Event {
+        ev(
+            seq,
+            serde_json::from_value(serde_json::json!({
+                "type": "attempt_started", "node": node, "attempt": attempt, "agent": "claude", "model": model
+            }))
+            .unwrap(),
+        )
+    }
+
+    fn attempt_finished(seq: u64, node: &str, attempt: u32, status: &str) -> Event {
+        ev(
+            seq,
+            serde_json::from_value(serde_json::json!({
+                "type": "attempt_finished", "node": node, "attempt": attempt, "status": status,
+                "duration_ms": 1, "session": null, "summary": null
+            }))
+            .unwrap(),
+        )
+    }
+
+    #[test]
+    fn retry_advice_is_labelled_by_the_next_same_executor_attempt() {
+        let l = RetryAdviceLabeller;
+        let r = answered("retry_advice", "a", 1, "next", "switch_executor", "shadow");
+        let base = || {
+            vec![
+                started(0, "a"),
+                attempt_started(1, "a", 1, "m"),
+                attempt_finished(2, "a", 1, "failed"),
+                decision_event(3),
+            ]
+        };
+        let mut failed_again = base();
+        failed_again.extend([
+            attempt_started(4, "a", 2, "m"),
+            attempt_finished(5, "a", 2, "failed"),
+        ]);
+        assert_eq!(l.label(&r, &failed_again), Label::Act);
+        let mut helped = base();
+        helped.extend([
+            attempt_started(4, "a", 2, "m"),
+            attempt_finished(5, "a", 2, "succeeded"),
+        ]);
+        assert_eq!(l.label(&r, &helped), Label::Keep);
+        // Another executor next (a fallback, or another model), no further
+        // attempt, or an enforced skip: unlabelled.
+        let mut other = base();
+        other.extend([
+            attempt_started(4, "a", 2, "other"),
+            attempt_finished(5, "a", 2, "succeeded"),
+        ]);
+        assert!(matches!(l.label(&r, &other), Label::Unlabelled(_)));
+        let mut fallback = base();
+        fallback.push(ev(
+            4,
+            serde_json::from_value(serde_json::json!({
+                "type": "fallback_triggered", "node": "a", "from": "claude", "to": "codex"
+            }))
+            .unwrap(),
+        ));
+        assert!(matches!(l.label(&r, &fallback), Label::Unlabelled(_)));
+        assert!(matches!(l.label(&r, &base()), Label::Unlabelled(_)));
+        let mut enforced = base();
+        enforced.push(ev(
+            4,
+            EventPayload::SupervisorAction {
+                action: crate::decision::retry_advice::RETRY_ADVICE_ACTION.into(),
+                node: Some("a".into()),
+                detail: String::new(),
+            },
+        ));
+        assert!(matches!(l.label(&r, &enforced), Label::Unlabelled(_)));
+        // Acting means switching or stopping at the threshold.
+        assert_eq!(l.acts_at(&r, 0.6), Some(true));
+        assert_eq!(
+            l.acts_at(
+                &answered(
+                    "retry_advice",
+                    "a",
+                    1,
+                    "next",
+                    "retry_same_likely_helps",
+                    "shadow"
+                ),
+                0.6
+            ),
+            Some(false)
+        );
+        assert!(!labeller_for("retry_advice").pending());
     }
 }

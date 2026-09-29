@@ -77,6 +77,15 @@ fn group(out: &mut String, g: &GroupReport) {
     for (why, n) in &g.unlabelled {
         let _ = writeln!(out, "  unlabelled: {n} ({why})");
     }
+    if let Some(sh) = &g.shown_to_reviewer {
+        let _ = writeln!(
+            out,
+            "  shown to the reviewer (advise, kept out of the figures): {} labelled, {} agreed ({})",
+            sh.labelled,
+            sh.agreed,
+            pct(sh.agreement),
+        );
+    }
     if g.labelled == 0 {
         let _ = writeln!(
             out,
