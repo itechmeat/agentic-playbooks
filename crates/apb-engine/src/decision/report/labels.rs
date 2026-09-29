@@ -497,21 +497,28 @@ impl Labeller for RetryAdviceLabeller {
         let (Some(node), Some(failed)) = (r.node.as_deref(), r.attempt) else {
             return Label::Unlabelled("no node or attempt on the decision");
         };
-        let executor = |attempt: u32| {
-            events.iter().find_map(|e| match &e.payload {
+        let Some(at) = events.iter().position(|e| e.seq == r.seq) else {
+            return Label::Unlabelled("decision not in its journal");
+        };
+        // Attempt numbers restart at 1 on every visit of the node, so the
+        // failed attempt is the one of the current visit: the latest start of
+        // that number after the node's last `node_started`.
+        let failed_executor = events[..at]
+            .iter()
+            .rev()
+            .take_while(
+                |e| !matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node),
+            )
+            .find_map(|e| match &e.payload {
                 EventPayload::AttemptStarted {
                     node: n,
                     attempt: a,
                     agent,
                     model,
                     ..
-                } if n == node && *a == attempt => Some((agent.clone(), model.clone())),
+                } if n == node && *a == failed => Some((agent.clone(), model.clone())),
                 _ => None,
-            })
-        };
-        let Some(at) = events.iter().position(|e| e.seq == r.seq) else {
-            return Label::Unlabelled("decision not in its journal");
-        };
+            });
         // Up to the node's next execution: a later visit is not this retry.
         let window = events[at + 1..].iter().take_while(
             |e| !matches!(&e.payload, EventPayload::NodeStarted { node: n, .. } if n == node),
@@ -530,9 +537,13 @@ impl Labeller for RetryAdviceLabeller {
                     return Label::Unlabelled("the next attempt ran on another executor");
                 }
                 EventPayload::AttemptStarted {
-                    node: n, attempt, ..
+                    node: n,
+                    attempt,
+                    agent,
+                    model,
+                    ..
                 } if n == node && *attempt == failed + 1 => {
-                    if executor(failed) != executor(failed + 1) {
+                    if failed_executor.as_ref() != Some(&(agent.clone(), model.clone())) {
                         return Label::Unlabelled("the next attempt ran on another executor");
                     }
                     next_started = true;
@@ -1026,5 +1037,35 @@ mod tests {
             Some(false)
         );
         assert!(!labeller_for("retry_advice").pending());
+    }
+
+    #[test]
+    fn retry_advice_compares_the_executors_of_the_current_visit() {
+        let l = RetryAdviceLabeller;
+        let mut r = answered("retry_advice", "a", 1, "next", "switch_executor", "shadow");
+        r.seq = 9;
+        let events = vec![
+            // Visit 1: attempt 1 failed, a fallback ran attempt 2 elsewhere.
+            started(0, "a"),
+            attempt_started(1, "a", 1, "m"),
+            attempt_finished(2, "a", 1, "failed"),
+            ev(
+                3,
+                serde_json::from_value(serde_json::json!({
+                    "type": "fallback_triggered", "node": "a", "from": "claude", "to": "codex"
+                }))
+                .unwrap(),
+            ),
+            attempt_started(4, "a", 2, "other"),
+            attempt_finished(5, "a", 2, "succeeded"),
+            // Visit 2 (a loop back): attempt numbers restart at 1.
+            started(6, "a"),
+            attempt_started(7, "a", 1, "m"),
+            attempt_finished(8, "a", 1, "failed"),
+            decision_event(9),
+            attempt_started(10, "a", 2, "m"),
+            attempt_finished(11, "a", 2, "failed"),
+        ];
+        assert_eq!(l.label(&r, &events), Label::Act);
     }
 }
