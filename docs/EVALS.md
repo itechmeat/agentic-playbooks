@@ -272,6 +272,11 @@ driver lives: a repetition whose driver does not exit within 30 seconds of
 a stop moves, run directory included, to
 `<config-dir>/evals/kept/<eval-id>/<case>-<n>/`, and the result's
 `kept_worktree` and `run_dir` name it. Remove it once the driver is gone.
+A run directory the agent put behind a symlink (the run directory itself,
+`.apb` or `.apb/runs`) is never moved; that repetition is kept the same
+way. The move is a rename only: when it fails, the repetition stays in the
+scratch directory, the scratch directory is not removed, and the result's
+`warnings` say so.
 When the driver has exited, anything left in its process group is killed
 before the tree is removed.
 

@@ -674,9 +674,14 @@ fn driver_gone(run_dir: &Path, run_id: &str) -> bool {
 }
 
 /// Moves a run directory out of the tree. The agent could have replaced
-/// it with a symlink: that is refused, and so is a destination that is
-/// not a real directory afterwards.
-fn move_run_dir(from: &Path, to: &Path) -> std::io::Result<()> {
+/// it, or any directory between the tree and it (`.apb`, `.apb/runs`), with
+/// a symlink to a directory outside: that is refused before anything moves,
+/// so an outside directory is never moved or deleted, and so is a
+/// destination that is not a real directory afterwards.
+fn move_run_dir(tree: &Path, from: &Path, to: &Path) -> std::io::Result<()> {
+    apb_core::fsutil::ensure_no_symlink_below(tree, from).map_err(|e| {
+        std::io::Error::other(format!("the run directory is behind a symlink: {e}"))
+    })?;
     if std::fs::symlink_metadata(from)?.file_type().is_symlink() {
         return Err(std::io::Error::other("the run directory is a symlink"));
     }
@@ -697,6 +702,32 @@ fn move_dir(from: &Path, to: &Path) -> std::io::Result<()> {
     }
     apb_core::fsutil::copy_tree(from, to)?;
     std::fs::remove_dir_all(from)
+}
+
+/// Moves a repetition whose driver may still be alive out of the scratch
+/// directory. Only a rename: a copy followed by a removal would delete the
+/// tree under the live driver. On failure the repetition stays where it is,
+/// and `keep_scratch` tells the scratch guard not to remove it.
+fn keep_repetition(
+    rep_dir: &Path,
+    kept_rep: &Path,
+    keep_scratch: &std::sync::atomic::AtomicBool,
+) -> Result<PathBuf, String> {
+    let moved = kept_rep
+        .parent()
+        .map_or(Ok(()), std::fs::create_dir_all)
+        .and_then(|()| std::fs::rename(rep_dir, kept_rep));
+    match moved {
+        Ok(()) => Ok(kept_rep.to_path_buf()),
+        Err(e) => {
+            keep_scratch.store(true, std::sync::atomic::Ordering::SeqCst);
+            Err(format!(
+                "cannot move {} to {}: {e}; it is kept in place, and the scratch directory is not removed",
+                rep_dir.display(),
+                kept_rep.display()
+            ))
+        }
+    }
 }
 
 /// Copies every file a `files` check names that exists in the tree into
@@ -844,6 +875,9 @@ const OWNER_FILE: &str = "owner.pid";
 struct ScratchGuard {
     scratch: PathBuf,
     evals_home: PathBuf,
+    /// Set when a repetition that had to be kept could not be moved out:
+    /// the scratch directory then stays, since it still holds that tree.
+    keep: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ScratchGuard {
@@ -853,6 +887,7 @@ impl ScratchGuard {
         Ok(ScratchGuard {
             scratch: scratch.to_path_buf(),
             evals_home: evals_home.to_path_buf(),
+            keep: std::sync::Arc::default(),
         })
     }
 }
@@ -867,8 +902,14 @@ impl Drop for ScratchGuard {
                 && let (Some(rep), Some(eval)) = (run.tree.parent(), self.scratch.file_name())
                 && let Some(name) = rep.file_name()
             {
-                let _ = move_dir(rep, &self.evals_home.join("kept").join(eval).join(name));
+                let kept = self.evals_home.join("kept").join(eval).join(name);
+                if let Err(e) = keep_repetition(rep, &kept, &self.keep) {
+                    eprintln!("warning: {e}");
+                }
             }
+        }
+        if self.keep.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
         }
         let _ = std::fs::remove_dir_all(&self.scratch);
         let _ = std::fs::remove_dir(self.evals_home.join("scratch"));
@@ -965,6 +1006,8 @@ struct RepContext<'a> {
     evals_home: &'a Path,
     eval_id: &'a str,
     overrides_file: Option<&'a Path>,
+    /// The scratch guard's keep flag (see [`keep_repetition`]).
+    keep_scratch: &'a std::sync::atomic::AtomicBool,
 }
 
 fn error_rep(n: u32, detail: String, kept: Option<String>) -> Repetition {
@@ -987,9 +1030,14 @@ fn error_rep(n: u32, detail: String, kept: Option<String>) -> Repetition {
     }
 }
 
-/// One repetition end to end. Returns the repetition and, when the run
-/// started, its stored run directory.
-fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<PathBuf>) {
+/// One repetition end to end. Returns the repetition, its stored run
+/// directory when the run started, and a warning when its tree had to stay
+/// in place.
+fn run_repetition(
+    cx: &RepContext,
+    p: &Planned,
+    n: u32,
+) -> (Repetition, Option<PathBuf>, Option<String>) {
     let lc = p.lc;
     let rep_dir = cx.scratch.join(format!("{}-{n}", lc.case.id));
     let tree = rep_dir.join("tree");
@@ -1008,7 +1056,7 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
         Ok(c) => c,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&rep_dir);
-            return (error_rep(n, format!("fixture: {e}"), None), None);
+            return (error_rep(n, format!("fixture: {e}"), None), None, None);
         }
     };
     let env = overlay(&lc.env(&cx.suite.suite), &rep_dir);
@@ -1029,7 +1077,7 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
         Ok(s) => s,
         Err(e) => {
             let _ = std::fs::remove_dir_all(&rep_dir);
-            return (error_rep(n, e, None), None);
+            return (error_rep(n, e, None), None, None);
         }
     };
     let run_dir = tree.join(".apb/runs").join(&started.run_id);
@@ -1078,7 +1126,41 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
     } else {
         checks::verdict(&check_results).to_string()
     };
-    let (stored, kept) = if clean {
+    let kept_rep = cx
+        .evals_home
+        .join("kept")
+        .join(cx.eval_id)
+        .join(format!("{}-{n}", lc.case.id));
+    // The driver still lives, or the run directory could not be moved out
+    // safely: the tree is never deleted. The whole repetition moves out of
+    // the scratch directory, run directory included, and the result names
+    // where; when even that fails it stays in the scratch directory.
+    let keep = |why: Option<String>| -> (Option<PathBuf>, Option<String>, Option<String>) {
+        match keep_repetition(&rep_dir, &kept_rep, cx.keep_scratch) {
+            Ok(kept_rep) => {
+                let kept_tree = kept_rep.join("tree");
+                let run = kept_tree.join(".apb/runs").join(&started.run_id);
+                (
+                    Some(run),
+                    Some(kept_tree.to_string_lossy().into_owned()),
+                    why,
+                )
+            }
+            Err(e) => {
+                let run = tree.join(".apb/runs").join(&started.run_id);
+                let w = match why {
+                    Some(why) => format!("{why}; {e}"),
+                    None => e,
+                };
+                (
+                    Some(run),
+                    Some(tree.to_string_lossy().into_owned()),
+                    Some(w),
+                )
+            }
+        }
+    };
+    let (stored, kept, warning) = if clean {
         // The driver is gone; whatever it left in its process group goes
         // with it before the tree is removed.
         kill_leftover_group(driver_pid, &rep_dir);
@@ -1087,29 +1169,19 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
             .join("runs")
             .join(&cx.args.id)
             .join(&started.run_id);
-        let moved = move_run_dir(&run_dir, &stored).is_ok();
-        if moved {
-            keep_checked_files(&lc.case, &tree, &stored);
-        }
-        let _ = std::fs::remove_dir_all(&rep_dir);
-        (moved.then_some(stored), None)
-    } else {
-        // The driver still lives: its tree is never deleted under it. The
-        // whole repetition moves out of the scratch directory, run
-        // directory included, and the result names where.
-        let kept_rep = cx
-            .evals_home
-            .join("kept")
-            .join(cx.eval_id)
-            .join(format!("{}-{n}", lc.case.id));
-        match move_dir(&rep_dir, &kept_rep) {
+        match move_run_dir(&tree, &run_dir, &stored) {
             Ok(()) => {
-                let kept_tree = kept_rep.join("tree");
-                let run = kept_tree.join(".apb/runs").join(&started.run_id);
-                (Some(run), Some(kept_tree.to_string_lossy().into_owned()))
+                keep_checked_files(&lc.case, &tree, &stored);
+                let _ = std::fs::remove_dir_all(&rep_dir);
+                (Some(stored), None, None)
             }
-            Err(_) => (None, Some(tree.to_string_lossy().into_owned())),
+            Err(e) => keep(Some(format!(
+                "case `{}` repetition {n}: the run directory was not stored ({e})",
+                lc.case.id
+            ))),
         }
+    } else {
+        keep(None)
     };
     let rep = Repetition {
         repetition: n,
@@ -1124,7 +1196,7 @@ fn run_repetition(cx: &RepContext, p: &Planned, n: u32) -> (Repetition, Option<P
         duration_ms: checks::duration_ms(&events),
         kept_worktree: kept,
     };
-    (rep, stored)
+    (rep, stored, warning)
 }
 
 fn overrides_digest(ov: Option<&RunOverrides>) -> Option<String> {
@@ -1265,7 +1337,8 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
         Ok(o) => o,
         Err(e) => return fail(args.json, "bad_overrides", e),
     };
-    let eval_id = format!("eval-{}", apb_core::clock::now_ms());
+    // The pid keeps two invocations started in the same millisecond apart.
+    let eval_id = format!("eval-{}-{}", apb_core::clock::now_ms(), std::process::id());
     let scratch = evals_home.join("scratch").join(&eval_id);
     sweep_stale_scratch(&evals_home);
     let guard = match ScratchGuard::new(&evals_home, &scratch) {
@@ -1308,6 +1381,7 @@ pub(crate) fn eval_cmd(root: &Path, args: EvalArgs) -> ExitCode {
         &suite_digest,
         overrides.as_ref(),
         &eval_id,
+        &guard.keep,
     );
     drop(guard);
     outcome
@@ -1363,6 +1437,7 @@ fn run_eval(
     suite_digest: &str,
     overrides: Option<&RunOverrides>,
     eval_id: &str,
+    keep_scratch: &std::sync::atomic::AtomicBool,
 ) -> ExitCode {
     let suite = core_eval::load_suite(scratch);
     let cases = match selected(args, &suite, version) {
@@ -1517,6 +1592,7 @@ fn run_eval(
         evals_home,
         eval_id,
         overrides_file: overrides_file.as_deref(),
+        keep_scratch,
     };
     let started_at_ms = apb_core::clock::now_ms();
     let mut spent = 0.0_f64;
@@ -1525,6 +1601,7 @@ fn run_eval(
     let mut key: Option<ConfigKey> = None;
     let mut results = Vec::new();
     let mut warnings: Vec<String> = Vec::new();
+    let mut cost_warned = false;
     for p in &planned {
         let lc = p.lc;
         let mut reps = Vec::new();
@@ -1542,8 +1619,15 @@ fn run_eval(
             if !args.json {
                 eprintln!("running {} #{n}", lc.case.id);
             }
-            let (rep, stored) = run_repetition(&cx, p, n);
-            if rep.run_id.is_some() && rep.usage.cost_usd.is_none() && warnings.is_empty() {
+            let (rep, stored, kept_warning) = run_repetition(&cx, p, n);
+            if let Some(w) = kept_warning {
+                if !args.json {
+                    eprintln!("warning: {w}");
+                }
+                warnings.push(w);
+            }
+            if rep.run_id.is_some() && rep.usage.cost_usd.is_none() && !cost_warned {
+                cost_warned = true;
                 let w = format!(
                     "case `{}` repetition {n} reported no cost: the invocation budget (${budget:.2}) and max_usd cannot be enforced for this executor",
                     lc.case.id
@@ -1633,5 +1717,95 @@ fn run_eval(
         ExitCode::SUCCESS
     } else {
         ExitCode::from(1)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::atomic::Ordering;
+
+    /// An agent that replaced `tree/.apb` with a link to a directory outside
+    /// the tree does not get that directory moved into the eval store, nor
+    /// deleted by the copy fallback.
+    #[cfg(unix)]
+    #[test]
+    fn a_run_directory_behind_a_symlinked_apb_is_refused_and_the_outside_stays() {
+        let t = tempfile::tempdir().unwrap();
+        let outside = t.path().join("outside");
+        let outside_run = outside.join("runs/r1");
+        std::fs::create_dir_all(&outside_run).unwrap();
+        std::fs::write(outside_run.join("keep.txt"), "mine").unwrap();
+        let tree = t.path().join("tree");
+        std::fs::create_dir_all(&tree).unwrap();
+        std::os::unix::fs::symlink(&outside, tree.join(".apb")).unwrap();
+        let from = tree.join(".apb/runs/r1");
+        let to = t.path().join("store/r1");
+
+        let err = move_run_dir(&tree, &from, &to).expect_err("a symlinked .apb is refused");
+
+        assert!(err.to_string().contains("symlink"), "{err}");
+        assert_eq!(
+            std::fs::read_to_string(outside_run.join("keep.txt")).unwrap(),
+            "mine"
+        );
+        assert!(!to.exists(), "nothing was moved into the store");
+    }
+
+    #[test]
+    fn a_plain_run_directory_is_moved() {
+        let t = tempfile::tempdir().unwrap();
+        let tree = t.path().join("tree");
+        let from = tree.join(".apb/runs/r1");
+        std::fs::create_dir_all(&from).unwrap();
+        std::fs::write(from.join("events.jsonl"), "{}").unwrap();
+        let to = t.path().join("store/r1");
+
+        move_run_dir(&tree, &from, &to).unwrap();
+
+        assert!(to.join("events.jsonl").is_file());
+        assert!(!from.exists());
+    }
+
+    /// A repetition that has to be kept but cannot be moved stays in the
+    /// scratch directory, and the scratch guard then leaves the scratch
+    /// directory alone instead of deleting the tree under a live driver.
+    #[test]
+    fn a_kept_repetition_that_cannot_move_stays_and_the_scratch_survives() {
+        let t = tempfile::tempdir().unwrap();
+        let evals_home = t.path().join("evals");
+        let scratch = evals_home.join("scratch/eval-1");
+        let guard = ScratchGuard::new(&evals_home, &scratch).unwrap();
+        let rep_dir = scratch.join("case-1");
+        std::fs::create_dir_all(rep_dir.join("tree")).unwrap();
+        // The kept directory's parent is a file, so the move cannot happen.
+        std::fs::write(evals_home.join("kept"), "not a directory").unwrap();
+        let kept_rep = evals_home.join("kept/eval-1/case-1");
+
+        let err = keep_repetition(&rep_dir, &kept_rep, &guard.keep).expect_err("the move fails");
+        assert!(err.contains("kept in place"), "{err}");
+        assert!(guard.keep.load(Ordering::SeqCst));
+        drop(guard);
+
+        assert!(rep_dir.join("tree").is_dir(), "the kept tree was deleted");
+    }
+
+    #[test]
+    fn a_kept_repetition_moves_and_the_scratch_is_removed() {
+        let t = tempfile::tempdir().unwrap();
+        let evals_home = t.path().join("evals");
+        let scratch = evals_home.join("scratch/eval-1");
+        let guard = ScratchGuard::new(&evals_home, &scratch).unwrap();
+        let rep_dir = scratch.join("case-1");
+        std::fs::create_dir_all(rep_dir.join("tree")).unwrap();
+        let kept_rep = evals_home.join("kept/eval-1/case-1");
+
+        let kept = keep_repetition(&rep_dir, &kept_rep, &guard.keep).unwrap();
+        assert_eq!(kept, kept_rep);
+        assert!(!guard.keep.load(Ordering::SeqCst));
+        drop(guard);
+
+        assert!(kept_rep.join("tree").is_dir());
+        assert!(!scratch.exists(), "the scratch directory stayed");
     }
 }
