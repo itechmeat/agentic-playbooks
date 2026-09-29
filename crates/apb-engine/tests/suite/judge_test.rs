@@ -636,3 +636,55 @@ fn every_loop_execution_gets_its_own_answer() {
     assert_eq!(attempts, vec![Some(1), Some(2), Some(3)]);
     assert!(ran(&events, "done"));
 }
+
+/// Issue #171: a judge edge that points straight back at its own source
+/// (`review -> review`) loops like any bounded edge. Every execution is asked
+/// for its own answer, each pass is a counted traversal, and once the cap is
+/// spent the run leaves through the fallback.
+#[test]
+fn a_judge_self_edge_loops_to_its_cap_then_takes_the_fallback() {
+    let yaml = "schema: 2\nid: selfjudge\nname: selfjudge\nversion: 1.0.0\ndefaults:\n  profile: main\nnodes:\n  - { id: start, type: start }\n  - { id: review, type: agent_task, prompt: review }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: review }\n  - { from: review, to: review, condition: { type: judge, question: \"Does `output` report a defect?\", min_p: 0.7, on_unavailable: false }, max_traversals: 2 }\n  - { from: review, to: done, fallback: true }\n";
+    let p = Project::new(yaml);
+    // The self-edge is edge 0 among review's outgoing edges, and it always
+    // matches: only the cap ends the loop.
+    p.decisions("version: 1\nmode: enforce\nproviders:\n  - id: fake\n    kind: fake\n    answers:\n      edge_0: { type: noul, noul: 0.9 }\nuses:\n  judge_edge: { mode: enforce }\n");
+    let _lock = common::env_lock();
+    let _env = p.env();
+    let (status, _, events) = p.run("selfjudge");
+    assert_eq!(
+        status,
+        RunStatus::Succeeded,
+        "{:#?}",
+        events.iter().map(|e| &e.payload).collect::<Vec<_>>()
+    );
+    let starts = events
+        .iter()
+        .filter(
+            |e| matches!(&e.payload, EventPayload::NodeStarted { node, .. } if node == "review"),
+        )
+        .count();
+    assert_eq!(starts, 3, "first pass + 2 loops");
+    let counted = events
+        .iter()
+        .filter(|e| {
+            matches!(&e.payload, EventPayload::EdgeTraversed { from, to, via_policy: false, uncounted: false }
+                if from == "review" && to == "review")
+        })
+        .count();
+    assert_eq!(counted, 2, "one counted traversal per loop pass");
+    let attempts: Vec<Option<u32>> = events
+        .iter()
+        .filter_map(|e| match &e.payload {
+            EventPayload::DecisionMade {
+                use_site, attempt, ..
+            } if use_site == "judge_edge" => Some(*attempt),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        attempts,
+        vec![Some(1), Some(2), Some(3)],
+        "one answer per execution"
+    );
+    assert!(ran(&events, "done"));
+}

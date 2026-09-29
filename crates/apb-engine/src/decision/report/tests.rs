@@ -581,6 +581,6 @@ fn a_linked_runs_directory_is_not_read() {
         linked.path().join(".apb/runs"),
     )
     .unwrap();
-    assert_eq!(run_dirs(&[other.path().to_path_buf()]).len(), 1);
-    assert!(run_dirs(&[linked.path().to_path_buf()]).is_empty());
+    assert_eq!(candidate_run_dirs(&[other.path().to_path_buf()]).len(), 1);
+    assert!(candidate_run_dirs(&[linked.path().to_path_buf()]).is_empty());
 }

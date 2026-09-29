@@ -28,7 +28,11 @@ fn key_path() -> Option<PathBuf> {
 }
 
 fn load_key() -> Option<Vec<u8>> {
-    let raw = std::fs::read_to_string(key_path()?).ok()?;
+    load_key_from(&key_path()?)
+}
+
+fn load_key_from(path: &Path) -> Option<Vec<u8>> {
+    let raw = std::fs::read_to_string(path).ok()?;
     let key = raw.trim();
     (key.len() >= 64).then(|| key.as_bytes().to_vec())
 }
@@ -75,7 +79,19 @@ pub fn stamp(run_dir: &Path, run_id: &str) -> std::io::Result<()> {
     let Some(key) = load_key() else {
         return Ok(());
     };
-    let tag = mac(&key, run_dir, run_id)?;
+    write_stamp(&key, run_dir, run_id)
+}
+
+/// [`stamp`] with the installation key of an explicit config dir.
+pub fn stamp_in(config_dir: &Path, run_dir: &Path, run_id: &str) -> std::io::Result<()> {
+    let Some(key) = load_key_from(&config_dir.join(KEY_FILE)) else {
+        return Ok(());
+    };
+    write_stamp(&key, run_dir, run_id)
+}
+
+fn write_stamp(key: &[u8], run_dir: &Path, run_id: &str) -> std::io::Result<()> {
+    let tag = mac(key, run_dir, run_id)?;
     crate::fsutil::atomic_write(&run_dir.join(STAMP_FILE), tag.as_bytes())
 }
 

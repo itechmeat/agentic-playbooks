@@ -3205,8 +3205,11 @@ pub(crate) fn maybe_compact_context(
 /// (marking them cancelled). The sole writer of events (cancelled) is the
 /// calling drive, so the single-writer invariant is preserved.
 /// The ready successors a node hands the frontier: its outgoing edges evaluated
-/// against the folded status and outputs, dropping the node itself and any join
-/// that is not yet ready. Pure - it reads state and writes nothing, so a resume
+/// against the folded status and outputs, dropping any join that is not yet
+/// ready. A selected self-edge (`review -> review`) hands back the node itself:
+/// it is a loop like any other (issue #171), bounded by the edge's
+/// `max_traversals` through the same availability check, and the caller's
+/// frontier de-duplication applies to it unchanged. Pure - it reads state and writes nothing, so a resume
 /// can ask "would advancing past this node have anything to run" WITHOUT any
 /// journal side effect. `advance_frontier` layers the join:any cancellation and
 /// the frontier writes on top of this.
@@ -3226,7 +3229,7 @@ pub(crate) fn seed_successors(
         } else {
             true
         };
-        if ready && s != node && !runnable.contains(&s) {
+        if ready && !runnable.contains(&s) {
             runnable.push(s);
         }
     }
@@ -3411,9 +3414,6 @@ pub(crate) fn advance_frontier(
     // drives), so a loop cannot grow the journal without bound; the counted
     // record below is deliberately NOT deduped.
     for e in &selected {
-        if e.to == node {
-            continue;
-        }
         if raced_out.contains(&e.to) {
             continue;
         }

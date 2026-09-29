@@ -36,3 +36,48 @@ fn init_creates_apb_structure_idempotently() {
         "port: 9999\n"
     );
 }
+
+/// A freshly written executable reads as busy (ETXTBSY) while any process
+/// still holds a write handle to it; the spawn waits that out instead of
+/// failing. Linux-only: that is where exec reports a file open for writing
+/// as busy (not verified on macOS).
+#[cfg(target_os = "linux")]
+#[test]
+fn a_spawn_waits_out_an_executable_that_is_still_open_for_writing() {
+    use std::io::Write;
+    use std::os::unix::fs::PermissionsExt;
+    let dir = tempfile::tempdir().unwrap();
+    let exe = dir.path().join("tool");
+    let mut writer = std::fs::File::create(&exe).unwrap();
+    writer.write_all(b"#!/bin/sh\nexit 0\n").unwrap();
+    writer.flush().unwrap();
+    std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+    // The premise: while the handle is open, a plain spawn is refused.
+    let busy = std::process::Command::new(&exe)
+        .spawn()
+        .map(|mut c| c.wait());
+    assert_eq!(
+        busy.err().map(|e| e.kind()),
+        Some(std::io::ErrorKind::ExecutableFileBusy),
+        "the fixture must make the executable busy"
+    );
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        drop(writer);
+    });
+    let mut child =
+        apb_core::fsutil::spawn_when_not_busy(&mut std::process::Command::new(&exe)).unwrap();
+    release.join().unwrap();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    let status = loop {
+        if let Some(s) = child.try_wait().unwrap() {
+            break s;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "timed out after 10s waiting for the spawned tool to exit"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    assert!(status.success());
+}

@@ -510,6 +510,18 @@ struct Dashboard {
 
 impl Dashboard {
     fn start(config_dir: &Path) -> Self {
+        // A port probed free can be taken by another test's listener before
+        // the dashboard binds it; the dashboard then exits on the bind error,
+        // and a fresh port is tried. Three attempts bound it.
+        for _ in 0..3 {
+            if let Some(dashboard) = Self::try_start(config_dir) {
+                return dashboard;
+            }
+        }
+        panic!("the dashboard failed to bind a free port three times");
+    }
+
+    fn try_start(config_dir: &Path) -> Option<Self> {
         let port = std::net::TcpListener::bind("127.0.0.1:0")
             .unwrap()
             .local_addr()
@@ -524,11 +536,31 @@ impl Dashboard {
             .process_group(0)
             .spawn()
             .unwrap();
-        let dashboard = Self { child, port };
+        let pid = child.id();
+        // The guard exists before the first wait that can panic.
+        let mut dashboard = Self { child, port };
+        // Readiness is this child's own claim on the port, not a bare connect:
+        // under a full suite a connect can reach a stranger that took the port
+        // (the ConnectionReset this test used to flake on). The dashboard
+        // writes `serve.lock` only after its bind succeeded, naming its pid
+        // and port.
+        let lock = config_dir.join("serve.lock");
+        let bound = poll_until("the dashboard to bind its port or exit", || {
+            if let Ok(Some(_)) = dashboard.child.try_wait() {
+                return Some(false);
+            }
+            let raw = fs::read(&lock).ok()?;
+            let v: serde_json::Value = serde_json::from_slice(&raw).ok()?;
+            (v["pid"] == pid && v["port"] == port).then_some(true)
+        });
+        if !bound {
+            // Already reaped by `try_wait`, which the drop checks first.
+            return None;
+        }
         poll_until("the dashboard to accept connections", || {
             std::net::TcpStream::connect(("127.0.0.1", port)).ok()
         });
-        dashboard
+        Some(dashboard)
     }
 
     /// `POST /api/playbooks/{id}/run` and the run id it answers with.
@@ -565,6 +597,12 @@ impl Dashboard {
 impl Drop for Dashboard {
     /// Bounded, like `McpSession`'s: this also runs while unwinding.
     fn drop(&mut self) {
+        // A child already reaped (killed by the test, or exited on its own)
+        // must not be signalled again: its pid may belong to another process
+        // by now. `try_wait` answers from the cached status then.
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return;
+        }
         sig::kill_pid(self.child.id());
         let deadline = Instant::now() + REAP_DEADLINE;
         while Instant::now() < deadline {
@@ -757,17 +795,17 @@ impl McpSession {
     }
 
     fn start_with(root: &Path, mut cmd: std::process::Command) -> Self {
-        let mut child = cmd
-            .arg("mcp")
+        cmd.arg("mcp")
             .current_dir(root)
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::null())
             // Its own process group, so a test can kill the launcher's whole
             // group without also signalling the cargo test runner.
-            .process_group(0)
-            .spawn()
-            .unwrap();
+            .process_group(0);
+        // A binary this test just copied can read as busy (ETXTBSY) while a
+        // process another test forked still holds the copy's write handle.
+        let mut child = apb_core::fsutil::spawn_when_not_busy(&mut cmd).unwrap();
         let mut stdin = child.stdin.take().unwrap();
         let stdout = child.stdout.take().unwrap();
 
@@ -878,6 +916,11 @@ impl Drop for McpSession {
         // runs during unwinding too, so this must not be able to hang: a
         // second panic while panicking aborts the process, and an unbounded
         // wait here would bury the original failure under a hang instead.
+        // A child already reaped must not be signalled again (its pid may be
+        // reused); `try_wait` answers from the cached status then.
+        if let Ok(Some(_)) = self.child.try_wait() {
+            return;
+        }
         sig::kill_pid(self.child.id());
         let deadline = Instant::now() + REAP_DEADLINE;
         while Instant::now() < deadline {

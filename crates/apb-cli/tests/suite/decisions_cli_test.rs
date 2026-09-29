@@ -44,6 +44,16 @@ fn project(with_decisions: bool) -> tempfile::TempDir {
     dir
 }
 
+/// Stamps `demo-1` as created by the installation whose config dir is `cfg`
+/// (the key an `apb` process creates at its entry point).
+fn stamp_demo(cfg: &std::path::Path, project: &std::path::Path) {
+    let key = cfg.join("run-origin.key");
+    if !key.exists() {
+        fs::write(&key, "k".repeat(64)).unwrap();
+    }
+    apb_core::run_origin::stamp_in(cfg, &project.join(".apb/runs/demo-1"), "demo-1").unwrap();
+}
+
 const LINE: &str =
     "  decisions: 3 (1 replayed, 1 error), $0.0004, p50 190 ms; shadow would change: 2";
 
@@ -94,6 +104,20 @@ fn the_report_says_when_nothing_was_recorded_and_reads_journals() {
         .stdout("no decisions recorded\n");
     let dir = project(true);
     let journal = dir.path().join(".apb/runs/demo-1/events.jsonl");
+    // A journal apb did not write here (no stamp, as a repository could ship
+    // one) is not read: nothing is recorded, and the skip is named.
+    apb()
+        .args(["decisions", "report"])
+        .env("APB_CONFIG_DIR", cfg.path())
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout("no decisions recorded\n")
+        .stderr(predicate::str::contains(
+            "skipped 1 run directory not created by apb on this machine",
+        ));
+    // The same run stamped with this installation's key is read.
+    stamp_demo(cfg.path(), dir.path());
     let before = fs::read(&journal).unwrap();
     let out = apb()
         .args(["decisions", "report", "--json", "--use", "completion_check"])
@@ -185,6 +209,7 @@ fn replayable(project_config: &str) -> (tempfile::TempDir, tempfile::TempDir) {
     .unwrap();
     fs::write(dir.path().join(".apb/config.yaml"), project_config).unwrap();
     let cfg = tempfile::tempdir().unwrap();
+    stamp_demo(cfg.path(), dir.path());
     fs::write(
         cfg.path().join("decisions.yaml"),
         "mode: shadow\nproviders:\n  - id: hosted\n    kind: fake\n    answers:\n      final_result: { type: noul, noul: 0.9 }\nuses:\n  completion_check: { mode: shadow }\n",

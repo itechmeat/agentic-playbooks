@@ -282,7 +282,8 @@ pub fn spawn_detached_driver(
     #[cfg(unix)]
     cmd.process_group(0);
 
-    let child = cmd.spawn()?;
+    // Re-exec'd from a path a reinstall may have just rewritten.
+    let child = apb_core::fsutil::spawn_when_not_busy(&mut cmd)?;
     let pid = child.id();
     reap_in_background(child);
     Ok(pid)

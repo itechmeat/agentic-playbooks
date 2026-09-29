@@ -379,7 +379,8 @@ fn doctor_says_nothing_about_ingest_when_it_is_disabled() {
 /// must not be able to write a second line naming any other address.
 #[test]
 fn a_rejected_delivery_logs_exactly_one_line_whatever_its_path() {
-    use std::io::{Read, Write};
+    use std::io::{BufRead, Read, Write};
+    use std::time::{Duration, Instant};
     let cfg = tempfile::tempdir().unwrap();
     let port = std::net::TcpListener::bind("127.0.0.1:0")
         .unwrap()
@@ -389,25 +390,45 @@ fn a_rejected_delivery_logs_exactly_one_line_whatever_its_path() {
     let mut child = crate::common::apb_std()
         .args(["ingest", "--bind", "127.0.0.1", "--port", &port.to_string()])
         .env("APB_CONFIG_DIR", cfg.path())
-        .stdout(std::process::Stdio::null())
+        .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
         .spawn()
         .expect("spawn apb ingest");
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    let mut conn = loop {
-        match std::net::TcpStream::connect(("127.0.0.1", port)) {
-            Ok(c) => break c,
-            Err(_) if std::time::Instant::now() < deadline => {
-                std::thread::sleep(std::time::Duration::from_millis(20))
+    // Both pipes are read on their own threads into channels, so every wait
+    // below is a bounded `recv_timeout` and a full pipe can never stall the
+    // listener.
+    let lines = |pipe: Box<dyn Read + Send>| {
+        let (tx, rx) = std::sync::mpsc::channel::<String>();
+        std::thread::spawn(move || {
+            for line in std::io::BufReader::new(pipe).lines().map_while(Result::ok) {
+                if tx.send(line).is_err() {
+                    break;
+                }
             }
-            Err(e) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                panic!("timed out after 10s waiting for `apb ingest` to listen: {e}")
-            }
-        }
+        });
+        rx
     };
-    conn.set_read_timeout(Some(std::time::Duration::from_secs(10)))
+    let stdout = lines(Box::new(child.stdout.take().unwrap()));
+    let stderr = lines(Box::new(child.stderr.take().unwrap()));
+    let fail = |child: &mut std::process::Child, what: &str| -> ! {
+        let _ = child.kill();
+        let _ = child.wait();
+        panic!("timed out after 10s waiting for {what}")
+    };
+    // Readiness is the listener's own banner, printed after it bound THIS
+    // port: a bare connect could reach another test's server that took the
+    // port in the gap after the probe listener above was dropped.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match stdout.recv_timeout(left) {
+            Ok(l) if l.starts_with(&format!("apb ingest: http://127.0.0.1:{port}/")) => break,
+            Ok(_) => {}
+            Err(_) => fail(&mut child, "`apb ingest` to report it is listening"),
+        }
+    }
+    let mut conn = std::net::TcpStream::connect(("127.0.0.1", port)).unwrap();
+    conn.set_read_timeout(Some(Duration::from_secs(10)))
         .unwrap();
     write!(
         conn,
@@ -416,17 +437,37 @@ fn a_rejected_delivery_logs_exactly_one_line_whatever_its_path() {
     .unwrap();
     let mut response = String::new();
     let _ = conn.read_to_string(&mut response);
+    // The record, not the response, is what this test is about: wait for it
+    // before stopping the listener, instead of killing a process that may not
+    // have written it yet.
+    let mut logged: Vec<String> = Vec::new();
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !logged.iter().any(|l| l.starts_with("apb ingest_rejected")) {
+        let left = deadline.saturating_duration_since(Instant::now());
+        match stderr.recv_timeout(left) {
+            Ok(l) => logged.push(l),
+            Err(_) => fail(&mut child, "the rejection to be logged"),
+        }
+    }
     let _ = child.kill();
-    let out = child.wait_with_output().unwrap();
-    let stderr = String::from_utf8_lossy(&out.stderr);
-    let records: Vec<&str> = stderr
-        .lines()
+    let _ = child.wait();
+    // Whatever else the listener wrote before it died.
+    while let Ok(l) = stderr.recv_timeout(Duration::from_millis(500)) {
+        logged.push(l);
+    }
+    let all = logged.join("\n");
+    let records: Vec<&String> = logged
+        .iter()
         .filter(|l| l.starts_with("apb ingest_rejected"))
         .collect();
-    assert_eq!(records.len(), 1, "one record per rejection: {stderr}");
+    assert_eq!(records.len(), 1, "one record per rejection: {all}");
     assert!(
         records[0].starts_with("apb ingest_rejected ip=127.0.0.1 "),
-        "{stderr}"
+        "{all}"
     );
-    assert!(!stderr.contains("192.0.2.44"), "{stderr}");
+    assert!(!all.contains("192.0.2.44"), "{all}");
+    assert!(
+        response.starts_with("HTTP/1.1 "),
+        "no answer from the listener: {response}"
+    );
 }

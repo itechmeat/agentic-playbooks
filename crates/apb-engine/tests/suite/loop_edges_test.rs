@@ -419,3 +419,178 @@ fn a_loop_fork_that_changes_branches_still_reaches_finish() {
     assert_eq!(count_starts(&events, "m"), 2, "the merge ran once per pass");
     assert_eq!(count_finishes(&events, "done"), 1, "the run reached finish");
 }
+
+// --- Direct self-edges (issue #171) -------------------------------------------
+//
+// A loop edge that points straight back at its own source (`review -> review`)
+// must behave like the same loop routed through a `condition` node: each pass
+// is a counted `edge_traversed`, the node runs again, and once the cap is spent
+// the bounded edge stops matching and the `fallback` edge is taken. Before the
+// fix the frontier dropped the node itself, so the first pass failed the run
+// with "has no outgoing edge and is not finish".
+
+/// The issue's reproduction: one script node that always succeeds, a bounded
+/// self-edge on its success, and a fallback exit.
+const SELF_LOOP: &str = r#"schema: 2
+id: selfloop
+name: Self loop
+version: 1.0.0
+nodes:
+  - { id: start,  type: start }
+  - { id: review, type: script, script: scripts/review.sh, runner: sh }
+  - { id: done,   type: finish, outcome: success }
+edges:
+  - { from: start,  to: review }
+  - { from: review, to: review, condition: { type: node_status, node: review, equals: success }, max_traversals: 2 }
+  - { from: review, to: done, fallback: true }
+"#;
+
+/// Seeds playbook `id` with `yaml` and one `scripts/review.sh` of `script`.
+fn seed_script_playbook(root: &Path, id: &str, yaml: &str, script: &str) {
+    init_project(root).unwrap();
+    let vdir = root.join(format!(".apb/playbooks/{id}/1.0.0"));
+    fs::create_dir_all(vdir.join("scripts")).unwrap();
+    fs::write(vdir.join("playbook.yaml"), yaml).unwrap();
+    fs::write(vdir.join("scripts/review.sh"), script).unwrap();
+    fs::write(root.join(format!(".apb/playbooks/{id}/current")), "1.0.0").unwrap();
+}
+
+const REVIEW_OK: &str = "#!/bin/sh\necho reviewed\nexit 0\n";
+
+#[test]
+fn a_bounded_self_edge_loops_to_its_cap_then_takes_the_fallback() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path(), "selfloop", SELF_LOOP, REVIEW_OK);
+
+    let res = run(dir.path(), "selfloop", None, RunOptions::default()).unwrap();
+
+    let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "{:#?}",
+        events.iter().map(|e| &e.payload).collect::<Vec<_>>()
+    );
+    assert_eq!(count_starts(&events, "review"), 3, "first pass + 2 loops");
+    assert_eq!(
+        count_traversals(&events, "review", "review"),
+        2,
+        "one counted traversal per loop pass"
+    );
+    assert_eq!(
+        count_finishes(&events, "done"),
+        1,
+        "left through the fallback"
+    );
+}
+
+/// The self-edge stops matching before its cap: the loop ends on the
+/// condition, not on the bound, and the run still leaves through the fallback.
+#[test]
+fn a_self_edge_whose_condition_stops_matching_exits_before_the_cap() {
+    let dir = tempfile::tempdir().unwrap();
+    let marker = dir.path().join("again.marker");
+    // First pass asks for another round, every later pass does not.
+    let script = format!(
+        "#!/bin/sh\nif [ -f '{m}' ]; then echo stop; else touch '{m}'; echo again; fi\n",
+        m = marker.display()
+    );
+    let yaml = SELF_LOOP
+        .replace(
+            "condition: { type: node_status, node: review, equals: success }, max_traversals: 2",
+            "condition: { type: output_match, node: review, pattern: again }, max_traversals: 5",
+        )
+        .replace("id: selfloop", "id: selfstop");
+    seed_script_playbook(dir.path(), "selfstop", &yaml, &script);
+
+    let res = run(dir.path(), "selfstop", None, RunOptions::default()).unwrap();
+
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+    let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_eq!(
+        count_starts(&events, "review"),
+        2,
+        "one loop, then the exit"
+    );
+    assert_eq!(count_traversals(&events, "review", "review"), 1);
+    assert_eq!(count_finishes(&events, "done"), 1);
+}
+
+/// A resume that starts right after the self-looping node (`StartMode::After`)
+/// advances through the self-edge instead of refusing with "no pending
+/// successor", and the folded count keeps the cap: the resumed run ends in the
+/// same shape as an uninterrupted one.
+#[test]
+fn a_resume_after_a_self_looping_node_continues_the_loop() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path(), "selfloop", SELF_LOOP, REVIEW_OK);
+    let res = run(dir.path(), "selfloop", None, RunOptions::default()).unwrap();
+    assert_eq!(res.outcome, RunStatus::Succeeded);
+
+    // Cut the journal right after the first `review` finished: the loop's
+    // first hop has not been taken yet.
+    keep_through(
+        dir.path(),
+        &res.run_id,
+        |p| matches!(p, EventPayload::NodeFinished { node, .. } if node == "review"),
+    );
+    let before = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_eq!(
+        count_starts(&before, "review"),
+        1,
+        "fixture: one pass so far"
+    );
+    assert_eq!(count_traversals(&before, "review", "review"), 0);
+
+    let resumed = resume(dir.path(), &res.run_id, None).unwrap();
+
+    assert_eq!(resumed.outcome, RunStatus::Succeeded);
+    let after = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_eq!(count_starts(&after, "review"), 3);
+    assert_eq!(count_traversals(&after, "review", "review"), 2);
+    assert_eq!(count_finishes(&after, "done"), 1);
+}
+
+/// A self-looping node inside a concurrent batch (`max_parallel`): `start`
+/// fans out into `review` and `side`, and the batch-tail advance re-admits
+/// `review` for its loop passes while `side` has already delivered into the
+/// merge.
+const SELF_LOOP_PARALLEL: &str = r#"schema: 2
+id: selfpar
+name: Self loop in a batch
+version: 1.0.0
+nodes:
+  - { id: start,  type: start }
+  - { id: review, type: script, script: scripts/review.sh, runner: sh }
+  - { id: side,   type: script, script: scripts/review.sh, runner: sh }
+  - { id: merge,  type: script, script: scripts/review.sh, runner: sh }
+  - { id: done,   type: finish, outcome: success }
+edges:
+  - { from: start,  to: review }
+  - { from: start,  to: side }
+  - { from: review, to: review, condition: { type: node_status, node: review, equals: success }, max_traversals: 2 }
+  - { from: review, to: merge, fallback: true, join: all }
+  - { from: side,   to: merge, join: all }
+  - { from: merge,  to: done }
+"#;
+
+#[test]
+fn a_self_edge_loops_inside_a_parallel_batch() {
+    let dir = tempfile::tempdir().unwrap();
+    seed_script_playbook(dir.path(), "selfpar", SELF_LOOP_PARALLEL, REVIEW_OK);
+
+    let res = run(dir.path(), "selfpar", None, RunOptions::default()).unwrap();
+
+    let events = read_all(&dir.path().join(".apb/runs").join(&res.run_id)).unwrap();
+    assert_eq!(
+        res.outcome,
+        RunStatus::Succeeded,
+        "{:#?}",
+        events.iter().map(|e| &e.payload).collect::<Vec<_>>()
+    );
+    assert_eq!(count_starts(&events, "review"), 3);
+    assert_eq!(count_traversals(&events, "review", "review"), 2);
+    assert_eq!(count_starts(&events, "side"), 1);
+    assert_eq!(count_starts(&events, "merge"), 1, "the merge ran once");
+    assert_eq!(count_finishes(&events, "done"), 1);
+}

@@ -18,14 +18,14 @@ The full design is issue #165; every use below ships in the same release.
 
 | Use | What it asks | Modes | Since | Threshold source |
 |---|---|---|---|---|
-| `completion_check` | whether a successful agent reply is a finished result rather than a progress note, a plan or a question back | `off`, `shadow`, `advise`, `enforce` | #165 Part 8 (shadow first, advise and enforce with Part 14) | `uses.completion_check.thresholds.final_result` (default 0.15) for shadow and advise; enforce needs a stored threshold |
-| `judge_node` | the questions a playbook's `judge` node declares | `off`, `shadow`, `advise` (journal only), `enforce` (routes) | #165 Part 5 | the node's own `thresholds` in the playbook; no stored threshold |
-| `judge_edge` | the yes/no question of a `judge` edge condition | `off`, `shadow`, `advise` (journal only), `enforce` (routes) | #165 Part 7 | the edge's own `min_p`; no stored threshold |
-| `retry_advice` | whether a same-executor retry after an agent failure is likely to help | `off`, `shadow`, `advise`, `enforce` | #165 Part 9 | `uses.retry_advice.thresholds.min_confidence` (default 0.6); enforce needs a stored threshold |
-| `supervisor_triage` | what a supervisor should do about a park wake | `off`, `shadow`, `advise`, `enforce` | #165 Part 10 | `uses.supervisor_triage.thresholds.looping_max` (default 0.3); enforce needs a stored threshold |
-| `review_triage` | which option a reviewer would most likely pick at a `human_review` gate | `off`, `shadow`, `advise`, `enforce` | #165 Part 11 | enforce: the higher of the stored threshold and the gate's `auto_decide.min_confidence` |
-| `routing` | which of a profile's executor tiers a step needs | `off`, `shadow`, `advise`, `enforce` | #165 Part 12 | `uses.routing.thresholds.hysteresis` (default 0.75); enforce needs a stored threshold |
-| `catalog_rank` | which catalog playbook fits the task an agent names, whether the task needs a playbook at all, and whether a silenced suggestion covers it (MCP, outside runs) | `off`, `shadow`, `advise` (`enforce` acts as `advise`) | #165 Part 16 | `uses.catalog_rank.thresholds.covered` (default 0.8); advisory by design |
+| `completion_check` | whether a successful agent reply is a finished result rather than a progress note, a plan or a question back | `off`, `shadow`, `advise`, `enforce` | v0.22.0 | `uses.completion_check.thresholds.final_result` (default 0.15) for shadow and advise; enforce needs a stored threshold |
+| `judge_node` | the questions a playbook's `judge` node declares | `off`, `shadow`, `advise` (journal only), `enforce` (routes) | v0.22.0 | the node's own `thresholds` in the playbook; no stored threshold |
+| `judge_edge` | the yes/no question of a `judge` edge condition | `off`, `shadow`, `advise` (journal only), `enforce` (routes) | v0.22.0 | the edge's own `min_p`; no stored threshold |
+| `retry_advice` | whether a same-executor retry after an agent failure is likely to help | `off`, `shadow`, `advise`, `enforce` | v0.22.0 | `uses.retry_advice.thresholds.min_confidence` (default 0.6); enforce needs a stored threshold |
+| `supervisor_triage` | what a supervisor should do about a park wake | `off`, `shadow`, `advise`, `enforce` | v0.22.0 | `uses.supervisor_triage.thresholds.looping_max` (default 0.3); enforce needs a stored threshold |
+| `review_triage` | which option a reviewer would most likely pick at a `human_review` gate | `off`, `shadow`, `advise`, `enforce` | v0.22.0 | enforce: the higher of the stored threshold and the gate's `auto_decide.min_confidence` |
+| `routing` | which of a profile's executor tiers a step needs | `off`, `shadow`, `advise`, `enforce` | v0.22.0 | `uses.routing.thresholds.hysteresis` (default 0.75); enforce needs a stored threshold |
+| `catalog_rank` | which catalog playbook fits the task an agent names, whether the task needs a playbook at all, and whether a silenced suggestion covers it (MCP, outside runs) | `off`, `shadow`, `advise` (`enforce` acts as `advise`) | v0.22.0 | `uses.catalog_rank.thresholds.covered` (default 0.8); advisory by design |
 
 Shadow means journal only: the answer is recorded in the run's journal and
 nothing acts on it. Advise shows the answer where a person or supervisor
@@ -185,8 +185,18 @@ A node can switch the completion check off for itself with
 ### `apb doctor`
 
 One line: `not configured`, or the ceiling, the effective use modes and each
-provider's id, kind, host, whether its key resolves and whether a TCP
-connection to its host opens. No key and no request are ever sent by doctor.
+provider's id, kind, host, whether its key resolves, and the outcome of one
+request that costs nothing, sent with the provider's key to its own base URL
+within `timeout_ms`: the HTTP status and latency (`GET /v1/models: HTTP 200
+in 230 ms`), or `no answer within <timeout_ms> ms`, or why it failed. The
+free request per kind is `GET /v1/models` (`systemone`, `vercel_evaluate`),
+`GET /models` (`llm_emulation`), `GET /api/v1/key` (`openrouter_decisions`)
+and `GET /user/tokens/verify` (`cloudflare`). A provider whose key comes from
+a command (`{{cmd:...}}`, which only a run executes) or whose variable does
+not resolve gets a TCP connect instead, reported as `reachable (connect
+only)` or `unreachable (connect only)`. The line is a warning when any
+provider's check fails. Doctor never sends a decision request and never
+prints a key.
 
 ## What is sent
 
@@ -341,7 +351,11 @@ apb decisions report [--use USE] [--since 7d|2026-09-20] [--playbook ID]
 ```
 
 Reads run journals only (this project's, or every registered one with
-`--all-projects`); it asks no model and writes nothing. Per use and
+`--all-projects`); it asks no model and writes nothing. Only run directories
+apb created on this machine count (their `origin.stamp` verifies against the
+installation key, as for an MCP resume): a `.apb/runs/<id>` that came with a
+repository is skipped by the report and by `apb decisions replay`, and the
+command names how many it skipped on stderr. Per use and
 `(provider, model)`:
 
 - counts, errors, and label coverage (labelled of answered);
@@ -461,6 +475,12 @@ applied: the host still decides what to run and whether to offer a capture.
 the server's lifetime per project, catalog revision and query. A failure
 keeps the full catalog with `ranking: {error}`.
 
+A query about another workspace's catalog (`workspace` set) is narrowed by
+both projects: the calling session's project and the target project each
+apply their `decisions:` section, so the stricter setting of the two wins
+(either one turning `catalog_rank` off keeps the plain catalog). The request
+is logged in the target project.
+
 The response is byte-identical to today without `decisions.yaml`, with the
 use off, with `APB_DECISIONS=off`, when no provider key resolves, in shadow,
 and whenever `query` is absent or blank. The server's instructions (TIER0)
@@ -472,7 +492,11 @@ Each decision is logged as one line of `<root>/.apb/decisions.jsonl`
 nothing is sent. The count, the request and its line are taken under a lock
 on the log, so concurrent MCP servers never pass the cap; a call that finds
 the lock still held after about two seconds is not ranked (`ranking.error:
-busy`, the plain catalog). The log is opened only as a regular file, never
+busy`, the plain catalog). A holder may keep the lock for a whole provider
+chain, so the lock counts as abandoned only once it is older than
+`timeout_ms` times the number of providers plus ten seconds; an abandoned
+lock (its holder died) is broken and a `{"note": "stale_lock_broken"}` line
+is logged. The log is opened only as a regular file, never
 through a link: a log that is a link, a directory or anything else counts as
 a spent cap (nothing is sent and nothing written), and only its last 8 MiB
 are read to count the day's requests. The task, the triggers and a suggestion's synopsis

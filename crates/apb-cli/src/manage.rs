@@ -209,12 +209,19 @@ pub(crate) fn projects_cmd(action: Option<ProjectsAction>) -> ExitCode {
             ExitCode::SUCCESS
         }
         ProjectsAction::Remove { workspace_id } => {
-            if apb_core::projects::remove(&workspace_id) {
-                println!("removed {workspace_id}");
-                ExitCode::SUCCESS
-            } else {
-                eprintln!("no such workspace: {workspace_id}");
-                ExitCode::from(2)
+            match apb_core::projects::remove(&workspace_id) {
+                Ok(true) => {
+                    println!("removed {workspace_id}");
+                    ExitCode::SUCCESS
+                }
+                Ok(false) => {
+                    eprintln!("no such workspace: {workspace_id}");
+                    ExitCode::from(2)
+                }
+                Err(e) => {
+                    eprintln!("projects: {e}");
+                    ExitCode::from(1)
+                }
             }
         }
     }

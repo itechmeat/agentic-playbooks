@@ -125,6 +125,22 @@ impl ProviderKind {
         }
     }
 
+    /// The route's request that costs nothing, relative to the base URL,
+    /// for the doctor's check ([`crate::decision_probe`]).
+    fn free_endpoint(self) -> Option<&'static str> {
+        match self {
+            // TypeSafe and the systemone-compatible routes list their models.
+            ProviderKind::Systemone | ProviderKind::VercelEvaluate => Some("/v1/models"),
+            // An OpenAI-compatible chat endpoint lists models next to it.
+            ProviderKind::LlmEmulation => Some("/models"),
+            // OpenRouter reports the key's own limits and usage, free.
+            ProviderKind::OpenrouterDecisions => Some("/api/v1/key"),
+            // Cloudflare verifies the API token, free.
+            ProviderKind::Cloudflare => Some("/user/tokens/verify"),
+            ProviderKind::Fake => None,
+        }
+    }
+
     /// The base URL a kind uses when the file names none.
     fn default_base_url(self) -> Option<&'static str> {
         match self {
@@ -904,7 +920,24 @@ pub fn resolve(root: &Path) -> Resolution {
 
 /// [`resolve`] with an explicit config dir.
 pub fn resolve_in(config_dir: &Path, root: &Path) -> Resolution {
-    let eff = match load_file(config_dir) {
+    resolve_in_all(config_dir, &[root])
+}
+
+/// The configuration for a request that concerns several projects at once,
+/// such as an agent in `caller` asking for `target`'s catalog: narrowed by
+/// every project in turn, so the stricter setting of each wins and any one of
+/// them opting out turns the layer off. The same project twice is the same as
+/// once.
+pub fn resolve_for_all(roots: &[&Path]) -> Resolution {
+    let Some(dir) = crate::config::config_dir() else {
+        return Resolution::NotConfigured;
+    };
+    resolve_in_all(&dir, roots)
+}
+
+/// [`resolve_for_all`] with an explicit config dir.
+pub fn resolve_in_all(config_dir: &Path, roots: &[&Path]) -> Resolution {
+    let mut eff = match load_file(config_dir) {
         Ok(Some(eff)) => eff,
         Ok(None) => return Resolution::NotConfigured,
         Err(e) => return Resolution::Invalid(e),
@@ -912,11 +945,17 @@ pub fn resolve_in(config_dir: &Path, root: &Path) -> Resolution {
     if killed_by_switch() {
         return Resolution::KilledBySwitch;
     }
-    match project_section(root) {
-        Ok(Some(p)) => narrow(eff, p),
-        Ok(None) => finish(eff),
-        Err(reason) => Resolution::OptedOut(reason),
+    for root in roots {
+        match project_section(root) {
+            Ok(Some(p)) => match narrow(eff, p) {
+                Resolution::Active(narrowed) => eff = narrowed,
+                other => return other,
+            },
+            Ok(None) => {}
+            Err(reason) => return Resolution::OptedOut(reason),
+        }
     }
+    finish(eff)
 }
 
 /// Resolves a provider key variable from the process environment, then the
@@ -948,6 +987,28 @@ fn key_resolves(key: &Option<KeyRef>) -> Option<bool> {
     }
 }
 
+/// The doctor's check of one provider: a free request where the route has
+/// one ([`crate::decision_probe`]), else a TCP connect. `None` for a
+/// provider without a base URL (the fake provider).
+fn probe(
+    spec: &ProviderSpec,
+    timeout: std::time::Duration,
+) -> Option<crate::decision_probe::ProbeResult> {
+    use crate::decision_probe::{ProbeKey, ProbeResult, probe_request, send};
+    let key = match &spec.key {
+        None => ProbeKey::None,
+        Some(KeyRef::Env(var)) => {
+            resolve_key_var(var).map_or(ProbeKey::Unavailable, ProbeKey::Value)
+        }
+        // Only a run executes a key command.
+        Some(KeyRef::Cmd(_)) => ProbeKey::Unavailable,
+    };
+    match probe_request(spec.base_url.as_deref(), spec.kind.free_endpoint(), key) {
+        Some(req) => Some(send(&req, timeout)),
+        None => reachable(spec).map(|reachable| ProbeResult::ConnectOnly { reachable }),
+    }
+}
+
 /// Whether a TCP connection to the provider's host opens within a second.
 /// Sends nothing: no request, no key.
 fn reachable(spec: &ProviderSpec) -> Option<bool> {
@@ -963,8 +1024,9 @@ fn reachable(spec: &ProviderSpec) -> Option<bool> {
     Some(std::net::TcpStream::connect_timeout(&addr, std::time::Duration::from_secs(1)).is_ok())
 }
 
-/// The one doctor line: `(ok, detail)`. Never prints a key; the only
-/// network use is a TCP connect to each configured host.
+/// The one doctor line: `(ok, detail)`, not ok when a provider's check
+/// fails. Never prints a key; the network use is one free request (or a TCP
+/// connect) per configured provider, within `timeout_ms`.
 pub fn doctor_line(root: &Path) -> (bool, String) {
     match resolve(root) {
         Resolution::NotConfigured => (true, "not configured".into()),
@@ -973,6 +1035,8 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
         Resolution::OptedOut(why) => (true, format!("off for this project: {why}")),
         Resolution::AllOff => (true, "configured, every use off".into()),
         Resolution::Active(eff) => {
+            let timeout = std::time::Duration::from_millis(eff.timeout_ms.max(1));
+            let mut all_ok = true;
             let uses: Vec<String> = eff
                 .uses
                 .iter()
@@ -996,8 +1060,9 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
                         (_, Some(false)) => "key missing".into(),
                         (_, None) => "key from command".into(),
                     });
-                    if let Some(r) = reachable(p) {
-                        parts.push(if r { "reachable" } else { "unreachable" }.into());
+                    if let Some(r) = probe(p, timeout) {
+                        all_ok &= r.ok();
+                        parts.push(r.describe());
                     }
                     if p.model.as_deref().is_some_and(is_model_alias) {
                         parts.push("model is an alias, pin a version".into());
@@ -1006,7 +1071,7 @@ pub fn doctor_line(root: &Path) -> (bool, String) {
                 })
                 .collect();
             (
-                true,
+                all_ok,
                 format!(
                     "ceiling {}; {}; providers: {}",
                     eff.mode.as_str(),
@@ -1042,6 +1107,20 @@ uses:
   judge_node: { mode: off }
 privacy: { send: [prompts, outputs], redact: true, max_state_bytes: 20000, debug_state: true }
 "#;
+
+    #[test]
+    fn each_kind_names_its_free_doctor_endpoint() {
+        for (kind, path) in [
+            (ProviderKind::Systemone, Some("/v1/models")),
+            (ProviderKind::VercelEvaluate, Some("/v1/models")),
+            (ProviderKind::LlmEmulation, Some("/models")),
+            (ProviderKind::OpenrouterDecisions, Some("/api/v1/key")),
+            (ProviderKind::Cloudflare, Some("/user/tokens/verify")),
+            (ProviderKind::Fake, None),
+        ] {
+            assert_eq!(kind.free_endpoint(), path, "{kind:?}");
+        }
+    }
 
     #[test]
     fn a_tampered_snapshot_is_capped_by_the_live_file() {

@@ -8,15 +8,22 @@ use super::*;
 use crate::decision::review_triage::{self, Recommendation};
 
 /// The effects of every sub-playbook the playbook runs, recursively and in
-/// any scope, resolved as the run gate resolves them. `None` when the tree
-/// does not resolve: the automatic decision is then refused (fail-closed).
+/// any scope. A gated run weighs the child versions its gate pinned
+/// (`expected_children`), which are the ones it will execute; an ungated run
+/// has no pins and resolves the tree as the run gate would. `None` when the
+/// tree does not resolve or the run config does not read: the automatic
+/// decision is then refused (fail-closed).
 fn inherited_effects(
     root: &Path,
     run_dir: &Path,
     playbook: &Playbook,
 ) -> Option<Vec<apb_core::schema::Effect>> {
-    let origin = node::parent_run_origin(run_dir);
-    crate::gate::tree_effects(root, playbook, &origin).map(|set| set.into_iter().collect())
+    let cfg = crate::run_config::read_run_config(run_dir).ok()?;
+    let set = match &cfg.expected_children {
+        Some(pins) => crate::gate::pinned_tree_effects(root, playbook, pins)?,
+        None => crate::gate::tree_effects(root, playbook, &node::parent_run_origin(run_dir))?,
+    };
+    Some(set.into_iter().collect())
 }
 
 /// Asks for the recommendation of one gate visit.

@@ -66,6 +66,26 @@ fn start(root: &Path) -> (mpsc::Receiver<RunResult>, String) {
     (rx, run_id)
 }
 
+/// Waits (bounded) until the run journals its review request.
+fn wait_for_pending_review(run_dir: &Path) {
+    let started = Instant::now();
+    loop {
+        let requested = read_all(run_dir).is_ok_and(|events| {
+            events
+                .iter()
+                .any(|e| matches!(e.payload, EventPayload::ReviewRequested { .. }))
+        });
+        if requested {
+            return;
+        }
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "timed out after 20s waiting for the review gate to be requested"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+}
+
 fn decide(run_dir: &Path, decision: &str) {
     post_review(
         run_dir,
@@ -113,6 +133,10 @@ fn run_wait_times_out_while_a_gate_is_still_inside_its_grace() {
     seed(dir.path());
     let (rx, run_id) = start(dir.path());
     let run_dir = dir.path().join(".apb/runs").join(&run_id);
+    // The premise: the gate is pending before the timed wait starts. A loaded
+    // host can take longer than the 300 ms wait to reach it, and the decision
+    // below needs a pending review to land on.
+    wait_for_pending_review(&run_dir);
 
     let started = Instant::now();
     let res = wait_run_with(
