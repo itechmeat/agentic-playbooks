@@ -196,7 +196,7 @@ More: [docs/INSTALL.md](docs/INSTALL.md), [docs/MCP.md](docs/MCP.md),
 [docs/HOST-INTEGRATION.md](docs/HOST-INTEGRATION.md),
 [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md),
 [docs/GUARDRAILS.md](docs/GUARDRAILS.md), [docs/CI.md](docs/CI.md),
-[docs/STATS.md](docs/STATS.md).
+[docs/STATS.md](docs/STATS.md), [docs/EVALS.md](docs/EVALS.md).
 
 ## Security
 
