@@ -857,3 +857,29 @@ fn host_and_cli_runs_never_share_a_cache_entry() {
     assert_eq!(status, RunStatus::Succeeded);
     assert_eq!(node_output(&events, "w"), "host reply");
 }
+
+#[test]
+fn a_judge_node_never_emulates_through_the_profile_cli_in_host_mode() {
+    let h = Host::new(
+        "schema: 2\nid: h\nname: H\nversion: 1.0.0\ndefaults:\n  profile: main\nnodes:\n  - { id: start, type: start }\n  - id: triage\n    type: judge\n    state: { note: \"fixed text\" }\n    questions:\n      risky: { type: noul, instructions: \"Is `note` risky?\" }\n    on_unavailable: emulate\n  - { id: done, type: finish, outcome: success }\n  - { id: failed, type: finish, outcome: failure }\nedges:\n  - { from: start, to: triage }\n  - { from: triage, to: failed, condition: { type: node_status, node: triage, equals: failure } }\n  - { from: triage, to: done, fallback: true }\n",
+        &[],
+    );
+    let _lock = common::env_lock();
+    let _env = h.env();
+    let run_id = h.start(HOST);
+    let (status, events) = h.finish(&run_id);
+    assert!(!h.cli_ran(), "host mode must never spawn the profile CLI");
+    assert_eq!(status, RunStatus::Failed);
+    let out = node_output(&events, "triage");
+    assert!(
+        out.contains("host execution mode spawns no agent CLI"),
+        "{out}"
+    );
+    assert_eq!(
+        count(&events, |p| matches!(
+            p,
+            EventPayload::HostTaskRequested { .. }
+        )),
+        0
+    );
+}

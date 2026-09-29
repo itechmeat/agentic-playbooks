@@ -590,7 +590,12 @@ Two backends:
 `judge_node` use is above off), then the profile. The profile backend runs
 whatever the use's mode, `APB_DECISIONS=off` included, because it is the
 playbook's own declared executor; its answer is replayed on resume like any
-decision.
+decision. A host-mode run (`execution: host`) never spawns an agent CLI, so
+there the profile backend is unavailable: after the `llm_emulation` providers
+give no answer, the node fails with the reason "host execution mode spawns no
+agent CLI" and follows its failure edges, like an emulation that gave no
+answer. It is not turned into a host task: a judge answer is a decision, not
+an agent step.
 
 ## Judge edge (`judge_edge`)
 
