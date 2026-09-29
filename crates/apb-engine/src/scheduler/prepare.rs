@@ -867,7 +867,7 @@ pub(crate) fn prepare_run_target(
 
 // --- 0.24.0 irreversible consent ---
 /// The engine's check at run start: `Ok(Some(consent))` to record in the
-/// manifest when the run needs it and has it, `Ok(None)` when it needs none,
+/// manifest (with the sources it covers) when the run needs it and has it, `Ok(None)` when it needs none,
 /// an error naming what is irreversible when it needs one and has none.
 fn check_consent(
     root: &Path,
@@ -881,7 +881,12 @@ fn check_consent(
         return Ok(None);
     }
     match granted {
-        Some(c) if c.irreversible => Ok(Some(c.clone())),
+        // The manifest records what the consent covered, so a later patch
+        // cannot widen it (see `scheduler::patch`).
+        Some(c) if c.irreversible => Ok(Some(crate::consent::RunConsent {
+            sources,
+            ..c.clone()
+        })),
         _ => Err(EngineError::Invalid(format!(
             "{}: {}",
             crate::consent::REFUSAL_POLICY,

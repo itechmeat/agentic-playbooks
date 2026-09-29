@@ -168,13 +168,18 @@ async fn run_report_path_traversal_is_rejected() {
 /// dir. A second dashboard (another port) must not take it over from a live
 /// one, and no dashboard may delete a lock it does not own; a lock left by a
 /// dead process is replaced.
+#[cfg(unix)]
 #[test]
 fn global_lock_is_owned_by_one_live_dashboard() {
     use apb_server::lock::{GlobalLock, LockError};
     let cfg = tempfile::tempdir().unwrap();
     let path = cfg.path().join("serve.lock");
-    // Another dashboard: a live process whose program is named `apb`.
+    // Another dashboard: ONE live process whose argv[0] is `apb` (what the
+    // liveness probe reads), with null stdio. A shell (`sh -c 'sleep; :'`)
+    // would fork `sleep`, which killing the shell orphans with the test's
+    // stdout and stderr (a nextest LEAK).
     use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
     struct Reap(std::process::Child);
     impl Drop for Reap {
         fn drop(&mut self) {
@@ -183,9 +188,12 @@ fn global_lock_is_owned_by_one_live_dashboard() {
         }
     }
     let mut other = Reap(
-        std::process::Command::new("/bin/sh")
+        std::process::Command::new("sleep")
             .arg0("apb")
-            .args(["-c", "sleep 30; :"])
+            .arg("30")
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
             .spawn()
             .unwrap(),
     );

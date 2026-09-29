@@ -53,6 +53,9 @@ Rules:
 - Prefer passing paths and config explicitly over env vars at all. The lock
   serializes every env-mutating test in the whole crate; each new env test
   makes the suite more sequential.
+- When you touch a file whose older tests clean up at the end of the body
+  (`remove_var` as the last statement), convert those tests to a Drop guard
+  rather than copying their pattern into the new test.
 
 ## Fixtures and paths
 
@@ -119,6 +122,12 @@ product itself. Treat an unbounded wait as a defect wherever it appears.
 - A process spawned by a test is the test's to reap on every path,
   including the failing one. Detached children need their own group and
   null stdio, or they keep the harness alive after the test ends.
+- A child that stands in for a live process must be ONE process with null
+  stdio. `sh -c 'x; y'` forks `x`, and killing `sh` orphans it with the
+  test's stdout and stderr, which nextest reports as LEAK. Use
+  `Command::new(prog).arg0(name)` with `Stdio::null()` for all three
+  streams; when a shell is unavoidable, spawn it with `process_group(0)` and
+  kill the group through `libc`.
 
 ## Platform divergence: local green proves little
 
@@ -172,6 +181,13 @@ timing-shaped: a run that finishes before a stop lands on a fast runner.
   shared lock, with a Drop restore.
 - Do not weaken an existing assertion to make a new feature pass; that is a
   review finding, not a fix.
+- Snapshot tests normalize volatile fields (timestamps, pids, temp paths,
+  durations) before comparing. Pin a hash only when it is a storage key,
+  and say in a comment which store it keys, so a change to it reads as the
+  migration it is and not as an accidental pin.
+- A cleanup assertion checks what the product reports (a `kept_worktree`
+  field, a `kept` path), not only that a directory is absent: a later
+  unconditional cleanup makes an absence assertion pass whatever happened.
 
 ## Running tests
 

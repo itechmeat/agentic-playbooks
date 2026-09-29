@@ -197,6 +197,27 @@ fn irreversible_effects_forbid_trial() {
     )
     .unwrap();
     assert_eq!(res["rejected"], "trial_forbidden_irreversible");
+    assert_eq!(res["sources"], serde_json::json!(["playbook"]));
+
+    // A parent that declares nothing but runs an irreversible sub-playbook
+    // is refused the same way, naming the sub-playbook node (C6).
+    seed(
+        proj.path(),
+        "par",
+        "schema: 1\nid: __ID__\nname: __ID__\nversion: 1.0.0\nnodes:\n  - { id: start, type: start }\n  - { id: sub, type: playbook, playbook: irr }\n  - { id: done, type: finish, outcome: success }\nedges:\n  - { from: start, to: sub }\n  - { from: sub, to: done }\n",
+        None,
+    );
+    let res = playbook_trial(
+        proj.path(),
+        "par",
+        None,
+        Default::default(),
+        None,
+        "project",
+    )
+    .unwrap();
+    assert_eq!(res["rejected"], "trial_forbidden_irreversible", "{res}");
+    assert_eq!(res["sources"], serde_json::json!(["sub-playbook node sub"]));
 }
 
 #[test]

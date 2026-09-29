@@ -814,28 +814,55 @@ mod tests {
         }
     }
 
-    /// 0.24.0: the current implement playbook pushes a branch, opens a PR
-    /// (`create_pull`), pushes review fixes and deletes the merged branch on
-    /// origin, so those steps declare `irreversible` and a run of it needs
-    /// the person's consent at start.
+    /// 0.24.0: in the CURRENT version of the implement playbook, every step
+    /// that pushes, opens a PR or deletes a remote branch declares
+    /// `irreversible`, so a run of it needs the person's consent at start.
+    /// The version and the node set are read from the repository, not
+    /// pinned, so a new version of the playbook keeps the test meaningful.
     #[test]
     fn the_repository_implement_playbook_declares_its_irreversible_steps() {
-        let p = Playbook::from_yaml(include_str!(
-            "../../../../.apb/playbooks/apb-task-implement/1.17.0/playbook.yaml"
-        ))
-        .unwrap();
-        let declared: Vec<&str> = p
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../.apb/playbooks/apb-task-implement");
+        let current = std::fs::read_to_string(dir.join("current")).unwrap();
+        let vdir = dir.join(current.trim());
+        let p = Playbook::from_yaml(&std::fs::read_to_string(vdir.join("playbook.yaml")).unwrap())
+            .unwrap();
+        // The commands and phrasings a step that ships uses: pushing (also
+        // "commit ..., push, and wait" in the review-fix loop), opening a PR
+        // and deleting the merged branch on origin.
+        const SHIPS: [&str; 6] = [
+            "git push",
+            "gh pr create",
+            "create_pull",
+            "push origin --delete",
+            ", push, and",
+            "commits and push",
+        ];
+        let ships = |n: &crate::schema::Node| {
+            let mut text = serde_json::to_string(n).unwrap();
+            if let crate::schema::NodeKind::Script { script, .. } = &n.kind {
+                text.push_str(&std::fs::read_to_string(vdir.join(script)).unwrap_or_default());
+            }
+            SHIPS.iter().any(|m| text.contains(m))
+        };
+        let shipping: Vec<&str> = p
             .nodes
             .iter()
-            .filter(|n| n.effects.contains(&crate::schema::Effect::Irreversible))
+            .filter(|n| ships(n))
             .map(|n| n.id.as_str())
             .collect();
-        assert_eq!(declared, ["pr", "post_pr", "finalize"]);
-        assert!(crate::effects::effective(&p).contains(&crate::schema::Effect::Irreversible));
-        assert_eq!(
-            include_str!("../../../../.apb/playbooks/apb-task-implement/current").trim(),
-            "1.17.0"
+        assert!(!shipping.is_empty(), "the playbook ships something");
+        let undeclared: Vec<&str> = p
+            .nodes
+            .iter()
+            .filter(|n| ships(n) && !n.effects.contains(&crate::schema::Effect::Irreversible))
+            .map(|n| n.id.as_str())
+            .collect();
+        assert!(
+            undeclared.is_empty(),
+            "shipping steps {shipping:?}; without `irreversible`: {undeclared:?}"
         );
+        assert!(crate::effects::effective(&p).contains(&crate::schema::Effect::Irreversible));
     }
 
     #[test]

@@ -191,17 +191,20 @@ fn supervisor_wait_keeps_the_heartbeat_fresh_while_it_blocks() {
     // it is still blocking. A loaded runner delays the refresh but cannot fake
     // one, so a slow host passes and a wait that beats only on entry fails.
     let root = dir.path().to_path_buf();
+    // The wait's own 20 s timeout bounds `waiter.join()` below, so the join
+    // cannot hang even if `run_finished` were never seen; it stays under the
+    // nextest SLOW period (60 s).
     let waiter = std::thread::spawn(move || {
         wait_supervisor_event_with(
             &root,
             "hb",
             None,
-            Duration::from_secs(60),
+            Duration::from_secs(20),
             Duration::from_millis(50),
         )
     });
 
-    let limit = Instant::now() + Duration::from_secs(30);
+    let limit = Instant::now() + Duration::from_secs(15);
     let entry = loop {
         if let Some(beat) = stored_beat(&hb) {
             break beat;

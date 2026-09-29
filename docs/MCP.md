@@ -73,7 +73,7 @@ Mutations (destructive):
 
 | Tool | What it does |
 | --- | --- |
-| `playbook_run` | Run a playbook (spawns agents, changes project files). Server-side policy gate: draft/untrusted/cross-workspace are rejected, and a playbook whose tree declares `irreversible` needs `acknowledge_untrusted: true` after asking the person (`irreversible_requires_confirmation` otherwise; see below). `worktree` gives the run its own working tree (a directory in the project or a git worktree of it): its nodes run there and it does not wait on runs over other trees. `execution: "host"` (only when the person asks for mono, host or single-agent mode, or for your own subagents) spawns no agent CLI: every agent step becomes a host task, and the run always starts in the background; see "Host execution mode" below |
+| `playbook_run` | Run a playbook (spawns agents, changes project files). Server-side policy gate: draft/untrusted/cross-workspace are rejected, and a playbook whose tree declares `irreversible` needs `confirm_irreversible` with the refusal's `consent_nonce` after asking the person (`irreversible_requires_confirmation` otherwise; see below). `worktree` gives the run its own working tree (a directory in the project or a git worktree of it): its nodes run there and it does not wait on runs over other trees. `execution: "host"` (only when the person asks for mono, host or single-agent mode, or for your own subagents) spawns no agent CLI: every agent step becomes a host task, and the run always starts in the background; see "Host execution mode" below |
 | `playbook_capture` | Distill an action into a draft playbook in the chosen scope (not executed until trial) |
 | `playbook_trial` | Trial run of a draft against the effects matrix: filesystem writes go into a git worktree with a diff; irreversible effects are forbidden. Accepts an `instruction`, exactly like `playbook_run` |
 | `playbook_approve` | Activation after trial/confirmation: lifecycle active, digest trusted |
@@ -139,17 +139,26 @@ two-phase `playbook_prepare_run` / `playbook_execute_plan`.
 Irreversible effects are enforced, not only listed (0.24.0). The catalog and
 `playbook_prepare_run` show the effects for the consent screen; the start
 itself is refused with `policy_refusal: { policy:
-"irreversible_requires_confirmation", sources, detail }` when the tree (the
-playbook, its nodes, every sub-playbook) declares `irreversible` and the call
-has no `acknowledge_untrusted: true`, even for a trusted playbook. The tier-0
-running policy already tells the host to confirm such effects with the person;
-passing `acknowledge_untrusted: true` after that confirmation is the consent,
-and the manifest records it as `consent: { irreversible: true, by: "mcp:<client>" }`.
-The same holds for `playbook_execute_plan`. The engine checks it again when it
-prepares the run, so a start that bypasses the gate is refused too; a
-sub-playbook inherits the parent's consent and a resume keeps it. The tier-0
-text itself is unchanged (it sits at the host's byte limit); the argument is
-described on `playbook_run` and in the refusal.
+"irreversible_requires_confirmation", sources, consent_nonce, detail }` when
+the tree (the playbook, its nodes, every sub-playbook, every granted connector
+function flagged `irreversible: true`) declares `irreversible`, even for a
+trusted playbook. Consent is its own argument: show the sources to the person
+and, if they agree, call again with `confirm_irreversible: "<consent_nonce>"`.
+The nonce binds the consent to what the person saw; a playbook that changed in
+between is refused again with a new nonce (`reason: consent_nonce_mismatch`).
+The manifest records `consent: { irreversible: true, by: "mcp:<client>",
+sources }`. `acknowledge_untrusted` answers trust only: a trust refusal of an
+irreversible playbook also lists `irreversible` and `consent_nonce`, so the
+host asks one question and passes both answers in one retry. For one release
+`acknowledge_untrusted: true` alone, or `confirm_irreversible: true`, is still
+accepted as the consent and the response carries a `deprecation` note. The same
+holds for `playbook_execute_plan`, which records the client name too, and for
+`run_resume`, which asks once for a run with no valid consent recorded (one an
+older apb started) and writes the consent into its manifest. Every start path
+checks it (the engine again when it prepares the run); a supervisor patch may
+not add irreversible steps the consent does not cover; a sub-playbook inherits
+the parent's consent. The tier-0 text itself is unchanged (it sits at the
+host's byte limit); the argument is described on the tools and in the refusal.
 `playbook_execute_plan` runs the same gate in the target workspace, with the
 caller's `acknowledge_untrusted`: the parent and every sub-playbook child must
 be approved (or acknowledged), and the verified child pins go to the engine,

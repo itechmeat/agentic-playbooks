@@ -360,6 +360,35 @@ pub fn write(run_dir: &Path, manifest: &RunExecutionManifest) -> Result<(), Engi
     Ok(())
 }
 
+// --- 0.24.0 irreversible consent ---
+/// Replaces the consent a run's manifest records: the one exception to the
+/// write-once rule, for a resume that asked the person (a run of an
+/// irreversible tree that has no valid consent, such as one started by an
+/// older apb) or one that drops a consent it cannot honour. The rest of the
+/// manifest is kept as read. The run-origin stamp covers the manifest, so it
+/// is renewed, but only for a directory that carried a valid stamp before:
+/// a run directory apb did not create here does not become one.
+pub fn replace_consent(
+    run_dir: &Path,
+    run_id: &str,
+    consent: Option<crate::consent::RunConsent>,
+) -> Result<(), EngineError> {
+    let was_local = apb_core::run_origin::verify(run_dir, run_id);
+    let existing = read(run_dir)?;
+    if existing.is_none() && consent.is_none() {
+        return Ok(());
+    }
+    let mut manifest = existing.unwrap_or_default();
+    manifest.consent = consent;
+    let yaml = serde_yaml_ng::to_string(&manifest).map_err(|e| EngineError::Yaml(e.to_string()))?;
+    apb_core::fsutil::atomic_write_private(&manifest_path(run_dir), yaml.as_bytes())?;
+    if was_local {
+        apb_core::run_origin::stamp(run_dir, run_id)?;
+    }
+    Ok(())
+}
+// --- end 0.24.0 irreversible consent ---
+
 /// Reads the run manifest. `Ok(None)` means there is no manifest (the
 /// executor path without profiles).
 pub fn read(run_dir: &Path) -> Result<Option<RunExecutionManifest>, EngineError> {

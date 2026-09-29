@@ -151,8 +151,9 @@ fn the_runs_table_gets_a_mode_column_only_when_a_run_has_an_execution_block() {
         .current_dir(plain.path())
         .assert()
         .success()
-        .stdout(predicate::str::contains("\tcli").not())
-        .stdout(predicate::str::contains("\thost").not());
+        .stdout(predicate::str::contains(
+            "demo-1\tdemo\tsucceeded\t1 unknown event (newer apb?)\n",
+        ));
     let dir = project_with_host_run("  mode: host\n  source: argument\n", "");
     apb()
         .arg("runs")
@@ -161,6 +162,55 @@ fn the_runs_table_gets_a_mode_column_only_when_a_run_has_an_execution_block() {
         .success()
         .stdout(predicate::str::contains("host-1\tdemo\tsucceeded\thost\n"))
         .stdout(predicate::str::contains("demo-1\tdemo\tsucceeded\tcli\t"));
+}
+
+const FALLBACK_EXECUTION: &str =
+    "  mode: cli\n  source: default\n  client: claude-code\n  fallback_to_host: true\n";
+const FALLBACK_EVENT: &str = r#"{"seq":3,"ts":1790000001003,"type":"execution_fallback","node":"w","attempt":1,"reason":"spawn failed"}"#;
+
+/// A `cli` run with the host fallback shows as `cli+host-fallback` in the
+/// table (R2).
+#[test]
+fn the_runs_table_marks_a_run_with_the_host_fallback() {
+    let dir = project_with_host_run(FALLBACK_EXECUTION, FALLBACK_EVENT);
+    apb()
+        .arg("runs")
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(
+            "host-1\tdemo\tsucceeded\tcli+host-fallback\n",
+        ));
+}
+
+/// `--json` of a fallback run carries the nodes that fell back, the list
+/// the text line names (R1).
+#[test]
+fn runs_json_names_the_nodes_that_fell_back() {
+    let dir = project_with_host_run(FALLBACK_EXECUTION, FALLBACK_EVENT);
+    let out = apb()
+        .args(["runs", "host-1", "--json"])
+        .current_dir(dir.path())
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["execution"]["fallback_to_host"], true);
+    assert_eq!(v["execution"]["fell_back"], serde_json::json!(["w"]));
+}
+
+/// `--json` needs a run id (R3).
+#[test]
+fn runs_json_without_an_id_is_a_usage_error() {
+    let dir = project();
+    apb()
+        .args(["runs", "--json"])
+        .current_dir(dir.path())
+        .assert()
+        .code(2)
+        .stderr(predicate::str::contains("<RUN_ID>"));
 }
 
 #[test]
@@ -176,6 +226,10 @@ fn runs_json_is_the_run_status_object() {
         .clone();
     let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
     let expected = apb_mcp::tools::run::run_status(dir.path(), "host-1").unwrap();
+    assert!(
+        v["execution"].get("fell_back").is_none(),
+        "nothing fell back"
+    );
     // `driver_alive` reads the process table at request time; the rest is
     // the same fold of the same journal.
     let strip = |mut v: serde_json::Value| {

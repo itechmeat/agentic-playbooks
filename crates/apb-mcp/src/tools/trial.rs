@@ -89,8 +89,21 @@ pub fn playbook_trial(
     let effects = apb_core::effects::effective(&loaded.playbook);
     let digest = loaded.trust_digest()?;
 
-    if effects.contains(&Effect::Irreversible) {
-        return Ok(json!({ "rejected": "trial_forbidden_irreversible", "id": id }));
+    // 0.24.0: the whole tree counts, as for the consent gate: a playbook
+    // whose sub-playbook (or a granted connector function) is irreversible is
+    // refused here with the same answer, not later by the engine.
+    let origin = if origin_label == "global" {
+        apb_core::scope::Origin::Global
+    } else {
+        apb_core::scope::Origin::Project { workspace_id: None }
+    };
+    let sources = apb_engine::gate::consent_sources(root, &loaded.playbook, &origin, None);
+    if effects.contains(&Effect::Irreversible) || !sources.is_empty() {
+        return Ok(json!({
+            "rejected": "trial_forbidden_irreversible",
+            "id": id,
+            "sources": sources,
+        }));
     }
 
     let opts = RunOptions {

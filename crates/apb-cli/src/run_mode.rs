@@ -4,8 +4,6 @@
 
 use std::path::Path;
 
-use apb_engine::event::EventPayload;
-
 /// The `execution:` line of `apb runs <id>`: `host (argument, client x)`,
 /// `cli`, and for a `cli` run with the host fallback the nodes that actually
 /// fell back (`execution_fallback` events in the journal).
@@ -32,14 +30,8 @@ pub(crate) fn detail_line(run_dir: &Path, events: &[apb_engine::event::Event]) -
             }
         }
     };
-    let mut fell_back: Vec<&str> = Vec::new();
-    for e in events {
-        if let EventPayload::ExecutionFallback { node, .. } = &e.payload
-            && !fell_back.contains(&node.as_str())
-        {
-            fell_back.push(node);
-        }
-    }
+    // The same list `run_status` carries as `execution.fell_back`.
+    let fell_back = apb_engine::run_view::fell_back_nodes(events);
     if !fell_back.is_empty() {
         line.push_str(&format!("; host fallback: {}", fell_back.join(", ")));
     }

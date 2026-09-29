@@ -131,8 +131,9 @@ Build (debug): `cargo build`. Release (bakes the frontend first):
 `cd web && bun install && bun run build` then `cargo build --release`.
 
 Test everything: `cargo test --workspace`. A single test:
-`cargo test -p <crate> --test <file> <test_name>` (e.g.
-`cargo test -p apb-engine --test profile_run_test legacy_run_resume_via_ephemeral_snapshot`).
+`cargo test -p <crate> --test main <module>::<test_name>` (each crate has
+one integration binary, `main`; e.g.
+`cargo test -p apb-engine --test main profile_run_test::legacy_run_resume_via_ephemeral_snapshot`).
 
 Frontend (`web/`, bun + vite + vitest): `bun run test`, `bun run build`,
 `bun run check`.
